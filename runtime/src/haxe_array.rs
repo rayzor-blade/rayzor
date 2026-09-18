@@ -25,7 +25,7 @@ const INITIAL_CAPACITY: usize = 8;
 // ============================================================================
 
 /// Create a new empty array
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_new(out: *mut HaxeArray, elem_size: usize) {
     crate::panic_guard::guarded_call(|| unsafe {
         let total_size = INITIAL_CAPACITY * elem_size;
@@ -44,7 +44,7 @@ pub extern "C" fn haxe_array_new(out: *mut HaxeArray, elem_size: usize) {
 }
 
 /// Create array from existing elements
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_from_elements(
     out: *mut HaxeArray,
     elements: *const u8,
@@ -81,7 +81,7 @@ pub extern "C" fn haxe_array_from_elements(
 // ============================================================================
 
 /// Get array length
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_length(arr: *const HaxeArray) -> usize {
     debug!("[haxe_array_length] Called with arr={:?}", arr);
     if arr.is_null() {
@@ -114,7 +114,7 @@ pub extern "C" fn haxe_array_length(arr: *const HaxeArray) -> usize {
 // ============================================================================
 
 /// Get element at index (copies to out buffer)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_get(arr: *const HaxeArray, index: usize, out: *mut u8) -> bool {
     if arr.is_null() || out.is_null() {
         return false;
@@ -135,7 +135,7 @@ pub extern "C" fn haxe_array_get(arr: *const HaxeArray, index: usize, out: *mut 
 /// Set element at index (copies from data buffer)
 /// Auto-expands array if index is beyond current length (Haxe semantics)
 /// If data is null, stores zeros (null) at the index
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_set(arr: *mut HaxeArray, index: usize, data: *const u8) -> bool {
     debug!(
         "[haxe_array_set] Called with arr={:?}, index={}, data={:?}",
@@ -225,7 +225,7 @@ pub extern "C" fn haxe_array_set(arr: *mut HaxeArray, index: usize, data: *const
 
 /// Set element at index by value (i64) - avoids boxing overhead
 /// Auto-expands array if index is beyond current length (Haxe semantics)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_set_i64(arr: *mut HaxeArray, index: usize, value: i64) -> bool {
     if arr.is_null() {
         return false;
@@ -277,7 +277,7 @@ pub extern "C" fn haxe_array_set_i64(arr: *mut HaxeArray, index: usize, value: i
 
 /// Set element at index by value (f64) - avoids boxing overhead
 /// Auto-expands array if index is beyond current length (Haxe semantics)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_set_f64(arr: *mut HaxeArray, index: usize, value: f64) -> bool {
     if arr.is_null() {
         return false;
@@ -328,7 +328,7 @@ pub extern "C" fn haxe_array_set_f64(arr: *mut HaxeArray, index: usize, value: f
 
 /// Set element at index to null (store zeros)
 /// Auto-expands array if index is beyond current length (Haxe semantics)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_set_null(arr: *mut HaxeArray, index: usize) -> bool {
     if arr.is_null() {
         return false;
@@ -379,7 +379,7 @@ pub extern "C" fn haxe_array_set_null(arr: *mut HaxeArray, index: usize) -> bool
 }
 
 /// Get pointer to element (for direct access)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_get_ptr(arr: *const HaxeArray, index: usize) -> *mut u8 {
     debug!(
         "[haxe_array_get_ptr] Called with arr={:?}, index={}",
@@ -415,7 +415,7 @@ pub extern "C" fn haxe_array_get_ptr(arr: *const HaxeArray, index: usize) -> *mu
 // ============================================================================
 
 /// Push element onto array
-#[no_mangle]
+#[unsafe(no_mangle)]
 /// Whether `RAYZOR_ARRAY_GUARD` is set, read once.
 ///
 /// `haxe_array_push` is on the hot path of any array-building program, and a
@@ -504,7 +504,7 @@ pub extern "C" fn haxe_array_push(arr: *mut HaxeArray, data: *const u8) {
 }
 
 /// Pop element from array (original version with out param)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_pop(arr: *mut HaxeArray, out: *mut u8) -> bool {
     if arr.is_null() {
         return false;
@@ -529,7 +529,7 @@ pub extern "C" fn haxe_array_pop(arr: *mut HaxeArray, out: *mut u8) -> bool {
 
 /// Pop element from array and return it as i64 (for Array<Int>)
 /// Returns 0 if array is empty (Haxe's Null<Int> semantics)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_pop_i64(arr: *mut HaxeArray) -> i64 {
     if arr.is_null() {
         return 0;
@@ -560,7 +560,7 @@ pub extern "C" fn haxe_array_pop_i64(arr: *mut HaxeArray) -> i64 {
 /// Pop element from array and return it as a boxed Dynamic value
 /// Returns null if array is empty
 /// The returned pointer is a DynamicValue* suitable for haxe_trace_any
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_pop_ptr(arr: *mut HaxeArray) -> *mut u8 {
     if arr.is_null() {
         return ptr::null_mut();
@@ -598,7 +598,7 @@ pub extern "C" fn haxe_array_pop_ptr(arr: *mut HaxeArray) -> *mut u8 {
 }
 
 /// Insert element at index
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_insert(arr: *mut HaxeArray, index: i32, data: *const u8) {
     if arr.is_null() || data.is_null() {
         return;
@@ -641,7 +641,7 @@ pub extern "C" fn haxe_array_insert(arr: *mut HaxeArray, index: i32, data: *cons
 }
 
 /// Remove element at index
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_remove(arr: *mut HaxeArray, index: usize) -> bool {
     if arr.is_null() {
         return false;
@@ -667,7 +667,7 @@ pub extern "C" fn haxe_array_remove(arr: *mut HaxeArray, index: usize) -> bool {
 }
 
 /// Reverse array in place
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_reverse(arr: *mut HaxeArray) {
     if arr.is_null() {
         return;
@@ -705,7 +705,7 @@ pub extern "C" fn haxe_array_reverse(arr: *mut HaxeArray) {
 }
 
 /// Copy array
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_copy(out: *mut HaxeArray, arr: *const HaxeArray) {
     if arr.is_null() {
         return;
@@ -718,7 +718,7 @@ pub extern "C" fn haxe_array_copy(out: *mut HaxeArray, arr: *const HaxeArray) {
 }
 
 /// Slice array
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_slice(
     out: *mut HaxeArray,
     arr: *const HaxeArray,
@@ -786,7 +786,7 @@ fn arrfree_dbg_count() {
 }
 
 /// Free array memory
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_free(arr: *mut HaxeArray) {
     if arr.is_null() {
         return;
@@ -808,13 +808,13 @@ pub extern "C" fn haxe_array_free(arr: *mut HaxeArray) {
 // ============================================================================
 
 /// Push i32 onto array
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_push_i32(arr: *mut HaxeArray, value: i32) {
     haxe_array_push(arr, &value as *const i32 as *const u8);
 }
 
 /// Get i32 from array
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_get_i32(arr: *const HaxeArray, index: usize) -> i32 {
     let mut value: i32 = 0;
     if haxe_array_get(arr, index, &mut value as *mut i32 as *mut u8) {
@@ -825,13 +825,13 @@ pub extern "C" fn haxe_array_get_i32(arr: *const HaxeArray, index: usize) -> i32
 }
 
 /// Push i64 onto array
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_push_i64(arr: *mut HaxeArray, value: i64) {
     haxe_array_push(arr, &value as *const i64 as *const u8);
 }
 
 /// Get i64 from array
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_get_i64(arr: *const HaxeArray, index: usize) -> i64 {
     let mut value: i64 = 0;
     if haxe_array_get(arr, index, &mut value as *mut i64 as *mut u8) {
@@ -842,13 +842,13 @@ pub extern "C" fn haxe_array_get_i64(arr: *const HaxeArray, index: usize) -> i64
 }
 
 /// Push f64 onto array
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_push_f64(arr: *mut HaxeArray, value: f64) {
     haxe_array_push(arr, &value as *const f64 as *const u8);
 }
 
 /// Get f64 from array
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_get_f64(arr: *const HaxeArray, index: usize) -> f64 {
     let mut value: f64 = 0.0;
     if haxe_array_get(arr, index, &mut value as *mut f64 as *mut u8) {
@@ -866,7 +866,7 @@ pub extern "C" fn haxe_array_get_f64(arr: *const HaxeArray, index: usize) -> f64
 /// arr: pointer to array of HaxeString pointers
 /// sep: separator string
 /// Returns: pointer to a new HaxeString (caller should manage memory)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_join(
     arr: *const HaxeArray,
     sep: *const HaxeString,
@@ -967,7 +967,7 @@ pub extern "C" fn haxe_array_join(
 /// etc. the raw values are dereferenced as pointers and SIGSEGV. Here each
 /// element is first converted to a `HaxeString` via `haxe_value_to_string_by_tag`
 /// (tag 5 = already a String pointer — fast path; 1/2/4/6 = Int/Bool/Float/Ref).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_join_typed(
     arr: *const HaxeArray,
     sep: *const HaxeString,
@@ -1048,7 +1048,7 @@ pub extern "C" fn haxe_array_join_typed(
 
 /// Map: apply callback to each element, collect results into a new array.
 /// Callback signature: fn(env_ptr: *mut u8, element: i64) -> i64
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_map(
     out: *mut HaxeArray,
     arr: *const HaxeArray,
@@ -1106,7 +1106,7 @@ pub extern "C" fn haxe_array_map(
 
 /// Filter: keep elements where callback returns non-zero.
 /// Callback signature: fn(env_ptr: *mut u8, element: i64) -> i64 (0 = false, non-zero = true)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_filter(
     out: *mut HaxeArray,
     arr: *const HaxeArray,
@@ -1166,7 +1166,7 @@ pub extern "C" fn haxe_array_filter(
 
 /// indexOf: find first occurrence of value, searching from fromIndex forward.
 /// Returns index or -1 if not found. Compares raw i64 values.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_index_of(arr: *const HaxeArray, value: i64, from_index: i64) -> i64 {
     if arr.is_null() {
         return -1;
@@ -1199,7 +1199,7 @@ pub extern "C" fn haxe_array_index_of(arr: *const HaxeArray, value: i64, from_in
 
 /// lastIndexOf: find last occurrence of value, searching from fromIndex backward.
 /// Returns index or -1 if not found.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_last_index_of(
     arr: *const HaxeArray,
     value: i64,
@@ -1243,7 +1243,7 @@ pub extern "C" fn haxe_array_last_index_of(
 }
 
 /// contains: check if array contains value. Returns 1 (true) or 0 (false).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_contains(arr: *const HaxeArray, value: i64) -> i64 {
     if haxe_array_index_of(arr, value, 0) >= 0 {
         1
@@ -1257,7 +1257,7 @@ pub extern "C" fn haxe_array_contains(arr: *const HaxeArray, value: i64) -> i64 
 // ============================================================================
 
 /// shift: remove and return first element as raw i64. Returns 0 if empty.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_shift(arr: *mut HaxeArray) -> i64 {
     if arr.is_null() {
         return 0;
@@ -1288,7 +1288,7 @@ pub extern "C" fn haxe_array_shift(arr: *mut HaxeArray) -> i64 {
 
 /// shift_ptr: remove and return first element as a boxed DynamicValue*.
 /// Returns null if empty. Matches the pattern of haxe_array_pop_ptr.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_shift_ptr(arr: *mut HaxeArray) -> *mut u8 {
     if arr.is_null() {
         return ptr::null_mut();
@@ -1328,7 +1328,7 @@ pub extern "C" fn haxe_array_shift_ptr(arr: *mut HaxeArray) -> *mut u8 {
 }
 
 /// unshift: add element at the beginning of the array
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_unshift(arr: *mut HaxeArray, value: i64) {
     if arr.is_null() {
         return;
@@ -1376,7 +1376,7 @@ pub extern "C" fn haxe_array_unshift(arr: *mut HaxeArray, value: i64) {
 }
 
 /// concat: create new array from elements of arr followed by elements of other
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_concat(
     out: *mut HaxeArray,
     arr: *const HaxeArray,
@@ -1434,7 +1434,7 @@ pub extern "C" fn haxe_array_concat(
 
 /// splice: remove `len` elements starting at `pos`, return them in `out`.
 /// Modifies `arr` in place.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_splice(out: *mut HaxeArray, arr: *mut HaxeArray, pos: i64, len: i64) {
     if arr.is_null() || out.is_null() {
         if !out.is_null() {
@@ -1480,7 +1480,7 @@ pub extern "C" fn haxe_array_splice(out: *mut HaxeArray, arr: *mut HaxeArray, po
 }
 
 /// resize: set array length. Truncates or zero-extends.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_resize(arr: *mut HaxeArray, new_len: i64) {
     if arr.is_null() || new_len < 0 {
         return;
@@ -1544,13 +1544,13 @@ pub extern "C" fn haxe_array_resize(arr: *mut HaxeArray, new_len: i64) {
 /// The untyped formatter has to guess what a raw slot holds and reads 0 as
 /// `null`, so `[0, 2, 4]` printed `[null, 2, 4]`. When the element type is
 /// known there is nothing to guess.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_to_string_i64(arr: *const HaxeArray) -> *mut HaxeString {
     unsafe { array_to_string_typed(arr, |v| v.to_string()) }
 }
 
 /// `toString` for an array whose element type is statically `Bool`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_to_string_bool(arr: *const HaxeArray) -> *mut HaxeString {
     unsafe { array_to_string_typed(arr, |v| if v != 0 { "true" } else { "false" }.to_string()) }
 }
@@ -1586,7 +1586,7 @@ unsafe fn array_to_string_typed(
     result_ptr
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_to_string_f64(arr: *const HaxeArray) -> *mut HaxeString {
     unsafe {
         let result_layout = Layout::new::<HaxeString>();
@@ -1625,7 +1625,7 @@ pub extern "C" fn haxe_array_to_string_f64(arr: *const HaxeArray) -> *mut HaxeSt
 /// compiler does for heterogeneous-element array literals so
 /// `Std.string([true, "hi", 3.14])` reads back as
 /// `"[true, hi, 3.14]"` rather than raw bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_to_string(arr: *const HaxeArray) -> *mut HaxeString {
     unsafe {
         let result_layout = Layout::new::<HaxeString>();
@@ -1670,7 +1670,7 @@ pub extern "C" fn haxe_array_to_string(arr: *const HaxeArray) -> *mut HaxeString
 /// Sort: in-place sort using comparator callback.
 /// Callback signature: fn(env_ptr: *mut u8, a: i64, b: i64) -> i32
 /// Returns negative if a < b, 0 if equal, positive if a > b.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_sort(arr: *mut HaxeArray, fn_ptr: usize, env_ptr: *mut u8) {
     if arr.is_null() || fn_ptr == 0 {
         return;
@@ -1706,7 +1706,7 @@ pub extern "C" fn haxe_array_sort(arr: *mut HaxeArray, fn_ptr: usize, env_ptr: *
 }
 
 /// String search compares contents; the generic search compares raw slots.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn haxe_array_string_index_of(
     arr: *const HaxeArray,
     value: *const HaxeString,
@@ -1737,7 +1737,7 @@ pub unsafe extern "C" fn haxe_array_string_index_of(
 /// Index an erased array. JSON/runtime metadata boxes both the array and its
 /// elements; ordinary Haxe arrays carry raw slots. The array tag distinguishes
 /// these representations before any data-buffer load.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_get_erased(array: *mut u8, index: i64, target: i32) -> u64 {
     use crate::type_system::*;
     if array.is_null() || index < 0 {

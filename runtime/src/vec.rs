@@ -15,7 +15,7 @@ pub struct HaxeVec {
 }
 
 /// Create a new empty Vec with initial capacity of 16
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_new() -> HaxeVec {
     const INITIAL_CAPACITY: usize = 16;
 
@@ -36,7 +36,7 @@ pub extern "C" fn haxe_vec_new() -> HaxeVec {
 }
 
 /// Push a byte onto the end of the vec
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_push(vec: *mut HaxeVec, value: u8) {
     unsafe {
         if vec.is_null() {
@@ -66,7 +66,7 @@ pub extern "C" fn haxe_vec_push(vec: *mut HaxeVec, value: u8) {
 }
 
 /// Get a byte at index (returns 0 if out of bounds)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_get(vec: *const HaxeVec, index: usize) -> u8 {
     unsafe {
         if vec.is_null() {
@@ -84,7 +84,7 @@ pub extern "C" fn haxe_vec_get(vec: *const HaxeVec, index: usize) -> u8 {
 }
 
 /// Set a byte at index (no-op if out of bounds)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_set(vec: *mut HaxeVec, index: usize, value: u8) {
     unsafe {
         if vec.is_null() {
@@ -102,7 +102,7 @@ pub extern "C" fn haxe_vec_set(vec: *mut HaxeVec, index: usize, value: u8) {
 }
 
 /// Get the length of the vec
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_len(vec: *const HaxeVec) -> usize {
     unsafe {
         if vec.is_null() {
@@ -114,7 +114,7 @@ pub extern "C" fn haxe_vec_len(vec: *const HaxeVec) -> usize {
 }
 
 /// Get the capacity of the vec
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_capacity(vec: *const HaxeVec) -> usize {
     unsafe {
         if vec.is_null() {
@@ -126,7 +126,7 @@ pub extern "C" fn haxe_vec_capacity(vec: *const HaxeVec) -> usize {
 }
 
 /// Clear the vec (set length to 0, keep capacity)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_clear(vec: *mut HaxeVec) {
     unsafe {
         if vec.is_null() {
@@ -138,7 +138,7 @@ pub extern "C" fn haxe_vec_clear(vec: *mut HaxeVec) {
 }
 
 /// Free the vec's memory
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_free(vec: *mut HaxeVec) {
     unsafe {
         if vec.is_null() {
@@ -160,7 +160,7 @@ pub extern "C" fn haxe_vec_free(vec: *mut HaxeVec) {
 }
 
 /// Reserve additional capacity
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_reserve(vec: *mut HaxeVec, additional: usize) {
     unsafe {
         if vec.is_null() {

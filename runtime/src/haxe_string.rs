@@ -118,7 +118,7 @@ fn write_stdout_parts(head: &[u8], tail: &[u8], force: bool) {
 // ============================================================================
 
 /// Create a new empty string
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_new(out: *mut HaxeString) {
     crate::panic_guard::guarded_call(|| unsafe {
         let layout = Layout::from_size_align_unchecked(INITIAL_CAPACITY, 1);
@@ -136,7 +136,7 @@ pub extern "C" fn haxe_string_new(out: *mut HaxeString) {
 }
 
 /// Create a string from a C string (null-terminated)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_cstr(out: *mut HaxeString, cstr: *const u8) {
     if cstr.is_null() {
         haxe_string_new(out);
@@ -169,7 +169,7 @@ pub extern "C" fn haxe_string_from_cstr(out: *mut HaxeString, cstr: *const u8) {
 }
 
 /// Create a string from bytes with known length
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_bytes(out: *mut HaxeString, bytes: *const u8, len: usize) {
     if bytes.is_null() || len == 0 {
         haxe_string_new(out);
@@ -199,7 +199,7 @@ pub extern "C" fn haxe_string_from_bytes(out: *mut HaxeString, bytes: *const u8,
 // ============================================================================
 
 /// Get string length
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_length(s: *const HaxeString) -> usize {
     if s.is_null() {
         return 0;
@@ -208,7 +208,7 @@ pub extern "C" fn haxe_string_length(s: *const HaxeString) -> usize {
 }
 
 /// Get character at index
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_char_at(s: *const HaxeString, index: usize) -> i32 {
     if s.is_null() {
         return -1;
@@ -224,7 +224,7 @@ pub extern "C" fn haxe_string_char_at(s: *const HaxeString, index: usize) -> i32
 }
 
 /// Get character code at index
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_char_code_at(s: *const HaxeString, index: usize) -> i32 {
     haxe_string_char_at(s, index)
 }
@@ -234,7 +234,7 @@ pub extern "C" fn haxe_string_char_code_at(s: *const HaxeString, index: usize) -
 // ============================================================================
 
 /// Concatenate two strings (sret variant — use haxe_string_concat_ptr instead)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_concat_sret(
     out: *mut HaxeString,
     a: *const HaxeString,
@@ -277,7 +277,7 @@ pub extern "C" fn haxe_string_concat_sret(
 }
 
 /// Get substring
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_substring(
     out: *mut HaxeString,
     s: *const HaxeString,
@@ -318,7 +318,7 @@ pub extern "C" fn haxe_string_substring(
 }
 
 /// Substring with just start position (to end of string)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_substr(
     out: *mut HaxeString,
     s: *const HaxeString,
@@ -339,7 +339,7 @@ pub extern "C" fn haxe_string_substr(
 }
 
 /// Convert to uppercase
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_to_upper_case(out: *mut HaxeString, s: *const HaxeString) {
     if s.is_null() {
         haxe_string_new(out);
@@ -365,7 +365,7 @@ pub extern "C" fn haxe_string_to_upper_case(out: *mut HaxeString, s: *const Haxe
 }
 
 /// Convert to lowercase
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_to_lower_case(out: *mut HaxeString, s: *const HaxeString) {
     if s.is_null() {
         haxe_string_new(out);
@@ -391,7 +391,7 @@ pub extern "C" fn haxe_string_to_lower_case(out: *mut HaxeString, s: *const Haxe
 }
 
 /// Index of substring
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_index_of(
     s: *const HaxeString,
     needle: *const HaxeString,
@@ -424,7 +424,7 @@ pub extern "C" fn haxe_string_index_of(
 }
 
 /// Compare two strings lexicographically, returns -1/0/1
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_compare(a: *const HaxeString, b: *const HaxeString) -> i32 {
     if a.is_null() && b.is_null() {
         return 0;
@@ -449,7 +449,7 @@ pub extern "C" fn haxe_string_compare(a: *const HaxeString, b: *const HaxeString
 }
 
 /// Split string by delimiter
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_split(
     out: *mut *mut HaxeString,
     out_len: *mut usize,
@@ -513,7 +513,7 @@ pub extern "C" fn haxe_string_split(
 
 /// Split string into an array of strings (returns proper HaxeArray)
 /// This is the preferred version that returns Array<String> properly
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_split_array(
     s: *const HaxeString,
     delimiter: *const HaxeString,
@@ -668,7 +668,7 @@ fn strfree_dbg_count() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_free(s: *mut HaxeString) {
     if s.is_null() {
         return;
@@ -728,7 +728,7 @@ pub extern "C" fn haxe_string_free(s: *mut HaxeString) {
 // ============================================================================
 
 /// Print string to stdout
-#[no_mangle]
+#[unsafe(no_mangle)]
 /// `Sys.print`/`Sys.println` are declared `(v:Dynamic)`, so the compiler boxes
 /// a non-String argument (`haxe_box_int_ptr` etc.) but passes a String RAW as a
 /// `*HaxeString`. Both then arrive here. Reading a boxed `DynamicValue` as a
@@ -780,7 +780,7 @@ pub extern "C" fn haxe_string_print(s: *const HaxeString) {
 }
 
 /// Print string to stdout with newline
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_println(s: *const HaxeString) {
     // One write, so the newline cannot be separated from its line. An empty or
     // unprintable argument still emits the newline, as it did when this was two
@@ -791,7 +791,7 @@ pub extern "C" fn haxe_string_println(s: *const HaxeString) {
 
 /// Replace all occurrences of `needle` in `haystack` with `replacement`.
 /// Returns a new HaxeString with the result.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_replace(
     haystack: *const HaxeString,
     needle: *const HaxeString,
@@ -843,7 +843,7 @@ pub extern "C" fn haxe_string_replace(
 }
 
 /// Get C string pointer (null-terminated)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_to_cstr(s: *const HaxeString) -> *const u8 {
     if s.is_null() {
         return ptr::null();
@@ -852,7 +852,7 @@ pub extern "C" fn haxe_string_to_cstr(s: *const HaxeString) -> *const u8 {
 }
 
 /// Hash a string using FNV-1a. Returns i32 for Haxe Int compatibility.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_hash(s: *const HaxeString) -> i32 {
     if s.is_null() {
         return 0;

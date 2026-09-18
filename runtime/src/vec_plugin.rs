@@ -13,7 +13,7 @@ pub struct HaxeVec {
 }
 
 /// Create a new Vec and write it to the out pointer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_new_ptr(out: *mut HaxeVec) {
     const INITIAL_CAPACITY: usize = 16;
     unsafe {
@@ -29,7 +29,7 @@ pub extern "C" fn haxe_vec_new_ptr(out: *mut HaxeVec) {
 }
 
 /// Push a value onto the vec (may reallocate)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_push_ptr(vec: *mut HaxeVec, value: u8) {
     if vec.is_null() {
         return;
@@ -65,7 +65,7 @@ pub extern "C" fn haxe_vec_push_ptr(vec: *mut HaxeVec, value: u8) {
 }
 
 /// Get element at index
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_get_ptr(vec: *const HaxeVec, index: usize) -> u8 {
     if vec.is_null() {
         return 0;
@@ -81,7 +81,7 @@ pub extern "C" fn haxe_vec_get_ptr(vec: *const HaxeVec, index: usize) -> u8 {
 }
 
 /// Get length
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_len_ptr(vec: *const HaxeVec) -> usize {
     if vec.is_null() {
         return 0;
@@ -90,7 +90,7 @@ pub extern "C" fn haxe_vec_len_ptr(vec: *const HaxeVec) -> usize {
 }
 
 /// Free the vec
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vec_free_ptr(vec: *mut HaxeVec) {
     if vec.is_null() {
         return;

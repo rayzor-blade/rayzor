@@ -439,7 +439,7 @@ pub fn get_enum_variant_info(
 }
 
 /// Register an enum type with its variant metadata
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_register_enum(
     type_id: u32,
     name_ptr: *const u8,
@@ -674,7 +674,7 @@ unsafe fn build_i64_array(values: &[i64]) -> *mut u8 {
 
 /// Type.getClassName(c) -> String
 /// Takes a type_id (i64), returns the class name as a HaxeString pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_class_name(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref() {
@@ -688,7 +688,7 @@ pub extern "C" fn haxe_type_get_class_name(type_id: i64) -> *mut u8 {
 }
 
 /// Type.getSuperClass(c) -> Class<Dynamic> (returns super's type_id, or -1 if none)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_super_class(type_id: i64) -> i64 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref() {
@@ -705,7 +705,7 @@ pub extern "C" fn haxe_type_get_super_class(type_id: i64) -> i64 {
 
 /// Type.getInstanceFields(c) -> Array<String>
 /// Returns an array of instance field names (including inherited).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_instance_fields(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref() {
@@ -735,7 +735,7 @@ pub extern "C" fn haxe_type_get_instance_fields(type_id: i64) -> *mut u8 {
 
 /// Type.getClassFields(c) -> Array<String>
 /// Returns an array of static field names (own class only).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_class_fields(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref() {
@@ -749,7 +749,7 @@ pub extern "C" fn haxe_type_get_class_fields(type_id: i64) -> *mut u8 {
 }
 
 /// Type.resolveClass(name) -> Class<Dynamic> (returns type_id, or -1 if not found)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_resolve_class(name_ptr: *mut u8) -> i64 {
     if name_ptr.is_null() {
         return -1;
@@ -772,7 +772,7 @@ pub extern "C" fn haxe_type_resolve_class(name_ptr: *mut u8) -> i64 {
 }
 
 /// Type.resolveEnum(name) -> Enum<Dynamic> (returns type_id, or -1 if not found)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_resolve_enum(name_ptr: *mut u8) -> i64 {
     if name_ptr.is_null() {
         return -1;
@@ -798,7 +798,7 @@ pub extern "C" fn haxe_type_resolve_enum(name_ptr: *mut u8) -> i64 {
 ///
 /// The compiler injects `type_id` as a hidden argument because enum values can be
 /// unboxed discriminants and don't carry runtime type metadata by themselves.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_enum(value: i64, type_id: i32) -> i64 {
     // A `Dynamic` receiver carries its enum identity in the box, not in a
     // compiler-injected constant.
@@ -819,7 +819,7 @@ pub extern "C" fn haxe_type_get_enum(value: i64, type_id: i32) -> i64 {
 
 /// Type.createEmptyInstance(c) -> T
 /// Allocates a zero-initialized class instance without invoking the constructor.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_create_empty_instance(type_id: i64) -> *mut u8 {
     if type_id <= 0 {
         return std::ptr::null_mut();
@@ -869,7 +869,7 @@ pub extern "C" fn haxe_type_create_empty_instance(type_id: i64) -> *mut u8 {
 /// Register a constructor closure for reflective Type.createInstance calls.
 ///
 /// `ctor_closure_ptr` is a pointer to closure layout `{fn_ptr: i64, env_ptr: i64}`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_register_constructor(type_id: i64, ctor_closure_ptr: i64) {
     if type_id <= 0 || ctor_closure_ptr == 0 {
         return;
@@ -881,7 +881,7 @@ pub extern "C" fn haxe_type_register_constructor(type_id: i64, ctor_closure_ptr:
 
 /// Type.createInstance(c, args) -> T
 /// Allocates an object, then invokes its registered constructor wrapper.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_create_instance(type_id: i64, args_ptr: *mut u8) -> *mut u8 {
     let obj = haxe_type_create_empty_instance(type_id);
     if obj.is_null() {
@@ -923,7 +923,7 @@ pub extern "C" fn haxe_type_create_instance(type_id: i64, args_ptr: *mut u8) -> 
 
 /// Type.getEnumConstructs(e) -> Array<String>
 /// Takes an enum type_id, returns array of constructor names.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_enum_constructs(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref() {
@@ -938,7 +938,7 @@ pub extern "C" fn haxe_type_get_enum_constructs(type_id: i64) -> *mut u8 {
 }
 
 /// Type.getEnumName(e) -> String
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_enum_name(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref() {
@@ -1003,7 +1003,7 @@ unsafe fn haxe_string_ptr_eq(a: i64, b: i64) -> bool {
 
 /// Type.allEnums(e) -> Array<T>
 /// Returns all parameterless constructors for an enum type.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_all_enums(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref() {
@@ -1026,7 +1026,7 @@ pub extern "C" fn haxe_type_all_enums(type_id: i64) -> *mut u8 {
 /// Deep equality for enum values (constructor + parameters).
 ///
 /// Compiler injects `type_id` as hidden argument because enum values can be unboxed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32) -> bool {
     if type_id <= 0 {
         return false;
@@ -1086,7 +1086,7 @@ pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32) -> bool {
 /// Creates an enum value dynamically by constructor name.
 /// For parameterless constructors, returns the tag as i64 (unboxed).
 /// For constructors with parameters, allocates boxed enum [tag:i32][pad:i32][fields...].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_create_enum(
     type_id: i64,
     constr_ptr: *mut u8,
@@ -1118,7 +1118,7 @@ pub extern "C" fn haxe_type_create_enum(
 
 /// Type.createEnumIndex(e, index, ?params) -> T
 /// Creates an enum value dynamically by constructor index.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_create_enum_index(
     type_id: i64,
     index: i64,
@@ -1189,7 +1189,7 @@ static ENUM_BUILDER: RwLock<Option<HashMap<u32, EnumBuilderEntry>>> = RwLock::ne
 /// Start registering an enum type - call this first, then call register_enum_variant for each variant
 /// Finally call register_enum_finish to complete registration
 /// Note: name_str is a HaxeString pointer (from IrValue::String), not raw *const u8
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_register_enum_start(
     type_id: u32,
     name_str: *const crate::string::HaxeString,
@@ -1220,7 +1220,7 @@ pub extern "C" fn haxe_register_enum_start(
 /// Register a single enum variant - call after register_enum_start for each variant
 /// Note: name_str is a HaxeString pointer (from IrValue::String), not raw *const u8
 /// param_types_ptr: pointer to array of ParamType (u8), or null if no params
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_register_enum_variant(
     type_id: u32,
     _variant_index: usize,
@@ -1268,7 +1268,7 @@ pub extern "C" fn haxe_register_enum_variant(
 
 /// Finish enum registration - call after all variants have been registered
 /// This creates the final TypeInfo and registers it
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_register_enum_finish(type_id: u32) {
     let mut builder = ENUM_BUILDER.write().unwrap();
     if let Some(ref mut map) = *builder {
@@ -1337,7 +1337,7 @@ unsafe extern "C" fn enum_to_string(value_ptr: *const u8) -> StringPtr {
 /// Get the discriminant index of an enum value.
 /// For unboxed enums (is_boxed=0): value IS the discriminant, return directly.
 /// For boxed enums (is_boxed!=0): value is a pointer, read i32 tag from offset 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_enum_get_index(value: i64, is_boxed: i32) -> i64 {
     if is_boxed == 0 {
         value
@@ -1353,7 +1353,7 @@ pub extern "C" fn haxe_enum_get_index(value: i64, is_boxed: i32) -> i64 {
 /// Get the name of an enum value.
 /// For unboxed enums (is_boxed=0): value is the discriminant.
 /// For boxed enums (is_boxed!=0): value is a pointer, read i32 tag from offset 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_enum_get_name(
     type_id: u32,
     value: i64,
@@ -1373,7 +1373,7 @@ pub extern "C" fn haxe_enum_get_name(
 
 /// Returns the variant name for the given type_id and discriminant
 /// Returns null if not an enum or discriminant is out of range
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_enum_variant_name(
     type_id: u32,
     discriminant: i64,
@@ -1396,7 +1396,7 @@ pub extern "C" fn haxe_enum_variant_name(
 
 /// Get name of a boxed enum value (heap-allocated with tag at offset 0).
 /// Reads the i32 tag from the struct, then looks up the variant name via RTTI.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_enum_get_name_boxed(
     type_id: u32,
     ptr: *const u8,
@@ -1413,7 +1413,7 @@ pub extern "C" fn haxe_enum_get_name_boxed(
 /// Get parameters of an enum value as a HaxeArray.
 /// For unboxed enums (is_boxed=0): returns empty array.
 /// For boxed enums (is_boxed!=0): reads fields from heap struct and boxes them as Dynamic.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_enum_get_parameters(
     type_id: u32,
     value: i64,
@@ -1542,7 +1542,7 @@ fn class_implements_interface_id(class_type_id: i64, interface_type_id: i64) -> 
 }
 
 /// Register that a class implements an interface.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_register_interface_impl(class_type_id: i64, interface_type_id: i64) {
     if class_type_id <= 0 || interface_type_id <= 0 {
         return;
@@ -1571,7 +1571,7 @@ static OWNED_FIELD_MASKS: RwLock<Option<HashMap<u32, u64>>> = RwLock::new(None);
 /// The compiler proves this per field and defaults to NOT owned. That default
 /// is the whole safety argument: freeing a field that is merely a REFERENCE
 /// corrupts the heap, while declining to free one that is owned only leaks.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_register_owned_mask(class_type_id: i64, mask: i64) {
     if class_type_id <= 0 || mask == 0 {
         return;
@@ -1603,7 +1603,7 @@ pub extern "C" fn haxe_register_owned_mask(class_type_id: i64, mask: i64) {
 /// `ptr` must be a live class instance allocated by the compiler's object
 /// allocator, with its `__type_id` header intact, and must not be reachable
 /// from anywhere else.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn haxe_object_free_deep(ptr: *mut u8) {
     if ptr.is_null() {
         return;
@@ -1637,7 +1637,7 @@ pub unsafe extern "C" fn haxe_object_free_deep(ptr: *mut u8) {
 /// Runtime type check for Dynamic/boxed values.
 /// Checks if a boxed DynamicValue has the given type_id, walking the class hierarchy.
 /// Used by `Std.is()` and `(expr is Type)` for Dynamic-typed values.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_is(value_ptr: *mut u8, expected_type_id: i64) -> bool {
     if value_ptr.is_null() {
         return false;
@@ -1658,7 +1658,7 @@ pub extern "C" fn haxe_std_is(value_ptr: *mut u8, expected_type_id: i64) -> bool
 /// Runtime downcast for Dynamic/boxed values.
 /// Returns the value pointer if the type matches (with hierarchy walking), null otherwise.
 /// Used by `Std.downcast()`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_downcast(value_ptr: *mut u8, expected_type_id: i64) -> *mut u8 {
     if value_ptr.is_null() {
         return std::ptr::null_mut();
@@ -1737,7 +1737,7 @@ fn resolve_dynamic_enum(value: i64, type_id: i32) -> (i64, u32) {
 /// existing convention for `enumConstructor` / `enumParameters`)
 /// so the runtime can determine whether `value` is a raw
 /// discriminant or a heap-pointer to a `[tag:i32, ...]` box.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_enum_index(value: i64, type_id: i32) -> i64 {
     let (value, type_id) = resolve_dynamic_enum(value, type_id);
     let is_boxed = if enum_is_boxed(type_id) { 1 } else { 0 };
@@ -1746,7 +1746,7 @@ pub extern "C" fn haxe_type_enum_index(value: i64, type_id: i32) -> i64 {
 
 /// Type.enumConstructor(e:EnumValue):String — get constructor name.
 /// Takes raw i64 value + type_id (injected by compiler).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_enum_constructor(
     value: i64,
     type_id: i32,
@@ -1758,7 +1758,7 @@ pub extern "C" fn haxe_type_enum_constructor(
 
 /// Type.enumParameters(e:EnumValue):Array<Dynamic> — get parameters.
 /// Takes raw i64 value + type_id (injected by compiler).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_enum_parameters(
     value: i64,
     type_id: i32,
@@ -1770,7 +1770,7 @@ pub extern "C" fn haxe_type_enum_parameters(
 
 /// Trace an enum value by type_id and discriminant
 /// Prints the variant name if available, otherwise the discriminant
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_enum(type_id: i64, discriminant: i64) {
     if let Some(name) = get_enum_variant_name(TypeId(type_id as u32), discriminant) {
         println!("{}", name);
@@ -1783,7 +1783,7 @@ pub extern "C" fn haxe_trace_enum(type_id: i64, discriminant: i64) {
 /// Trace a boxed enum value (heap-allocated with parameters)
 /// Memory layout: [tag:i32][pad:i32][field0:i64][field1:i64]...
 /// Prints "VariantName(param1, param2, ...)" format
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_enum_boxed(type_id: u32, ptr: *const u8) {
     if ptr.is_null() {
         println!("null");
@@ -1870,7 +1870,7 @@ pub extern "C" fn haxe_trace_enum_boxed(type_id: u32, ptr: *const u8) {
 /// Called when the compiler knows the concrete types at the call site (e.g. Result<Int, String>).
 /// param_types_ptr: pointer to array of ParamType (u8) values, one per variant field.
 /// param_count: number of entries in param_types_ptr.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_enum_boxed_typed(
     type_id: u32,
     ptr: *const u8,
@@ -2134,7 +2134,7 @@ unsafe extern "C" fn array_to_string(value_ptr: *const u8) -> StringPtr {
 // ============================================================================
 
 /// Box an Int as Dynamic
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_int(value: i64) -> DynamicValue {
     unsafe {
         let ptr = libc::malloc(std::mem::size_of::<i64>()) as *mut i64;
@@ -2147,7 +2147,7 @@ pub extern "C" fn haxe_box_int(value: i64) -> DynamicValue {
 }
 
 /// Box a Float as Dynamic
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_float(value: f64) -> DynamicValue {
     unsafe {
         let ptr = libc::malloc(std::mem::size_of::<f64>()) as *mut f64;
@@ -2160,7 +2160,7 @@ pub extern "C" fn haxe_box_float(value: f64) -> DynamicValue {
 }
 
 /// Box a Bool as Dynamic
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_bool(value: bool) -> DynamicValue {
     unsafe {
         let ptr = libc::malloc(std::mem::size_of::<bool>()) as *mut bool;
@@ -2173,7 +2173,7 @@ pub extern "C" fn haxe_box_bool(value: bool) -> DynamicValue {
 }
 
 /// Box a String as Dynamic
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_string(str_ptr: *const u8, len: usize) -> DynamicValue {
     unsafe {
         let ptr = libc::malloc(std::mem::size_of::<StringPtr>()) as *mut StringPtr;
@@ -2186,7 +2186,7 @@ pub extern "C" fn haxe_box_string(str_ptr: *const u8, len: usize) -> DynamicValu
 }
 
 /// Box null as Dynamic
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_null() -> DynamicValue {
     DynamicValue {
         type_id: TYPE_NULL,
@@ -2199,7 +2199,7 @@ pub extern "C" fn haxe_box_null() -> DynamicValue {
 // ============================================================================
 
 /// Unbox a Dynamic as Int (handles Float→Int truncation, returns 0 for other types)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_int(dynamic: DynamicValue) -> i64 {
     if dynamic.type_id == TYPE_INT {
         unsafe { *(dynamic.value_ptr as *const i64) }
@@ -2219,7 +2219,7 @@ pub extern "C" fn haxe_unbox_int(dynamic: DynamicValue) -> i64 {
 }
 
 /// Unbox a Dynamic as Float (handles Int→Float promotion, returns 0.0 for other types)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_float(dynamic: DynamicValue) -> f64 {
     if dynamic.type_id == TYPE_FLOAT {
         unsafe { *(dynamic.value_ptr as *const f64) }
@@ -2239,7 +2239,7 @@ pub extern "C" fn haxe_unbox_float(dynamic: DynamicValue) -> f64 {
 }
 
 /// Unbox a Dynamic as Bool (returns false if wrong type)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_bool(dynamic: DynamicValue) -> bool {
     if dynamic.type_id == TYPE_BOOL {
         unsafe { *(dynamic.value_ptr as *const bool) }
@@ -2249,7 +2249,7 @@ pub extern "C" fn haxe_unbox_bool(dynamic: DynamicValue) -> bool {
 }
 
 /// Unbox a Dynamic as String (returns empty string if wrong type)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_string(dynamic: DynamicValue) -> StringPtr {
     if dynamic.type_id == TYPE_STRING {
         unsafe { *(dynamic.value_ptr as *const StringPtr) }
@@ -2268,7 +2268,7 @@ pub extern "C" fn haxe_unbox_string(dynamic: DynamicValue) -> StringPtr {
 /// Convert a Dynamic value to String using runtime type dispatch
 ///
 /// This is the implementation of Std.string(Dynamic)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_string(dynamic: DynamicValue) -> StringPtr {
     // Handle null specially
     if dynamic.type_id == TYPE_NULL || dynamic.value_ptr.is_null() {
@@ -2293,7 +2293,7 @@ pub extern "C" fn haxe_std_string(dynamic: DynamicValue) -> StringPtr {
 ///
 /// This is the pointer-returning version of Std.string(Dynamic)
 /// Returns *mut HaxeString for proper ABI compatibility
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_string::HaxeString {
     use crate::haxe_string::HaxeString;
 
@@ -2363,7 +2363,7 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
 }
 
 /// Free a Dynamic value
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_free_dynamic(dynamic: DynamicValue) {
     if !dynamic.value_ptr.is_null() {
         // The boxed value may be a compiler-allocated object, which now comes
@@ -2378,7 +2378,7 @@ pub extern "C" fn haxe_free_dynamic(dynamic: DynamicValue) {
 
 /// Convert a Float to an Int, rounded towards 0
 /// Implements Std.int(x:Float):Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_int(x: f64) -> i64 {
     // Truncate towards zero (same as casting in Rust)
     // Handle special cases
@@ -2397,7 +2397,7 @@ pub extern "C" fn haxe_std_int(x: f64) -> i64 {
 
 /// Whether a `Null<T>` box holds null. A BOX's address is never zero, so
 /// comparing the pointer answers false for a boxed null; only its tag says.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_is_null(ptr: *mut u8) -> bool {
     if ptr.is_null() {
         return true;
@@ -2412,7 +2412,7 @@ pub extern "C" fn haxe_dynamic_is_null(ptr: *mut u8) -> bool {
 /// Implements Std.parseInt(x:String):Null<Int>
 /// Returns the parsed value, or i64::MIN as a sentinel for null
 /// (caller should check for this and convert to null)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_parse_int(str_ptr: *const crate::haxe_string::HaxeString) -> i64 {
     if str_ptr.is_null() {
         return i64::MIN; // Sentinel for null
@@ -2474,7 +2474,7 @@ pub extern "C" fn haxe_std_parse_int(str_ptr: *const crate::haxe_string::HaxeStr
 /// Parse a String to a Float
 /// Implements Std.parseFloat(x:String):Float
 /// Returns NaN if parsing fails
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_parse_float(str_ptr: *const crate::haxe_string::HaxeString) -> f64 {
     if str_ptr.is_null() {
         return f64::NAN;
@@ -2552,7 +2552,7 @@ pub extern "C" fn haxe_std_parse_float(str_ptr: *const crate::haxe_string::HaxeS
 
 /// Return a random integer between 0 (inclusive) and max (exclusive)
 /// Implements Std.random(x:Int):Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_random(max: i64) -> i64 {
     if max <= 1 {
         return 0;
@@ -2681,7 +2681,7 @@ fn box_trace_tick(value: i64) {
 }
 
 /// Box an Int as Dynamic (returns opaque pointer to DynamicValue)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_int_ptr(value: i64) -> *mut u8 {
     box_trace_tick(value);
     let dynamic = haxe_box_int(value);
@@ -2690,7 +2690,7 @@ pub extern "C" fn haxe_box_int_ptr(value: i64) -> *mut u8 {
 }
 
 /// Box a Float as Dynamic (returns opaque pointer to DynamicValue)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_float_ptr(value: f64) -> *mut u8 {
     let dynamic = haxe_box_float(value);
     let boxed = Box::new(dynamic);
@@ -2698,7 +2698,7 @@ pub extern "C" fn haxe_box_float_ptr(value: f64) -> *mut u8 {
 }
 
 /// Box a Bool as Dynamic (returns opaque pointer to DynamicValue)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_bool_ptr(value: bool) -> *mut u8 {
     let dynamic = haxe_box_bool(value);
     let boxed = Box::new(dynamic);
@@ -2716,7 +2716,7 @@ pub extern "C" fn haxe_box_bool_ptr(value: bool) -> *mut u8 {
 ///
 /// This function is preserved for FFI users that genuinely have a
 /// null-terminated C string (e.g. embedded Rayzor in C-style hosts).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_cstring_ptr(str_ptr: *const u8) -> *mut u8 {
     let len = if str_ptr.is_null() {
         0
@@ -2733,7 +2733,7 @@ pub extern "C" fn haxe_box_cstring_ptr(str_ptr: *const u8) -> *mut u8 {
 /// caches reference the symbol by name. New code MUST NOT call this:
 /// it does NOT do what its name suggests for Rayzor strings (see
 /// `haxe_box_cstring_ptr` doc).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_string_ptr(str_ptr: *const u8) -> *mut u8 {
     haxe_box_cstring_ptr(str_ptr)
 }
@@ -2741,7 +2741,7 @@ pub extern "C" fn haxe_box_string_ptr(str_ptr: *const u8) -> *mut u8 {
 /// Box a HaxeString pointer as Dynamic.
 /// Unlike haxe_box_cstring_ptr (which expects a null-terminated C string),
 /// this takes a pointer to an existing HaxeString struct and wraps it directly.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_haxestring_ptr(hs_ptr: *mut u8) -> *mut u8 {
     if hs_ptr.is_null() {
         let dynamic = haxe_box_null();
@@ -2759,7 +2759,7 @@ pub extern "C" fn haxe_box_haxestring_ptr(hs_ptr: *mut u8) -> *mut u8 {
 /// Box a function/closure pointer as Dynamic.
 /// The value pointer is expected to be a closure object pointer
 /// (`{fn_ptr, env_ptr}`) or another callable runtime representation.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_function_ptr(fn_ptr: *mut u8) -> *mut u8 {
     if fn_ptr.is_null() {
         let dynamic = haxe_box_null();
@@ -2775,7 +2775,7 @@ pub extern "C" fn haxe_box_function_ptr(fn_ptr: *mut u8) -> *mut u8 {
 }
 
 /// Unbox an Int from Dynamic (takes opaque pointer to DynamicValue)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_int_ptr(ptr: *mut u8) -> i64 {
     if ptr.is_null() {
         return 0;
@@ -2791,7 +2791,7 @@ pub extern "C" fn haxe_unbox_int_ptr(ptr: *mut u8) -> i64 {
 /// If the pointer is a genuinely boxed DynamicValue* (properly aligned, valid type_id),
 /// unbox it. Otherwise, treat the pointer value itself as a raw integer.
 /// This handles the ambiguity between boxed DynamicValue* and type-erased raw integers.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_coerce_dynamic_to_int(ptr: *mut u8) -> i64 {
     if ptr.is_null() {
         return 0;
@@ -2811,7 +2811,7 @@ pub extern "C" fn haxe_coerce_dynamic_to_int(ptr: *mut u8) -> i64 {
 /// a primitive tag is unwrapped; anything else keeps its bits, so a reference
 /// survives the round trip. This is deliberately stricter than
 /// `haxe_coerce_dynamic_to_int`, which accepts class ids as boxes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_scalar_or_addr(ptr: *mut u8) -> i64 {
     if ptr.is_null() {
         return 0;
@@ -2828,7 +2828,7 @@ pub extern "C" fn haxe_unbox_scalar_or_addr(ptr: *mut u8) -> i64 {
 /// object, then `iterator`, `hasNext` and `next` entry points. An array
 /// iterates through `iterator_fn`; a value tagged `iterator_tag` (an array
 /// iterator) is the iterator already, and slot 16 is left null to say so.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_iter_handle_from_dynamic(
     ptr: *mut u8,
     handle_tag: i64,
@@ -2858,7 +2858,7 @@ pub extern "C" fn haxe_iter_handle_from_dynamic(
 }
 
 /// The tag of a Dynamic value's box, or 0 for a slot that is not one.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_tag(ptr: *mut u8) -> u32 {
     dynamic_box_at(ptr)
         .filter(|d| d.tag_is_known())
@@ -2870,7 +2870,7 @@ pub extern "C" fn haxe_dynamic_tag(ptr: *mut u8) -> u32 {
 /// For an array, string or anonymous object the raw value begins with a
 /// data pointer, which can never read as the small builtin tag, so this
 /// tells the box from the object without a heuristic.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_if_tag(ptr: *mut u8, tag: u32) -> *mut u8 {
     match dynamic_box_at(ptr) {
         Some(d) if d.type_id.0 == tag => d.value_ptr,
@@ -2887,7 +2887,7 @@ pub extern "C" fn haxe_unbox_if_tag(ptr: *mut u8, tag: u32) -> *mut u8 {
 /// directly under type_id 0. Both must come out as the same value. Tag 0 is
 /// never a real type, so it identifies the second shape unambiguously; any
 /// other unrecognised first word means the slot was never a box.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_erased_return(ptr: *mut u8) -> i64 {
     if ptr.is_null() {
         return 0;
@@ -2908,7 +2908,7 @@ pub extern "C" fn haxe_unbox_erased_return(ptr: *mut u8) -> i64 {
 
 /// Safely coerce a Dynamic-typed value to a float.
 /// Same heuristic as haxe_coerce_dynamic_to_int.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_coerce_dynamic_to_float(ptr: *mut u8) -> f64 {
     if ptr.is_null() {
         return 0.0;
@@ -2920,7 +2920,7 @@ pub extern "C" fn haxe_coerce_dynamic_to_float(ptr: *mut u8) -> f64 {
 }
 
 /// Unbox a Float from Dynamic (takes opaque pointer to DynamicValue)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_float_ptr(ptr: *mut u8) -> f64 {
     if ptr.is_null() {
         return 0.0;
@@ -2953,7 +2953,7 @@ pub(crate) fn dynamic_value_if_boxed(p: *mut u8) -> Option<DynamicValue> {
 /// Haxe semantics: numbers compare numerically across Int/Float, Bool and
 /// String compare by value, everything else compares by reference. Two nulls
 /// are equal; null is equal to nothing else.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_equals(a: *mut u8, b: *mut u8) -> bool {
     if a == b {
         return true;
@@ -3008,7 +3008,7 @@ pub extern "C" fn haxe_dynamic_equals(a: *mut u8, b: *mut u8) -> bool {
 /// HaxeString. Each side is read the way its own provenance says.
 ///
 /// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Dynamic, 0=unresolved.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_equals_typed(raw: i64, type_tag: i32, other: *mut u8) -> bool {
     // Reference/Dynamic, and the placeholder a monomorphisation never filled
     // in, both leave `raw` pointer-shaped: neither side is a described value.
@@ -3058,7 +3058,7 @@ pub extern "C" fn haxe_dynamic_equals_typed(raw: i64, type_tag: i32, other: *mut
 }
 
 /// Unbox a Bool from Dynamic (takes opaque pointer to DynamicValue)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_bool_ptr(ptr: *mut u8) -> bool {
     if ptr.is_null() {
         return false;
@@ -3074,7 +3074,7 @@ pub extern "C" fn haxe_unbox_bool_ptr(ptr: *mut u8) -> bool {
 /// Used by monomorphized generic code where the concrete type is determined
 /// at specialization time via type_param_tag_fixups.
 /// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Object
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
     match ValueTag::from_i32(type_tag) {
         Some(ValueTag::Int) => {
@@ -3118,7 +3118,7 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
 
 /// Box a reference type (class, enum, anonymous object, array, etc.)
 /// The value is already a pointer, so we just wrap it with type metadata
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_reference_ptr(value_ptr: *mut u8, type_id: u32) -> *mut u8 {
     let dynamic = DynamicValue {
         type_id: TypeId(type_id),
@@ -3129,7 +3129,7 @@ pub extern "C" fn haxe_box_reference_ptr(value_ptr: *mut u8, type_id: u32) -> *m
 }
 
 /// Unbox a reference type - just extract the pointer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_reference_ptr(ptr: *mut u8) -> *mut u8 {
     if ptr.is_null() {
         return std::ptr::null_mut();
@@ -3157,7 +3157,7 @@ pub extern "C" fn haxe_unbox_reference_ptr(ptr: *mut u8) -> *mut u8 {
 /// boxed primitive from a boxed reference, so the tag decides: numeric prim
 /// tags return the scalar value, every other tag (string/class/enum/anon/array)
 /// returns the raw payload pointer. A null box (empty channel) -> 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_channel_unbox_erased(box_ptr: *mut u8) -> i64 {
     if box_ptr.is_null() {
         return 0;
@@ -3179,7 +3179,7 @@ pub extern "C" fn haxe_channel_unbox_erased(box_ptr: *mut u8) -> i64 {
 /// DynamicValue box; the raw cmp compared the BOX POINTER to the value
 /// (`Null<Int> == 9` was always false). Tag-aware via haxe_unbox_int, so a
 /// FLOAT/BOOL-tagged box still compares by value.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_null_int_eq(box_ptr: *mut u8, value: i64) -> bool {
     if box_ptr.is_null() {
         return false;
@@ -3188,7 +3188,7 @@ pub extern "C" fn haxe_null_int_eq(box_ptr: *mut u8, value: i64) -> bool {
 }
 
 /// Float variant of `haxe_null_int_eq` (either side statically Float).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_null_float_eq(box_ptr: *mut u8, value: f64) -> bool {
     if box_ptr.is_null() {
         return false;
@@ -3198,7 +3198,7 @@ pub extern "C" fn haxe_null_float_eq(box_ptr: *mut u8, value: f64) -> bool {
 
 /// Both sides nullable: null == null is true, null == value is false,
 /// otherwise compare the unboxed values.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_null_null_eq_int(a: *mut u8, b: *mut u8) -> bool {
     match (a.is_null(), b.is_null()) {
         (true, true) => true,
@@ -3211,7 +3211,7 @@ pub extern "C" fn haxe_null_null_eq_int(a: *mut u8, b: *mut u8) -> bool {
 }
 
 /// Float variant of `haxe_null_null_eq_int`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_null_null_eq_float(a: *mut u8, b: *mut u8) -> bool {
     match (a.is_null(), b.is_null()) {
         (true, true) => true,
@@ -3231,7 +3231,7 @@ pub extern "C" fn haxe_null_null_eq_float(a: *mut u8, b: *mut u8) -> bool {
 /// representation — `Null<Int>` machinery null-checks and unboxes it
 /// downstream; unwrapping here handed back the malloc'd value slot, which
 /// read as garbage). Null (empty channel) stays null either way.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_channel_unbox_try(box_ptr: *mut u8) -> *mut u8 {
     if box_ptr.is_null() {
         return std::ptr::null_mut();
@@ -3356,7 +3356,7 @@ pub unsafe fn box_class_field_as_dynamic(value: u64, ty: ParamType) -> *mut u8 {
 /// resulting Dynamic.
 ///
 /// Returns null when `obj_ptr` is null.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_class_instance(obj_ptr: *mut u8) -> *mut u8 {
     if obj_ptr.is_null() {
         return std::ptr::null_mut();
@@ -3367,7 +3367,7 @@ pub extern "C" fn haxe_box_class_instance(obj_ptr: *mut u8) -> *mut u8 {
 
 /// Read the runtime type_id from an object's header (first 8 bytes at offset 0).
 /// All class instances have a `__type_id: i64` field at GEP index 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_object_get_type_id(obj_ptr: *const u8) -> i64 {
     if obj_ptr.is_null() {
         return -1;
@@ -3379,7 +3379,7 @@ pub extern "C" fn haxe_object_get_type_id(obj_ptr: *const u8) -> i64 {
 /// Reads the type_id from offset 0, walks the class hierarchy, and returns
 /// the object pointer on match or null on failure.
 /// Used by `cast(expr, Type)` for class→class safe casts.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_safe_downcast_class(obj_ptr: *mut u8, target_type_id: i64) -> *mut u8 {
     if haxe_object_is_instance(obj_ptr, target_type_id) != 0 {
         obj_ptr
@@ -3390,7 +3390,7 @@ pub extern "C" fn haxe_safe_downcast_class(obj_ptr: *mut u8, target_type_id: i64
 
 /// Check if an object is an instance of (or subclass of) a target type.
 /// Walks the class hierarchy via TYPE_REGISTRY super_type_id chain.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_object_is_instance(obj_ptr: *const u8, target_type_id: i64) -> i64 {
     if obj_ptr.is_null() {
         return 0;
@@ -3453,7 +3453,7 @@ static mut VTABLE_FLAT_SLOTS: *const Vec<Vec<i64>> = std::ptr::null();
 
 /// Initialize a vtable for a class with the given type_id and slot count.
 /// Called at program startup before any user code.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vtable_init(type_id: i32, slot_count: i32) {
     // Invalidate flat cache — will be rebuilt on next lookup.
     // Must free slots BEFORE flat table since flat entries point into slots.
@@ -3480,7 +3480,7 @@ pub extern "C" fn haxe_vtable_init(type_id: i32, slot_count: i32) {
 }
 
 /// Store a closure pointer at a vtable slot for a class type_id.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vtable_set_slot(type_id: i32, slot_index: i32, closure_ptr: i64) {
     let mut registry = VTABLE_REGISTRY.write().unwrap();
     if let Some(map) = registry.as_mut() {
@@ -3503,7 +3503,7 @@ static IFACE_VTABLE_REGISTRY: RwLock<Option<IfaceVtableMap>> = RwLock::new(None)
 /// Register one (class, iface, slot) → closure_ptr entry. Called once
 /// per (class, iface, method) tuple during program startup from
 /// `__vtable_init__`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 /// Whether `RAYZOR_IFACE_DEBUG` is set, read once. Both callers sit on the
 /// interface dispatch path, where a `getenv` per call is pure overhead.
 fn iface_debug_enabled() -> bool {
@@ -3574,7 +3574,7 @@ pub extern "C" fn haxe_iface_vtable_set_slot(
 ///
 /// Returns null if the object's class doesn't implement the target
 /// interface (no registry entry).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_iface_fat_ptr_build(obj_ptr: *mut u8, iface_type_id: i32) -> *mut u8 {
     let debug = iface_debug_enabled();
     if obj_ptr.is_null() || (obj_ptr as usize) < 0x1000 {
@@ -3723,7 +3723,7 @@ fn ensure_flat_vtable() {
 ///
 /// Hot path is unchanged: two array indexes, no locks, no hash lookups. The
 /// throws sit only on paths that previously produced a guaranteed crash.
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[inline(never)]
 /// Is dispatch instrumentation on? Resolved once.
 ///
@@ -3881,15 +3881,15 @@ fn runtime_metadata(type_id: i64, kind: &str) -> *mut u8 {
     };
     crate::json::haxe_json_parse(&string as *const _ as *const u8)
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_meta_get_type(type_id: i64) -> *mut u8 {
     runtime_metadata(type_id, "type")
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_meta_get_fields(type_id: i64) -> *mut u8 {
     runtime_metadata(type_id, "fields")
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_meta_get_statics(type_id: i64) -> *mut u8 {
     runtime_metadata(type_id, "statics")
 }

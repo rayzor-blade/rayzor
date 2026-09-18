@@ -54,7 +54,7 @@ fn main() {
     // reference probe (-framework Accelerate) loads it at process start and
     // is fine — do the same here.
     #[link(name = "Accelerate", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         #[link_name = "BNNSGraphCompileFromFile_v2"]
         fn compile_from_file(
             filename: *const c_char,

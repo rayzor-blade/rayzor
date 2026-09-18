@@ -23,7 +23,7 @@ mod imp {
 
     pub const BUCKETS: [usize; 2] = [128, 512];
 
-    extern "C" {
+    unsafe extern "C" {
         fn nue_coreml_load(path: *const c_char, compute_units: i32) -> *mut c_void;
         fn nue_coreml_predict_prefill(
             handle: *mut c_void,
@@ -154,7 +154,7 @@ mod imp {
 /// Load `<stem>.prefill_s{S}.mlmodelc` buckets from `dir` for one model.
 /// Strings are raw (ptr, len) UTF-8; dims come from the model's metadata.
 /// Returns a handle > 0, 0 when no artifacts, -1 off-macOS.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nue_prefill_graph_load(
     dir_ptr: i64,
     dir_len: i64,
@@ -203,7 +203,7 @@ pub unsafe extern "C" fn nue_prefill_graph_load(
 /// prefix rows. A dest-pointer out-param (the caller allocates the tensor via
 /// the `Tensor.uninit` builtin) keeps this a plain bulk copy — no per-slot owned
 /// Tensor handle to hand back across FFI. Returns 0 on success.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nue_prefill_graph_kv_copy(
     kv_ptr: i64,
     slot: i64,
@@ -238,7 +238,7 @@ pub unsafe extern "C" fn nue_prefill_graph_kv_copy(
 }
 
 /// Smallest loaded bucket of `handle` that fits `seq`, or 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nue_prefill_graph_bucket(handle: i64, seq: i64) -> i64 {
     #[cfg(target_os = "macos")]
     {
@@ -254,7 +254,7 @@ pub extern "C" fn nue_prefill_graph_bucket(handle: i64, seq: i64) -> i64 {
 /// Run bucket `s`: h[s*hidden] -> out[s*hidden] + kv laid out
 /// [layers][2][s*kv_heads*head_dim] (k slot 2i, v slot 2i+1), all f32.
 /// Returns 0 on success.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nue_prefill_graph_execute(
     handle: i64,
     s: i64,

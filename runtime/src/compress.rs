@@ -54,7 +54,7 @@ fn to_flush_compress(mode: i32) -> flate2::FlushCompress {
 }
 
 /// Compress.new(level:Int) -> handle
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_compress_new(level: i32) -> *mut u8 {
     let level = flate2::Compression::new(level.clamp(0, 9) as u32);
     let handle = Box::new(CompressHandle {
@@ -65,7 +65,7 @@ pub extern "C" fn rayzor_compress_new(level: i32) -> *mut u8 {
 }
 
 /// Compress.execute(src, srcPos, dst, dstPos) -> {done, read, write}
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_compress_execute(
     handle: *mut u8,
     src_bytes: *mut u8,
@@ -107,7 +107,7 @@ pub extern "C" fn rayzor_compress_execute(
 }
 
 /// Compress.setFlushMode(mode)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_compress_set_flush(handle: *mut u8, mode: i32) {
     if handle.is_null() {
         return;
@@ -119,7 +119,7 @@ pub extern "C" fn rayzor_compress_set_flush(handle: *mut u8, mode: i32) {
 }
 
 /// Compress.close()
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_compress_close(handle: *mut u8) {
     if handle.is_null() {
         return;
@@ -131,7 +131,7 @@ pub extern "C" fn rayzor_compress_close(handle: *mut u8) {
 
 /// Compress.run(bytes, level) -> compressed Bytes
 /// One-shot convenience: compress entire input buffer, return new Bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_compress_run(src_bytes: *mut u8, level: i32) -> *mut u8 {
     if src_bytes.is_null() {
         return std::ptr::null_mut();
@@ -192,7 +192,7 @@ fn to_flush_decompress(mode: i32) -> flate2::FlushDecompress {
 }
 
 /// Uncompress.new(?windowBits) -> handle
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_uncompress_new(window_bits: i32) -> *mut u8 {
     // window_bits: 0 or negative means raw deflate, positive means zlib wrapper
     let zlib = window_bits >= 0;
@@ -204,7 +204,7 @@ pub extern "C" fn rayzor_uncompress_new(window_bits: i32) -> *mut u8 {
 }
 
 /// Uncompress.execute(src, srcPos, dst, dstPos) -> {done, read, write}
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_uncompress_execute(
     handle: *mut u8,
     src_bytes: *mut u8,
@@ -246,7 +246,7 @@ pub extern "C" fn rayzor_uncompress_execute(
 }
 
 /// Uncompress.setFlushMode(mode)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_uncompress_set_flush(handle: *mut u8, mode: i32) {
     if handle.is_null() {
         return;
@@ -258,7 +258,7 @@ pub extern "C" fn rayzor_uncompress_set_flush(handle: *mut u8, mode: i32) {
 }
 
 /// Uncompress.close()
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_uncompress_close(handle: *mut u8) {
     if handle.is_null() {
         return;

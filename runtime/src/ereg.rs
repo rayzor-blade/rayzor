@@ -70,7 +70,7 @@ fn parse_flags(flags_str: &str) -> (bool, String) {
 
 /// Create a new EReg from pattern and flags strings.
 /// Returns opaque pointer (Box<HaxeEReg> as *mut u8).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_new(pattern: *const HaxeString, opts: *const HaxeString) -> *mut u8 {
     unsafe {
         let pattern_str = hs_to_str(pattern);
@@ -99,7 +99,7 @@ pub extern "C" fn haxe_ereg_new(pattern: *const HaxeString, opts: *const HaxeStr
 
 /// Test if regex matches the string. Updates internal match state.
 /// Returns 1 if match found, 0 otherwise.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_match(ereg: *mut u8, s: *const HaxeString) -> i32 {
     if ereg.is_null() {
         return 0;
@@ -126,7 +126,7 @@ pub extern "C" fn haxe_ereg_match(ereg: *mut u8, s: *const HaxeString) -> i32 {
 
 /// Get the nth matched group (0 = full match).
 /// Returns HaxeString pointer, or null if no match or group out of range.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_matched(ereg: *mut u8, n: i32) -> *mut u8 {
     if ereg.is_null() {
         return ptr::null_mut();
@@ -146,7 +146,7 @@ pub extern "C" fn haxe_ereg_matched(ereg: *mut u8, n: i32) -> *mut u8 {
 }
 
 /// Get the substring before the match.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_matched_left(ereg: *mut u8) -> *mut u8 {
     if ereg.is_null() {
         return rust_str_to_hs("");
@@ -163,7 +163,7 @@ pub extern "C" fn haxe_ereg_matched_left(ereg: *mut u8) -> *mut u8 {
 }
 
 /// Get the substring after the match.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_matched_right(ereg: *mut u8) -> *mut u8 {
     if ereg.is_null() {
         return rust_str_to_hs("");
@@ -180,7 +180,7 @@ pub extern "C" fn haxe_ereg_matched_right(ereg: *mut u8) -> *mut u8 {
 }
 
 /// Write match position and length to out-params.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_matched_pos(ereg: *mut u8, out_pos: *mut i32, out_len: *mut i32) {
     if ereg.is_null() || out_pos.is_null() || out_len.is_null() {
         return;
@@ -202,7 +202,7 @@ pub extern "C" fn haxe_ereg_matched_pos(ereg: *mut u8, out_pos: *mut i32, out_le
 /// Return matchedPos() as an anonymous object `{len:Int, pos:Int}`.
 /// Fields are alphabetically sorted: len (index 0), pos (index 1).
 /// Uses a fixed shape_id (1000) for the {len, pos} shape.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_matched_pos_anon(ereg: *mut u8) -> *mut u8 {
     use crate::anon_object::{
         rayzor_anon_new, rayzor_anon_set_field_by_index, rayzor_ensure_shape,
@@ -244,7 +244,7 @@ pub extern "C" fn haxe_ereg_matched_pos_anon(ereg: *mut u8) -> *mut u8 {
 /// Match a substring of s starting at pos with optional length.
 /// len = -1 means match to end of string.
 /// Returns 1 if match found, 0 otherwise.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_match_sub(
     ereg: *mut u8,
     s: *const HaxeString,
@@ -283,7 +283,7 @@ pub extern "C" fn haxe_ereg_match_sub(
 }
 
 /// Split string by regex. Returns a HaxeArray of HaxeString pointers.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_split(ereg: *mut u8, s: *const HaxeString) -> *mut HaxeArray {
     if ereg.is_null() || s.is_null() {
         let arr = Box::new(HaxeArray {
@@ -343,7 +343,7 @@ pub extern "C" fn haxe_ereg_split(ereg: *mut u8, s: *const HaxeString) -> *mut H
 /// Replace matches in the string.
 /// If global flag is set, replaces all occurrences; otherwise only the first.
 /// Supports $1..$9 backreferences and $$ for literal $.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_replace(
     ereg: *mut u8,
     s: *const HaxeString,
@@ -370,7 +370,7 @@ pub extern "C" fn haxe_ereg_replace(
 /// Map regex matches using a callback function.
 /// Callback receives (env_ptr, ereg_ptr) and returns HaxeString*.
 /// If global, replaces all matches; otherwise only the first.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_map(
     ereg: *mut u8,
     s: *const HaxeString,
@@ -443,7 +443,7 @@ pub extern "C" fn haxe_ereg_map(
 
 /// Escape regex metacharacters in the string.
 /// Static method — does not use an EReg instance.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_escape(s: *const HaxeString) -> *mut u8 {
     if s.is_null() {
         return rust_str_to_hs("");

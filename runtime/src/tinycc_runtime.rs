@@ -19,7 +19,7 @@ use crate::haxe_string::HaxeString;
 #[allow(non_camel_case_types)]
 type TCCState = std::ffi::c_void;
 
-extern "C" {
+unsafe extern "C" {
     fn tcc_new() -> *mut TCCState;
     fn tcc_delete(s: *mut TCCState);
     fn tcc_set_lib_path(s: *mut TCCState, path: *const c_char);
@@ -39,7 +39,7 @@ extern "C" {
 // `dlopen` is POSIX; Windows spells it `LoadLibraryA`, and referencing the
 // POSIX name there fails the link outright.
 #[cfg(unix)]
-extern "C" {
+unsafe extern "C" {
     fn dlopen(filename: *const c_char, flags: i32) -> *mut std::ffi::c_void;
 }
 
@@ -152,7 +152,7 @@ unsafe fn haxe_string_to_cstring(s: *const HaxeString) -> Option<CString> {
 
 /// Create a new TCC compilation context with output type set to memory.
 /// Returns an opaque pointer to TCCState.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_create() -> *mut TCCState {
     unsafe {
         let state = tcc_new();
@@ -201,7 +201,7 @@ pub extern "C" fn rayzor_tcc_create() -> *mut TCCState {
 /// Compile a C source string.
 /// Takes the TCC state and a HaxeString pointer to the source code.
 /// Returns 1 on success, 0 on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_compile(state: *mut TCCState, code: *const HaxeString) -> i32 {
     if state.is_null() {
         return 0;
@@ -222,7 +222,7 @@ pub extern "C" fn rayzor_tcc_compile(state: *mut TCCState, code: *const HaxeStri
 /// Register a symbol (name → value) in the TCC context.
 /// The value is an i64 that C code can reference via `extern`.
 /// Takes the TCC state, a HaxeString pointer to the name, and the raw value.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_add_symbol(state: *mut TCCState, name: *const HaxeString, value: i64) {
     if state.is_null() {
         return;
@@ -240,7 +240,7 @@ pub extern "C" fn rayzor_tcc_add_symbol(state: *mut TCCState, name: *const HaxeS
 /// `tcc_add_symbol` maps a name to an *address* — for `extern long __arg0`,
 /// TCC reads the long at that address. So we Box the value and leak it.
 /// Returns the heap address (caller should free with rayzor_tcc_free_value after execution).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_add_value_symbol(
     state: *mut TCCState,
     name: *const HaxeString,
@@ -262,7 +262,7 @@ pub extern "C" fn rayzor_tcc_add_value_symbol(
 }
 
 /// Free a value allocated by rayzor_tcc_add_value_symbol.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_free_value(addr: i64) {
     if addr == 0 {
         return;
@@ -275,7 +275,7 @@ pub extern "C" fn rayzor_tcc_free_value(addr: i64) {
 /// Relocate all compiled code into executable memory.
 /// Must be called after all compile() and addSymbol() calls.
 /// Returns 1 on success, 0 on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_relocate(state: *mut TCCState) -> i32 {
     if state.is_null() {
         return 0;
@@ -291,7 +291,7 @@ pub extern "C" fn rayzor_tcc_relocate(state: *mut TCCState) -> i32 {
 
 /// Get a symbol address by name after relocation.
 /// Returns the address as i64 (0 if not found).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_get_symbol(state: *mut TCCState, name: *const HaxeString) -> i64 {
     if state.is_null() {
         return 0;
@@ -318,7 +318,7 @@ pub extern "C" fn rayzor_tcc_get_symbol(state: *mut TCCState, name: *const HaxeS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[allow(dead_code)]
 unsafe fn jit_write_protect(enabled: bool) {
-    extern "C" {
+    unsafe extern "C" {
         fn pthread_jit_write_protect_np(enabled: i32);
     }
     pthread_jit_write_protect_np(if enabled { 1 } else { 0 });
@@ -329,7 +329,7 @@ unsafe fn jit_write_protect(enabled: bool) {
 unsafe fn jit_write_protect(_enabled: bool) {}
 
 /// `fn_addr` is the address returned by `rayzor_tcc_get_symbol`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_call0(fn_addr: i64) -> i64 {
     if fn_addr == 0 {
         return 0;
@@ -341,7 +341,7 @@ pub extern "C" fn rayzor_tcc_call0(fn_addr: i64) -> i64 {
 }
 
 /// Call a JIT-compiled function with 1 i64 argument, returning i64.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_call1(fn_addr: i64, arg0: i64) -> i64 {
     if fn_addr == 0 {
         return 0;
@@ -353,7 +353,7 @@ pub extern "C" fn rayzor_tcc_call1(fn_addr: i64, arg0: i64) -> i64 {
 }
 
 /// Call a JIT-compiled function with 2 i64 arguments, returning i64.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_call2(fn_addr: i64, arg0: i64, arg1: i64) -> i64 {
     if fn_addr == 0 {
         return 0;
@@ -365,7 +365,7 @@ pub extern "C" fn rayzor_tcc_call2(fn_addr: i64, arg0: i64, arg1: i64) -> i64 {
 }
 
 /// Call a JIT-compiled function with 3 i64 arguments, returning i64.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_call3(fn_addr: i64, arg0: i64, arg1: i64, arg2: i64) -> i64 {
     if fn_addr == 0 {
         return 0;
@@ -387,7 +387,7 @@ pub extern "C" fn rayzor_tcc_call3(fn_addr: i64, arg0: i64, arg1: i64, arg2: i64
 ///   - Loads libNAME.dylib (macOS) or libNAME.so (Linux) via dlopen
 ///
 /// Returns 1 on success, 0 on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_add_framework(state: *mut TCCState, name: *const HaxeString) -> i32 {
     if state.is_null() {
         return 0;
@@ -447,7 +447,7 @@ pub extern "C" fn rayzor_tcc_add_framework(state: *mut TCCState, name: *const Ha
 
 /// Add a directory to the include search path.
 /// Returns 1 on success, 0 on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_add_include_path(
     state: *mut TCCState,
     path: *const HaxeString,
@@ -472,7 +472,7 @@ pub extern "C" fn rayzor_tcc_add_include_path(
 /// Add a file (.c, .o, .a, .dylib, .so, .dll) to the TCC context.
 /// C source files are compiled; object/archive/shared libs are linked.
 /// Returns 1 on success, panics on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_add_file(state: *mut TCCState, path: *const HaxeString) -> i32 {
     if state.is_null() {
         panic!("TCC addFile: null state");
@@ -495,7 +495,7 @@ pub extern "C" fn rayzor_tcc_add_file(state: *mut TCCState, path: *const HaxeStr
 /// Runs `pkg-config --cflags --libs <name>` to discover include paths and
 /// shared library locations. Adds include paths to TCC and loads the library.
 /// Panics if pkg-config is not found or the library is not installed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_add_clib(state: *mut TCCState, name: *const HaxeString) -> i32 {
     if state.is_null() {
         panic!("TCC addClib: null state");
@@ -604,7 +604,7 @@ pub extern "C" fn rayzor_tcc_add_clib(state: *mut TCCState, name: *const HaxeStr
 
 /// Free the TCC compilation context.
 /// Note: relocated code memory is intentionally leaked (JIT pattern).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tcc_delete(state: *mut TCCState) {
     if state.is_null() {
         return;

@@ -83,7 +83,7 @@
 // Rust 1.98 expects c_void spelling for these libc symbols; u8 has the same
 // pointer ABI and is the byte-oriented type used throughout these kernels.
 #[allow(suspicious_runtime_symbol_definitions)]
-extern "C" {
+unsafe extern "C" {
     fn malloc(size: usize) -> *mut u8;
     fn free(ptr: *mut u8);
 }
@@ -536,7 +536,7 @@ unsafe fn alloc_qtensor(
 /// Create an INT8-quantised 2-D tensor `[rows, cols]` from an f32 source.
 /// Each row of `cols` elements gets its own f32 scale. Returns the i64
 /// pointer to the opaque `RayzorQTensor`; 0 on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_from_f32_int8(src_ptr: i64, rows: i64, cols: i64) -> i64 {
     if src_ptr == 0 || rows <= 0 || cols <= 0 {
         return 0;
@@ -565,7 +565,7 @@ pub unsafe extern "C" fn rayzor_qtensor_from_f32_int8(src_ptr: i64, rows: i64, c
 ///
 /// This is the intended GGUF integration point: the loader mmaps the
 /// weights file and hands the runtime a raw block pointer + shape.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_wrap_q4_k_m(
     block_data_ptr: i64,
     rows: i64,
@@ -612,7 +612,7 @@ pub unsafe extern "C" fn rayzor_qtensor_wrap_q4_k_m(
 /// transfer a malloc'd buffer's ownership in.
 ///
 /// `bytes_handle` is a `*const HaxeBytes` interpreted as i64.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q4_k_m(
     bytes_handle: i64,
     rows: i64,
@@ -657,7 +657,7 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q4_k_m(
 /// Wrap a `HaxeBytes` slice as a Q6_K-backed QTensor. Same zero-copy
 /// semantics as `rayzor_qtensor_from_bytes_q4_k_m`. Used for GGUF's
 /// dtype 14 (token_embd, attn_v, ffn_down in Q4_K_M variants).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q6_k(
     bytes_handle: i64,
     rows: i64,
@@ -738,7 +738,7 @@ unsafe fn dequant_q5_0_block(src: *const u8, dst: &mut [f32]) {
 ///
 /// Same `[out, in]` = `[rows, cols]` orientation as the other
 /// `from_bytes_*` loaders. Returns 0 on malformed input.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q5_0_int8(
     bytes_handle: i64,
     rows: i64,
@@ -1016,7 +1016,7 @@ unsafe fn dequant_q5_k_block(src: *const u8, dst: &mut [f32]) {
 /// legacy block cannot be expressed in the 256-wide k-quant machinery, so each
 /// row is decoded once and re-encoded into the INT8 per-row scheme that the
 /// integer-dot matmul dispatches natively.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q5_1_int8(
     bytes_handle: i64,
     rows: i64,
@@ -1067,7 +1067,7 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q5_1_int8(
 /// fastest kernel in the tree (Q4_K SDOT, AMX-eligible), and SHRINKS the
 /// weights — 4.5 bits/weight vs Q5_K's 5.5, where INT8 would have EXPANDED
 /// them to 8. Cost is one bit of mantissa per weight, paid once at load.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q5_k_q4km(
     bytes_handle: i64,
     rows: i64,
@@ -1133,7 +1133,7 @@ unsafe fn dequant_q8_0_block(src: *const u8, dst: &mut [f32]) {
 ///
 /// Same `[out, in]` orientation as the other `from_bytes_*` loaders; `cols`
 /// (the inner/contraction dim) must be a multiple of 32. Returns 0 otherwise.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q8_0(
     bytes_handle: i64,
     rows: i64,
@@ -1322,7 +1322,7 @@ unsafe fn q8_0_xtq_threaded(x_tensor: i64, qt_w: i64, threads: i64) -> i64 {
 ///   - source scheme != Q6_K
 ///   - rows × cols not divisible by 256
 ///   - allocation failure
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_requant_q6k_to_q4km(src_ptr: i64) -> i64 {
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_qtensor_requant_q6k_to_q4km");
     if src_ptr == 0 {
@@ -1376,7 +1376,7 @@ pub unsafe extern "C" fn rayzor_qtensor_requant_q6k_to_q4km(src_ptr: i64) -> i64
 }
 
 /// `qt.rows() -> i64`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_rows(qt_ptr: i64) -> i64 {
     if qt_ptr == 0 {
         return 0;
@@ -1389,7 +1389,7 @@ pub unsafe extern "C" fn rayzor_qtensor_rows(qt_ptr: i64) -> i64 {
 /// `SIMD16i8.load(Ptr.fromRaw(qt.dataPtr() + Usize.fromInt((r*bpr + b)*144)))`,
 /// where bpr = cols/256. Guest-resident on wasm (the QTensor data buffer is
 /// dlmalloc'd in guest linear memory), so the offset is a valid guest load.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_data_ptr(qt_ptr: i64) -> i64 {
     if qt_ptr == 0 {
         return 0;
@@ -1401,7 +1401,7 @@ pub unsafe extern "C" fn rayzor_qtensor_data_ptr(qt_ptr: i64) -> i64 {
 /// (`meta`). INT8 stores `rows` scales here (one per row); non-INT8 schemes
 /// keep their scales inline in the block data and return 0 (null `meta`).
 /// Lets the pure-Haxe INT8 band kernel read row scales without an FFI matmul.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_scales_ptr(qt_ptr: i64) -> i64 {
     if qt_ptr == 0 {
         return 0;
@@ -1410,7 +1410,7 @@ pub unsafe extern "C" fn rayzor_qtensor_scales_ptr(qt_ptr: i64) -> i64 {
 }
 
 /// `qt.cols() -> i64`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_cols(qt_ptr: i64) -> i64 {
     if qt_ptr == 0 {
         return 0;
@@ -1419,7 +1419,7 @@ pub unsafe extern "C" fn rayzor_qtensor_cols(qt_ptr: i64) -> i64 {
 }
 
 /// `qt.scheme() -> i64`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_scheme(qt_ptr: i64) -> i64 {
     if qt_ptr == 0 {
         return 0;
@@ -1428,7 +1428,7 @@ pub unsafe extern "C" fn rayzor_qtensor_scheme(qt_ptr: i64) -> i64 {
 }
 
 /// `qt.numel() -> i64`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_numel(qt_ptr: i64) -> i64 {
     if qt_ptr == 0 {
         return 0;
@@ -1439,7 +1439,7 @@ pub unsafe extern "C" fn rayzor_qtensor_numel(qt_ptr: i64) -> i64 {
 /// Dequant the whole tensor into a fresh f32 Tensor (shape [rows, cols]).
 /// Useful for debug / accuracy comparison; production code should prefer
 /// the fused matmul path.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_dequant(qt_ptr: i64) -> i64 {
     if qt_ptr == 0 {
         return 0;
@@ -1550,7 +1550,7 @@ pub unsafe extern "C" fn rayzor_qtensor_dequant(qt_ptr: i64) -> i64 {
 ///
 /// Out-of-range indices leave the corresponding output row zero-filled,
 /// matching `rayzor_tensor_gather_rows`'s policy.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_gather_rows_q6_k(
     qt_ptr: i64,
     indices_ptr: i64,
@@ -1655,7 +1655,7 @@ pub unsafe extern "C" fn rayzor_tensor_gather_rows_q6_k(
 
 /// Fused dequant-matmul: A is quantised `[M, K]`, B is f32 `[K, N]`, out is
 /// f32 `[M, N]`. Returns a fresh f32 Tensor; 0 on shape mismatch.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_matmul_f32(qt_a: i64, b_tensor: i64) -> i64 {
     crate::kernel_timing::init();
     let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::QTENSOR_MATMUL_F32);
@@ -1748,7 +1748,7 @@ pub unsafe extern "C" fn rayzor_qtensor_matmul_f32(qt_a: i64, b_tensor: i64) -> 
 /// Single-threaded fallback. The Haxe path threads explicitly by
 /// allocating Y first and dispatching `rayzor_tensor_matmul_qt_t_f32_chunk`
 /// across workers via `rayzor.concurrent.WorkerPool.parallelRows`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(qt_w: i64, x_tensor: i64) -> i64 {
     if x_tensor == 0 || qt_w == 0 {
         return 0;
@@ -1793,7 +1793,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(qt_w: i64, x_tensor: i64)
 /// shape is the same either way.
 ///
 /// Returns a fresh F32 tensor; returns 0 on shape mismatch.
-#[no_mangle]
+#[unsafe(no_mangle)]
 /// AMX prefill gate — ON by default on macOS (`RZT_AMX_PREFILL=0` opts out).
 /// Must agree with the Haxe-side gate in nue's Q4Matmul.amxPrefill.
 #[cfg(target_os = "macos")]
@@ -1836,7 +1836,7 @@ fn amx_prefill_min_batch() -> usize {
 ///
 /// # Safety
 /// `a16` must have m*k u16s, `b16` n*k u16s, `cf32` m*n writable f32s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_amx_gemm_f16(
     m: i64,
     k: i64,
@@ -2350,7 +2350,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
 /// these fail the function returns non-zero so the caller falls back
 /// to three sequential calls (which already handle multi-batch /
 /// non-Q4_K_M shapes individually).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_qt_t_f32_threaded(
     x_tensor: i64,
     q_w: i64,
@@ -2602,7 +2602,7 @@ fn bias_to_performance_core() {
 ///
 /// Parameter order: receiver (`qt_w`) first — the instance-extern ABI
 /// (see `rayzor_tensor_matmul_qt_t_f32`).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_chunk(
     qt_w: i64,
     x_tensor: i64,
@@ -3355,7 +3355,7 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
 }
 
 /// Atomic-refcount QTensor clone. Mirrors `rayzor_tensor_arc_clone`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_arc_clone(src: i64) -> i64 {
     if src == 0 {
         return 0;
@@ -3369,7 +3369,7 @@ pub unsafe extern "C" fn rayzor_qtensor_arc_clone(src: i64) -> i64 {
 /// `QTensor.clone(src)` Haxe entry point. Routes to the Arc-increment path.
 /// Preserves the `rayzor_qtensor_clone` extern symbol used by the Tier B
 /// `@:derive([Clone])` lowering.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_clone(src: i64) -> i64 {
     rayzor_qtensor_arc_clone(src)
 }
@@ -3385,7 +3385,7 @@ pub unsafe extern "C" fn rayzor_qtensor_clone(src: i64) -> i64 {
 /// INT8 also carries a per-group `meta` f32 scale array of
 /// `numel / group_size` entries; Q4_K_M / Q6_K embed scales inside each
 /// super-block so `meta` is null for those.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_deep_clone(src: i64) -> i64 {
     if src == 0 {
         return 0;
@@ -3520,7 +3520,7 @@ unsafe fn qtensor_pool_freer(entry: PooledEntry) {
 /// allocations including scales. Zero-copy wrappers (`owns_data=false`,
 /// Q4_K_M / Q6_K mmap views) take the direct free path: their `data`
 /// belongs to a parent `HaxeBytes`, only the wrapper struct is released.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_free(qt_ptr: i64) {
     if qt_ptr == 0 {
         return;

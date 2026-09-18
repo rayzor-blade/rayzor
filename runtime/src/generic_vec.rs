@@ -44,7 +44,7 @@ pub struct VecI32 {
 }
 
 /// Create a new empty Vec<i32>
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_new() -> *mut VecI32 {
     let layout = Layout::new::<VecI32>();
     unsafe {
@@ -70,7 +70,7 @@ pub extern "C" fn rayzor_vec_i32_new() -> *mut VecI32 {
 }
 
 /// Create Vec<i32> with specific capacity
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_with_capacity(capacity: usize) -> *mut VecI32 {
     let cap = if capacity == 0 {
         INITIAL_CAPACITY
@@ -101,7 +101,7 @@ pub extern "C" fn rayzor_vec_i32_with_capacity(capacity: usize) -> *mut VecI32 {
 }
 
 /// Push element to Vec<i32>
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_push(vec: *mut VecI32, value: i32) {
     if vec.is_null() {
         return;
@@ -133,7 +133,7 @@ pub extern "C" fn rayzor_vec_i32_push(vec: *mut VecI32, value: i32) {
 }
 
 /// Pop element from Vec<i32>, returns 0 if empty
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_pop(vec: *mut VecI32) -> i32 {
     if vec.is_null() {
         return 0;
@@ -150,7 +150,7 @@ pub extern "C" fn rayzor_vec_i32_pop(vec: *mut VecI32) -> i32 {
 }
 
 /// Get element at index (returns 0 if out of bounds)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_get(vec: *const VecI32, index: usize) -> i32 {
     if vec.is_null() {
         return 0;
@@ -166,7 +166,7 @@ pub extern "C" fn rayzor_vec_i32_get(vec: *const VecI32, index: usize) -> i32 {
 }
 
 /// Set element at index (no-op if out of bounds)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_set(vec: *mut VecI32, index: usize, value: i32) {
     if vec.is_null() {
         return;
@@ -182,7 +182,7 @@ pub extern "C" fn rayzor_vec_i32_set(vec: *mut VecI32, index: usize, value: i32)
 }
 
 /// Get length
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_len(vec: *const VecI32) -> usize {
     if vec.is_null() {
         return 0;
@@ -191,7 +191,7 @@ pub extern "C" fn rayzor_vec_i32_len(vec: *const VecI32) -> usize {
 }
 
 /// Get capacity
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_capacity(vec: *const VecI32) -> usize {
     if vec.is_null() {
         return 0;
@@ -200,7 +200,7 @@ pub extern "C" fn rayzor_vec_i32_capacity(vec: *const VecI32) -> usize {
 }
 
 /// Check if empty
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_is_empty(vec: *const VecI32) -> bool {
     if vec.is_null() {
         return true;
@@ -209,7 +209,7 @@ pub extern "C" fn rayzor_vec_i32_is_empty(vec: *const VecI32) -> bool {
 }
 
 /// Clear vector (keeps capacity)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_clear(vec: *mut VecI32) {
     if vec.is_null() {
         return;
@@ -220,13 +220,13 @@ pub extern "C" fn rayzor_vec_i32_clear(vec: *mut VecI32) {
 }
 
 /// Get first element (returns 0 if empty)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_first(vec: *const VecI32) -> i32 {
     rayzor_vec_i32_get(vec, 0)
 }
 
 /// Get last element (returns 0 if empty)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_last(vec: *const VecI32) -> i32 {
     if vec.is_null() {
         return 0;
@@ -241,7 +241,7 @@ pub extern "C" fn rayzor_vec_i32_last(vec: *const VecI32) -> i32 {
 }
 
 /// Sort Vec<i32> in ascending order
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_sort(vec: *mut VecI32) {
     if vec.is_null() {
         return;
@@ -260,7 +260,7 @@ pub extern "C" fn rayzor_vec_i32_sort(vec: *mut VecI32) {
 /// compare_fn: closure function pointer
 /// compare_env: closure captured environment
 /// The closure signature is: (env, a, b) -> Int where negative means a < b, 0 means a == b, positive means a > b
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_sort_by(
     vec: *mut VecI32,
     compare_fn: *const u8,
@@ -294,7 +294,7 @@ pub extern "C" fn rayzor_vec_i32_sort_by(
 }
 
 /// Free Vec<i32>
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i32_free(vec: *mut VecI32) {
     if vec.is_null() {
         return;
@@ -322,7 +322,7 @@ pub struct VecI64 {
     cap: usize,
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i64_new() -> *mut VecI64 {
     let layout = Layout::new::<VecI64>();
     unsafe {
@@ -345,7 +345,7 @@ pub extern "C" fn rayzor_vec_i64_new() -> *mut VecI64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i64_push(vec: *mut VecI64, value: i64) {
     if vec.is_null() {
         return;
@@ -371,7 +371,7 @@ pub extern "C" fn rayzor_vec_i64_push(vec: *mut VecI64, value: i64) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i64_pop(vec: *mut VecI64) -> i64 {
     if vec.is_null() {
         return 0;
@@ -386,7 +386,7 @@ pub extern "C" fn rayzor_vec_i64_pop(vec: *mut VecI64) -> i64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i64_get(vec: *const VecI64, index: usize) -> i64 {
     if vec.is_null() {
         return 0;
@@ -400,7 +400,7 @@ pub extern "C" fn rayzor_vec_i64_get(vec: *const VecI64, index: usize) -> i64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i64_set(vec: *mut VecI64, index: usize, value: i64) {
     if vec.is_null() {
         return;
@@ -414,7 +414,7 @@ pub extern "C" fn rayzor_vec_i64_set(vec: *mut VecI64, index: usize, value: i64)
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i64_len(vec: *const VecI64) -> usize {
     if vec.is_null() {
         return 0;
@@ -422,7 +422,7 @@ pub extern "C" fn rayzor_vec_i64_len(vec: *const VecI64) -> usize {
     unsafe { (*vec).len }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i64_is_empty(vec: *const VecI64) -> bool {
     if vec.is_null() {
         return true;
@@ -430,7 +430,7 @@ pub extern "C" fn rayzor_vec_i64_is_empty(vec: *const VecI64) -> bool {
     unsafe { (*vec).len == 0 }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i64_clear(vec: *mut VecI64) {
     if vec.is_null() {
         return;
@@ -440,12 +440,12 @@ pub extern "C" fn rayzor_vec_i64_clear(vec: *mut VecI64) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i64_first(vec: *const VecI64) -> i64 {
     rayzor_vec_i64_get(vec, 0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i64_last(vec: *const VecI64) -> i64 {
     if vec.is_null() {
         return 0;
@@ -459,7 +459,7 @@ pub extern "C" fn rayzor_vec_i64_last(vec: *const VecI64) -> i64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_i64_free(vec: *mut VecI64) {
     if vec.is_null() {
         return;
@@ -485,7 +485,7 @@ pub struct VecF64 {
     cap: usize,
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_new() -> *mut VecF64 {
     let layout = Layout::new::<VecF64>();
     unsafe {
@@ -508,7 +508,7 @@ pub extern "C" fn rayzor_vec_f64_new() -> *mut VecF64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_push(vec: *mut VecF64, value: f64) {
     if vec.is_null() {
         return;
@@ -534,7 +534,7 @@ pub extern "C" fn rayzor_vec_f64_push(vec: *mut VecF64, value: f64) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_pop(vec: *mut VecF64) -> f64 {
     if vec.is_null() {
         return 0.0;
@@ -549,7 +549,7 @@ pub extern "C" fn rayzor_vec_f64_pop(vec: *mut VecF64) -> f64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_get(vec: *const VecF64, index: usize) -> f64 {
     if vec.is_null() {
         return 0.0;
@@ -563,7 +563,7 @@ pub extern "C" fn rayzor_vec_f64_get(vec: *const VecF64, index: usize) -> f64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_set(vec: *mut VecF64, index: usize, value: f64) {
     if vec.is_null() {
         return;
@@ -577,7 +577,7 @@ pub extern "C" fn rayzor_vec_f64_set(vec: *mut VecF64, index: usize, value: f64)
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_len(vec: *const VecF64) -> usize {
     if vec.is_null() {
         return 0;
@@ -585,7 +585,7 @@ pub extern "C" fn rayzor_vec_f64_len(vec: *const VecF64) -> usize {
     unsafe { (*vec).len }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_is_empty(vec: *const VecF64) -> bool {
     if vec.is_null() {
         return true;
@@ -593,7 +593,7 @@ pub extern "C" fn rayzor_vec_f64_is_empty(vec: *const VecF64) -> bool {
     unsafe { (*vec).len == 0 }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_clear(vec: *mut VecF64) {
     if vec.is_null() {
         return;
@@ -603,12 +603,12 @@ pub extern "C" fn rayzor_vec_f64_clear(vec: *mut VecF64) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_first(vec: *const VecF64) -> f64 {
     rayzor_vec_f64_get(vec, 0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_last(vec: *const VecF64) -> f64 {
     if vec.is_null() {
         return 0.0;
@@ -623,7 +623,7 @@ pub extern "C" fn rayzor_vec_f64_last(vec: *const VecF64) -> f64 {
 }
 
 /// Sort Vec<f64> in ascending order
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_sort(vec: *mut VecF64) {
     if vec.is_null() {
         return;
@@ -643,7 +643,7 @@ pub extern "C" fn rayzor_vec_f64_sort(vec: *mut VecF64) {
 /// compare_fn: closure function pointer
 /// compare_env: closure captured environment
 /// The closure signature is: (env, a, b) -> Int where negative means a < b, 0 means a == b, positive means a > b
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_sort_by(
     vec: *mut VecF64,
     compare_fn: *const u8,
@@ -676,7 +676,7 @@ pub extern "C" fn rayzor_vec_f64_sort_by(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_f64_free(vec: *mut VecF64) {
     if vec.is_null() {
         return;
@@ -702,7 +702,7 @@ pub struct VecPtr {
     cap: usize,
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_new() -> *mut VecPtr {
     let layout = Layout::new::<VecPtr>();
     unsafe {
@@ -725,7 +725,7 @@ pub extern "C" fn rayzor_vec_ptr_new() -> *mut VecPtr {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_push(vec: *mut VecPtr, value: *mut u8) {
     if vec.is_null() {
         return;
@@ -751,7 +751,7 @@ pub extern "C" fn rayzor_vec_ptr_push(vec: *mut VecPtr, value: *mut u8) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_pop(vec: *mut VecPtr) -> *mut u8 {
     if vec.is_null() {
         return ptr::null_mut();
@@ -766,7 +766,7 @@ pub extern "C" fn rayzor_vec_ptr_pop(vec: *mut VecPtr) -> *mut u8 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_get(vec: *const VecPtr, index: usize) -> *mut u8 {
     if vec.is_null() {
         return ptr::null_mut();
@@ -780,7 +780,7 @@ pub extern "C" fn rayzor_vec_ptr_get(vec: *const VecPtr, index: usize) -> *mut u
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_set(vec: *mut VecPtr, index: usize, value: *mut u8) {
     if vec.is_null() {
         return;
@@ -794,7 +794,7 @@ pub extern "C" fn rayzor_vec_ptr_set(vec: *mut VecPtr, index: usize, value: *mut
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_len(vec: *const VecPtr) -> usize {
     if vec.is_null() {
         return 0;
@@ -802,7 +802,7 @@ pub extern "C" fn rayzor_vec_ptr_len(vec: *const VecPtr) -> usize {
     unsafe { (*vec).len }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_is_empty(vec: *const VecPtr) -> bool {
     if vec.is_null() {
         return true;
@@ -810,7 +810,7 @@ pub extern "C" fn rayzor_vec_ptr_is_empty(vec: *const VecPtr) -> bool {
     unsafe { (*vec).len == 0 }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_clear(vec: *mut VecPtr) {
     if vec.is_null() {
         return;
@@ -820,12 +820,12 @@ pub extern "C" fn rayzor_vec_ptr_clear(vec: *mut VecPtr) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_first(vec: *const VecPtr) -> *mut u8 {
     rayzor_vec_ptr_get(vec, 0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_last(vec: *const VecPtr) -> *mut u8 {
     if vec.is_null() {
         return ptr::null_mut();
@@ -844,7 +844,7 @@ pub extern "C" fn rayzor_vec_ptr_last(vec: *const VecPtr) -> *mut u8 {
 /// compare_fn: closure function pointer
 /// compare_env: closure captured environment
 /// The closure signature is: (env, a, b) -> Int where negative means a < b, 0 means a == b, positive means a > b
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_sort_by(
     vec: *mut VecPtr,
     compare_fn: *const u8,
@@ -878,7 +878,7 @@ pub extern "C" fn rayzor_vec_ptr_sort_by(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_free(vec: *mut VecPtr) {
     if vec.is_null() {
         return;
@@ -904,7 +904,7 @@ pub struct VecBool {
     cap: usize,
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_bool_new() -> *mut VecBool {
     let layout = Layout::new::<VecBool>();
     unsafe {
@@ -927,7 +927,7 @@ pub extern "C" fn rayzor_vec_bool_new() -> *mut VecBool {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_bool_push(vec: *mut VecBool, value: bool) {
     if vec.is_null() {
         return;
@@ -949,7 +949,7 @@ pub extern "C" fn rayzor_vec_bool_push(vec: *mut VecBool, value: bool) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_bool_pop(vec: *mut VecBool) -> bool {
     if vec.is_null() {
         return false;
@@ -964,7 +964,7 @@ pub extern "C" fn rayzor_vec_bool_pop(vec: *mut VecBool) -> bool {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_bool_get(vec: *const VecBool, index: usize) -> bool {
     if vec.is_null() {
         return false;
@@ -978,7 +978,7 @@ pub extern "C" fn rayzor_vec_bool_get(vec: *const VecBool, index: usize) -> bool
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_bool_set(vec: *mut VecBool, index: usize, value: bool) {
     if vec.is_null() {
         return;
@@ -992,7 +992,7 @@ pub extern "C" fn rayzor_vec_bool_set(vec: *mut VecBool, index: usize, value: bo
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_bool_len(vec: *const VecBool) -> usize {
     if vec.is_null() {
         return 0;
@@ -1000,7 +1000,7 @@ pub extern "C" fn rayzor_vec_bool_len(vec: *const VecBool) -> usize {
     unsafe { (*vec).len }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_bool_is_empty(vec: *const VecBool) -> bool {
     if vec.is_null() {
         return true;
@@ -1008,7 +1008,7 @@ pub extern "C" fn rayzor_vec_bool_is_empty(vec: *const VecBool) -> bool {
     unsafe { (*vec).len == 0 }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_bool_clear(vec: *mut VecBool) {
     if vec.is_null() {
         return;
@@ -1018,7 +1018,7 @@ pub extern "C" fn rayzor_vec_bool_clear(vec: *mut VecBool) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_bool_free(vec: *mut VecBool) {
     if vec.is_null() {
         return;

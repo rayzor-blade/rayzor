@@ -67,7 +67,7 @@ struct ChunkHeader {
 static POOL_SERVED: AtomicUsize = AtomicUsize::new(0);
 
 /// How many blocks the pool has served this process.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_pool_served() -> u64 {
     POOL_SERVED.load(Ordering::Relaxed) as u64
 }
@@ -200,7 +200,7 @@ fn class_of(size: usize) -> Option<usize> {
 ///
 /// The contents are NOT zeroed. Compiler-emitted allocation writes every field
 /// before use, and a reused block would otherwise be cleared twice.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_object_alloc(size: u64) -> *mut u8 {
     let size = size as usize;
     if !pool_enabled() {
@@ -252,7 +252,7 @@ pub extern "C" fn rayzor_object_alloc(size: u64) -> *mut u8 {
 }
 
 /// Return a block to the pool, or to libc if it never came from one.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_object_free(ptr: *mut u8) {
     if ptr.is_null() {
         return;

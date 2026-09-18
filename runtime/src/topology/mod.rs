@@ -36,26 +36,26 @@ mod platform;
 /// Returns `false` on macOS, wasm, single-socket Linux, and Windows
 /// systems with one NUMA node. The Haxe `WorkerPool` uses this to skip
 /// affinity calls entirely on systems where they would be no-ops.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_multi_node() -> bool {
     platform::available()
 }
 
 /// Number of NUMA nodes in the system. Always `>= 1`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_node_count() -> i32 {
     platform::node_count()
 }
 
 /// Total logical CPU count. Always `>= 1`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_cpu_count() -> i32 {
     platform::cpu_count()
 }
 
 /// Physical performance-core count on hybrid (big.LITTLE) parts. Falls
 /// back to the logical CPU count when no hybrid split is exposed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_perf_core_count() -> i32 {
     platform::perf_core_count()
 }
@@ -67,7 +67,7 @@ pub extern "C" fn rayzor_topology_perf_core_count() -> i32 {
 /// and heats the core on x86 and on thermally-tight ARM boards, but on a
 /// thermally-generous Apple M-series desktop/laptop the hint's marginal
 /// idle-branch cost is not worth it. `RAYZOR_HAXE_POOL_RELAX` overrides.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_pool_relax_default() -> i32 {
     // Platform-derived default. On macOS/M-series the Haxe-level relax path
     // still flows through a wrapper call in tight joins, so the call overhead
@@ -147,7 +147,7 @@ fn park_wake_latency_us() -> f64 {
 /// between hot dispatches and costs far more than the spin itself. Keep those
 /// workers resident by default on that platform. `RAYZOR_HAXE_POOL_SPINS`
 /// still overrides. Clamped to a sane band, then platform-adjusted.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_pool_spin_default() -> i32 {
     use std::sync::OnceLock;
     static CACHED: OnceLock<i32> = OnceLock::new();
@@ -176,7 +176,7 @@ pub extern "C" fn rayzor_pool_spin_default() -> i32 {
 
 /// NUMA node a given logical CPU belongs to. Returns `0` on no-NUMA
 /// platforms; returns `-1` if `cpu` is out of range.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_cpu_to_node(cpu: i32) -> i32 {
     platform::cpu_to_node(cpu)
 }
@@ -187,7 +187,7 @@ pub extern "C" fn rayzor_topology_cpu_to_node(cpu: i32) -> i32 {
 /// # Safety
 /// `out_buf` must point to writable memory for at least `max` `i32` slots,
 /// or be null when `max == 0`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_topology_node_cpus(node: i32, out_buf: *mut i32, max: i32) -> i32 {
     if max < 0 {
         return -1;
@@ -208,7 +208,7 @@ pub unsafe extern "C" fn rayzor_topology_node_cpus(node: i32, out_buf: *mut i32,
 /// Returns `0` on success (including no-NUMA platforms where the call
 /// is a no-op), `-1` if the platform doesn't support thread affinity,
 /// `-2` if `node` is out of range.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_bind_to_node(node: i32) -> i32 {
     platform::bind_current_thread(node)
 }
@@ -226,7 +226,7 @@ pub extern "C" fn rayzor_topology_bind_to_node(node: i32) -> i32 {
 /// memory-level parallelism when pinned to P-cores (measured -28% decode
 /// throughput and +60% ttft on a 4P+8E i5-1250P at identical thermal state).
 /// `RAYZOR_NO_PERF_AFFINITY=1` forces the pin off even when opted in.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_bind_performance() -> i32 {
     fn truthy(name: &str) -> bool {
         std::env::var(name)
@@ -249,7 +249,7 @@ pub extern "C" fn rayzor_topology_bind_performance() -> i32 {
 }
 
 /// Clear any affinity hint on the calling thread.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_unbind() -> i32 {
     platform::unbind_current_thread()
 }

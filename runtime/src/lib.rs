@@ -118,7 +118,7 @@ pub const DEBUG_MODE: bool = false;
 ///
 /// # Returns
 /// Pointer to allocated memory, or null on failure
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_malloc(size: u64) -> *mut u8 {
     if size == 0 {
         return ptr::null_mut();
@@ -153,7 +153,7 @@ pub unsafe extern "C" fn rayzor_malloc(size: u64) -> *mut u8 {
 ///
 /// # Returns
 /// Pointer to reallocated memory, or null on failure
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_realloc(ptr: *mut u8, old_size: u64, new_size: u64) -> *mut u8 {
     if ptr.is_null() {
         return rayzor_malloc(new_size);
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn rayzor_realloc(ptr: *mut u8, old_size: u64, new_size: u
 /// # Arguments
 /// * `ptr` - Pointer to memory to free
 /// * `size` - Size of the allocation in bytes
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_free(ptr: *mut u8, size: u64) {
     if ptr.is_null() || size == 0 {
         return;
@@ -219,7 +219,7 @@ pub unsafe extern "C" fn rayzor_free(ptr: *mut u8, size: u64) {
 /// - `var_name` must be a valid pointer to `var_len` bytes of UTF-8, or null
 /// - `var_len` must be the byte length of `var_name`
 /// - `line` is the source line of the offending read (best-effort)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_panic_use_after_move(
     var_name: *const u8,
     var_len: i64,
@@ -273,7 +273,7 @@ pub use profile::{ensure_alloc_dump_hooks, TrackingAllocator};
 /// Compatible with libc malloc signature: fn(size) -> *mut u8
 /// Prepends a 16-byte header (size in first 8 bytes, padding in next 8).
 /// Returns 16-byte aligned pointer for SIMD compatibility.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tracked_alloc(size: u64) -> *mut u8 {
     if size == 0 {
         return ptr::null_mut();
@@ -303,7 +303,7 @@ pub unsafe extern "C" fn rayzor_tracked_alloc(size: u64) -> *mut u8 {
 /// Compatible with libc free signature: fn(*mut u8)
 /// Reads the size from the 16-byte header prepended by `rayzor_tracked_alloc`.
 /// Rejects obviously invalid sizes as a safety net against double-free.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tracked_free(ptr: *mut u8) {
     if ptr.is_null() {
         return;
@@ -334,7 +334,7 @@ pub unsafe extern "C" fn rayzor_tracked_free(ptr: *mut u8) {
 /// Compatible with libc realloc signature: fn(*mut u8, u64) -> *mut u8
 /// Handles the 16-byte size header correctly by allocating a new block,
 /// copying data, and freeing the old block.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tracked_realloc(ptr: *mut u8, new_size: u64) -> *mut u8 {
     if ptr.is_null() {
         return rayzor_tracked_alloc(new_size);
@@ -453,13 +453,13 @@ fn global_slot(global_id: usize) -> &'static AtomicU64 {
 }
 
 /// Store a value to a global variable
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_global_store(global_id: i64, value: i64) {
     global_slot(global_id as usize).store(value as u64, Ordering::Relaxed);
 }
 
 /// Load a value from a global variable
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_global_load(global_id: i64) -> i64 {
     global_slot(global_id as usize).load(Ordering::Relaxed) as i64
 }
@@ -474,7 +474,7 @@ pub unsafe extern "C" fn rayzor_global_load(global_id: i64) -> i64 {
 ///
 /// # Safety
 /// `name` must point to `len` bytes of UTF-8 for the duration of the call.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_uncompiled_function(name: *const u8, len: usize) -> ! {
     let what = if name.is_null() {
         "<unnamed>".to_string()
@@ -493,7 +493,7 @@ pub unsafe extern "C" fn rayzor_uncompiled_function(name: *const u8, len: usize)
 /// call. Binding to this is what lets code from two backends see one variable:
 /// without it each keeps its own copy, and a static written by one reads as
 /// zero in the other.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_global_slot(global_id: i64) -> *mut u64 {
     global_slot(global_id as usize).as_ptr()
 }

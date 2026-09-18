@@ -73,7 +73,7 @@ fn u32_to_ipv4(ip: u32) -> Ipv4Addr {
 // =============================================================================
 
 /// Create a new unconnected socket handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_new() -> *mut u8 {
     let handle = Box::new(SocketHandle {
         stream: None,
@@ -85,7 +85,7 @@ pub extern "C" fn rayzor_socket_new() -> *mut u8 {
 }
 
 /// Connect socket to host:port. host_ip is packed IPv4 from HostHandle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_connect(handle: *mut u8, host_ip: i32, port: i32) {
     if handle.is_null() {
         return;
@@ -110,7 +110,7 @@ pub extern "C" fn rayzor_socket_connect(handle: *mut u8, host_ip: i32, port: i32
 }
 
 /// Bind socket to host:port for listening.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_bind(handle: *mut u8, host_ip: i32, port: i32) {
     if handle.is_null() {
         return;
@@ -131,14 +131,14 @@ pub extern "C" fn rayzor_socket_bind(handle: *mut u8, host_ip: i32, port: i32) {
 }
 
 /// Start listening for connections. Backlog is the max pending connections.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_listen(_handle: *mut u8, _backlog: i32) {
     // TcpListener::bind() already starts listening in Rust.
     // The backlog is set at OS level via bind(). No-op here.
 }
 
 /// Accept an incoming connection. Returns new SocketHandle or null.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_accept(handle: *mut u8) -> *mut u8 {
     if handle.is_null() {
         return ptr::null_mut();
@@ -165,7 +165,7 @@ pub extern "C" fn rayzor_socket_accept(handle: *mut u8) -> *mut u8 {
 }
 
 /// Close the socket.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_close(handle: *mut u8) {
     if handle.is_null() {
         return;
@@ -175,7 +175,7 @@ pub extern "C" fn rayzor_socket_close(handle: *mut u8) {
 }
 
 /// Read all available data from socket. Returns HaxeString pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_read(handle: *mut u8) -> *mut u8 {
     if handle.is_null() {
         return ptr::null_mut();
@@ -209,7 +209,7 @@ pub extern "C" fn rayzor_socket_read(handle: *mut u8) -> *mut u8 {
 }
 
 /// Write string data to socket.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_write(handle: *mut u8, data: *const u8) {
     if handle.is_null() || data.is_null() {
         return;
@@ -224,7 +224,7 @@ pub extern "C" fn rayzor_socket_write(handle: *mut u8, data: *const u8) {
 }
 
 /// Shutdown the socket for reading, writing, or both.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_shutdown(handle: *mut u8, read: i32, write: i32) {
     if handle.is_null() {
         return;
@@ -243,7 +243,7 @@ pub extern "C" fn rayzor_socket_shutdown(handle: *mut u8, read: i32, write: i32)
 }
 
 /// Set blocking mode. b=1 for blocking, b=0 for non-blocking.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_set_blocking(handle: *mut u8, b: i32) {
     if handle.is_null() {
         return;
@@ -260,7 +260,7 @@ pub extern "C" fn rayzor_socket_set_blocking(handle: *mut u8, b: i32) {
 }
 
 /// Set timeout in seconds (as f64). 0.0 means no timeout.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_set_timeout(handle: *mut u8, seconds: f64) {
     if handle.is_null() {
         return;
@@ -280,7 +280,7 @@ pub extern "C" fn rayzor_socket_set_timeout(handle: *mut u8, seconds: f64) {
 }
 
 /// Set TCP_NODELAY (fast send). b=1 to enable, b=0 to disable.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_set_fast_send(handle: *mut u8, b: i32) {
     if handle.is_null() {
         return;
@@ -293,7 +293,7 @@ pub extern "C" fn rayzor_socket_set_fast_send(handle: *mut u8, b: i32) {
 }
 
 /// Block until data is available for reading.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_wait_for_read(handle: *mut u8) {
     if handle.is_null() {
         return;
@@ -314,7 +314,7 @@ pub extern "C" fn rayzor_socket_wait_for_read(handle: *mut u8) {
 }
 
 /// Get peer address. Writes host_ip and port to out-params.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_peer(handle: *mut u8, out_host: *mut i32, out_port: *mut i32) {
     if handle.is_null() {
         return;
@@ -332,7 +332,7 @@ pub extern "C" fn rayzor_socket_peer(handle: *mut u8, out_host: *mut i32, out_po
 }
 
 /// Get local address. Writes host_ip and port to out-params.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_host_info(handle: *mut u8, out_host: *mut i32, out_port: *mut i32) {
     if handle.is_null() {
         return;
@@ -358,7 +358,7 @@ pub extern "C" fn rayzor_socket_host_info(handle: *mut u8, out_host: *mut i32, o
 /// Socket.select() — wait for readability/writability on multiple sockets.
 /// Uses poll() on macOS/Linux. Returns null for now (complex — can be implemented
 /// as a follow-up with proper anonymous struct construction).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_select(
     _read_arr: *const u8,
     _write_arr: *const u8,
@@ -377,19 +377,19 @@ pub extern "C" fn rayzor_socket_select(
 // return the socket handle directly — no separate allocation needed.
 
 /// Get the socket's input adapter (returns the socket handle itself).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_get_input(handle: *mut u8) -> *mut u8 {
     handle
 }
 
 /// Get the socket's output adapter (returns the socket handle itself).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_get_output(handle: *mut u8) -> *mut u8 {
     handle
 }
 
 /// Read a single byte from the socket. Returns -1 on EOF/error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_read_byte(handle: *mut u8) -> i32 {
     if handle.is_null() {
         return -1;
@@ -407,7 +407,7 @@ pub extern "C" fn rayzor_socket_read_byte(handle: *mut u8) -> i32 {
 }
 
 /// Read bytes into a Bytes buffer. Returns number of bytes actually read.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_read_bytes(
     handle: *mut u8,
     bytes_ptr: *mut HaxeBytes,
@@ -437,7 +437,7 @@ pub extern "C" fn rayzor_socket_read_bytes(
 }
 
 /// Write a single byte to the socket.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_write_byte(handle: *mut u8, byte: i32) {
     if handle.is_null() {
         return;
@@ -449,7 +449,7 @@ pub extern "C" fn rayzor_socket_write_byte(handle: *mut u8, byte: i32) {
 }
 
 /// Write bytes from a Bytes buffer to the socket. Returns number of bytes written.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_write_bytes(
     handle: *mut u8,
     bytes_ptr: *mut HaxeBytes,
@@ -478,7 +478,7 @@ pub extern "C" fn rayzor_socket_write_bytes(
 }
 
 /// Write a string to the socket.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_write_string(handle: *mut u8, str_ptr: *const u8) {
     if handle.is_null() || str_ptr.is_null() {
         return;
@@ -491,7 +491,7 @@ pub extern "C" fn rayzor_socket_write_string(handle: *mut u8, str_ptr: *const u8
 }
 
 /// Flush the socket output.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_socket_flush(handle: *mut u8) {
     if handle.is_null() {
         return;
@@ -507,7 +507,7 @@ pub extern "C" fn rayzor_socket_flush(handle: *mut u8) {
 // =============================================================================
 
 /// Create a new Host by resolving a hostname or IP string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_host_new(name_ptr: *const u8) -> *mut u8 {
     if name_ptr.is_null() {
         return ptr::null_mut();
@@ -538,7 +538,7 @@ pub extern "C" fn rayzor_host_new(name_ptr: *const u8) -> *mut u8 {
 }
 
 /// Get the IP address as a packed i32.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_host_get_ip(handle: *const u8) -> i32 {
     if handle.is_null() {
         return 0;
@@ -548,7 +548,7 @@ pub extern "C" fn rayzor_host_get_ip(handle: *const u8) -> i32 {
 }
 
 /// Get string representation of the host IP.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_host_to_string(handle: *const u8) -> *mut u8 {
     if handle.is_null() {
         return ptr::null_mut();
@@ -560,7 +560,7 @@ pub extern "C" fn rayzor_host_to_string(handle: *const u8) -> *mut u8 {
 }
 
 /// Reverse DNS lookup.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_host_reverse(handle: *const u8) -> *mut u8 {
     if handle.is_null() {
         return ptr::null_mut();
@@ -577,7 +577,7 @@ pub extern "C" fn rayzor_host_reverse(handle: *const u8) -> *mut u8 {
 }
 
 /// Get the local hostname.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_host_localhost() -> *mut u8 {
     #[cfg(unix)]
     {

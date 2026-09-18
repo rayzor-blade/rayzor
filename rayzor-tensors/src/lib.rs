@@ -30,7 +30,7 @@ pub(crate) fn env_var(primary: &str, legacy: &str) -> Result<String, std::env::V
 
 /// Host-runtime services resolved from the loading binary.
 pub mod topology {
-    extern "C" {
+    unsafe extern "C" {
         #[link_name = "rayzor_topology_perf_core_count"]
         fn perf_core_count_ffi() -> i32;
     }
@@ -168,7 +168,7 @@ rayzor_plugin::declare_native_methods! {
 }
 
 /// Typed method manifest export — same contract as nue-plugins.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn plugin_describe(
     out_count: *mut usize,
 ) -> *const rayzor_plugin::NativeMethodDesc {
@@ -197,7 +197,7 @@ macro_rules! entry {
 
 /// JIT linkage entry point: hands the host the tensor/quant kernel symbol
 /// table. The host reads `count` entries of `(name_ptr, name_len, fn_ptr)`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn plugin_init(out_count: *mut usize) -> *const SymbolEntry {
     let entries = Box::new([
         entry!(

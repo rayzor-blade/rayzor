@@ -11,7 +11,7 @@ const JMP_BUF_SIZE: usize = 256;
 /// Dynamic type_id used when no specific type is known
 const TYPE_DYNAMIC: u32 = 5;
 
-extern "C" {
+unsafe extern "C" {
     fn _setjmp(buf: *mut u8) -> i32;
     // The MSVC CRT exports `longjmp`, not the POSIX `_longjmp` spelling — it
     // does export `_setjmp`, which is why only this one needs redirecting.
@@ -47,7 +47,7 @@ thread_local! {
 
 /// Push a new exception handler. Returns a pointer to the jmp_buf
 /// that the compiler should pass to _setjmp.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_exception_push_handler() -> *mut u8 {
     let saved_shadow_depth = crate::native_stack_trace::shadow_stack_depth();
     STATE.with(|state| {
@@ -62,7 +62,7 @@ pub extern "C" fn rayzor_exception_push_handler() -> *mut u8 {
 }
 
 /// Pop the current exception handler (called on normal try-block exit).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_exception_pop_handler() {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -73,14 +73,14 @@ pub extern "C" fn rayzor_exception_pop_handler() {
 /// Throw an exception. Stores the exception value and longjmps to the
 /// most recent handler. If no handler exists, aborts.
 /// Sets type_id to Dynamic (5) for backward compatibility.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_throw(exception_value: i64) {
     rayzor_throw_typed(exception_value, TYPE_DYNAMIC);
 }
 
 /// Throw a typed exception. Stores both the value and its runtime type_id,
 /// then longjmps to the most recent handler.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_throw_typed(exception_value: i64, type_id: u32) {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -121,14 +121,14 @@ pub extern "C" fn rayzor_throw_typed(exception_value: i64, type_id: u32) {
 }
 
 /// Get the current exception value (called after landing in catch block).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_get_exception() -> i64 {
     STATE.with(|state| state.borrow().current_exception)
 }
 
 /// Get the runtime type_id of the current exception.
 /// Used by typed catch blocks to dispatch to the correct handler.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_get_exception_type_id() -> u32 {
     STATE.with(|state| state.borrow().current_exception_type_id)
 }
@@ -294,7 +294,7 @@ fn format_uncaught_exception(exception_value: i64, thrown_type_id: u32) -> Strin
 /// Polymorphic type matching for catch dispatch.
 /// Returns 1 if actual_type_id matches expected_type_id (including via inheritance), 0 otherwise.
 /// Both IDs use the +1000 offset convention from runtime_type_id().
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_exception_type_matches(actual_type_id: i32, expected_type_id: i32) -> i32 {
     if actual_type_id == expected_type_id {
         return 1;

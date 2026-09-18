@@ -2,13 +2,13 @@
 //!
 //! A plugin cdylib `use`s this crate (and nothing else from the
 //! rayzor workspace). It calls the host through `extern "C"`
-//! functions whose symbols are exported with `#[no_mangle]` by the
+//! functions whose symbols are exported with `#[unsafe(no_mangle)]` by the
 //! host binary; the dynamic linker resolves the plugin's externs
 //! against the host's exports at `dlopen` time.
 //!
 //! Native binaries built from this workspace pass
 //! `-Wl,-export_dynamic` (or platform equivalent) via
-//! `.cargo/config.toml` so the host's `#[no_mangle]` symbols stay
+//! `.cargo/config.toml` so the host's `#[unsafe(no_mangle)]` symbols stay
 //! visible to dlopen'd plugins.
 //!
 //! On wasm, plugins are rlib-linked into the host wasm runtime; the
@@ -29,7 +29,7 @@
 //! ```rust,ignore
 //! // 1. ABI handshake — host checks this at dlopen and refuses
 //! //    to bind any symbols on mismatch.
-//! #[no_mangle]
+//! #[unsafe(no_mangle)]
 //! pub extern "C" fn rayzor_plugin_abi_version() -> u32 {
 //!     rayzor_plugin::ABI_VERSION
 //! }
@@ -505,7 +505,7 @@ unsafe impl Sync for RpkgPluginInfo {}
 #[macro_export]
 macro_rules! rpkg_entry {
     ($methods:ident, $symbols_fn:path) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn rayzor_rpkg_entry() -> $crate::RpkgPluginInfo {
             let symbols = $symbols_fn();
             let entries: Vec<(usize, usize, usize)> = symbols
@@ -533,7 +533,7 @@ macro_rules! rpkg_entry {
 #[macro_export]
 macro_rules! export_abi_version {
     () => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn rayzor_plugin_abi_version() -> u32 {
             $crate::ABI_VERSION
         }

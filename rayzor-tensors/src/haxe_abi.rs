@@ -40,43 +40,43 @@ unsafe fn arr(handle: i64) -> (i64, i64) {
     (a.data as i64, a.len)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_zeros_arr(shape_arr: i64, dtype: i64) -> i64 {
     let (p, n) = arr(shape_arr);
     rayzor_tensor_zeros(p, n, dtype)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_uninit_arr(shape_arr: i64, dtype: i64) -> i64 {
     let (p, n) = arr(shape_arr);
     rayzor_tensor_uninit(p, n, dtype)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_ones_arr(shape_arr: i64, dtype: i64) -> i64 {
     let (p, n) = arr(shape_arr);
     rayzor_tensor_ones(p, n, dtype)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_full_arr(shape_arr: i64, value: f64, dtype: i64) -> i64 {
     let (p, n) = arr(shape_arr);
     rayzor_tensor_full(p, n, value, dtype)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rand_arr(shape_arr: i64, dtype: i64) -> i64 {
     let (p, n) = arr(shape_arr);
     rayzor_tensor_rand(p, n, dtype)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_array_arr(data_arr: i64, dtype: i64) -> i64 {
     let (p, n) = arr(data_arr);
     rayzor_tensor_from_array(p, n, dtype)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_bytes_f32_arr(
     bytes_handle: i64,
     shape_arr: i64,
@@ -85,7 +85,7 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_f32_arr(
     rayzor_tensor_from_bytes_f32(bytes_handle, p, n)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_bytes_f16_arr(
     bytes_handle: i64,
     shape_arr: i64,
@@ -94,7 +94,7 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_f16_arr(
     rayzor_tensor_from_bytes_f16(bytes_handle, p, n)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_bytes_q8_0_arr(
     bytes_handle: i64,
     shape_arr: i64,
@@ -103,37 +103,37 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_q8_0_arr(
     rayzor_tensor_from_bytes_q8_0(bytes_handle, p, n)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_reshape_arr(tensor: i64, shape_arr: i64) -> i64 {
     let (p, n) = arr(shape_arr);
     rayzor_tensor_reshape(tensor, p, n)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_permute_arr(tensor: i64, axes_arr: i64) -> i64 {
     let (p, n) = arr(axes_arr);
     rayzor_tensor_permute(tensor, p, n)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_get_arr(tensor: i64, indices_arr: i64) -> f64 {
     let (p, n) = arr(indices_arr);
     rayzor_tensor_get(tensor, p, n)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_set_arr(tensor: i64, indices_arr: i64, value: f64) {
     let (p, n) = arr(indices_arr);
     rayzor_tensor_set(tensor, p, n, value)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_gather_rows_arr(tensor: i64, indices_arr: i64) -> i64 {
     let (p, n) = arr(indices_arr);
     rayzor_tensor_gather_rows(tensor, p, n)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_gather_rows_q6_k_arr(qt: i64, indices_arr: i64) -> i64 {
     let (p, n) = arr(indices_arr);
     rayzor_tensor_gather_rows_q6_k(qt, p, n)
@@ -142,7 +142,7 @@ pub unsafe extern "C" fn rayzor_tensor_gather_rows_q6_k_arr(qt: i64, indices_arr
 /// Top-K scan over logits. `out_logits`/`out_ids` are caller-allocated Haxe
 /// arrays with capacity >= k; we write through their data pointers (their
 /// `len` fields are untouched — same contract the MIR glue had).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_topk_scan_arr(
     logits: i64,
     out_logits_arr: i64,
@@ -161,7 +161,7 @@ pub unsafe extern "C" fn rayzor_tensor_topk_scan_arr(
 /// `Array<Tensor>` (pre-sized >= 3, slots null). On gate-miss (non-zero
 /// return) the slots are left untouched — callers null-check, same contract
 /// the MIR glue had.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_fused_arr(
     x: i64,
     q_w: i64,
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_fused_arr(
 /// `QTensor.fromFloat32(src, scheme)`: reads (data, rows, cols) from the
 /// source tensor here — the struct is ours — then quantises. Only INT8
 /// (scheme 0) routes through this entry; Q4_K_M comes from the loader.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_from_f32_int8_t(src_tensor: i64, _scheme: i64) -> i64 {
     if src_tensor == 0 {
         return 0;

@@ -12,7 +12,7 @@ use std::ptr;
 /// Returns the raw address of the buffer as i64 (0 on failure).
 ///
 /// Signature: (source: *const HaxeString) -> i64
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_cstring_from(source: *const HaxeString) -> i64 {
     if source.is_null() {
         return 0;
@@ -42,7 +42,7 @@ pub extern "C" fn rayzor_cstring_from(source: *const HaxeString) -> i64 {
 /// Returns a pointer to the new HaxeString.
 ///
 /// Signature: (cstr_addr: i64) -> *mut HaxeString
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_cstring_to_string(cstr_addr: i64) -> *mut HaxeString {
     let cstr = cstr_addr as *const u8;
     let hs = Box::new(HaxeString {
@@ -64,7 +64,7 @@ pub extern "C" fn rayzor_cstring_to_string(cstr_addr: i64) -> *mut HaxeString {
 /// Free a CString buffer allocated by rayzor_cstring_from.
 ///
 /// Signature: (cstr_addr: i64) -> void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_cstring_free(cstr_addr: i64) {
     let ptr = cstr_addr as *mut u8;
     if ptr.is_null() {

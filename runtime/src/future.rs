@@ -19,7 +19,7 @@ use std::thread;
 
 use crate::concurrency::{arm64_jit_barrier, ACTIVE_THREAD_COUNT};
 
-extern "C" {
+unsafe extern "C" {
     fn _setjmp(buf: *mut u8) -> i32;
 }
 
@@ -164,7 +164,7 @@ fn spawn_future(handle: &FutureHandle, handle_ptr: *mut FutureHandle) {
 ///
 /// # Returns
 /// Opaque handle to the future (must be freed when no longer needed)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_future_create(fn_ptr: *const u8, env_ptr: *const u8) -> *mut u8 {
     if fn_ptr.is_null() {
         return ptr::null_mut();
@@ -198,7 +198,7 @@ pub extern "C" fn rayzor_future_create(fn_ptr: *const u8, env_ptr: *const u8) ->
 ///
 /// # Safety
 /// `handle` must be a valid pointer from `rayzor_future_create`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_future_await(handle: *mut u8) -> *mut u8 {
     if handle.is_null() {
         return ptr::null_mut();
@@ -255,7 +255,7 @@ pub extern "C" fn rayzor_future_await(handle: *mut u8) -> *mut u8 {
 /// # Returns
 /// - Boxed DynamicValue* on success
 /// - null pointer on timeout or cancellation
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_future_await_timeout(handle: *mut u8, millis: i64) -> *mut u8 {
     if handle.is_null() {
         return ptr::null_mut();
@@ -320,7 +320,7 @@ pub extern "C" fn rayzor_future_await_timeout(handle: *mut u8, millis: i64) -> *
 /// * `handle` - Future handle
 /// * `cb_fn` - Callback function pointer: `extern "C" fn(*const u8, i64)`
 /// * `cb_env` - Callback environment pointer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_future_then(handle: *mut u8, cb_fn: *const u8, cb_env: *const u8) {
     // Debug removed
     if handle.is_null() || cb_fn.is_null() {
@@ -369,7 +369,7 @@ pub extern "C" fn rayzor_future_then(handle: *mut u8, cb_fn: *const u8, cb_env: 
 /// # Returns
 /// - If resolved: boxed result value (DynamicValue*)
 /// - If not resolved: null
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_future_poll(handle: *mut u8) -> *mut u8 {
     if handle.is_null() {
         return ptr::null_mut();
@@ -394,7 +394,7 @@ pub extern "C" fn rayzor_future_poll(handle: *mut u8) -> *mut u8 {
 ///
 /// # Returns
 /// A new lazy Future handle. When awaited, resolves to a Haxe Array* of boxed results.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_future_all(arr_ptr: *const u8) -> *mut u8 {
     if arr_ptr.is_null() {
         return ptr::null_mut();
@@ -537,7 +537,7 @@ pub extern "C" fn rayzor_future_all(arr_ptr: *const u8) -> *mut u8 {
 ///
 /// # Returns
 /// A new Future handle that resolves with the first completed result
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_future_race(arr_ptr: *const u8) -> *mut u8 {
     if arr_ptr.is_null() {
         return ptr::null_mut();
@@ -654,7 +654,7 @@ pub extern "C" fn rayzor_future_race(arr_ptr: *const u8) -> *mut u8 {
 ///
 /// # Returns
 /// `true` if the future has resolved and the value is available
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_future_is_ready(handle: *const u8) -> bool {
     if handle.is_null() {
         return false;
@@ -671,7 +671,7 @@ pub extern "C" fn rayzor_future_is_ready(handle: *const u8) -> bool {
 /// - If already Resolved: returns false
 ///
 /// After cancellation, `.await()` returns null.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_future_cancel(handle: *mut u8) -> bool {
     if handle.is_null() {
         return false;
@@ -698,7 +698,7 @@ pub extern "C" fn rayzor_future_cancel(handle: *mut u8) -> bool {
 }
 
 /// Check if a future has been cancelled.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_future_is_cancelled(handle: *const u8) -> bool {
     if handle.is_null() {
         return false;

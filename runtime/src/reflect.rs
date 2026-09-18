@@ -122,7 +122,7 @@ unsafe fn read_class_type_id(obj: *mut u8) -> u32 {
 /// Handles class instances (via `lookup_class_field`) and anon
 /// objects (via `rayzor_anon_get_field`). DynamicValue-wrapped
 /// anons get unwrapped first.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_has_field(obj: *mut u8, field: *mut u8) -> bool {
     if obj.is_null() {
         return false;
@@ -166,7 +166,7 @@ pub extern "C" fn haxe_reflect_has_field(obj: *mut u8, field: *mut u8) -> bool {
 /// field: HaxeString pointer.
 /// Returns: freshly-allocated `DynamicValue*` (caller manages), or
 /// null on miss.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return std::ptr::null_mut();
@@ -242,7 +242,7 @@ fn class_declares_method(start_type_id: u32, name: &str) -> bool {
 /// scalar has no fields, an anonymous object or class instance goes to
 /// `haxe_reflect_field` on the payload. A slot that is not a box at all is
 /// taken as the object itself.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return std::ptr::null_mut();
@@ -287,7 +287,7 @@ pub extern "C" fn haxe_dynamic_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
 /// best-effort coerced (e.g. an `Int` value into a `Float` slot
 /// stores the int bits — same behaviour as the corresponding
 /// `box_class_field_as_dynamic` direction).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_set_field(obj: *mut u8, field: *mut u8, value: *mut u8) {
     if obj.is_null() {
         return;
@@ -352,7 +352,7 @@ unsafe fn raw_value_to_slot(value: *mut u8, ty: ParamType) -> u64 {
 /// obj: anonymous object handle pointer
 /// field: HaxeString pointer
 /// Returns: true if field existed and was deleted
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_delete_field(obj: *mut u8, field: *mut u8) -> bool {
     if obj.is_null() {
         return false;
@@ -372,7 +372,7 @@ pub extern "C" fn haxe_reflect_delete_field(obj: *mut u8, field: *mut u8) -> boo
 /// this delegates to `haxe_type_get_instance_fields` (so the result
 /// includes inherited fields, matching Haxe semantics). For anon
 /// objects it delegates to `rayzor_anon_fields`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_fields(obj: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return std::ptr::null_mut();
@@ -401,7 +401,7 @@ pub extern "C" fn haxe_reflect_fields(obj: *mut u8) -> *mut u8 {
 ///
 /// Returns true if v is an anonymous object or class instance
 /// v: DynamicValue pointer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_is_object(v: *mut u8) -> bool {
     // A raw scalar in a Dynamic slot (an array element, an iterator yield)
     // is not a box and not an object; reading it as a box faulted on it.
@@ -425,7 +425,7 @@ pub extern "C" fn haxe_reflect_is_object(v: *mut u8) -> bool {
 ///
 /// Returns true if v is a function/closure
 /// v: DynamicValue pointer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_is_function(v: *mut u8) -> bool {
     if v.is_null() {
         return false;
@@ -441,7 +441,7 @@ pub extern "C" fn haxe_reflect_is_function(v: *mut u8) -> bool {
 /// Returns true if f1 and f2 are the same function or method closure.
 /// For closures, compares both fn_ptr and env_ptr fields (16 bytes).
 /// f1, f2: DynamicValue pointers (boxed functions) or raw closure/function pointers
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_compare_methods(f1: *mut u8, f2: *mut u8) -> bool {
     if f1.is_null() && f2.is_null() {
         return true;
@@ -501,7 +501,7 @@ pub extern "C" fn haxe_reflect_compare_methods(f1: *mut u8, f2: *mut u8) -> bool
 /// Deep copies an anonymous object
 /// obj: anonymous object handle pointer
 /// Returns: new anonymous object handle pointer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_copy(obj: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return std::ptr::null_mut();
@@ -517,7 +517,7 @@ pub extern "C" fn haxe_reflect_copy(obj: *mut u8) -> *mut u8 {
 ///
 /// Compares two Dynamic values. Returns negative if a < b, 0 if equal, positive if a > b.
 /// Both arguments are DynamicValue pointers (boxed values).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
     if a.is_null() && b.is_null() {
         return 0;
@@ -608,7 +608,7 @@ pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
 /// would require knowing the concrete type at compile time.
 ///
 /// type_tag values: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Dynamic
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i64 {
     match type_tag {
         1 | 3 => {
@@ -726,7 +726,7 @@ fn compare_reference_slot(a: i64, b: i64) -> i64 {
 ///
 /// Returns true if v is an enum value (has enum_info in the type registry).
 /// v: DynamicValue pointer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_is_enum_value(v: *mut u8) -> bool {
     if v.is_null() {
         return false;
@@ -790,7 +790,7 @@ fn valuetype_tenum(type_id: i64) -> i64 {
 /// v: DynamicValue pointer
 /// Returns: i32 ordinal (TNull=0, TInt=1, TFloat=2, TBool=3, TObject=4,
 ///          TFunction=5, TClass=6, TEnum=7, TUnknown=8)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_typeof(v: *mut u8) -> i32 {
     if v.is_null() {
         return TVALUETYPE_TNULL;
@@ -843,7 +843,7 @@ pub extern "C" fn haxe_type_typeof(v: *mut u8) -> i32 {
 ///
 /// This keeps the low-level typeof contract simple (`i32`) while allowing
 /// compiler lowering to request a real enum value when needed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_typeof_value(v: *mut u8) -> i64 {
     let tag = haxe_type_typeof(v);
     match tag {
@@ -929,14 +929,14 @@ fn format_value_type(value: i64) -> String {
 ///
 /// This avoids relying on enum RTTI registration for `ValueType` and provides
 /// stable output for `trace(Type.typeof(x))`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_value_type(value: i64) {
     let text = format_value_type(value);
     crate::haxe_sys::haxe_trace_string(text.as_ptr(), text.len());
 }
 
 /// Convert a boxed ValueType payload to a HaxeString.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_value_type(value: i64) -> *mut crate::haxe_string::HaxeString {
     let text = format_value_type(value);
     crate::haxe_sys::haxe_string_from_string(text.as_ptr(), text.len())

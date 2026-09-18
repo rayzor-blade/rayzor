@@ -17,7 +17,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "macos")]
-extern "C" {
+unsafe extern "C" {
     fn malloc_zone_check(zone: *mut std::ffi::c_void) -> i32;
 }
 

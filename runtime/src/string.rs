@@ -119,7 +119,7 @@ fn haxe_string_char_at(s: *const HaxeString, index: usize) -> u8 {
 /// Concatenate two strings and return a heap-allocated result pointer
 /// This avoids struct return ABI issues
 /// Note: exported as both `haxe_string_concat` (used by MIR/AOT) and `haxe_string_concat_ptr`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_concat(
     a: *const HaxeString,
     b: *const HaxeString,
@@ -127,7 +127,7 @@ pub extern "C" fn haxe_string_concat(
     haxe_string_concat_ptr(a, b)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_concat_ptr(
     a: *const HaxeString,
     b: *const HaxeString,
@@ -297,7 +297,7 @@ fn haxe_string_as_ptr(s: *const HaxeString) -> *const u8 {
 
 /// Check if a string starts with another string
 /// Returns 1 (true) or 0 (false)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_starts_with(s: *const HaxeString, prefix: *const HaxeString) -> i8 {
     unsafe {
         // Handle null cases
@@ -331,7 +331,7 @@ pub extern "C" fn haxe_string_starts_with(s: *const HaxeString, prefix: *const H
 
 /// Check if a string ends with another string
 /// Returns 1 (true) or 0 (false)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_ends_with(s: *const HaxeString, suffix: *const HaxeString) -> i8 {
     unsafe {
         // Handle null cases
@@ -366,7 +366,7 @@ pub extern "C" fn haxe_string_ends_with(s: *const HaxeString, suffix: *const Hax
 
 /// Check if a string contains another string
 /// Returns 1 (true) or 0 (false)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_contains(s: *const HaxeString, needle: *const HaxeString) -> i8 {
     unsafe {
         // Handle null cases

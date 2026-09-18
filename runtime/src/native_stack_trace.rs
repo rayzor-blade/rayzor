@@ -22,7 +22,7 @@ static STACK_TRACES_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Enable or disable stack trace capture at runtime.
 /// Called by the compiler at startup based on debug/release mode.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_set_stack_traces_enabled(enabled: i32) {
     STACK_TRACES_ENABLED.store(enabled != 0, Ordering::Relaxed);
 }
@@ -154,7 +154,7 @@ static FUNC_ID_MAP: LazyLock<RwLock<std::collections::HashMap<u32, u32>>> =
 /// Register a JIT-compiled function's source metadata.
 /// Called by the compiler after JIT finalization in debug mode.
 /// `func_id` is the compiler-assigned IrFunctionId used by push_call_frame.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_register_function_source(
     func_id: u32,
     code_start: usize,
@@ -329,7 +329,7 @@ thread_local! {
 /// cheap as possible.  We store `func_id` directly and defer the FUNC_ID_MAP lookup
 /// (which requires a global RwLock) to `capture_shadow_stack`, which only runs when
 /// an exception is thrown.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_push_call_frame(func_id: u32) {
     SHADOW_STACK.with(|stack| {
         stack.borrow_mut().push(ShadowFrame {
@@ -341,7 +341,7 @@ pub extern "C" fn rayzor_push_call_frame(func_id: u32) {
 }
 
 /// Pop a call frame from the shadow stack (called at function return in debug mode).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_pop_call_frame() {
     SHADOW_STACK.with(|stack| {
         stack.borrow_mut().pop();
@@ -373,7 +373,7 @@ pub fn truncate_shadow_stack(depth: usize) {
 /// Update the top frame's source location to reflect the current statement.
 /// Emitted by the compiler before throw statements and call expressions so the
 /// snapshot captures the exact line rather than the function definition line.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_update_call_frame_location(line: u32, column: u32) {
     SHADOW_STACK.with(|stack| {
         if let Some(frame) = stack.borrow_mut().last_mut() {
@@ -542,7 +542,7 @@ fn render_frame_ariadne(info: &FunctionSourceInfo, line: u32, column: u32) -> St
 /// Called automatically at throw time. The exception parameter is a DynamicValue*
 /// (Any = type-safe Dynamic = boxed value with type tag). Unused in our implementation
 /// — we store the trace in thread-local ExceptionState.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_native_stack_trace_save_stack(_exception: *mut u8) {
     // Stack is already captured in rayzor_throw_typed, nothing extra needed
 }
@@ -569,7 +569,7 @@ pub fn make_haxe_string(s: String) -> *mut HaxeString {
 
 /// Capture and return the current call stack as a HaxeString pointer.
 /// In debug mode, returns source-mapped trace. In production, returns empty string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_native_stack_trace_call_stack() -> *mut u8 {
     if is_enabled() {
         let trace_str = capture_shadow_stack();
@@ -580,7 +580,7 @@ pub extern "C" fn rayzor_native_stack_trace_call_stack() -> *mut u8 {
 }
 
 /// Return the stored exception stack trace as a HaxeString pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_native_stack_trace_exception_stack() -> *mut u8 {
     let trace_str = get_exception_stack_trace();
     make_haxe_string(trace_str) as *mut u8
@@ -588,7 +588,7 @@ pub extern "C" fn rayzor_native_stack_trace_exception_stack() -> *mut u8 {
 
 /// Convert a native stack trace to a Haxe Array<StackItem>.
 /// V1: returns an empty HaxeArray (full StackItem conversion deferred).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_native_stack_trace_to_haxe(_native_trace: *mut u8, _skip: i32) -> *mut u8 {
     // Return empty array — allocate on heap
     unsafe {

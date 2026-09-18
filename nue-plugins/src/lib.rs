@@ -194,7 +194,7 @@ declare_native_methods! {
         [Ptr, Ptr, Ptr, I64, I64, F64]                                        => Ptr;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn plugin_describe(out_count: *mut usize) -> *const NativeMethodDesc {
     if !out_count.is_null() {
         *out_count = NUE_METHODS.len();
@@ -231,7 +231,7 @@ macro_rules! entry {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn plugin_init(out_count: *mut usize) -> *const SymbolEntry {
     let entries = Box::new([
         entry!(b"rayzor_kv_cache_q8_alloc", rayzor_kv_cache_q8_alloc),
@@ -309,13 +309,13 @@ struct RayzorKvCacheQ8 {
 }
 
 #[allow(suspicious_runtime_symbol_definitions)]
-extern "C" {
+unsafe extern "C" {
     fn malloc(size: usize) -> *mut u8;
     fn free(ptr: *mut u8);
 }
 
 /// Raw base of the Q8_0 block storage (guest kernels read it directly).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kv_q8_data_ptr(handle: i64) -> i64 {
     if handle == 0 {
         return 0;
@@ -324,7 +324,7 @@ pub unsafe extern "C" fn rayzor_kv_q8_data_ptr(handle: i64) -> i64 {
 }
 
 /// Bytes per cache row (= num_kv_heads * head_dim_bytes).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kv_q8_row_bytes(handle: i64) -> i64 {
     if handle == 0 {
         return 0;
@@ -432,7 +432,7 @@ unsafe fn dequant_q8_0_block(src: *const u8, dst: &mut [f32; Q8_0_BLOCK_SIZE]) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kv_cache_q8_alloc(
     max_seq_len: i64,
     num_kv_heads: i64,
@@ -476,7 +476,7 @@ pub unsafe extern "C" fn rayzor_kv_cache_q8_alloc(
     handle as i64
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kv_cache_q8_free(handle: i64) {
     if handle == 0 {
         return;
@@ -488,7 +488,7 @@ pub unsafe extern "C" fn rayzor_kv_cache_q8_free(handle: i64) {
     free(h as *mut u8);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kv_cache_q8_append(
     handle: i64,
     current_len: i64,
@@ -534,7 +534,7 @@ pub unsafe extern "C" fn rayzor_kv_cache_q8_append(
     (current_len + n_new) as i64
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kv_cache_q8_dequant_view(handle: i64, current_len: i64) -> i64 {
     if handle == 0 || current_len <= 0 {
         return 0;
@@ -676,7 +676,7 @@ unsafe fn axpy_block_f32(out: *mut f32, w: f32, v: &[f32; Q8_0_BLOCK_SIZE]) {
 /// the attention across the embedder's otherwise-idle native worker pool.
 /// Gated off wasm so the side-module never exports a shadowing copy.
 #[cfg(not(target_arch = "wasm32"))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_flash_attn_q8_host(
     _k_handle: i64,
     _q_ptr: i64,
@@ -688,7 +688,7 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_q8_host(
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_q8(
     // Self-first ABI: kCache.flashAttnDecodeQ8(q, vCache, ...).
     k_handle: i64,
@@ -861,12 +861,12 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_q8(
 // symbol names (`rayzor_<lower_class>_(arc_)clone`). Cache doesn't
 // currently track a refcount, so arc_clone is a no-op aliasing pass;
 // deep clone duplicates bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kvcacheq8_arc_clone(handle: i64) -> i64 {
     handle
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kvcacheq8_clone(handle: i64) -> i64 {
     if handle == 0 {
         return 0;

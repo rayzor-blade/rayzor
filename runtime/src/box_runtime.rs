@@ -13,7 +13,7 @@
 // Rust 1.98 expects c_void spelling for these libc symbols; u8 has the same
 // pointer ABI and is the representation used by the box runtime.
 #[allow(suspicious_runtime_symbol_definitions)]
-extern "C" {
+unsafe extern "C" {
     fn malloc(size: usize) -> *mut u8;
     fn free(ptr: *mut u8);
 }
@@ -26,7 +26,7 @@ extern "C" {
 ///
 /// # Safety
 /// - Caller must eventually call `rayzor_box_free` to release the memory.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_box_init(value: i64) -> i64 {
     let p = malloc(8);
     if p.is_null() {
@@ -41,7 +41,7 @@ pub unsafe extern "C" fn rayzor_box_init(value: i64) -> i64 {
 /// # Safety
 /// - `box_ptr` must be a valid i64 returned by `rayzor_box_init`.
 /// - Must not be called more than once on the same pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_box_free(box_ptr: i64) {
     if box_ptr == 0 {
         return;
@@ -55,7 +55,7 @@ pub unsafe extern "C" fn rayzor_box_free(box_ptr: i64) {
 ///
 /// # Safety
 /// - `box_ptr` must be a valid i64 returned by `rayzor_box_init`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_box_unbox(box_ptr: i64) -> i64 {
     if box_ptr == 0 {
         return 0;
@@ -66,7 +66,7 @@ pub unsafe extern "C" fn rayzor_box_unbox(box_ptr: i64) -> i64 {
 /// Get the raw heap address as i64 (Box.raw / Box.asPtr / Box.asRef).
 ///
 /// This is an identity operation — the Box IS the pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_box_raw(box_ptr: i64) -> i64 {
     box_ptr
 }

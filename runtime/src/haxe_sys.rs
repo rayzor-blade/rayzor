@@ -25,7 +25,7 @@ thread_local! {
 }
 
 /// Set the trace prefix for the current thread (e.g., "[rayzor-tiered] ")
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_set_trace_prefix(ptr: *const u8, len: usize) {
     if ptr.is_null() || len == 0 {
         TRACE_PREFIX.with(|p| p.borrow_mut().clear());
@@ -74,7 +74,7 @@ pub fn set_trace_enabled(enabled: bool) {
 }
 
 /// Extern entry point for toggling trace output from generated/native code.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_set_trace_enabled(enabled: bool) {
     set_trace_enabled(enabled);
 }
@@ -128,28 +128,28 @@ fn print_with_prefix(msg: &str) {
 // ============================================================================
 
 /// Print integer to stdout
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_print_int(value: i64) {
     let text = value.to_string();
     crate::haxe_string::rayzor_stdout_write(text.as_bytes(), b"", true);
 }
 
 /// Print float to stdout
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_print_float(value: f64) {
     let text = value.to_string();
     crate::haxe_string::rayzor_stdout_write(text.as_bytes(), b"", true);
 }
 
 /// Print boolean to stdout
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_print_bool(value: bool) {
     let text = value.to_string();
     crate::haxe_string::rayzor_stdout_write(text.as_bytes(), b"", true);
 }
 
 /// Print newline
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_println() {
     crate::haxe_string::rayzor_stdout_write(b"\n", b"", true);
 }
@@ -159,25 +159,25 @@ pub extern "C" fn haxe_sys_println() {
 // ============================================================================
 
 /// Trace integer value
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_int(value: i64) {
     print_with_prefix(&format!("{}", value));
 }
 
 /// Trace float value
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_float(value: f64) {
     print_with_prefix(&format!("{}", value));
 }
 
 /// Trace boolean value
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_bool(value: bool) {
     print_with_prefix(&format!("{}", value));
 }
 
 /// Trace string value (ptr + len)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_string(ptr: *const u8, len: usize) {
     if ptr.is_null() {
         print_with_prefix("null");
@@ -194,7 +194,7 @@ pub extern "C" fn haxe_trace_string(ptr: *const u8, len: usize) {
 }
 
 /// Trace string value (takes pointer to HaxeString struct)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_string_struct(s_ptr: *const HaxeString) {
     if s_ptr.is_null() {
         print_with_prefix("null");
@@ -209,7 +209,7 @@ pub extern "C" fn haxe_trace_string_struct(s_ptr: *const HaxeString) {
 /// Trace a type-erased value using a type tag for dispatch.
 /// Used for generic code where the concrete type isn't known until monomorphization.
 /// type_tag values: 1=Int, 2=Bool, 4=Float, 5=String
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_typed(value: i64, type_tag: i32) {
     match type_tag {
         1 | 3 => haxe_trace_int(value),
@@ -232,7 +232,7 @@ pub extern "C" fn haxe_trace_typed(value: i64, type_tag: i32) {
 
 /// Trace any Dynamic value using Std.string() for proper type dispatch
 /// The value is expected to be a pointer to a DynamicValue (boxed Dynamic)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_any(dynamic_ptr: *mut u8) {
     if dynamic_ptr.is_null() {
         print_with_prefix("null");
@@ -269,7 +269,7 @@ pub extern "C" fn haxe_trace_any(dynamic_ptr: *mut u8) {
 /// This makes heterogeneous `Array<Dynamic>` literals like
 /// `[true, false, null, "hello", 3.14]` print as the user's values
 /// instead of raw byte patterns.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_array(arr_ptr: *mut u8) {
     if arr_ptr.is_null() {
         print_with_prefix("null");
@@ -554,7 +554,7 @@ mod tests {
 // ============================================================================
 
 /// Convert Int to String - returns heap-allocated HaxeString pointer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_int(value: i64) -> *mut HaxeString {
     let s = value.to_string();
     let bytes = s.into_bytes();
@@ -567,7 +567,7 @@ pub extern "C" fn haxe_string_from_int(value: i64) -> *mut HaxeString {
 }
 
 /// Convert Float to String - returns heap-allocated HaxeString pointer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_float(value: f64) -> *mut HaxeString {
     let s = value.to_string();
     let bytes = s.into_bytes();
@@ -580,7 +580,7 @@ pub extern "C" fn haxe_string_from_float(value: f64) -> *mut HaxeString {
 }
 
 /// Convert Bool to String - returns heap-allocated HaxeString pointer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_bool(value: bool) -> *mut HaxeString {
     let s = if value { "true" } else { "false" };
     // For static strings, use the static pointer with cap=0 to indicate no-free
@@ -595,7 +595,7 @@ pub extern "C" fn haxe_string_from_bool(value: bool) -> *mut HaxeString {
 /// Used for generic type parameters where the concrete type is resolved at compile time
 /// via type_param_tag_fixups (monomorphization/inlining).
 /// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Object
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_value_to_string_by_tag(value: i64, type_tag: i32) -> *mut HaxeString {
     use crate::type_system::ValueTag;
     match ValueTag::from_i32(type_tag) {
@@ -612,7 +612,7 @@ pub extern "C" fn haxe_value_to_string_by_tag(value: i64, type_tag: i32) -> *mut
 }
 
 /// Convert String to String (identity, but normalizes representation)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_string(ptr: *const u8, len: usize) -> *mut HaxeString {
     // Create a copy of the string data
     let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
@@ -629,7 +629,7 @@ pub extern "C" fn haxe_string_from_string(ptr: *const u8, len: usize) -> *mut Ha
 }
 
 /// Convert null to String - returns heap-allocated HaxeString pointer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_null() -> *mut HaxeString {
     let s = "null";
     Box::into_raw(Box::new(HaxeString {
@@ -642,7 +642,7 @@ pub extern "C" fn haxe_string_from_null() -> *mut HaxeString {
 /// Create a string literal from embedded bytes
 /// Returns a pointer to a heap-allocated HaxeString struct
 /// The bytes are NOT copied - they must remain valid (e.g., in JIT code section)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_literal(ptr: *const u8, len: usize) -> *mut HaxeString {
     Box::into_raw(Box::new(HaxeString {
         ptr: ptr as *mut u8,
@@ -653,7 +653,7 @@ pub extern "C" fn haxe_string_literal(ptr: *const u8, len: usize) -> *mut HaxeSt
 
 /// Convert string to uppercase (wrapper returning pointer)
 /// Takes pointer to input string, returns pointer to new heap-allocated uppercase string
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_upper(s: *const HaxeString) -> *mut HaxeString {
     if s.is_null() {
         return Box::into_raw(Box::new(HaxeString {
@@ -694,7 +694,7 @@ pub extern "C" fn haxe_string_upper(s: *const HaxeString) -> *mut HaxeString {
 
 /// Convert string to lowercase (wrapper returning pointer)
 /// Takes pointer to input string, returns pointer to new heap-allocated lowercase string
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_lower(s: *const HaxeString) -> *mut HaxeString {
     if s.is_null() {
         return Box::into_raw(Box::new(HaxeString {
@@ -738,7 +738,7 @@ pub extern "C" fn haxe_string_lower(s: *const HaxeString) -> *mut HaxeString {
 // ============================================================================
 
 /// Get string length
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_len(s: *const HaxeString) -> i32 {
     if s.is_null() {
         return 0;
@@ -748,7 +748,7 @@ pub extern "C" fn haxe_string_len(s: *const HaxeString) -> i32 {
 
 /// Get character at index - returns empty string if out of bounds
 /// Note: charAt returns String, not Int, per Haxe specification
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_char_at_ptr(s: *const HaxeString, index: i64) -> *mut HaxeString {
     if s.is_null() {
         return Box::into_raw(Box::new(HaxeString {
@@ -780,7 +780,7 @@ pub extern "C" fn haxe_string_char_at_ptr(s: *const HaxeString, index: i64) -> *
 }
 
 /// Get character code at index - returns -1 (represented as null Int) if out of bounds
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_char_code_at_ptr(s: *const HaxeString, index: i64) -> i64 {
     if s.is_null() {
         return -1; // null
@@ -796,7 +796,7 @@ pub extern "C" fn haxe_string_char_code_at_ptr(s: *const HaxeString, index: i64)
 
 /// Find index of substring, starting from startIndex
 /// Returns -1 if not found
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_index_of_ptr(
     s: *const HaxeString,
     needle: *const HaxeString,
@@ -842,7 +842,7 @@ pub extern "C" fn haxe_string_index_of_ptr(
 
 /// Find last index of substring, searching backwards from startIndex
 /// Returns -1 if not found
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_last_index_of_ptr(
     s: *const HaxeString,
     needle: *const HaxeString,
@@ -897,7 +897,7 @@ pub extern "C" fn haxe_string_last_index_of_ptr(
 /// Get substring using substr semantics (pos, len)
 /// If len is negative, returns empty string
 /// If pos is negative, calculated from end
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_substr_ptr(
     s: *const HaxeString,
     pos: i32,
@@ -964,7 +964,7 @@ pub extern "C" fn haxe_string_substr_ptr(
 /// Get substring using substring semantics (startIndex, endIndex)
 /// Negative indices become 0
 /// If startIndex > endIndex, they are swapped
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_substring_ptr(
     s: *const HaxeString,
     start_index: i32,
@@ -1027,7 +1027,7 @@ pub extern "C" fn haxe_string_substring_ptr(
 }
 
 /// Create string from character code (static method)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_char_code(code: i32) -> *mut HaxeString {
     if !(0..=0x10FFFF).contains(&code) {
         // Invalid code point, return empty string
@@ -1058,7 +1058,7 @@ pub extern "C" fn haxe_string_from_char_code(code: i32) -> *mut HaxeString {
 }
 
 /// Copy string (for toString() method)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_copy(s: *const HaxeString) -> *mut HaxeString {
     if s.is_null() {
         return Box::into_raw(Box::new(HaxeString {
@@ -1089,7 +1089,7 @@ pub extern "C" fn haxe_string_copy(s: *const HaxeString) -> *mut HaxeString {
 
 /// Split string by delimiter - returns array pointer and sets length
 /// Note: Caller is responsible for freeing the returned array and strings
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_split_ptr(
     s: *const HaxeString,
     delimiter: *const HaxeString,
@@ -1214,13 +1214,13 @@ pub extern "C" fn haxe_string_split_ptr(
 // ============================================================================
 
 /// Exit program with code
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_exit(code: i32) -> ! {
     std::process::exit(code)
 }
 
 /// Get current time in milliseconds
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_time() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1231,7 +1231,7 @@ pub extern "C" fn haxe_sys_time() -> f64 {
 }
 
 /// Get command line arguments count
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_args_count() -> i32 {
     std::env::args().count() as i32
 }
@@ -1298,7 +1298,7 @@ fn build_args_array(args: &[&str]) -> *mut crate::haxe_array::HaxeArray {
 
 /// C-callable: Initialize program args from argc/argv (used by AOT C wrapper).
 /// Skips argv[0] (the binary name) to match Haxe convention.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_init_args_from_argv(argc: i32, argv: *const *const i8) {
     if argv.is_null() || argc <= 1 {
         let arr = build_args_array(&[]);
@@ -1335,7 +1335,7 @@ pub fn init_program_args(args: &[String]) {
 }
 
 /// Sys.args() — returns Array<String> of program arguments
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_args() -> *mut crate::haxe_array::HaxeArray {
     match PROGRAM_ARGS.get() {
         Some(storage) => storage.0,
@@ -1352,7 +1352,7 @@ pub extern "C" fn haxe_sys_args() -> *mut crate::haxe_array::HaxeArray {
 
 /// Get environment variable value
 /// Returns null if the variable doesn't exist
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_get_env(name: *const HaxeString) -> *mut HaxeString {
     if name.is_null() {
         return std::ptr::null_mut();
@@ -1386,7 +1386,7 @@ pub extern "C" fn haxe_sys_get_env(name: *const HaxeString) -> *mut HaxeString {
 
 /// Set environment variable value
 /// If value is null, removes the environment variable
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_put_env(name: *const HaxeString, value: *const HaxeString) {
     if name.is_null() {
         return;
@@ -1426,7 +1426,7 @@ pub extern "C" fn haxe_sys_put_env(name: *const HaxeString, value: *const HaxeSt
 // ============================================================================
 
 /// Get current working directory
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_get_cwd() -> *mut HaxeString {
     match std::env::current_dir() {
         Ok(path) => {
@@ -1443,7 +1443,7 @@ pub extern "C" fn haxe_sys_get_cwd() -> *mut HaxeString {
 }
 
 /// Set current working directory
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_set_cwd(path: *const HaxeString) {
     if path.is_null() {
         return;
@@ -1467,7 +1467,7 @@ pub extern "C" fn haxe_sys_set_cwd(path: *const HaxeString) {
 // ============================================================================
 
 /// Sleep for the specified number of seconds
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_sleep(seconds: f64) {
     if seconds <= 0.0 {
         return;
@@ -1483,7 +1483,7 @@ pub extern "C" fn haxe_sys_sleep(seconds: f64) {
 
 /// Get the system/OS name
 /// Returns "Windows", "Linux", "Mac", or "BSD"
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_system_name() -> *mut HaxeString {
     let name = if cfg!(target_os = "windows") {
         "Windows"
@@ -1509,7 +1509,7 @@ pub extern "C" fn haxe_sys_system_name() -> *mut HaxeString {
 }
 
 /// Get the CPU architecture for the current runtime.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_cpu_arch() -> *mut HaxeString {
     let arch = std::env::consts::ARCH;
 
@@ -1521,7 +1521,7 @@ pub extern "C" fn haxe_sys_cpu_arch() -> *mut HaxeString {
 }
 
 /// Get CPU time for current process (in seconds)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_cpu_time() -> f64 {
     // This is a simplified implementation - full accuracy would require platform-specific code
     // On Unix, we could use getrusage() for accurate CPU time
@@ -1533,7 +1533,7 @@ pub extern "C" fn haxe_sys_cpu_time() -> f64 {
 }
 
 /// Get path to current executable
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_program_path() -> *mut HaxeString {
     match std::env::current_exe() {
         Ok(path) => {
@@ -1552,7 +1552,7 @@ pub extern "C" fn haxe_sys_program_path() -> *mut HaxeString {
 /// Execute a shell command and return the exit code
 /// Sys.command(cmd: String, args: Array<String>): Int
 /// When args is null, cmd is passed directly to the shell
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_command(cmd: *const HaxeString) -> i32 {
     unsafe {
         let cmd_str = match haxe_string_to_rust(cmd) {
@@ -1580,7 +1580,7 @@ pub extern "C" fn haxe_sys_command(cmd: *const HaxeString) -> i32 {
 
 /// Read a single character from stdin
 /// Sys.getChar(echo: Bool): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_get_char(echo: bool) -> i32 {
     use std::io::Read;
 
@@ -1625,7 +1625,7 @@ fn rust_string_to_haxe(s: String) -> *mut HaxeString {
 
 /// Read entire file content as string
 /// File.getContent(path: String): String
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_get_content(path: *const HaxeString) -> *mut HaxeString {
     unsafe {
         match haxe_string_to_rust(path) {
@@ -1643,7 +1643,7 @@ pub extern "C" fn haxe_file_get_content(path: *const HaxeString) -> *mut HaxeStr
 
 /// Write string content to file
 /// File.saveContent(path: String, content: String): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_save_content(path: *const HaxeString, content: *const HaxeString) {
     unsafe {
         let path_str = match haxe_string_to_rust(path) {
@@ -1659,7 +1659,7 @@ pub extern "C" fn haxe_file_save_content(path: *const HaxeString, content: *cons
 
 /// Copy file from src to dst
 /// File.copy(srcPath: String, dstPath: String): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_copy(src: *const HaxeString, dst: *const HaxeString) {
     unsafe {
         let src_str = match haxe_string_to_rust(src) {
@@ -1686,7 +1686,7 @@ pub extern "C" fn haxe_file_copy(src: *const HaxeString, dst: *const HaxeString)
 /// for the lifetime of the mapping as a Linux safety net.
 ///
 /// On other platforms / mmap failure, falls back to a full read.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_get_bytes(path: *const HaxeString) -> *mut HaxeBytes {
     unsafe {
         let path_str = match haxe_string_to_rust(path) {
@@ -1724,7 +1724,7 @@ pub extern "C" fn haxe_file_get_bytes(path: *const HaxeString) -> *mut HaxeBytes
 
 /// Write binary bytes to file
 /// File.saveBytes(path: String, bytes: haxe.io.Bytes): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_save_bytes(path: *const HaxeString, bytes: *const HaxeBytes) {
     unsafe {
         let path_str = match haxe_string_to_rust(path) {
@@ -1752,7 +1752,7 @@ pub extern "C" fn haxe_file_save_bytes(path: *const HaxeString, bytes: *const Ha
 
 /// Check if file or directory exists
 /// FileSystem.exists(path: String): Bool
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_exists(path: *const HaxeString) -> bool {
     unsafe {
         match haxe_string_to_rust(path) {
@@ -1764,7 +1764,7 @@ pub extern "C" fn haxe_filesystem_exists(path: *const HaxeString) -> bool {
 
 /// Check if path is a directory
 /// FileSystem.isDirectory(path: String): Bool
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_is_directory(path: *const HaxeString) -> bool {
     unsafe {
         match haxe_string_to_rust(path) {
@@ -1776,7 +1776,7 @@ pub extern "C" fn haxe_filesystem_is_directory(path: *const HaxeString) -> bool 
 
 /// Create directory (recursively)
 /// FileSystem.createDirectory(path: String): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_create_directory(path: *const HaxeString) {
     unsafe {
         if let Some(path_str) = haxe_string_to_rust(path) {
@@ -1789,7 +1789,7 @@ pub extern "C" fn haxe_filesystem_create_directory(path: *const HaxeString) {
 
 /// Delete file
 /// FileSystem.deleteFile(path: String): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_delete_file(path: *const HaxeString) {
     unsafe {
         if let Some(path_str) = haxe_string_to_rust(path) {
@@ -1802,7 +1802,7 @@ pub extern "C" fn haxe_filesystem_delete_file(path: *const HaxeString) {
 
 /// Delete directory (must be empty)
 /// FileSystem.deleteDirectory(path: String): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_delete_directory(path: *const HaxeString) {
     unsafe {
         if let Some(path_str) = haxe_string_to_rust(path) {
@@ -1815,7 +1815,7 @@ pub extern "C" fn haxe_filesystem_delete_directory(path: *const HaxeString) {
 
 /// Rename/move file or directory
 /// FileSystem.rename(path: String, newPath: String): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_rename(path: *const HaxeString, new_path: *const HaxeString) {
     unsafe {
         let path_str = match haxe_string_to_rust(path) {
@@ -1837,7 +1837,7 @@ pub extern "C" fn haxe_filesystem_rename(path: *const HaxeString, new_path: *con
 
 /// Get full/absolute path
 /// FileSystem.fullPath(relPath: String): String
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_full_path(path: *const HaxeString) -> *mut HaxeString {
     unsafe {
         match haxe_string_to_rust(path) {
@@ -1852,7 +1852,7 @@ pub extern "C" fn haxe_filesystem_full_path(path: *const HaxeString) -> *mut Hax
 
 /// Get absolute path (doesn't need to exist)
 /// FileSystem.absolutePath(relPath: String): String
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_absolute_path(path: *const HaxeString) -> *mut HaxeString {
     unsafe {
         match haxe_string_to_rust(path) {
@@ -1892,7 +1892,7 @@ pub struct HaxeFileStat {
 
 /// Get file/directory statistics
 /// FileSystem.stat(path: String): FileStat
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_stat(path: *const HaxeString) -> *mut HaxeFileStat {
     unsafe {
         match haxe_string_to_rust(path) {
@@ -1981,7 +1981,7 @@ pub extern "C" fn haxe_filesystem_stat(path: *const HaxeString) -> *mut HaxeFile
 
 /// Check if path is a file (not directory)
 /// FileSystem.isFile(path: String): Bool
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_is_file(path: *const HaxeString) -> bool {
     unsafe {
         match haxe_string_to_rust(path) {
@@ -1993,7 +1993,7 @@ pub extern "C" fn haxe_filesystem_is_file(path: *const HaxeString) -> bool {
 
 /// Read directory contents
 /// FileSystem.readDirectory(path: String): Array<String>
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_read_directory(
     path: *const HaxeString,
 ) -> *mut crate::haxe_array::HaxeArray {
@@ -2067,7 +2067,7 @@ const SEEK_END: i32 = 2;
 
 /// Open file for reading
 /// File.read(path: String, binary: Bool): FileInput
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_read(path: *const HaxeString, _binary: bool) -> *mut HaxeFileInput {
     unsafe {
         match haxe_string_to_rust(path) {
@@ -2088,7 +2088,7 @@ pub extern "C" fn haxe_file_read(path: *const HaxeString, _binary: bool) -> *mut
 
 /// Open file for writing (creates or truncates)
 /// File.write(path: String, binary: Bool): FileOutput
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_write(path: *const HaxeString, _binary: bool) -> *mut HaxeFileOutput {
     unsafe {
         match haxe_string_to_rust(path) {
@@ -2108,7 +2108,7 @@ pub extern "C" fn haxe_file_write(path: *const HaxeString, _binary: bool) -> *mu
 
 /// Open file for appending
 /// File.append(path: String, binary: Bool): FileOutput
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_append(path: *const HaxeString, _binary: bool) -> *mut HaxeFileOutput {
     unsafe {
         match haxe_string_to_rust(path) {
@@ -2134,7 +2134,7 @@ pub extern "C" fn haxe_file_append(path: *const HaxeString, _binary: bool) -> *m
 
 /// Open file for updating (read/write, seek anywhere)
 /// File.update(path: String, binary: Bool): FileOutput
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_update(path: *const HaxeString, _binary: bool) -> *mut HaxeFileOutput {
     unsafe {
         match haxe_string_to_rust(path) {
@@ -2166,7 +2166,7 @@ pub extern "C" fn haxe_file_update(path: *const HaxeString, _binary: bool) -> *m
 
 /// Read one byte from FileInput
 /// FileInput.readByte(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileinput_read_byte(handle: *mut HaxeFileInput) -> i32 {
     if handle.is_null() {
         return -1;
@@ -2190,7 +2190,7 @@ pub extern "C" fn haxe_fileinput_read_byte(handle: *mut HaxeFileInput) -> i32 {
 
 /// Read multiple bytes into buffer
 /// Returns actual bytes read
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileinput_read_bytes(
     handle: *mut HaxeFileInput,
     buf: *mut u8,
@@ -2218,7 +2218,7 @@ pub extern "C" fn haxe_fileinput_read_bytes(
 
 /// Read multiple bytes into a Bytes buffer at given offset
 /// FileInput.readBytes(s: Bytes, pos: Int, len: Int): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileinput_read_bytes_buf(
     handle: *mut HaxeFileInput,
     bytes: *mut HaxeBytes,
@@ -2253,7 +2253,7 @@ pub extern "C" fn haxe_fileinput_read_bytes_buf(
 
 /// Read a line from FileInput (until \n or EOF)
 /// FileInput.readLine(): String
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileinput_read_line(handle: *mut HaxeFileInput) -> *mut HaxeString {
     if handle.is_null() {
         return haxe_string_from_string(std::ptr::null(), 0);
@@ -2286,7 +2286,7 @@ pub extern "C" fn haxe_fileinput_read_line(handle: *mut HaxeFileInput) -> *mut H
 
 /// Read all remaining bytes from FileInput
 /// FileInput.readAll(?bufsize:Int): Bytes
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileinput_read_all(handle: *mut HaxeFileInput) -> *mut HaxeBytes {
     if handle.is_null() {
         return haxe_bytes_alloc(0);
@@ -2313,7 +2313,7 @@ pub extern "C" fn haxe_fileinput_read_all(handle: *mut HaxeFileInput) -> *mut Ha
 
 /// Seek to position in FileInput
 /// FileInput.seek(p: Int, pos: FileSeek): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileinput_seek(handle: *mut HaxeFileInput, p: i32, pos: i32) {
     if handle.is_null() {
         return;
@@ -2333,7 +2333,7 @@ pub extern "C" fn haxe_fileinput_seek(handle: *mut HaxeFileInput, p: i32, pos: i
 
 /// Get current position in FileInput
 /// FileInput.tell(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileinput_tell(handle: *mut HaxeFileInput) -> i32 {
     if handle.is_null() {
         return 0;
@@ -2349,7 +2349,7 @@ pub extern "C" fn haxe_fileinput_tell(handle: *mut HaxeFileInput) -> i32 {
 
 /// Check if EOF reached
 /// FileInput.eof(): Bool
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileinput_eof(handle: *mut HaxeFileInput) -> bool {
     if handle.is_null() {
         return true;
@@ -2359,7 +2359,7 @@ pub extern "C" fn haxe_fileinput_eof(handle: *mut HaxeFileInput) -> bool {
 
 /// Close FileInput
 /// FileInput.close(): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileinput_close(handle: *mut HaxeFileInput) {
     if handle.is_null() {
         return;
@@ -2376,7 +2376,7 @@ pub extern "C" fn haxe_fileinput_close(handle: *mut HaxeFileInput) {
 
 /// Write one byte to FileOutput
 /// FileOutput.writeByte(c: Int): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileoutput_write_byte(handle: *mut HaxeFileOutput, c: i32) {
     if handle.is_null() {
         return;
@@ -2389,7 +2389,7 @@ pub extern "C" fn haxe_fileoutput_write_byte(handle: *mut HaxeFileOutput, c: i32
 
 /// Write multiple bytes from buffer
 /// Returns actual bytes written
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileoutput_write_bytes(
     handle: *mut HaxeFileOutput,
     buf: *const u8,
@@ -2410,7 +2410,7 @@ pub extern "C" fn haxe_fileoutput_write_bytes(
 
 /// Write multiple bytes from a Bytes buffer at given offset
 /// FileOutput.writeBytes(s: Bytes, pos: Int, len: Int): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileoutput_write_bytes_buf(
     handle: *mut HaxeFileOutput,
     bytes: *const HaxeBytes,
@@ -2438,7 +2438,7 @@ pub extern "C" fn haxe_fileoutput_write_bytes_buf(
 
 /// Seek to position in FileOutput
 /// FileOutput.seek(p: Int, pos: FileSeek): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileoutput_seek(handle: *mut HaxeFileOutput, p: i32, pos: i32) {
     if handle.is_null() {
         return;
@@ -2459,7 +2459,7 @@ pub extern "C" fn haxe_fileoutput_seek(handle: *mut HaxeFileOutput, p: i32, pos:
 
 /// Get current position in FileOutput
 /// FileOutput.tell(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileoutput_tell(handle: *mut HaxeFileOutput) -> i32 {
     if handle.is_null() {
         return 0;
@@ -2475,7 +2475,7 @@ pub extern "C" fn haxe_fileoutput_tell(handle: *mut HaxeFileOutput) -> i32 {
 
 /// Flush FileOutput buffer
 /// FileOutput.flush(): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileoutput_flush(handle: *mut HaxeFileOutput) {
     if handle.is_null() {
         return;
@@ -2488,7 +2488,7 @@ pub extern "C" fn haxe_fileoutput_flush(handle: *mut HaxeFileOutput) {
 
 /// Close FileOutput
 /// FileOutput.close(): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_fileoutput_close(handle: *mut HaxeFileOutput) {
     if handle.is_null() {
         return;
@@ -2507,7 +2507,7 @@ pub extern "C" fn haxe_fileoutput_close(handle: *mut HaxeFileOutput) {
 
 /// Sys.stdin() — returns a FileInput-compatible handle wrapping process stdin.
 /// Uses dup() to duplicate the fd so close() won't close the real stdin.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_stdin() -> *mut HaxeFileInput {
     #[cfg(unix)]
     {
@@ -2529,7 +2529,7 @@ pub extern "C" fn haxe_sys_stdin() -> *mut HaxeFileInput {
 }
 
 /// Sys.stdout() — returns a FileOutput-compatible handle wrapping process stdout.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_stdout() -> *mut HaxeFileOutput {
     #[cfg(unix)]
     {
@@ -2550,7 +2550,7 @@ pub extern "C" fn haxe_sys_stdout() -> *mut HaxeFileOutput {
 }
 
 /// Sys.stderr() — returns a FileOutput-compatible handle wrapping process stderr.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_stderr() -> *mut HaxeFileOutput {
     #[cfg(unix)]
     {
@@ -2588,7 +2588,7 @@ pub struct HaxeDate {
 
 /// Create a new Date from components (local timezone)
 /// Date.new(year, month, day, hour, min, sec)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_new(
     year: i32,
     month: i32,
@@ -2618,7 +2618,7 @@ pub extern "C" fn haxe_date_new(
 
 /// Get current date/time
 /// Date.now(): Date
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_now() -> *mut HaxeDate {
     let timestamp_ms = Local::now().timestamp_millis() as f64;
     Box::into_raw(Box::new(HaxeDate { timestamp_ms }))
@@ -2626,14 +2626,14 @@ pub extern "C" fn haxe_date_now() -> *mut HaxeDate {
 
 /// Create Date from timestamp (milliseconds)
 /// Date.fromTime(t: Float): Date
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_from_time(t: f64) -> *mut HaxeDate {
     Box::into_raw(Box::new(HaxeDate { timestamp_ms: t }))
 }
 
 /// Create Date from string
 /// Date.fromString(s: String): Date
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_from_string(s: *const HaxeString) -> *mut HaxeDate {
     unsafe {
         let s_str = match haxe_string_to_rust(s) {
@@ -2705,7 +2705,7 @@ fn get_utc_datetime(date: *const HaxeDate) -> Option<DateTime<Utc>> {
 
 /// Get timestamp in milliseconds
 /// date.getTime(): Float
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_time(date: *const HaxeDate) -> f64 {
     if date.is_null() {
         return 0.0;
@@ -2715,7 +2715,7 @@ pub extern "C" fn haxe_date_get_time(date: *const HaxeDate) -> f64 {
 
 /// Get hours (0-23) in local timezone
 /// date.getHours(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_hours(date: *const HaxeDate) -> i32 {
     get_local_datetime(date)
         .map(|dt| dt.hour() as i32)
@@ -2724,7 +2724,7 @@ pub extern "C" fn haxe_date_get_hours(date: *const HaxeDate) -> i32 {
 
 /// Get minutes (0-59) in local timezone
 /// date.getMinutes(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_minutes(date: *const HaxeDate) -> i32 {
     get_local_datetime(date)
         .map(|dt| dt.minute() as i32)
@@ -2733,7 +2733,7 @@ pub extern "C" fn haxe_date_get_minutes(date: *const HaxeDate) -> i32 {
 
 /// Get seconds (0-59) in local timezone
 /// date.getSeconds(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_seconds(date: *const HaxeDate) -> i32 {
     get_local_datetime(date)
         .map(|dt| dt.second() as i32)
@@ -2742,14 +2742,14 @@ pub extern "C" fn haxe_date_get_seconds(date: *const HaxeDate) -> i32 {
 
 /// Get full year (4 digits) in local timezone
 /// date.getFullYear(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_full_year(date: *const HaxeDate) -> i32 {
     get_local_datetime(date).map(|dt| dt.year()).unwrap_or(1970)
 }
 
 /// Get month (0-11) in local timezone
 /// date.getMonth(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_month(date: *const HaxeDate) -> i32 {
     get_local_datetime(date)
         .map(|dt| (dt.month() - 1) as i32)
@@ -2758,7 +2758,7 @@ pub extern "C" fn haxe_date_get_month(date: *const HaxeDate) -> i32 {
 
 /// Get day of month (1-31) in local timezone
 /// date.getDate(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_date(date: *const HaxeDate) -> i32 {
     get_local_datetime(date)
         .map(|dt| dt.day() as i32)
@@ -2767,7 +2767,7 @@ pub extern "C" fn haxe_date_get_date(date: *const HaxeDate) -> i32 {
 
 /// Get day of week (0-6, Sunday=0) in local timezone
 /// date.getDay(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_day(date: *const HaxeDate) -> i32 {
     get_local_datetime(date)
         .map(|dt| dt.weekday().num_days_from_sunday() as i32)
@@ -2776,7 +2776,7 @@ pub extern "C" fn haxe_date_get_day(date: *const HaxeDate) -> i32 {
 
 /// Get hours (0-23) in UTC
 /// date.getUTCHours(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_utc_hours(date: *const HaxeDate) -> i32 {
     get_utc_datetime(date)
         .map(|dt| dt.hour() as i32)
@@ -2785,7 +2785,7 @@ pub extern "C" fn haxe_date_get_utc_hours(date: *const HaxeDate) -> i32 {
 
 /// Get minutes (0-59) in UTC
 /// date.getUTCMinutes(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_utc_minutes(date: *const HaxeDate) -> i32 {
     get_utc_datetime(date)
         .map(|dt| dt.minute() as i32)
@@ -2794,7 +2794,7 @@ pub extern "C" fn haxe_date_get_utc_minutes(date: *const HaxeDate) -> i32 {
 
 /// Get seconds (0-59) in UTC
 /// date.getUTCSeconds(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_utc_seconds(date: *const HaxeDate) -> i32 {
     get_utc_datetime(date)
         .map(|dt| dt.second() as i32)
@@ -2803,14 +2803,14 @@ pub extern "C" fn haxe_date_get_utc_seconds(date: *const HaxeDate) -> i32 {
 
 /// Get full year (4 digits) in UTC
 /// date.getUTCFullYear(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_utc_full_year(date: *const HaxeDate) -> i32 {
     get_utc_datetime(date).map(|dt| dt.year()).unwrap_or(1970)
 }
 
 /// Get month (0-11) in UTC
 /// date.getUTCMonth(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_utc_month(date: *const HaxeDate) -> i32 {
     get_utc_datetime(date)
         .map(|dt| (dt.month() - 1) as i32)
@@ -2819,7 +2819,7 @@ pub extern "C" fn haxe_date_get_utc_month(date: *const HaxeDate) -> i32 {
 
 /// Get day of month (1-31) in UTC
 /// date.getUTCDate(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_utc_date(date: *const HaxeDate) -> i32 {
     get_utc_datetime(date)
         .map(|dt| dt.day() as i32)
@@ -2828,7 +2828,7 @@ pub extern "C" fn haxe_date_get_utc_date(date: *const HaxeDate) -> i32 {
 
 /// Get day of week (0-6, Sunday=0) in UTC
 /// date.getUTCDay(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_utc_day(date: *const HaxeDate) -> i32 {
     get_utc_datetime(date)
         .map(|dt| dt.weekday().num_days_from_sunday() as i32)
@@ -2837,7 +2837,7 @@ pub extern "C" fn haxe_date_get_utc_day(date: *const HaxeDate) -> i32 {
 
 /// Get timezone offset in minutes (local - UTC)
 /// date.getTimezoneOffset(): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_get_timezone_offset(date: *const HaxeDate) -> i32 {
     get_local_datetime(date)
         .map(|dt| -(dt.offset().local_minus_utc() / 60))
@@ -2846,7 +2846,7 @@ pub extern "C" fn haxe_date_get_timezone_offset(date: *const HaxeDate) -> i32 {
 
 /// Convert date to string "YYYY-MM-DD HH:MM:SS"
 /// date.toString(): String
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_date_to_string(date: *const HaxeDate) -> *mut HaxeString {
     let s = get_local_datetime(date)
         .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -3274,7 +3274,7 @@ pub fn haxe_bytes_mmap_file(_path: &str) -> *mut HaxeBytes {
 
 /// Allocate a new Bytes of given size (zero-initialized).
 /// Bytes.alloc(size: Int): Bytes
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_alloc(size: i32) -> *mut HaxeBytes {
     let size = size.max(0) as usize;
     let cap = size.max(16); // Minimum capacity of 16
@@ -3302,7 +3302,7 @@ pub extern "C" fn haxe_bytes_alloc(size: i32) -> *mut HaxeBytes {
 
 /// Create Bytes from String (UTF-8)
 /// Bytes.ofString(s: String): Bytes
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_of_string(s: *const HaxeString) -> *mut HaxeBytes {
     unsafe {
         let s_str = match haxe_string_to_rust(s) {
@@ -3322,7 +3322,7 @@ pub extern "C" fn haxe_bytes_of_string(s: *const HaxeString) -> *mut HaxeBytes {
 
 /// Get the length of Bytes
 /// bytes.length: Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_length(bytes: *const HaxeBytes) -> i32 {
     if bytes.is_null() {
         return 0;
@@ -3341,11 +3341,11 @@ pub extern "C" fn haxe_bytes_length(bytes: *const HaxeBytes) -> i32 {
 /// Software-prefetch hint. No-op here: the LLVM tier replaces this symbol
 /// with an alwaysinline wrapper around `llvm.prefetch`; other tiers call
 /// this empty body (correctness-neutral).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_mem_prefetch(_addr: i64) {}
 
 #[cfg(target_os = "macos")]
-extern "C" {
+unsafe extern "C" {
     fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
     fn malloc_default_zone() -> *mut std::ffi::c_void;
     fn malloc_get_all_zones(
@@ -3383,7 +3383,7 @@ extern "C" {
 /// reports what was actually released.
 /// `RAYZOR_DBG_TRIM=1` reports what the allocator actually gave up — the call
 /// is advisory, so a silent zero is a normal outcome worth being able to see.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_mem_release_free_pages(goal_kb: i32) {
     let goal_bytes = if goal_kb <= 0 {
         0usize
@@ -3434,7 +3434,7 @@ pub extern "C" fn rayzor_mem_release_free_pages(goal_kb: i32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_data_address(bytes: *const HaxeBytes) -> i64 {
     if bytes.is_null() {
         return 0;
@@ -3444,7 +3444,7 @@ pub extern "C" fn haxe_bytes_data_address(bytes: *const HaxeBytes) -> i64 {
 
 /// Get a single byte
 /// bytes.get(pos: Int): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_get(bytes: *const HaxeBytes, pos: i32) -> i32 {
     if bytes.is_null() || pos < 0 {
         return 0;
@@ -3460,7 +3460,7 @@ pub extern "C" fn haxe_bytes_get(bytes: *const HaxeBytes, pos: i32) -> i32 {
 
 /// Set a single byte
 /// bytes.set(pos: Int, value: Int): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_set(bytes: *mut HaxeBytes, pos: i32, value: i32) {
     if bytes.is_null() || pos < 0 {
         return;
@@ -3487,7 +3487,7 @@ pub extern "C" fn haxe_bytes_set(bytes: *mut HaxeBytes, pos: i32, value: i32) {
 /// tensor — turning a 4.9 GB model file into 300+ slices used to allocate
 /// a few GB of extra heap on top of the mapped file. With the view path
 /// the slice cost is one 64-byte `HaxeBytes` struct.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_sub(bytes: *mut HaxeBytes, pos: i32, len: i32) -> *mut HaxeBytes {
     haxe_bytes_sub_i64(bytes, pos as i64, len as i64)
 }
@@ -3498,7 +3498,7 @@ pub extern "C" fn haxe_bytes_sub(bytes: *mut HaxeBytes, pos: i32, len: i32) -> *
 /// are combined as `((hi as u32 as u64) << 32) | (lo as u32 as u64)` so
 /// callers can read a GGUF-style u64 offset via two `bytes.getInt32` calls
 /// and pass the raw values through unchanged.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_sub_u64lh(
     bytes: *mut HaxeBytes,
     pos_lo: i32,
@@ -3516,7 +3516,7 @@ pub extern "C" fn haxe_bytes_sub_u64lh(
 /// `dataStart` (offset of the tensor-data section within the file, well
 /// under 2 GiB for any realistic header), and `(off_lo, off_hi)` is the
 /// per-tensor u64 offset within that section.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_sub_base_u64lh(
     bytes: *mut HaxeBytes,
     base: i32,
@@ -3535,7 +3535,7 @@ pub extern "C" fn haxe_bytes_sub_base_u64lh(
 /// Same as `haxe_bytes_sub` but accepts 64-bit offset + length. Needed for
 /// files larger than 2 GiB (e.g. a Llama-3-8B Q4_K_M GGUF whose tensor-data
 /// section starts past offset 2³¹).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_sub_i64(bytes: *mut HaxeBytes, pos: i64, len: i64) -> *mut HaxeBytes {
     if bytes.is_null() || pos < 0 || len < 0 {
         return haxe_bytes_alloc(0);
@@ -3574,7 +3574,7 @@ pub extern "C" fn haxe_bytes_sub_i64(bytes: *mut HaxeBytes, pos: i64, len: i64) 
 
 /// Copy bytes from source to destination
 /// bytes.blit(srcPos: Int, dest: Bytes, destPos: Int, len: Int): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_blit(
     src: *const HaxeBytes,
     src_pos: i32,
@@ -3603,7 +3603,7 @@ pub extern "C" fn haxe_bytes_blit(
 
 /// Fill a range with a byte value
 /// bytes.fill(pos: Int, len: Int, value: Int): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_fill(bytes: *mut HaxeBytes, pos: i32, len: i32, value: i32) {
     if bytes.is_null() || pos < 0 || len <= 0 {
         return;
@@ -3621,7 +3621,7 @@ pub extern "C" fn haxe_bytes_fill(bytes: *mut HaxeBytes, pos: i32, len: i32, val
 
 /// Compare two Bytes
 /// bytes.compare(other: Bytes): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_compare(a: *const HaxeBytes, b: *const HaxeBytes) -> i32 {
     if a.is_null() && b.is_null() {
         return 0;
@@ -3646,7 +3646,7 @@ pub extern "C" fn haxe_bytes_compare(a: *const HaxeBytes, b: *const HaxeBytes) -
 
 /// Convert Bytes to String (UTF-8)
 /// bytes.toString(): String
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_to_string(bytes: *const HaxeBytes) -> *mut HaxeString {
     if bytes.is_null() {
         return rust_string_to_haxe(String::new());
@@ -3661,7 +3661,7 @@ pub extern "C" fn haxe_bytes_to_string(bytes: *const HaxeBytes) -> *mut HaxeStri
 
 /// Get 16-bit integer (little-endian)
 /// bytes.getInt16(pos: Int): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_get_int16(bytes: *const HaxeBytes, pos: i32) -> i32 {
     if bytes.is_null() || pos < 0 {
         return 0;
@@ -3679,7 +3679,7 @@ pub extern "C" fn haxe_bytes_get_int16(bytes: *const HaxeBytes, pos: i32) -> i32
 
 /// Get 32-bit integer (little-endian)
 /// bytes.getInt32(pos: Int): Int
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_get_int32(bytes: *const HaxeBytes, pos: i32) -> i32 {
     if bytes.is_null() || pos < 0 {
         return 0;
@@ -3697,7 +3697,7 @@ pub extern "C" fn haxe_bytes_get_int32(bytes: *const HaxeBytes, pos: i32) -> i32
 
 /// Get 64-bit integer (little-endian)
 /// bytes.getInt64(pos: Int): Int64
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_get_int64(bytes: *const HaxeBytes, pos: i32) -> i64 {
     if bytes.is_null() || pos < 0 {
         return 0;
@@ -3721,7 +3721,7 @@ pub extern "C" fn haxe_bytes_get_int64(bytes: *const HaxeBytes, pos: i32) -> i64
 /// reads the f32 bits as an f64 and the bytes' exponent area falls into
 /// f64's subnormal range — every value becomes ~2e-310. This broke
 /// GGUF F32-tensor loading (RMSNorm gains, RoPE frequencies) silently.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_get_float(bytes: *const HaxeBytes, pos: i32) -> f64 {
     if bytes.is_null() || pos < 0 {
         return 0.0;
@@ -3739,7 +3739,7 @@ pub extern "C" fn haxe_bytes_get_float(bytes: *const HaxeBytes, pos: i32) -> f64
 
 /// Get 64-bit double (little-endian)
 /// bytes.getDouble(pos: Int): Float
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_get_double(bytes: *const HaxeBytes, pos: i32) -> f64 {
     if bytes.is_null() || pos < 0 {
         return 0.0;
@@ -3757,7 +3757,7 @@ pub extern "C" fn haxe_bytes_get_double(bytes: *const HaxeBytes, pos: i32) -> f6
 
 /// Set 16-bit integer (little-endian)
 /// bytes.setInt16(pos: Int, value: Int): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_set_int16(bytes: *mut HaxeBytes, pos: i32, value: i32) {
     if bytes.is_null() || pos < 0 {
         return;
@@ -3775,7 +3775,7 @@ pub extern "C" fn haxe_bytes_set_int16(bytes: *mut HaxeBytes, pos: i32, value: i
 
 /// Set 32-bit integer (little-endian)
 /// bytes.setInt32(pos: Int, value: Int): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_set_int32(bytes: *mut HaxeBytes, pos: i32, value: i32) {
     if bytes.is_null() || pos < 0 {
         return;
@@ -3793,7 +3793,7 @@ pub extern "C" fn haxe_bytes_set_int32(bytes: *mut HaxeBytes, pos: i32, value: i
 
 /// Set 64-bit integer (little-endian)
 /// bytes.setInt64(pos: Int, value: Int64): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_set_int64(bytes: *mut HaxeBytes, pos: i32, value: i64) {
     if bytes.is_null() || pos < 0 {
         return;
@@ -3811,7 +3811,7 @@ pub extern "C" fn haxe_bytes_set_int64(bytes: *mut HaxeBytes, pos: i32, value: i
 
 /// Set 32-bit float (little-endian)
 /// bytes.setFloat(pos: Int, value: Float): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_set_float(bytes: *mut HaxeBytes, pos: i32, value: f32) {
     if bytes.is_null() || pos < 0 {
         return;
@@ -3829,7 +3829,7 @@ pub extern "C" fn haxe_bytes_set_float(bytes: *mut HaxeBytes, pos: i32, value: f
 
 /// Set 64-bit double (little-endian)
 /// bytes.setDouble(pos: Int, value: Float): Void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_set_double(bytes: *mut HaxeBytes, pos: i32, value: f64) {
     if bytes.is_null() || pos < 0 {
         return;
@@ -3853,7 +3853,7 @@ pub extern "C" fn haxe_bytes_set_double(bytes: *mut HaxeBytes, pos: i32, value: 
 ///   close the retained fd before freeing the struct.
 /// - `Malloc`: decrement own refcount; at 0, free the data buffer and
 ///   the struct.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_free(bytes: *mut HaxeBytes) {
     if bytes.is_null() {
         return;
@@ -3930,7 +3930,7 @@ pub struct HaxeStringMap {
 }
 
 /// Create a new StringMap
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_new() -> *mut HaxeStringMap {
     Box::into_raw(Box::new(HaxeStringMap {
         map: HashMap::new(),
@@ -3939,7 +3939,7 @@ pub extern "C" fn haxe_stringmap_new() -> *mut HaxeStringMap {
 
 /// Set a value in the StringMap
 /// Value is passed as raw u64 bits (compiler handles type conversion)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_set(
     map_ptr: *mut HaxeStringMap,
     key: *const HaxeString,
@@ -3959,7 +3959,7 @@ pub extern "C" fn haxe_stringmap_set(
 /// Get a value from the StringMap
 /// Returns raw u64 bits (compiler handles type conversion)
 /// Returns 0 if key doesn't exist (caller should use exists() to distinguish)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_get(map_ptr: *mut HaxeStringMap, key: *const HaxeString) -> u64 {
     if map_ptr.is_null() {
         return 0;
@@ -3975,7 +3975,7 @@ pub extern "C" fn haxe_stringmap_get(map_ptr: *mut HaxeStringMap, key: *const Ha
 }
 
 /// Check if a key exists in the StringMap
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_exists(
     map_ptr: *mut HaxeStringMap,
     key: *const HaxeString,
@@ -3995,7 +3995,7 @@ pub extern "C" fn haxe_stringmap_exists(
 
 /// Remove a key from the StringMap
 /// Returns true if the key existed and was removed
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_remove(
     map_ptr: *mut HaxeStringMap,
     key: *const HaxeString,
@@ -4014,7 +4014,7 @@ pub extern "C" fn haxe_stringmap_remove(
 }
 
 /// Clear all entries from the StringMap
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_clear(map_ptr: *mut HaxeStringMap) {
     if map_ptr.is_null() {
         return;
@@ -4026,7 +4026,7 @@ pub extern "C" fn haxe_stringmap_clear(map_ptr: *mut HaxeStringMap) {
 }
 
 /// Get the number of entries in the map
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_count(map_ptr: *mut HaxeStringMap) -> i64 {
     if map_ptr.is_null() {
         return 0;
@@ -4039,7 +4039,7 @@ pub extern "C" fn haxe_stringmap_count(map_ptr: *mut HaxeStringMap) -> i64 {
 
 /// Get all keys as an array
 /// Returns pointer to array of HaxeString pointers, sets out_len to count
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_keys(
     map_ptr: *mut HaxeStringMap,
     out_len: *mut i64,
@@ -4087,7 +4087,7 @@ fn map_slot_to_string(bits: u64, tag: i32) -> String {
 
 /// `haxe_stringmap_to_string` with the value's static type, so a non-Int V
 /// renders as itself instead of as the raw bits of its slot.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_to_string_typed(
     map_ptr: *mut HaxeStringMap,
     val_tag: i32,
@@ -4107,7 +4107,7 @@ pub extern "C" fn haxe_stringmap_to_string_typed(
 }
 
 /// `haxe_intmap_to_string` with the value's static type.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_to_string_typed(
     map_ptr: *mut HaxeIntMap,
     val_tag: i32,
@@ -4128,7 +4128,7 @@ pub extern "C" fn haxe_intmap_to_string_typed(
 
 /// `haxe_objectmap_to_string` with both static types: an object key has no
 /// readable form of its own, so it renders the way `"" + key` does.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_to_string_typed(
     map_ptr: *mut HaxeObjectMap,
     key_tag: i32,
@@ -4154,7 +4154,7 @@ pub extern "C" fn haxe_objectmap_to_string_typed(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_to_string(map_ptr: *mut HaxeStringMap) -> *mut HaxeString {
     if map_ptr.is_null() {
         return rust_string_to_haxe("{}".to_string());
@@ -4185,7 +4185,7 @@ pub struct HaxeIntMap {
 }
 
 /// Create a new IntMap
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_new() -> *mut HaxeIntMap {
     Box::into_raw(Box::new(HaxeIntMap {
         map: HashMap::new(),
@@ -4194,7 +4194,7 @@ pub extern "C" fn haxe_intmap_new() -> *mut HaxeIntMap {
 
 /// Set a value in the IntMap
 /// Value is passed as raw u64 bits
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_set(map_ptr: *mut HaxeIntMap, key: i64, value: u64) {
     if map_ptr.is_null() {
         return;
@@ -4207,7 +4207,7 @@ pub extern "C" fn haxe_intmap_set(map_ptr: *mut HaxeIntMap, key: i64, value: u64
 
 /// Get a value from the IntMap
 /// Returns raw u64 bits, 0 if key doesn't exist
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_get(map_ptr: *mut HaxeIntMap, key: i64) -> u64 {
     if map_ptr.is_null() {
         return 0;
@@ -4219,7 +4219,7 @@ pub extern "C" fn haxe_intmap_get(map_ptr: *mut HaxeIntMap, key: i64) -> u64 {
 }
 
 /// Check if a key exists in the IntMap
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_exists(map_ptr: *mut HaxeIntMap, key: i64) -> bool {
     if map_ptr.is_null() {
         return false;
@@ -4232,7 +4232,7 @@ pub extern "C" fn haxe_intmap_exists(map_ptr: *mut HaxeIntMap, key: i64) -> bool
 
 /// Remove a key from the IntMap
 /// Returns true if the key existed and was removed
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_remove(map_ptr: *mut HaxeIntMap, key: i64) -> bool {
     if map_ptr.is_null() {
         return false;
@@ -4244,7 +4244,7 @@ pub extern "C" fn haxe_intmap_remove(map_ptr: *mut HaxeIntMap, key: i64) -> bool
 }
 
 /// Clear all entries from the IntMap
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_clear(map_ptr: *mut HaxeIntMap) {
     if map_ptr.is_null() {
         return;
@@ -4256,7 +4256,7 @@ pub extern "C" fn haxe_intmap_clear(map_ptr: *mut HaxeIntMap) {
 }
 
 /// Get the number of entries in the map
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_count(map_ptr: *mut HaxeIntMap) -> i64 {
     if map_ptr.is_null() {
         return 0;
@@ -4269,7 +4269,7 @@ pub extern "C" fn haxe_intmap_count(map_ptr: *mut HaxeIntMap) -> i64 {
 
 /// Get all keys as an array
 /// Returns pointer to array of i64, sets out_len to count
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_keys(map_ptr: *mut HaxeIntMap, out_len: *mut i64) -> *mut i64 {
     if map_ptr.is_null() || out_len.is_null() {
         if !out_len.is_null() {
@@ -4288,7 +4288,7 @@ pub extern "C" fn haxe_intmap_keys(map_ptr: *mut HaxeIntMap, out_len: *mut i64) 
 }
 
 /// Convert IntMap to string representation
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_to_string(map_ptr: *mut HaxeIntMap) -> *mut HaxeString {
     if map_ptr.is_null() {
         return rust_string_to_haxe("{}".to_string());
@@ -4307,7 +4307,7 @@ pub extern "C" fn haxe_intmap_to_string(map_ptr: *mut HaxeIntMap) -> *mut HaxeSt
 
 /// Get StringMap keys as a HaxeArray of HaxeString pointers.
 /// Returns a pointer to a heap-allocated HaxeArray with elem_size=8 (pointer-sized elements).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_keys_to_array(
     map_ptr: *mut HaxeStringMap,
 ) -> *mut crate::haxe_array::HaxeArray {
@@ -4333,7 +4333,7 @@ pub extern "C" fn haxe_stringmap_keys_to_array(
 
 /// Get IntMap keys as a HaxeArray of i64 values.
 /// Returns a pointer to a heap-allocated HaxeArray with elem_size=8.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_keys_to_array(
     map_ptr: *mut HaxeIntMap,
 ) -> *mut crate::haxe_array::HaxeArray {
@@ -4357,7 +4357,7 @@ pub extern "C" fn haxe_intmap_keys_to_array(
 
 /// Get StringMap values as a HaxeArray of u64 raw values.
 /// Returns a pointer to a heap-allocated HaxeArray with elem_size=8.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_values_to_array(
     map_ptr: *mut HaxeStringMap,
 ) -> *mut crate::haxe_array::HaxeArray {
@@ -4381,7 +4381,7 @@ pub extern "C" fn haxe_stringmap_values_to_array(
 
 /// Get IntMap values as a HaxeArray of u64 raw values.
 /// Returns a pointer to a heap-allocated HaxeArray with elem_size=8.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_values_to_array(
     map_ptr: *mut HaxeIntMap,
 ) -> *mut crate::haxe_array::HaxeArray {
@@ -4416,7 +4416,7 @@ pub struct HaxeObjectMap {
 }
 
 /// Create a new ObjectMap
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_new() -> *mut HaxeObjectMap {
     Box::into_raw(Box::new(HaxeObjectMap {
         map: HashMap::new(),
@@ -4425,7 +4425,7 @@ pub extern "C" fn haxe_objectmap_new() -> *mut HaxeObjectMap {
 
 /// Set a value in the ObjectMap
 /// Key is an object pointer cast to u64, value is raw u64 bits
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_set(map_ptr: *mut HaxeObjectMap, key: u64, value: u64) {
     if map_ptr.is_null() {
         return;
@@ -4438,7 +4438,7 @@ pub extern "C" fn haxe_objectmap_set(map_ptr: *mut HaxeObjectMap, key: u64, valu
 
 /// Get a value from the ObjectMap
 /// Returns raw u64 bits, 0 if key doesn't exist
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_get(map_ptr: *mut HaxeObjectMap, key: u64) -> u64 {
     if map_ptr.is_null() {
         return 0;
@@ -4450,7 +4450,7 @@ pub extern "C" fn haxe_objectmap_get(map_ptr: *mut HaxeObjectMap, key: u64) -> u
 }
 
 /// Check if a key exists in the ObjectMap
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_exists(map_ptr: *mut HaxeObjectMap, key: u64) -> bool {
     if map_ptr.is_null() {
         return false;
@@ -4463,7 +4463,7 @@ pub extern "C" fn haxe_objectmap_exists(map_ptr: *mut HaxeObjectMap, key: u64) -
 
 /// Remove a key from the ObjectMap
 /// Returns true if the key existed and was removed
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_remove(map_ptr: *mut HaxeObjectMap, key: u64) -> bool {
     if map_ptr.is_null() {
         return false;
@@ -4475,7 +4475,7 @@ pub extern "C" fn haxe_objectmap_remove(map_ptr: *mut HaxeObjectMap, key: u64) -
 }
 
 /// Clear all entries from the ObjectMap
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_clear(map_ptr: *mut HaxeObjectMap) {
     if map_ptr.is_null() {
         return;
@@ -4487,7 +4487,7 @@ pub extern "C" fn haxe_objectmap_clear(map_ptr: *mut HaxeObjectMap) {
 }
 
 /// Get the number of entries in the ObjectMap
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_count(map_ptr: *mut HaxeObjectMap) -> i64 {
     if map_ptr.is_null() {
         return 0;
@@ -4499,7 +4499,7 @@ pub extern "C" fn haxe_objectmap_count(map_ptr: *mut HaxeObjectMap) -> i64 {
 }
 
 /// Get all keys as a HaxeArray of u64 pointer values
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_keys_to_array(
     map_ptr: *mut HaxeObjectMap,
 ) -> *mut crate::haxe_array::HaxeArray {
@@ -4522,7 +4522,7 @@ pub extern "C" fn haxe_objectmap_keys_to_array(
 }
 
 /// Get all values as a HaxeArray of raw u64 values
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_values_to_array(
     map_ptr: *mut HaxeObjectMap,
 ) -> *mut crate::haxe_array::HaxeArray {
@@ -4545,7 +4545,7 @@ pub extern "C" fn haxe_objectmap_values_to_array(
 }
 
 /// Convert ObjectMap to string representation
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_to_string(map_ptr: *mut HaxeObjectMap) -> *mut HaxeString {
     if map_ptr.is_null() {
         return rust_string_to_haxe("null".to_string());
@@ -4565,7 +4565,7 @@ pub extern "C" fn haxe_objectmap_to_string(map_ptr: *mut HaxeObjectMap) -> *mut 
 }
 
 /// Shallow copy of the ObjectMap
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_copy(map_ptr: *mut HaxeObjectMap) -> *mut HaxeObjectMap {
     if map_ptr.is_null() {
         return haxe_objectmap_new();

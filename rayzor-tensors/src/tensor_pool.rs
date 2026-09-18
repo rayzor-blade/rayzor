@@ -818,7 +818,7 @@ extern "C" fn pool_stats_atexit() {
 }
 
 fn register_atexit_hook() {
-    extern "C" {
+    unsafe extern "C" {
         fn atexit(cb: extern "C" fn()) -> i32;
     }
     unsafe {

@@ -86,7 +86,7 @@ pub fn register_builtin_shapes() {
 }
 
 /// Register a new shape, returns shape_id
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_register_shape(
     field_names_ptr: *const *const u8,
     field_name_lens_ptr: *const u32,
@@ -128,7 +128,7 @@ pub extern "C" fn rayzor_register_shape(
 /// Type IDs: 0=Void, 1=Null, 2=Bool, 3=Int, 4=Float, 5=String
 ///
 /// Idempotent: if shape_id is already registered, this is a no-op.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ensure_shape(shape_id: u32, descriptor_hs: *mut u8) {
     ensure_shape_table();
 
@@ -211,7 +211,7 @@ unsafe fn borrow_arc_mut(ptr: *mut u8) -> &'static mut Arc<AnonObject> {
 // ============================================================================
 
 /// Create a new anonymous object with the given shape
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_new(shape_id: u32, field_count: u32) -> *mut u8 {
     let data = if shape_id == DYNAMIC_SHAPE {
         AnonData::Map(HashMap::new())
@@ -226,7 +226,7 @@ pub extern "C" fn rayzor_anon_new(shape_id: u32, field_count: u32) -> *mut u8 {
 }
 
 /// Clone an anonymous object handle (creates new handle sharing the same Arc)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_clone(ptr: *mut u8) -> *mut u8 {
     if ptr.is_null() {
         return std::ptr::null_mut();
@@ -240,7 +240,7 @@ pub extern "C" fn rayzor_anon_clone(ptr: *mut u8) -> *mut u8 {
 }
 
 /// Drop an anonymous object handle (decrements Arc refcount, frees if zero)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_drop(ptr: *mut u8) {
     if ptr.is_null() {
         return;
@@ -252,7 +252,7 @@ pub extern "C" fn rayzor_anon_drop(ptr: *mut u8) {
 }
 
 /// Get field by index (optimized path for known shapes)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_get_field_by_index(ptr: *mut u8, index: u32) -> u64 {
     if ptr.is_null() {
         return 0;
@@ -267,7 +267,7 @@ pub extern "C" fn rayzor_anon_get_field_by_index(ptr: *mut u8, index: u32) -> u6
 }
 
 /// Set field by index with COW (optimized path for known shapes)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_set_field_by_index(ptr: *mut u8, index: u32, value: u64) {
     if ptr.is_null() {
         return;
@@ -284,7 +284,7 @@ pub extern "C" fn rayzor_anon_set_field_by_index(ptr: *mut u8, index: u32, value
 }
 
 /// Check if field exists by name
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_has_field(ptr: *mut u8, name_ptr: *const u8, name_len: u32) -> bool {
     if ptr.is_null() || name_ptr.is_null() {
         return false;
@@ -308,7 +308,7 @@ pub extern "C" fn rayzor_anon_has_field(ptr: *mut u8, name_ptr: *const u8, name_
 }
 
 /// Get field by name, returns boxed DynamicValue pointer (caller must free)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_get_field(
     ptr: *mut u8,
     name_ptr: *const u8,
@@ -349,7 +349,7 @@ pub extern "C" fn rayzor_anon_get_field(
 
 /// Set field by name with COW (dynamic path)
 /// value_ptr: pointer to DynamicValue containing the value to store
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_set_field(
     ptr: *mut u8,
     name_ptr: *const u8,
@@ -416,7 +416,7 @@ pub extern "C" fn rayzor_anon_set_field(
 }
 
 /// Delete field by name with COW (returns true if field existed)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_delete_field(
     ptr: *mut u8,
     name_ptr: *const u8,
@@ -459,7 +459,7 @@ pub extern "C" fn rayzor_anon_delete_field(
 }
 
 /// Get all field names as a HaxeArray of HaxeString pointers
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_fields(ptr: *mut u8) -> *mut u8 {
     use crate::haxe_array::HaxeArray;
     use crate::haxe_string::HaxeString;
@@ -513,7 +513,7 @@ pub extern "C" fn rayzor_anon_fields(ptr: *mut u8) -> *mut u8 {
 }
 
 /// Deep copy an anonymous object (creates independent clone)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_copy(ptr: *mut u8) -> *mut u8 {
     if ptr.is_null() {
         return std::ptr::null_mut();

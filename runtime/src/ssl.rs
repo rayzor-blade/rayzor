@@ -105,7 +105,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
 }
 
 /// sys.ssl.Socket.new() -> handle
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_new() -> *mut u8 {
     let handle = Box::new(SslSocketHandle {
         tcp_stream: None,
@@ -121,7 +121,7 @@ pub extern "C" fn rayzor_ssl_socket_new() -> *mut u8 {
 }
 
 /// sys.ssl.Socket.connect(host, port) — TCP connect + TLS handshake
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_connect(handle: *mut u8, host_ip: i32, port: i32) {
     if handle.is_null() {
         return;
@@ -186,13 +186,13 @@ pub extern "C" fn rayzor_ssl_socket_connect(handle: *mut u8, host_ip: i32, port:
 }
 
 /// sys.ssl.Socket.handshake() — explicit handshake (TLS handshake happens on connect)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_handshake(_handle: *mut u8) {
     // Handshake is performed during connect/first I/O in rustls
 }
 
 /// sys.ssl.Socket.setHostname(name)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_set_hostname(handle: *mut u8, name: *const u8) {
     if handle.is_null() || name.is_null() {
         return;
@@ -206,7 +206,7 @@ pub extern "C" fn rayzor_ssl_socket_set_hostname(handle: *mut u8, name: *const u
 }
 
 /// sys.ssl.Socket.setCA(cert)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_set_ca(handle: *mut u8, cert_handle: *mut u8) {
     if handle.is_null() || cert_handle.is_null() {
         return;
@@ -223,7 +223,7 @@ pub extern "C" fn rayzor_ssl_socket_set_ca(handle: *mut u8, cert_handle: *mut u8
 }
 
 /// sys.ssl.Socket.setCertificate(cert, key) — client certificate
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_set_certificate(
     _handle: *mut u8,
     _cert: *mut u8,
@@ -233,7 +233,7 @@ pub extern "C" fn rayzor_ssl_socket_set_certificate(
 }
 
 /// sys.ssl.Socket.peerCertificate() -> Certificate handle
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_peer_certificate(handle: *mut u8) -> *mut u8 {
     if handle.is_null() {
         return std::ptr::null_mut();
@@ -255,7 +255,7 @@ pub extern "C" fn rayzor_ssl_socket_peer_certificate(handle: *mut u8) -> *mut u8
 }
 
 /// sys.ssl.Socket.read() -> String
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_read(handle: *mut u8) -> *mut u8 {
     if handle.is_null() {
         return std::ptr::null_mut();
@@ -278,7 +278,7 @@ pub extern "C" fn rayzor_ssl_socket_read(handle: *mut u8) -> *mut u8 {
 }
 
 /// sys.ssl.Socket.write(data)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_write(handle: *mut u8, data: *const u8) {
     if handle.is_null() || data.is_null() {
         return;
@@ -295,7 +295,7 @@ pub extern "C" fn rayzor_ssl_socket_write(handle: *mut u8, data: *const u8) {
 }
 
 /// sys.ssl.Socket.close()
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_close(handle: *mut u8) {
     if handle.is_null() {
         return;
@@ -310,7 +310,7 @@ pub extern "C" fn rayzor_ssl_socket_close(handle: *mut u8) {
 }
 
 /// sys.ssl.Socket.setBlocking(b)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_set_blocking(handle: *mut u8, blocking: i32) {
     if handle.is_null() {
         return;
@@ -325,7 +325,7 @@ pub extern "C" fn rayzor_ssl_socket_set_blocking(handle: *mut u8, blocking: i32)
 }
 
 /// sys.ssl.Socket.setTimeout(seconds)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_set_timeout(handle: *mut u8, seconds: f64) {
     if handle.is_null() {
         return;
@@ -345,19 +345,19 @@ pub extern "C" fn rayzor_ssl_socket_set_timeout(handle: *mut u8, seconds: f64) {
 }
 
 /// sys.ssl.Socket.input -> handle (same SSL handle for I/O)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_get_input(handle: *mut u8) -> *mut u8 {
     handle
 }
 
 /// sys.ssl.Socket.output -> handle (same SSL handle for I/O)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_get_output(handle: *mut u8) -> *mut u8 {
     handle
 }
 
 /// SocketInput.readByte() for SSL socket
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_read_byte(handle: *mut u8) -> i32 {
     if handle.is_null() {
         return -1;
@@ -377,7 +377,7 @@ pub extern "C" fn rayzor_ssl_socket_read_byte(handle: *mut u8) -> i32 {
 }
 
 /// SocketInput.readBytes(bytes, pos, len) for SSL socket
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_read_bytes(
     handle: *mut u8,
     bytes: *mut u8,
@@ -408,7 +408,7 @@ pub extern "C" fn rayzor_ssl_socket_read_bytes(
 }
 
 /// SocketOutput.writeByte(c) for SSL socket
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_write_byte(handle: *mut u8, c: i32) {
     if handle.is_null() {
         return;
@@ -422,7 +422,7 @@ pub extern "C" fn rayzor_ssl_socket_write_byte(handle: *mut u8, c: i32) {
 }
 
 /// SocketOutput.writeBytes(bytes, pos, len) for SSL socket
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_write_bytes(
     handle: *mut u8,
     bytes: *mut u8,
@@ -453,7 +453,7 @@ pub extern "C" fn rayzor_ssl_socket_write_bytes(
 }
 
 /// SocketOutput.writeString(s) for SSL socket
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_write_string(handle: *mut u8, s: *const u8) {
     if handle.is_null() || s.is_null() {
         return;
@@ -470,7 +470,7 @@ pub extern "C" fn rayzor_ssl_socket_write_string(handle: *mut u8, s: *const u8) 
 }
 
 /// SocketOutput.flush() for SSL socket
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_flush(handle: *mut u8) {
     if handle.is_null() {
         return;
@@ -484,7 +484,7 @@ pub extern "C" fn rayzor_ssl_socket_flush(handle: *mut u8) {
 }
 
 /// sys.ssl.Socket.shutdown(read, write)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_shutdown(handle: *mut u8, read: i32, write: i32) {
     if handle.is_null() {
         return;
@@ -504,7 +504,7 @@ pub extern "C" fn rayzor_ssl_socket_shutdown(handle: *mut u8, read: i32, write: 
 }
 
 /// sys.ssl.Socket.setFastSend(b) — TCP_NODELAY
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_socket_set_fast_send(handle: *mut u8, fast: i32) {
     if handle.is_null() {
         return;
@@ -526,7 +526,7 @@ struct CertificateHandle {
 }
 
 /// Certificate.loadFile(path) -> Certificate
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_load_file(path: *const u8) -> *mut u8 {
     if path.is_null() {
         return std::ptr::null_mut();
@@ -552,7 +552,7 @@ pub extern "C" fn rayzor_ssl_cert_load_file(path: *const u8) -> *mut u8 {
 }
 
 /// Certificate.loadPath(path) -> Certificate (loads all .pem/.crt files in directory)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_load_path(path: *const u8) -> *mut u8 {
     if path.is_null() {
         return std::ptr::null_mut();
@@ -588,7 +588,7 @@ pub extern "C" fn rayzor_ssl_cert_load_path(path: *const u8) -> *mut u8 {
 }
 
 /// Certificate.fromString(pem) -> Certificate
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_from_string(pem: *const u8) -> *mut u8 {
     if pem.is_null() {
         return std::ptr::null_mut();
@@ -610,7 +610,7 @@ pub extern "C" fn rayzor_ssl_cert_from_string(pem: *const u8) -> *mut u8 {
 }
 
 /// Certificate.loadDefaults() -> Certificate (system root CAs)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_load_defaults() -> *mut u8 {
     // webpki-roots provides Mozilla's root CAs
     let certs: Vec<_> = webpki_roots::TLS_SERVER_ROOTS
@@ -621,45 +621,45 @@ pub extern "C" fn rayzor_ssl_cert_load_defaults() -> *mut u8 {
 }
 
 /// Certificate.commonName -> String
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_common_name(_cert: *mut u8) -> *mut u8 {
     // X.509 parsing requires x509-parser crate — return empty for now
     crate::ereg::rust_str_to_hs("")
 }
 
 /// Certificate.altNames -> Array<String>
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_alt_names(_cert: *mut u8) -> *mut u8 {
     // Returns null — X.509 SAN parsing deferred
     std::ptr::null_mut()
 }
 
 /// Certificate.notBefore -> Date (as epoch float)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_not_before(_cert: *mut u8) -> f64 {
     0.0
 }
 
 /// Certificate.notAfter -> Date (as epoch float)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_not_after(_cert: *mut u8) -> f64 {
     0.0
 }
 
 /// Certificate.subject(field) -> String
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_subject(_cert: *mut u8, _field: *const u8) -> *mut u8 {
     std::ptr::null_mut()
 }
 
 /// Certificate.issuer(field) -> String
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_issuer(_cert: *mut u8, _field: *const u8) -> *mut u8 {
     std::ptr::null_mut()
 }
 
 /// Certificate.next() -> Certificate (chain traversal)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_next(cert: *mut u8) -> *mut u8 {
     if cert.is_null() {
         return std::ptr::null_mut();
@@ -676,7 +676,7 @@ pub extern "C" fn rayzor_ssl_cert_next(cert: *mut u8) -> *mut u8 {
 }
 
 /// Certificate.add(pem)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_add(cert: *mut u8, pem: *const u8) {
     if cert.is_null() || pem.is_null() {
         return;
@@ -696,7 +696,7 @@ pub extern "C" fn rayzor_ssl_cert_add(cert: *mut u8, pem: *const u8) {
 }
 
 /// Certificate.addDER(bytes)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_cert_add_der(cert: *mut u8, der_bytes: *mut u8) {
     if cert.is_null() || der_bytes.is_null() {
         return;
@@ -721,7 +721,7 @@ struct KeyHandle {
 }
 
 /// Key.loadFile(path, ?isPublic, ?pass) -> Key
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_key_load_file(
     path: *const u8,
     is_public: i32,
@@ -747,7 +747,7 @@ pub extern "C" fn rayzor_ssl_key_load_file(
 }
 
 /// Key.readPEM(data, isPublic, ?pass) -> Key
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_key_read_pem(
     data: *const u8,
     is_public: i32,
@@ -780,7 +780,7 @@ pub extern "C" fn rayzor_ssl_key_read_pem(
 }
 
 /// Key.readDER(data, isPublic) -> Key
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_key_read_der(data: *mut u8, is_public: i32) -> *mut u8 {
     if data.is_null() {
         return std::ptr::null_mut();
@@ -802,13 +802,13 @@ pub extern "C" fn rayzor_ssl_key_read_der(data: *mut u8, is_public: i32) -> *mut
 /// Digest.make(data, algorithm) -> Bytes
 /// Deferred: needs `ring` or `sha2` crate for hash computation.
 /// HTTPS does not require this function — it's for explicit digest operations.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_digest_make(_data: *mut u8, _alg: *const u8) -> *mut u8 {
     std::ptr::null_mut()
 }
 
 /// Digest.sign(data, privKey, algorithm) -> Bytes
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_digest_sign(
     _data: *mut u8,
     _priv_key: *mut u8,
@@ -819,7 +819,7 @@ pub extern "C" fn rayzor_ssl_digest_sign(
 }
 
 /// Digest.verify(data, signature, pubKey, algorithm) -> Bool
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ssl_digest_verify(
     _data: *mut u8,
     _sig: *mut u8,

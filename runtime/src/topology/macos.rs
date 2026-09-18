@@ -27,7 +27,7 @@ struct ThreadAffinityPolicy {
 
 // Declared in <mach/thread_act.h>; not exposed by the libc crate, so we
 // bring them in directly.
-extern "C" {
+unsafe extern "C" {
     fn mach_thread_self() -> c_uint;
     fn thread_policy_set(
         thread: c_uint,
@@ -43,7 +43,7 @@ const THREAD_AFFINITY_POLICY_COUNT: c_uint =
 const QOS_CLASS_USER_INTERACTIVE: c_uint = 0x21;
 const QOS_CLASS_USER_INITIATED: c_uint = 0x19;
 
-extern "C" {
+unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: c_uint, relative_priority: c_int) -> c_int;
 }
 

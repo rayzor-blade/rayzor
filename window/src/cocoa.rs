@@ -21,7 +21,7 @@ pub struct CGRect {
     pub height: CGFloat,
 }
 
-extern "C" {
+unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> Class;
     fn sel_registerName(name: *const c_char) -> Sel;
     // NOTE: We never call objc_msgSend directly as variadic.

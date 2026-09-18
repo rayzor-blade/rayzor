@@ -49,7 +49,7 @@ const WS: [bool; 256] = {
 /// Parse a JSON string and return a DynamicValue*.
 ///
 /// `str_ptr` is a `*const HaxeString` (the compiler passes String as PtrU8).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_json_parse(str_ptr: *const u8) -> *mut u8 {
     if str_ptr.is_null() {
         return std::ptr::null_mut();
@@ -72,7 +72,7 @@ pub extern "C" fn haxe_json_parse(str_ptr: *const u8) -> *mut u8 {
 /// `value_ptr` is a `*mut u8` pointing to a DynamicValue, an AnonObject handle,
 /// or a HaxeArray pointer (depending on how it was produced).
 /// Returns a `*mut HaxeString`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_json_stringify(value_ptr: *mut u8) -> *mut u8 {
     let mut buf = String::with_capacity(128);
     stringify_value(value_ptr, &mut buf);

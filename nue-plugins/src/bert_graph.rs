@@ -59,7 +59,7 @@ mod imp {
         data_ptr_size: usize,
     }
 
-    extern "C" {
+    unsafe extern "C" {
         #[link_name = "BNNSGraphCompileFromFile_v2"]
         fn compile_from_file(
             filename: *const c_char,
@@ -89,7 +89,7 @@ mod imp {
 
     // In-process CoreML runtime (src/coreml_shim.m, compiled by build.rs) —
     // the ANE path. Same artifacts, different executor.
-    extern "C" {
+    unsafe extern "C" {
         fn nue_coreml_load(path: *const c_char, compute_units: i32) -> *mut c_void;
         fn nue_coreml_predict(
             handle: *mut c_void,
@@ -287,7 +287,7 @@ mod imp {
 /// `hidden` is the model's embedding width from its metadata, and `kind`
 /// picks the backend (0 = BNNSGraph CPU, 1 = CoreML CPU+ANE). Returns a
 /// handle > 0 on success, 0 when no artifacts were found, -1 off-macOS.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nue_bert_graph_load(
     dir_ptr: i64,
     dir_len: i64,
@@ -322,7 +322,7 @@ pub unsafe extern "C" fn nue_bert_graph_load(
 
 /// Smallest loaded bucket of `handle` that fits `seq`, or 0 when the graph
 /// engine can't take this sequence.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nue_bert_graph_bucket(handle: i64, seq: i64) -> i64 {
     #[cfg(target_os = "macos")]
     {
@@ -337,7 +337,7 @@ pub extern "C" fn nue_bert_graph_bucket(handle: i64, seq: i64) -> i64 {
 
 /// Run the fused encoder for bucket `s` of `handle`: h[s*hidden] + bias[s]
 /// -> out[s*hidden], all f32. Returns 0 on success.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nue_bert_graph_execute(
     handle: i64,
     s: i64,

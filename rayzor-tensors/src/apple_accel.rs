@@ -15,7 +15,7 @@ const CBLAS_ROW_MAJOR: c_int = 101;
 const CBLAS_NO_TRANS: c_int = 111;
 const CBLAS_TRANS: c_int = 112;
 
-extern "C" {
+unsafe extern "C" {
     #[allow(clippy::too_many_arguments)]
     fn cblas_sgemm(
         order: c_int,
@@ -111,7 +111,7 @@ struct VImageBuffer {
     row_bytes: usize,
 }
 
-extern "C" {
+unsafe extern "C" {
     fn vImageConvert_PlanarFtoPlanar16F(
         src: *const VImageBuffer,
         dest: *const VImageBuffer,
@@ -169,7 +169,7 @@ const BNNS_DTYPE_INT32: u32 = 0x20000 | 32; // IntBit | 32
                                             // size[0]=cols, size[1]=rows. Contiguous row-major -> stride[0]=1, stride[1]=cols.
 const BNNS_LAYOUT_ROW_MAJOR: u32 = 0x20000;
 
-extern "C" {
+unsafe extern "C" {
     fn BNNSMatMul(
         trans_a: bool,
         trans_b: bool,
@@ -254,7 +254,7 @@ pub fn matmul_f16_nt(m: usize, k: usize, n: usize, a: &[u16], b: &[u16], c: &mut
     rc == 0
 }
 
-extern "C" {
+unsafe extern "C" {
     fn BNNSMatMulWorkspaceSize(
         trans_a: bool,
         trans_b: bool,

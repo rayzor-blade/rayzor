@@ -15,7 +15,7 @@
 // Rust 1.98 expects c_void spelling for these libc symbols; u8 has the same
 // pointer ABI and avoids casts at every byte-buffer allocation site.
 #[allow(suspicious_runtime_symbol_definitions)]
-extern "C" {
+unsafe extern "C" {
     fn malloc(size: usize) -> *mut u8;
     fn free(ptr: *mut u8);
 }
@@ -68,7 +68,7 @@ fn record_data_free(bytes: usize) {
 /// Dumps live tensor-data stats to stderr. Callable from Haxe via the
 /// runtime mapping `rayzor_dump_tensor_alloc_stats` (no Haxe binding
 /// today; invoked via the SIGTRAP/atexit hook in `profile.rs`).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_dump_tensor_alloc_stats() {
     let a = TENSOR_DATA_ALLOC_BYTES.load(MemOrdering::Relaxed);
     let f = TENSOR_DATA_FREE_BYTES.load(MemOrdering::Relaxed);
@@ -1013,7 +1013,7 @@ unsafe fn alloc_tensor_uninit(shape: &[usize], dtype: u8) -> i64 {
 /// Plugin ABI: read a tensor's data pointer. Returns null for the
 /// null handle (0) to keep plugin callers from segfaulting on a
 /// missed null check.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_data(t: i64) -> *mut u8 {
     if t == 0 {
         return std::ptr::null_mut();
@@ -1024,7 +1024,7 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_data(t: i64) -> *mut u8 {
 /// Plugin ABI: read a tensor's dtype tag. Returns 255 (an unused
 /// dtype slot) for the null handle so plugins can sentinel-check
 /// without UB.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_dtype(t: i64) -> u8 {
     if t == 0 {
         return u8::MAX;
@@ -1033,7 +1033,7 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_dtype(t: i64) -> u8 {
 }
 
 /// Plugin ABI: read a tensor's ndim. Returns 0 for the null handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_ndim(t: i64) -> u32 {
     if t == 0 {
         return 0;
@@ -1043,7 +1043,7 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_ndim(t: i64) -> u32 {
 
 /// Plugin ABI: read a tensor's shape pointer. Returns null for the
 /// null handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_shape(t: i64) -> *const usize {
     if t == 0 {
         return std::ptr::null();
@@ -1054,7 +1054,7 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_shape(t: i64) -> *const usize {
 /// Plugin ABI: 1 if the tensor's strides match row-major
 /// contiguous layout for its current shape, 0 otherwise. Returns 0
 /// for the null handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_is_contiguous(t: i64) -> u8 {
     if t == 0 {
         return 0;
@@ -1070,7 +1070,7 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_is_contiguous(t: i64) -> u8 {
 /// shape + dtype. Mirror of `rayzor_tensor_zeros` but takes
 /// `*const usize` directly so plugin code can pass a Rust slice
 /// without an i64 cast. Returns 0 on shape rejection / OOM.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_alloc_zeros(
     shape_ptr: *const usize,
     ndim: usize,
@@ -1087,7 +1087,7 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_alloc_zeros(
 ///
 /// shape_ptr is a pointer to an array of i64 shape values (from Haxe Array<Int>).
 /// We read ndim elements, convert to usize, and create the tensor.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_zeros(shape_ptr: i64, ndim: i64, dtype: i64) -> i64 {
     let shape = read_shape(shape_ptr, ndim as usize);
     alloc_tensor(&shape, dtype as u8, Some(0.0))
@@ -1098,21 +1098,21 @@ pub unsafe extern "C" fn rayzor_tensor_zeros(shape_ptr: i64, ndim: i64, dtype: i
 /// Allocate an owning contiguous tensor without initialising its data buffer.
 /// This is only valid for full-overwrite producers. General callers must use
 /// Tensor.zeros/full so stale pooled bytes never become observable.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_uninit(shape_ptr: i64, ndim: i64, dtype: i64) -> i64 {
     let shape = read_shape(shape_ptr, ndim as usize);
     alloc_tensor_uninit(&shape, dtype as u8)
 }
 
 /// Tensor.ones(shape_ptr, ndim, dtype) -> i64
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_ones(shape_ptr: i64, ndim: i64, dtype: i64) -> i64 {
     let shape = read_shape(shape_ptr, ndim as usize);
     alloc_tensor(&shape, dtype as u8, Some(1.0))
 }
 
 /// Tensor.full(shape_ptr, ndim, value, dtype) -> i64
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_full(
     shape_ptr: i64,
     ndim: i64,
@@ -1125,7 +1125,7 @@ pub unsafe extern "C" fn rayzor_tensor_full(
 
 /// Tensor.fromArray(data_ptr, data_len, dtype) -> i64
 /// Creates a 1-D tensor with shape=[data_len] from a flat array of f64 values.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_array(data_ptr: i64, data_len: i64, dtype: i64) -> i64 {
     let numel = data_len as usize;
     let shape = vec![numel];
@@ -1158,7 +1158,7 @@ pub unsafe extern "C" fn rayzor_tensor_from_array(data_ptr: i64, data_len: i64, 
 /// Bytes are interpreted as f16, widened to f32, and stored — i.e. the
 /// output tensor is plain F32. Keeping it F32 sidesteps the half-kernel
 /// gap (Phase 3 is partial: storage works, compute kernels don't).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_bytes_f16(
     bytes_handle: i64,
     shape_ptr: i64,
@@ -1199,7 +1199,7 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_f16(
 /// element as `Any` (i64). For GGUF F32 tensors the bytes are already
 /// little-endian f32, so we just memcpy them into a freshly allocated
 /// tensor buffer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_bytes_f32(
     bytes_handle: i64,
     shape_ptr: i64,
@@ -1233,7 +1233,7 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_f32(
 /// As with F16: output is F32 to avoid needing a Q8_0-aware compute
 /// kernel. Block-Q8_0 is uncommon in Q4_K_M models so the load-time
 /// expansion cost is modest.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_bytes_q8_0(
     bytes_handle: i64,
     shape_ptr: i64,
@@ -1279,7 +1279,7 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_q8_0(
 }
 
 /// Tensor.rand(shape_ptr, ndim, dtype) -> i64
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rand(shape_ptr: i64, ndim: i64, dtype: i64) -> i64 {
     let shape = read_shape(shape_ptr, ndim as usize);
     let tensor_ptr = alloc_tensor(&shape, dtype as u8, None);
@@ -1309,7 +1309,7 @@ pub unsafe extern "C" fn rayzor_tensor_rand(shape_ptr: i64, ndim: i64, dtype: i6
 // ============================================================================
 
 /// tensor.ndim() -> i64
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_ndim(tensor_ptr: i64) -> i64 {
     if tensor_ptr == 0 {
         return 0;
@@ -1319,7 +1319,7 @@ pub unsafe extern "C" fn rayzor_tensor_ndim(tensor_ptr: i64) -> i64 {
 }
 
 /// tensor.numel() -> i64
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_numel(tensor_ptr: i64) -> i64 {
     if tensor_ptr == 0 {
         return 0;
@@ -1329,7 +1329,7 @@ pub unsafe extern "C" fn rayzor_tensor_numel(tensor_ptr: i64) -> i64 {
 }
 
 /// tensor.device() -> i64 (returns device tag: 0=CPU, 1=Metal, 2=Cuda, 3=WebGPU)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_device(tensor_ptr: i64) -> i64 {
     if tensor_ptr == 0 {
         return DEVICE_CPU as i64;
@@ -1339,7 +1339,7 @@ pub unsafe extern "C" fn rayzor_tensor_device(tensor_ptr: i64) -> i64 {
 }
 
 /// tensor.numa_node() -> i64 (NUMA node hint when device == CPU; -1 means "any")
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_numa_node(tensor_ptr: i64) -> i64 {
     if tensor_ptr == 0 {
         return -1;
@@ -1349,7 +1349,7 @@ pub unsafe extern "C" fn rayzor_tensor_numa_node(tensor_ptr: i64) -> i64 {
 }
 
 /// tensor.dtype() -> i64 (returns dtype tag)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_dtype(tensor_ptr: i64) -> i64 {
     if tensor_ptr == 0 {
         return 0;
@@ -1362,7 +1362,7 @@ pub unsafe extern "C" fn rayzor_tensor_dtype(tensor_ptr: i64) -> i64 {
 ///
 /// Allocates a HaxeArray struct + data buffer, copies shape dims as i64 values.
 /// HaxeArray layout: { ptr: *mut u8, len: usize, cap: usize, elem_size: usize }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_shape(tensor_ptr: i64) -> i64 {
     if tensor_ptr == 0 {
         return 0;
@@ -1402,7 +1402,7 @@ pub unsafe extern "C" fn rayzor_tensor_shape(tensor_ptr: i64) -> i64 {
 }
 
 /// tensor.shape_ptr() -> i64 (returns raw pointer to shape data, for internal use)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_shape_ptr(tensor_ptr: i64) -> i64 {
     if tensor_ptr == 0 {
         return 0;
@@ -1412,7 +1412,7 @@ pub unsafe extern "C" fn rayzor_tensor_shape_ptr(tensor_ptr: i64) -> i64 {
 }
 
 /// tensor.shape_ndim() -> i64 (helper: returns ndim for shape access)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_shape_ndim(tensor_ptr: i64) -> i64 {
     rayzor_tensor_ndim(tensor_ptr)
 }
@@ -1429,7 +1429,7 @@ pub unsafe extern "C" fn rayzor_tensor_shape_ndim(tensor_ptr: i64) -> i64 {
 /// LocalTempSampler.sample (see profile from session 2026-06-04).
 ///
 /// Returns 0.0 if `i` is out of range or the tensor handle is null.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_get_flat(tensor_ptr: i64, i: i64) -> f64 {
     crate::kernel_timing::init();
     let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_GET_FLAT);
@@ -1467,7 +1467,7 @@ pub unsafe extern "C" fn rayzor_tensor_get_flat(tensor_ptr: i64, i: i64) -> f64 
 /// tensor stores 4 bytes. A raw `Ptr<Float>` write from Haxe would instead
 /// store 8 bytes at an 8-byte stride and corrupt the buffer. No-op if `i` is
 /// out of range or the handle is null.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_set_flat(tensor_ptr: i64, i: i64, value: f64) {
     if tensor_ptr == 0 {
         return;
@@ -1530,7 +1530,7 @@ pub unsafe extern "C" fn rayzor_tensor_set_flat(tensor_ptr: i64, i: i64, value: 
 /// SAFETY: all pointers must point to valid, sized buffers for the
 /// duration of the call. The output buffers are written sequentially;
 /// the caller is responsible for not aliasing them with the input.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_topk_scan(
     logits_ptr: i64,
     out_logits_ptr: i64,
@@ -1696,7 +1696,7 @@ pub unsafe extern "C" fn rayzor_tensor_topk_scan(
 }
 
 /// tensor.get(indices_ptr, ndim) -> f64
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_get(tensor_ptr: i64, indices_ptr: i64, ndim: i64) -> f64 {
     if tensor_ptr == 0 {
         return 0.0;
@@ -1709,7 +1709,7 @@ pub unsafe extern "C" fn rayzor_tensor_get(tensor_ptr: i64, indices_ptr: i64, nd
 }
 
 /// tensor.set(indices_ptr, ndim, value) -> void
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_set(
     tensor_ptr: i64,
     indices_ptr: i64,
@@ -1736,7 +1736,7 @@ pub unsafe extern "C" fn rayzor_tensor_set(
 /// Falls back to scalar set semantics conceptually but skips the index-walk
 /// and the per-element `store_f32_at` dispatch, so it's ~headroom faster on
 /// large blocks while still being a single memcpy.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_append_along_0_f32(
     dst_ptr: i64,
     src_ptr: i64,
@@ -1794,7 +1794,7 @@ pub unsafe extern "C" fn rayzor_tensor_append_along_0_f32(
 /// Layout: src row i is written to dst rows `i*repeats .. i*repeats+repeats`,
 /// which matches numpy's `np.repeat(x, repeats, axis=0)` (KV-head GQA expand
 /// convention), not `np.tile`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_broadcast_repeat_0_f32(
     dst_ptr: i64,
     src_ptr: i64,
@@ -1853,7 +1853,7 @@ pub unsafe extern "C" fn rayzor_tensor_broadcast_repeat_0_f32(
 ///
 /// Allocates and returns a fresh F32 tensor; returns 0 on null pointer, dtype
 /// mismatch (F32 only), shape mismatch (ndim != 3), or `repeats <= 0`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_expand_kv_heads_axis1_f32(
     src_ptr: i64,
     repeats: i64,
@@ -1919,7 +1919,7 @@ pub unsafe extern "C" fn rayzor_tensor_expand_kv_heads_axis1_f32(
 // ============================================================================
 
 /// tensor.reshape(shape_ptr, ndim) -> i64 (new tensor, shared data)
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(clippy::manual_slice_size_calculation, clippy::needless_range_loop)]
 pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i64, shape_ptr: i64, ndim: i64) -> i64 {
     crate::kernel_timing::init();
@@ -2044,7 +2044,7 @@ pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i64, shape_ptr: i64, 
 }
 
 /// tensor.permute(axes_ptr, ndim) -> i64 (n-D permutation — reorders shape/strides, view)
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(clippy::manual_slice_size_calculation, clippy::needless_range_loop)]
 pub unsafe extern "C" fn rayzor_tensor_permute(
     tensor_ptr: i64,
@@ -2109,7 +2109,7 @@ pub unsafe extern "C" fn rayzor_tensor_permute(
 }
 
 /// tensor.slice(dim, start, end) -> i64 (view over [start..end) along `dim`, view)
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(clippy::manual_slice_size_calculation, clippy::needless_range_loop)]
 pub unsafe extern "C" fn rayzor_tensor_slice(
     tensor_ptr: i64,
@@ -2181,7 +2181,7 @@ pub unsafe extern "C" fn rayzor_tensor_slice(
 }
 
 /// tensor.transpose() -> i64 (2D transpose — swaps shape/strides)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_transpose(tensor_ptr: i64) -> i64 {
     if tensor_ptr == 0 {
         return 0;
@@ -2341,7 +2341,7 @@ unsafe fn tensor_binop_scalar(a_ptr: i64, b_ptr: i64, op: fn(f32, f32) -> f32) -
     result
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_add(a: i64, b: i64) -> i64 {
     if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
         crate::tensor_simd::add_slice(r_s, a_s, b_s);
@@ -2354,7 +2354,7 @@ pub unsafe extern "C" fn rayzor_tensor_add(a: i64, b: i64) -> i64 {
     tensor_binop_scalar(a, b, |x, y| x + y)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_sub(a: i64, b: i64) -> i64 {
     if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
         crate::tensor_simd::sub_slice(r_s, a_s, b_s);
@@ -2367,7 +2367,7 @@ pub unsafe extern "C" fn rayzor_tensor_sub(a: i64, b: i64) -> i64 {
     tensor_binop_scalar(a, b, |x, y| x - y)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_mul(a: i64, b: i64) -> i64 {
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_mul");
     if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
@@ -2381,7 +2381,7 @@ pub unsafe extern "C" fn rayzor_tensor_mul(a: i64, b: i64) -> i64 {
     tensor_binop_scalar(a, b, |x, y| x * y)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_silu_mul(a: i64, b: i64) -> i64 {
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_silu_mul");
     if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
@@ -2418,7 +2418,7 @@ pub unsafe extern "C" fn rayzor_tensor_silu_mul(a: i64, b: i64) -> i64 {
     tensor_binop_scalar(a, b, |x, y| (x / (1.0 + (-x).exp())) * y)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_div(a: i64, b: i64) -> i64 {
     match prepare_binop(a, b) {
         Some((a_s, b_s, r_s, result)) => {
@@ -2459,7 +2459,7 @@ pub unsafe extern "C" fn rayzor_tensor_div(a: i64, b: i64) -> i64 {
 /// back to a strided scalar loop via `load_f32_at` / `store_f32_at` so the
 /// call doesn't silently no-op, but emits a one-line `eprintln!` on the
 /// first hit to flag the slow path. Other dtypes (I32, I8, U8, FP8) abort.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i64, src: i64) {
     crate::kernel_timing::init();
     let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_ADD_INTO);
@@ -2685,22 +2685,22 @@ unsafe fn tensor_unary(a_ptr: i64, op: fn(f32) -> f32) -> i64 {
     result
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_sqrt(a: i64) -> i64 {
     tensor_unary(a, |x| x.sqrt())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_exp(a: i64) -> i64 {
     tensor_unary(a, |x| x.exp())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_log(a: i64) -> i64 {
     tensor_unary(a, |x| x.ln())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_relu(a_ptr: i64) -> i64 {
     if a_ptr == 0 {
         return 0;
@@ -2729,7 +2729,7 @@ pub unsafe extern "C" fn rayzor_tensor_relu(a_ptr: i64) -> i64 {
 }
 
 /// GELU (approximate, tanh-based) — matches PyTorch `gelu(approximate='tanh')`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_gelu(a: i64) -> i64 {
     tensor_unary(a, |x| {
         let c = (2.0f32 / std::f32::consts::PI).sqrt();
@@ -2739,7 +2739,7 @@ pub unsafe extern "C" fn rayzor_tensor_gelu(a: i64) -> i64 {
 }
 
 /// SiLU / swish: x * sigmoid(x).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_silu(a: i64) -> i64 {
     crate::kernel_timing::init();
     let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_SILU);
@@ -2783,7 +2783,7 @@ fn neon_silu_opted_in() -> bool {
 }
 
 /// Softmax over the last dimension.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_softmax(a_ptr: i64) -> i64 {
     crate::kernel_timing::init();
     let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_SOFTMAX);
@@ -2856,7 +2856,7 @@ pub unsafe extern "C" fn rayzor_tensor_softmax(a_ptr: i64) -> i64 {
 
 /// Layer normalization over the last dimension. (x - mean) / sqrt(var + eps).
 /// `eps` is passed as f64 from Haxe.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_layer_norm(a_ptr: i64, eps: f64) -> i64 {
     if a_ptr == 0 {
         return 0;
@@ -2920,7 +2920,7 @@ pub unsafe extern "C" fn rayzor_tensor_layer_norm(a_ptr: i64, eps: f64) -> i64 {
 }
 
 /// RMS normalization over the last dimension. x / sqrt(mean(x^2) + eps).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rms_norm(a_ptr: i64, eps: f64) -> i64 {
     crate::kernel_timing::init();
     let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_RMS_NORM);
@@ -2976,7 +2976,7 @@ pub unsafe extern "C" fn rayzor_tensor_rms_norm(a_ptr: i64, eps: f64) -> i64 {
 }
 
 /// RMS normalization with a fused per-channel gain over the last dimension.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rms_norm_weight(
     a_ptr: i64,
     weight_ptr: i64,
@@ -3043,7 +3043,7 @@ pub unsafe extern "C" fn rayzor_tensor_rms_norm_weight(
 /// where `p` is the absolute position (`row + position_offset`).
 ///
 /// Returns a new tensor with the same shape + dtype.
-#[no_mangle]
+#[unsafe(no_mangle)]
 unsafe fn rope_impl(
     x_ptr: i64,
     cos_ptr: i64,
@@ -3149,7 +3149,7 @@ unsafe fn rope_impl(
 }
 
 /// Interleaved (NORM) RoPE — Llama/Mistral. GGUF permutes Q/K to suit.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rope(
     x_ptr: i64,
     cos_ptr: i64,
@@ -3160,7 +3160,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
 }
 
 /// Half-split (NEOX) RoPE — Qwen2/GPT-NeoX/Falcon. GGUF leaves Q/K unpermuted.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rope_neox(
     x_ptr: i64,
     cos_ptr: i64,
@@ -3209,7 +3209,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope_neox(
 /// the bmm path (sequential along axis 0), so MATCH-on-canonical
 /// should hold modulo a few f32 ULPs at the very tail — not enough to
 /// shift argmax on a 128k vocab.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
     q_ptr: i64,
     k_ptr: i64,
@@ -3438,7 +3438,7 @@ unsafe fn flash_attn_decode_one_qhead(
 /// ```
 /// `base` defaults to 10000.0 in most Llama checkpoints (passed as f64 from
 /// Haxe). Use the same base used by the model that produced your weights.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rope_cos_table(
     head_dim: i64,
     max_seq_len: i64,
@@ -3447,7 +3447,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope_cos_table(
     rope_table(head_dim, max_seq_len, base, DTYPE_F32, /* sin */ false)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rope_sin_table(
     head_dim: i64,
     max_seq_len: i64,
@@ -3466,7 +3466,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope_sin_table(
 /// LUT element back to f32 before the multiply, so the precision loss
 /// is bounded by the F16 quantisation of `cos / sin ∈ [-1, 1]` —
 /// roughly 5e-4 absolute. Indistinguishable in practice for inference.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rope_cos_table_f16(
     head_dim: i64,
     max_seq_len: i64,
@@ -3475,7 +3475,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope_cos_table_f16(
     rope_table(head_dim, max_seq_len, base, DTYPE_F16, /* sin */ false)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rope_sin_table_f16(
     head_dim: i64,
     max_seq_len: i64,
@@ -3516,7 +3516,7 @@ unsafe fn rope_table(head_dim: i64, max_seq_len: i64, base: f64, dtype: u8, want
 /// This is the core kernel that lets the Haxe layer build attention as
 /// `(Q @ Kᵀ) → softmax → (· V)` without materialising a per-head loop in
 /// user code.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_bmm(a_ptr: i64, b_ptr: i64) -> i64 {
     if a_ptr == 0 || b_ptr == 0 {
         return 0;
@@ -3615,7 +3615,7 @@ pub unsafe extern "C" fn rayzor_tensor_bmm(a_ptr: i64, b_ptr: i64) -> i64 {
 /// short-circuits to the sequential fast path, otherwise clamped to
 /// `min(threads, 64)`. F32 only for now; other dtypes return `0`
 /// rather than silently falling through.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_bmm_threaded(a_ptr: i64, b_ptr: i64, threads: i64) -> i64 {
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_bmm_threaded");
     if a_ptr == 0 || b_ptr == 0 {
@@ -3789,7 +3789,7 @@ pub unsafe extern "C" fn rayzor_tensor_bmm_threaded(a_ptr: i64, b_ptr: i64, thre
 /// query at logical position T attends to keys 0..=T).
 ///
 /// Returns the same tensor pointer (mutates in place) for convenience.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_causal_mask_(t_ptr: i64, position_offset: i64) -> i64 {
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_causal_mask_");
     if t_ptr == 0 {
@@ -3824,7 +3824,7 @@ pub unsafe extern "C" fn rayzor_tensor_causal_mask_(t_ptr: i64, position_offset:
 /// Scale every element by a scalar f32. Allocates a fresh tensor; no
 /// in-place variant since composing with other ops works just as well
 /// after the new allocation.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_scale(t_ptr: i64, factor: f64) -> i64 {
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_scale");
     if t_ptr == 0 {
@@ -3861,7 +3861,7 @@ pub unsafe extern "C" fn rayzor_tensor_scale(t_ptr: i64, factor: f64) -> i64 {
 /// pre-transpose at the per-head level — depends on layout choices.
 /// Provided for completeness so nue doesn't need to reach for permute()
 /// every time.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_transpose_last2(t_ptr: i64) -> i64 {
     if t_ptr == 0 {
         return 0;
@@ -3924,7 +3924,7 @@ pub unsafe extern "C" fn rayzor_tensor_transpose_last2(t_ptr: i64) -> i64 {
 /// Out-of-range indices return 0 — caller is responsible for validating
 /// the vocabulary range. The indices array is read as i64, matching the
 /// Haxe Array<Int> layout (which boxes ints to i64 in this runtime).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_gather_rows(
     table_ptr: i64,
     indices_ptr: i64,
@@ -3977,7 +3977,7 @@ pub unsafe extern "C" fn rayzor_tensor_gather_rows(
 // ============================================================================
 
 /// tensor.sum() -> f64
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_sum(tensor_ptr: i64) -> f64 {
     if tensor_ptr == 0 {
         return 0.0;
@@ -3995,7 +3995,7 @@ pub unsafe extern "C" fn rayzor_tensor_sum(tensor_ptr: i64) -> f64 {
 }
 
 /// tensor.max() -> f64 (returns -inf for empty tensors)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_max(tensor_ptr: i64) -> f64 {
     if tensor_ptr == 0 {
         return f64::NEG_INFINITY;
@@ -4019,7 +4019,7 @@ pub unsafe extern "C" fn rayzor_tensor_max(tensor_ptr: i64) -> f64 {
 }
 
 /// tensor.min() -> f64 (returns +inf for empty tensors)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_min(tensor_ptr: i64) -> f64 {
     if tensor_ptr == 0 {
         return f64::INFINITY;
@@ -4043,7 +4043,7 @@ pub unsafe extern "C" fn rayzor_tensor_min(tensor_ptr: i64) -> f64 {
 }
 
 /// tensor.mean() -> f64
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_mean(tensor_ptr: i64) -> f64 {
     if tensor_ptr == 0 {
         return 0.0;
@@ -4056,7 +4056,7 @@ pub unsafe extern "C" fn rayzor_tensor_mean(tensor_ptr: i64) -> f64 {
 }
 
 /// tensor.dot(other) -> f64
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_dot(a_ptr: i64, b_ptr: i64) -> f64 {
     if a_ptr == 0 || b_ptr == 0 {
         return 0.0;
@@ -4087,7 +4087,7 @@ pub unsafe extern "C" fn rayzor_tensor_dot(a_ptr: i64, b_ptr: i64) -> f64 {
 
 /// tensor.matmul(other) -> i64
 /// Naive O(n³) matmul for [M,K] × [K,N] -> [M,N]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul(a_ptr: i64, b_ptr: i64) -> i64 {
     crate::kernel_timing::init();
     let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL);
@@ -4236,7 +4236,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul(a_ptr: i64, b_ptr: i64) -> i64 {
 /// the inner loop becomes a fused-multiply-add reduction. Compared to
 /// `rayzor_tensor_matmul` (which uses axpy along columns of B), this
 /// avoids the strided B access entirely.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_t(a_ptr: i64, b_ptr: i64) -> i64 {
     crate::kernel_timing::init();
     let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_T);
@@ -4316,7 +4316,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t(a_ptr: i64, b_ptr: i64) -> i64 {
 /// to the sequential fast path, otherwise clamped to `min(threads, 64)`. When
 /// `M` is below `MIN_PARALLEL_ROWS` we skip fork/join overhead and inline the
 /// sequential body.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(
     a_ptr: i64,
     b_ptr: i64,
@@ -4475,7 +4475,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(
 // ============================================================================
 
 /// tensor.data() -> i64 (raw pointer to data buffer)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_data(tensor_ptr: i64) -> i64 {
     if tensor_ptr == 0 {
         return 0;
@@ -4497,7 +4497,7 @@ pub unsafe extern "C" fn rayzor_tensor_data(tensor_ptr: i64) -> i64 {
 /// Disjoint-storage callers should use `rayzor_tensor_deep_clone` instead
 /// (kept as the moral equivalent of the old `rayzor_tensor_clone` body,
 /// including compact-to-contiguous on views).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_arc_clone(src: i64) -> i64 {
     if src == 0 {
         return 0;
@@ -4515,7 +4515,7 @@ pub unsafe extern "C" fn rayzor_tensor_arc_clone(src: i64) -> i64 {
 /// (see `rayzor_tensor_arc_clone`). The original `rayzor_tensor_clone`
 /// extern name is preserved for ABI compatibility with the Tier B
 /// `@:derive([Clone])` lowering in hir_to_mir.rs.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
     crate::kernel_timing::init();
     let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_CLONE);
@@ -4540,7 +4540,7 @@ pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
 /// - If `src` is non-contiguous (permute/slice/transpose view), we walk by
 ///   strides and gather byte-block-by-byte-block into a fresh row-major
 ///   contiguous buffer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_deep_clone(src: i64) -> i64 {
     if src == 0 {
         return 0;
@@ -4668,7 +4668,7 @@ pub unsafe extern "C" fn rayzor_tensor_deep_clone(src: i64) -> i64 {
 ///   `tensor_pool::global()` keyed on `(dtype, shape)`. The pool decides
 ///   pool-vs-evict; on eviction it invokes `tensor_pool_freer` which runs
 ///   the same physical release this function would have run inline.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
     if tensor_ptr == 0 {
         return;
@@ -4746,7 +4746,7 @@ pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
 ///
 /// Safe to call from any context; no-op when the pool has not been
 /// initialised.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_pool_reset() {
     tensor_pool::global().drain(tensor_pool_freer);
 }
