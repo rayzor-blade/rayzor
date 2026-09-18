@@ -1243,7 +1243,7 @@ impl CompilationUnit {
                         for instr in &mut block.instructions {
                             match instr {
                                 IrInstruction::CallDirect {
-                                    func_id: ref mut called_func_id,
+                                    func_id: called_func_id,
                                     ..
                                 } => {
                                     if let Some(&new_id) = id_replacements.get(called_func_id) {
@@ -1251,7 +1251,7 @@ impl CompilationUnit {
                                     }
                                 }
                                 IrInstruction::FunctionRef {
-                                    func_id: ref mut ref_func_id,
+                                    func_id: ref_func_id,
                                     ..
                                 } => {
                                     if let Some(&new_id) = id_replacements.get(ref_func_id) {
@@ -1263,7 +1263,7 @@ impl CompilationUnit {
                                     }
                                 }
                                 IrInstruction::MakeClosure {
-                                    func_id: ref mut closure_func_id,
+                                    func_id: closure_func_id,
                                     ..
                                 } => {
                                     if let Some(&new_id) = id_replacements.get(closure_func_id) {

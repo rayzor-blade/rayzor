@@ -347,7 +347,7 @@ impl MacroVm {
 
                     // Check for compiled class instance methods
                     let class_method = if let MacroValue::Object(ref obj) = base {
-                        if let Some(MacroValue::String(ref type_name)) = obj.get("__type__") {
+                        if let Some(MacroValue::String(type_name)) = obj.get("__type__") {
                             self.class_chunks
                                 .get(type_name.as_ref())
                                 .and_then(|ci| ci.instance_methods.get(&method_name))

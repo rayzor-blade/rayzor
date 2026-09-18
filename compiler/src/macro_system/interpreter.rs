@@ -1611,7 +1611,7 @@ impl MacroInterpreter {
         let base = unwrapped.as_ref().unwrap_or(base);
 
         // Check for static method calls (e.g., Std.string(), Math.abs())
-        if let MacroValue::String(ref s) = base {
+        if let MacroValue::String(s) = base {
             // String methods would be handled here in a full implementation
             return self.string_method(s, method, args, location);
         }
@@ -2008,7 +2008,7 @@ impl MacroInterpreter {
 
         // Initialize instance vars with their default init expressions
         for (name, init_expr) in instance_vars {
-            let val = if let Some(ref init) = init_expr {
+            let val = if let Some(init) = init_expr {
                 self.eval_expr(init).unwrap_or(MacroValue::Null)
             } else {
                 MacroValue::Null

@@ -396,7 +396,7 @@ impl<'a> HirToMirContext<'a> {
                     let current_class = self.builder.current_function().and_then(|f| {
                         self.class_method_by_name
                             .iter()
-                            .find(|(_, &method_sym)| {
+                            .find(|&(_, &method_sym)| {
                                 self.function_map.get(&method_sym) == Some(&f.id)
                             })
                             .map(|((class_sym, _), _)| *class_sym)
@@ -623,7 +623,7 @@ impl<'a> HirToMirContext<'a> {
                     .map(|s| s.to_string());
                 let receiver_class = self.find_receiver_class_name(object);
 
-                if let (Some(ref cls), Some(ref mn)) = (&receiver_class, &method_name_str) {
+                if let (Some(cls), Some(mn)) = (&receiver_class, &method_name_str) {
                     let plugin_match = self.stdlib_mapping.class_key(cls).and_then(|key| {
                         self.stdlib_mapping
                             .find_by_name_and_params(key, mn, args.len())

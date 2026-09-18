@@ -94,7 +94,7 @@ impl Chunk {
     /// Deduplicates: if the string already exists in the pool, returns its index.
     pub fn intern_string(&mut self, s: &str) -> u16 {
         for (i, c) in self.constants.iter().enumerate() {
-            if let MacroValue::String(ref cs) = c {
+            if let MacroValue::String(cs) = c {
                 if &**cs == s {
                     return i as u16;
                 }

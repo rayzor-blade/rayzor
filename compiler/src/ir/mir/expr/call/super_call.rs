@@ -43,7 +43,7 @@ impl<'a> HirToMirContext<'a> {
                 let current_class = self.builder.current_function().and_then(|f| {
                     self.class_method_by_name
                         .iter()
-                        .find(|(_, &method_sym)| self.function_map.get(&method_sym) == Some(&f.id))
+                        .find(|&(_, &method_sym)| self.function_map.get(&method_sym) == Some(&f.id))
                         .map(|((class_sym, _), _)| *class_sym)
                 });
                 let parent_class =

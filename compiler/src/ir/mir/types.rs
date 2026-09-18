@@ -719,7 +719,7 @@ impl<'a> HirToMirContext<'a> {
             IrType::Ptr(_) => {
                 return self.convert_dynamic_to_string(value);
             }
-            IrType::TypeVar(ref type_param_name) => {
+            IrType::TypeVar(type_param_name) => {
                 // The tag is a placeholder (0) resolved during inlining or
                 // monomorphization via type_param_tag_fixups.
                 let tag_reg = self.builder.build_const(IrValue::I32(0))?;

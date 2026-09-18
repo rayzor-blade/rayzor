@@ -263,7 +263,7 @@ impl DependencyGraph {
         // Start with nodes that have no dependencies
         let mut queue: VecDeque<String> = in_degree
             .iter()
-            .filter(|(_, &degree)| degree == 0)
+            .filter(|&(_, &degree)| degree == 0)
             .map(|(name, _)| name.clone())
             .collect();
 

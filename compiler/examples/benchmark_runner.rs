@@ -2162,7 +2162,7 @@ fn main() {
 
     if cli.disable_trace {
         rayzor_runtime::haxe_sys::set_trace_enabled(false);
-        std::env::set_var("RAYZOR_DISABLE_TRACE", "1");
+        unsafe { std::env::set_var("RAYZOR_DISABLE_TRACE", "1") };
     }
 
     // Get available benchmarks

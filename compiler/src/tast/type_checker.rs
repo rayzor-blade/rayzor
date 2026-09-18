@@ -469,7 +469,7 @@ impl ConstraintSet {
         // Kahn's algorithm for topological sorting
         let mut queue: Vec<TypeId> = in_degree
             .iter()
-            .filter(|(_, &degree)| degree == 0)
+            .filter(|(_, degree)| **degree == 0)
             .map(|(&var, _)| var)
             .collect();
 
@@ -495,7 +495,7 @@ impl ConstraintSet {
             // Return variables involved in cycles
             let cycle_vars: Vec<TypeId> = in_degree
                 .iter()
-                .filter(|(_, &degree)| degree > 0)
+                .filter(|&(_, &degree)| degree > 0)
                 .map(|(&var, _)| var)
                 .collect();
             Err(cycle_vars)

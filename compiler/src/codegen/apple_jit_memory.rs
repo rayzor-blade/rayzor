@@ -34,7 +34,7 @@ const PAGE_SIZE: usize = 16 * 1024;
 const DEFAULT_REGION_SIZE: usize = 4 * 1024 * 1024;
 
 // FFI declarations for Apple Silicon JIT support
-extern "C" {
+unsafe extern "C" {
     /// Toggle JIT write protection for the current thread.
     /// - 0: Disable write protection (memory is writable, not executable)
     /// - 1: Enable write protection (memory is executable, not writable)
@@ -54,7 +54,7 @@ const MAP_ANONYMOUS: i32 = 0x1000;
 const MAP_JIT: i32 = 0x0800;
 const MAP_FAILED: *mut std::ffi::c_void = !0 as *mut std::ffi::c_void;
 
-extern "C" {
+unsafe extern "C" {
     fn mmap(
         addr: *mut std::ffi::c_void,
         len: usize,

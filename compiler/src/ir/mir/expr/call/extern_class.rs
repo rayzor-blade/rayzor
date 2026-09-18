@@ -641,7 +641,7 @@ impl<'a> HirToMirContext<'a> {
                                 self.builder
                                     .build_cast(call_result, IrType::U64, IrType::Bool)
                             }
-                            IrType::Ptr(ref inner) if matches!(inner.as_ref(), IrType::String) => {
+                            IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String) => {
                                 // Concrete pointer type (e.g., Ptr(String))
                                 self.builder.build_cast(
                                     call_result,

@@ -977,7 +977,7 @@ impl CompileCtx {
                 for block in func.cfg.blocks.values() {
                     for inst in &block.instructions {
                         if let IrInstruction::Const {
-                            value: IrValue::String(ref s),
+                            value: IrValue::String(s),
                             ..
                         } = inst
                         {

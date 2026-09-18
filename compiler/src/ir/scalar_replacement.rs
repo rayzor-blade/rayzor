@@ -953,7 +953,7 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
             let phi_geps_for_field: Vec<IrId> = candidate
                 .phi_gep_map
                 .iter()
-                .filter(|(_, &idx)| idx == field_idx)
+                .filter(|(_, idx)| **idx == field_idx)
                 .map(|(&gep_id, _)| gep_id)
                 .collect();
             for &(block_id, block) in &sorted_scan {

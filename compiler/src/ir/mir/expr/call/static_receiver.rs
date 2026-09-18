@@ -86,7 +86,7 @@ impl<'a> HirToMirContext<'a> {
                 }
             });
 
-            if let (Some(ref cls), Some(ref mn)) = (&static_class_name, &static_method_name) {
+            if let (Some(cls), Some(mn)) = (&static_class_name, &static_method_name) {
                 let static_stdlib_info = self
                     .stdlib_mapping
                     .class_key(cls)

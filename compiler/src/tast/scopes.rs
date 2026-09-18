@@ -815,7 +815,7 @@ impl ScopeTreeStats {
     pub fn most_common_scope_kind(&self) -> Option<(ScopeKind, usize)> {
         self.scopes_by_kind
             .iter()
-            .max_by_key(|(_, &count)| count)
+            .max_by_key(|&(_, &count)| count)
             .map(|(&kind, &count)| (kind, count))
     }
 

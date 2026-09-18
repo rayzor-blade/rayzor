@@ -3595,7 +3595,7 @@ impl TieredBackend {
         // for any code that we'll be calling via function pointers.
         #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
         {
-            extern "C" {
+            unsafe extern "C" {
                 fn sys_icache_invalidate(start: *const std::ffi::c_void, size: usize);
             }
             // Invalidate instruction cache for each function entry point.

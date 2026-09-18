@@ -120,7 +120,7 @@ fn profile_feature_present() -> bool {
     #[cfg(unix)]
     {
         unsafe {
-            extern "C" {
+            unsafe extern "C" {
                 fn dlsym(handle: *mut std::ffi::c_void, symbol: *const i8)
                     -> *mut std::ffi::c_void;
             }

@@ -371,7 +371,7 @@ impl MacroExpander {
                 }
             }
             ClassFieldKind::Var {
-                expr: ref mut init, ..
+                expr: init, ..
             } => {
                 if let Some(init_expr) = init.take() {
                     let backup = init_expr.clone();
@@ -393,7 +393,7 @@ impl MacroExpander {
                 }
             }
             ClassFieldKind::Final {
-                expr: ref mut init, ..
+                expr: init, ..
             } => {
                 if let Some(init_expr) = init.take() {
                     let backup = init_expr.clone();

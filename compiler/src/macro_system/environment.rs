@@ -68,7 +68,7 @@ impl Environment {
     pub fn mutate_object_field(&mut self, var_name: &str, field: &str, value: MacroValue) -> bool {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(mac_val) = scope.get_mut(var_name) {
-                if let MacroValue::Object(ref mut arc_map) = mac_val {
+                if let MacroValue::Object(arc_map) = mac_val {
                     Arc::make_mut(arc_map).insert(field.to_string(), value);
                     return true;
                 }

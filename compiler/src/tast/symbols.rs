@@ -1893,7 +1893,7 @@ impl SymbolTableStats {
     pub fn most_common_kind(&self) -> Option<(SymbolKind, usize)> {
         self.symbols_by_kind
             .iter()
-            .max_by_key(|(_, &count)| count)
+            .max_by_key(|(_, count)| **count)
             .map(|(&kind, &count)| (kind, count))
     }
 

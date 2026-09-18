@@ -1704,7 +1704,7 @@ impl LifetimeAnalyzer {
         let variables_to_update: Vec<(SymbolId, LifetimeId)> = self
             .lifetime_assignments
             .iter()
-            .filter(|(_, &lt)| lt == lifetime1 || lt == lifetime2)
+            .filter(|&(_, &lt)| lt == lifetime1 || lt == lifetime2)
             .map(|(&symbol, _)| (symbol, unified_lifetime))
             .collect();
 
