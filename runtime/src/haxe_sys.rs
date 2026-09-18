@@ -3342,7 +3342,7 @@ pub extern "C" fn haxe_bytes_length(bytes: *const HaxeBytes) -> i32 {
 /// with an alwaysinline wrapper around `llvm.prefetch`; other tiers call
 /// this empty body (correctness-neutral).
 #[unsafe(no_mangle)]
-pub extern "C" fn rayzor_mem_prefetch(_addr: i64) {}
+pub unsafe extern "C" fn rayzor_mem_prefetch(_addr: i64) {}
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
@@ -3357,7 +3357,7 @@ unsafe extern "C" {
 }
 
 #[cfg(target_os = "linux")]
-extern "C" {
+unsafe extern "C" {
     fn malloc_trim(pad: usize) -> i32;
 }
 
