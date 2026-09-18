@@ -47,7 +47,7 @@ pub struct GgufTensorInfoView {
     pub nbytes: i32,
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gguf_open_from_bytes(ptr: i32, len: i32) -> i32 {
     if ptr == 0 || len <= 0 {
         return 0;
@@ -61,7 +61,7 @@ pub unsafe extern "C" fn rayzor_gguf_open_from_bytes(ptr: i32, len: i32) -> i32 
     Box::into_raw(Box::new(WasmGguf { source, parsed })) as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gguf_metadata_count(handle: i32) -> i32 {
     if handle == 0 {
         return 0;
@@ -69,7 +69,7 @@ pub unsafe extern "C" fn rayzor_gguf_metadata_count(handle: i32) -> i32 {
     (*(handle as *const WasmGguf)).parsed.metadata.len() as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gguf_metadata_kv(handle: i32, idx: i32) -> GgufMetadataKvView {
     if handle == 0 || idx < 0 {
         return empty_kv();
@@ -104,7 +104,7 @@ pub unsafe extern "C" fn rayzor_gguf_metadata_kv(handle: i32, idx: i32) -> GgufM
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gguf_tensor_count(handle: i32) -> i32 {
     if handle == 0 {
         return 0;
@@ -112,7 +112,7 @@ pub unsafe extern "C" fn rayzor_gguf_tensor_count(handle: i32) -> i32 {
     (*(handle as *const WasmGguf)).parsed.tensors.len() as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gguf_tensor_info(handle: i32, idx: i32) -> GgufTensorInfoView {
     if handle == 0 || idx < 0 {
         return empty_tensor();
@@ -133,7 +133,7 @@ pub unsafe extern "C" fn rayzor_gguf_tensor_info(handle: i32, idx: i32) -> GgufT
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gguf_tensor_bytes(
     handle: i32,
     idx: i32,
@@ -155,7 +155,7 @@ pub unsafe extern "C" fn rayzor_gguf_tensor_bytes(
     len
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gguf_close(handle: i32) {
     if handle != 0 {
         drop(Box::from_raw(handle as *mut WasmGguf));

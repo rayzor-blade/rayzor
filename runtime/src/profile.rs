@@ -99,7 +99,7 @@ fn record_sample() {
     IN_GRAPH.with(|g| g.set(false));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_dump_alloc_stats() {
     let a = ALLOC_BYTES_TOTAL.load(MemOrdering::Relaxed);
     let f = FREE_BYTES_TOTAL.load(MemOrdering::Relaxed);
@@ -121,7 +121,7 @@ pub extern "C" fn rayzor_dump_alloc_stats() {
     let _ = std::fs::write("/tmp/rayzor-metrics-alloc.kv", kv);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_dump_alloc_graph() {
     // Disarm SIGPROF first if active — otherwise the handler can fire
     // mid-dump and either spin on `try_lock` (cheap) or interleave
@@ -388,7 +388,7 @@ unsafe impl std::alloc::GlobalAlloc for TrackingAllocator {
 ///
 /// Idempotent: calling twice has no extra effect, calling after env-var
 /// based init is a no-op (CPU_PROFILE_ACTIVE flag).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_profile_start() {
     if CPU_PROFILE_ACTIVE.load(MemOrdering::Relaxed) == 1 {
         return;
@@ -414,7 +414,7 @@ pub extern "C" fn rayzor_profile_start() {
 /// Disarm the SIGPROF profiler. Pair with `rayzor_profile_start`.
 /// Subsequent calls to start re-arm with the same period; the
 /// accumulated GRAPH_SITES table persists across start/stop windows.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_profile_stop() {
     if CPU_PROFILE_ACTIVE.load(MemOrdering::Relaxed) == 0 {
         return;

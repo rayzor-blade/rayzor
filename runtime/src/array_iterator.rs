@@ -54,7 +54,7 @@ fn ensure_kv_shape() {
 // ============================================================================
 
 /// Create a new ArrayIterator from an array pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_iterator_new(arr: *mut u8) -> *mut u8 {
     // eprintln!("[DEBUG] haxe_array_iterator_new called, arr={:?}", arr);
     let iter = Box::new(HaxeArrayIterator {
@@ -68,7 +68,7 @@ pub extern "C" fn haxe_array_iterator_new(arr: *mut u8) -> *mut u8 {
 
 /// Check if the iterator has more elements.
 /// Returns 1 if more elements, 0 otherwise.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_iterator_has_next(iter: *mut u8) -> i32 {
     // eprintln!("[DEBUG] haxe_array_iterator_has_next called, iter={:?}", iter);
     if iter.is_null() {
@@ -87,7 +87,7 @@ pub extern "C" fn haxe_array_iterator_has_next(iter: *mut u8) -> i32 {
 
 /// Get the next element value (raw i64).
 /// Advances the iterator position.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_iterator_next(iter: *mut u8) -> i64 {
     // eprintln!("[DEBUG] haxe_array_iterator_next called, iter={:?}", iter);
     if iter.is_null() {
@@ -115,7 +115,7 @@ pub extern "C" fn haxe_array_iterator_next(iter: *mut u8) -> i64 {
 // ============================================================================
 
 /// Create a new ArrayKeyValueIterator from an array pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_kv_iterator_new(arr: *mut u8) -> *mut u8 {
     let iter = Box::new(HaxeArrayKeyValueIterator {
         array: arr as *mut HaxeArray,
@@ -125,7 +125,7 @@ pub extern "C" fn haxe_array_kv_iterator_new(arr: *mut u8) -> *mut u8 {
 }
 
 /// Check if the KV iterator has more elements.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_kv_iterator_has_next(iter: *mut u8) -> i32 {
     if iter.is_null() {
         return 0;
@@ -145,7 +145,7 @@ pub extern "C" fn haxe_array_kv_iterator_has_next(iter: *mut u8) -> i32 {
 
 /// Get the next {key: Int, value: Dynamic} anonymous object.
 /// Advances the iterator position.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_kv_iterator_next(iter: *mut u8) -> *mut u8 {
     ensure_kv_shape();
 

@@ -32,14 +32,14 @@ static IFACE_VTABLES: Mutex<Option<HashMap<(u32, u32), Vec<i64>>>> = Mutex::new(
 static IFACE_IMPLS: Mutex<Option<HashMap<i64, Vec<i64>>>> = Mutex::new(None);
 static CONSTRUCTORS: Mutex<Option<HashMap<i64, i64>>> = Mutex::new(None);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vtable_init(type_id: i32, slot_count: i32) {
     let mut g = VTABLES.lock().unwrap();
     let map = g.get_or_insert_with(HashMap::new);
     map.insert(type_id as u32, vec![0i64; slot_count.max(0) as usize]);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vtable_set_slot(type_id: i32, slot_index: i32, closure_ptr: i32) {
     let mut g = VTABLES.lock().unwrap();
     if let Some(map) = g.as_mut() {
@@ -52,7 +52,7 @@ pub extern "C" fn haxe_vtable_set_slot(type_id: i32, slot_index: i32, closure_pt
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn haxe_vtable_lookup(obj_ptr: i32, slot_index: i32) -> i64 {
     if obj_ptr == 0 {
         return 0;
@@ -70,14 +70,14 @@ pub unsafe extern "C" fn haxe_vtable_lookup(obj_ptr: i32, slot_index: i32) -> i6
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_register_constructor(type_id: i32, ctor_closure_ptr: i32) {
     let mut g = CONSTRUCTORS.lock().unwrap();
     g.get_or_insert_with(HashMap::new)
         .insert(type_id as i64, ctor_closure_ptr as u32 as i64);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_register_interface_impl(class_type_id: i32, iface_type_id: i32) {
     let mut g = IFACE_IMPLS.lock().unwrap();
     g.get_or_insert_with(HashMap::new)
@@ -86,7 +86,7 @@ pub extern "C" fn haxe_register_interface_impl(class_type_id: i32, iface_type_id
         .push(iface_type_id as i64);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_class_implements(class_type_id: i64, iface_type_id: i64) -> i32 {
     let g = IFACE_IMPLS.lock().unwrap();
     if let Some(map) = g.as_ref() {
@@ -97,7 +97,7 @@ pub extern "C" fn haxe_class_implements(class_type_id: i64, iface_type_id: i64) 
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_iface_vtable_set_slot(
     class_type_id: i32,
     iface_type_id: i32,
@@ -119,7 +119,7 @@ pub extern "C" fn haxe_iface_vtable_set_slot(
 /// Build a fresh interface fat pointer `[obj][slot…]` for `obj`'s class
 /// and the target interface. Returns 0 (null) when the pair was never
 /// registered — callers treat that as a failed cast.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn haxe_iface_fat_ptr_build(obj_ptr: i32, iface_type_id: i32) -> i32 {
     if obj_ptr == 0 {
         return 0;

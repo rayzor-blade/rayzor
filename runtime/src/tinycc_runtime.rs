@@ -45,7 +45,7 @@ unsafe extern "C" {
 
 #[cfg(windows)]
 #[link(name = "kernel32")]
-extern "system" {
+unsafe extern "system" {
     fn LoadLibraryA(filename: *const c_char) -> *mut std::ffi::c_void;
 }
 

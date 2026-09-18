@@ -125,7 +125,7 @@ fn _rt_free(_ptr: i32) {
 }
 
 /// Reallocate a block to `new_size` bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn realloc_block(ptr: i32, old_size: i32, new_size: i32) -> i32 {
     if new_size <= 0 {
         _rt_free(ptr);
@@ -365,7 +365,7 @@ unsafe fn alloc_string_data(cap: u32) -> *mut u8 {
 
 /// Create a string from raw bytes with known length.
 /// Writes the HaxeString struct to `out`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_bytes(out: i32, bytes: i32, len: i32) {
     unsafe {
         if bytes == 0 || len <= 0 {
@@ -395,7 +395,7 @@ pub extern "C" fn haxe_string_from_bytes(out: i32, bytes: i32, len: i32) {
 }
 
 /// Get string length (in bytes).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_length(s: i32) -> i32 {
     if s == 0 {
         return 0;
@@ -407,7 +407,7 @@ pub extern "C" fn haxe_string_length(s: i32) -> i32 {
 }
 
 /// Get byte value at index. Returns -1 if out of bounds.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_char_at(s: i32, idx: i32) -> i32 {
     if s == 0 || idx < 0 {
         return -1;
@@ -423,13 +423,13 @@ pub extern "C" fn haxe_string_char_at(s: i32, idx: i32) -> i32 {
 }
 
 /// Get character code at index. Same as char_at for byte-based strings.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_char_code_at(s: i32, idx: i32) -> i32 {
     haxe_string_char_at(s, idx)
 }
 
 /// Concatenate two strings, write result to `out`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_concat_sret(out: i32, a: i32, b: i32) {
     unsafe {
         let (a_ptr, a_len, a_cap) = if a == 0 {
@@ -493,7 +493,7 @@ pub extern "C" fn haxe_string_concat_sret(out: i32, a: i32, b: i32) {
 }
 
 /// Extract a substring [start, end).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_substring(out: i32, s: i32, start: i32, end: i32) {
     unsafe {
         if s == 0 {
@@ -528,7 +528,7 @@ pub extern "C" fn haxe_string_substring(out: i32, s: i32, start: i32, end: i32) 
 }
 
 /// Compare two strings lexicographically. Returns -1, 0, or 1.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_compare(a: i32, b: i32) -> i32 {
     if a == 0 && b == 0 {
         return 0;
@@ -555,7 +555,7 @@ pub extern "C" fn haxe_string_compare(a: i32, b: i32) -> i32 {
 }
 
 /// Find substring `sub` in `s` starting at `start`. Returns byte index or -1.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_index_of(s: i32, sub: i32, start: i32) -> i32 {
     if s == 0 || sub == 0 {
         return -1;
@@ -588,7 +588,7 @@ pub extern "C" fn haxe_string_index_of(s: i32, sub: i32, start: i32) -> i32 {
 }
 
 /// Print string to WASI stdout (fd 1). No newline.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_print(s: i32) {
     if s == 0 {
         return;
@@ -602,7 +602,7 @@ pub extern "C" fn haxe_string_print(s: i32) {
 }
 
 /// Print string to WASI stdout (fd 1) followed by a newline.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_println(s: i32) {
     haxe_string_print(s);
     unsafe {
@@ -612,7 +612,7 @@ pub extern "C" fn haxe_string_println(s: i32) {
 }
 
 /// FNV-1a hash of string bytes. Returns i32.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_hash(s: i32) -> i32 {
     if s == 0 {
         return 0;
@@ -633,7 +633,7 @@ pub extern "C" fn haxe_string_hash(s: i32) -> i32 {
 }
 
 /// Free string data buffer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_free(s: i32) {
     if s == 0 {
         return;
@@ -657,7 +657,7 @@ pub extern "C" fn haxe_string_free(s: i32) {
 // Returns i32 (a dummy 0) rather than `()` — the wasm backend lowers this
 // Void-returning extern method with the default i32 result, so the runtime
 // signature must match `(i32) -> i32` or the linker stubs it out.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_free(b: i32) -> i32 {
     if b == 0 {
         return 0;
@@ -675,7 +675,7 @@ pub extern "C" fn haxe_bytes_free(b: i32) -> i32 {
 }
 
 /// Trace a HaxeString struct to stdout (with "trace: " prefix and newline).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_string_struct(s: i32) {
     unsafe {
         let prefix = b"trace: ";
@@ -699,93 +699,93 @@ pub extern "C" fn haxe_trace_string_struct(s: i32) {
 // Section 3: Math Functions
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_sqrt(x: f64) -> f64 {
     libm::sqrt(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_sin(x: f64) -> f64 {
     libm::sin(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_cos(x: f64) -> f64 {
     libm::cos(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_tan(x: f64) -> f64 {
     libm::tan(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_asin(x: f64) -> f64 {
     libm::asin(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_acos(x: f64) -> f64 {
     libm::acos(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_atan(x: f64) -> f64 {
     libm::atan(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_atan2(y: f64, x: f64) -> f64 {
     libm::atan2(y, x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_exp(x: f64) -> f64 {
     libm::exp(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_log(x: f64) -> f64 {
     libm::log(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_pow(x: f64, y: f64) -> f64 {
     libm::pow(x, y)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_floor(x: f64) -> f64 {
     libm::floor(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_ceil(x: f64) -> f64 {
     libm::ceil(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_round(x: f64) -> f64 {
     libm::round(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_abs(x: f64) -> f64 {
     libm::fabs(x)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_min(a: f64, b: f64) -> f64 {
     libm::fmin(a, b)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_max(a: f64, b: f64) -> f64 {
     libm::fmax(a, b)
 }
 
 /// Simple LCG random number generator. Returns [0.0, 1.0).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_random() -> f64 {
     // With wasm32-wasip1-threads + shared memory, multiple Rayzor threads
     // can call this concurrently — a plain `static mut` would be a data
@@ -802,22 +802,22 @@ pub extern "C" fn haxe_math_random() -> f64 {
     ((next / 65536) % 32768) as f64 / 32768.0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_pi() -> f64 {
     core::f64::consts::PI
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_nan() -> f64 {
     f64::NAN
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_positive_infinity() -> f64 {
     f64::INFINITY
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_is_nan(x: f64) -> i32 {
     if x.is_nan() {
         1
@@ -826,7 +826,7 @@ pub extern "C" fn haxe_math_is_nan(x: f64) -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_is_finite(x: f64) -> i32 {
     if x.is_finite() {
         1
@@ -869,7 +869,7 @@ unsafe fn read_dynamic(ptr: i32) -> (u32, u32) {
 
 /// Box an Int as DynamicValue. Allocates 4 bytes for the int value,
 /// then 8 bytes for the DynamicValue header.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_int_ptr(val: i32) -> i32 {
     unsafe {
         let layout = Layout::from_size_align_unchecked(4, 4);
@@ -883,7 +883,7 @@ pub extern "C" fn haxe_box_int_ptr(val: i32) -> i32 {
 }
 
 /// Box a Float (f64) as DynamicValue. Allocates 8 bytes for the f64 value.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_float_ptr(val: f64) -> i32 {
     unsafe {
         let layout = Layout::from_size_align_unchecked(8, 8);
@@ -897,7 +897,7 @@ pub extern "C" fn haxe_box_float_ptr(val: f64) -> i32 {
 }
 
 /// Box a Bool as DynamicValue.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_bool_ptr(val: i32) -> i32 {
     unsafe {
         let layout = Layout::from_size_align_unchecked(4, 4);
@@ -911,7 +911,7 @@ pub extern "C" fn haxe_box_bool_ptr(val: i32) -> i32 {
 }
 
 /// Unbox an Int from DynamicValue pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_int(ptr: i32) -> i32 {
     if ptr == 0 {
         return 0;
@@ -931,7 +931,7 @@ pub extern "C" fn haxe_unbox_int(ptr: i32) -> i32 {
 }
 
 /// Unbox a Float from DynamicValue pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_float(ptr: i32) -> f64 {
     if ptr == 0 {
         return 0.0;
@@ -959,7 +959,7 @@ pub extern "C" fn haxe_unbox_float(ptr: i32) -> f64 {
 /// Signature note: the user module imports this as `(i32) -> i32` (the
 /// backend derives the import type from the call site's register types),
 /// and the linker requires exact equality — declare i32, not i64.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_coerce_dynamic_to_int(ptr: i32) -> i32 {
     if ptr == 0 {
         return 0;
@@ -980,7 +980,7 @@ pub extern "C" fn haxe_coerce_dynamic_to_int(ptr: i32) -> i32 {
 
 /// Safely coerce a Dynamic-typed value to a Float. Same heuristic as
 /// `haxe_coerce_dynamic_to_int`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_coerce_dynamic_to_float(ptr: i32) -> f64 {
     if ptr == 0 {
         return 0.0;
@@ -998,7 +998,7 @@ pub extern "C" fn haxe_coerce_dynamic_to_float(ptr: i32) -> f64 {
 }
 
 /// Unbox a Bool from DynamicValue pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_bool(ptr: i32) -> i32 {
     if ptr == 0 {
         return 0;
@@ -1015,7 +1015,7 @@ pub extern "C" fn haxe_unbox_bool(ptr: i32) -> i32 {
 
 /// Extract the raw pointer from a boxed DynamicValue.
 /// For reference types, value_ptr is already the object pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_reference_ptr(ptr: i32) -> i32 {
     if ptr == 0 {
         return 0;
@@ -1041,7 +1041,7 @@ const ARRAY_INITIAL_CAP: u32 = 8;
 const ARRAY_ELEM_SIZE: u32 = 4; // i32 elements for basic array
 
 /// Allocate a new empty array. Returns pointer to HaxeArray struct (i32).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_new() -> i32 {
     unsafe {
         // Allocate the HaxeArray header (32 bytes to match MIR layout with i64 fields)
@@ -1179,7 +1179,7 @@ unsafe fn array_ensure_len(arr: i32, new_len: u32) -> bool {
 /// On WASM32, MIR's IrType::I64 lowers to WASM i32, so we receive only the
 /// low 32 bits of the 64-bit value. For float arrays, callers must use
 /// haxe_array_push_f64 instead.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_push_i64(arr: i32, val: i32) {
     if arr == 0 {
         return;
@@ -1200,7 +1200,7 @@ pub extern "C" fn haxe_array_push_i64(arr: i32, val: i32) {
 
 /// Push an f64 value onto the array. Used for float array literals on WASM32.
 /// Stores the full 64-bit value at the slot.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_push_f64(arr: i32, val: f64) {
     if arr == 0 {
         return;
@@ -1223,7 +1223,7 @@ pub extern "C" fn haxe_array_push_f64(arr: i32, val: f64) {
 
 /// Get the low 32 bits of an element at index. Returns 0 if out of bounds.
 /// Reads from `data_ptr + idx * elem_size`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_get_i64(arr: i32, idx: i32) -> i32 {
     if arr == 0 || idx < 0 {
         return 0;
@@ -1241,7 +1241,7 @@ pub extern "C" fn haxe_array_get_i64(arr: i32, idx: i32) -> i32 {
 }
 
 /// Get array length.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_length(arr: i32) -> i32 {
     if arr == 0 {
         return 0;
@@ -1258,7 +1258,7 @@ pub extern "C" fn haxe_array_length(arr: i32) -> i32 {
 
 /// Read the runtime type_id from an object's header (first 4 bytes at offset 0).
 /// In WASM32, type_id is stored as i32 (not i64 like native).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_object_get_type_id(ptr: i32) -> i32 {
     if ptr == 0 {
         return -1;
@@ -1268,7 +1268,7 @@ pub extern "C" fn haxe_object_get_type_id(ptr: i32) -> i32 {
 
 /// Check if an object is an instance of a target type.
 /// Simplified: only checks direct type_id match (no hierarchy walk).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_object_is_instance(ptr: i32, type_id: i32) -> i32 {
     if ptr == 0 {
         return 0;
@@ -1283,7 +1283,7 @@ pub extern "C" fn haxe_object_is_instance(ptr: i32, type_id: i32) -> i32 {
 
 /// Allocate an anonymous object with `n_fields` slots.
 /// Each slot is 4 bytes (i32). Returns pointer to the data area.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_anon_new(n_fields: i32) -> i32 {
     if n_fields <= 0 {
         return rt_alloc(4); // minimum allocation
@@ -1306,7 +1306,7 @@ pub extern "C" fn haxe_anon_new(n_fields: i32) -> i32 {
 // ============================================================================
 
 /// Raw trace: print bytes + newline to stdout via WASI fd_write.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_string(data: i32, len: i32) {
     unsafe {
         let prefix = b"trace: ";
@@ -1327,7 +1327,7 @@ pub extern "C" fn haxe_trace_string(data: i32, len: i32) {
 // ============================================================================
 
 /// No-op: call frame location tracking (used by debug stack traces).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_update_call_frame_location(_line: i32, _col: i32) {
     // no-op in WASM
 }
@@ -1336,7 +1336,7 @@ pub extern "C" fn rayzor_update_call_frame_location(_line: i32, _col: i32) {
 /// prints the exception (when it's a String — type_id 5) and traps.
 /// Printing first turns the otherwise-anonymous `unreachable` into a
 /// readable "uncaught exception: <message>" diagnostic.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_throw_typed(exception_value: i32, type_id: u32) {
     unsafe {
         let prefix = b"uncaught exception: ";
@@ -1362,19 +1362,19 @@ pub extern "C" fn rayzor_throw_typed(exception_value: i32, type_id: u32) {
 }
 
 /// No-op: JIT cleanup (not applicable to AOT WASM).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_jit_cleanup() {
     // no-op
 }
 
 /// No-op: thread synchronization (WASM is single-threaded).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_wait_all_threads() {
     // no-op
 }
 
 /// Int-to-string conversion. Writes result to `out` HaxeString.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_int_to_string(out: i32, value: i32) {
     let mut buf = [0u8; 12]; // max "-2147483648" = 11 chars + null
     let s = int_to_buf(value, &mut buf);
@@ -1405,7 +1405,7 @@ fn int_to_buf(mut value: i32, buf: &mut [u8; 12]) -> &[u8] {
 }
 
 /// Float-to-string conversion. Writes result to `out` HaxeString.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_float_to_string(out: i32, value: f64) {
     // Simple float formatting without std::fmt
     let mut buf = [0u8; 32];
@@ -1494,19 +1494,19 @@ fn float_to_buf(value: f64, buf: &mut [u8; 32]) -> usize {
 // The compiler's WASM backend should map to these when needed.
 
 /// Allocate `size` bytes via `rt_alloc`. Prefixed to avoid libc collision.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_malloc(size: i32) -> i32 {
     rt_alloc(size as usize)
 }
 
 /// Free — no-op in Phase 1 (bump allocator). Prefixed to avoid libc collision.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_free(_ptr: i32) {
     // Intentional no-op. A proper GC will replace this.
 }
 
 /// Reallocate: allocate new block + copy old data. Prefixed to avoid libc collision.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_realloc(ptr: i32, new_size: i32) -> i32 {
     if new_size <= 0 {
         return 0;
@@ -1548,7 +1548,7 @@ pub extern "C" fn rayzor_realloc(ptr: i32, new_size: i32) -> i32 {
 // align-8 invariant rt_alloc guarantees, so the returned raw+8 is 8-aligned.
 const OBJ_HEADER: i32 = 8;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_obj_malloc(size: i32) -> i32 {
     if size <= 0 {
         return 0;
@@ -1565,7 +1565,7 @@ pub extern "C" fn rayzor_obj_malloc(size: i32) -> i32 {
     raw + OBJ_HEADER
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_obj_free(ptr: i32) {
     if ptr <= 0 {
         return;
@@ -1578,7 +1578,7 @@ pub extern "C" fn rayzor_obj_free(ptr: i32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_obj_realloc(ptr: i32, new_size: i32) -> i32 {
     if new_size <= 0 {
         return 0;
@@ -1604,7 +1604,7 @@ pub extern "C" fn rayzor_obj_realloc(ptr: i32, new_size: i32) -> i32 {
 // ============================================================================
 
 /// Concatenate two HaxeStrings. Allocates and returns new HaxeString*.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_concat(a: i32, b: i32) -> i32 {
     let out = rt_alloc(12);
     if out == 0 {
@@ -1615,7 +1615,7 @@ pub extern "C" fn haxe_string_concat(a: i32, b: i32) -> i32 {
 }
 
 /// Convert an int to a HaxeString. Allocates and returns new HaxeString*.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_int(val: i32) -> i32 {
     let out = rt_alloc(12);
     if out == 0 {
@@ -1626,7 +1626,7 @@ pub extern "C" fn haxe_string_from_int(val: i32) -> i32 {
 }
 
 /// Convert a float to a HaxeString. Allocates and returns new HaxeString*.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_float(val: f64) -> i32 {
     let out = rt_alloc(12);
     if out == 0 {
@@ -1637,7 +1637,7 @@ pub extern "C" fn haxe_string_from_float(val: f64) -> i32 {
 }
 
 /// Convert a bool to a HaxeString ("true"/"false"). Allocates and returns new HaxeString*.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_bool(val: i32) -> i32 {
     let out = rt_alloc(12);
     if out == 0 {
@@ -1655,7 +1655,7 @@ pub extern "C" fn haxe_string_from_bool(val: i32) -> i32 {
 
 /// Copy a HaxeString. Allocates and returns new HaxeString*.
 /// Signature: (s: i32, _dummy: i32) -> i32 to match WASM import expectations.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_string(s: i32, _dummy: i32) -> i32 {
     let out = rt_alloc(12);
     if out == 0 {
@@ -1674,7 +1674,7 @@ pub extern "C" fn haxe_string_from_string(s: i32, _dummy: i32) -> i32 {
 
 /// Return a new HaxeString* containing the single character at `idx`.
 /// Returns pointer to a newly allocated HaxeString struct.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_char_at_ptr(s: i32, idx: i32) -> i32 {
     // Allocate a HaxeString struct (12 bytes)
     let out = rt_alloc(12);
@@ -1700,14 +1700,14 @@ pub extern "C" fn haxe_string_char_at_ptr(s: i32, idx: i32) -> i32 {
 
 /// Find substring `sub` in `s` starting at `start`. Returns index (i32) or -1.
 /// Pointer-returning variant (same value, different name for ABI consistency).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_index_of_ptr(s: i32, sub: i32, start: i32) -> i32 {
     haxe_string_index_of(s, sub, start)
 }
 
 /// Find last occurrence of `sub` in `s` searching backwards from `start`.
 /// Returns byte index or -1.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_last_index_of_ptr(s: i32, sub: i32, start: i32) -> i32 {
     if s == 0 || sub == 0 {
         return -1;
@@ -1745,7 +1745,7 @@ pub extern "C" fn haxe_string_last_index_of_ptr(s: i32, sub: i32, start: i32) ->
 }
 
 /// Extract substring [start, end). Returns new HaxeString*.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_substring_ptr(s: i32, start: i32, end: i32) -> i32 {
     let out = rt_alloc(12);
     if out == 0 {
@@ -1757,7 +1757,7 @@ pub extern "C" fn haxe_string_substring_ptr(s: i32, start: i32, end: i32) -> i32
 
 /// Extract `len` characters starting at `pos`. Returns new HaxeString*.
 /// Follows Haxe semantics: negative pos counts from end, negative len means to-end.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_substr_ptr(s: i32, pos: i32, len: i32) -> i32 {
     let out = rt_alloc(12);
     if out == 0 {
@@ -1797,7 +1797,7 @@ pub extern "C" fn haxe_string_substr_ptr(s: i32, pos: i32, len: i32) -> i32 {
 }
 
 /// Split string `s` by `delimiter`. Returns a HaxeArray* of HaxeString*.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_split_array(s: i32, delimiter: i32) -> i32 {
     let arr = haxe_array_new();
     if arr == 0 {
@@ -1876,7 +1876,7 @@ pub extern "C" fn haxe_string_split_array(s: i32, delimiter: i32) -> i32 {
 // ============================================================================
 
 /// Set an i32 element at index. Returns arr.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_set_i64(arr: i32, idx: i32, val: i32) -> i32 {
     if arr == 0 || idx < 0 {
         return 0;
@@ -1899,7 +1899,7 @@ pub extern "C" fn haxe_array_set_i64(arr: i32, idx: i32, val: i32) -> i32 {
 
 /// Get an f64 element at index. Reads 8 bytes (two i32 slots).
 /// NOTE: f64 values occupy 2 consecutive i32 slots in the array.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_get_f64(arr: i32, idx: i32) -> f64 {
     if arr == 0 || idx < 0 {
         return 0.0;
@@ -1921,7 +1921,7 @@ pub extern "C" fn haxe_array_get_f64(arr: i32, idx: i32) -> f64 {
 }
 
 /// Set an f64 element at index. Stores as i32 (truncated bits). Returns arr.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_set_f64(arr: i32, idx: i32, val: f64) -> i32 {
     if arr == 0 || idx < 0 {
         return 0;
@@ -1944,14 +1944,14 @@ pub extern "C" fn haxe_array_set_f64(arr: i32, idx: i32, val: f64) -> i32 {
 }
 
 /// Set array element at index to null (0). Returns 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_set_null(arr: i32, idx: i32) -> i32 {
     haxe_array_set_i64(arr, idx, 0);
     0
 }
 
 /// Pop the last i32 element. Returns 0 if empty.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_pop_i64(arr: i32) -> i32 {
     if arr == 0 {
         return 0;
@@ -1970,13 +1970,13 @@ pub extern "C" fn haxe_array_pop_i64(arr: i32) -> i32 {
 }
 
 /// Pop the last element as a boxed pointer. Returns 0 if empty.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_pop_ptr(arr: i32) -> i32 {
     haxe_array_pop_i64(arr)
 }
 
 /// Remove and return the first element. Returns 0 if empty.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_shift(arr: i32) -> i32 {
     if arr == 0 {
         return 0;
@@ -1999,13 +1999,13 @@ pub extern "C" fn haxe_array_shift(arr: i32) -> i32 {
 }
 
 /// Shift returning a pointer value.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_shift_ptr(arr: i32) -> i32 {
     haxe_array_shift(arr)
 }
 
 /// Insert an element at the beginning of the array.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_unshift(arr: i32, val: i32) {
     if arr == 0 {
         return;
@@ -2025,7 +2025,7 @@ pub extern "C" fn haxe_array_unshift(arr: i32, val: i32) {
 }
 
 /// Find first index of `val` in array starting at `start`. Returns -1 if not found.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_index_of(arr: i32, val: i32, start: i32) -> i32 {
     if arr == 0 {
         return -1;
@@ -2048,7 +2048,7 @@ pub extern "C" fn haxe_array_index_of(arr: i32, val: i32, start: i32) -> i32 {
 }
 
 /// Find last index of `val` in array searching backwards from `start`. Returns -1 if not found.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_last_index_of(arr: i32, val: i32, start: i32) -> i32 {
     if arr == 0 {
         return -1;
@@ -2076,7 +2076,7 @@ pub extern "C" fn haxe_array_last_index_of(arr: i32, val: i32, start: i32) -> i3
 }
 
 /// Check if array contains `val`. Returns 1 (true) or 0 (false).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_contains(arr: i32, val: i32) -> i32 {
     if haxe_array_index_of(arr, val, 0) >= 0 {
         1
@@ -2086,7 +2086,7 @@ pub extern "C" fn haxe_array_contains(arr: i32, val: i32) -> i32 {
 }
 
 /// Slice array from `start` to `end` (exclusive). Writes result into `out`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_slice(out: i32, arr: i32, start: i32, end: i32) {
     let result = haxe_array_new();
     if result == 0 || arr == 0 {
@@ -2145,7 +2145,7 @@ fn haxe_array_copy_internal(arr: i32) -> i32 {
 }
 
 /// Shallow copy of array. Writes result into `out` (pre-allocated array header).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_copy(out: i32, arr: i32) {
     let result = haxe_array_copy_internal(arr);
     if out != 0 && result != 0 {
@@ -2157,7 +2157,7 @@ pub extern "C" fn haxe_array_copy(out: i32, arr: i32) {
 }
 
 /// Concatenate two arrays, writing result to `out` (pre-allocated array ptr).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_concat(out: i32, arr: i32, other: i32) {
     // Copy elements from arr into a new array, then copy elements from other
     let result = haxe_array_copy_internal(arr);
@@ -2180,7 +2180,7 @@ pub extern "C" fn haxe_array_concat(out: i32, arr: i32, other: i32) {
 }
 
 /// Resize the array to `new_len`. Truncates if shorter, zero-fills if longer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_resize(arr: i32, new_len: i32) {
     if arr == 0 || new_len < 0 {
         return;
@@ -2232,7 +2232,7 @@ pub extern "C" fn haxe_array_resize(arr: i32, new_len: i32) {
 
 /// Convert array to string representation "[elem0, elem1, ...]".
 /// Elements are treated as i32 values. Returns new HaxeString*.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_to_string(arr: i32) -> i32 {
     let out = rt_alloc(12);
     if out == 0 {
@@ -2290,7 +2290,7 @@ pub extern "C" fn haxe_array_to_string(arr: i32) -> i32 {
 }
 
 /// Join array elements with a separator string. Returns new HaxeString*.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_join(arr: i32, sep: i32) -> i32 {
     let out = rt_alloc(12);
     if out == 0 {
@@ -2344,7 +2344,7 @@ pub extern "C" fn haxe_array_join(arr: i32, sep: i32) -> i32 {
 }
 
 /// Remove `len` elements starting at `pos`. Writes removed elements array into `out`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_splice(out: i32, arr: i32, pos: i32, len: i32) {
     let removed = haxe_array_new();
     if removed == 0 || arr == 0 || len <= 0 {
@@ -2403,14 +2403,14 @@ pub extern "C" fn haxe_array_splice(out: i32, arr: i32, pos: i32, len: i32) {
 }
 
 /// Sort array using a comparator function pointer. Stub — not yet implemented for WASM.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_sort(_out: i32, _arr: i32, _cmp: i32) {
     // Stub: would require call_indirect with a comparator function table index.
     // Phase 1: no-op.
 }
 
 /// Map array elements through a function. Stub — not yet implemented for WASM.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_map(out: i32, _arr: i32, _fn_ptr: i32, _extra: i32) {
     // Stub: would require call_indirect.
     // Write an empty array header into out.
@@ -2424,7 +2424,7 @@ pub extern "C" fn haxe_array_map(out: i32, _arr: i32, _fn_ptr: i32, _extra: i32)
 }
 
 /// Filter array elements through a predicate. Stub — not yet implemented for WASM.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_filter(out: i32, _arr: i32, _fn_ptr: i32, _extra: i32) {
     // Stub: would require call_indirect.
     // Write an empty array header into out.
@@ -2444,25 +2444,25 @@ pub extern "C" fn haxe_array_filter(out: i32, _arr: i32, _fn_ptr: i32, _extra: i
 const TYPE_REFERENCE: u32 = 5;
 
 /// Box a pointer (reference type) as DynamicValue.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_reference_ptr(val: i32, _dummy: i32) -> i32 {
     unsafe { alloc_dynamic(TYPE_REFERENCE, val as u32) }
 }
 
 /// Unbox an Int from DynamicValue pointer (ptr-returning variant).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_int_ptr(ptr: i32) -> i32 {
     haxe_unbox_int(ptr)
 }
 
 /// Unbox a Float from DynamicValue pointer (ptr-returning variant).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_float_ptr(ptr: i32) -> f64 {
     haxe_unbox_float(ptr)
 }
 
 /// Unbox a Bool from DynamicValue pointer (ptr-returning variant).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_bool_ptr(ptr: i32) -> i32 {
     haxe_unbox_bool(ptr)
 }
@@ -2502,7 +2502,7 @@ unsafe fn haxe_string_to_string(s: i32) -> Option<String> {
 }
 
 /// Register an anonymous-object shape descriptor.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_ensure_shape(shape_id: i32, descriptor: i32) {
     if shape_id < 0 {
         return;
@@ -2524,7 +2524,7 @@ pub extern "C" fn rayzor_ensure_shape(shape_id: i32, descriptor: i32) {
 }
 
 /// Allocate an anonymous object with a fixed shape and 8-byte value slots.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_new(shape_id: i32, field_count: i32) -> i32 {
     if shape_id < 0 || field_count < 0 {
         return 0;
@@ -2544,7 +2544,7 @@ pub extern "C" fn rayzor_anon_new(shape_id: i32, field_count: i32) -> i32 {
 }
 
 /// Clone an anonymous object into an independent wasm-linear-memory object.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_clone(obj: i32) -> i32 {
     if obj == 0 {
         return 0;
@@ -2561,12 +2561,12 @@ pub extern "C" fn rayzor_anon_clone(obj: i32) -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_copy(obj: i32) -> i32 {
     rayzor_anon_clone(obj)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_drop(obj: i32) {
     // Real single-owner free. rt_alloc is dlmalloc (std::alloc), NOT arena —
     // dealloc reclaims. `rayzor_anon_clone` deep-copies into an independent
@@ -2587,7 +2587,7 @@ pub extern "C" fn rayzor_anon_drop(obj: i32) {
 }
 
 /// Get a field by index from an anonymous object.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_get_field_by_index(obj: i32, idx: i32) -> i64 {
     if obj == 0 || idx < 0 {
         return 0;
@@ -2602,7 +2602,7 @@ pub extern "C" fn rayzor_anon_get_field_by_index(obj: i32, idx: i32) -> i64 {
 }
 
 /// Set a field by index on an anonymous object.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_set_field_by_index(obj: i32, idx: i32, val: i64) {
     if obj == 0 || idx < 0 {
         return;
@@ -2616,7 +2616,7 @@ pub extern "C" fn rayzor_anon_set_field_by_index(obj: i32, idx: i32, val: i64) {
 }
 
 /// Check whether a shaped anonymous object contains a named field.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_has_field(obj: i32, name: i32) -> i32 {
     if obj == 0 || name == 0 {
         return 0;
@@ -2642,7 +2642,7 @@ pub extern "C" fn haxe_reflect_has_field(obj: i32, name: i32) -> i32 {
 // ============================================================================
 
 /// Read a file's contents via WASI. Returns HaxeString pointer, 0 on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_read(path: i32, _dummy: i32) -> i32 {
     unsafe {
         let (p, plen, _) = read_haxe_string(path);
@@ -2682,7 +2682,7 @@ pub extern "C" fn haxe_file_read(path: i32, _dummy: i32) -> i32 {
 }
 
 /// Write content to a file via WASI. Returns 0 on success.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_write(path: i32, data: i32) -> i32 {
     unsafe {
         let (pp, plen, _) = read_haxe_string(path);
@@ -2704,7 +2704,7 @@ pub extern "C" fn haxe_file_write(path: i32, data: i32) -> i32 {
 }
 
 /// Append content to a file via WASI.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_append(path: i32, data: i32) -> i32 {
     unsafe {
         let (pp, plen, _) = read_haxe_string(path);
@@ -2734,19 +2734,19 @@ pub extern "C" fn haxe_file_append(path: i32, data: i32) -> i32 {
 }
 
 /// Update (overwrite) a file — same as write.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_update(path: i32, data: i32) -> i32 {
     haxe_file_write(path, data)
 }
 
 /// sys.io.File.saveContent(path, content) — Haxe stdlib wrapper.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_save_content(path: i32, content: i32) {
     haxe_file_write(path, content);
 }
 
 /// sys.io.File.getContent(path) — Haxe stdlib wrapper. Returns HaxeString*.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_get_content(path: i32) -> i32 {
     haxe_file_read(path, 0)
 }
@@ -2756,7 +2756,7 @@ pub extern "C" fn haxe_file_get_content(path: i32) -> i32 {
 // ============================================================================
 
 /// Trace an f64 value to stdout: "trace: {value}\n"
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_float(val: f64) {
     unsafe {
         wasi_write(1, b"trace: ".as_ptr(), 7);
@@ -2768,7 +2768,7 @@ pub extern "C" fn haxe_trace_float(val: f64) {
 }
 
 /// Trace an i32 value to stdout: "trace: {value}\n"
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_int(val: i32) {
     unsafe {
         wasi_write(1, b"trace: ".as_ptr(), 7);
@@ -2780,7 +2780,7 @@ pub extern "C" fn haxe_trace_int(val: i32) {
 }
 
 /// Trace a bool value to stdout.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_bool(val: i32) {
     let s: &[u8] = if val != 0 {
         b"trace: true\n"
@@ -2798,7 +2798,7 @@ pub extern "C" fn haxe_trace_bool(val: i32) {
 
 /// Get a pointer to the array element at index. Returns pointer as i32.
 /// This is used by the MIR for array[i] access on class/pointer types.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_get_ptr(arr: i32, idx: i32) -> i32 {
     if arr == 0 || idx < 0 {
         return 0;
@@ -2834,7 +2834,7 @@ fn simd4f_alloc() -> *mut f32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_splat(v: f32) -> i32 {
     let ptr = simd4f_alloc();
     unsafe {
@@ -2854,7 +2854,7 @@ pub extern "C" fn rayzor_simd4f_splat(v: f32) -> i32 {
     ptr as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_make(x: f32, y: f32, z: f32, w: f32) -> i32 {
     let ptr = simd4f_alloc();
     unsafe {
@@ -2874,7 +2874,7 @@ pub extern "C" fn rayzor_simd4f_make(x: f32, y: f32, z: f32, w: f32) -> i32 {
     ptr as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_load(src: i32) -> i32 {
     let ptr = simd4f_alloc();
     unsafe {
@@ -2883,19 +2883,19 @@ pub extern "C" fn rayzor_simd4f_load(src: i32) -> i32 {
     ptr as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_store(vec: i32, dst: i32) {
     unsafe {
         ptr::copy_nonoverlapping(vec as *const u8, dst as *mut u8, 16);
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_extract(vec: i32, lane: i32) -> f32 {
     unsafe { *((vec as *const f32).add(lane as usize)) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_insert(vec: i32, lane: i32, val: f32) -> i32 {
     let ptr = simd4f_alloc();
     unsafe {
@@ -2907,7 +2907,7 @@ pub extern "C" fn rayzor_simd4f_insert(vec: i32, lane: i32, val: f32) -> i32 {
 
 macro_rules! simd4f_binop {
     ($name:ident, $simd_op:ident, $scalar_op:tt) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn $name(a: i32, b: i32) -> i32 {
             let ptr = simd4f_alloc();
             unsafe {
@@ -2936,7 +2936,7 @@ simd4f_binop!(rayzor_simd4f_sub, f32x4_sub, -);
 simd4f_binop!(rayzor_simd4f_mul, f32x4_mul, *);
 simd4f_binop!(rayzor_simd4f_div, f32x4_div, /);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_min(a: i32, b: i32) -> i32 {
     let ptr = simd4f_alloc();
     unsafe {
@@ -2960,7 +2960,7 @@ pub extern "C" fn rayzor_simd4f_min(a: i32, b: i32) -> i32 {
     ptr as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_max(a: i32, b: i32) -> i32 {
     let ptr = simd4f_alloc();
     unsafe {
@@ -2986,7 +2986,7 @@ pub extern "C" fn rayzor_simd4f_max(a: i32, b: i32) -> i32 {
 
 macro_rules! simd4f_unary {
     ($name:ident, $simd_op:ident) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn $name(a: i32) -> i32 {
             let ptr = simd4f_alloc();
             unsafe {
@@ -3008,7 +3008,7 @@ macro_rules! simd4f_unary {
     };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_sqrt(a: i32) -> i32 {
     let ptr = simd4f_alloc();
     unsafe {
@@ -3028,7 +3028,7 @@ pub extern "C" fn rayzor_simd4f_sqrt(a: i32) -> i32 {
     ptr as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_abs(a: i32) -> i32 {
     let ptr = simd4f_alloc();
     unsafe {
@@ -3048,7 +3048,7 @@ pub extern "C" fn rayzor_simd4f_abs(a: i32) -> i32 {
     ptr as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_neg(a: i32) -> i32 {
     let ptr = simd4f_alloc();
     unsafe {
@@ -3068,7 +3068,7 @@ pub extern "C" fn rayzor_simd4f_neg(a: i32) -> i32 {
     ptr as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_ceil(a: i32) -> i32 {
     let ptr = simd4f_alloc();
     unsafe {
@@ -3088,7 +3088,7 @@ pub extern "C" fn rayzor_simd4f_ceil(a: i32) -> i32 {
     ptr as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_floor(a: i32) -> i32 {
     let ptr = simd4f_alloc();
     unsafe {
@@ -3108,7 +3108,7 @@ pub extern "C" fn rayzor_simd4f_floor(a: i32) -> i32 {
     ptr as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_nearest(a: i32) -> i32 {
     let ptr = simd4f_alloc();
     unsafe {
@@ -3128,7 +3128,7 @@ pub extern "C" fn rayzor_simd4f_nearest(a: i32) -> i32 {
     ptr as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_sum(a: i32) -> f32 {
     unsafe {
         let p = a as *const f32;
@@ -3136,7 +3136,7 @@ pub extern "C" fn rayzor_simd4f_sum(a: i32) -> f32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_dot(a: i32, b: i32) -> f32 {
     unsafe {
         let pa = a as *const f32;
@@ -3162,12 +3162,12 @@ pub extern "C" fn rayzor_simd4f_dot(a: i32, b: i32) -> f32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_length(a: i32) -> f32 {
     libm::sqrtf(rayzor_simd4f_dot(a, a))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_normalize(a: i32) -> i32 {
     let len = rayzor_simd4f_length(a);
     if len == 0.0 {
@@ -3178,7 +3178,7 @@ pub extern "C" fn rayzor_simd4f_normalize(a: i32) -> i32 {
     rayzor_simd4f_mul(a, inv_vec)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_cross3(a: i32, b: i32) -> i32 {
     unsafe {
         let pa = a as *const f32;
@@ -3190,19 +3190,19 @@ pub extern "C" fn rayzor_simd4f_cross3(a: i32, b: i32) -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_distance(a: i32, b: i32) -> f32 {
     let diff = rayzor_simd4f_sub(a, b);
     rayzor_simd4f_length(diff)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_clamp(v: i32, lo: i32, hi: i32) -> i32 {
     let tmp = rayzor_simd4f_max(v, lo);
     rayzor_simd4f_min(tmp, hi)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_simd4f_lerp(a: i32, b: i32, t: f32) -> i32 {
     let t_vec = rayzor_simd4f_splat(t);
     let diff = rayzor_simd4f_sub(b, a);
@@ -3215,7 +3215,7 @@ pub extern "C" fn rayzor_simd4f_lerp(a: i32, b: i32, t: f32) -> i32 {
 // ============================================================================
 
 /// Vectorized f32 add: dst[i] = a[i] + b[i], processing 4 elements at a time.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tensor_simd_add_f32(dst: i32, a: i32, b: i32, n: i32) {
     unsafe {
         let pd = dst as *mut f32;
@@ -3240,7 +3240,7 @@ pub extern "C" fn rayzor_tensor_simd_add_f32(dst: i32, a: i32, b: i32, n: i32) {
 }
 
 /// Vectorized f32 mul
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tensor_simd_mul_f32(dst: i32, a: i32, b: i32, n: i32) {
     unsafe {
         let pd = dst as *mut f32;
@@ -3268,7 +3268,7 @@ pub extern "C" fn rayzor_tensor_simd_mul_f32(dst: i32, a: i32, b: i32, n: i32) {
 /// fused multiply-add when available — single rounding per pair, half
 /// the instruction count of separate fmul + fadd, and lets the runtime
 /// pick the hardware FMA on host CPUs that have it (M-series, AVX2+).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tensor_simd_dot_f32(a: i32, b: i32, n: i32) -> f32 {
     unsafe {
         let pa = a as *const f32;
@@ -3309,7 +3309,7 @@ pub extern "C" fn rayzor_tensor_simd_dot_f32(a: i32, b: i32, n: i32) -> f32 {
 /// flash_attn_decode + matmul accumulators use this exact shape — the
 /// fused multiply-add and the in-place destination make it cheap on
 /// hardware. relaxed_madd preserves the FMA when available.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tensor_simd_axpy_f32(dst: i32, w: f32, src: i32, n: i32) {
     unsafe {
         let pd = dst as *mut f32;
@@ -3338,7 +3338,7 @@ pub extern "C" fn rayzor_tensor_simd_axpy_f32(dst: i32, w: f32, src: i32, n: i32
 }
 
 /// Vectorized f32 sum
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_tensor_simd_sum_f32(a: i32, n: i32) -> f32 {
     unsafe {
         let pa = a as *const f32;

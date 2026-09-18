@@ -112,7 +112,7 @@ pub struct RECT {
 // ============================================================================
 
 #[link(name = "user32")]
-extern "system" {
+unsafe extern "system" {
     fn RegisterClassExW(lpWndClass: *const WNDCLASSEXW) -> u16;
     fn CreateWindowExW(
         dwExStyle: u32,
@@ -175,7 +175,7 @@ extern "system" {
 }
 
 #[link(name = "kernel32")]
-extern "system" {
+unsafe extern "system" {
     fn GetModuleHandleW(lpModuleName: *const u16) -> *mut c_void;
 }
 
@@ -185,7 +185,7 @@ extern "system" {
 // functions. We declare them separately.
 #[cfg(target_pointer_width = "64")]
 #[link(name = "user32")]
-extern "system" {
+unsafe extern "system" {
     fn SetWindowLongPtrW(hWnd: *mut c_void, nIndex: i32, dwNewLong: isize) -> isize;
     fn GetWindowLongPtrW(hWnd: *mut c_void, nIndex: i32) -> isize;
 }

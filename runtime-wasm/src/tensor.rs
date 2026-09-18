@@ -332,7 +332,7 @@ pub(crate) unsafe fn alloc_tensor(shape: &[usize], dtype: u8) -> *mut Tensor {
 
 /// `Tensor.zeros(shape, ndim, dtype) -> *Tensor`. Shape is passed as a
 /// `*const usize` cursor with `ndim` entries.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_zeros(shape_ptr: i32, ndim: i32, dtype: i32) -> i32 {
     if shape_ptr == 0 || ndim < 0 || ndim > 16 {
         return 0;
@@ -341,19 +341,19 @@ pub unsafe extern "C" fn rayzor_tensor_zeros(shape_ptr: i32, ndim: i32, dtype: i
     alloc_tensor(&shape, dtype as u8) as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_uninit(shape_ptr: i32, ndim: i32, dtype: i32) -> i32 {
     // WASM keeps the existing zero-init allocation path for now; the symbol
     // exists so Haxe code that uses full-overwrite Tensor.uninit links on wasm.
     rayzor_tensor_zeros(shape_ptr, ndim, dtype)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_ones(shape_ptr: i32, ndim: i32, dtype: i32) -> i32 {
     rayzor_tensor_full(shape_ptr, ndim, 1.0, dtype)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rand(shape_ptr: i32, ndim: i32, dtype: i32) -> i32 {
     // Deterministic LCG fill (same constants as the host fallback in
     // wasm_runner.rs) so `Tensor.rand` yields non-zero data on wasm instead of
@@ -377,7 +377,7 @@ pub unsafe extern "C" fn rayzor_tensor_rand(shape_ptr: i32, ndim: i32, dtype: i3
 }
 
 /// `Tensor.full(shape, ndim, value, dtype)`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_full(
     shape_ptr: i32,
     ndim: i32,
@@ -401,7 +401,7 @@ pub unsafe extern "C" fn rayzor_tensor_full(
 }
 
 /// `Tensor.fromArray(data_ptr, data_len, dtype)`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_array(data_ptr: i32, data_len: i32, dtype: i32) -> i32 {
     if data_ptr == 0 || data_len < 0 {
         return 0;
@@ -419,7 +419,7 @@ pub unsafe extern "C" fn rayzor_tensor_from_array(data_ptr: i32, data_len: i32, 
     t
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_bytes_f32(
     bytes_handle: i32,
     shape_ptr: i32,
@@ -442,7 +442,7 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_f32(
     t
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_bytes_f16(
     bytes_handle: i32,
     shape_ptr: i32,
@@ -469,7 +469,7 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_f16(
     t
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_bytes_q8_0(
     bytes_handle: i32,
     shape_ptr: i32,
@@ -506,7 +506,7 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_q8_0(
 /// `Tensor.from_floats(data, len, shape, ndim)` — copy `len` f32 values from
 /// `data` into a fresh tensor with the given shape (must satisfy
 /// `prod(shape) == len`).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_floats(
     data_ptr: i32,
     len: i32,
@@ -533,7 +533,7 @@ pub unsafe extern "C" fn rayzor_tensor_from_floats(
 /// Field accessors. Direct reads of the `#[repr(C)]` fields; the Haxe
 /// extern wiring uses these to read tensor metadata without exposing the
 /// raw struct layout to the JIT.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_ndim(t: i32) -> i32 {
     if t == 0 {
         return 0;
@@ -541,7 +541,7 @@ pub unsafe extern "C" fn rayzor_tensor_ndim(t: i32) -> i32 {
     (*(t as *const Tensor)).ndim as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_numel(t: i32) -> i32 {
     if t == 0 {
         return 0;
@@ -549,7 +549,7 @@ pub unsafe extern "C" fn rayzor_tensor_numel(t: i32) -> i32 {
     (*(t as *const Tensor)).numel as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_dtype(t: i32) -> i32 {
     if t == 0 {
         return 0;
@@ -557,7 +557,7 @@ pub unsafe extern "C" fn rayzor_tensor_dtype(t: i32) -> i32 {
     (*(t as *const Tensor)).dtype as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_device(t: i32) -> i32 {
     if t == 0 {
         return 0;
@@ -565,7 +565,7 @@ pub unsafe extern "C" fn rayzor_tensor_device(t: i32) -> i32 {
     (*(t as *const Tensor)).device as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_numa_node(t: i32) -> i32 {
     if t == 0 {
         return -1;
@@ -573,7 +573,7 @@ pub unsafe extern "C" fn rayzor_tensor_numa_node(t: i32) -> i32 {
     (*(t as *const Tensor)).numa_node
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_data(t: i32) -> i32 {
     if t == 0 {
         return 0;
@@ -581,7 +581,7 @@ pub unsafe extern "C" fn rayzor_tensor_data(t: i32) -> i32 {
     (*(t as *const Tensor)).data as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_shape_ptr(t: i32) -> i32 {
     if t == 0 {
         return 0;
@@ -589,12 +589,12 @@ pub unsafe extern "C" fn rayzor_tensor_shape_ptr(t: i32) -> i32 {
     (*(t as *const Tensor)).shape as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_shape_ndim(t: i32) -> i32 {
     rayzor_tensor_ndim(t)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_shape(t: i32) -> i32 {
     if t == 0 {
         return 0;
@@ -625,7 +625,7 @@ pub unsafe extern "C" fn rayzor_tensor_shape(t: i32) -> i32 {
 }
 
 /// Read one f32 element by flat index.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_get_flat_f32(t: i32, idx: i32) -> f32 {
     if t == 0 {
         return 0.0;
@@ -637,12 +637,12 @@ pub unsafe extern "C" fn rayzor_tensor_get_flat_f32(t: i32, idx: i32) -> f32 {
     load_f32_at(tr.data, idx as usize, tr.dtype)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_get_flat(t: i32, idx: i32) -> f64 {
     rayzor_tensor_get_flat_f32(t, idx) as f64
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_get(t: i32, indices_ptr: i32, ndim: i32) -> f64 {
     if t == 0 || indices_ptr == 0 || ndim < 0 {
         return 0.0;
@@ -665,7 +665,7 @@ pub unsafe extern "C" fn rayzor_tensor_get(t: i32, indices_ptr: i32, ndim: i32) 
     load_f32_at(tr.data, off, tr.dtype) as f64
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_set(t: i32, indices_ptr: i32, ndim: i32, value: f64) {
     if t == 0 || indices_ptr == 0 || ndim < 0 {
         return;
@@ -695,7 +695,7 @@ pub unsafe extern "C" fn rayzor_tensor_set(t: i32, indices_ptr: i32, ndim: i32, 
 /// dot product. On wasm32 with `+simd128 +relaxed-simd` the scalar
 /// fallback path auto-vectorises through LLVM; a dedicated wasm-simd128
 /// inner is a Phase 3 follow-up.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_t(x: i32, w: i32) -> i32 {
     if x == 0 || w == 0 {
         return 0;
@@ -736,7 +736,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t(x: i32, w: i32) -> i32 {
     y as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul(a: i32, b: i32) -> i32 {
     if a == 0 || b == 0 {
         return 0;
@@ -775,12 +775,12 @@ pub unsafe extern "C" fn rayzor_tensor_matmul(a: i32, b: i32) -> i32 {
     y as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(a: i32, b: i32, _threads: i32) -> i32 {
     rayzor_tensor_matmul_t(a, b)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_bmm(a: i32, b: i32) -> i32 {
     if a == 0 || b == 0 {
         return 0;
@@ -845,7 +845,7 @@ pub unsafe extern "C" fn rayzor_tensor_bmm(a: i32, b: i32) -> i32 {
     y as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_bmm_threaded(a: i32, b: i32, _threads: i32) -> i32 {
     rayzor_tensor_bmm(a, b)
 }
@@ -929,64 +929,64 @@ unsafe fn tensor_binary<F: Fn(f32, f32) -> f32>(a: i32, b: i32, f: F) -> i32 {
     y as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_add(a: i32, b: i32) -> i32 {
     tensor_binary(a, b, |x, y| x + y)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_sub(a: i32, b: i32) -> i32 {
     tensor_binary(a, b, |x, y| x - y)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_mul(a: i32, b: i32) -> i32 {
     tensor_binary(a, b, |x, y| x * y)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_silu_mul(a: i32, b: i32) -> i32 {
     tensor_binary(a, b, |x, y| (x / (1.0 + libm::expf(-x))) * y)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_div(a: i32, b: i32) -> i32 {
     tensor_binary(a, b, |x, y| x / y)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_sqrt(t: i32) -> i32 {
     tensor_unary(t, libm::sqrtf)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_exp(t: i32) -> i32 {
     tensor_unary(t, libm::expf)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_log(t: i32) -> i32 {
     tensor_unary(t, libm::logf)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_relu(t: i32) -> i32 {
     tensor_unary(t, |x| x.max(0.0))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_gelu(t: i32) -> i32 {
     tensor_unary(t, |x| {
         0.5 * x * (1.0 + libm::tanhf(0.7978846 * (x + 0.044715 * x * x * x)))
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_silu(t: i32) -> i32 {
     tensor_unary(t, |x| x / (1.0 + libm::expf(-x)))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_sum(t: i32) -> f64 {
     if t == 0 {
         return 0.0;
@@ -999,7 +999,7 @@ pub unsafe extern "C" fn rayzor_tensor_sum(t: i32) -> f64 {
     sum
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_mean(t: i32) -> f64 {
     if t == 0 {
         return 0.0;
@@ -1012,7 +1012,7 @@ pub unsafe extern "C" fn rayzor_tensor_mean(t: i32) -> f64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_max(t: i32) -> f64 {
     if t == 0 {
         return 0.0;
@@ -1028,7 +1028,7 @@ pub unsafe extern "C" fn rayzor_tensor_max(t: i32) -> f64 {
     best as f64
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_min(t: i32) -> f64 {
     if t == 0 {
         return 0.0;
@@ -1044,7 +1044,7 @@ pub unsafe extern "C" fn rayzor_tensor_min(t: i32) -> f64 {
     best as f64
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_dot(a: i32, b: i32) -> f64 {
     if a == 0 || b == 0 {
         return 0.0;
@@ -1062,7 +1062,7 @@ pub unsafe extern "C" fn rayzor_tensor_dot(a: i32, b: i32) -> f64 {
     sum
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i32, src: i32) {
     if dest == 0 || src == 0 {
         return;
@@ -1102,7 +1102,7 @@ pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i32, src: i32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_scale(t: i32, factor: f64) -> i32 {
     tensor_unary(t, |x| x * factor as f32)
 }
@@ -1121,7 +1121,7 @@ pub unsafe extern "C" fn rayzor_tensor_scale(t: i32, factor: f64) -> i32 {
 // zero-extended; `as usize` recovers it on either width).
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_alloc_zeros(
     shape_ptr: *const usize,
     ndim: usize,
@@ -1135,7 +1135,7 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_alloc_zeros(
     t as usize as i64
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_data(t: i64) -> *mut u8 {
     if t == 0 {
         return core::ptr::null_mut();
@@ -1143,7 +1143,7 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_data(t: i64) -> *mut u8 {
     (*(t as usize as *const Tensor)).data
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_dtype(t: i64) -> u8 {
     if t == 0 {
         return 0;
@@ -1151,7 +1151,7 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_dtype(t: i64) -> u8 {
     (*(t as usize as *const Tensor)).dtype
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_ndim(t: i64) -> u32 {
     if t == 0 {
         return 0;
@@ -1159,7 +1159,7 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_ndim(t: i64) -> u32 {
     (*(t as usize as *const Tensor)).ndim as u32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_shape(t: i64) -> *const usize {
     if t == 0 {
         return core::ptr::null();
@@ -1167,7 +1167,7 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_shape(t: i64) -> *const usize {
     (*(t as usize as *const Tensor)).shape as *const usize
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_is_contiguous(t: i64) -> u8 {
     if t == 0 {
         return 0;
@@ -1175,7 +1175,7 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_is_contiguous(t: i64) -> u8 {
     u8::from((*(t as usize as *const Tensor)).is_contiguous())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_causal_mask_(t: i32, position_offset: i32) -> i32 {
     if t == 0 {
         return 0;
@@ -1204,7 +1204,7 @@ pub unsafe extern "C" fn rayzor_tensor_causal_mask_(t: i32, position_offset: i32
     t
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_transpose_last2(t: i32) -> i32 {
     if t == 0 {
         return 0;
@@ -1250,7 +1250,7 @@ pub unsafe extern "C" fn rayzor_tensor_transpose_last2(t: i32) -> i32 {
     wrapper as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_transpose(t: i32) -> i32 {
     if t == 0 {
         return 0;
@@ -1262,7 +1262,7 @@ pub unsafe extern "C" fn rayzor_tensor_transpose(t: i32) -> i32 {
     rayzor_tensor_transpose_last2(t)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_permute(t: i32, axes_ptr: i32, axes_len: i32) -> i32 {
     if t == 0 || axes_ptr == 0 || axes_len <= 0 {
         return 0;
@@ -1320,7 +1320,7 @@ pub unsafe extern "C" fn rayzor_tensor_permute(t: i32, axes_ptr: i32, axes_len: 
     wrapper as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_gather_rows(
     table_ptr: i32,
     indices_ptr: i32,
@@ -1359,7 +1359,7 @@ pub unsafe extern "C" fn rayzor_tensor_gather_rows(
     out as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_broadcast_repeat_0_f32(
     dst_ptr: i32,
     src_ptr: i32,
@@ -1396,7 +1396,7 @@ pub unsafe extern "C" fn rayzor_tensor_broadcast_repeat_0_f32(
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_expand_kv_heads_axis1_f32(
     src_ptr: i32,
     repeats: i32,
@@ -1447,7 +1447,7 @@ pub unsafe extern "C" fn rayzor_tensor_expand_kv_heads_axis1_f32(
 ///
 /// Both tensors must be F32, same rank, and have identical trailing axes.
 /// Returns `0` on success and `-1` on validation failure, mirroring native.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_append_along_0_f32(
     dst_ptr: i32,
     src_ptr: i32,
@@ -1487,7 +1487,7 @@ pub unsafe extern "C" fn rayzor_tensor_append_along_0_f32(
 }
 
 /// Contiguous-only reshape. Returns a zero-copy view with canonical strides.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i32, shape_ptr: i32, ndim: i32) -> i32 {
     if tensor_ptr == 0 || ndim < 0 || ndim > 16 || (ndim > 0 && shape_ptr == 0) {
         return 0;
@@ -1565,7 +1565,7 @@ pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i32, shape_ptr: i32, 
 }
 
 /// Slice along one axis. Returns a zero-copy view with the same strides.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_slice(
     tensor_ptr: i32,
     axis: i32,
@@ -1633,7 +1633,7 @@ pub unsafe extern "C" fn rayzor_tensor_slice(
 }
 
 /// Atomic-refcount clone: bump `src`'s refcount and return the same pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_arc_clone(src: i32) -> i32 {
     if src == 0 {
         return 0;
@@ -1643,13 +1643,13 @@ pub unsafe extern "C" fn rayzor_tensor_arc_clone(src: i32) -> i32 {
     src
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_clone(src: i32) -> i32 {
     rayzor_tensor_arc_clone(src)
 }
 
 /// Disjoint-storage deep clone. Materialises a fresh owning contiguous tensor.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_deep_clone(src: i32) -> i32 {
     if src == 0 {
         return 0;
@@ -1692,7 +1692,7 @@ pub unsafe extern "C" fn rayzor_tensor_deep_clone(src: i32) -> i32 {
 }
 
 /// Release a tensor wrapper + its owned shape/strides/data buffers.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_free(t: i32) {
     if t == 0 {
         return;

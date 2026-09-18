@@ -30,7 +30,7 @@ static FLASH_DONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32
 ///
 /// `group = n_q_heads / n_kv_heads` (GQA grouping factor; 4 for Llama 3 1B,
 /// 8 for Llama 3 70B).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_f32(
     q_data: i32,
     k_data: i32,
@@ -195,7 +195,7 @@ struct FlashBandWork {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_flash_band_worker(work_ptr: i32) -> i64 {
     unsafe {
         let w = &*(work_ptr as *const FlashBandWork);
@@ -230,7 +230,7 @@ unsafe extern "C" {
     fn rayzor_thread_join_void(handle: i32);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
     q_ptr: i32,
     k_ptr: i32,
@@ -301,7 +301,7 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
 }
 
 /// In-place row-wise softmax over an `[n_rows, row_len]` F32 buffer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_softmax_inplace_f32(data: i32, n_rows: i32, row_len: i32) {
     if data == 0 || n_rows <= 0 || row_len <= 0 {
         return;
@@ -339,7 +339,7 @@ pub unsafe extern "C" fn rayzor_tensor_softmax_inplace_f32(data: i32, n_rows: i3
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_softmax(t: i32) -> i32 {
     if t == 0 {
         return 0;
@@ -368,7 +368,7 @@ pub unsafe extern "C" fn rayzor_tensor_softmax(t: i32) -> i32 {
 
 /// Row-wise RMSNorm over an `[n_rows, hidden_dim]` F32 buffer, writing to
 /// `out`. `weight` is the per-channel learnable gain (`[hidden_dim]`).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rms_norm_f32(
     out: i32,
     x: i32,
@@ -391,7 +391,7 @@ pub unsafe extern "C" fn rayzor_tensor_rms_norm_f32(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rms_norm_weight(x: i32, weight: i32, eps: f64) -> i32 {
     if x == 0 || weight == 0 {
         return 0;
@@ -426,7 +426,7 @@ pub unsafe extern "C" fn rayzor_tensor_rms_norm_weight(x: i32, weight: i32, eps:
     out as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rms_norm(x: i32, eps: f64) -> i32 {
     if x == 0 {
         return 0;
@@ -466,7 +466,7 @@ pub unsafe extern "C" fn rayzor_tensor_rms_norm(x: i32, eps: f64) -> i32 {
     out as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_layer_norm(x: i32, eps: f64) -> i32 {
     if x == 0 {
         return 0;
@@ -514,7 +514,7 @@ pub unsafe extern "C" fn rayzor_tensor_layer_norm(x: i32, eps: f64) -> i32 {
 /// Returns a freshly allocated Tensor with the same shape. This export uses
 /// the same public name as the native runtime so Haxe's existing
 /// `Tensor.rope()` stdlib wrapper resolves on WASM too.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rope(
     x: i32,
     cos: i32,
@@ -614,7 +614,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
 }
 
 /// Generate an F32 RoPE cosine table `[max_seq_len, head_dim / 2]`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rope_cos_table(
     head_dim: i32,
     max_seq_len: i32,
@@ -624,7 +624,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope_cos_table(
 }
 
 /// Generate an F32 RoPE sine table `[max_seq_len, head_dim / 2]`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rope_sin_table(
     head_dim: i32,
     max_seq_len: i32,
@@ -633,7 +633,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope_sin_table(
     rope_table(head_dim, max_seq_len, base, DTYPE_F32, libm::sin)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rope_cos_table_f16(
     head_dim: i32,
     max_seq_len: i32,
@@ -642,7 +642,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope_cos_table_f16(
     rope_table(head_dim, max_seq_len, base, DTYPE_F16, libm::cos)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rope_sin_table_f16(
     head_dim: i32,
     max_seq_len: i32,
@@ -685,7 +685,7 @@ unsafe fn rope_table<F: Fn(f64) -> f64>(
 }
 
 /// Return the index of the maximum F32 value in `data[0..n]`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_argmax_f32(data: i32, n: i32) -> i32 {
     if data == 0 || n <= 0 {
         return -1;
@@ -707,7 +707,7 @@ pub unsafe extern "C" fn rayzor_tensor_argmax_f32(data: i32, n: i32) -> i32 {
 /// Writes descending logits into `out_logits` (`f32*`) and ids into `out_ids`
 /// (`i32*`). `cutoff` is an additional fast-reject threshold; pass
 /// `f32::NEG_INFINITY` to disable it.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_topk_scan_f32(
     data: i32,
     n: i32,
@@ -772,7 +772,7 @@ pub unsafe extern "C" fn rayzor_tensor_topk_scan_f32(
 }
 
 /// Native-shaped Tensor top-k scan used by Haxe `Tensor.topkScan`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_topk_scan(
     tensor: i32,
     out_logits_ptr: i32,

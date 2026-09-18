@@ -187,7 +187,7 @@ unsafe fn alloc_qtensor(scheme: u8, rows: usize, cols: usize) -> *mut QTensor {
 /// `cols` a multiple of `Q4_K_M_BLOCK_SIZE`. The byte buffer at `bytes_ptr`
 /// holds `rows × (cols / 256) × 144` bytes of canonical GGUF Q4_K_M blocks,
 /// and is COPIED into the QTensor's owned data buffer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q4_k_m(
     bytes_handle: i32,
     rows: i32,
@@ -212,7 +212,7 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q4_k_m(
     qt as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q6_k(
     bytes_handle: i32,
     rows: i32,
@@ -240,7 +240,7 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q6_k(
     qt as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_rows(qt: i32) -> i32 {
     if qt == 0 {
         return 0;
@@ -250,7 +250,7 @@ pub unsafe extern "C" fn rayzor_qtensor_rows(qt: i32) -> i32 {
 
 /// Raw base offset of the quantised weight bytes in guest linear memory, so a
 /// pure-Haxe qmatmul can SIMD16i8.load Q4_K_M blocks directly in-guest.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_data_ptr(qt: i32) -> i32 {
     if qt == 0 {
         return 0;
@@ -258,7 +258,7 @@ pub unsafe extern "C" fn rayzor_qtensor_data_ptr(qt: i32) -> i32 {
     (*(qt as *const QTensor)).data as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_cols(qt: i32) -> i32 {
     if qt == 0 {
         return 0;
@@ -266,7 +266,7 @@ pub unsafe extern "C" fn rayzor_qtensor_cols(qt: i32) -> i32 {
     (*(qt as *const QTensor)).cols as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_scheme(qt: i32) -> i32 {
     if qt == 0 {
         return 0;
@@ -274,7 +274,7 @@ pub unsafe extern "C" fn rayzor_qtensor_scheme(qt: i32) -> i32 {
     (*(qt as *const QTensor)).scheme as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_numel(qt: i32) -> i32 {
     if qt == 0 {
         return 0;
@@ -282,7 +282,7 @@ pub unsafe extern "C" fn rayzor_qtensor_numel(qt: i32) -> i32 {
     (*(qt as *const QTensor)).numel as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_free(qt: i32) {
     if qt == 0 {
         return;
@@ -301,7 +301,7 @@ pub unsafe extern "C" fn rayzor_qtensor_free(qt: i32) {
     dealloc(qt as *mut u8, wrapper_layout);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_dequant(qt: i32) -> i32 {
     if qt == 0 {
         return 0;
@@ -350,7 +350,7 @@ pub unsafe extern "C" fn rayzor_qtensor_dequant(qt: i32) -> i32 {
     out as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_gather_rows_q6_k(
     qt: i32,
     indices_ptr: i32,
@@ -565,7 +565,7 @@ struct BandWork {
 /// Worker entry, invoked on a `rayzor_thread_spawn` OS thread via the indirect
 /// function table. Reads its `BandWork` from shared memory and dots its band.
 #[cfg(target_arch = "wasm32")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_qmatmul_band_worker(work_ptr: i32) -> i64 {
     unsafe {
         let w = &*(work_ptr as *const BandWork);
@@ -607,7 +607,7 @@ unsafe extern "C" {
 ///
 /// Threading is sequential in Phase 3. Phase 6 (Web Workers / wasi-threads)
 /// will wrap the per-output-row loop in a `parallel_rows` worker pool.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x: i32, qt: i32) -> i32 {
     if x == 0 || qt == 0 {
         return 0;
@@ -639,7 +639,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x: i32, qt: i32) -> i32 {
 /// Returns the output Tensor handle, or `0` to tell the caller to fall back to
 /// the guest serial kernel (host absent in a browser, or the import stubbed to
 /// return 0). The speculatively-allocated output is freed on that path.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_flash_attn_q8_host(
     k_handle: i32,
     q_ptr: i32,
@@ -708,7 +708,7 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_q8_host(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_chunk(
     x: i32,
     qt: i32,
@@ -723,7 +723,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_chunk(
     1
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
     x: i32,
     qt: i32,
@@ -870,7 +870,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
     y
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_qt_t_f32_threaded(
     x: i32,
     q_w: i32,

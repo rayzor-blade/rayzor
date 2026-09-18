@@ -72,7 +72,7 @@ const ARC_STRONG: i32 = 0;
 const ARC_VALUE: i32 = 4;
 
 /// Allocate an Arc inner wrapping `value`, refcount 1. Returns the handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_arc_init(value: i32) -> i32 {
     let h = crate::rayzor_malloc(8);
     if h == 0 {
@@ -90,7 +90,7 @@ pub extern "C" fn rayzor_arc_init(value: i32) -> i32 {
 /// inner cell). `Relaxed` is sufficient for the increment — the new reference
 /// is published through whatever synchronization hands the clone to another
 /// thread (identical to `std::sync::Arc::clone`).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_arc_clone(arc: i32) -> i32 {
     if arc == 0 {
         return 0;
@@ -102,7 +102,7 @@ pub extern "C" fn rayzor_arc_clone(arc: i32) -> i32 {
 }
 
 /// Return the wrapped payload pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_arc_get(arc: i32) -> i32 {
     if arc == 0 {
         return 0;
@@ -111,7 +111,7 @@ pub extern "C" fn rayzor_arc_get(arc: i32) -> i32 {
 }
 
 /// Current strong count. Native returns `u64`; on wasm that is carried as `i32`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_arc_strong_count(arc: i32) -> i32 {
     if arc == 0 {
         return 0;
@@ -121,7 +121,7 @@ pub extern "C" fn rayzor_arc_strong_count(arc: i32) -> i32 {
 
 /// Identity address of the wrapped payload (for pointer comparison). Native
 /// returns `u64`; on wasm that is carried as `i32`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_arc_as_ptr(arc: i32) -> i32 {
     if arc == 0 {
         return 0;
@@ -132,7 +132,7 @@ pub extern "C" fn rayzor_arc_as_ptr(arc: i32) -> i32 {
 /// Consume the Arc if it is the sole owner: succeeds (returns the payload)
 /// only when the strong count is exactly 1, mirroring `Arc::try_unwrap`.
 /// On failure returns 0 (null) and leaves the count untouched.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_arc_try_unwrap(arc: i32) -> i32 {
     if arc == 0 {
         return 0;
@@ -164,7 +164,7 @@ pub extern "C" fn rayzor_arc_try_unwrap(arc: i32) -> i32 {
 /// the count climbs monotonically exactly as on native. This symbol exists so
 /// the primitive is complete and testable, and so a future compiler change that
 /// emits drops gets a correct free path here.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_arc_drop(arc: i32) {
     if arc == 0 {
         return;
@@ -246,7 +246,7 @@ fn futex_notify(addr: *mut i32, count: u32) {
 }
 
 /// Allocate a mutex wrapping `value`, initially unlocked. Returns the handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_mutex_init(value: i32) -> i32 {
     let h = crate::rayzor_malloc(8);
     if h == 0 {
@@ -287,7 +287,7 @@ fn mutex_lock_contended(state: &AtomicU32, addr: *mut i32) {
 }
 
 /// Acquire the lock, blocking until available. Returns the handle as the guard.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_mutex_lock(mutex: i32) -> i32 {
     if mutex == 0 {
         return 0;
@@ -308,7 +308,7 @@ pub extern "C" fn rayzor_mutex_lock(mutex: i32) -> i32 {
 
 /// Try to acquire without blocking. Returns the guard handle on success, 0 if
 /// already held (matching native's null-guard-on-failure).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_mutex_try_lock(mutex: i32) -> i32 {
     if mutex == 0 {
         return 0;
@@ -326,7 +326,7 @@ pub extern "C" fn rayzor_mutex_try_lock(mutex: i32) -> i32 {
 }
 
 /// Whether the lock is currently held. Native returns `bool`; wasm carries `i32`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_mutex_is_locked(mutex: i32) -> i32 {
     if mutex == 0 {
         return 0;
@@ -335,7 +335,7 @@ pub extern "C" fn rayzor_mutex_is_locked(mutex: i32) -> i32 {
 }
 
 /// Read the guarded payload pointer (guard handle == mutex handle).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_mutex_guard_get(guard: i32) -> i32 {
     if guard == 0 {
         return 0;
@@ -345,7 +345,7 @@ pub extern "C" fn rayzor_mutex_guard_get(guard: i32) -> i32 {
 
 /// Release the lock. If the prior state was "maybe waiters" (2), wake exactly
 /// one parked thread. Returns `void` (NO wasm result — must match the import).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_mutex_unlock(guard: i32) {
     if guard == 0 {
         return;
@@ -364,25 +364,25 @@ pub extern "C" fn rayzor_mutex_unlock(guard: i32) {
 // ============================================================================
 
 /// Allocate a value-less lock.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn sys_mutex_alloc() -> i32 {
     rayzor_mutex_init(0)
 }
 
 /// Acquire (blocking).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn sys_mutex_acquire(mutex: i32) {
     rayzor_mutex_lock(mutex);
 }
 
 /// Try-acquire; returns 1 on success, 0 if held (Bool -> i32).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn sys_mutex_try_acquire(mutex: i32) -> i32 {
     i32::from(rayzor_mutex_try_lock(mutex) != 0)
 }
 
 /// Release.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn sys_mutex_release(mutex: i32) {
     rayzor_mutex_unlock(mutex);
 }
@@ -435,7 +435,7 @@ unsafe fn ch_slot_addr(ch: i32, idx: u32) -> i32 {
 
 /// Allocate a channel with the given capacity. capacity<=0 has no unbounded ring
 /// on wasm, so it falls back to a fixed buffer (documented limitation).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_channel_init(capacity: i32) -> i32 {
     let cap: i32 = if capacity > 0 { capacity } else { 256 };
     let bytes = (CH_SLOTS + cap.wrapping_mul(4)).max(CH_SLOTS);
@@ -454,7 +454,7 @@ pub extern "C" fn rayzor_channel_init(capacity: i32) -> i32 {
 }
 
 /// Send (blocks while full). No-op once closed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_channel_send(channel: i32, value: i32) {
     if channel == 0 {
         return;
@@ -485,7 +485,7 @@ pub extern "C" fn rayzor_channel_send(channel: i32, value: i32) {
 }
 
 /// Try-send (non-blocking). Returns 1 on success, 0 if full or closed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_channel_try_send(channel: i32, value: i32) -> i32 {
     if channel == 0 {
         return 0;
@@ -513,7 +513,7 @@ pub extern "C" fn rayzor_channel_try_send(channel: i32, value: i32) -> i32 {
 }
 
 /// Receive (blocks while empty). Returns 0 (null) if the channel is closed+empty.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_channel_receive(channel: i32) -> i32 {
     if channel == 0 {
         return 0;
@@ -543,7 +543,7 @@ pub extern "C" fn rayzor_channel_receive(channel: i32) -> i32 {
 }
 
 /// Try-receive (non-blocking). Returns the value, or 0 if empty.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_channel_try_receive(channel: i32) -> i32 {
     if channel == 0 {
         return 0;
@@ -567,7 +567,7 @@ pub extern "C" fn rayzor_channel_try_receive(channel: i32) -> i32 {
 }
 
 /// Close: mark closed and wake every blocked sender/receiver.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_channel_close(channel: i32) {
     if channel == 0 {
         return;
@@ -579,7 +579,7 @@ pub extern "C" fn rayzor_channel_close(channel: i32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_channel_is_closed(channel: i32) -> i32 {
     if channel == 0 {
         return 1;
@@ -587,7 +587,7 @@ pub extern "C" fn rayzor_channel_is_closed(channel: i32) -> i32 {
     unsafe { i32::from(atomic(channel, CH_CLOSED).load(Ordering::Relaxed) != 0) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_channel_len(channel: i32) -> i32 {
     if channel == 0 {
         return 0;
@@ -599,7 +599,7 @@ pub extern "C" fn rayzor_channel_len(channel: i32) -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_channel_capacity(channel: i32) -> i32 {
     if channel == 0 {
         return 0;
@@ -607,12 +607,12 @@ pub extern "C" fn rayzor_channel_capacity(channel: i32) -> i32 {
     unsafe { load_word(channel, CH_CAP) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_channel_is_empty(channel: i32) -> i32 {
     i32::from(rayzor_channel_len(channel) == 0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_channel_is_full(channel: i32) -> i32 {
     if channel == 0 {
         return 0;
@@ -632,38 +632,38 @@ pub extern "C" fn rayzor_channel_is_full(channel: i32) -> i32 {
 // ============================================================================
 
 /// No NUMA on wasm.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_multi_node() -> i32 {
     0
 }
 
 /// Single node.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_node_count() -> i32 {
     1
 }
 
 /// The guest can't introspect host cores; wasm parallelism comes from the worker
 /// pool, not topology. Report one logical CPU.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_cpu_count() -> i32 {
     1
 }
 
 /// Every CPU maps to node 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_cpu_to_node(_cpu: i32) -> i32 {
     0
 }
 
 /// Affinity bind is a no-op (success) in the wasm sandbox.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_bind_to_node(_node: i32) -> i32 {
     0
 }
 
 /// Unbind is a no-op (success).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_topology_unbind() -> i32 {
     0
 }
