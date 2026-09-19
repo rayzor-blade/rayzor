@@ -2191,3 +2191,54 @@ register_symbol!(
     "haxe_meta_get_statics",
     crate::type_system::haxe_meta_get_statics
 );
+
+// Emitted by the compiler; a backend given only this inventory (the benchmark
+// runner's tiered backend) cannot bind a symbol that is missing here, and a
+// function that names one silently never leaves the interpreter.
+register_symbol!("haxe_bytes_get_data", crate::haxe_sys::haxe_bytes_get_data);
+register_symbol!(
+    "haxe_bytes_of_int_array",
+    crate::haxe_sys::haxe_bytes_of_int_array
+);
+register_symbol!(
+    "haxe_channel_unbox_erased",
+    crate::type_system::haxe_channel_unbox_erased
+);
+register_symbol!(
+    "haxe_channel_unbox_try",
+    crate::type_system::haxe_channel_unbox_try
+);
+register_symbol!(
+    "haxe_dynamic_is_null",
+    crate::type_system::haxe_dynamic_is_null
+);
+register_symbol!(
+    "haxe_enum_to_string",
+    crate::type_system::haxe_enum_to_string
+);
+register_symbol!(
+    "haxe_enum_to_string_boxed",
+    crate::type_system::haxe_enum_to_string_boxed
+);
+register_symbol!("haxe_null_float_eq", crate::type_system::haxe_null_float_eq);
+register_symbol!("haxe_null_int_eq", crate::type_system::haxe_null_int_eq);
+register_symbol!(
+    "haxe_null_null_eq_float",
+    crate::type_system::haxe_null_null_eq_float
+);
+register_symbol!(
+    "haxe_null_null_eq_int",
+    crate::type_system::haxe_null_null_eq_int
+);
+register_symbol!(
+    "haxe_string_concat_ptr",
+    crate::string::haxe_string_concat_ptr
+);
+register_symbol!(
+    "haxe_type_register_to_string",
+    crate::type_system::haxe_type_register_to_string
+);
+register_symbol!(
+    "rayzor_mem_release_free_pages",
+    crate::haxe_sys::rayzor_mem_release_free_pages
+);
