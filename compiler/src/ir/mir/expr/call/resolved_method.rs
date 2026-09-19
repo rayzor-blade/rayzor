@@ -1370,7 +1370,27 @@ impl<'a> HirToMirContext<'a> {
 
                             // Prefer class-qualified lookup, but keep the global static
                             // fallback: some extern classes (e.g. Math) carry no
-                            // qualified or native name on the symbol.
+                            // qualified or native name on the symbol. Not for a
+                            // class whose source declares the method -- that
+                            // body is the target, whatever runtime row shares
+                            // the name (`Int64.fromFloat` vs `SIMD4i32.fromFloat`).
+                            let source_owner: Option<(String, bool)> =
+                                self.static_sig_index.as_ref().and_then(|index| {
+                                    let index = index.borrow();
+                                    [
+                                        qualified_name_opt.as_deref(),
+                                        object_qualified_name_opt.as_deref(),
+                                        Some(class_name),
+                                    ]
+                                    .into_iter()
+                                    .flatten()
+                                    .find_map(|c| index.indexed_static_owner(c, method_name))
+                                    .map(|owner| {
+                                        let has_body =
+                                            index.indexed_static_has_body(owner, method_name);
+                                        (owner.to_string(), has_body)
+                                    })
+                                });
                             let runtime_func_opt = qualified_name_opt
                                 .as_deref()
                                 .and_then(|class_qualified_name| {
@@ -1404,6 +1424,9 @@ impl<'a> HirToMirContext<'a> {
                                     )
                                 })
                                 .or_else(|| {
+                                    if source_owner.is_some() {
+                                        return None;
+                                    }
                                     self.stdlib_mapping
                                         .find_static_method_by_name_and_params(
                                             method_name,
@@ -1411,6 +1434,63 @@ impl<'a> HirToMirContext<'a> {
                                         )
                                         .map(|(_, mapping)| mapping.runtime_name)
                                 });
+
+                            // The class's own static, in a module that has not
+                            // lowered yet (a cycle: `haxe.xml.Parser` calls
+                            // `Xml.createDocument` while `Xml.parse` calls
+                            // `Parser.parse`). Linked by qualified name once
+                            // that module's body arrives, as a Variable callee
+                            // is in `try_forward_declared_call`.
+                            if runtime_func_opt.is_none() {
+                                if let Some((owner, true)) = &source_owner {
+                                    let key = format!("{owner}.{method_name}");
+                                    let mut arg_regs = Vec::new();
+                                    let mut param_types = Vec::new();
+                                    for arg in static_args {
+                                        if let Some(reg) = self.lower_expression(arg) {
+                                            arg_regs.push(reg);
+                                            param_types.push(self.convert_type(arg.ty));
+                                        }
+                                    }
+                                    // Trailing optional parameters the call leaves
+                                    // out take the zero of their declared type, as
+                                    // `fill_default_args` gives a cross-module call.
+                                    let declared: Vec<Option<String>> = self
+                                        .static_sig_index
+                                        .as_ref()
+                                        .and_then(|i| {
+                                            i.borrow()
+                                                .indexed_static_param_kinds(owner, method_name)
+                                                .map(|k| k.to_vec())
+                                        })
+                                        .unwrap_or_default();
+                                    for name in declared.iter().skip(arg_regs.len()) {
+                                        let (ty, zero) = match name.as_deref() {
+                                            Some("Int") => (IrType::I32, IrValue::I32(0)),
+                                            Some("Float") => (IrType::F64, IrValue::F64(0.0)),
+                                            Some("Bool") => (IrType::Bool, IrValue::Bool(false)),
+                                            Some("String") => (IrType::String, IrValue::I64(0)),
+                                            _ => (IrType::I64, IrValue::I64(0)),
+                                        };
+                                        let Some(reg) = self.builder.build_const(zero) else {
+                                            break;
+                                        };
+                                        arg_regs.push(reg);
+                                        param_types.push(ty);
+                                    }
+                                    self.builder.call_label = Some(format!("FORWARD_REF:{key}"));
+                                    let fid = self.register_stdlib_mir_forward_ref(
+                                        &key,
+                                        param_types,
+                                        result_type.clone(),
+                                    );
+                                    return self.builder.build_call_direct(
+                                        fid,
+                                        arg_regs,
+                                        result_type,
+                                    );
+                                }
+                            }
 
                             if let Some(runtime_func) = runtime_func_opt {
                                 // Static methods take no receiver, so the object is dropped.

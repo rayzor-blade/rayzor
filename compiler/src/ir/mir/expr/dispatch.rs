@@ -858,18 +858,49 @@ impl<'a> HirToMirContext<'a> {
         let result = match &expr.kind {
             HirExprKind::Literal(lit) => self.lower_literal(lit, expr.ty),
 
-            HirExprKind::Variable { .. } => self.lower_variable_expr(expr),
+            HirExprKind::Variable { symbol, .. } => {
+                let r = self.lower_variable_expr(expr);
+                if r.is_none() && crate::debug_flags::lower_trace() {
+                    eprintln!(
+                        "[lower-none] variable {} : {}",
+                        self.trace_symbol(*symbol),
+                        self.trace_type(expr.ty)
+                    );
+                }
+                r
+            }
             HirExprKind::Field { .. } => self.lower_field_expr(expr),
             HirExprKind::Index { .. } => self.lower_index_expr(expr),
-            HirExprKind::Call { .. } => {
+            HirExprKind::Call { callee, target, .. } => {
                 let reg = self.lower_call(expr);
                 if let Some(reg) = reg {
                     self.note_dynamic_stdlib_result(expr, reg);
+                } else if crate::debug_flags::lower_trace() && !self.is_void_type(expr.ty) {
+                    let callee = match &callee.kind {
+                        HirExprKind::Variable { symbol, .. }
+                        | HirExprKind::Field { field: symbol, .. } => self.trace_symbol(*symbol),
+                        other => format!("{other:?}").chars().take(40).collect(),
+                    };
+                    eprintln!(
+                        "[lower-none] call {callee} target={target:?} label={:?} : {}",
+                        self.builder.call_label,
+                        self.trace_type(expr.ty)
+                    );
                 }
                 reg
             }
             HirExprKind::New { .. } => self.lower_new(expr),
-            HirExprKind::Unary { .. } => self.lower_unary(expr),
+            HirExprKind::Unary { op, operand } => {
+                let r = self.lower_unary(expr);
+                if r.is_none() && crate::debug_flags::lower_trace() {
+                    eprintln!(
+                        "[lower-none] unary {op:?} on {} : {}",
+                        self.trace_type(operand.ty),
+                        self.trace_type(expr.ty)
+                    );
+                }
+                r
+            }
             HirExprKind::Binary { .. } => self.lower_binary(expr),
             HirExprKind::Cast { .. } => self.lower_cast(expr),
             HirExprKind::TypeCheck { .. } => self.lower_type_check(expr),
@@ -877,7 +908,14 @@ impl<'a> HirToMirContext<'a> {
                 condition,
                 then_expr,
                 else_expr,
-            } => self.lower_conditional_typed(condition, then_expr, else_expr, Some(expr.ty)),
+            } => {
+                let r =
+                    self.lower_conditional_typed(condition, then_expr, else_expr, Some(expr.ty));
+                if r.is_none() && crate::debug_flags::lower_trace() && !self.is_void_type(expr.ty) {
+                    eprintln!("[lower-none] if : {}", self.trace_type(expr.ty));
+                }
+                r
+            }
 
             HirExprKind::Block(block) => self.lower_block_expr(block),
 

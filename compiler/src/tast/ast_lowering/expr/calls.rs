@@ -1708,7 +1708,14 @@ impl<'a> AstLowering<'a> {
                                     (symbol_id, symbol.kind)
                                 };
 
-                                if resolved_kind == crate::tast::symbols::SymbolKind::Class {
+                                // An abstract's statics are called the same way
+                                // (`haxe.Int64.fromFloat`), as the one-segment
+                                // form above already allows.
+                                if matches!(
+                                    resolved_kind,
+                                    crate::tast::symbols::SymbolKind::Class
+                                        | crate::tast::symbols::SymbolKind::Abstract
+                                ) {
                                     // Resolved the qualified class — now handle as static method call
                                     let class_symbol = if let Ok(type_table) =
                                         self.context.type_table.try_borrow()
@@ -2023,6 +2030,58 @@ impl<'a> AstLowering<'a> {
                 }
             }
             _ => {
+                // A bare name a `import pkg.Type.*` brings in is the call
+                // `pkg.Type.name(..)`: lowered as that, so it binds to the
+                // owner's static and not to a same-named function elsewhere.
+                if let ExprKind::Ident(name) = &expr.kind {
+                    let interned = self.context.string_interner.intern(name);
+                    if self.resolve_symbol_in_scope_hierarchy(interned).is_none() {
+                        if let Some((owner, _)) = self.resolve_wildcard_static_owner(interned) {
+                            // The owner's bare name when it resolves to the owner
+                            // itself, else its qualified path (a package walk).
+                            let owner_sym = self.context.symbol_table.get_symbol(owner);
+                            let bare = owner_sym.and_then(|s| {
+                                let bare = self.context.string_interner.get(s.name)?;
+                                (self.resolve_symbol_in_scope_hierarchy(s.name) == Some(owner))
+                                    .then(|| bare.to_owned())
+                            });
+                            let owner_path = bare.or_else(|| {
+                                owner_sym
+                                    .and_then(|s| {
+                                        self.context
+                                            .string_interner
+                                            .get(s.qualified_name.unwrap_or(s.name))
+                                    })
+                                    .map(str::to_owned)
+                            });
+                            if let Some(owner_qn) = owner_path {
+                                let mut parts = owner_qn.split('.');
+                                let mut callee = Expr {
+                                    kind: ExprKind::Ident(parts.next().unwrap_or("").to_string()),
+                                    span: expr.span,
+                                };
+                                for part in parts.chain(std::iter::once(name.as_str())) {
+                                    callee = Expr {
+                                        kind: ExprKind::Field {
+                                            expr: Box::new(callee),
+                                            field: part.to_string(),
+                                            is_optional: false,
+                                        },
+                                        span: expr.span,
+                                    };
+                                }
+                                let synthetic = Expr {
+                                    kind: ExprKind::Call {
+                                        expr: Box::new(callee),
+                                        args: args.to_vec(),
+                                    },
+                                    span: expression.span,
+                                };
+                                return self.lower_expression(&synthetic);
+                            }
+                        }
+                    }
+                }
                 // Regular function call
                 let mut func_expr = self.lower_expression(expr)?;
 

@@ -21,6 +21,12 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct StaticMethodSig {
     pub params: Vec<Option<parser::Type>>,
     pub return_type: Option<parser::Type>,
+    /// A declaration with a definition: an `extern` method has none, and a
+    /// forward reference to it would never bind.
+    pub has_body: bool,
+    /// Each parameter's type as a bare name (`Int`, `Bool`, `String`): the
+    /// annotation's, else the default value's literal kind, else None.
+    pub param_kinds: Vec<Option<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -260,6 +266,80 @@ impl StaticSigIndex {
             .is_some_and(|c| c.instances.contains_key(name))
     }
 
+    /// The already-indexed class declaring `method` as a static, by qualified
+    /// name: `class_name` through typedef aliases, or a bare name exactly one
+    /// indexed class spells. Reads only; nothing is parsed or recorded missing.
+    pub fn indexed_static_owner(&self, class_name: &str, method: &str) -> Option<&str> {
+        let mut name = class_name;
+        for _ in 0..4 {
+            if let Some((key, c)) = self.classes.get_key_value(name) {
+                return c.statics.contains_key(method).then_some(key.as_str());
+            }
+            match self.aliases.get(name) {
+                Some(target) => name = target,
+                None => break,
+            }
+        }
+        if class_name.contains('.') {
+            return None;
+        }
+        let mut declaring = self.bare_to_qualified.get(class_name)?.iter().filter(|q| {
+            self.classes
+                .get(*q)
+                .is_some_and(|c| c.statics.contains_key(method))
+        });
+        let only = declaring.next()?;
+        declaring.next().is_none().then_some(only.as_str())
+    }
+
+    /// Whether an already-indexed class declares `method` as a static.
+    pub fn indexed_declares_static(&self, class_name: &str, method: &str) -> bool {
+        self.indexed_static_owner(class_name, method).is_some()
+    }
+
+    /// Whether the static `method` of an already-indexed class has a body,
+    /// so a forward reference to `owner.method` will bind once its module
+    /// lowers.
+    pub fn indexed_static_has_body(&self, owner: &str, method: &str) -> bool {
+        self.classes
+            .get(owner)
+            .and_then(|c| c.statics.get(method))
+            .is_some_and(|m| m.has_body)
+    }
+
+    /// The declared parameters of an indexed static as bare type names (see
+    /// `StaticMethodSig::param_kinds`). Sizes a forward reference to a call
+    /// that leaves trailing optional arguments out.
+    pub fn indexed_static_param_kinds(
+        &self,
+        owner: &str,
+        method: &str,
+    ) -> Option<&[Option<String>]> {
+        let sig = self.classes.get(owner)?.statics.get(method)?;
+        Some(&sig.param_kinds)
+    }
+
+    fn param_kind(p: &parser::FunctionParam) -> Option<String> {
+        let mut t = p.type_hint.as_ref();
+        while let Some(ty) = t {
+            match ty {
+                parser::Type::Optional { inner, .. } | parser::Type::Parenthesis { inner, .. } => {
+                    t = Some(inner)
+                }
+                parser::Type::Path { path, .. } => return Some(path.name.clone()),
+                _ => break,
+            }
+        }
+        let kind = match p.default_value.as_deref().map(|e| &e.kind)? {
+            parser::ExprKind::Int(_) => "Int",
+            parser::ExprKind::Float(_) => "Float",
+            parser::ExprKind::Bool(_) => "Bool",
+            parser::ExprKind::String(_) => "String",
+            _ => return None,
+        };
+        Some(kind.to_string())
+    }
+
     /// Record all class/abstract static signatures and typedef aliases in a
     /// parsed file. Idempotent per file.
     pub fn index_file(&mut self, file: &parser::HaxeFile) {
@@ -400,6 +480,8 @@ impl StaticSigIndex {
                 .or_insert_with(|| StaticMethodSig {
                     params: func.params.iter().map(|p| p.type_hint.clone()).collect(),
                     return_type: func.return_type.clone(),
+                    has_body: func.body.is_some(),
+                    param_kinds: func.params.iter().map(Self::param_kind).collect(),
                 });
         }
         self.bare_to_qualified

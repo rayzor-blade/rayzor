@@ -436,7 +436,7 @@ impl<'a> AstLowering<'a> {
     /// declaring keyword picks the kind: an `interface` placeholder left as a
     /// Class makes receivers typed by it call the abstract method by name
     /// instead of dispatching through the fat pointer.
-    fn create_import_placeholder(
+    pub(crate) fn create_import_placeholder(
         &mut self,
         name: InternedString,
         qualified_name: &str,

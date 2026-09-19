@@ -305,7 +305,10 @@ impl<'a> HirToMirContext<'a> {
             *fell_through = true;
             return None;
         };
-        if *is_method && !args.is_empty() {
+        // `Type.method(..)` typed as a method on the type itself is a static
+        // call: the type is not an argument, and this probe reads it as the
+        // receiver whose class owns the method.
+        if *is_method && !args.is_empty() && !self.is_class_symbol_expr(&args[0]) {
             let method_name_i = self.symbol_table.get_symbol(*symbol).map(|s| s.name);
             // Check if receiver class has runtime mappings (skip early resolution if so)
             let receiver_has_runtime_mapping = {

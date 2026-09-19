@@ -29,6 +29,48 @@ impl<'a> AstLowering<'a> {
     /// Both the enclosing scope and the module scope are searched, because an
     /// import written at the top of a file belongs to the latter.
     fn resolve_wildcard_static_import(&self, name: InternedString) -> Option<SymbolId> {
+        self.resolve_wildcard_static_owner(name).map(|(_, sym)| sym)
+    }
+
+    /// A type of the current package whose module has not lowered yet -- Haxe
+    /// resolves those without an import. It gets the placeholder an import
+    /// would mint, so `Type.method(..)` links by qualified name later instead
+    /// of decaying to `this.Type`.
+    fn same_package_type_placeholder(&mut self, name: &str) -> Option<SymbolId> {
+        if !name.chars().next().is_some_and(char::is_uppercase) {
+            return None;
+        }
+        let package = self
+            .context
+            .current_package
+            .and_then(|p| self.context.namespace_resolver.get_package(p))
+            .map(|p| {
+                p.full_path
+                    .iter()
+                    .filter_map(|s| self.context.string_interner.get(*s))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            })?;
+        let qualified = if package.is_empty() {
+            name.to_string()
+        } else {
+            format!("{package}.{name}")
+        };
+        self.context.namespace_resolver.declared_kind(&qualified)?;
+        let interned = self.context.intern_string(name);
+        let sym = self.create_import_placeholder(interned, &qualified);
+        self.context
+            .scope_tree
+            .get_scope_mut(ScopeId::first())?
+            .add_symbol(sym, interned);
+        Some(sym)
+    }
+
+    /// The (owner type, static member) a `import pkg.Type.*` brings `name` in as.
+    pub(crate) fn resolve_wildcard_static_owner(
+        &self,
+        name: InternedString,
+    ) -> Option<(SymbolId, SymbolId)> {
         let probe = crate::debug_flags::wildcard_log();
         // The whole chain, not just the innermost and outermost: an import
         // written at the top of a file is registered on that file's scope,
@@ -43,17 +85,40 @@ impl<'a> AstLowering<'a> {
                 // namespace resolver does not key on -- `import Helper.*` for a
                 // class in no package resolves to nothing there. Fall back to
                 // the scope chain, which is where such a type is registered.
+                // ... and an abstract whose module shares its root symbol
+                // with a typedef (`haxe.Int64`) is not keyed there either:
+                // the qualified name, then the bare name, find it.
                 let owner = self
                     .context
                     .namespace_resolver
                     .lookup_symbol(&import.package_path)
                     .or_else(|| {
-                        if import.package_path.package.is_empty() {
-                            self.resolve_symbol_in_scope_hierarchy(import.package_path.name)
-                        } else {
-                            None
-                        }
-                    });
+                        let mut parts: Vec<&str> = import
+                            .package_path
+                            .package
+                            .iter()
+                            .filter_map(|p| self.context.string_interner.get(*p))
+                            .collect();
+                        parts.push(self.context.string_interner.get(import.package_path.name)?);
+                        let qn = self.context.string_interner.intern(&parts.join("."));
+                        self.context.symbol_table.resolve_qualified_name(qn)
+                    })
+                    .or_else(|| self.resolve_symbol_in_scope_hierarchy(import.package_path.name));
+                // A plain `import pkg.Type` beside the wildcard registers a
+                // placeholder under the same name; the members live on the
+                // declaration's own symbol.
+                let owner = owner.and_then(|o| {
+                    if self.class_fields.contains_key(&o) {
+                        return Some(o);
+                    }
+                    let wanted = import.package_path.name;
+                    self.class_fields.keys().copied().find(|k| {
+                        self.context
+                            .symbol_table
+                            .get_symbol(*k)
+                            .is_some_and(|s| s.name == wanted)
+                    })
+                });
                 if probe {
                     let owner_name = self
                         .context
@@ -76,7 +141,7 @@ impl<'a> AstLowering<'a> {
                         .iter()
                         .find(|(field_name, _, is_static)| *field_name == name && *is_static)
                     {
-                        return Some(*field_symbol);
+                        return Some((owner, *field_symbol));
                     }
                 }
             }
@@ -220,6 +285,25 @@ impl<'a> AstLowering<'a> {
                 {
                     Some(s) => s,
                     None => {
+                        if let Some(sym) = self.same_package_type_placeholder(name) {
+                            return Ok(TypedExpression {
+                                expr_type: self
+                                    .context
+                                    .symbol_table
+                                    .get_symbol(sym)
+                                    .map(|s| s.type_id)
+                                    .unwrap_or_else(|| {
+                                        self.context.type_table.borrow().dynamic_type()
+                                    }),
+                                kind: TypedExpressionKind::Variable { symbol_id: sym },
+                                usage: VariableUsage::Copy,
+                                lifetime_id: crate::tast::LifetimeId::first(),
+                                source_location: self
+                                    .context
+                                    .create_location_from_span(expression.span),
+                                metadata: ExpressionMetadata::default(),
+                            });
+                        }
                         // Abstract-method implicit `this`: in an abstract, `this` IS the
                         // underlying value, so a bare member name that isn't a local/param
                         // is `this.<name>` — which dispatches to the underlying type's field
@@ -279,25 +363,49 @@ impl<'a> AstLowering<'a> {
                 // name (for example `unit.Bar` versus `Foo.Bar`), the root
                 // scope cannot represent Haxe's expected-type disambiguation.
                 // Redirect to the expected abstract's field before applying
-                // ordinary enum-variant disambiguation below.
-                if let Some(expected_abstract) = prefer.and_then(|expected_ty| {
-                    let type_table = self.context.type_table.borrow();
-                    type_table.get(expected_ty).and_then(|ty| match &ty.kind {
-                        crate::tast::core::TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
-                        _ => None,
-                    })
-                }) {
-                    if let Some(field_symbol) =
-                        self.class_fields
-                            .get(&expected_abstract)
-                            .and_then(|fields| {
-                                fields
-                                    .iter()
-                                    .find(|(field_name, _, is_static)| {
-                                        *field_name == id_name && *is_static
-                                    })
-                                    .map(|(_, field_symbol, _)| *field_symbol)
+                // ordinary enum-variant disambiguation below. A local or a
+                // parameter shadows it, and only a constant qualifies: the
+                // abstract's static methods are not bare names in Haxe.
+                let shadows_expected =
+                    self.context
+                        .symbol_table
+                        .get_symbol(symbol_id)
+                        .is_some_and(|s| {
+                            matches!(
+                                s.kind,
+                                crate::tast::symbols::SymbolKind::Variable
+                                    | crate::tast::symbols::SymbolKind::Parameter
+                            )
+                        });
+                if let Some(expected_abstract) =
+                    prefer
+                        .filter(|_| !shadows_expected)
+                        .and_then(|expected_ty| {
+                            let type_table = self.context.type_table.borrow();
+                            type_table.get(expected_ty).and_then(|ty| match &ty.kind {
+                                crate::tast::core::TypeKind::Abstract { symbol_id, .. } => {
+                                    Some(*symbol_id)
+                                }
+                                _ => None,
                             })
+                        })
+                {
+                    if let Some(field_symbol) = self
+                        .class_fields
+                        .get(&expected_abstract)
+                        .and_then(|fields| {
+                            fields
+                                .iter()
+                                .find(|(field_name, _, is_static)| {
+                                    *field_name == id_name && *is_static
+                                })
+                                .map(|(_, field_symbol, _)| *field_symbol)
+                        })
+                        .filter(|f| {
+                            self.context.symbol_table.get_symbol(*f).is_some_and(|s| {
+                                s.kind != crate::tast::symbols::SymbolKind::Function
+                            })
+                        })
                     {
                         symbol_id = field_symbol;
                     }

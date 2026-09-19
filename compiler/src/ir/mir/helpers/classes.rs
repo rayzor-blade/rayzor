@@ -33,6 +33,49 @@ impl<'a> HirToMirContext<'a> {
         })
     }
 
+    /// `name(kind, qualified)` of a symbol, for `RAYZOR_LOWER_TRACE` lines.
+    pub(crate) fn trace_symbol(&self, symbol: SymbolId) -> String {
+        match self.symbol_table.get_symbol(symbol) {
+            Some(s) => format!(
+                "{}({:?}, {})",
+                self.string_interner.get(s.name).unwrap_or("?"),
+                s.kind,
+                s.qualified_name
+                    .and_then(|q| self.string_interner.get(q))
+                    .unwrap_or("-")
+            ),
+            None => format!("{symbol:?}"),
+        }
+    }
+
+    pub(crate) fn is_void_type(&self, ty: TypeId) -> bool {
+        matches!(
+            self.type_table.get(ty).map(|t| &t.kind),
+            Some(crate::tast::TypeKind::Void)
+        )
+    }
+
+    /// The callee's name, for `RAYZOR_LOWER_TRACE` lines.
+    pub(crate) fn trace_callee(&self, expr: &HirExpr) -> String {
+        let HirExprKind::Call { callee, .. } = &expr.kind else {
+            return "?".into();
+        };
+        match &callee.kind {
+            HirExprKind::Variable { symbol, .. } | HirExprKind::Field { field: symbol, .. } => {
+                self.trace_symbol(*symbol)
+            }
+            other => format!("{other:?}").chars().take(40).collect(),
+        }
+    }
+
+    /// The first characters of a type's kind, for `RAYZOR_LOWER_TRACE` lines.
+    pub(crate) fn trace_type(&self, ty: TypeId) -> String {
+        match self.type_table.get(ty) {
+            Some(t) => format!("{:?}", t.kind).chars().take(60).collect(),
+            None => format!("{ty:?}"),
+        }
+    }
+
     /// Compare two class names for the owner-class property guard, tolerating
     /// qualified-vs-bare differences across compilation contexts (e.g.
     /// `haxe.io.Bytes` vs `Bytes`, `StringBuf` vs `haxe.StringBuf`). Matches

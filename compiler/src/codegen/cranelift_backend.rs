@@ -819,6 +819,12 @@ impl CraneliftBackend {
                 continue;
             }
             if function.uses_wide_vectors() {
+                if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                    eprintln!(
+                        "[trap-stub:wide-vector] {:?} {} (qn={:?})",
+                        func_id, function.name, function.qualified_name
+                    );
+                }
                 continue;
             }
             // Skip forward-reference stubs (1 block, 0 instructions, Unreachable).
@@ -1117,6 +1123,12 @@ impl CraneliftBackend {
                 continue;
             }
             if function.uses_wide_vectors() {
+                if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                    eprintln!(
+                        "[trap-stub:wide-vector] {:?} {} (qn={:?})",
+                        func_id, function.name, function.qualified_name
+                    );
+                }
                 continue;
             }
             // Forward-reference stub skip (see compile_module for the rationale).

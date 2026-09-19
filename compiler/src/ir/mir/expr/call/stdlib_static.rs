@@ -269,15 +269,15 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // With no qualified_name (e.g. Reflect.compare from import
-                    // files), find the method by scanning known classes; static
-                    // methods only, to avoid false positives. A qualified name is
-                    // tried class-first, before the global static-name scan.
+                    // A qualified name is tried class-first and never by bare
+                    // name: `F1.fromFloat` is not `SIMD4i32.fromFloat`. Only a
+                    // symbol with no qualified name at all (e.g. Reflect.compare
+                    // from import files) is found by scanning the static rows.
                     let mut static_fallback = None;
-                    if let Some(qual_name_str) = sym_info
+                    let qualified = sym_info
                         .qualified_name
-                        .and_then(|q| self.string_interner.get(q))
-                    {
+                        .and_then(|q| self.string_interner.get(q));
+                    if let Some(qual_name_str) = qualified {
                         let parts: Vec<&str> = qual_name_str.split('.').collect();
                         if parts.len() >= 2 {
                             let mut class_candidates: Vec<String> = Vec::new();
@@ -303,7 +303,7 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    if static_fallback.is_none() {
+                    if static_fallback.is_none() && qualified.is_none() {
                         debug!(
                             "[STATIC-FALLBACK] Trying global find_static_method_by_name_and_params('{}', {})...",
                             method_name,

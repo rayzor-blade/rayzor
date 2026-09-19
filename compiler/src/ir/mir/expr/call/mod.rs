@@ -30,10 +30,18 @@ use std::rc::Rc;
 /// Runs one call-shape probe, returning its result unless the probe reports
 /// that the callee was not its shape.
 macro_rules! probe {
-    ($self:ident.$m:ident($($a:expr),* $(,)?)) => {{
+    ($self:ident.$m:ident($first:expr $(, $a:expr)* $(,)?)) => {{
         let mut fell_through = false;
-        let lowered = $self.$m($($a,)* &mut fell_through);
+        let lowered = $self.$m($first, $($a,)* &mut fell_through);
         if !fell_through {
+            if crate::debug_flags::lower_trace() {
+                eprintln!(
+                    "[lower-call] {} by {} ({})",
+                    if lowered.is_some() { "lowered" } else { "consumed" },
+                    stringify!($m),
+                    $self.trace_callee($first)
+                );
+            }
             return lowered;
         }
     }};
@@ -1267,12 +1275,11 @@ impl<'a> HirToMirContext<'a> {
                         // consulted alone, and then only if it identifies one
                         // binding — never a pick among classes that share it.
                         let arity = static_args.len();
+                        let owner_qname = sym_info
+                            .qualified_name
+                            .and_then(|qn| self.string_interner.get(qn));
                         let found_mapping = self
-                            .class_key_from_method_qname(
-                                sym_info
-                                    .qualified_name
-                                    .and_then(|qn| self.string_interner.get(qn)),
-                            )
+                            .class_key_from_method_qname(owner_qname)
                             .and_then(|key| {
                                 self.stdlib_mapping
                                     .get(&crate::stdlib::MethodSignature {
@@ -1285,6 +1292,9 @@ impl<'a> HirToMirContext<'a> {
                                     .map(|mapping| (key, mapping))
                             })
                             .or_else(|| {
+                                if owner_qname.is_some() {
+                                    return None;
+                                }
                                 self.stdlib_mapping
                                     .find_unique_static_by_name_and_params(method_static, arity)
                                     .map(|(sig, mapping)| {
@@ -1412,6 +1422,9 @@ impl<'a> HirToMirContext<'a> {
         // for static calls left unresolved by cross-module stdlib compilation.
         probe!(self.try_forward_declared_call(expr, result_type.clone()));
 
+        if crate::debug_flags::lower_trace() {
+            eprintln!("[lower-call] indirect ({})", self.trace_callee(expr));
+        }
         self.lower_indirect_call(expr)
     }
 }

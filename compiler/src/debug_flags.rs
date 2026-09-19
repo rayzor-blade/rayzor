@@ -42,6 +42,13 @@ cached_flag!(
     "RAYZOR_PROBE_CALLTARGET"
 );
 cached_flag!(
+    /// `RAYZOR_LOWER_TRACE`: name each expression MIR lowering produced no
+    /// value for -- a variable, unary, conditional or call -- and the probe
+    /// that claimed each call.
+    lower_trace,
+    "RAYZOR_LOWER_TRACE"
+);
+cached_flag!(
     /// `RAYZOR_VECCALL_DIAG`: report direct calls taking vector arguments.
     veccall_diag,
     "RAYZOR_VECCALL_DIAG"
