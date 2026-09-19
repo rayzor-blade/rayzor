@@ -337,6 +337,7 @@ rayzor.Bytes compare static=false ctor=false params=1 -> haxe_bytes_compare
 rayzor.Bytes fill static=false ctor=false params=3 -> haxe_bytes_fill
 rayzor.Bytes free static=false ctor=false params=0 -> haxe_bytes_free
 rayzor.Bytes get static=false ctor=false params=1 -> haxe_bytes_get
+rayzor.Bytes getData static=false ctor=false params=0 -> haxe_bytes_get_data
 rayzor.Bytes getDouble static=false ctor=false params=1 -> haxe_bytes_get_double
 rayzor.Bytes getFloat static=false ctor=false params=1 -> haxe_bytes_get_float
 rayzor.Bytes getInt16 static=false ctor=false params=1 -> haxe_bytes_get_int16
@@ -344,6 +345,7 @@ rayzor.Bytes getInt32 static=false ctor=false params=1 -> haxe_bytes_get_int32
 rayzor.Bytes getInt64 static=false ctor=false params=1 -> haxe_bytes_get_int64
 rayzor.Bytes length static=false ctor=false params=0 -> haxe_bytes_length
 rayzor.Bytes loadI32AlignedUnchecked static=false ctor=false params=1 -> rayzor_bytes_load_i32_aligned_unchecked
+rayzor.Bytes new static=true ctor=true params=2 -> haxe_bytes_of_int_array
 rayzor.Bytes ofString static=true ctor=false params=1 -> haxe_bytes_of_string
 rayzor.Bytes set static=false ctor=false params=2 -> haxe_bytes_set
 rayzor.Bytes setDouble static=false ctor=false params=2 -> haxe_bytes_set_double
