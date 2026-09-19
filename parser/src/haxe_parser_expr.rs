@@ -572,17 +572,10 @@ fn int_literal<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
     let start = position(full, input);
     let (input, _) = ws(input)?;
 
-    let (input, value) = alt((
-        // Hex literal
-        map(preceded(tag("0x"), hex_digit1), |s: &str| {
-            i64::from_str_radix(s, 16).unwrap_or(0)
-        }),
-        // Octal literal
-        map(preceded(tag("0"), oct_digit1), |s: &str| {
-            i64::from_str_radix(s, 8).unwrap_or(0)
-        }),
-        // Decimal literal
-        map(digit1, |s: &str| s.parse().unwrap_or(0)),
+    let (input, text) = alt((
+        recognize(preceded(tag("0x"), hex_digit1)),
+        recognize(preceded(tag("0"), oct_digit1)),
+        digit1,
     ))
     .parse(input)?;
 
@@ -591,7 +584,7 @@ fn int_literal<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
     Ok((
         input,
         Expr {
-            kind: ExprKind::Int(value),
+            kind: crate::rd::expr::int_literal_kind(text, Span::new(start, end)),
             span: Span::new(start, end),
         },
     ))

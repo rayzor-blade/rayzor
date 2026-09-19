@@ -614,6 +614,7 @@ impl CompilationUnit {
             self.import_interface_vtables.clone(),
             self.import_function_param_iface_names.clone(),
             self.import_field_class_names.clone(),
+            self.import_abstract_cast_rules.clone(),
             Some(Rc::clone(&self.static_sig_index)),
         ) {
             Ok(result) => result,
@@ -772,6 +773,12 @@ impl CompilationUnit {
         for (sym, name) in mir_result.field_class_names {
             self.import_field_class_names.insert(sym, name);
         }
+        self.import_abstract_cast_rules
+            .from
+            .extend(mir_result.abstract_cast_rules.from);
+        self.import_abstract_cast_rules
+            .to
+            .extend(mir_result.abstract_cast_rules.to);
         for (sym, val) in mir_result.property_access_map {
             self.import_property_access_map.insert(sym, val);
         }

@@ -893,6 +893,16 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
+                            // A symbol that names its owner was resolved by the
+                            // typer; the owner had no row for it, and no other
+                            // class's same-named row is it (`Int64.toInt` is not
+                            // `Usize.toInt`). Only an owner-less symbol goes on
+                            // to the return-type inference and the class scan.
+                            if method_sym.qualified_name.is_some() {
+                                *fell_through = true;
+                                return None;
+                            }
+
                             // No usable qualified name: infer the class from the return type
                             // (Arc.init, Mutex.init, ...).
                             let inferred_class = {
@@ -1545,8 +1555,15 @@ impl<'a> HirToMirContext<'a> {
             // is a class reference, not a receiver, and `using` desugaring already put
             // the real receiver in args — so don't prepend it as 'this'.
             let is_static_stdlib = !has_self_param;
+            // An abstract's static called on a value (`x.toInt()`, with `x` an
+            // Int64) has that value as its first parameter; the typer does not
+            // move it into the arguments the way `using` does.
+            let receiver_is_arg = is_static_stdlib
+                && !self.is_class_symbol_expr(object)
+                && args.len() + 1 == expected_param_types.len();
+            let prepend_receiver = !is_static_stdlib || receiver_is_arg;
 
-            let mut arg_regs = if is_static_stdlib {
+            let mut arg_regs = if !prepend_receiver {
                 Vec::new()
             } else {
                 let obj_reg = self.lower_expression(object)?;
@@ -1558,7 +1575,7 @@ impl<'a> HirToMirContext<'a> {
                 let actual_ty = self.convert_type(arg.ty);
 
                 // Instance methods offset by 1 for 'this'.
-                let param_idx = if is_static_stdlib { i } else { i + 1 };
+                let param_idx = if prepend_receiver { i + 1 } else { i };
                 let expected_ty = expected_param_types
                     .get(param_idx)
                     .cloned()
@@ -1580,10 +1597,10 @@ impl<'a> HirToMirContext<'a> {
             let param_types = if expected_param_types.len() == arg_regs.len() {
                 expected_param_types.clone()
             } else {
-                let mut params = if is_static_stdlib {
-                    Vec::new()
-                } else {
+                let mut params = if prepend_receiver {
                     vec![IrType::Ptr(Box::new(IrType::U8))]
+                } else {
+                    Vec::new()
                 };
                 for arg in args {
                     params.push(self.convert_type(arg.ty));

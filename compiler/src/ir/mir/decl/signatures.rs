@@ -91,6 +91,10 @@ impl<'a> HirToMirContext<'a> {
             hir_func.params.iter().map(|p| p.default.clone()).collect();
         if defaults.iter().any(|d| d.is_some()) {
             self.function_param_defaults.insert(func_id, defaults);
+            self.function_param_symbols.insert(
+                func_id,
+                hir_func.params.iter().map(|p| p.symbol_id).collect(),
+            );
         }
 
         // Store parameter HIR types for structural subtyping materialization at call sites
@@ -252,6 +256,10 @@ impl<'a> HirToMirContext<'a> {
             hir_func.params.iter().map(|p| p.default.clone()).collect();
         if defaults.iter().any(|d| d.is_some()) {
             self.function_param_defaults.insert(func_id, defaults);
+            self.function_param_symbols.insert(
+                func_id,
+                hir_func.params.iter().map(|p| p.symbol_id).collect(),
+            );
         }
 
         // Store parameter HIR types for structural subtyping materialization at call sites
@@ -332,6 +340,10 @@ impl<'a> HirToMirContext<'a> {
             .collect();
         if defaults.iter().any(|d| d.is_some()) {
             self.function_param_defaults.insert(func_id, defaults);
+            self.function_param_symbols.insert(
+                func_id,
+                constructor.params.iter().map(|p| p.symbol_id).collect(),
+            );
         }
 
         // Store parameter HIR types for structural subtyping materialization at call sites
@@ -406,6 +418,10 @@ impl<'a> HirToMirContext<'a> {
             .collect();
         if defaults.iter().any(|d| d.is_some()) {
             self.function_param_defaults.insert(func_id, defaults);
+            self.function_param_symbols.insert(
+                func_id,
+                constructor.params.iter().map(|p| p.symbol_id).collect(),
+            );
         }
 
         // Store parameter HIR types for structural subtyping materialization at call sites

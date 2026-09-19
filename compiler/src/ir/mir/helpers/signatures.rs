@@ -296,10 +296,48 @@ impl<'a> HirToMirContext<'a> {
             if user_arg_count >= defaults.len() {
                 return; // All args provided
             }
+            // A default reads the callee's earlier parameters (`b:Int = a`) and
+            // its `this`: while it lowers here, those names are the arguments
+            // already in place. A method's list leaves `this` out, so it sits
+            // one before the list; a constructor's list starts with it.
+            let symbols = self
+                .function_param_symbols
+                .get(&func_id)
+                .cloned()
+                .unwrap_or_default();
+            // `this` lowers through SymbolId(0).
+            let this_symbol = SymbolId::from_raw(0);
+            let list_offset = usize::from(has_implicit_this);
+            let saved: Vec<(SymbolId, Option<IrId>)> = symbols
+                .iter()
+                .chain(std::iter::once(&this_symbol))
+                .map(|s| (*s, self.symbol_map.get(s).copied()))
+                .collect();
+            for (j, sym) in symbols.iter().enumerate() {
+                if let Some(reg) = arg_regs.get(j + list_offset) {
+                    self.symbol_map.insert(*sym, *reg);
+                }
+            }
+            if has_implicit_this {
+                self.symbol_map.insert(this_symbol, arg_regs[0]);
+            }
             for i in user_arg_count..defaults.len() {
                 if let Some(ref default_expr) = defaults[i] {
                     if let Some(reg) = self.lower_expression(default_expr) {
                         arg_regs.push(reg);
+                        if let Some(sym) = symbols.get(i) {
+                            self.symbol_map.insert(*sym, reg);
+                        }
+                    }
+                }
+            }
+            for (sym, prev) in saved {
+                match prev {
+                    Some(reg) => {
+                        self.symbol_map.insert(sym, reg);
+                    }
+                    None => {
+                        self.symbol_map.remove(&sym);
                     }
                 }
             }
@@ -512,6 +550,12 @@ impl<'a> HirToMirContext<'a> {
                             if boxed != arg_reg {
                                 return boxed;
                             }
+                        }
+                        // The typer may call the value Dynamic or an abstract
+                        // (`i64.high` is an Int32) while the register holds a
+                        // scalar; the slot still takes a box, never raw bits.
+                        if let Some(boxed) = self.box_scalar_register(arg_reg) {
+                            return boxed;
                         }
                     }
 

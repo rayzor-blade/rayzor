@@ -264,13 +264,60 @@ impl<'a> AstLowering<'a> {
             });
         }
 
-        // Body: return f(bound_args..., unbound_args...)
-        let call_expr = TypedExpression {
-            kind: TypedExpressionKind::FunctionCall {
+        // Body: return f(bound_args..., unbound_args...). A bare instance
+        // method of the enclosing class (`tryOverflow.bind(a)`) is called on
+        // `this`, spelled out so the lambda captures it like any other call.
+        let implicit_this_method = match &receiver.kind {
+            TypedExpressionKind::Variable { symbol_id } => self
+                .context
+                .class_context_stack
+                .last()
+                .and_then(|class| self.class_methods.get(class))
+                .and_then(|methods| {
+                    methods
+                        .iter()
+                        .find(|(_, sym, is_static)| sym == symbol_id && !is_static)
+                        .map(|(_, sym, _)| *sym)
+                }),
+            _ => None,
+        };
+        let call_kind = if let Some(method_symbol) = implicit_this_method {
+            let this_name = self.context.intern_string("this");
+            let this_symbol = self
+                .resolve_symbol_in_scope_hierarchy(this_name)
+                .unwrap_or_else(|| self.context.symbol_table.create_variable(this_name));
+            let this_type = self
+                .context
+                .class_context_stack
+                .last()
+                .and_then(|cs| self.context.symbol_table.get_symbol(*cs))
+                .map(|s| s.type_id)
+                .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+            TypedExpressionKind::MethodCall {
+                receiver: Box::new(TypedExpression {
+                    expr_type: this_type,
+                    kind: TypedExpressionKind::Variable {
+                        symbol_id: this_symbol,
+                    },
+                    usage: VariableUsage::Copy,
+                    lifetime_id: crate::tast::LifetimeId::default(),
+                    source_location: location,
+                    metadata: ExpressionMetadata::default(),
+                }),
+                method_symbol,
+                arguments: call_args,
+                type_arguments: Vec::new(),
+                is_optional: false,
+            }
+        } else {
+            TypedExpressionKind::FunctionCall {
                 function: Box::new(receiver),
                 arguments: call_args,
                 type_arguments: Vec::new(),
-            },
+            }
+        };
+        let call_expr = TypedExpression {
+            kind: call_kind,
             expr_type: func_return_type,
             usage: VariableUsage::Copy,
             lifetime_id: crate::tast::LifetimeId::default(),
@@ -278,10 +325,30 @@ impl<'a> AstLowering<'a> {
             metadata: ExpressionMetadata::default(),
         };
 
-        let body = vec![TypedStatement::Return {
-            value: Some(call_expr),
-            source_location: location,
-        }];
+        // A Void function has no value to return: the call is the statement.
+        let returns_void = self
+            .context
+            .type_table
+            .borrow()
+            .get(func_return_type)
+            .is_some_and(|t| matches!(t.kind, TypeKind::Void));
+        let body = if returns_void {
+            vec![
+                TypedStatement::Expression {
+                    expression: call_expr,
+                    source_location: location,
+                },
+                TypedStatement::Return {
+                    value: None,
+                    source_location: location,
+                },
+            ]
+        } else {
+            vec![TypedStatement::Return {
+                value: Some(call_expr),
+                source_location: location,
+            }]
+        };
 
         // Exit function scope
         self.context.exit_scope();

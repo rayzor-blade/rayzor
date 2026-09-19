@@ -385,6 +385,8 @@ pub struct CompilationUnit {
     /// Accumulated field class names from imported files (SymbolId -> qualified class name)
     /// Used by BLADE cache to serialize field entries with correct class names
     import_field_class_names: BTreeMap<crate::tast::SymbolId, String>,
+    /// Every compiled abstract's `@:from`/`@:to` rules, for later modules.
+    import_abstract_cast_rules: crate::ir::mir::AbstractCastRules,
 
     /// Accumulated property access map from imported files
     import_property_access_map: BTreeMap<crate::tast::SymbolId, crate::tast::PropertyAccessInfo>,
@@ -619,6 +621,7 @@ impl CompilationUnit {
             import_field_index_map: BTreeMap::new(),
             last_import_errors: BTreeMap::new(),
             import_field_class_names: BTreeMap::new(),
+            import_abstract_cast_rules: Default::default(),
             import_property_access_map: BTreeMap::new(),
             import_constructor_name_map: BTreeMap::new(),
             import_function_param_iface_names: BTreeMap::new(),

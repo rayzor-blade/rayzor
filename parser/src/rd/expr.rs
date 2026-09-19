@@ -17,6 +17,53 @@ fn strip_numeric_noise(text: &str) -> String {
     body.replace('_', "")
 }
 
+/// An integer literal as Haxe reads it: a hex, binary or octal literal that
+/// fits 32 bits is an `Int` with those bits (`0xFFFFFFFF` is -1); a decimal
+/// literal past `Int`, or any literal past 32 bits, is a `Float`. A typed
+/// suffix (`9i32`) keeps the value as written, and `i64` makes the literal
+/// a `haxe.Int64.make(high, low)` call.
+pub(crate) fn int_literal_kind(text: &str, span: Span) -> ExprKind {
+    let suffixed = ["i32", "u32", "i64", "f64"]
+        .iter()
+        .any(|s| text.ends_with(s));
+    let digits = strip_numeric_noise(text);
+    let (radix, body) = if let Some(h) = digits.strip_prefix("0x").or(digits.strip_prefix("0X")) {
+        (16, h)
+    } else if let Some(b) = digits.strip_prefix("0b").or(digits.strip_prefix("0B")) {
+        (2, b)
+    } else if digits.len() > 1 && digits.starts_with('0') && digits.as_bytes()[1].is_ascii_digit() {
+        // Octal: 0755 → 493
+        (8, &digits[1..])
+    } else {
+        (10, digits.as_str())
+    };
+    match u64::from_str_radix(body, radix) {
+        Ok(v) if text.ends_with("i64") => {
+            let at = |kind| Expr { kind, span };
+            let mut callee = at(ExprKind::Ident("haxe".to_string()));
+            for part in ["Int64", "make"] {
+                callee = at(ExprKind::Field {
+                    expr: Box::new(callee),
+                    field: part.to_string(),
+                    is_optional: false,
+                });
+            }
+            ExprKind::Call {
+                expr: Box::new(callee),
+                args: vec![
+                    at(ExprKind::Int((v >> 32) as u32 as i32 as i64)),
+                    at(ExprKind::Int(v as u32 as i32 as i64)),
+                ],
+            }
+        }
+        Ok(v) if suffixed => ExprKind::Int(v as i64),
+        Ok(v) if radix != 10 && v <= u32::MAX as u64 => ExprKind::Int(v as u32 as i32 as i64),
+        Ok(v) if radix == 10 && v <= i32::MAX as u64 => ExprKind::Int(v as i64),
+        Ok(v) => ExprKind::Float(v as f64),
+        Err(_) => ExprKind::Float(body.parse::<f64>().unwrap_or(0.0)),
+    }
+}
+
 impl<'a, 'b> RdParser<'a, 'b> {
     /// Parse an expression.
     pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {
@@ -255,7 +302,18 @@ impl<'a, 'b> RdParser<'a, 'b> {
             }
             TokenKind::Minus => {
                 self.stream.advance();
+                let operand_is_int_lit = self.stream.at(TokenKind::IntLit);
                 let expr = self.parse_unary()?;
+                // `-2147483648` is `Int`, as in Haxe, though the digits alone
+                // pass `Int` and read as a Float.
+                if operand_is_int_lit
+                    && matches!(expr.kind, ExprKind::Float(f) if f == -(i32::MIN as f64))
+                {
+                    return Ok(Expr {
+                        span: Span::new(start, expr.span.end),
+                        kind: ExprKind::Int(i32::MIN as i64),
+                    });
+                }
                 Ok(Expr {
                     span: Span::new(start, expr.span.end),
                     kind: ExprKind::Unary {
@@ -407,22 +465,8 @@ impl<'a, 'b> RdParser<'a, 'b> {
             TokenKind::IntLit => {
                 let text = token.text(self.source);
                 self.stream.advance();
-                let digits = strip_numeric_noise(text);
-                let val = if digits.starts_with("0x") || digits.starts_with("0X") {
-                    i64::from_str_radix(&digits[2..], 16).unwrap_or(0)
-                } else if digits.starts_with("0b") || digits.starts_with("0B") {
-                    i64::from_str_radix(&digits[2..], 2).unwrap_or(0)
-                } else if digits.starts_with('0')
-                    && digits.len() > 1
-                    && digits.as_bytes()[1].is_ascii_digit()
-                {
-                    // Octal: 0755 → 493
-                    i64::from_str_radix(&digits[1..], 8).unwrap_or(0)
-                } else {
-                    digits.parse::<i64>().unwrap_or(0)
-                };
                 Ok(Expr {
-                    kind: ExprKind::Int(val),
+                    kind: int_literal_kind(text, token.span),
                     span: token.span,
                 })
             }

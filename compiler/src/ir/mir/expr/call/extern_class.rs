@@ -247,7 +247,12 @@ impl<'a> HirToMirContext<'a> {
                     );
                 } else {
                     let runtime_func = runtime_call.runtime_name;
-                    let is_instance_method = runtime_call.has_self_param;
+                    // A static row reached through a value (`x.toInt()` on an
+                    // Int64) takes that value as its first parameter; only a
+                    // type as the receiver is dropped.
+                    let is_instance_method = runtime_call.has_self_param
+                        || (!self.is_class_symbol_expr(receiver)
+                            && args.len() == runtime_call.param_count);
                     let is_mir_wrapper = runtime_call.is_mir_wrapper;
                     let returns_raw_value = runtime_call.returns_raw_value;
                     let raw_value_params = runtime_call.raw_value_params;

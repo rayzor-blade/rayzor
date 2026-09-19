@@ -3632,8 +3632,7 @@ impl StdlibMapping {
         let mappings = vec![
             map_method!(static "haxe.Int64", "ofInt" => "Int64_ofInt", params: 1, mir_wrapper,
                 types: &[I32] => I64),
-            map_method!(static "haxe.Int64", "toInt" => "Int64_toInt", params: 1, mir_wrapper,
-                types: &[I64] => I32),
+            // `toInt` keeps its Haxe body: it throws "Overflow" past Int.
             map_method!(static "haxe.Int64", "make" => "Int64_make", params: 2, mir_wrapper,
                 types: &[I32, I32] => I64),
             map_method!(static "haxe.Int64", "neg" => "Int64_neg", params: 1, mir_wrapper,

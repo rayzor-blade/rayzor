@@ -57,7 +57,6 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
     build_fphelper_double_to_i64(builder);
 
     build_int64_of_int(builder);
-    build_int64_to_int(builder);
     build_int64_make(builder);
     build_int64_get_high(builder);
     build_int64_get_low(builder);
@@ -618,22 +617,6 @@ fn build_int64_of_int(builder: &mut MirBuilder) {
     let value = builder.get_param(0);
     let widened = builder.cast(value, IrType::I32, IrType::I64);
     builder.ret(Some(widened));
-}
-
-/// Int64_toInt(self: i64) -> i32 — truncates, as Haxe specifies.
-fn build_int64_to_int(builder: &mut MirBuilder) {
-    let func_id = builder
-        .begin_function("Int64_toInt")
-        .param("self_val", IrType::I64)
-        .returns(IrType::I32)
-        .calling_convention(CallingConvention::C)
-        .build();
-    builder.set_current_function(func_id);
-    let entry = builder.create_block("entry");
-    builder.set_insert_point(entry);
-    let self_val = builder.get_param(0);
-    let narrowed = builder.cast(self_val, IrType::I64, IrType::I32);
-    builder.ret(Some(narrowed));
 }
 
 /// Int64_make(high: i32, low: i32) -> i64 — (high << 32) | (low & 0xffffffff).

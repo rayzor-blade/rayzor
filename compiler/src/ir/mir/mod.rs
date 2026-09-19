@@ -490,6 +490,10 @@ pub struct HirToMirContext<'a> {
     /// Keyed by IrFunctionId, value is Vec matching user-visible params (excludes implicit 'this').
     /// Only populated for functions that have at least one parameter with a default value.
     function_param_defaults: BTreeMap<IrFunctionId, Vec<Option<HirExpr>>>,
+    /// The parameter symbols, one per entry of `function_param_defaults`: a
+    /// default may name a preceding parameter (`b:Int = a`), which at the
+    /// call site is the argument already lowered for it.
+    function_param_symbols: BTreeMap<IrFunctionId, Vec<SymbolId>>,
 
     /// Constructor param counts from import modules (for BLADE-cached constructors).
     /// fill_default_args uses this when the constructor isn't in the local module yet.
@@ -1088,8 +1092,19 @@ pub struct MirLoweringResult {
     /// `maybe_materialize_for_call` Path 3 skips the class→interface
     /// fat-pointer wrap for imported constructors.
     pub function_param_hir_types: BTreeMap<IrFunctionId, Vec<TypeId>>,
+    /// `@:from` / `@:to` rules of every abstract this module declared, keyed
+    /// by the abstract's qualified name, so a later module converting to or
+    /// from the abstract (`var f:Float = u` with `u:UInt`) finds them.
+    pub abstract_cast_rules: AbstractCastRules,
     /// Non-fatal diagnostics from the lowering pass (e.g., exhaustiveness warnings)
     pub diagnostics: Vec<diagnostics::Diagnostic>,
+}
+
+/// An abstract's implicit conversions, by its qualified name.
+#[derive(Debug, Clone, Default)]
+pub struct AbstractCastRules {
+    pub from: BTreeMap<InternedString, Vec<HirCastRule>>,
+    pub to: BTreeMap<InternedString, Vec<HirCastRule>>,
 }
 
 /// Lower HIR to MIR and return both the module and function mappings
@@ -1120,6 +1135,7 @@ pub fn lower_hir_to_mir_with_function_map(
     external_interface_vtables: BTreeMap<(SymbolId, SymbolId), Vec<SymbolId>>,
     external_function_param_iface_names: BTreeMap<IrFunctionId, Vec<Option<String>>>,
     external_field_class_names: BTreeMap<SymbolId, String>,
+    external_abstract_cast_rules: AbstractCastRules,
     static_sig_index: Option<
         std::rc::Rc<std::cell::RefCell<crate::tast::sig_index::StaticSigIndex>>,
     >,
@@ -1175,6 +1191,8 @@ pub fn lower_hir_to_mir_with_function_map(
     // fallback in `lower_field_access` reject cross-class matches (e.g.
     // `Bytes.length` must not resolve to `StringBuf.get_length`).
     context.field_class_names = external_field_class_names;
+    context.abstract_from_rules = external_abstract_cast_rules.from;
+    context.abstract_to_rules = external_abstract_cast_rules.to;
 
     // Also populate the name-keyed map from the SymbolId-keyed one.
     for (&sym_id, &size) in &context.class_alloc_sizes {
@@ -1285,6 +1303,10 @@ pub fn lower_hir_to_mir_with_function_map(
         interface_extends: context.interface_extends,
         interface_vtables: context.interface_vtables,
         function_param_hir_types: context.function_param_hir_types,
+        abstract_cast_rules: AbstractCastRules {
+            from: context.abstract_from_rules,
+            to: context.abstract_to_rules,
+        },
         diagnostics: context.diagnostics,
     })
 }
@@ -1403,6 +1425,7 @@ impl<'a> HirToMirContext<'a> {
             class_vtables: BTreeMap::new(),
             virtual_dispatch_info: BTreeMap::new(),
             function_param_defaults: BTreeMap::new(),
+            function_param_symbols: BTreeMap::new(),
             external_constructor_param_counts: BTreeMap::new(),
             external_function_param_types: BTreeMap::new(),
             function_param_hir_types: BTreeMap::new(),

@@ -251,7 +251,6 @@ haxe.Int64 or static=true ctor=false params=2 -> Int64_or
 haxe.Int64 shl static=true ctor=false params=2 -> Int64_shl
 haxe.Int64 shr static=true ctor=false params=2 -> Int64_shr
 haxe.Int64 sub static=true ctor=false params=2 -> Int64_sub
-haxe.Int64 toInt static=true ctor=false params=1 -> Int64_toInt
 haxe.Int64 ushr static=true ctor=false params=2 -> Int64_ushr
 haxe.Int64 xor static=true ctor=false params=2 -> Int64_xor
 haxe.Json parse static=true ctor=false params=1 -> haxe_json_parse

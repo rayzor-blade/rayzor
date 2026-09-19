@@ -538,15 +538,25 @@ impl<'a> HirToMirContext<'a> {
         source_type: TypeId,
         target_type: TypeId,
     ) -> Option<IrId> {
+        // Int64 is the native i64, so `@:from ofInt` is the widening itself;
+        // a target spelled as the class under the abstract reaches here too.
+        if self.is_int64_type(target_type) {
+            let src = self
+                .builder
+                .get_register_type(value)
+                .unwrap_or_else(|| self.convert_type(source_type));
+            if matches!(src, IrType::I32 | IrType::I16 | IrType::I8 | IrType::Bool) {
+                return self.builder.build_cast(value, src, IrType::I64);
+            }
+            return None;
+        }
         let abs_name = self.resolve_abstract_name(target_type)?;
 
-        let matching_rule = self
+        let rule = self
             .abstract_from_rules
             .get(&abs_name)
             .and_then(|rules| rules.iter().find(|r| r.from_type == source_type))
-            .cloned();
-
-        let rule = matching_rule?;
+            .cloned()?;
 
         if let Some(cast_func_sym) = rule.cast_function {
             let func_id = self.resolve_abstract_conversion_function(cast_func_sym, target_type)?;
@@ -567,6 +577,39 @@ impl<'a> HirToMirContext<'a> {
                 None
             }
         }
+    }
+
+    /// The source abstract's `@:to` conversion to `target_type`, when it
+    /// declares one (`var f:Float = u` with `u:UInt` runs `toFloat`).
+    pub(crate) fn maybe_abstract_to_convert(
+        &mut self,
+        value: IrId,
+        source_type: TypeId,
+        target_type: TypeId,
+    ) -> Option<IrId> {
+        let abs_name = self.resolve_abstract_name(source_type)?;
+        let target_kind = self.type_table.get(target_type).map(|t| t.kind.clone())?;
+        if !matches!(
+            target_kind,
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String
+        ) {
+            return None;
+        }
+        let rule = self
+            .abstract_to_rules
+            .get(&abs_name)?
+            .iter()
+            .find(|r| {
+                self.type_table
+                    .get(r.to_type)
+                    .is_some_and(|t| t.kind == target_kind)
+            })
+            .cloned()?;
+        let func_id =
+            self.resolve_abstract_conversion_function(rule.cast_function?, source_type)?;
+        let result_type = self.convert_type(target_type);
+        self.builder
+            .build_call_direct(func_id, vec![value], result_type)
     }
 
     pub(crate) fn try_lower_special_runtime_call(

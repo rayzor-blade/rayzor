@@ -336,6 +336,9 @@ impl<'a> HirToMirContext<'a> {
 
                         let final_value = if let Some(target_ty) = var_type {
                             self.maybe_abstract_from_convert(final_value, init_ty, target_ty)
+                                .or_else(|| {
+                                    self.maybe_abstract_to_convert(final_value, init_ty, target_ty)
+                                })
                                 .unwrap_or(final_value)
                         } else {
                             final_value
@@ -845,6 +848,9 @@ impl<'a> HirToMirContext<'a> {
                                 let target_ty = sym_info.type_id;
                                 if target_ty != TypeId::invalid() {
                                     self.maybe_abstract_from_convert(value, rhs_ty, target_ty)
+                                        .or_else(|| {
+                                            self.maybe_abstract_to_convert(value, rhs_ty, target_ty)
+                                        })
                                         .unwrap_or(value)
                                 } else {
                                     value

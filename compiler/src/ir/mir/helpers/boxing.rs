@@ -231,6 +231,29 @@ impl<'a> HirToMirContext<'a> {
             .filter(|boxed| *boxed != value)
     }
 
+    /// A box for a register that holds a scalar, whatever the typer called
+    /// the value. None for anything else -- an I64 may be an erased pointer.
+    pub(crate) fn box_scalar_register(&mut self, value: IrId) -> Option<IrId> {
+        let (box_fn, param) = match self.builder.get_register_type(value)? {
+            IrType::I32 => ("haxe_box_int_ptr", IrType::I64),
+            IrType::F64 => ("haxe_box_float_ptr", IrType::F64),
+            IrType::Bool => ("haxe_box_bool_ptr", IrType::Bool),
+            _ => return None,
+        };
+        let arg = if param == IrType::I64 {
+            self.builder
+                .build_cast(value, IrType::I32, IrType::I64)
+                .unwrap_or(value)
+        } else {
+            value
+        };
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let func = self.get_or_register_extern_function(box_fn, vec![param], ptr_u8.clone());
+        let boxed = self.builder.build_call_direct(func, vec![arg], ptr_u8)?;
+        self.boxed_value_regs.insert(boxed);
+        Some(boxed)
+    }
+
     pub(crate) fn maybe_box_for_extern_call(
         &mut self,
         value: IrId,
@@ -287,7 +310,31 @@ impl<'a> HirToMirContext<'a> {
 
         let expected_is_ptr_u8 = matches!(expected_ty, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void));
 
+        // A box handed to a scalar parameter (`Int64.ofInt(d)` with `d` a
+        // `Null<Int>` local) is unboxed by the parameter's type. Only a
+        // register this lowering boxed itself: an erased generic value is
+        // raw bits in a pointer-typed register.
         if !expected_is_ptr_u8 {
+            if self.boxed_value_regs.contains(&value) {
+                let unbox = match expected_ty {
+                    IrType::I32 => Some(("haxe_unbox_int_ptr", IrType::I64)),
+                    IrType::F64 => Some(("haxe_unbox_float_ptr", IrType::F64)),
+                    IrType::Bool => Some(("haxe_unbox_bool_ptr", IrType::Bool)),
+                    _ => None,
+                };
+                if let Some((name, ret)) = unbox {
+                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                    let func =
+                        self.get_or_register_extern_function(name, vec![ptr_u8], ret.clone());
+                    let raw = self
+                        .builder
+                        .build_call_direct(func, vec![value], ret.clone())?;
+                    if *expected_ty == IrType::I32 {
+                        return self.builder.build_cast(raw, IrType::I64, IrType::I32);
+                    }
+                    return Some(raw);
+                }
+            }
             return Some(value);
         }
 

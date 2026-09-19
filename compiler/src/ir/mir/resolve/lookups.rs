@@ -1262,39 +1262,51 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(ti) = type_table.get(target_type) {
                     if let TypeKind::Abstract { symbol_id, .. } = &ti.kind {
                         if let Some(abs_sym) = self.symbol_table.get_symbol(*symbol_id) {
-                            let class_name = abs_sym
-                                .native_name
-                                .and_then(|nn| self.string_interner.get(nn))
-                                .map(|n| n.replace("::", "."))
-                                .or_else(|| {
-                                    self.string_interner
-                                        .get(abs_sym.name)
-                                        .map(|n| format!("rayzor.{}", n))
-                                });
-                            if let Some(class) = class_name
-                                .as_deref()
-                                .and_then(|c| self.stdlib_mapping.class_key(c))
-                            {
-                                if let Some((_, mapping)) =
-                                    self.stdlib_mapping.find_by_name(class, method_name)
-                                {
-                                    let runtime_func = mapping.runtime_name;
-                                    let result_type = self.convert_type(target_type);
-                                    if mapping.is_mir_wrapper {
-                                        let func_id = self.register_stdlib_mir_forward_ref(
-                                            runtime_func,
-                                            vec![IrType::Ptr(Box::new(IrType::Void))],
-                                            result_type,
-                                        );
-                                        return Some(func_id);
-                                    } else {
-                                        let func_id = self.get_or_register_extern_function(
-                                            runtime_func,
-                                            vec![IrType::Ptr(Box::new(IrType::Void))],
-                                            result_type,
-                                        );
-                                        return Some(func_id);
-                                    }
+                            // The @:native spelling, the qualified name, then the
+                            // rayzor package (`haxe.Int64.ofInt` is a wrapper too).
+                            let spellings: Vec<String> = [
+                                abs_sym
+                                    .native_name
+                                    .and_then(|nn| self.string_interner.get(nn))
+                                    .map(|n| n.replace("::", ".")),
+                                abs_sym
+                                    .qualified_name
+                                    .and_then(|qn| self.string_interner.get(qn))
+                                    .map(str::to_owned),
+                                self.string_interner
+                                    .get(abs_sym.name)
+                                    .map(|n| format!("rayzor.{}", n)),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .collect();
+                            let found = spellings.iter().find_map(|c| {
+                                let class = self.stdlib_mapping.class_key(c)?;
+                                self.stdlib_mapping.find_by_name(class, method_name)
+                            });
+                            if let Some((_, mapping)) = found {
+                                let runtime_func = mapping.runtime_name;
+                                let result_type = self.convert_type(target_type);
+                                // The wrapper's own signature when it has one; a
+                                // pointer slot otherwise.
+                                let params = self
+                                    .get_stdlib_mir_wrapper_signature(runtime_func)
+                                    .map(|(p, _)| p)
+                                    .unwrap_or_else(|| vec![IrType::Ptr(Box::new(IrType::Void))]);
+                                if mapping.is_mir_wrapper {
+                                    let func_id = self.register_stdlib_mir_forward_ref(
+                                        runtime_func,
+                                        params,
+                                        result_type,
+                                    );
+                                    return Some(func_id);
+                                } else {
+                                    let func_id = self.get_or_register_extern_function(
+                                        runtime_func,
+                                        params,
+                                        result_type,
+                                    );
+                                    return Some(func_id);
                                 }
                             }
                         }
