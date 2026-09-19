@@ -161,29 +161,32 @@ impl<'a, 'b> RdParser<'a, 'b> {
         }
 
         loop {
+            // Haxe's ladder, not C's: `%` above `*` `/`; the three bitwise
+            // operators share one level ABOVE the comparisons, so
+            // `n & 0x8000 != 0` is `(n & 0x8000) != 0`; `...` sits below them.
             let (op, prec, right_assoc) = match self.stream.peek().kind {
                 TokenKind::QuestionQuestion => (BinaryOp::NullCoal, 2, true),
                 TokenKind::PipePipe => (BinaryOp::Or, 3, false),
                 TokenKind::AmpAmp => (BinaryOp::And, 4, false),
-                TokenKind::Pipe => (BinaryOp::BitOr, 5, false),
-                TokenKind::Caret => (BinaryOp::BitXor, 6, false),
+                TokenKind::DotDotDot => (BinaryOp::Range, 5, false),
+                TokenKind::Eq => (BinaryOp::Eq, 6, false),
+                TokenKind::NotEq => (BinaryOp::NotEq, 6, false),
+                TokenKind::Lt => (BinaryOp::Lt, 6, false),
+                TokenKind::Le => (BinaryOp::Le, 6, false),
+                TokenKind::Gt => (BinaryOp::Gt, 6, false),
+                TokenKind::Ge => (BinaryOp::Ge, 6, false),
+                TokenKind::KwIs => (BinaryOp::Is, 6, false),
+                TokenKind::Pipe => (BinaryOp::BitOr, 7, false),
+                TokenKind::Caret => (BinaryOp::BitXor, 7, false),
                 TokenKind::Amp => (BinaryOp::BitAnd, 7, false),
-                TokenKind::Eq => (BinaryOp::Eq, 8, false),
-                TokenKind::NotEq => (BinaryOp::NotEq, 8, false),
-                TokenKind::Lt => (BinaryOp::Lt, 9, false),
-                TokenKind::Le => (BinaryOp::Le, 9, false),
-                TokenKind::Gt => (BinaryOp::Gt, 9, false),
-                TokenKind::Ge => (BinaryOp::Ge, 9, false),
-                TokenKind::KwIs => (BinaryOp::Is, 9, false),
-                TokenKind::DotDotDot => (BinaryOp::Range, 10, false),
-                TokenKind::Shl => (BinaryOp::Shl, 11, false),
-                TokenKind::Shr => (BinaryOp::Shr, 11, false),
-                TokenKind::Ushr => (BinaryOp::Ushr, 11, false),
-                TokenKind::Plus => (BinaryOp::Add, 12, false),
-                TokenKind::Minus => (BinaryOp::Sub, 12, false),
-                TokenKind::Star => (BinaryOp::Mul, 13, false),
-                TokenKind::Slash => (BinaryOp::Div, 13, false),
-                TokenKind::Percent => (BinaryOp::Mod, 13, false),
+                TokenKind::Shl => (BinaryOp::Shl, 8, false),
+                TokenKind::Shr => (BinaryOp::Shr, 8, false),
+                TokenKind::Ushr => (BinaryOp::Ushr, 8, false),
+                TokenKind::Plus => (BinaryOp::Add, 9, false),
+                TokenKind::Minus => (BinaryOp::Sub, 9, false),
+                TokenKind::Star => (BinaryOp::Mul, 10, false),
+                TokenKind::Slash => (BinaryOp::Div, 10, false),
+                TokenKind::Percent => (BinaryOp::Mod, 11, false),
                 _ => break,
             };
 

@@ -83,6 +83,33 @@ impl<'a> HirToMirContext<'a> {
             .build_call_direct(func_id, vec![obj], result_type)
     }
 
+    fn int64_word_read(&mut self, obj: IrId, field: SymbolId, receiver_ty: TypeId) -> Option<IrId> {
+        // The receiver's type, or the field's owning class when the type is
+        // not resolved here (an inlined getter body).
+        let owned_by_int64 = self
+            .field_class_names
+            .get(&field)
+            .is_some_and(|c| c == "haxe.___Int64" || c.ends_with(".___Int64"));
+        if !self.is_int64_type(receiver_ty) && !owned_by_int64 {
+            return None;
+        }
+        let wrapper = match self
+            .symbol_table
+            .get_symbol(field)
+            .and_then(|s| self.string_interner.get(s.name))?
+        {
+            "high" => "Int64_getHigh",
+            "low" => "Int64_getLow",
+            _ => return None,
+        };
+        let value = match self.builder.get_register_type(obj) {
+            Some(IrType::I64) => obj,
+            _ => self.builder.build_bitcast(obj, IrType::I64)?,
+        };
+        let f = self.register_stdlib_mir_forward_ref(wrapper, vec![IrType::I64], IrType::I32);
+        self.builder.build_call_direct(f, vec![value], IrType::I32)
+    }
+
     pub(crate) fn lower_field_access(
         &mut self,
         obj: IrId,
@@ -93,6 +120,10 @@ impl<'a> HirToMirContext<'a> {
         // `Null<String>` is the same pointer as `String`, so its members resolve
         // through the inner type (an alias likewise through its target).
         let receiver_ty = self.resolve_through_aliases(receiver_ty);
+        // `___Int64.high` / `.low` are the words of the native i64.
+        if let Some(word) = self.int64_word_read(obj, field, receiver_ty) {
+            return Some(word);
+        }
         // Type erasure: if field_ty is a TypeParameter, resolve to concrete type
         // using the receiver's type arguments (e.g., Container<Float>.value → Float)
         let resolved_field_ty = self.resolve_type_param_from_receiver(field_ty, receiver_ty);
@@ -1188,6 +1219,12 @@ impl<'a> HirToMirContext<'a> {
         let HirExprKind::Field { object, field } = &expr.kind else {
             unreachable!("lower_field_expr_with_receiver on a non-Field expression")
         };
+
+        // `Int64.high` / `.low` are the words of the native i64, whichever
+        // path the property would otherwise take.
+        if let Some(word) = self.int64_word_read(obj_reg, *field, object.ty) {
+            return Some(word);
+        }
 
         // @:move strict-move tracking: prepend a CheckLive guard if
         // the field's receiver register is a strict-move local. The

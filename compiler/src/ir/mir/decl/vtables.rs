@@ -1034,6 +1034,9 @@ impl<'a> HirToMirContext<'a> {
             }
 
             for (slot_idx, method_sym) in vtable.iter().enumerate() {
+                let Some(method_sym) = method_sym else {
+                    continue;
+                };
                 if let Some(&func_id) = self.function_map.get(method_sym) {
                     let dispatch_func_id = self
                         .ensure_vtable_dispatch_thunk(func_id)

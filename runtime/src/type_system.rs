@@ -3551,6 +3551,36 @@ pub extern "C" fn haxe_vtable_init(type_id: i32, slot_count: i32) {
     map.insert(type_id as u32, vec![0i64; slot_count as usize]);
 }
 
+/// `vtable` with every zero slot filled from the class's ancestors' tables,
+/// walking RTTI `super_type_id`; a slot no ancestor sets stays zero.
+fn inherit_vtable_slots(map: &HashMap<u32, Vec<i64>>, type_id: u32, vtable: &[i64]) -> Vec<i64> {
+    let mut slots = vtable.to_vec();
+    if slots.iter().all(|&v| v != 0) {
+        return slots;
+    }
+    let mut parent =
+        get_type_info(TypeId(type_id)).and_then(|t| t.class_info.and_then(|c| c.super_type_id));
+    let mut hops = 0;
+    while let Some(pid) = parent {
+        if let Some(pt) = map.get(&pid) {
+            for (i, slot) in slots.iter_mut().enumerate() {
+                if *slot == 0
+                    && let Some(&v) = pt.get(i)
+                {
+                    *slot = v;
+                }
+            }
+        }
+        hops += 1;
+        if hops > 32 || slots.iter().all(|&v| v != 0) {
+            break;
+        }
+        parent =
+            get_type_info(TypeId(pid)).and_then(|t| t.class_info.and_then(|c| c.super_type_id));
+    }
+    slots
+}
+
 /// Store a closure pointer at a vtable slot for a class type_id.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_vtable_set_slot(type_id: i32, slot_index: i32, closure_ptr: i64) {
@@ -3753,9 +3783,11 @@ fn ensure_flat_vtable() {
                     len: 0,
                 })
                 .collect();
-            // First pass: copy all vtable data
-            for vtable in map.values() {
-                owned_slots.push(vtable.clone());
+            // First pass: copy all vtable data, an unset slot taking the
+            // nearest ancestor's (a subclass compiled apart from its parent
+            // registers only the slots it implements).
+            for (&type_id, vtable) in map.iter() {
+                owned_slots.push(inherit_vtable_slots(map, type_id, vtable));
             }
             // Store owned slots; point the dense table (or the sparse map, for
             // outlier ids) into them.
@@ -3903,7 +3935,14 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
         && let Some(vtable) = map.get(&(type_id as u32))
     {
         if slot < vtable.len() {
-            return vtable[slot];
+            let v = vtable[slot];
+            if v != 0 {
+                return v;
+            }
+            let inherited = inherit_vtable_slots(map, type_id as u32, vtable);
+            if inherited[slot] != 0 {
+                return inherited[slot];
+            }
         }
         crate::exception::throw_with_message(format!(
             "interface dispatch: vtable slot {slot} out of range for type_id \

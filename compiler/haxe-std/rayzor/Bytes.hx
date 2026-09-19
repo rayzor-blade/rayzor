@@ -74,6 +74,12 @@ extern class Bytes {
     public function get(pos: Int): Int;
 
     /**
+        The bytes as `haxe.io.BytesData` (an `Array<Int>` here), the way the
+        standard library's readers walk a buffer.
+    **/
+    public function getData(): haxe.io.BytesData;
+
+    /**
         Sets a single byte at the given position.
 
         @param pos The 0-based byte position

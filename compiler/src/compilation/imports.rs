@@ -696,7 +696,12 @@ impl CompilationUnit {
                 false,
                 &self.preprocessor_config(),
             ) {
-                Ok(ast) => Self::extract_all_dependencies(&ast),
+                Ok(ast) => {
+                    // Indexed here, before anything lowers: a base class needs
+                    // to know which of its methods a later file overrides.
+                    self.static_sig_index.borrow_mut().index_file(&ast);
+                    Self::extract_all_dependencies(&ast)
+                }
                 Err(_) => Vec::new(),
             };
             let (ctor_marks, deps): (Vec<String>, Vec<String>) =

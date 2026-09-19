@@ -226,10 +226,18 @@ impl<'a> AstLowering<'a> {
 
                     if let Some(symbol_id) = symbol_id_opt {
                         if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
-                            if symbol.kind == crate::tast::symbols::SymbolKind::Class
-                                || symbol.kind == crate::tast::symbols::SymbolKind::Enum
-                            {
-                                // Return a reference to the class/enum itself
+                            // Any type a bare identifier would name: `haxe.Int64.make`
+                            // reaches the abstract the way `Int64.make` does.
+                            use crate::tast::symbols::SymbolKind;
+                            if matches!(
+                                symbol.kind,
+                                SymbolKind::Class
+                                    | SymbolKind::Enum
+                                    | SymbolKind::Abstract
+                                    | SymbolKind::Interface
+                                    | SymbolKind::TypeAlias
+                            ) {
+                                // Return a reference to the type itself
                                 let class_type = symbol.type_id;
                                 return Ok(TypedExpression {
                                     expr_type: class_type,

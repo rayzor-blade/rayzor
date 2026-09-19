@@ -229,57 +229,55 @@ fn process_inline_conditionals(line: &str, config: &PreprocessorConfig) -> Strin
                 cond_end = line.len();
             }
 
-            // Find #else or #end
-            let else_pos = line[cond_end..].find("#else").map(|idx| cond_end + idx);
+            // The chain up to #end: the `#if` arm, any `#elseif` arms, an
+            // optional `#else` arm. `#elseif` is looked for before `#else`,
+            // which is its prefix.
             let end_pos = line[cond_end..].find("#end").map(|idx| cond_end + idx);
 
             if let Some(end_idx) = end_pos {
                 let condition = line[cond_start..cond_end].trim();
-
-                if let Some(else_idx) = else_pos
-                    && else_idx < end_idx
-                {
-                    // We have both if and else branches
-                    let if_branch = &line[cond_end..else_idx].trim();
-                    let else_start = else_idx + 5; // Skip "#else"
-                    let else_branch = &line[else_start..end_idx].trim();
-
-                    // Check if branches have trailing semicolons before trimming
-                    let if_has_semicolon = if_branch.trim_end().ends_with(';');
-                    let else_has_semicolon = else_branch.trim_end().ends_with(';');
-
-                    // Remove leading/trailing semicolons and whitespace
-                    let if_content =
-                        if_branch.trim_matches(|c: char| c == ';' || c.is_whitespace());
-                    let else_content =
-                        else_branch.trim_matches(|c: char| c == ';' || c.is_whitespace());
-
-                    // Evaluate condition and add semicolon back if needed
-                    if evaluate_condition(condition, config) {
-                        result.push_str(if_content);
-                        if if_has_semicolon {
-                            result.push(';');
+                let body = &line[cond_end..end_idx];
+                // (condition or None for `#else`, content)
+                let mut arms: Vec<(Option<String>, &str)> = Vec::new();
+                let mut arm_cond: Option<String> = Some(condition.to_string());
+                let mut arm_start = 0;
+                let mut scan = 0;
+                while scan < body.len() {
+                    let rest = &body[scan..];
+                    if let Some(rel) = rest.find("#else") {
+                        let at = scan + rel;
+                        arms.push((arm_cond.take(), &body[arm_start..at]));
+                        if body[at..].starts_with("#elseif") {
+                            let cstart = at + "#elseif".len();
+                            let ctext = &body[cstart..];
+                            let clen = ctext
+                                .trim_start()
+                                .find(char::is_whitespace)
+                                .map(|i| ctext.len() - ctext.trim_start().len() + i)
+                                .unwrap_or(ctext.len());
+                            arm_cond = Some(ctext[..clen].trim().to_string());
+                            arm_start = cstart + clen;
+                        } else {
+                            arm_cond = None;
+                            arm_start = at + "#else".len();
                         }
+                        scan = arm_start;
                     } else {
-                        result.push_str(else_content);
-                        if else_has_semicolon {
-                            result.push(';');
-                        }
+                        break;
                     }
-
-                    // Move past #end
-                    pos = end_idx + 4; // Skip "#end"
-                    continue;
                 }
+                arms.push((arm_cond, &body[arm_start..]));
 
-                // No else branch, just if
-                let if_branch = &line[cond_end..end_idx].trim();
-                let if_has_semicolon = if_branch.trim_end().ends_with(';');
-                let if_content = if_branch.trim_matches(|c: char| c == ';' || c.is_whitespace());
-
-                if evaluate_condition(condition, config) {
-                    result.push_str(if_content);
-                    if if_has_semicolon {
+                let taken = arms.iter().find(|(c, _)| match c {
+                    Some(c) => evaluate_condition(c, config),
+                    None => true,
+                });
+                if let Some((_, branch)) = taken {
+                    let branch = branch.trim();
+                    let has_semicolon = branch.ends_with(';');
+                    let content = branch.trim_matches(|c: char| c == ';' || c.is_whitespace());
+                    result.push_str(content);
+                    if has_semicolon {
                         result.push(';');
                     }
                 }
@@ -690,6 +688,23 @@ var x = 42;
 
         // rayzor block should be kept
         assert!(result.contains("var x = 42"));
+    }
+
+    #[test]
+    fn test_inline_conditional_elseif_chain() {
+        let config = PreprocessorConfig::default();
+        let out = process_inline_conditionals(
+            "var b:#if js js.lib.Uint8Array #elseif hl hl.Bytes #else BytesData #end;",
+            &config,
+        );
+        assert_eq!(out, "var b:BytesData;");
+        let mut hl = PreprocessorConfig::default();
+        hl.defines.insert("hl".to_string());
+        let out = process_inline_conditionals(
+            "var b:#if js js.lib.Uint8Array #elseif hl hl.Bytes #else BytesData #end;",
+            &hl,
+        );
+        assert_eq!(out, "var b:hl.Bytes;");
     }
 
     #[test]

@@ -169,6 +169,11 @@ impl<'a> HirToMirContext<'a> {
         field: &SymbolId,
         value: IrId,
     ) {
+        // `___Int64`'s constructor writes its words; the value is a native
+        // i64 built by `Int64_make`, so there is no slot to write.
+        if self.is_int64_type(object.ty) {
+            return;
+        }
         // Check if this is a property with a custom setter.
         // Clone the info so the immutable borrow of `self` is released
         // before any of the per-arm fallbacks that need `&mut self`.
@@ -240,6 +245,42 @@ impl<'a> HirToMirContext<'a> {
                         .string_interner
                         .get(*setter_method_name)
                         .unwrap_or("<unknown>");
+
+                    // A setter declared on a class whose module lowers later
+                    // (a placeholder parent) links by its qualified name, as
+                    // a call to such a method does.
+                    let owner_qn = self
+                        .class_qualified_name_of_type(receiver_ty)
+                        .or_else(|| self.field_class_names.get(field).cloned())
+                        .map(|start| {
+                            // The ancestor that declares the setter, per the
+                            // declaration index; the receiver's class if none does.
+                            let Some(index) = self.static_sig_index.clone() else {
+                                return start;
+                            };
+                            let mut index = index.borrow_mut();
+                            let mut cur = Some(start.clone());
+                            for _ in 0..16 {
+                                let Some(c) = cur else { break };
+                                if index.declares_instance_method(&c, method_name_str) {
+                                    return c;
+                                }
+                                cur = index.parent_of(&c);
+                            }
+                            start
+                        });
+                    if let Some(owner) = owner_qn {
+                        let value_ty = self.builder.get_register_type(value).unwrap_or(IrType::I64);
+                        let forward = self.register_stdlib_mir_forward_ref(
+                            &format!("{owner}.{method_name_str}"),
+                            vec![IrType::Ptr(Box::new(IrType::Void)), value_ty.clone()],
+                            value_ty.clone(),
+                        );
+                        self.builder
+                            .build_call_direct(forward, vec![obj_reg, value], value_ty);
+                        return;
+                    }
+
                     self.add_error(
                         &format!("Property setter method '{}' not found", method_name_str),
                         SourceLocation::unknown(),

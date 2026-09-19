@@ -688,11 +688,19 @@ impl<'a> HirToMirContext<'a> {
                         let extern_func_id = self.get_or_register_extern_function(
                             "haxe_reflect_compare_typed",
                             vec![IrType::I64, IrType::I64, IrType::I32],
-                            result_type.clone(),
+                            IrType::I64,
                         );
-                        return Some(self.builder.build_call_direct(
+                        let call_result = self.builder.build_call_direct(
                             extern_func_id,
                             arg_regs,
+                            IrType::I64,
+                        )?;
+                        if result_type == IrType::I64 {
+                            return Some(Some(call_result));
+                        }
+                        return Some(self.builder.build_cast(
+                            call_result,
+                            IrType::I64,
                             result_type,
                         ));
                     }

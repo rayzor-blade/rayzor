@@ -237,11 +237,17 @@ impl<'a> HirToMirContext<'a> {
         let mut var_initial_values: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
         for symbol_id in &modified_vars {
             if let Some(&reg) = self.symbol_map.get(symbol_id) {
-                if let Some(func) = self.builder.current_function() {
-                    if let Some(local) = func.locals.get(&reg) {
-                        debug!("var {:?} has initial value {:?}", symbol_id, reg);
-                        var_initial_values.insert(*symbol_id, (reg, local.ty.clone()));
-                    }
+                // A parameter is in `symbol_map` but never in `locals`; one
+                // the branches assign needs the phi like any local, or a
+                // read after the join sees the last branch's register.
+                let ty = self
+                    .builder
+                    .current_function()
+                    .and_then(|func| func.locals.get(&reg).map(|l| l.ty.clone()))
+                    .or_else(|| self.builder.get_register_type(reg));
+                if let Some(ty) = ty {
+                    debug!("var {:?} has initial value {:?}", symbol_id, reg);
+                    var_initial_values.insert(*symbol_id, (reg, ty));
                 }
             } else {
                 debug!("var {:?} NOT in symbol_map (new in branch)", symbol_id);

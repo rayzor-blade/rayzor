@@ -3065,6 +3065,10 @@ impl StdlibMapping {
             // rayzor.Bytes.ofString(s: String): Bytes
             map_method!(static "rayzor.Bytes", "ofString" => "haxe_bytes_of_string", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrString] => IrTypeDescriptor::PtrVoid),
+            // new Bytes(length, data:BytesData): the stdlib's BytesBuffer.getBytes,
+            // whose BytesData is Array<Int> here.
+            map_method!(constructor "rayzor.Bytes", "new" => "haxe_bytes_of_int_array", params: 2, returns: primitive,
+                types: &[IrTypeDescriptor::I32, IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::PtrVoid),
             // Property accessor
             // bytes.length: Int
             map_method!(instance "rayzor.Bytes", "length" => "haxe_bytes_length", params: 0, returns: primitive,
@@ -3073,6 +3077,9 @@ impl StdlibMapping {
             map_method!(instance "rayzor.Bytes", "free" => "haxe_bytes_free", params: 0, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid]),
             // Instance methods
+            // bytes.getData(): BytesData (Array<Int>)
+            map_method!(instance "rayzor.Bytes", "getData" => "haxe_bytes_get_data", params: 0, returns: primitive,
+                types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::PtrVoid),
             // bytes.get(pos: Int): Int
             map_method!(instance "rayzor.Bytes", "get" => "haxe_bytes_get", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),

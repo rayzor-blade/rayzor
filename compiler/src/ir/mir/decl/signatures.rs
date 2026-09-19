@@ -34,12 +34,13 @@ impl<'a> HirToMirContext<'a> {
         self.record_consume_method(symbol_id, hir_func);
         let mut signature = self.build_function_signature(hir_func);
 
-        // 'this' is always a pointer to the instance, generic parameters or not.
+        // 'this' is always a pointer to the instance, generic parameters or not
+        // -- except the native i64 under `Int64`, which is the value itself.
         if let Some(type_id) = this_type {
-            let this_type = match self.convert_type(type_id) {
-                IrType::Ptr(_) => IrType::Ptr(Box::new(IrType::Void)),
-                // Unresolved (a generic class with no instantiation) is a pointer too.
-                _ => IrType::Ptr(Box::new(IrType::Void)),
+            let this_type = if self.is_int64_type(type_id) {
+                IrType::I64
+            } else {
+                IrType::Ptr(Box::new(IrType::Void))
             };
             signature.parameters.insert(
                 0,

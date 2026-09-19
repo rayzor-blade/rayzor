@@ -714,12 +714,14 @@ impl<'a> HirToMirContext<'a> {
 
             // Take the type from the "before" register (the variable declaration):
             // registers created by assignments have no locals entry.
+            // A parameter has no locals entry either; its register is typed.
             let type_lookup_reg = before_reg.or(then_reg).or(else_reg);
             let var_type = match type_lookup_reg.and_then(|r| {
                 self.builder
                     .current_function()
                     .and_then(|f| f.locals.get(&r))
                     .map(|local| local.ty.clone())
+                    .or_else(|| before_reg.and_then(|b| self.builder.get_register_type(b)))
             }) {
                 Some(t) => t,
                 None => {

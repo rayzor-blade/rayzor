@@ -481,7 +481,7 @@ pub struct HirToMirContext<'a> {
     class_virtual_slots: BTreeMap<SymbolId, Vec<(InternedString, u32)>>,
 
     /// class SymbolId → [method_SymbolId per slot] — most-derived implementation
-    class_vtables: BTreeMap<SymbolId, Vec<SymbolId>>,
+    class_vtables: BTreeMap<SymbolId, Vec<Option<SymbolId>>>,
 
     /// base method SymbolId → (slot_index, defining_class) — checked at call sites
     virtual_dispatch_info: BTreeMap<SymbolId, (u32, SymbolId)>,

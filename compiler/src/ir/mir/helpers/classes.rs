@@ -88,6 +88,39 @@ impl<'a> HirToMirContext<'a> {
                     crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
                     _ => None,
                 });
+                // A parent whose module has not lowered yet is a Placeholder
+                // with no symbol; its slots still come first in the layout.
+                // The declaration index knows how many, and the header slot
+                // is counted separately.
+                if parent_symbol_hint.or(type_table_symbol).is_none() {
+                    let placeholder =
+                        self.type_table
+                            .get(parent_type_id)
+                            .and_then(|t| match &t.kind {
+                                crate::tast::TypeKind::Placeholder { name } => {
+                                    self.string_interner.get(*name).map(str::to_owned)
+                                }
+                                _ => None,
+                            });
+                    if let (Some(name), Some(index)) = (placeholder, self.static_sig_index.clone())
+                    {
+                        let mut index = index.borrow_mut();
+                        index.ensure_indexed_from_known_files(&name);
+                        let no_parse = |_: &str| -> Option<std::path::PathBuf> { None };
+                        if let Some(count) = index.instance_field_count(&name, &no_parse) {
+                            for i in 0..count {
+                                fields.push(IrField {
+                                    name: format!("__inherited_{i}"),
+                                    ty: IrType::I64,
+                                    offset: None,
+                                    shape: Default::default(),
+                                });
+                                *field_index += 1;
+                            }
+                            return;
+                        }
+                    }
+                }
                 if let Some(parent_symbol) = parent_symbol_hint.or(type_table_symbol).as_ref() {
                     for (decl_type_id, type_decl) in self.current_hir_types.iter() {
                         if let HirTypeDecl::Class(class) = type_decl {

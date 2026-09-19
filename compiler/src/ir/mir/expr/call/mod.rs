@@ -1354,15 +1354,24 @@ impl<'a> HirToMirContext<'a> {
                                     arg_regs.push(tag_reg);
                                     arg_types.push(IrType::I32);
 
+                                    // Declared as the runtime defines it: one name,
+                                    // one signature across every module in the JIT.
                                     let extern_func_id = self.get_or_register_extern_function(
                                         "haxe_reflect_compare_typed",
                                         arg_types,
-                                        result_type.clone(),
+                                        IrType::I64,
                                     );
-
-                                    return self.builder.build_call_direct(
+                                    let call_result = self.builder.build_call_direct(
                                         extern_func_id,
                                         arg_regs,
+                                        IrType::I64,
+                                    )?;
+                                    if result_type == IrType::I64 {
+                                        return Some(call_result);
+                                    }
+                                    return self.builder.build_cast(
+                                        call_result,
+                                        IrType::I64,
                                         result_type,
                                     );
                                 } else {

@@ -136,6 +136,74 @@ impl<'a> HirToMirContext<'a> {
         IrFieldShape::Unknown
     }
 
+    /// `haxe.___Int64`, the two-word class under the `Int64` abstract -- or
+    /// the abstract's own symbol seen as a class (a typedef and its target
+    /// share a root symbol here).
+    pub(crate) fn is_int64_underlying_class(&self, symbol_id: SymbolId) -> bool {
+        self.symbol_table
+            .get_symbol(symbol_id)
+            .and_then(|s| self.string_interner.get(s.name))
+            .is_some_and(|n| matches!(n, "Int64" | "__Int64" | "___Int64"))
+    }
+
+    /// `Int64`, or the class under it, through aliases: the native i64.
+    pub(crate) fn is_int64_type(&self, type_id: TypeId) -> bool {
+        use crate::tast::TypeKind;
+        let mut cur = type_id;
+        for _ in 0..4 {
+            match self.type_table.get(cur).map(|t| &t.kind) {
+                Some(TypeKind::Class { symbol_id, .. }) => {
+                    return self.is_int64_underlying_class(*symbol_id);
+                }
+                Some(TypeKind::Abstract { symbol_id, .. }) => {
+                    return self
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .and_then(|s| self.string_interner.get(s.name))
+                        .is_some_and(|n| n == "Int64");
+                }
+                Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// The qualified name of a receiver's class: a resolved class's symbol
+    /// name, or a placeholder's own name (the class its module has not
+    /// lowered yet).
+    pub(crate) fn class_qualified_name_of_type(&self, type_id: TypeId) -> Option<String> {
+        use crate::tast::TypeKind;
+        let mut cur = type_id;
+        for _ in 0..4 {
+            match self.type_table.get(cur).map(|t| &t.kind) {
+                Some(TypeKind::Class { symbol_id, .. }) => {
+                    return self.class_qualified_name(*symbol_id);
+                }
+                Some(TypeKind::Placeholder { name }) => {
+                    return self.string_interner.get(*name).map(str::to_owned);
+                }
+                Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// The class symbol of a receiver type, through aliases.
+    pub(crate) fn class_symbol_of_type(&self, type_id: TypeId) -> Option<SymbolId> {
+        use crate::tast::TypeKind;
+        let mut cur = type_id;
+        for _ in 0..4 {
+            match self.type_table.get(cur).map(|t| &t.kind) {
+                Some(TypeKind::Class { symbol_id, .. }) => return Some(*symbol_id),
+                Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
+                _ => return None,
+            }
+        }
+        None
+    }
+
     pub(crate) fn convert_type(&self, type_id: TypeId) -> IrType {
         use crate::tast::TypeKind;
 
@@ -166,7 +234,14 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            Some(TypeKind::Class { .. }) => IrType::Ptr(Box::new(IrType::Void)),
+            Some(TypeKind::Class { symbol_id, .. }) => {
+                // Int64's underlying two-word class is the native i64 as well:
+                // the abstract's own methods read `this.high`/`this.low` on it.
+                if self.is_int64_underlying_class(*symbol_id) {
+                    return IrType::I64;
+                }
+                IrType::Ptr(Box::new(IrType::Void))
+            }
             Some(TypeKind::Interface { .. }) => IrType::Ptr(Box::new(IrType::Void)),
             Some(TypeKind::Enum { .. }) => IrType::I64, // Enums as discriminant values (i64 to match Haxe Int)
             Some(TypeKind::Array { element_type, .. }) => {

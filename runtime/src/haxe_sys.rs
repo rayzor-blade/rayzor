@@ -3302,6 +3302,49 @@ pub extern "C" fn haxe_bytes_alloc(size: i32) -> *mut HaxeBytes {
 
 /// Create Bytes from String (UTF-8)
 /// Bytes.ofString(s: String): Bytes
+/// `new Bytes(length, data)` over an `Array<Int>` of byte values.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_bytes_of_int_array(
+    length: i32,
+    data: *const crate::haxe_array::HaxeArray,
+) -> *mut HaxeBytes {
+    let len = length.max(0) as usize;
+    let bytes = haxe_bytes_alloc(length);
+    if data.is_null() || bytes.is_null() {
+        return bytes;
+    }
+    let available = crate::haxe_array::haxe_array_length(data);
+    unsafe {
+        let dst = (*bytes).ptr;
+        for i in 0..len.min(available) {
+            *dst.add(i) = crate::haxe_array::haxe_array_get_i64(data, i) as u8;
+        }
+    }
+    bytes
+}
+
+/// `bytes.getData()`: the bytes as the `Array<Int>` that is `BytesData`
+/// here. A copy, as `getData` is on the targets whose BytesData is not the
+/// buffer itself.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_bytes_get_data(
+    bytes: *const HaxeBytes,
+) -> *mut crate::haxe_array::HaxeArray {
+    use crate::haxe_array::{HaxeArray, haxe_array_new, haxe_array_push_i64};
+    let arr = Box::into_raw(Box::new(unsafe { std::mem::zeroed::<HaxeArray>() }));
+    haxe_array_new(arr, 8);
+    if bytes.is_null() {
+        return arr;
+    }
+    unsafe {
+        let b = &*bytes;
+        for i in 0..b.len {
+            haxe_array_push_i64(arr, *b.ptr.add(i) as i64);
+        }
+    }
+    arr
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_of_string(s: *const HaxeString) -> *mut HaxeBytes {
     unsafe {

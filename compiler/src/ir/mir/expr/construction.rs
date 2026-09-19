@@ -85,6 +85,22 @@ impl<'a> HirToMirContext<'a> {
             (false, None)
         };
 
+        // `new ___Int64(high, low)` is the native i64 built from its words.
+        if actual_symbol_id.is_some_and(|sym| self.is_int64_underlying_class(sym))
+            && args.len() == 2
+        {
+            let high = self.lower_expression(&args[0])?;
+            let low = self.lower_expression(&args[1])?;
+            let make = self.register_stdlib_mir_forward_ref(
+                "Int64_make",
+                vec![IrType::I32, IrType::I32],
+                IrType::I64,
+            );
+            return self
+                .builder
+                .build_call_direct(make, vec![high, low], IrType::I64);
+        }
+
         // Cross-module `new C()` on an imported user class often arrives with
         // `class_type` as a Placeholder (its metadata is unresolved in THIS
         // context), leaving `actual_symbol_id` None — which degrades the

@@ -2317,7 +2317,11 @@ impl<'a> TastToHirContext<'a> {
                 // @:op rewrite for SIMD vector arithmetic so it falls through to the
                 // plain binary lowering, which hir_to_mir turns into a VectorBinOp once
                 // it sees the vector-typed operand registers.
-                let op_method = self.find_binary_operator_method(left.expr_type, operator);
+                let op_method = self
+                    .find_binary_operator_method(left.expr_type, operator)
+                    .filter(|(method, _, _)| {
+                        self.operator_method_accepts(*method, left.expr_type, right.expr_type)
+                    });
                 let owner_name_id = op_method
                     .as_ref()
                     .and_then(|(_, owner, _)| self.symbol_table.get_symbol(*owner).map(|s| s.name));
@@ -4857,6 +4861,44 @@ impl<'a> TastToHirContext<'a> {
             SourceLocation::unknown(),
         );
         self.get_dynamic_type() // Fallback to dynamic
+    }
+
+    /// Whether an `@:op` method's parameters take these operands. Only the
+    /// case Haxe decides differently is checked: a String operand against a
+    /// parameter that is not a String (nor Dynamic, nor a type parameter)
+    /// leaves `+` as string concatenation.
+    fn operator_method_accepts(&self, method: SymbolId, left_ty: TypeId, right_ty: TypeId) -> bool {
+        let Some(info) = self.symbol_table.get_symbol(method) else {
+            return true;
+        };
+        let is_static = info
+            .flags
+            .contains(crate::tast::symbols::SymbolFlags::STATIC);
+        let table = self.type_table.borrow();
+        let Some(TypeKind::Function { params, .. }) = table.get(info.type_id).map(|t| &t.kind)
+        else {
+            return true;
+        };
+        let operands: Vec<TypeId> = if is_static {
+            vec![left_ty, right_ty]
+        } else {
+            vec![right_ty]
+        };
+        for (formal, actual) in params.iter().zip(operands) {
+            let actual_is_string =
+                matches!(table.get(actual).map(|t| &t.kind), Some(TypeKind::String));
+            if !actual_is_string {
+                continue;
+            }
+            let formal_takes_string = matches!(
+                table.get(*formal).map(|t| &t.kind),
+                Some(TypeKind::String | TypeKind::Dynamic | TypeKind::TypeParameter { .. })
+            );
+            if !formal_takes_string {
+                return false;
+            }
+        }
+        true
     }
 
     /// Find a method with matching @:op metadata for a binary operator.

@@ -36,6 +36,8 @@ struct ClassSigs {
     extends: Option<String>,
     /// Package that declared this class, used to qualify a bare `extends`.
     package: String,
+    /// Instance methods this class declares with `override`.
+    overrides: BTreeSet<String>,
     /// Parameter count of a body-ful `function new` this class declares itself,
     /// recorded only for a non-`extern` `class`. Every other shape (abstract,
     /// extern, bodyless `new`, inherited ctor) is absent, because a `<C>.new`
@@ -144,6 +146,62 @@ impl StaticSigIndex {
         let class = self.classes.get(class_name)?;
         let (parent, pkg) = (class.extends.clone()?, class.package.clone());
         Some(self.qualify_parent(parent, &pkg))
+    }
+
+    /// Whether any indexed class below `class_name` (qualified, or bare when
+    /// the index knows it by that spelling) overrides `method`. A module
+    /// lowered before its subclasses learns here which of its methods need a
+    /// vtable slot; a subclass in an unindexed file is not seen.
+    pub fn is_overridden_below(&mut self, class_name: &str, method: &str) -> bool {
+        let bare = class_name.rsplit('.').next().unwrap_or(class_name);
+        let subclasses: Vec<(String, String, String)> = self
+            .classes
+            .iter()
+            .filter(|(_, c)| c.overrides.contains(method))
+            .filter_map(|(qn, c)| {
+                c.extends
+                    .clone()
+                    .map(|parent| (qn.clone(), parent, c.package.clone()))
+            })
+            .collect();
+        for (_, parent, pkg) in subclasses {
+            let mut next = Some(self.qualify_parent(parent, &pkg));
+            for _ in 0..16 {
+                let Some(cur) = next.take() else { break };
+                if cur == class_name || cur == bare || cur.rsplit('.').next() == Some(bare) {
+                    return true;
+                }
+                next = self.parent_of(&cur);
+            }
+        }
+        false
+    }
+
+    /// Whether the index holds `class_name` with any instance method.
+    pub fn declares_any_instance_method(&mut self, class_name: &str) -> bool {
+        if self.known_file(class_name).is_some() {
+            self.ensure_indexed_from_known_files(class_name);
+        }
+        self.classes
+            .get(class_name)
+            .is_some_and(|c| !c.instances.is_empty())
+    }
+
+    /// The instance methods of `class_name` that some indexed subclass
+    /// overrides, in name order: the class's own virtual slots, as every
+    /// module computes them.
+    pub fn virtual_methods_of(&mut self, class_name: &str) -> Vec<String> {
+        if self.known_file(class_name).is_some() {
+            self.ensure_indexed_from_known_files(class_name);
+        }
+        let Some(class) = self.classes.get(class_name) else {
+            return Vec::new();
+        };
+        let names: Vec<String> = class.instances.keys().cloned().collect();
+        names
+            .into_iter()
+            .filter(|m| self.is_overridden_below(class_name, m))
+            .collect()
     }
 
     /// A bare `extends Base` names a type in the subclass's own package first;
@@ -323,6 +381,14 @@ impl StaticSigIndex {
                     entry.ctor_params = Some(func.params.len());
                 }
                 continue;
+            }
+            if !is_static
+                && field
+                    .modifiers
+                    .iter()
+                    .any(|m| matches!(m, parser::Modifier::Override))
+            {
+                entry.overrides.insert(func.name.clone());
             }
             let table = if is_static {
                 &mut entry.statics

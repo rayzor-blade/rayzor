@@ -21,6 +21,36 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+/// The slot layout of `class_qn` as every module computes it from the
+/// declaration index: each ancestor's virtual methods, root first, then the
+/// class's own, in name order. None when the index does not know the class.
+fn index_slot_layout(
+    index: &mut crate::tast::sig_index::StaticSigIndex,
+    class_qn: &str,
+) -> Option<Vec<String>> {
+    let mut chain = vec![class_qn.to_string()];
+    let mut cur = index.parent_of(class_qn);
+    while let Some(p) = cur {
+        if chain.contains(&p) || chain.len() > 32 {
+            break;
+        }
+        cur = index.parent_of(&p);
+        chain.push(p);
+    }
+    if chain.len() == 1 && !index.declares_any_instance_method(class_qn) {
+        return None;
+    }
+    let mut layout: Vec<String> = Vec::new();
+    for cls in chain.iter().rev() {
+        for m in index.virtual_methods_of(cls) {
+            if !layout.contains(&m) {
+                layout.push(m);
+            }
+        }
+    }
+    Some(layout)
+}
+
 impl<'a> HirToMirContext<'a> {
     /// Build the vtable for a single class — inherits parent's slots and uses
     /// the most-derived implementation for each slot.
@@ -49,7 +79,10 @@ impl<'a> HirToMirContext<'a> {
             return;
         }
 
-        let mut vtable = Vec::new();
+        // One entry per slot, in slot order; a slot no local method fills
+        // (an inherited method compiled elsewhere) stays empty and the
+        // runtime takes it from the nearest ancestor's table.
+        let mut vtable: Vec<Option<SymbolId>> = Vec::new();
         for (method_name, _) in &slots {
             let method_sym = self
                 .class_method_by_name
@@ -63,13 +96,10 @@ impl<'a> HirToMirContext<'a> {
                             .copied()
                     })
                 });
-
-            if let Some(sym) = method_sym {
-                vtable.push(sym);
-            }
+            vtable.push(method_sym);
         }
 
-        if !vtable.is_empty() {
+        if vtable.iter().any(|m| m.is_some()) {
             self.class_virtual_slots.insert(class_sym, slots);
             self.class_vtables.insert(class_sym, vtable);
         }
@@ -99,19 +129,59 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        if self.override_methods.is_empty() {
+        // A method overridden by a subclass in a file this module never sees
+        // still needs its slot here, or a call from the base body binds to the
+        // base implementation. The declaration index has seen every file.
+        let mut seeded_virtual: BTreeSet<(SymbolId, InternedString)> = BTreeSet::new();
+        if let Some(index) = self.static_sig_index.clone() {
+            let mut index = index.borrow_mut();
+            let declared: Vec<_> = self
+                .class_method_by_name
+                .keys()
+                .map(|(cls, name)| (*cls, *name))
+                .collect();
+            for (cls, name) in declared {
+                // A generic class's methods are specialised per instantiation
+                // and the vtable would hold the erased body: those keep the
+                // direct call an override in another module cannot reach.
+                let generic = self.current_hir_types.values().any(|d| {
+                    matches!(d, HirTypeDecl::Class(c) if c.symbol_id == cls && !c.type_params.is_empty())
+                });
+                if generic {
+                    continue;
+                }
+                let Some(sym) = self.symbol_table.get_symbol(cls) else {
+                    continue;
+                };
+                let Some(class_qn) = self
+                    .string_interner
+                    .get(sym.qualified_name.unwrap_or(sym.name))
+                else {
+                    continue;
+                };
+                let Some(method) = self.string_interner.get(name) else {
+                    continue;
+                };
+                if method != "new" && index.is_overridden_below(class_qn, method) {
+                    seeded_virtual.insert((cls, name));
+                }
+            }
+        }
+
+        if self.override_methods.is_empty() && seeded_virtual.is_empty() {
             return;
         }
 
         // Step 1: For each override, trace up the parent chain to find the base class
         // that originally defines the method. Mark that base method as needing a virtual slot.
-        let mut base_virtual_methods: BTreeSet<(SymbolId, InternedString)> = BTreeSet::new();
+        let mut base_virtual_methods: BTreeSet<(SymbolId, InternedString)> = seeded_virtual;
 
         let override_methods_snapshot: Vec<_> = self
             .override_methods
             .iter()
             .map(|(s, n)| (*s, *n))
             .collect();
+        let mut index_laid_out: BTreeSet<SymbolId> = BTreeSet::new();
         for (child_sym, method_name) in &override_methods_snapshot {
             let method_name = *method_name;
             let child_sym = *child_sym;
@@ -124,13 +194,94 @@ impl<'a> HirToMirContext<'a> {
                     defining_class = Some(parent);
                 }
             }
+            // A parent that is not a class here at all (its module is not
+            // loaded yet): the index knows the ancestors and their slots, so
+            // this class lays out its own table over them and fills what it
+            // implements; the runtime inherits the rest.
+            if defining_class.is_none() && !self.class_parent_map.contains_key(&child_sym) {
+                if let Some(index) = self.static_sig_index.clone() {
+                    let mut index = index.borrow_mut();
+                    if let Some(child_qn) = self.class_qualified_name(child_sym) {
+                        if let Some(mut layout) = index_slot_layout(&mut index, &child_qn) {
+                            let method = self.string_interner.get(method_name).unwrap_or("");
+                            if !layout.iter().any(|m| m == method) {
+                                layout.push(method.to_string());
+                            }
+                            let slots: Vec<(InternedString, u32)> = layout
+                                .iter()
+                                .enumerate()
+                                .map(|(i, m)| (self.string_interner.intern(m), i as u32))
+                                .collect();
+                            self.class_virtual_slots.insert(child_sym, slots);
+                            index_laid_out.insert(child_sym);
+                        }
+                    }
+                }
+                continue;
+            }
+            // A parent declared in another module has no methods here; the
+            // declaration index says which ancestor defines the method, and
+            // its slots are laid out from the index the way its own module
+            // laid them out.
+            if defining_class.is_none() {
+                if let Some(index) = self.static_sig_index.clone() {
+                    let mut index = index.borrow_mut();
+                    let method = self.string_interner.get(method_name).unwrap_or("");
+                    for parent in self.parent_chain(child_sym) {
+                        let Some(parent_qn) = self.class_qualified_name(parent) else {
+                            continue;
+                        };
+                        if index.declares_instance_method(&parent_qn, method) {
+                            defining_class = Some(parent);
+                        }
+                    }
+                    if let Some(base) = defining_class {
+                        for cls in self.parent_chain(child_sym) {
+                            if self.class_virtual_slots.contains_key(&cls) {
+                                continue;
+                            }
+                            let Some(qn) = self.class_qualified_name(cls) else {
+                                continue;
+                            };
+                            let names: Vec<InternedString> = index
+                                .virtual_methods_of(&qn)
+                                .iter()
+                                .map(|m| self.string_interner.intern(m))
+                                .collect();
+                            if !names.is_empty() {
+                                let slots: Vec<(InternedString, u32)> = names
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(i, n)| (n, i as u32))
+                                    .collect();
+                                self.class_virtual_slots.insert(cls, slots);
+                            }
+                            if cls == base {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(base) = defining_class {
                 base_virtual_methods.insert((base, method_name));
             }
         }
 
-        // Step 2: Assign virtual slots for each base class
-        for (base_class, method_name) in &base_virtual_methods {
+        // Step 2: Assign virtual slots for each base class, in method-name
+        // order: every module lays a class's slots out the same way, so a
+        // subclass compiled elsewhere fills the slot the base dispatches on.
+        let mut ordered: Vec<(SymbolId, InternedString)> =
+            base_virtual_methods.iter().copied().collect();
+        ordered.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| {
+                self.string_interner
+                    .get(a.1)
+                    .unwrap_or("")
+                    .cmp(self.string_interner.get(b.1).unwrap_or(""))
+            })
+        });
+        for (base_class, method_name) in &ordered {
             let slots = self.class_virtual_slots.entry(*base_class).or_default();
             if !slots.iter().any(|(n, _)| *n == *method_name) {
                 let slot_idx = slots.len() as u32;

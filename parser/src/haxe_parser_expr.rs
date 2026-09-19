@@ -149,22 +149,22 @@ fn logical_or_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
 
 /// Parse logical AND expression: `a && b`
 fn logical_and_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
-    binary_expr(full, input, bitwise_or_expr, &[("&&", BinaryOp::And)])
+    binary_expr(full, input, equality_expr, &[("&&", BinaryOp::And)])
 }
 
-/// Parse bitwise OR expression: `a | b`
-fn bitwise_or_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
-    binary_expr(full, input, bitwise_xor_expr, &[("|", BinaryOp::BitOr)])
-}
-
-/// Parse bitwise XOR expression: `a ^ b`
-fn bitwise_xor_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
-    binary_expr(full, input, bitwise_and_expr, &[("^", BinaryOp::BitXor)])
-}
-
-/// Parse bitwise AND expression: `a & b`
-fn bitwise_and_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
-    binary_expr(full, input, equality_expr, &[("&", BinaryOp::BitAnd)])
+/// Parse a bitwise expression: `a | b`, `a ^ b`, `a & b`. One level in
+/// Haxe, and above the comparisons: `n & 0x8000 != 0` is `(n & 0x8000) != 0`.
+fn bitwise_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
+    binary_expr(
+        full,
+        input,
+        shift_expr,
+        &[
+            ("|", BinaryOp::BitOr),
+            ("^", BinaryOp::BitXor),
+            ("&", BinaryOp::BitAnd),
+        ],
+    )
 }
 
 /// Parse equality expression: `a == b`, `a != b`
@@ -180,7 +180,7 @@ fn equality_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
 /// Parse relational expression: `a < b`, `a <= b`, etc.
 fn relational_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
     // First parse the left side
-    let (input, mut left) = shift_expr(full, input)?;
+    let (input, mut left) = bitwise_expr(full, input)?;
     let mut current_input = input;
 
     loop {
@@ -190,7 +190,7 @@ fn relational_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
 
         // Check for `is` operator
         if let Ok((rest, _)) = keyword("is")(current_input) {
-            let (rest, right) = shift_expr(full, rest)?;
+            let (rest, right) = bitwise_expr(full, rest)?;
             let span = left.span.merge(right.span);
             left = Expr {
                 kind: ExprKind::Binary {
@@ -235,7 +235,7 @@ fn relational_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
         };
 
         if let Some(op) = op {
-            let (rest, right) = shift_expr(full, current_input)?;
+            let (rest, right) = bitwise_expr(full, current_input)?;
             let span = left.span.merge(right.span);
             left = Expr {
                 kind: ExprKind::Binary {
@@ -339,6 +339,13 @@ fn ws_before_one_of_ops<'a>(
                 // Don't match if the operator is followed by '=' (compound assignment)
                 // e.g., don't match >>> if the input is >>>=
                 if rest.starts_with('=') {
+                    continue;
+                }
+                // `|` and `&` are now matched below `||` / `&&`: the first
+                // character of the logical operator is not the bitwise one.
+                if (*op_str == "|" && rest.starts_with('|'))
+                    || (*op_str == "&" && rest.starts_with('&'))
+                {
                     continue;
                 }
                 return Ok((rest, *op_str));
