@@ -596,3 +596,23 @@ fn first_map_use<'e>(e: &'e Expr, name: &str) -> Option<(&'e Expr, &'e Expr)> {
         _ => None,
     }
 }
+
+impl AstLowering<'_> {
+    /// The type a `var x = null` local takes from its first assignment: the
+    /// assigned type, or `Null<T>` for a scalar; none while the assigned type
+    /// is itself unknown.
+    pub(crate) fn null_local_binding(&self, assigned: TypeId) -> Option<TypeId> {
+        let mut tt = self.context.type_table.borrow_mut();
+        match tt.get(assigned).map(|t| &t.kind) {
+            None
+            | Some(TypeKind::Dynamic)
+            | Some(TypeKind::Unknown)
+            | Some(TypeKind::Error)
+            | Some(TypeKind::Void) => None,
+            Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool) => {
+                Some(tt.create_optional_type(assigned))
+            }
+            Some(_) => Some(assigned),
+        }
+    }
+}

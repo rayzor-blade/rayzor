@@ -307,6 +307,22 @@ pub extern "C" fn rayzor_anon_has_field(ptr: *mut u8, name_ptr: *const u8, name_
     }
 }
 
+/// A field's stored bits, by name; `None` when the object has no such field.
+pub(crate) fn anon_raw_field(ptr: *mut u8, name: &str) -> Option<u64> {
+    if ptr.is_null() {
+        return None;
+    }
+    let arc_ref = unsafe { borrow_arc(ptr) };
+    match &arc_ref.data {
+        AnonData::Inline(fields) => {
+            let shape = get_shape(arc_ref.shape_id)?;
+            let idx = shape.field_names.iter().position(|n| n == name)?;
+            fields.get(idx).copied()
+        }
+        AnonData::Map(map) => map.get(name).map(|&(_, v)| v),
+    }
+}
+
 /// Get field by name, returns boxed DynamicValue pointer (caller must free)
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_get_field(

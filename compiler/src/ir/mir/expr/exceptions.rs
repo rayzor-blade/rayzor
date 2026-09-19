@@ -308,8 +308,12 @@ impl<'a> HirToMirContext<'a> {
                 for (s, (reg, _)) in &tc_pre {
                     self.symbol_map.insert(*s, *reg);
                 }
-                self.symbol_map
-                    .insert(catch_clause.exception_var, exception_id);
+                let bound = if is_dynamic {
+                    self.exception_as_dynamic(exception_id)
+                } else {
+                    exception_id
+                };
+                self.symbol_map.insert(catch_clause.exception_var, bound);
                 self.lower_block(&catch_clause.body);
                 if !self.is_terminated() {
                     if let Some(blk) = self.builder.current_block() {
@@ -410,6 +414,20 @@ impl<'a> HirToMirContext<'a> {
         if !reached {
             self.builder.build_unreachable();
         }
+    }
+
+    /// A `catch (e:Dynamic)` sees the exception as a box, whatever it was
+    /// thrown as; a typed catch reads the raw payload.
+    fn exception_as_dynamic(&mut self, raw: IrId) -> IrId {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let as_dyn = self.get_or_register_extern_function(
+            "rayzor_exception_as_dynamic",
+            vec![],
+            ptr_u8.clone(),
+        );
+        self.builder
+            .build_call_direct(as_dyn, vec![], ptr_u8)
+            .unwrap_or(raw)
     }
 
     pub(crate) fn lower_try_catch_expr(&mut self, expr: &HirExpr) -> Option<IrId> {
@@ -628,7 +646,12 @@ impl<'a> HirToMirContext<'a> {
                 for (s, (reg, _)) in &tc_pre {
                     self.symbol_map.insert(*s, *reg);
                 }
-                self.symbol_map.insert(handler.exception_var, exception_id);
+                let bound = if is_dynamic {
+                    self.exception_as_dynamic(exception_id)
+                } else {
+                    exception_id
+                };
+                self.symbol_map.insert(handler.exception_var, bound);
                 let handler_value = self.lower_expression(&handler.body);
 
                 if !self.is_terminated() {

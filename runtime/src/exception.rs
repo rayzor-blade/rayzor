@@ -133,6 +133,37 @@ pub extern "C" fn rayzor_get_exception_type_id() -> u32 {
     STATE.with(|state| state.borrow().current_exception_type_id)
 }
 
+/// The current exception as a Dynamic box, for a `catch (e:Dynamic)`: the
+/// payload is boxed by the type it was thrown as, unless it already is one.
+#[unsafe(no_mangle)]
+pub extern "C" fn rayzor_exception_as_dynamic() -> *mut u8 {
+    let (value, type_id) = STATE.with(|state| {
+        let state = state.borrow();
+        (state.current_exception, state.current_exception_type_id)
+    });
+    exception_as_dynamic(value, type_id)
+}
+
+fn exception_as_dynamic(value: i64, thrown_type_id: u32) -> *mut u8 {
+    use crate::type_system::*;
+    if value == 0 {
+        return std::ptr::null_mut();
+    }
+    let raw = normalize_thrown_type_id(thrown_type_id);
+    let p = value as *mut u8;
+    if dynamic_box_at(p).is_some_and(|d| d.type_id.0 == raw && !d.value_ptr.is_null()) {
+        return p;
+    }
+    match raw {
+        x if x == TYPE_STRING.0 => haxe_box_haxestring_ptr(p),
+        x if x == TYPE_INT.0 => haxe_box_int_ptr(value),
+        x if x == TYPE_FLOAT.0 => haxe_box_float_ptr(value as f64),
+        x if x == TYPE_BOOL.0 => haxe_box_bool_ptr(value != 0),
+        _ if thrown_type_id >= TYPE_USER_START => haxe_box_reference_ptr(p, thrown_type_id),
+        _ => p,
+    }
+}
+
 /// Get the stored exception stack trace (for NativeStackTrace module).
 pub fn get_exception_stack_trace() -> String {
     STATE.with(|state| state.borrow().current_stack_trace.clone())
@@ -261,6 +292,15 @@ fn format_uncaught_exception(exception_value: i64, thrown_type_id: u32) -> Strin
         }
         if let Some(msg) = try_format_exception_like_message_slot(exception_value, raw_type_id) {
             return msg;
+        }
+        if exception_value != 0 {
+            let s = crate::type_system::class_instance_to_string(
+                thrown_type_id,
+                exception_value as *mut u8,
+            );
+            if let Some(msg) = read_haxe_string(s) {
+                return msg;
+            }
         }
     }
 

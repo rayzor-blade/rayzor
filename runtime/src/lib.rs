@@ -48,6 +48,7 @@ pub mod concurrency; // Concurrency primitives (Thread, Arc, Mutex, Channel)
 pub mod ereg; // EReg regular expressions (regex crate)
 pub mod exception;
 pub mod future; // Future<T> — lazy async futures
+pub mod iter_handle; // Structural iterables and iterators read at run time
 pub mod socket; // Networking (Socket, Host — TCP/DNS)
 pub mod ssl; // SSL/TLS (sys.ssl.Socket, Certificate, Key, Digest)
 // Note: ArrayIterator/ArrayKeyValueIterator are compiled as regular Haxe classes.

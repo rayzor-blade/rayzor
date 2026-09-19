@@ -622,12 +622,21 @@ impl<'a> HirToMirContext<'a> {
                             _ => false,
                         };
                         let effective_ty = match resolved_value_ty.as_ref() {
-                            Some(rty @ (IrType::F64 | IrType::F32)) if result_is_opaque => {
+                            Some(rty @ (IrType::F64 | IrType::F32 | IrType::String))
+                                if result_is_opaque =>
+                            {
                                 rty.clone()
                             }
                             _ => result_type.clone(),
                         };
                         let final_result = match &effective_ty {
+                            // `Null<String>` value bits are the string pointer.
+                            IrType::String => self
+                                .builder
+                                .build_cast(call_result, IrType::U64, IrType::I64)
+                                .and_then(|r| {
+                                    self.builder.build_cast(r, IrType::I64, IrType::String)
+                                }),
                             IrType::I32 => {
                                 self.builder
                                     .build_cast(call_result, IrType::U64, IrType::I32)

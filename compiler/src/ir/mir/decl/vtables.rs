@@ -829,11 +829,6 @@ impl<'a> HirToMirContext<'a> {
         &mut self,
         method_func_id: IrFunctionId,
     ) -> Option<IrFunctionId> {
-        if let Some(cached) = self.method_ref_thunks.get(&method_func_id) {
-            return Some(*cached);
-        }
-
-        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let method_sig = self
             .builder
             .module
@@ -841,6 +836,21 @@ impl<'a> HirToMirContext<'a> {
             .get(&method_func_id)?
             .signature
             .clone();
+        self.ensure_method_ref_thunk_with_sig(method_func_id, method_sig)
+    }
+
+    /// The same thunk for a method whose body lives in another module:
+    /// `method_sig` is its signature as this module knows it.
+    pub(crate) fn ensure_method_ref_thunk_with_sig(
+        &mut self,
+        method_func_id: IrFunctionId,
+        method_sig: IrFunctionSignature,
+    ) -> Option<IrFunctionId> {
+        if let Some(cached) = self.method_ref_thunks.get(&method_func_id) {
+            return Some(*cached);
+        }
+
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         if method_sig.parameters.is_empty() {
             return None;
         }

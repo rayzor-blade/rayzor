@@ -875,8 +875,19 @@ impl CompilationUnit {
                     // `new LlamaModel()`) lands before its caller — otherwise the
                     // caller can't resolve the callee's constructor and leaves the
                     // object unconstructed.
+                    // A stuck file nothing else stuck depends on is not part of
+                    // the cycle: emitting it early frees nothing and lowers it
+                    // before its own dependencies (a `using StringTools` module
+                    // typed before StringTools loses every extension call).
+                    let in_cycle = |name: &String| {
+                        graph
+                            .get(name)
+                            .is_some_and(|ds| ds.iter().any(|d| stuck.contains_key(d)))
+                    };
+                    let any_in_cycle = stuck.keys().any(in_cycle);
                     let victim = stuck
                         .iter()
+                        .filter(|(name, _)| !any_in_cycle || in_cycle(name))
                         .map(|(name, deps)| {
                             let outstanding = deps.iter().filter(|d| !emitted.contains(*d)).count();
                             // Among equals, the class that is constructed goes

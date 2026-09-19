@@ -203,6 +203,22 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(box_func_id, vec![value_as_ptr], ptr_u8)
             }
 
+            // Null<T> over a scalar is already a box. `Null<String>` is the
+            // nullable string pointer, boxed as a String (a null stays null).
+            // Other references stay raw: an enum or class read back from a
+            // Dynamic slot is not unboxed on the way out yet.
+            Some(TypeKind::Optional { inner_type }) => {
+                let inner_type = *inner_type;
+                let inner_is_string = matches!(
+                    self.type_table.get(inner_type).map(|t| &t.kind),
+                    Some(TypeKind::String)
+                );
+                if inner_is_string {
+                    return self.maybe_box_value_inner(value, inner_type, target_ty);
+                }
+                Some(value)
+            }
+
             // Abstract, TypeParam, etc. — skip boxing for unsupported types
             _ => {
                 debug!(

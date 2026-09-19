@@ -1110,8 +1110,35 @@ impl<'a> AstLowering<'a> {
             return Some(elem);
         }
         let iterator = self.context.string_interner.intern("iterator");
-        let it = self.structural_method_return_type(ty, iterator)?;
+        let it = self
+            .structural_method_return_type(ty, iterator)
+            .or_else(|| self.class_method_return_type(ty, iterator))?;
         self.structural_method_return_type(it, next)
+    }
+
+    /// The declared return type of a class's own method, for a receiver that
+    /// is a class rather than a structure.
+    fn class_method_return_type(
+        &self,
+        ty: TypeId,
+        method: crate::tast::InternedString,
+    ) -> Option<TypeId> {
+        let class_symbol = match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Class { symbol_id, .. }) => *symbol_id,
+            _ => return None,
+        };
+        let method_symbol = self.resolve_class_method_symbol(class_symbol, method)?;
+        let method_type = self.context.symbol_table.get_symbol(method_symbol)?.type_id;
+        match self
+            .context
+            .type_table
+            .borrow()
+            .get(method_type)
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Function { return_type, .. }) => Some(*return_type),
+            _ => None,
+        }
     }
 
     /// Determine variable usage based on expression kind (simplified for TAST)

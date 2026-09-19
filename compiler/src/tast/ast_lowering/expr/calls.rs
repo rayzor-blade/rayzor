@@ -1424,6 +1424,11 @@ impl<'a> AstLowering<'a> {
                                 } else {
                                     self.context.type_table.borrow().dynamic_type()
                                 };
+                                let expr_type = self.bind_return_type_params(
+                                    expr_type,
+                                    method_symbol,
+                                    &arg_exprs,
+                                );
 
                                 let kind = TypedExpressionKind::StaticMethodCall {
                                     class_symbol,
@@ -1831,6 +1836,11 @@ impl<'a> AstLowering<'a> {
                                         self.context.type_table.borrow().dynamic_type()
                                     };
 
+                                    let expr_type = self.bind_return_type_params(
+                                        expr_type,
+                                        method_symbol,
+                                        &arg_exprs,
+                                    );
                                     let kind = TypedExpressionKind::StaticMethodCall {
                                         class_symbol,
                                         method_symbol,
@@ -2556,18 +2566,36 @@ impl<'a> AstLowering<'a> {
     /// What an instantiated alias binds each parameter of its declaration to.
     fn alias_bindings(&self, alias: SymbolId, args: &[TypeId]) -> Vec<(SymbolId, TypeId)> {
         let tt = self.context.type_table.borrow();
-        let Some(decl) = self
+        // The declaration: the symbol's own type, or -- for a typedef
+        // pre-registered as a class, whose symbol carries the class type --
+        // the alias node registered under the symbol.
+        let decl_params = self
             .context
             .symbol_table
             .get_symbol(alias)
             .and_then(|s| tt.get(s.type_id))
-        else {
-            return Vec::new();
-        };
-        let crate::tast::core::TypeKind::TypeAlias {
-            type_args: params, ..
-        } = &decl.kind
-        else {
+            .and_then(|decl| match &decl.kind {
+                crate::tast::core::TypeKind::TypeAlias { type_args, .. } => Some(type_args.clone()),
+                _ => None,
+            })
+            .or_else(|| {
+                tt.types_for_symbol(alias)?
+                    .iter()
+                    .find_map(|t| match &tt.get(*t)?.kind {
+                        crate::tast::core::TypeKind::TypeAlias { type_args, .. }
+                            if type_args.iter().any(|p| {
+                                matches!(
+                                    tt.get(*p).map(|i| &i.kind),
+                                    Some(crate::tast::core::TypeKind::TypeParameter { .. })
+                                )
+                            }) =>
+                        {
+                            Some(type_args.clone())
+                        }
+                        _ => None,
+                    })
+            });
+        let Some(params) = decl_params else {
             return Vec::new();
         };
         params
@@ -2584,7 +2612,11 @@ impl<'a> AstLowering<'a> {
 
     /// `ty` with every bound parameter replaced; a node is rebuilt only where
     /// something under it changed.
-    fn substitute_alias_args(&self, ty: TypeId, bindings: &[(SymbolId, TypeId)]) -> TypeId {
+    pub(crate) fn substitute_alias_args(
+        &self,
+        ty: TypeId,
+        bindings: &[(SymbolId, TypeId)],
+    ) -> TypeId {
         use crate::tast::core::{AnonymousField, TypeKind};
         if bindings.is_empty() {
             return ty;
@@ -2678,6 +2710,33 @@ impl<'a> AstLowering<'a> {
                     return ty;
                 }
                 TypeKind::Anonymous { fields: rebuilt }
+            }
+            // A typedef pre-registered as a class instantiates as a Class
+            // node over the alias's parameters.
+            Some(TypeKind::Class {
+                symbol_id,
+                type_args,
+            }) => {
+                let args = sub(&type_args);
+                if args == type_args {
+                    return ty;
+                }
+                return self
+                    .context
+                    .type_table
+                    .borrow_mut()
+                    .create_class_type(symbol_id, args);
+            }
+            Some(TypeKind::Optional { inner_type }) => {
+                let inner = self.substitute_alias_args(inner_type, bindings);
+                if inner == inner_type {
+                    return ty;
+                }
+                return self
+                    .context
+                    .type_table
+                    .borrow_mut()
+                    .create_optional_type(inner);
             }
             _ => return ty,
         };
@@ -2880,53 +2939,10 @@ impl<'a> AstLowering<'a> {
             return Vec::new();
         };
 
-        // Walk a declared type and the actual beside it, recording what each
-        // type variable met. Structural, so `Array<T>` against `Array<Int>`
-        // reaches T. Depth-bounded because a type can be cyclic.
-        fn unify(
-            table: &crate::tast::core::TypeTable,
-            declared: TypeId,
-            actual: TypeId,
-            depth: u32,
-            out: &mut Vec<(SymbolId, TypeId)>,
-        ) {
-            if depth > 8 {
-                return;
-            }
-            let (Some(d), Some(a)) = (table.get(declared), table.get(actual)) else {
-                return;
-            };
-            match (&d.kind, &a.kind) {
-                // An actual that is a variable, or that carries no type of its
-                // own, says nothing about T -- skip it rather than count it as
-                // disagreement. `aeq([1,2,3], xs)` where `xs` inferred as
-                // Array<Dynamic> still pins T from the first argument.
-                (TypeKind::TypeParameter { symbol_id, .. }, _) => {
-                    let uninformative = matches!(
-                        a.kind,
-                        TypeKind::TypeParameter { .. }
-                            | TypeKind::Dynamic
-                            | TypeKind::Unknown
-                            | TypeKind::Error
-                    );
-                    if !uninformative {
-                        out.push((*symbol_id, actual));
-                    }
-                }
-                (TypeKind::Array { element_type: de }, TypeKind::Array { element_type: ae }) => {
-                    unify(table, *de, *ae, depth + 1, out)
-                }
-                (
-                    TypeKind::Optional { inner_type: di, .. },
-                    TypeKind::Optional { inner_type: ai, .. },
-                ) => unify(table, *di, *ai, depth + 1, out),
-                _ => {}
-            }
-        }
-
+        drop(table);
         let mut bindings: Vec<(SymbolId, TypeId)> = Vec::new();
         for (declared, argument) in params.iter().zip(arguments.iter()) {
-            unify(&table, *declared, argument.expr_type, 0, &mut bindings);
+            self.unify_type_args(*declared, argument.expr_type, 0, &mut bindings);
         }
         let Some(&(first_var, first_ty)) = bindings.first() else {
             return Vec::new();
@@ -2940,6 +2956,194 @@ impl<'a> AstLowering<'a> {
             return Vec::new();
         }
         vec![first_ty]
+    }
+
+    /// Walk a declared type and the actual beside it, recording what each
+    /// type variable met. Structural, so `Array<T>` against `Array<Int>`
+    /// reaches T, and `Iterable<T>` against `{ iterator: f }` reaches T
+    /// through the alias's structure. Depth-bounded because a type can be
+    /// cyclic.
+    pub(crate) fn unify_type_args(
+        &self,
+        declared: TypeId,
+        actual: TypeId,
+        depth: u32,
+        out: &mut Vec<(SymbolId, TypeId)>,
+    ) {
+        use crate::tast::core::TypeKind;
+        if depth > 8 {
+            return;
+        }
+        let (d, a) = {
+            let table = self.context.type_table.borrow();
+            let (Some(d), Some(a)) = (table.get(declared), table.get(actual)) else {
+                return;
+            };
+            (d.kind.clone(), a.kind.clone())
+        };
+        match (&d, &a) {
+            // An actual that is a variable, or that carries no type of its
+            // own, says nothing about T -- skip it rather than count it as
+            // disagreement. `aeq([1,2,3], xs)` where `xs` inferred as
+            // Array<Dynamic> still pins T from the first argument.
+            (TypeKind::TypeParameter { symbol_id, .. }, _) => {
+                let uninformative = matches!(
+                    a,
+                    TypeKind::TypeParameter { .. }
+                        | TypeKind::Dynamic
+                        | TypeKind::Unknown
+                        | TypeKind::Error
+                );
+                if !uninformative {
+                    out.push((*symbol_id, actual));
+                }
+            }
+            (TypeKind::Array { element_type: de }, TypeKind::Array { element_type: ae }) => {
+                self.unify_type_args(*de, *ae, depth + 1, out)
+            }
+            (
+                TypeKind::Optional { inner_type: di, .. },
+                TypeKind::Optional { inner_type: ai, .. },
+            ) => self.unify_type_args(*di, *ai, depth + 1, out),
+            (
+                TypeKind::Function {
+                    params: dp,
+                    return_type: dr,
+                    ..
+                },
+                TypeKind::Function {
+                    params: ap,
+                    return_type: ar,
+                    ..
+                },
+            ) => {
+                for (x, y) in dp.iter().zip(ap.iter()) {
+                    self.unify_type_args(*x, *y, depth + 1, out);
+                }
+                self.unify_type_args(*dr, *ar, depth + 1, out);
+            }
+            (TypeKind::Anonymous { fields: df }, TypeKind::Anonymous { fields: af }) => {
+                for f in df {
+                    if let Some(g) = af.iter().find(|g| g.name == f.name) {
+                        self.unify_type_args(f.type_id, g.type_id, depth + 1, out);
+                    }
+                }
+            }
+            // The same generic type on both sides: its arguments pair up.
+            (
+                TypeKind::TypeAlias {
+                    symbol_id: ds,
+                    type_args: da,
+                    ..
+                },
+                TypeKind::TypeAlias {
+                    symbol_id: as_,
+                    type_args: aa,
+                    ..
+                },
+            ) if ds == as_ => {
+                for (x, y) in da.iter().zip(aa.iter()) {
+                    self.unify_type_args(*x, *y, depth + 1, out);
+                }
+            }
+            (
+                TypeKind::Class {
+                    symbol_id: ds,
+                    type_args: da,
+                },
+                TypeKind::Class {
+                    symbol_id: as_,
+                    type_args: aa,
+                },
+            ) if ds == as_ => {
+                for (x, y) in da.iter().zip(aa.iter()) {
+                    self.unify_type_args(*x, *y, depth + 1, out);
+                }
+            }
+            // An alias against anything else: its structure, with the alias's
+            // own parameters bound to the arguments named here.
+            (
+                TypeKind::TypeAlias {
+                    symbol_id,
+                    target_type,
+                    type_args,
+                },
+                _,
+            ) => {
+                let bindings = self.alias_bindings(*symbol_id, type_args);
+                let expanded = self.substitute_alias_args(*target_type, &bindings);
+                if expanded != declared {
+                    self.unify_type_args(expanded, actual, depth + 1, out);
+                }
+            }
+            // A typedef pre-registered as a class keeps that symbol kind; its
+            // declaration is the alias to expand.
+            (
+                TypeKind::Class {
+                    symbol_id,
+                    type_args,
+                },
+                _,
+            ) => {
+                let (resolved, dynamic) = {
+                    let tt = self.context.type_table.borrow();
+                    (tt.resolve_type_alias(*symbol_id), tt.dynamic_type())
+                };
+                if resolved != declared && resolved != dynamic {
+                    let bindings = self.alias_bindings(*symbol_id, type_args);
+                    let expanded = self.substitute_alias_args(resolved, &bindings);
+                    self.unify_type_args(expanded, actual, depth + 1, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A call's return type with every parameter the arguments bind
+    /// structurally replaced (`array(it:Iterable<A>):Array<A>` called with a
+    /// `{ iterator }` structure). Unchanged when nothing binds.
+    pub(crate) fn bind_return_type_params(
+        &self,
+        ret: TypeId,
+        method_symbol: SymbolId,
+        arguments: &[TypedExpression],
+    ) -> TypeId {
+        let params = {
+            let table = self.context.type_table.borrow();
+            let Some(sym) = self.context.symbol_table.get_symbol(method_symbol) else {
+                return ret;
+            };
+            match table.get(sym.type_id).map(|t| &t.kind) {
+                Some(crate::tast::core::TypeKind::Function { params, .. }) => params.clone(),
+                _ => return ret,
+            }
+        };
+        let mut bindings = Vec::new();
+        for (p, a) in params.iter().zip(arguments.iter()) {
+            self.unify_type_args(*p, a.expr_type, 0, &mut bindings);
+        }
+        // RAYZOR_BIND_TRACE=1 prints each call's parameter bindings.
+        if std::env::var_os("RAYZOR_BIND_TRACE").is_some() {
+            let f = |t: TypeId| {
+                crate::tast::type_checker::format_type_for_error(
+                    t,
+                    &self.context.type_table,
+                    &self.context.string_interner,
+                )
+            };
+            eprintln!(
+                "[BIND] method={:?} params={:?} args={:?} bindings={:?} ret={}",
+                method_symbol,
+                params.iter().map(|t| f(*t)).collect::<Vec<_>>(),
+                arguments.iter().map(|a| f(a.expr_type)).collect::<Vec<_>>(),
+                bindings,
+                f(ret)
+            );
+        }
+        if bindings.is_empty() {
+            return ret;
+        }
+        self.substitute_alias_args(ret, &bindings)
     }
 
     pub(crate) fn infer_method_call_return_type(

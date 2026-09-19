@@ -211,6 +211,23 @@ impl<'a> HirToMirContext<'a> {
             return;
         }
 
+        // A structure literal supplying the protocol through closure fields
+        // iterates through a handle the runtime steps.
+        if matches!(
+            iter_type_kind,
+            Some(crate::tast::TypeKind::Anonymous { .. })
+        ) {
+            if let Some(source) = self.iter_source_of(iter_expr.ty) {
+                let Some(value) = self.lower_expression(iter_expr) else {
+                    return;
+                };
+                if let Some(handle) = self.build_iter_handle(value, &source) {
+                    self.lower_for_in_iter_handle_reg(pattern, handle, body, label);
+                }
+                return;
+            }
+        }
+
         // For class/interface types with hasNext()/next() iterator protocol,
         // desugar to a while loop calling those methods directly.
         // Dynamic is included because arr.iterator() returns Dynamic-typed iterators
@@ -807,23 +824,27 @@ impl<'a> HirToMirContext<'a> {
                         return;
                     };
 
-                    // Find the iterator class from the return type
-                    let iter_class_sym = {
-                        let sym = self.symbol_table.get_symbol(iter_sym);
-                        sym.and_then(|s| {
-                            let tt = self.type_table;
-                            let ret_ty = tt.get(s.type_id)?;
-                            if let crate::tast::TypeKind::Function { return_type, .. } =
-                                &ret_ty.kind
-                            {
-                                let ret = tt.get(*return_type)?;
-                                if let crate::tast::TypeKind::Class { symbol_id, .. } = &ret.kind {
-                                    return Some(*symbol_id);
-                                }
+                    let iter_ret_ty = self.symbol_table.get_symbol(iter_sym).and_then(|s| {
+                        match &self.type_table.get(s.type_id)?.kind {
+                            crate::tast::TypeKind::Function { return_type, .. } => {
+                                Some(*return_type)
                             }
-                            None
-                        })
-                    };
+                            _ => None,
+                        }
+                    });
+                    // `iterator():Iterator<T>` hands back a handle, not a class
+                    // with compiled entry points.
+                    if iter_ret_ty.is_some_and(|t| self.iter_protocol_of(t).is_some()) {
+                        self.lower_for_in_iter_handle_reg(pattern, iter_obj, body, label);
+                        return;
+                    }
+
+                    // Find the iterator class from the return type
+                    let iter_class_sym =
+                        iter_ret_ty.and_then(|ret| match &self.type_table.get(ret)?.kind {
+                            crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                            _ => None,
+                        });
 
                     // Fallback: search class_method_symbols for any class with hasNext+next
                     let iter_class_sym = iter_class_sym.or_else(|| {

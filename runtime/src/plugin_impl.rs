@@ -1887,6 +1887,22 @@ register_symbol!(
     crate::exception::rayzor_get_exception_type_id
 );
 register_symbol!(
+    "rayzor_exception_as_dynamic",
+    crate::exception::rayzor_exception_as_dynamic
+);
+register_symbol!(
+    "rayzor_anon_iterable_iterator",
+    crate::iter_handle::rayzor_anon_iterable_iterator
+);
+register_symbol!(
+    "rayzor_iter_value_has_next",
+    crate::iter_handle::rayzor_iter_value_has_next
+);
+register_symbol!(
+    "rayzor_iter_value_next",
+    crate::iter_handle::rayzor_iter_value_next
+);
+register_symbol!(
     "rayzor_exception_type_matches",
     crate::exception::rayzor_exception_type_matches
 );

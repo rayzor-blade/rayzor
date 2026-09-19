@@ -899,7 +899,10 @@ pub extern "C" fn haxe_type_register_to_string(type_id: i64, fn_ptr: i64) {
 
 /// `Std.string` of a class instance: its `toString()` if it declares one,
 /// else the class name.
-fn class_instance_to_string(type_id: u32, obj: *mut u8) -> *mut crate::haxe_string::HaxeString {
+pub(crate) fn class_instance_to_string(
+    type_id: u32,
+    obj: *mut u8,
+) -> *mut crate::haxe_string::HaxeString {
     let to_string = {
         let registry = TO_STRING_REGISTRY.read().unwrap();
         registry.as_ref().and_then(|m| m.get(&type_id).copied())

@@ -358,6 +358,23 @@ impl<'a> AstLowering<'a> {
                     }
                 };
 
+                if std::env::var_os("RAYZOR_RESOLVE_TRACE").is_some() {
+                    let sym = self.context.symbol_table.get_symbol(symbol_id);
+                    eprintln!(
+                        "[RESOLVE_TRACE] '{}' -> {:?} kind={:?} scope={:?} type={:?} ({})",
+                        name,
+                        symbol_id,
+                        sym.map(|s| s.kind),
+                        sym.map(|s| s.scope_id),
+                        sym.map(|s| s.type_id),
+                        sym.map(|s| crate::tast::type_checker::format_type_for_error(
+                            s.type_id,
+                            &self.context.type_table,
+                            &self.context.string_interner
+                        ))
+                        .unwrap_or_default()
+                    );
+                }
                 // Enum-abstract constants share the module namespace with
                 // ordinary types. If an unrelated class already owns the bare
                 // name (for example `unit.Bar` versus `Foo.Bar`), the root
@@ -775,6 +792,18 @@ impl<'a> AstLowering<'a> {
                     self.context.expected_new_type_hint = prev_hint;
                     result?
                 };
+
+                // Monomorph rewrite: `var x = null` takes the type of its
+                // first plain assignment.
+                if matches!(op, parser::AssignOp::Assign) {
+                    if let TypedExpressionKind::Variable { symbol_id } = &target_expr.kind {
+                        if self.null_inferred.remove(symbol_id) {
+                            if let Some(t) = self.null_local_binding(value_expr.expr_type) {
+                                self.context.symbol_table.update_symbol_type(*symbol_id, t);
+                            }
+                        }
+                    }
+                }
 
                 match op {
                     parser::AssignOp::Assign => {
@@ -2086,6 +2115,15 @@ impl<'a> AstLowering<'a> {
                 {
                     let loc = self.context.span_to_location(&expression.span);
                     self.empty_array_inferred.insert(var_symbol, loc);
+                }
+                // Likewise `var x = null` and `var x;`: the first assignment
+                // types it.
+                if declared_type.is_none()
+                    && expr
+                        .as_ref()
+                        .is_none_or(|e| matches!(&e.kind, ExprKind::Null))
+                {
+                    self.null_inferred.insert(var_symbol);
                 }
 
                 TypedExpressionKind::VarDeclarationExpr {

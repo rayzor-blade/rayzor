@@ -444,7 +444,19 @@ impl<'a> AstLowering<'a> {
                                     }
                                 }
                             }
-                            Ok(ret)
+                            // A parameter reached through the arguments'
+                            // structure (`Iterable<A>` against `{ iterator }`)
+                            // is bound in the return type the same way.
+                            let params = params.clone();
+                            drop(type_table);
+                            let mut bindings = Vec::new();
+                            for (p, a) in params.iter().zip(arguments.iter()) {
+                                self.unify_type_args(*p, a.expr_type, 0, &mut bindings);
+                            }
+                            if bindings.is_empty() {
+                                return Ok(ret);
+                            }
+                            Ok(self.substitute_alias_args(ret, &bindings))
                         }
                         _ => Ok(type_table.dynamic_type()),
                     },
@@ -692,7 +704,8 @@ impl<'a> AstLowering<'a> {
                                         }
                                     }
                                 }
-                                Ok(ret)
+                                drop(type_table);
+                                Ok(self.bind_return_type_params(ret, *method_symbol, arguments))
                             }
                             _ => Ok(type_table.dynamic_type()),
                         }

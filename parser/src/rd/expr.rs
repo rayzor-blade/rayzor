@@ -415,6 +415,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
                         },
                     };
                 }
+                // After a block or statement-shaped form, `++`/`--` starts the
+                // next statement.
+                TokenKind::PlusPlus | TokenKind::MinusMinus if !takes_postfix(&expr) => break,
                 TokenKind::PlusPlus => {
                     let end = self.stream.peek().span.end;
                     self.stream.advance();
@@ -1963,4 +1966,20 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.expect_closing_gt()?;
         Ok(args)
     }
+}
+
+/// Haxe's grammar does not continue an expression after a block or a
+/// statement-shaped form, so a `++`/`--` there starts the next statement.
+fn takes_postfix(expr: &Expr) -> bool {
+    !matches!(
+        expr.kind,
+        ExprKind::Block(_)
+            | ExprKind::If { .. }
+            | ExprKind::Switch { .. }
+            | ExprKind::For { .. }
+            | ExprKind::While { .. }
+            | ExprKind::DoWhile { .. }
+            | ExprKind::Try { .. }
+            | ExprKind::Function(_)
+    )
 }

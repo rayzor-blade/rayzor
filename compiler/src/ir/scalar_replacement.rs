@@ -162,6 +162,14 @@ fn run_sra_on_function(
             break;
         };
         let eliminated = apply_sra(function, candidate);
+        // RAYZOR_SRA_DEBUG=<name substring> dumps each function after a replacement.
+        if std::env::var("RAYZOR_SRA_DEBUG").is_ok_and(|v| function.name.contains(&v)) {
+            eprintln!(
+                "=== SRA {} ===\n{}",
+                function.name,
+                crate::ir::dump::dump_function(function)
+            );
+        }
         if eliminated == 0 {
             break;
         }
@@ -1844,138 +1852,150 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
 
     let mut eliminated = 0;
 
-    // Per-block IN and OUT reaching definitions for each field index.
-    // field_in[block][f] = reg holding field f at block entry
-    // field_out[block][f] = reg holding field f after processing block
-    let mut field_in: BTreeMap<IrBlockId, Vec<IrId>> = BTreeMap::new();
+    // Per-block IN and OUT reaching definitions for each field index,
+    // iterated to a fixed point: a block after a loop reads its predecessors'
+    // OUT sets, and the in-loop predecessor is only known once the loop body
+    // has been walked. Phi and copy registers are allocated once and kept
+    // across iterations so the sets can converge.
     let mut field_out: BTreeMap<IrBlockId, Vec<IrId>> = BTreeMap::new();
-
-    // Phi nodes to insert at each block: (field_idx, phi_dest, incoming(block, reg))
-    // We collect first, then materialise after the in/out fixed point.
     let mut block_field_phis: BTreeMap<IrBlockId, Vec<(usize, IrId, Vec<(IrBlockId, IrId)>)>> =
         BTreeMap::new();
-
-    // Replacement map and removal set.
     let mut replacements: BTreeMap<(IrBlockId, usize), IrInstruction> = BTreeMap::new();
     let mut to_remove: BTreeMap<IrBlockId, BTreeSet<usize>> = BTreeMap::new();
+    let mut phi_ids: BTreeMap<(IrBlockId, usize), IrId> = BTreeMap::new();
+    let mut store_ids: BTreeMap<(IrBlockId, usize), IrId> = BTreeMap::new();
 
-    // Mark alloc for removal.
-    to_remove
-        .entry(candidate.alloc_location.0)
-        .or_default()
-        .insert(candidate.alloc_location.1);
-
-    // Mark frees for removal.
-    for &(block_id, inst_idx) in &candidate.free_locations {
-        to_remove.entry(block_id).or_default().insert(inst_idx);
-    }
-
-    // Use a stable reverse-postorder block traversal so each block is
-    // analysed after its predecessors (modulo loops, which SRA candidates
-    // reject — the candidate filter in `try_build_candidate_function_wide`
-    // returns None on phi nodes involving tracked pointers, so loops over
-    // the allocation cannot reach this point).
     let block_order = bfs_block_order(&function.cfg);
-
-    // Block where the alloc lives — fields are "live" only from here on.
     let alloc_block = candidate.alloc_location.0;
+    let preds_of: BTreeMap<IrBlockId, Vec<IrBlockId>> = block_order
+        .iter()
+        .map(|&b| (b, predecessor_blocks(&function.cfg, b)))
+        .collect();
 
-    // For each block, compute predecessors (excluding back edges if any).
-    // BFS order gives us a topological walk for DAGs.
-    for &block_id in &block_order {
-        let preds = predecessor_blocks(&function.cfg, block_id);
-
-        // Build field_in[block_id].
-        let mut block_in: Vec<IrId> = Vec::with_capacity(candidate.num_fields);
-
-        if block_id == alloc_block {
-            // The alloc's block sees the Undef field_regs at entry.
-            // (We still iterate the same way for uniformity.)
-            block_in.extend_from_slice(&field_regs);
-        } else if preds.is_empty() {
-            // Unreachable block: use the Undef baseline.
-            block_in.extend_from_slice(&field_regs);
-        } else {
-            // For each field, collect the OUT value from each predecessor.
-            // If all preds agree, use the shared value. Otherwise emit a phi.
-            for f in 0..candidate.num_fields {
-                let pred_vals: Vec<(IrBlockId, IrId)> = preds
-                    .iter()
-                    .map(|&p| {
-                        let v = field_out
-                            .get(&p)
-                            .and_then(|out| out.get(f).copied())
-                            .unwrap_or(field_regs[f]);
-                        (p, v)
-                    })
-                    .collect();
-
-                let first_val = pred_vals[0].1;
-                let all_same = pred_vals.iter().all(|&(_, v)| v == first_val);
-                if all_same {
-                    block_in.push(first_val);
-                } else {
-                    let phi_dest = IrId::new(function.next_reg_id);
-                    function.next_reg_id += 1;
-                    block_field_phis
-                        .entry(block_id)
-                        .or_default()
-                        .push((f, phi_dest, pred_vals));
-                    block_in.push(phi_dest);
-                }
-            }
+    let mut rounds = 0;
+    loop {
+        rounds += 1;
+        if rounds > 64 {
+            return 0;
+        }
+        let mut next_out: BTreeMap<IrBlockId, Vec<IrId>> = BTreeMap::new();
+        block_field_phis.clear();
+        replacements.clear();
+        to_remove.clear();
+        to_remove
+            .entry(candidate.alloc_location.0)
+            .or_default()
+            .insert(candidate.alloc_location.1);
+        for &(block_id, inst_idx) in &candidate.free_locations {
+            to_remove.entry(block_id).or_default().insert(inst_idx);
         }
 
-        // Walk block instructions, computing block_out and emitting replacements.
-        let mut field_state = block_in.clone();
-        field_in.insert(block_id, block_in);
+        for &block_id in &block_order {
+            let preds = &preds_of[&block_id];
+            let mut block_in: Vec<IrId> = Vec::with_capacity(candidate.num_fields);
 
-        let block = match function.cfg.blocks.get(&block_id) {
-            Some(b) => b,
-            None => {
-                field_out.insert(block_id, field_state);
-                continue;
-            }
-        };
-
-        for (inst_idx, inst) in block.instructions.iter().enumerate() {
-            match inst {
-                IrInstruction::Store { ptr, value, .. } if candidate.gep_map.contains_key(ptr) => {
-                    let field_idx = candidate.gep_map[ptr];
-                    if field_idx < candidate.num_fields {
-                        let new_reg = IrId::new(function.next_reg_id);
-                        function.next_reg_id += 1;
-                        replacements.insert(
-                            (block_id, inst_idx),
-                            IrInstruction::Copy {
-                                dest: new_reg,
-                                src: *value,
-                            },
-                        );
-                        field_state[field_idx] = new_reg;
+            if block_id == alloc_block || preds.is_empty() {
+                block_in.extend_from_slice(&field_regs);
+            } else {
+                for f in 0..candidate.num_fields {
+                    // A predecessor walked earlier this iteration is current;
+                    // one not yet walked (a back edge) carries last iteration's
+                    // value, or the undef baseline on the first.
+                    let pred_vals: Vec<(IrBlockId, IrId)> = preds
+                        .iter()
+                        .map(|&p| {
+                            let v = next_out
+                                .get(&p)
+                                .or_else(|| field_out.get(&p))
+                                .and_then(|out| out.get(f).copied())
+                                .unwrap_or(field_regs[f]);
+                            (p, v)
+                        })
+                        .collect();
+                    let first_val = pred_vals[0].1;
+                    let all_same = pred_vals.iter().all(|&(_, v)| v == first_val);
+                    let unresolved = preds
+                        .iter()
+                        .any(|p| !next_out.contains_key(p) && !field_out.contains_key(p));
+                    if all_same && !unresolved {
+                        block_in.push(first_val);
+                    } else {
+                        let phi_dest = *phi_ids.entry((block_id, f)).or_insert_with(|| {
+                            let id = IrId::new(function.next_reg_id);
+                            function.next_reg_id += 1;
+                            id
+                        });
+                        block_field_phis
+                            .entry(block_id)
+                            .or_default()
+                            .push((f, phi_dest, pred_vals));
+                        block_in.push(phi_dest);
                     }
-                    to_remove.entry(block_id).or_default().insert(inst_idx);
                 }
-
-                IrInstruction::Load { dest, ptr, .. } if candidate.gep_map.contains_key(ptr) => {
-                    let field_idx = candidate.gep_map[ptr];
-                    if field_idx < candidate.num_fields {
-                        replacements.insert(
-                            (block_id, inst_idx),
-                            IrInstruction::Copy {
-                                dest: *dest,
-                                src: field_state[field_idx],
-                            },
-                        );
-                    }
-                    to_remove.entry(block_id).or_default().insert(inst_idx);
-                }
-
-                _ => {}
             }
+
+            let mut field_state = block_in;
+            let block = match function.cfg.blocks.get(&block_id) {
+                Some(b) => b,
+                None => {
+                    next_out.insert(block_id, field_state);
+                    continue;
+                }
+            };
+
+            for (inst_idx, inst) in block.instructions.iter().enumerate() {
+                match inst {
+                    IrInstruction::Store { ptr, value, .. }
+                        if candidate.gep_map.contains_key(ptr) =>
+                    {
+                        let field_idx = candidate.gep_map[ptr];
+                        if field_idx < candidate.num_fields {
+                            let new_reg =
+                                *store_ids.entry((block_id, inst_idx)).or_insert_with(|| {
+                                    let id = IrId::new(function.next_reg_id);
+                                    function.next_reg_id += 1;
+                                    id
+                                });
+                            replacements.insert(
+                                (block_id, inst_idx),
+                                IrInstruction::Copy {
+                                    dest: new_reg,
+                                    src: *value,
+                                },
+                            );
+                            field_state[field_idx] = new_reg;
+                        }
+                        to_remove.entry(block_id).or_default().insert(inst_idx);
+                    }
+
+                    IrInstruction::Load { dest, ptr, .. }
+                        if candidate.gep_map.contains_key(ptr) =>
+                    {
+                        let field_idx = candidate.gep_map[ptr];
+                        if field_idx < candidate.num_fields {
+                            replacements.insert(
+                                (block_id, inst_idx),
+                                IrInstruction::Copy {
+                                    dest: *dest,
+                                    src: field_state[field_idx],
+                                },
+                            );
+                        }
+                        to_remove.entry(block_id).or_default().insert(inst_idx);
+                    }
+
+                    _ => {}
+                }
+            }
+
+            next_out.insert(block_id, field_state);
         }
 
-        field_out.insert(block_id, field_state);
+        let converged = next_out == field_out;
+        field_out = next_out;
+        if converged {
+            break;
+        }
     }
 
     // Materialise the phi nodes for each field at the front of their block.
@@ -2006,26 +2026,33 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
             None => continue,
         };
 
-        let has_removes = block_removes.map_or(false, |s| !s.is_empty());
-        if !has_removes {
+        let has_removes = block_removes.is_some_and(|s| !s.is_empty());
+        if !has_removes && block_id != function.cfg.entry_block {
             continue;
         }
 
-        let block_removes = block_removes.unwrap();
+        let empty = BTreeSet::new();
+        let block_removes = block_removes.unwrap_or(&empty);
         let old_instructions = std::mem::take(&mut block.instructions);
         let mut new_instructions = Vec::with_capacity(old_instructions.len());
 
+        // The field baselines go at the function entry, where they dominate
+        // every block: a phi at a loop header before the allocation reads them
+        // for the edge that has not allocated yet.
+        if block_id == function.cfg.entry_block {
+            for (field_idx, reg) in field_regs.iter().enumerate() {
+                let ty = candidate
+                    .field_types
+                    .get(&field_idx)
+                    .cloned()
+                    .unwrap_or(IrType::I64);
+                new_instructions.push(IrInstruction::Undef { dest: *reg, ty });
+            }
+        }
+
         for (idx, inst) in old_instructions.into_iter().enumerate() {
-            // At alloc position, insert Undef for each field.
+            // The allocation itself goes.
             if (block_id, idx) == candidate.alloc_location {
-                for (field_idx, reg) in field_regs.iter().enumerate() {
-                    let ty = candidate
-                        .field_types
-                        .get(&field_idx)
-                        .cloned()
-                        .unwrap_or(IrType::I64);
-                    new_instructions.push(IrInstruction::Undef { dest: *reg, ty });
-                }
                 eliminated += 1;
                 continue;
             }

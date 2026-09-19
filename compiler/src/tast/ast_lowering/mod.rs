@@ -982,6 +982,8 @@ pub struct AstLowering<'a> {
     /// (`Array<Float>` routes through the f64 push/get path, not the truncating
     /// generic one).
     empty_array_inferred: std::collections::BTreeMap<SymbolId, SourceLocation>,
+    /// Untyped `var x = null` locals whose first assignment has not typed them yet.
+    null_inferred: std::collections::BTreeSet<SymbolId>,
     /// Subset of `empty_array_inferred` that was USED (pushed/index-assigned)
     /// but whose element type could not be determined at compile time — if a
     /// symbol is still here AND still unbound at end of file, it stayed

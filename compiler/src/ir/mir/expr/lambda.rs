@@ -430,9 +430,38 @@ impl<'a> HirToMirContext<'a> {
         method_symbol: SymbolId,
     ) -> Option<IrId> {
         let receiver_reg = self.lower_expression(receiver)?;
-        let method_func_id = *self.function_map.get(&method_symbol)?;
-        let thunk_id = self.ensure_method_ref_thunk(method_func_id)?;
+        let thunk_id = match self.function_map.get(&method_symbol) {
+            Some(&id) => self.ensure_method_ref_thunk(id)?,
+            // A method compiled in another module: its parameter types were
+            // recorded at import, its return type is the symbol's.
+            None => {
+                let id = *self.external_function_map.get(&method_symbol)?;
+                let sig = self.external_method_signature(id, method_symbol)?;
+                self.ensure_method_ref_thunk_with_sig(id, sig)?
+            }
+        };
         self.builder
             .build_make_closure(thunk_id, vec![receiver_reg])
+    }
+
+    fn external_method_signature(
+        &mut self,
+        func_id: IrFunctionId,
+        method_symbol: SymbolId,
+    ) -> Option<IrFunctionSignature> {
+        let params = self.external_function_param_types.get(&func_id)?.clone();
+        let method_ty = self.symbol_table.get_symbol(method_symbol)?.type_id;
+        let return_type = match &self.type_table.get(method_ty)?.kind {
+            crate::tast::TypeKind::Function { return_type, .. } => *return_type,
+            _ => return None,
+        };
+        let return_type = self.convert_type(return_type);
+        let mut sig = FunctionSignatureBuilder::new()
+            .returns(return_type)
+            .calling_convention(CallingConvention::Haxe);
+        for (i, ty) in params.into_iter().enumerate() {
+            sig = sig.param(format!("p{i}"), ty);
+        }
+        Some(sig.build())
     }
 }

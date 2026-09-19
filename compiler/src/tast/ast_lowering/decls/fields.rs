@@ -255,6 +255,25 @@ impl<'a> AstLowering<'a> {
             };
 
         let interned_field_name = self.context.intern_string(&field_name);
+        // A field pre-registered for forward references keeps its symbol: a
+        // method lowered before this field (or on an earlier pass over the
+        // file) already resolved that symbol, and a second one would leave it
+        // typed Dynamic with no qualified name.
+        let pre_registered_symbol = pre_registered_symbol.or_else(|| {
+            let class_symbol = self.context.class_context_stack.last()?;
+            let (_, symbol, _) = self
+                .class_fields
+                .get(class_symbol)?
+                .iter()
+                .find(|(name, _, _)| *name == interned_field_name)?;
+            let symbol = *symbol;
+            let sym = self.context.symbol_table.get_symbol_mut(symbol)?;
+            if sym.kind != crate::tast::SymbolKind::Field {
+                return None;
+            }
+            sym.kind = crate::tast::SymbolKind::Variable;
+            Some(symbol)
+        });
         let field_symbol = pre_registered_symbol.unwrap_or_else(|| {
             self.context
                 .symbol_table

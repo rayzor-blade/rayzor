@@ -472,12 +472,26 @@ pub fn postfix_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
                 span: Span::new(start, end),
             };
             input = rest;
-        } else if let Ok((rest, op)) = alt((
-            value(UnaryOp::PostIncr, symbol("++")),
-            value(UnaryOp::PostDecr, symbol("--")),
-        ))
-        .parse(input)
-        {
+        } else if let (true, Ok((rest, op))) = (
+            // After a block or statement-shaped form, `++`/`--` starts the
+            // next statement.
+            !matches!(
+                expr.kind,
+                ExprKind::Block(_)
+                    | ExprKind::If { .. }
+                    | ExprKind::Switch { .. }
+                    | ExprKind::For { .. }
+                    | ExprKind::While { .. }
+                    | ExprKind::DoWhile { .. }
+                    | ExprKind::Try { .. }
+                    | ExprKind::Function(_)
+            ),
+            alt((
+                value(UnaryOp::PostIncr, symbol("++")),
+                value(UnaryOp::PostDecr, symbol("--")),
+            ))
+            .parse(input),
+        ) {
             // Postfix increment/decrement
             let end = position(full, rest);
             expr = Expr {

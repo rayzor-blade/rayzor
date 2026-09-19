@@ -75,6 +75,11 @@ pub(crate) enum IterSource {
     /// array iterator, so the runtime builds the handle, given the array
     /// wrappers' entry points. Anything else yields no handle.
     Dynamic,
+    /// A structure `{ iterator: f }`: the runtime reads the closure and
+    /// steps whatever iterator it answers.
+    AnonIterable,
+    /// A structure `{ hasNext: f, next: f }`, stepped through its closures.
+    AnonIterator,
 }
 
 impl<'a> HirToMirContext<'a> {
@@ -189,6 +194,19 @@ impl<'a> HirToMirContext<'a> {
                     }
                     return None;
                 }
+                TypeKind::Anonymous { fields } => {
+                    let has = |m: &str| {
+                        let interned = self.string_interner.intern(m);
+                        fields.iter().any(|f| f.name == interned)
+                    };
+                    if has("hasNext") && has("next") {
+                        return Some(IterSource::AnonIterator);
+                    }
+                    if has("iterator") {
+                        return Some(IterSource::AnonIterable);
+                    }
+                    return None;
+                }
                 TypeKind::TypeAlias { target_type, .. } => tid = *target_type,
                 TypeKind::GenericInstance { base_type, .. } => tid = *base_type,
                 // An abstract is its underlying value at run time, so a value
@@ -265,6 +283,10 @@ impl<'a> HirToMirContext<'a> {
         let TypeKind::Function { return_type, .. } = &ty.kind else {
             return None;
         };
+        // `Iterator<T>` names the protocol, not a class with entry points.
+        if self.iter_protocol_of(*return_type).is_some() {
+            return None;
+        }
         match &self.type_table.get(*return_type)?.kind {
             TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
             _ => None,
@@ -381,14 +403,20 @@ impl<'a> HirToMirContext<'a> {
             IterSource::ClassIterable {
                 class_sym,
                 iterator_class,
-            } => {
-                let it_class = (*iterator_class)?;
-                (
+            } => match *iterator_class {
+                Some(it_class) => (
                     Some(self.iter_thunk_for_class(*class_sym, "iterator")?),
                     self.iter_thunk_for_class(it_class, "hasNext")?,
                     self.iter_thunk_for_class(it_class, "next")?,
-                )
-            }
+                ),
+                // `iterator():Iterator<T>` answers a handle or a structure,
+                // which the runtime steps.
+                None => (
+                    Some(self.iter_thunk_for_class(*class_sym, "iterator")?),
+                    self.iter_thunk_for_runtime("rayzor_iter_value_has_next", false, IrType::I32)?,
+                    self.iter_thunk_for_runtime("rayzor_iter_value_next", false, IrType::I64)?,
+                ),
+            },
             IterSource::ClassIterator { class_sym } => (
                 None,
                 self.iter_thunk_for_class(*class_sym, "hasNext")?,
@@ -405,6 +433,20 @@ impl<'a> HirToMirContext<'a> {
                 let nx = self.iter_thunk_for_runtime(&next.clone(), *next_is_mir, IrType::I64)?;
                 (None, hn, nx)
             }
+            IterSource::AnonIterable => (
+                Some(self.iter_thunk_for_runtime(
+                    "rayzor_anon_iterable_iterator",
+                    false,
+                    ptr_void.clone(),
+                )?),
+                self.iter_thunk_for_runtime("rayzor_iter_value_has_next", false, IrType::I32)?,
+                self.iter_thunk_for_runtime("rayzor_iter_value_next", false, IrType::I64)?,
+            ),
+            IterSource::AnonIterator => (
+                None,
+                self.iter_thunk_for_runtime("rayzor_iter_value_has_next", false, IrType::I32)?,
+                self.iter_thunk_for_runtime("rayzor_iter_value_next", false, IrType::I64)?,
+            ),
             IterSource::Dynamic => return self.build_iter_handle_from_dynamic(obj_reg),
         };
 
@@ -703,6 +745,18 @@ impl<'a> HirToMirContext<'a> {
         let Some(handle_raw) = self.lower_expression(iter_expr) else {
             return true;
         };
+        self.lower_for_in_iter_handle_reg(pattern, handle_raw, body, label);
+        true
+    }
+
+    /// The handle loop over an already-lowered `Iterator`/`Iterable` value.
+    pub(crate) fn lower_for_in_iter_handle_reg(
+        &mut self,
+        pattern: &HirPattern,
+        handle_raw: IrId,
+        body: &HirBlock,
+        label: Option<&SymbolId>,
+    ) {
         let ptr_void = IrType::Ptr(Box::new(IrType::Void));
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
@@ -716,7 +770,7 @@ impl<'a> HirToMirContext<'a> {
             } else {
                 match self.builder.build_bitcast(handle_raw, ptr_u8.clone()) {
                     Some(p) => p,
-                    None => return true,
+                    None => return,
                 }
             }
         };
@@ -755,7 +809,7 @@ impl<'a> HirToMirContext<'a> {
             self.builder.build_alloc(IrType::I64, None),
             self.builder.build_alloc(IrType::I64, None),
         ) else {
-            return true;
+            return;
         };
 
         let (
@@ -772,34 +826,34 @@ impl<'a> HirToMirContext<'a> {
             self.builder.create_block(),
         )
         else {
-            return true;
+            return;
         };
 
         // Tag check. A null receiver never reaches the load.
         let Some(handle_i) = self.builder.build_bitcast(handle, IrType::I64) else {
-            return true;
+            return;
         };
         let (Some(zero), Some(tag_const)) = (
             self.builder.build_const(IrValue::I64(0)),
             self.builder.build_const(IrValue::I64(ITER_HANDLE_TAG)),
         ) else {
-            return true;
+            return;
         };
         let Some(not_null) = self.builder.build_cmp(CompareOp::Ne, handle_i, zero) else {
-            return true;
+            return;
         };
         let Some(read_tag_block) = self.builder.create_block() else {
-            return true;
+            return;
         };
         self.builder
             .build_cond_branch(not_null, read_tag_block, exit_block);
 
         self.builder.switch_to_block(read_tag_block);
         let Some(tag) = self.builder.build_load(handle, IrType::I64) else {
-            return true;
+            return;
         };
         let Some(is_handle) = self.builder.build_cmp(CompareOp::Eq, tag, tag_const) else {
-            return true;
+            return;
         };
         self.builder
             .build_cond_branch(is_handle, setup_block, exit_block);
@@ -817,16 +871,16 @@ impl<'a> HirToMirContext<'a> {
             slot_of(self, 24),
             slot_of(self, 32),
         ) else {
-            return true;
+            return;
         };
         self.builder.build_store(obj_slot, obj0);
         self.builder.build_store(hn_slot, hn_fn);
         self.builder.build_store(nx_slot, nx_fn);
         let Some(zero2) = self.builder.build_const(IrValue::I64(0)) else {
-            return true;
+            return;
         };
         let Some(needs_iter) = self.builder.build_cmp(CompareOp::Ne, it_fn, zero2) else {
-            return true;
+            return;
         };
         self.builder
             .build_cond_branch(needs_iter, call_iter_block, cond_block);
@@ -871,14 +925,14 @@ impl<'a> HirToMirContext<'a> {
             self.builder.build_load(hn_slot, IrType::I64),
         ) else {
             self.loop_stack.pop();
-            return true;
+            return;
         };
         let Some(more) = self
             .builder
             .build_call_indirect(hn_c, vec![obj_c], bool_sig)
         else {
             self.loop_stack.pop();
-            return true;
+            return;
         };
         self.builder.build_cond_branch(more, body_block, exit_block);
 
@@ -917,7 +971,7 @@ impl<'a> HirToMirContext<'a> {
             self.builder.build_load(nx_slot, IrType::I64),
         ) else {
             self.loop_stack.pop();
-            return true;
+            return;
         };
         if let Some(value) = self
             .builder
@@ -961,7 +1015,6 @@ impl<'a> HirToMirContext<'a> {
                 self.symbol_map.insert(*sym, loaded);
             }
         }
-        true
     }
 }
 

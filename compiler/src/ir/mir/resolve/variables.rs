@@ -143,7 +143,17 @@ impl<'a> HirToMirContext<'a> {
                 self.find_modified_variables_in_expression(lhs, modified);
                 self.find_modified_variables_in_expression(rhs, modified);
             }
-            HirExprKind::Unary { operand, .. } => {
+            HirExprKind::Unary { op, operand } => {
+                if let (
+                    HirUnaryOp::PreIncr
+                    | HirUnaryOp::PostIncr
+                    | HirUnaryOp::PreDecr
+                    | HirUnaryOp::PostDecr,
+                    HirExprKind::Variable { symbol, .. },
+                ) = (op, &operand.kind)
+                {
+                    modified.insert(*symbol);
+                }
                 self.find_modified_variables_in_expression(operand, modified);
             }
             HirExprKind::If {
