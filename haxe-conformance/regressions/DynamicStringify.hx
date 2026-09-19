@@ -28,6 +28,11 @@ class DynamicStringify {
         check("toString via dynamic", Std.string(w), "WithTs!");
         check("toString via concat", "" + w, "WithTs!");
         check("plain class", Std.string(Std.string(new Plain()) != "void"), "true");
+        var sb = new StringBuf(); sb.add("ab"); sb.add(1);
+        var dsb:Dynamic = sb;
+        check("stdlib toString via dynamic", Std.string(dsb), "ab1");
+        var de:Dynamic = new haxe.Exception("boom");
+        check("exception toString via dynamic", Std.string(de), "boom");
         var i:Dynamic = 7;
         check("int box", "" + i, "7");
         Sys.println(1.5);

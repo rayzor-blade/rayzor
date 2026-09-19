@@ -1173,46 +1173,38 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Register each class's own `toString` for `Std.string` of an
-        // instance held as Dynamic. Locally compiled methods only, as above,
-        // and not in the standard library: a reference from here keeps the
-        // method's callees live, and the selective import merge does not
-        // carry every stdlib callee's body (Int64's `copy`).
-        let in_stdlib = self.builder.module.source_file.contains("haxe-std");
+        // instance held as Dynamic. Locally compiled methods only, as above.
         let register_to_string_fn = self.get_or_register_extern_function(
             "haxe_type_register_to_string",
             vec![IrType::I64, IrType::I64],
             IrType::Void,
         );
-        let classes: Vec<(TypeId, SymbolId)> = self
+        let class_by_qn: BTreeMap<String, SymbolId> = self
             .class_type_to_symbol
-            .iter()
-            .map(|(t, s)| (*t, *s))
+            .values()
+            .filter_map(|class_sym| {
+                let sym = self.symbol_table.get_symbol(*class_sym)?;
+                let qn = self
+                    .string_interner
+                    .get(sym.qualified_name.unwrap_or(sym.name))?;
+                Some((qn.to_string(), *class_sym))
+            })
             .collect();
-        for (_class_ty, class_sym) in classes {
-            if in_stdlib {
-                break;
-            }
-            let Some(class_qn) = self.symbol_table.get_symbol(class_sym).and_then(|sym| {
-                sym.qualified_name
-                    .or(Some(sym.name))
-                    .and_then(|n| self.string_interner.get(n))
-                    .map(str::to_owned)
-            }) else {
-                continue;
-            };
-            let wanted = format!("{class_qn}.toString");
-            let func_id = self
-                .builder
-                .module
-                .functions
-                .values()
-                .find(|f| {
-                    f.qualified_name.as_deref() == Some(wanted.as_str())
-                        && !f.cfg.blocks.is_empty()
-                        && f.signature.parameters.len() == 1
-                })
-                .map(|f| f.id);
-            let Some(func_id) = func_id else {
+        // Only methods this module lowered: a merged import's copy is not the
+        // one its own module registered and compiled.
+        let local_to_strings: Vec<(String, IrFunctionId)> = self
+            .function_map
+            .values()
+            .filter_map(|func_id| {
+                let f = self.builder.module.functions.get(func_id)?;
+                let qn = f.qualified_name.as_deref()?;
+                let class_qn = qn.strip_suffix(".toString")?;
+                (!f.cfg.blocks.is_empty() && f.signature.parameters.len() == 1)
+                    .then(|| (class_qn.to_string(), *func_id))
+            })
+            .collect();
+        for (class_qn, func_id) in local_to_strings {
+            let Some(&class_sym) = class_by_qn.get(&class_qn) else {
                 continue;
             };
             let Some(stable_id) = self.deterministic_class_type_id(class_sym) else {

@@ -904,14 +904,20 @@ fn class_instance_to_string(type_id: u32, obj: *mut u8) -> *mut crate::haxe_stri
         let registry = TO_STRING_REGISTRY.read().unwrap();
         registry.as_ref().and_then(|m| m.get(&type_id).copied())
     };
-    // A `fn_ref` is a closure record `[fn_ptr, env]`; a class method takes
-    // no env, so only the code address is used.
+    // A `fn_ref` is a closure record `[code, env]` whose code speaks the
+    // closure ABI: the env first, then the arguments, as the constructor
+    // wrappers are called above.
     if let Some(closure) = to_string.filter(|c| *c >= 0x1000 && c & 7 == 0) {
-        let code = unsafe { *(closure as *const usize) };
+        let (code, env) = unsafe {
+            (
+                *(closure as *const usize),
+                *(closure as *const usize).add(1),
+            )
+        };
         if code != 0 {
-            let f: extern "C" fn(*mut u8) -> *mut crate::haxe_string::HaxeString =
+            let f: extern "C" fn(usize, *mut u8) -> *mut crate::haxe_string::HaxeString =
                 unsafe { std::mem::transmute(code) };
-            return f(obj);
+            return f(env, obj);
         }
     }
     let name = get_type_info(TypeId(type_id))

@@ -1204,11 +1204,27 @@ impl CompilationUnit {
             // Build a map of old ID -> new ID for all replacements
             let mut id_replacements: BTreeMap<IrFunctionId, IrFunctionId> = BTreeMap::new();
 
+            // Replacement is by bare name, and a stdlib import's methods are
+            // not protected: a body-less extern in the stdlib module must not
+            // take the place of a function that has a body (`copy` on Int64
+            // against a `copy` stub), or every caller traps at runtime.
+            let bodied_existing: BTreeSet<IrFunctionId> = mir_module
+                .functions
+                .iter()
+                .filter(|(_, f)| !f.cfg.blocks.is_empty())
+                .map(|(id, _)| *id)
+                .collect();
+            let keeps_body = |existing_id: &IrFunctionId, stdlib_func: &crate::ir::IrFunction| {
+                stdlib_func.cfg.blocks.is_empty() && bodied_existing.contains(existing_id)
+            };
+
             for (func_id, func) in &renumbered_functions {
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
                     for &existing_id in existing_ids {
                         // Protect source-level import functions from stdlib replacement.
-                        if !merged_import_func_ids.contains(&existing_id) {
+                        if !merged_import_func_ids.contains(&existing_id)
+                            && !keeps_body(&existing_id, func)
+                        {
                             id_replacements.insert(existing_id, *func_id);
                         } else if func.name == "match" || func.name == "matched" {
                             eprintln!(
@@ -1226,7 +1242,9 @@ impl CompilationUnit {
                 // Remove stubs, but protect user package import functions
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
                     for &existing_id in existing_ids {
-                        if !merged_import_func_ids.contains(&existing_id) {
+                        if !merged_import_func_ids.contains(&existing_id)
+                            && !keeps_body(&existing_id, &func)
+                        {
                             mir_module.functions.remove(&existing_id);
                         }
                     }
