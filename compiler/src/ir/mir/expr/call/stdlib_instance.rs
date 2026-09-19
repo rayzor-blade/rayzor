@@ -219,9 +219,19 @@ impl<'a> HirToMirContext<'a> {
 
                             // Filter by param count to disambiguate overloaded methods
                             // e.g., Array.join(sep) with 1 param vs Thread.join() with 0 params
+                            // A SIMD vector is never behind a Dynamic: it has no box.
+                            // Its arm would type the receiver as the vector and, for
+                            // a wide one, refuse the whole function on Cranelift.
+                            let takes_vector = |call: &crate::stdlib::RuntimeFunctionCall| {
+                                call.param_types
+                                    .and_then(|p| p.first())
+                                    .is_some_and(|d| d.to_ir_type().is_vector())
+                            };
                             let mut filtered_classes: Vec<_> = matching_classes
                                 .into_iter()
-                                .filter(|(_, _, call)| call.param_count == actual_param_count)
+                                .filter(|(_, _, call)| {
+                                    call.param_count == actual_param_count && !takes_vector(*call)
+                                })
                                 .collect();
                             debug!(
                                 "[DYNAMIC STDLIB] {} classes after param count filter",

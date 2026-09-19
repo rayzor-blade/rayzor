@@ -177,13 +177,7 @@ impl<'a> HirToMirContext<'a> {
         };
 
         if let Some(&gid) = self.global_symbol_map.get(&lookup_symbol) {
-            let global_type = self
-                .builder
-                .module
-                .globals
-                .get(&gid)
-                .map(|g| g.ty.clone())
-                .unwrap_or(IrType::Any);
+            let global_type = self.global_type_of(gid);
             return self.builder.build_load_global(gid, global_type);
         }
 
@@ -293,6 +287,13 @@ impl<'a> HirToMirContext<'a> {
                 Some(reg)
             }
         } else {
+            // A static first: the same class typed twice names its static by
+            // two symbols, and the by-name instance-field fallback below would
+            // otherwise read a `this` slot for it.
+            if let Some(gid) = self.static_global_for(*symbol) {
+                let global_type = self.global_type_of(gid);
+                return self.builder.build_load_global(gid, global_type);
+            }
             // Not in local scope: it may be a class field reached via `this`.
             // field_index_map is more reliable than SymbolKind::Field because
             // field symbols may be registered with SymbolKind::Variable.
@@ -398,13 +399,7 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or_else(|| "<not-in-table>".to_string());
                     debug!("[globals] READ {} -> @g{} ({})", nm, global_id.0, gname);
                 }
-                let global_type = self
-                    .builder
-                    .module
-                    .globals
-                    .get(&global_id)
-                    .map(|g| g.ty.clone())
-                    .unwrap_or(IrType::Any);
+                let global_type = self.global_type_of(global_id);
                 return self.builder.build_load_global(global_id, global_type);
             }
 
@@ -474,13 +469,7 @@ impl<'a> HirToMirContext<'a> {
                                         name_str, gid.0
                                     );
                                 }
-                                let global_type = self
-                                    .builder
-                                    .module
-                                    .globals
-                                    .get(&gid)
-                                    .map(|g| g.ty.clone())
-                                    .unwrap_or(IrType::Any);
+                                let global_type = self.global_type_of(gid);
                                 return self.builder.build_load_global(gid, global_type);
                             }
                         }

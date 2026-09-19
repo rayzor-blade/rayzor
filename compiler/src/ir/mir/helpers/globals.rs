@@ -22,6 +22,40 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// The global a static field symbol names: by symbol, else by the
+    /// symbol's qualified name among this module's globals and then the
+    /// imported ones. The same class typed twice (an entry file that is also
+    /// its own import) gives its field two symbols with one qualified name.
+    pub(crate) fn static_global_for(&self, symbol: SymbolId) -> Option<IrGlobalId> {
+        if let Some(&gid) = self.global_symbol_map.get(&symbol) {
+            return Some(gid);
+        }
+        let qn = self
+            .symbol_table
+            .get_symbol(symbol)
+            .and_then(|s| s.qualified_name)
+            .and_then(|q| self.string_interner.get(q))?;
+        self.builder
+            .module
+            .globals
+            .values()
+            .find(|g| g.name == qn)
+            .map(|g| g.id)
+            .or_else(|| self.external_globals.get(qn).map(|(gid, _)| *gid))
+    }
+
+    /// The type of a global by id: this module's, or one another module
+    /// owns that a static field of this module aliases.
+    pub(crate) fn global_type_of(&self, gid: IrGlobalId) -> IrType {
+        self.builder
+            .module
+            .globals
+            .get(&gid)
+            .map(|g| g.ty.clone())
+            .or_else(|| self.external_global_types.get(&gid).cloned())
+            .unwrap_or(IrType::Any)
+    }
+
     pub(crate) fn refine_global_type_from_initializer(
         &self,
         ty: IrType,

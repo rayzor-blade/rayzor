@@ -90,7 +90,13 @@ impl<'a> HirToMirContext<'a> {
             .field_class_names
             .get(&field)
             .is_some_and(|c| c == "haxe.___Int64" || c.ends_with(".___Int64"));
-        if !self.is_int64_type(receiver_ty) && !owned_by_int64 {
+        // `Null<Int64>` is a box around the i64.
+        let optional_inner = match self.type_table.get(receiver_ty).map(|t| &t.kind) {
+            Some(crate::tast::TypeKind::Optional { inner_type }) => Some(*inner_type),
+            _ => None,
+        };
+        let boxed = optional_inner.is_some_and(|inner| self.is_int64_type(inner));
+        if !boxed && !self.is_int64_type(receiver_ty) && !owned_by_int64 {
             return None;
         }
         let wrapper = match self
@@ -102,9 +108,20 @@ impl<'a> HirToMirContext<'a> {
             "low" => "Int64_getLow",
             _ => return None,
         };
-        let value = match self.builder.get_register_type(obj) {
-            Some(IrType::I64) => obj,
-            _ => self.builder.build_bitcast(obj, IrType::I64)?,
+        let value = if boxed {
+            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+            let unbox = self.get_or_register_extern_function(
+                "haxe_unbox_int_ptr",
+                vec![ptr_u8],
+                IrType::I64,
+            );
+            self.builder
+                .build_call_direct(unbox, vec![obj], IrType::I64)?
+        } else {
+            match self.builder.get_register_type(obj) {
+                Some(IrType::I64) => obj,
+                _ => self.builder.build_bitcast(obj, IrType::I64)?,
+            }
         };
         let f = self.register_stdlib_mir_forward_ref(wrapper, vec![IrType::I64], IrType::I32);
         self.builder.build_call_direct(f, vec![value], IrType::I32)
@@ -895,13 +912,7 @@ impl<'a> HirToMirContext<'a> {
                                         .map(|g| g.id)
                                 });
                             if let Some(global_id) = global_lookup {
-                                let global_type = self
-                                    .builder
-                                    .module
-                                    .globals
-                                    .get(&global_id)
-                                    .map(|g| g.ty.clone())
-                                    .unwrap_or(IrType::Any);
+                                let global_type = self.global_type_of(global_id);
                                 return self.builder.build_load_global(global_id, global_type);
                             }
 

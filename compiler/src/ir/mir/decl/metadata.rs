@@ -64,9 +64,21 @@ impl<'a> HirToMirContext<'a> {
         for field in &class.fields {
             // Static fields should be stored as globals, not instance fields
             if field.is_static {
-                let global_id = self.builder.module.alloc_global_id();
                 let field_name = self.string_interner.get(field.name).unwrap_or("<unknown>");
                 let class_name = self.string_interner.get(class.name).unwrap_or("<unknown>");
+
+                // The same class compiled once already -- the entry file also
+                // reached as an import of itself -- owns this static; a second
+                // global would give it two homes, one written and one read.
+                if let Some((gid, _)) = self
+                    .external_globals
+                    .get(&format!("{}.{}", class_name, field_name))
+                    .cloned()
+                {
+                    self.global_symbol_map.insert(field.symbol_id, gid);
+                    continue;
+                }
+                let global_id = self.builder.module.alloc_global_id();
 
                 let initializer = if let Some(ref init_expr) = field.init {
                     let constant_init = self.try_evaluate_constant_init(init_expr);

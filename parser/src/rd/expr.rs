@@ -526,6 +526,15 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     span: token.span,
                 })
             }
+            // `abstract` in an abstract's method is `this` seen as the
+            // abstract type (Haxe 4.3); the two share a representation here.
+            TokenKind::KwAbstract => {
+                self.stream.advance();
+                Ok(Expr {
+                    kind: ExprKind::This,
+                    span: token.span,
+                })
+            }
             TokenKind::KwSuper => {
                 self.stream.advance();
                 Ok(Expr {

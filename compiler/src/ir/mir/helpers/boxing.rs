@@ -53,16 +53,15 @@ impl<'a> HirToMirContext<'a> {
             let type_table = self.type_table;
             let value_kind = type_table.get(value_ty).map(|t| t.kind.clone());
             let target_is_optional_scalar = match type_table.get(target_ty).map(|t| &t.kind) {
-                Some(TypeKind::Optional { inner_type }) => type_table
-                    .get(*inner_type)
-                    .map(|t| matches!(t.kind, TypeKind::Int | TypeKind::Float | TypeKind::Bool))
-                    .unwrap_or(false),
+                Some(TypeKind::Optional { inner_type }) => {
+                    self.optional_inner_is_boxable_primitive(*inner_type)
+                }
                 _ => false,
             };
             let value_is_scalar = matches!(
                 value_kind,
                 Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool)
-            );
+            ) || self.is_int64_type(value_ty);
             let target_is_dyn = matches!(
                 type_table.get(target_ty).map(|t| &t.kind),
                 Some(TypeKind::Dynamic)
@@ -75,6 +74,20 @@ impl<'a> HirToMirContext<'a> {
 
         if !needs_boxing {
             return Some(value);
+        }
+
+        // Int64 is the native i64; its box is an Int box with a 64-bit payload.
+        if self.is_int64_type(value_ty) {
+            let value_mir_type = self.builder.get_register_type(value).unwrap_or(IrType::I64);
+            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+            let box_func_id = self.get_or_register_extern_function(
+                "haxe_box_int_ptr",
+                vec![value_mir_type],
+                ptr_u8.clone(),
+            );
+            return self
+                .builder
+                .build_call_direct(box_func_id, vec![value], ptr_u8);
         }
 
         match &value_kind_cloned {
@@ -690,7 +703,7 @@ impl<'a> HirToMirContext<'a> {
         use crate::tast::TypeKind;
 
         // Clone TypeKind to avoid borrow checker issues
-        let (value_is_dynamic, target_kind_cloned) = {
+        let (value_is_dynamic, target_kind_cloned, value_is_optional_scalar) = {
             let type_table = self.type_table;
             let value_kind = type_table.get(value_ty).map(|t| &t.kind);
             // A typedef of a structure unboxes as the structure.
@@ -704,20 +717,19 @@ impl<'a> HirToMirContext<'a> {
             let target_kind = type_table.get(target_ty).map(|t| t.kind.clone());
 
             let value_is_optional_scalar = match value_kind {
-                Some(TypeKind::Optional { inner_type }) => type_table
-                    .get(*inner_type)
-                    .map(|t| matches!(t.kind, TypeKind::Int | TypeKind::Float | TypeKind::Bool))
-                    .unwrap_or(false),
+                Some(TypeKind::Optional { inner_type }) => {
+                    self.optional_inner_is_boxable_primitive(*inner_type)
+                }
                 _ => false,
             };
             let target_is_scalar = matches!(
                 target_kind,
                 Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool)
-            );
+            ) || self.is_int64_type(target_ty);
 
             let value_is_dyn = matches!(value_kind, Some(TypeKind::Dynamic))
                 || (value_is_optional_scalar && target_is_scalar);
-            (value_is_dyn, target_kind)
+            (value_is_dyn, target_kind, value_is_optional_scalar)
         };
 
         let target_is_dynamic = matches!(&target_kind_cloned, Some(TypeKind::Dynamic));
@@ -792,6 +804,24 @@ impl<'a> HirToMirContext<'a> {
                 let to = self.convert_type(target_ty);
                 return self.builder.build_bitcast(raw, to);
             }
+        }
+
+        // Int64 is the native i64: a `Null<Int64>` (or a box this lowering
+        // made) yields the Int box's 64-bit payload whole. An i64 the typer
+        // calls Dynamic (`cast this` in the abstract) is not a box.
+        if self.is_int64_type(target_ty) {
+            if !value_is_optional_scalar && !self.boxed_value_regs.contains(&value) {
+                return Some(value);
+            }
+            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+            let unbox_func_id = self.get_or_register_extern_function(
+                "haxe_unbox_int_ptr",
+                vec![ptr_u8],
+                IrType::I64,
+            );
+            return self
+                .builder
+                .build_call_direct(unbox_func_id, vec![value], IrType::I64);
         }
 
         match &target_kind_cloned {
@@ -1403,6 +1433,10 @@ impl<'a> HirToMirContext<'a> {
     /// is handled separately upstream, so it is not boxable here.
     pub(crate) fn optional_inner_is_boxable_primitive(&self, inner_type: TypeId) -> bool {
         use crate::tast::TypeKind;
+        // Int64 is the native i64, and null is not an i64 value.
+        if self.is_int64_type(inner_type) {
+            return true;
+        }
         let mut ty = inner_type;
         // Resolve through abstracts / aliases (bounded to avoid cycles).
         for _ in 0..8 {

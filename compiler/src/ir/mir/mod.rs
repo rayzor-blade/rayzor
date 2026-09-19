@@ -147,6 +147,9 @@ pub struct HirToMirContext<'a> {
     /// (`old_id + import_base`) BEFORE the reading module is lowered, and
     /// backends key global storage by raw id, so these are final.
     external_globals: BTreeMap<String, (IrGlobalId, IrType)>,
+    /// Types of globals another module owns that this module reads or writes
+    /// through their ids, so a load keyed by id finds its type.
+    external_global_types: BTreeMap<IrGlobalId, IrType>,
 
     /// External function map from previously compiled modules (e.g., stdlib)
     /// These are functions defined in other modules that can be called from this module
@@ -1154,6 +1157,10 @@ pub fn lower_hir_to_mir_with_function_map(
 
     context.external_function_map = external_functions;
     context.external_function_name_map = external_functions_by_name;
+    context.external_global_types = external_globals
+        .values()
+        .map(|(id, ty)| (*id, ty.clone()))
+        .collect();
     context.external_globals = external_globals;
 
     context.field_index_map = external_field_index_map;
@@ -1345,6 +1352,7 @@ impl<'a> HirToMirContext<'a> {
             function_map: BTreeMap::new(),
             global_symbol_map: BTreeMap::new(),
             external_globals: BTreeMap::new(),
+            external_global_types: BTreeMap::new(),
             external_function_map: BTreeMap::new(),
             external_function_name_map: BTreeMap::new(),
             block_map: BTreeMap::new(),

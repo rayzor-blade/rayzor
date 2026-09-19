@@ -359,9 +359,14 @@ for i in range(start, len(lines)):
 # entry instance -- a program Haxe itself rejects, and which rayzor instead
 # synthesises as a bodyless member and trap-stubs, so the row scored as a
 # compiler failure while measuring nothing.
+# Members sit one brace deep in the class; a `function test()` nested in a
+# method body (TestInt64.testCapture) is a local function, not a member.
 methods = []
+depth = 0
 for i in range(start, last):
-    if not live[i]:
+    depth_before = depth
+    depth += lines[i].count('{') - lines[i].count('}')
+    if not live[i] or depth_before != 1:
         continue
     m = re.search(r'\bfunction\s+(test[A-Za-z0-9_]*)\s*\(', lines[i])
     if not m or any(name == m.group(1) for name, _ in methods):

@@ -103,24 +103,22 @@ impl<'a> HirToMirContext<'a> {
             Int,
             Float,
             Bool,
+            /// The native i64 behind haxe.Int64: an Int box with a 64-bit payload.
+            Int64,
         }
         let classify = |me: &Self, ty: crate::tast::TypeId| -> (Option<Prim>, Option<Prim>) {
             // (optional_inner_prim, bare_prim)
             let tt = me.type_table;
+            let prim_of = |t: crate::tast::TypeId| match tt.get(t).map(|x| &x.kind) {
+                Some(TypeKind::Int) => Some(Prim::Int),
+                Some(TypeKind::Float) => Some(Prim::Float),
+                Some(TypeKind::Bool) => Some(Prim::Bool),
+                _ if me.is_int64_type(t) => Some(Prim::Int64),
+                _ => None,
+            };
             match tt.get(ty).map(|t| &t.kind) {
-                Some(TypeKind::Optional { inner_type }) => {
-                    let inner = match tt.get(*inner_type).map(|t| &t.kind) {
-                        Some(TypeKind::Int) => Some(Prim::Int),
-                        Some(TypeKind::Float) => Some(Prim::Float),
-                        Some(TypeKind::Bool) => Some(Prim::Bool),
-                        _ => None,
-                    };
-                    (inner, None)
-                }
-                Some(TypeKind::Int) => (None, Some(Prim::Int)),
-                Some(TypeKind::Float) => (None, Some(Prim::Float)),
-                Some(TypeKind::Bool) => (None, Some(Prim::Bool)),
-                _ => (None, None),
+                Some(TypeKind::Optional { inner_type }) => (prim_of(*inner_type), None),
+                _ => (None, prim_of(ty)),
             }
         };
         let (lhs_opt, lhs_bare) = classify(self, lhs.ty);
@@ -132,6 +130,7 @@ impl<'a> HirToMirContext<'a> {
             match from {
                 Prim::Int => me.builder.build_cast(reg, IrType::I32, IrType::I64),
                 Prim::Bool => me.builder.build_cast(reg, IrType::Bool, IrType::I64),
+                Prim::Int64 => Some(reg),
                 Prim::Float => None, // routed to the float helper instead
             }
         };
@@ -139,6 +138,7 @@ impl<'a> HirToMirContext<'a> {
             match from {
                 Prim::Float => Some(reg), // Haxe Float is already f64
                 Prim::Int => me.builder.build_cast(reg, IrType::I32, IrType::F64),
+                Prim::Int64 => me.builder.build_cast(reg, IrType::I64, IrType::F64),
                 Prim::Bool => me.builder.build_cast(reg, IrType::Bool, IrType::F64),
             }
         };
@@ -155,7 +155,7 @@ impl<'a> HirToMirContext<'a> {
             }
             let boxed_ptr = IrType::Ptr(Box::new(IrType::U8));
             let (name, arg_ty) = match inner {
-                Prim::Int => ("haxe_box_int_ptr", IrType::I64),
+                Prim::Int | Prim::Int64 => ("haxe_box_int_ptr", IrType::I64),
                 Prim::Bool => ("haxe_box_bool_ptr", IrType::Bool),
                 Prim::Float => ("haxe_box_float_ptr", IrType::F64),
             };

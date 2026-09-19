@@ -222,6 +222,40 @@ impl<'a> AstLowering<'a> {
                         | BinaryOperator::Div
                         | BinaryOperator::Mod
                 ) {
+                    // An abstract over Int (Int32, UInt) meeting a Float is
+                    // Float arithmetic: its `@:op` overloads for Float return
+                    // Float, as Haxe types it.
+                    let over_int = |ty: crate::tast::TypeId| {
+                        let mut t = ty;
+                        let mut saw_abstract = false;
+                        for _ in 0..4 {
+                            match type_table.get(t).map(|x| &x.kind) {
+                                Some(crate::tast::core::TypeKind::Abstract {
+                                    underlying: Some(u),
+                                    ..
+                                }) => {
+                                    saw_abstract = true;
+                                    t = *u;
+                                }
+                                Some(crate::tast::core::TypeKind::TypeAlias {
+                                    target_type,
+                                    ..
+                                }) => t = *target_type,
+                                _ => break,
+                            }
+                        }
+                        saw_abstract
+                            && matches!(
+                                type_table.get(t).map(|x| &x.kind),
+                                Some(crate::tast::core::TypeKind::Int)
+                            )
+                    };
+                    let float_type = type_table.float_type();
+                    if (over_int(left.expr_type) && right.expr_type == float_type)
+                        || (over_int(right.expr_type) && left.expr_type == float_type)
+                    {
+                        return Ok(float_type);
+                    }
                     let lhs_is_user_type = type_table
                         .get(left.expr_type)
                         .map(|t| {

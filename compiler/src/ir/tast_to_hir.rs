@@ -2642,7 +2642,19 @@ impl<'a> TastToHirContext<'a> {
                     );
                 }
 
-                let mut result = None;
+                // A lone `'$x'` is still a String: seed the chain with "" so
+                // the value goes through the concatenation's conversion
+                // instead of being handed on as itself.
+                let lone_expression =
+                    matches!(parts.as_slice(), [StringInterpolationPart::Expression(_)]);
+                let mut result = lone_expression.then(|| {
+                    HirExpr::new(
+                        HirExprKind::Literal(HirLiteral::String(self.intern_str(""))),
+                        self.get_string_type(),
+                        self.current_lifetime,
+                        expr.source_location,
+                    )
+                });
 
                 for part in parts {
                     let part_expr = match part {
@@ -4884,9 +4896,30 @@ impl<'a> TastToHirContext<'a> {
         } else {
             vec![right_ty]
         };
+        // The primitive behind a type: an abstract over Int (Int32) is an Int
+        // formal, which a Float never fits.
+        let primitive_of = |mut t: TypeId| {
+            for _ in 0..4 {
+                match table.get(t).map(|x| &x.kind) {
+                    Some(TypeKind::Abstract {
+                        underlying: Some(u),
+                        ..
+                    }) => t = *u,
+                    Some(TypeKind::TypeAlias { target_type, .. }) => t = *target_type,
+                    _ => break,
+                }
+            }
+            table.get(t).map(|x| x.kind.clone())
+        };
         for (formal, actual) in params.iter().zip(operands) {
-            let actual_is_string =
-                matches!(table.get(actual).map(|t| &t.kind), Some(TypeKind::String));
+            let actual_kind = table.get(actual).map(|t| &t.kind);
+            if matches!(actual_kind, Some(TypeKind::Float)) {
+                if matches!(primitive_of(*formal), Some(TypeKind::Int)) {
+                    return false;
+                }
+                continue;
+            }
+            let actual_is_string = matches!(actual_kind, Some(TypeKind::String));
             if !actual_is_string {
                 continue;
             }

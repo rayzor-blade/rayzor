@@ -70,7 +70,7 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn lower_lvalue_write(&mut self, lvalue: &HirLValue, value: IrId) {
         match lvalue {
             HirLValue::Variable(symbol) => {
-                let global_id = self.global_symbol_map.get(symbol).copied().or_else(|| {
+                let global_id = self.static_global_for(*symbol).or_else(|| {
                     // Name-based fallback: SymbolIds may differ between contexts
                     let sym_name = self
                         .symbol_table

@@ -122,10 +122,7 @@ impl<'a> HirToMirContext<'a> {
                 Some(TypeKind::Anonymous { .. }) => return IrFieldShape::Anonymous,
                 Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
                 Some(TypeKind::Optional { inner_type }) => {
-                    if matches!(
-                        self.type_table.get(*inner_type).map(|t| &t.kind),
-                        Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
-                    ) {
+                    if self.optional_inner_is_boxable_primitive(*inner_type) {
                         return IrFieldShape::Boxed;
                     }
                     cur = *inner_type;

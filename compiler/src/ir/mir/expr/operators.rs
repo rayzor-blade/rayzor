@@ -178,7 +178,7 @@ impl<'a> HirToMirContext<'a> {
                     HirExprKind::Variable { symbol, .. } => {
                         // A bare static field lives in GLOBAL storage, not an
                         // SSA local, so the write must go through the global.
-                        if let Some(&global_id) = self.global_symbol_map.get(symbol) {
+                        if let Some(global_id) = self.static_global_for(*symbol) {
                             self.builder.build_store_global(global_id, new_value);
                         } else if let Some(&cell) = self.capture_cells.get(symbol) {
                             self.builder.build_store(cell, new_value);
@@ -1270,7 +1270,25 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Haxe division always yields Float, so int operands are promoted first.
-        if matches!(op, HirBinaryOp::Div) && lhs_is_int && rhs_is_int {
+        // Not for Int64: its `/` is the abstract's integer division, with an
+        // Int on the other side widened.
+        let int64_div = matches!(op, HirBinaryOp::Div)
+            && lhs_is_int
+            && rhs_is_int
+            && (self.is_int64_type(lhs.ty) || self.is_int64_type(rhs.ty));
+        if int64_div {
+            if lhs_type != IrType::I64 {
+                lhs_reg = self
+                    .builder
+                    .build_cast(lhs_reg, lhs_type.clone(), IrType::I64)?;
+            }
+            if rhs_type != IrType::I64 {
+                rhs_reg = self
+                    .builder
+                    .build_cast(rhs_reg, rhs_type.clone(), IrType::I64)?;
+            }
+        }
+        if matches!(op, HirBinaryOp::Div) && lhs_is_int && rhs_is_int && !int64_div {
             lhs_reg = self
                 .builder
                 .build_cast(lhs_reg, lhs_type.clone(), IrType::F64)?;

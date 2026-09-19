@@ -147,7 +147,8 @@ fn dollar_identifier<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
 
 pub fn this_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
     let start = position(full, input);
-    let (input, _) = keyword("this").parse(input)?;
+    // `abstract` in an abstract's method is `this` seen as the abstract type.
+    let (input, _) = alt((keyword("this"), keyword("abstract"))).parse(input)?;
     let end = position(full, input);
 
     Ok((

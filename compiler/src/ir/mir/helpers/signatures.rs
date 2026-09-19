@@ -224,10 +224,18 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Nothing was skipped, or an argument found no home -- leave the call as
-        // it was rather than guessing at a shape this cannot describe.
-        if next_arg != supplied || plan.iter().all(|slot| slot.is_some()) {
+        // it was rather than guessing at a shape this cannot describe. Trailing
+        // parameters left out are not skips; `fill_default_args` owns those.
+        let last_supplied = plan.iter().rposition(|slot| slot.is_some());
+        let skipped = last_supplied.is_some_and(|last| plan[..last].iter().any(|s| s.is_none()));
+        if next_arg != supplied || !skipped {
             return;
         }
+        let symbols = self
+            .function_param_symbols
+            .get(&func_id)
+            .cloned()
+            .unwrap_or_default();
 
         let supplied_regs: Vec<IrId> = arg_regs[offset..].to_vec();
         let mut rebound: Vec<IrId> = arg_regs[..offset].to_vec();
@@ -236,7 +244,15 @@ impl<'a> HirToMirContext<'a> {
                 Some(a_idx) => rebound.push(supplied_regs[*a_idx]),
                 None => {
                     let reg = match defaults.get(p_idx) {
-                        Some(Some(default_expr)) => self.lower_expression(&default_expr.clone()),
+                        Some(Some(default_expr)) => {
+                            let default_expr = default_expr.clone();
+                            self.lower_param_default(
+                                &default_expr,
+                                &symbols,
+                                &rebound,
+                                has_implicit_this,
+                            )
+                        }
                         // Skipped and undefaulted: the parameter is Null<T>, so
                         // it reads as absent rather than as a value.
                         _ => {
@@ -258,6 +274,49 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         *arg_regs = rebound;
+    }
+
+    /// Lower a parameter's default at the call site. A default reads the
+    /// callee's earlier parameters (`b:Int = a`) and its `this`: while it
+    /// lowers, those names are the arguments already in place. A method's
+    /// symbol list leaves `this` out, so it sits one before the list; a
+    /// constructor's list starts with it. `this` lowers through SymbolId(0).
+    fn lower_param_default(
+        &mut self,
+        default_expr: &HirExpr,
+        symbols: &[SymbolId],
+        bound: &[IrId],
+        has_implicit_this: bool,
+    ) -> Option<IrId> {
+        let this_symbol = SymbolId::from_raw(0);
+        let list_offset = usize::from(has_implicit_this);
+        let saved: Vec<(SymbolId, Option<IrId>)> = symbols
+            .iter()
+            .chain(std::iter::once(&this_symbol))
+            .map(|s| (*s, self.symbol_map.get(s).copied()))
+            .collect();
+        for (j, sym) in symbols.iter().enumerate() {
+            if let Some(reg) = bound.get(j + list_offset) {
+                self.symbol_map.insert(*sym, *reg);
+            }
+        }
+        if has_implicit_this {
+            if let Some(this_reg) = bound.first() {
+                self.symbol_map.insert(this_symbol, *this_reg);
+            }
+        }
+        let reg = self.lower_expression(default_expr);
+        for (sym, prev) in saved {
+            match prev {
+                Some(reg) => {
+                    self.symbol_map.insert(sym, reg);
+                }
+                None => {
+                    self.symbol_map.remove(&sym);
+                }
+            }
+        }
+        reg
     }
 
     pub(crate) fn fill_default_args(
@@ -296,48 +355,20 @@ impl<'a> HirToMirContext<'a> {
             if user_arg_count >= defaults.len() {
                 return; // All args provided
             }
-            // A default reads the callee's earlier parameters (`b:Int = a`) and
-            // its `this`: while it lowers here, those names are the arguments
-            // already in place. A method's list leaves `this` out, so it sits
-            // one before the list; a constructor's list starts with it.
             let symbols = self
                 .function_param_symbols
                 .get(&func_id)
                 .cloned()
                 .unwrap_or_default();
-            // `this` lowers through SymbolId(0).
-            let this_symbol = SymbolId::from_raw(0);
-            let list_offset = usize::from(has_implicit_this);
-            let saved: Vec<(SymbolId, Option<IrId>)> = symbols
-                .iter()
-                .chain(std::iter::once(&this_symbol))
-                .map(|s| (*s, self.symbol_map.get(s).copied()))
-                .collect();
-            for (j, sym) in symbols.iter().enumerate() {
-                if let Some(reg) = arg_regs.get(j + list_offset) {
-                    self.symbol_map.insert(*sym, *reg);
-                }
-            }
-            if has_implicit_this {
-                self.symbol_map.insert(this_symbol, arg_regs[0]);
-            }
             for i in user_arg_count..defaults.len() {
                 if let Some(ref default_expr) = defaults[i] {
-                    if let Some(reg) = self.lower_expression(default_expr) {
+                    if let Some(reg) = self.lower_param_default(
+                        default_expr,
+                        &symbols,
+                        arg_regs,
+                        has_implicit_this,
+                    ) {
                         arg_regs.push(reg);
-                        if let Some(sym) = symbols.get(i) {
-                            self.symbol_map.insert(*sym, reg);
-                        }
-                    }
-                }
-            }
-            for (sym, prev) in saved {
-                match prev {
-                    Some(reg) => {
-                        self.symbol_map.insert(sym, reg);
-                    }
-                    None => {
-                        self.symbol_map.remove(&sym);
                     }
                 }
             }
@@ -527,15 +558,9 @@ impl<'a> HirToMirContext<'a> {
                         // Ptr(U8) slot the callee then unboxes.
                         let param_is_optional_scalar =
                             match type_table.get(resolved_param).map(|t| &t.kind) {
-                                Some(TypeKind::Optional { inner_type }) => type_table
-                                    .get(*inner_type)
-                                    .map(|t| {
-                                        matches!(
-                                            t.kind,
-                                            TypeKind::Int | TypeKind::Float | TypeKind::Bool
-                                        )
-                                    })
-                                    .unwrap_or(false),
+                                Some(TypeKind::Optional { inner_type }) => {
+                                    self.optional_inner_is_boxable_primitive(*inner_type)
+                                }
                                 _ => false,
                             };
                         matches!(
