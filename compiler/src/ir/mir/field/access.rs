@@ -1135,12 +1135,29 @@ impl<'a> HirToMirContext<'a> {
         // object fields (build_gep with IrType::I64 scales the index by 8), and
         // `obj` is the struct pointer whose first field is the data buffer.
         //
-        // The GEP is deliberately unchecked: a bounds-check branch here would
-        // defeat the vectorization it exists for, and BCE only runs in the
-        // AOT/pipeline PassManager, not the JIT path.
+        // An index outside `len` reads as null/0, as Haxe reads it, without a
+        // branch: the address is clamped onto the array struct itself (valid
+        // memory) and the loaded value is replaced by zero. A branch here
+        // would defeat the vectorization the inline address exists for, and
+        // BCE only runs in the AOT/pipeline PassManager, not the JIT path.
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-        let data_ptr = self.builder.build_load(obj, ptr_u8)?;
-        let elem_ptr = self.builder.build_gep(data_ptr, vec![idx], IrType::I64)?;
+        let data_ptr = self.builder.build_load(obj, ptr_u8.clone())?;
+        let idx64 = match self.builder.get_register_type(idx) {
+            Some(IrType::I64) | Some(IrType::U64) => idx,
+            Some(from) => self.builder.build_cast(idx, from, IrType::I64)?,
+            None => idx,
+        };
+        let len_off = self.builder.build_const(IrValue::I64(8))?;
+        let len_ptr = self.builder.build_ptr_add(obj, len_off, ptr_u8.clone())?;
+        let len = self.builder.build_load(len_ptr, IrType::I64)?;
+        let in_bounds = self.builder.build_cmp(CompareOp::ULt, idx64, len)?;
+        let zero_idx = self.builder.build_const(IrValue::I64(0))?;
+        let safe_idx = self.builder.build_select(in_bounds, idx64, zero_idx)?;
+        let obj_u8 = self.builder.build_bitcast(obj, ptr_u8.clone())?;
+        let safe_base = self.builder.build_select(in_bounds, data_ptr, obj_u8)?;
+        let elem_ptr = self
+            .builder
+            .build_gep(safe_base, vec![safe_idx], IrType::I64)?;
 
         // Slots are always 8 bytes, so load the storage type and narrow after
         // (Int→I32, Bool).
@@ -1162,6 +1179,15 @@ impl<'a> HirToMirContext<'a> {
         };
 
         let loaded = self.builder.build_load(elem_ptr, load_type.clone())?;
+        let zero = match &load_type {
+            IrType::F64 => self.builder.build_const(IrValue::F64(0.0))?,
+            IrType::Ptr(_) => {
+                let null = self.builder.build_const(IrValue::Null)?;
+                self.builder.build_bitcast(null, load_type.clone())?
+            }
+            _ => self.builder.build_const(IrValue::I64(0))?,
+        };
+        let loaded = self.builder.build_select(in_bounds, loaded, zero)?;
 
         if load_type != target_type {
             self.builder.build_cast(loaded, load_type, target_type)

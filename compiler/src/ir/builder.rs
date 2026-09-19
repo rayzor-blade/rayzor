@@ -938,6 +938,14 @@ impl IrBuilder {
         false_val: IrId,
     ) -> Option<IrId> {
         let dest = self.alloc_reg()?;
+        // The result has the arms' type; a backend reads it for a later
+        // compare or call.
+        if let Some(ty) = self
+            .get_register_type(true_val)
+            .or_else(|| self.get_register_type(false_val))
+        {
+            self.set_register_type(dest, ty);
+        }
         self.add_instruction(IrInstruction::Select {
             dest,
             condition,

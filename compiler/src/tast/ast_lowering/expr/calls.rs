@@ -3029,6 +3029,19 @@ impl<'a> AstLowering<'a> {
                     }
                 }
             }
+            // A structure against a class: the class's methods of those names.
+            (TypeKind::Anonymous { fields: df }, TypeKind::Class { symbol_id, .. }) => {
+                for f in df {
+                    let Some(m) = self.resolve_class_method_symbol(*symbol_id, f.name) else {
+                        continue;
+                    };
+                    let Some(mt) = self.context.symbol_table.get_symbol(m).map(|s| s.type_id)
+                    else {
+                        continue;
+                    };
+                    self.unify_type_args(f.type_id, mt, depth + 1, out);
+                }
+            }
             // The same generic type on both sides: its arguments pair up.
             (
                 TypeKind::TypeAlias {
