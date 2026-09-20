@@ -671,6 +671,7 @@ pub fn function_param<'a>(full: &'a str, input: &'a str) -> PResult<'a, Function
             rest: is_rest,
             default_value: default_value.map(Box::new),
             span: Span::new(start, end),
-        },
+        }
+        .rest_wrapped(),
     ))
 }

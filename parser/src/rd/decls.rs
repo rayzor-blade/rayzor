@@ -749,7 +749,8 @@ impl<'a, 'b> RdParser<'a, 'b> {
             rest,
             default_value,
             span: self.stream.span_from(start),
-        })
+        }
+        .rest_wrapped())
     }
 
     /// Parse module-level field: `var x = 10;` or `function foo() {}`

@@ -241,11 +241,17 @@ impl<'a> HirToMirContext<'a> {
         // and would bind a user field to an unrelated stdlib method. A
         // Placeholder receiver (unresolved extern class such as rayzor.Bytes) is
         // never a user field and must go through stdlib dispatch.
+        // A Placeholder receiver, an Array or a String never carries a user
+        // field: `Array<T>.length` with a parameter element must not be
+        // taken for `List.length` because the two share a name.
         let receiver_is_placeholder = {
             let type_table = self.type_table;
-            type_table
-                .get(receiver_ty)
-                .map_or(false, |t| matches!(t.kind, TypeKind::Placeholder { .. }))
+            type_table.get(receiver_ty).is_some_and(|t| {
+                matches!(
+                    t.kind,
+                    TypeKind::Placeholder { .. } | TypeKind::Array { .. } | TypeKind::String
+                )
+            })
         };
         // Existence probe only (gates stdlib property dispatch): ambiguity
         // still means "a user field of this name exists" — the erroring
@@ -268,7 +274,6 @@ impl<'a> HirToMirContext<'a> {
             .get_symbol(field)
             .and_then(|s| self.string_interner.get(s.name))
             .unwrap_or("<unknown>");
-
         if !is_known_user_field {
             if let Some((_class_match, _method, runtime_call)) =
                 self.get_stdlib_runtime_info(field, receiver_ty, Some(0), None)
@@ -310,13 +315,23 @@ impl<'a> HirToMirContext<'a> {
                 );
 
                 // Property getters take the object as their only parameter; opaque
-                // stdlib objects (Array, String, ...) pass as Ptr(Void).
+                // stdlib objects (Array, String, ...) pass as Ptr(Void). A MIR
+                // wrapper is a stdlib function the merge binds by name, so it
+                // is a forward reference, not an extern.
                 let param_types = vec![IrType::Ptr(Box::new(IrType::Void))];
-                let runtime_func_id = self.get_or_register_extern_function(
-                    &runtime_func,
-                    param_types,
-                    result_type.clone(),
-                );
+                let runtime_func_id = if runtime_call.is_mir_wrapper {
+                    self.register_stdlib_mir_forward_ref(
+                        &runtime_func,
+                        param_types,
+                        result_type.clone(),
+                    )
+                } else {
+                    self.get_or_register_extern_function(
+                        &runtime_func,
+                        param_types,
+                        result_type.clone(),
+                    )
+                };
 
                 let result_reg =
                     self.builder
@@ -478,6 +493,21 @@ impl<'a> HirToMirContext<'a> {
                     // unresolvable, which is where those scans earn their keep.
                     let getter_func_id = self
                         .resolve_method_function_id(receiver_ty, *getter_method_name)
+                        // An abstract's getter is the abstract's own method: a
+                        // by-name scan would hand `rest.length` another class's.
+                        .or_else(|| {
+                            let abstract_sym = match self
+                                .type_table
+                                .get(self.resolve_through_aliases(receiver_ty))
+                                .map(|t| &t.kind)
+                            {
+                                Some(TypeKind::Abstract { symbol_id, .. }) => Some(*symbol_id),
+                                _ => None,
+                            }?;
+                            let method = self
+                                .resolve_class_method_symbol(abstract_sym, *getter_method_name)?;
+                            self.resolve_function_id_with_qualified_fallback(method)
+                        })
                         .or_else(|| {
                             self.function_map
                                 .iter()

@@ -197,6 +197,18 @@ impl<'a> AstLowering<'a> {
             );
             type_param_map.insert(tp.name, type_id);
         }
+        // Ordered as declared, so a call on `Rest<String>` substitutes T in
+        // `toArray():Array<T>` the way a class receiver does.
+        if !type_param_map.is_empty() {
+            let ordered: Vec<TypeId> = type_params
+                .iter()
+                .filter_map(|tp| type_param_map.get(&tp.name).copied())
+                .collect();
+            self.context
+                .symbol_table
+                .set_class_type_params(abstract_symbol, ordered.clone());
+            self.class_type_params.insert(abstract_symbol, ordered);
+        }
         self.context.push_type_parameters(type_param_map);
 
         // Process underlying type

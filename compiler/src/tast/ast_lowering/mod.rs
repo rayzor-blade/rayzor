@@ -984,6 +984,8 @@ pub struct AstLowering<'a> {
     empty_array_inferred: std::collections::BTreeMap<SymbolId, SourceLocation>,
     /// Untyped `var x = null` locals whose first assignment has not typed them yet.
     null_inferred: std::collections::BTreeSet<SymbolId>,
+    /// `haxe.Rest`'s abstract symbol once looked up (`None` inside = not found).
+    rest_symbol_cache: Option<Option<SymbolId>>,
     /// Subset of `empty_array_inferred` that was USED (pushed/index-assigned)
     /// but whose element type could not be determined at compile time — if a
     /// symbol is still here AND still unbound at end of file, it stayed
@@ -1082,6 +1084,8 @@ pub(crate) enum TypeSubstitutionResult {
     /// stays an abstract `V`, and the caller boxes the value with an
     /// unresolved type tag (corrupting enum/reference values).
     NeedOptional { inner_type: TypeId },
+    /// Need to create an `Array<T>` with this substituted element
+    NeedArray { element_type: TypeId },
     /// Need an alias over substituted arguments — `Iterator<T>` returned off a
     /// `StringMap<Int>` receiver becomes `Iterator<Int>`, keeping the alias's
     /// own declaration as its target.

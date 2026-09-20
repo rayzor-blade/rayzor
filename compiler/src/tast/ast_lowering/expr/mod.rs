@@ -1680,6 +1680,35 @@ impl<'a> AstLowering<'a> {
                 };
                 return self.lower_expression(&array_expr);
             }
+            // `f(...array)`: the array stands for the rest parameter, typed
+            // `haxe.Rest<T>` so the call packs nothing around it.
+            ExprKind::Spread(inner) => {
+                let typed = self.lower_expression(inner)?;
+                let elem = {
+                    let tt = self.context.type_table.borrow();
+                    match tt.get(typed.expr_type).map(|t| &t.kind) {
+                        Some(crate::tast::core::TypeKind::Array { element_type }) => {
+                            Some(*element_type)
+                        }
+                        _ => None,
+                    }
+                };
+                let Some(rest_ty) = elem.and_then(|e| self.rest_type_of(e)) else {
+                    return Ok(typed);
+                };
+                return Ok(TypedExpression {
+                    expr_type: rest_ty,
+                    kind: TypedExpressionKind::Cast {
+                        expression: Box::new(typed),
+                        target_type: rest_ty,
+                        cast_kind: CastKind::Implicit,
+                    },
+                    usage: VariableUsage::Copy,
+                    lifetime_id: crate::tast::LifetimeId::first(),
+                    source_location: self.context.create_location_from_span(expression.span),
+                    metadata: ExpressionMetadata::default(),
+                });
+            }
             ExprKind::Cast { expr, type_hint } => {
                 let typed_expr = self.lower_expression(expr)?;
                 let (target_type, cast_kind) = if let Some(hint) = type_hint {

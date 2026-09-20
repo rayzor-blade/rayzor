@@ -224,6 +224,43 @@ impl<'a> AstLowering<'a> {
                                     return Ok(imap);
                                 }
                             }
+                            // A typedef of an array (`NativeRest<T> = Array<T>`)
+                            // is the array, so its methods are the array's;
+                            // other typedefs keep the class kind their values
+                            // are laid out with.
+                            let alias_target = {
+                                let tt = self.context.type_table.borrow();
+                                tt.types_for_symbol(symbol_id)
+                                    .and_then(|ts| {
+                                        ts.iter().find_map(|t| match &tt.get(*t)?.kind {
+                                            crate::tast::core::TypeKind::TypeAlias {
+                                                target_type,
+                                                ..
+                                            } => Some(*target_type),
+                                            _ => None,
+                                        })
+                                    })
+                                    .filter(|target| {
+                                        matches!(
+                                            tt.get(*target).map(|t| &t.kind),
+                                            Some(crate::tast::core::TypeKind::Array { .. })
+                                        )
+                                    })
+                            };
+                            if let Some(target_type) = alias_target {
+                                // The declaration's target names its own
+                                // parameters; this use binds them.
+                                let bindings = self.alias_bindings(symbol_id, &type_arg_ids);
+                                let target_type =
+                                    self.substitute_alias_args(target_type, &bindings);
+                                return Ok(self.context.type_table.borrow_mut().create_type(
+                                    crate::tast::core::TypeKind::TypeAlias {
+                                        symbol_id,
+                                        target_type,
+                                        type_args: type_arg_ids,
+                                    },
+                                ));
+                            }
                             // Check if this class already has a type from pre-registration
                             if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
                                 if symbol.type_id.is_valid() && type_arg_ids.is_empty() {

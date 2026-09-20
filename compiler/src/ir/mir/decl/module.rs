@@ -141,12 +141,24 @@ impl<'a> HirToMirContext<'a> {
                             if is_method(&info.getter) || is_method(&info.setter) {
                                 self.abstract_property_accessors
                                     .insert(field.symbol_id, info.clone());
+                                // Exported with the class properties, so a
+                                // module reading `rest.length` on an imported
+                                // abstract finds the getter.
+                                self.property_access_map
+                                    .entry(field.symbol_id)
+                                    .or_insert_with(|| info.clone());
                             }
                         }
                     }
                     // Register abstract method signatures — same as classes but
                     // this_type uses the underlying type (value, not pointer)
                     for method in &abstract_decl.methods {
+                        // Named under the abstract, as a class's are, so an
+                        // importer resolves `rest.length`'s getter to this one.
+                        self.class_method_symbols.insert(
+                            (abstract_decl.symbol_id, method.function.name),
+                            method.function.symbol_id,
+                        );
                         let this_type = if !method.is_static {
                             Some(abstract_decl.underlying)
                         } else {

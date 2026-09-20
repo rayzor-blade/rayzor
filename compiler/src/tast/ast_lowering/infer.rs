@@ -977,6 +977,21 @@ impl<'a> AstLowering<'a> {
             return Ok(self.context.type_table.borrow().dynamic_type());
         };
 
+        // A typedef of a built-in is that built-in here.
+        let receiver_type = {
+            let tt = self.context.type_table.borrow();
+            let mut t = receiver_type;
+            for _ in 0..4 {
+                match tt.get(t).map(|i| &i.kind) {
+                    Some(crate::tast::core::TypeKind::TypeAlias { target_type, .. }) => {
+                        t = *target_type
+                    }
+                    _ => break,
+                }
+            }
+            t
+        };
+
         // Check the object type to see if it's a built-in type with known methods
         let type_table = self.context.type_table.borrow();
         if let Some(object_type_info) = type_table.get(receiver_type) {

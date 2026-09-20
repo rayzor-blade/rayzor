@@ -451,7 +451,16 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.expect(TokenKind::LParen)?;
         let mut args = Vec::new();
         while !self.stream.at(TokenKind::RParen) && !self.stream.is_eof() {
-            args.push(self.parse_expression()?);
+            // `...expr` hands the array to the callee's rest parameter.
+            if let Some(dots) = self.stream.eat(TokenKind::DotDotDot).map(|t| t.span.start) {
+                let inner = self.parse_expression()?;
+                args.push(Expr {
+                    span: Span::new(dots, inner.span.end),
+                    kind: ExprKind::Spread(Box::new(inner)),
+                });
+            } else {
+                args.push(self.parse_expression()?);
+            }
             if !self.stream.at(TokenKind::RParen) {
                 self.stream.eat(TokenKind::Comma);
             }

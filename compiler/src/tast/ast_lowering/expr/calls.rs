@@ -1155,6 +1155,10 @@ impl<'a> AstLowering<'a> {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Trailing arguments bound for a `...rest` parameter travel as one
+        // `haxe.Rest<T>` array; a spread argument already is one.
+        let arg_exprs = self.pack_rest_args(arg_exprs, expected_arg_types.as_deref(), expr);
+
         // Box primitive value-type arguments passed to `Dynamic` parameters.
         // Formal param types come from the import-aware `boxing_param_types`
         // (covers cross-module STATIC calls that the lambda-hint resolver
@@ -2564,7 +2568,11 @@ impl<'a> AstLowering<'a> {
     }
 
     /// What an instantiated alias binds each parameter of its declaration to.
-    fn alias_bindings(&self, alias: SymbolId, args: &[TypeId]) -> Vec<(SymbolId, TypeId)> {
+    pub(crate) fn alias_bindings(
+        &self,
+        alias: SymbolId,
+        args: &[TypeId],
+    ) -> Vec<(SymbolId, TypeId)> {
         let tt = self.context.type_table.borrow();
         // The declaration: the symbol's own type, or -- for a typedef
         // pre-registered as a class, whose symbol carries the class type --
@@ -3159,6 +3167,126 @@ impl<'a> AstLowering<'a> {
         self.substitute_alias_args(ret, &bindings)
     }
 
+    /// `haxe.Rest<T>`'s symbol, resolved once through the type lowering.
+    fn rest_symbol(&mut self) -> Option<SymbolId> {
+        if let Some(sym) = self.rest_symbol_cache {
+            return sym;
+        }
+        let span = parser::haxe_ast::Span::new(0, 0);
+        let ast = parser::Type::Path {
+            path: parser::TypePath {
+                package: vec!["haxe".to_string()],
+                name: "Rest".to_string(),
+                sub: None,
+            },
+            params: vec![parser::Type::Path {
+                path: parser::TypePath {
+                    package: Vec::new(),
+                    name: "Dynamic".to_string(),
+                    sub: None,
+                },
+                params: Vec::new(),
+                span,
+            }],
+            span,
+        };
+        let sym = self.lower_type(&ast).ok().and_then(|t| {
+            match self.context.type_table.borrow().get(t).map(|i| &i.kind) {
+                Some(crate::tast::core::TypeKind::Abstract { symbol_id, .. }) => Some(*symbol_id),
+                _ => None,
+            }
+        });
+        self.rest_symbol_cache = Some(sym);
+        sym
+    }
+
+    /// `haxe.Rest<elem>`.
+    pub(crate) fn rest_type_of(&mut self, elem: TypeId) -> Option<TypeId> {
+        let sym = self.rest_symbol()?;
+        Some(
+            self.context
+                .type_table
+                .borrow_mut()
+                .create_abstract_type(sym, None, vec![elem]),
+        )
+    }
+
+    /// The element type when `ty` is `haxe.Rest<T>`.
+    fn rest_elem_of(&self, ty: TypeId) -> Option<TypeId> {
+        let tt = self.context.type_table.borrow();
+        let crate::tast::core::TypeKind::Abstract {
+            symbol_id,
+            type_args,
+            ..
+        } = &tt.get(ty)?.kind
+        else {
+            return None;
+        };
+        let name = self
+            .context
+            .symbol_table
+            .get_symbol(*symbol_id)
+            .and_then(|s| self.context.string_interner.get(s.name))?;
+        if name != "Rest" {
+            return None;
+        }
+        type_args
+            .first()
+            .copied()
+            .or_else(|| Some(tt.dynamic_type()))
+    }
+
+    /// Pack the arguments past the fixed formals into the `haxe.Rest<T>`
+    /// array the last formal takes. A spread argument, already a Rest, and a
+    /// call with too few arguments are left alone.
+    fn pack_rest_args(
+        &mut self,
+        mut args: Vec<TypedExpression>,
+        formals: Option<&[TypeId]>,
+        call: &Expr,
+    ) -> Vec<TypedExpression> {
+        let Some(formals) = formals else {
+            return args;
+        };
+        let Some(&last) = formals.last() else {
+            return args;
+        };
+        let Some(elem) = self.rest_elem_of(last) else {
+            return args;
+        };
+        let fixed = formals.len() - 1;
+        if args.len() < fixed {
+            return args;
+        }
+        if args.len() == formals.len() && self.rest_elem_of(args[fixed].expr_type).is_some() {
+            return args;
+        }
+        let tail = args.split_off(fixed);
+        let array_ty = self.context.type_table.borrow_mut().create_array_type(elem);
+        let location = self.context.create_location_from_span(call.span);
+        let literal = TypedExpression {
+            expr_type: array_ty,
+            kind: TypedExpressionKind::ArrayLiteral { elements: tail },
+            usage: VariableUsage::Copy,
+            lifetime_id: crate::tast::LifetimeId::first(),
+            source_location: location.clone(),
+            metadata: ExpressionMetadata::default(),
+        };
+        args.push(TypedExpression {
+            expr_type: last,
+            kind: TypedExpressionKind::Cast {
+                expression: Box::new(literal),
+                target_type: last,
+                cast_kind: CastKind::Implicit,
+            },
+            usage: VariableUsage::Copy,
+            lifetime_id: crate::tast::LifetimeId::first(),
+            source_location: location,
+            metadata: ExpressionMetadata::default(),
+        });
+        args
+    }
+
     pub(crate) fn infer_method_call_return_type(
         &mut self,
         method_symbol: SymbolId,
@@ -3343,6 +3471,11 @@ impl<'a> AstLowering<'a> {
                 .type_table
                 .borrow_mut()
                 .create_optional_type(inner_type)),
+            TypeSubstitutionResult::NeedArray { element_type } => Ok(self
+                .context
+                .type_table
+                .borrow_mut()
+                .create_array_type(element_type)),
             TypeSubstitutionResult::NeedTypeAlias {
                 symbol_id,
                 target_type,

@@ -579,6 +579,13 @@ impl<'a> AstLowering<'a> {
             | crate::tast::core::TypeKind::Interface {
                 symbol_id,
                 type_args,
+            }
+            // A generic abstract's methods name its parameters the same way
+            // (`Rest<String>.toArray():Array<T>`).
+            | crate::tast::core::TypeKind::Abstract {
+                symbol_id,
+                type_args,
+                ..
             } if !type_args.is_empty() => {
                 // Concrete generic class instance like `Mutex<State>` —
                 // type_args holds the concrete substitution. Derive the
@@ -729,6 +736,7 @@ impl<'a> AstLowering<'a> {
                         TypeSubstitutionResult::NeedGenericInstance { .. }
                         | TypeSubstitutionResult::NeedClassInstance { .. }
                         | TypeSubstitutionResult::NeedOptional { .. }
+                        | TypeSubstitutionResult::NeedArray { .. }
                         | TypeSubstitutionResult::NeedTypeAlias { .. } => {
                             // Would need to create nested type - for now just use the original
                             // This is a limitation, but handles most common cases
@@ -773,6 +781,7 @@ impl<'a> AstLowering<'a> {
                         TypeSubstitutionResult::NeedGenericInstance { .. }
                         | TypeSubstitutionResult::NeedClassInstance { .. }
                         | TypeSubstitutionResult::NeedOptional { .. }
+                        | TypeSubstitutionResult::NeedArray { .. }
                         | TypeSubstitutionResult::NeedTypeAlias { .. } => {
                             new_type_args.push(*arg);
                         }
@@ -812,6 +821,18 @@ impl<'a> AstLowering<'a> {
                     };
                 }
                 TypeSubstitutionResult::NoChange(return_type)
+            }
+            // `Array<T>` (`Rest<T>.toArray()`): substitute the element.
+            crate::tast::core::TypeKind::Array { element_type } => {
+                let elem = *element_type;
+                match self.compute_type_substitution(elem, receiver_type, type_table) {
+                    TypeSubstitutionResult::DirectSubstitution(new_elem) => {
+                        TypeSubstitutionResult::NeedArray {
+                            element_type: new_elem,
+                        }
+                    }
+                    _ => TypeSubstitutionResult::NoChange(return_type),
+                }
             }
             // `Null<V>` (e.g. `Map<K,V>.get` return) — substitute the inner type
             // so the result is `Optional<concrete>` rather than `Optional<V>`.

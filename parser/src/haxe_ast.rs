@@ -532,6 +532,36 @@ pub struct FunctionParam {
     pub span: Span,
 }
 
+impl FunctionParam {
+    /// A rest parameter `...r:T` is typed `haxe.Rest<T>` (`haxe.Rest<Dynamic>`
+    /// when unannotated), as Haxe types it.
+    pub fn rest_wrapped(mut self) -> Self {
+        if !self.rest {
+            return self;
+        }
+        let span = self.span;
+        let inner = self.type_hint.take().unwrap_or(Type::Path {
+            path: TypePath {
+                package: Vec::new(),
+                name: "Dynamic".to_string(),
+                sub: None,
+            },
+            params: Vec::new(),
+            span,
+        });
+        self.type_hint = Some(Type::Path {
+            path: TypePath {
+                package: vec!["haxe".to_string()],
+                name: "Rest".to_string(),
+                sub: None,
+            },
+            params: vec![inner],
+            span,
+        });
+        self
+    }
+}
+
 /// Arrow function parameter (supports optional type annotations)
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArrowParam {
@@ -700,6 +730,9 @@ pub enum ExprKind {
 
     /// Function expression: `function(x) return x * 2`
     Function(Function),
+    /// A spread call argument: `f(...array)`, the array itself standing for
+    /// the callee's rest parameter.
+    Spread(Box<Expr>),
 
     /// Arrow function: `x -> x * 2` or `(x:Int) -> x * 2`
     Arrow {

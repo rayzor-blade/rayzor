@@ -175,6 +175,13 @@ impl<'a, 'b> RdParser<'a, 'b> {
         if optional_named {
             self.stream.advance(); // `?`
         }
+        // `...name:Type` — a rest parameter, typed `haxe.Rest<Type>`.
+        let rest_named = self.stream.at(TokenKind::DotDotDot)
+            && self.stream.peek_at(1).kind == TokenKind::Ident
+            && self.stream.peek_at(2).kind == TokenKind::Colon;
+        if rest_named {
+            self.stream.advance(); // `...`
+        }
         let was_named =
             self.stream.at(TokenKind::Ident) && self.stream.peek_at(1).kind == TokenKind::Colon;
         if was_named {
@@ -186,6 +193,17 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let span = Span::new(start, ty.span().end);
             Type::Optional {
                 inner: Box::new(ty),
+                span,
+            }
+        } else if rest_named {
+            let span = Span::new(start, ty.span().end);
+            Type::Path {
+                path: TypePath {
+                    package: vec!["haxe".to_string()],
+                    name: "Rest".to_string(),
+                    sub: None,
+                },
+                params: vec![ty],
                 span,
             }
         } else {
