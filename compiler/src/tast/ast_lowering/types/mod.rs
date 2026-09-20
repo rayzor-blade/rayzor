@@ -225,9 +225,10 @@ impl<'a> AstLowering<'a> {
                                 }
                             }
                             // A typedef of an array (`NativeRest<T> = Array<T>`)
-                            // is the array, so its methods are the array's;
-                            // other typedefs keep the class kind their values
-                            // are laid out with.
+                            // or of an extern class (`VectorData<T> =
+                            // rayzor.Vec<T>`) is its target, so its methods
+                            // are the target's; other typedefs keep the class
+                            // kind their values are laid out with.
                             let alias_target = {
                                 let tt = self.context.type_table.borrow();
                                 tt.types_for_symbol(symbol_id)
@@ -240,11 +241,25 @@ impl<'a> AstLowering<'a> {
                                             _ => None,
                                         })
                                     })
-                                    .filter(|target| {
-                                        matches!(
-                                            tt.get(*target).map(|t| &t.kind),
-                                            Some(crate::tast::core::TypeKind::Array { .. })
-                                        )
+                                    .filter(|target| match tt.get(*target).map(|t| &t.kind) {
+                                        Some(crate::tast::core::TypeKind::Array { .. }) => true,
+                                        Some(crate::tast::core::TypeKind::Class {
+                                            symbol_id: target_sym,
+                                            ..
+                                        })
+                                        | Some(crate::tast::core::TypeKind::Abstract {
+                                            symbol_id: target_sym,
+                                            ..
+                                        }) => self
+                                            .context
+                                            .symbol_table
+                                            .get_symbol(*target_sym)
+                                            .is_some_and(|s| {
+                                                s.flags.contains(
+                                                    crate::tast::symbols::SymbolFlags::EXTERN,
+                                                )
+                                            }),
+                                        _ => false,
                                     })
                             };
                             if let Some(target_type) = alias_target {

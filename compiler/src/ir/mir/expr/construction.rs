@@ -218,11 +218,15 @@ impl<'a> HirToMirContext<'a> {
         // Generic extern classes monomorphize by type argument: Vec<Int> -> VecI32,
         // Vec<Float> -> VecF64. hir_type_args is used directly because a
         // type_table lookup can fail for extern classes.
+        // An erased or missing argument (`new Vec<T>()` inside a generic
+        // body) is the pointer variant, as the receiver dispatch reads it.
         let monomorphized_class_name: Option<String> = if let Some(base_name) = class_name {
-            if base_name == "Vec" && !hir_type_args.is_empty() {
-                let first_arg = hir_type_args[0];
+            if base_name.rsplit('.').next() == Some("Vec") {
                 let type_table = self.type_table;
-                let suffix = if let Some(arg_type) = type_table.get(first_arg) {
+                let suffix = if let Some(arg_type) = hir_type_args
+                    .first()
+                    .and_then(|first| type_table.get(*first))
+                {
                     match &arg_type.kind {
                         crate::tast::TypeKind::Int => Some("I32"),
                         crate::tast::TypeKind::Float => Some("F64"),

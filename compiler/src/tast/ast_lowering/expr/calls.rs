@@ -294,19 +294,31 @@ impl<'a> AstLowering<'a> {
         // Try to resolve method from receiver's type
         match &receiver.kind {
             TypedExpressionKind::This { this_type } => {
-                // In an abstract over a built-in (`Rest<T>` over an array)
-                // `this.toString()` is the built-in's method, not the
-                // abstract's own; over a class the abstract's methods keep
-                // answering first, as the runtime-mapped Map relies on.
-                let over_builtin = self
+                // In an abstract `this` is the underlying value, so its
+                // methods answer first (`this.get(i)` in `Vector.get` is
+                // `rayzor.Vec.get`, `this.toString()` in `Rest.toString` is
+                // Array's); the abstract's own methods only when the
+                // underlying has none of that name.
+                let in_abstract = self
                     .context
                     .class_context_stack
                     .last()
                     .and_then(|s| self.context.symbol_table.get_symbol(*s))
-                    .is_some_and(|s| s.kind == crate::tast::symbols::SymbolKind::Abstract)
-                    && self.resolve_type_to_class_symbol(*this_type).is_none();
-                if over_builtin {
-                    // Fall through to the receiver-type fallbacks below.
+                    .is_some_and(|s| s.kind == crate::tast::symbols::SymbolKind::Abstract);
+                let underlying = if in_abstract {
+                    self.resolve_type_to_class_symbol(*this_type)
+                } else {
+                    None
+                };
+                if let Some(underlying) = underlying {
+                    if let Some(found) = self.resolve_class_method_symbol(underlying, method_name) {
+                        return found;
+                    }
+                }
+                // A built-in underlying is left to the receiver-type
+                // fallbacks below.
+                let own_methods_answer = !in_abstract || underlying.is_some();
+                if !own_methods_answer {
                 } else if let Some(class_symbol) = self.context.class_context_stack.last() {
                     if let Some(methods) = self.class_methods.get(class_symbol) {
                         if let Some((_, method_symbol, _)) =
@@ -2690,6 +2702,21 @@ impl<'a> AstLowering<'a> {
                     base_type,
                     type_args: args,
                     instantiation_cache_id,
+                }
+            }
+            Some(TypeKind::Abstract {
+                symbol_id,
+                underlying,
+                type_args,
+            }) => {
+                let args = sub(&type_args);
+                if args == type_args {
+                    return ty;
+                }
+                TypeKind::Abstract {
+                    symbol_id,
+                    underlying,
+                    type_args: args,
                 }
             }
             Some(TypeKind::Array { element_type }) => {

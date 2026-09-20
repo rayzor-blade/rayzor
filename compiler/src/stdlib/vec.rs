@@ -826,21 +826,24 @@ fn build_vec_i32_wrappers(builder: &mut MirBuilder) {
         builder.ret(None);
     }
 
-    // VecI32_sortBy(vec: *VecI32, compare_fn: *u8, compare_env: *u8)
+    // VecI32_sortBy(vec: *VecI32, compare: closure)
     {
         let func_id = builder
             .begin_function("VecI32_sortBy")
             .param("vec", ptr_u8.clone())
-            .param("compare_fn", ptr_u8.clone())
-            .param("compare_env", ptr_u8.clone())
+            .param("compare", ptr_u8.clone())
             .returns(void_ty)
             .build();
         builder.set_current_function(func_id);
         let entry = builder.create_block("entry");
         builder.set_insert_point(entry);
         let vec = builder.get_param(0);
-        let compare_fn = builder.get_param(1);
-        let compare_env = builder.get_param(2);
+        // The comparator is a closure record {fn_ptr, env}, as array_sort takes.
+        let closure = builder.get_param(1);
+        let compare_fn = builder.load(closure, ptr_u8.clone());
+        let offset_8 = builder.const_i64(8);
+        let env_slot = builder.ptr_add(closure, offset_8, ptr_u8.clone());
+        let compare_env = builder.load(env_slot, ptr_u8.clone());
         let extern_id = builder
             .get_function_by_name("rayzor_vec_i32_sort_by")
             .expect("rayzor_vec_i32_sort_by not found");
@@ -1255,21 +1258,24 @@ fn build_vec_f64_wrappers(builder: &mut MirBuilder) {
         builder.ret(None);
     }
 
-    // VecF64_sortBy(vec: *VecF64, compare_fn: *u8, compare_env: *u8)
+    // VecF64_sortBy(vec: *VecF64, compare: closure)
     {
         let func_id = builder
             .begin_function("VecF64_sortBy")
             .param("vec", ptr_u8.clone())
-            .param("compare_fn", ptr_u8.clone())
-            .param("compare_env", ptr_u8.clone())
+            .param("compare", ptr_u8.clone())
             .returns(void_ty)
             .build();
         builder.set_current_function(func_id);
         let entry = builder.create_block("entry");
         builder.set_insert_point(entry);
         let vec = builder.get_param(0);
-        let compare_fn = builder.get_param(1);
-        let compare_env = builder.get_param(2);
+        // The comparator is a closure record {fn_ptr, env}, as array_sort takes.
+        let closure = builder.get_param(1);
+        let compare_fn = builder.load(closure, ptr_u8.clone());
+        let offset_8 = builder.const_i64(8);
+        let env_slot = builder.ptr_add(closure, offset_8, ptr_u8.clone());
+        let compare_env = builder.load(env_slot, ptr_u8.clone());
         let extern_id = builder
             .get_function_by_name("rayzor_vec_f64_sort_by")
             .expect("rayzor_vec_f64_sort_by not found");
@@ -1471,21 +1477,24 @@ fn build_vec_ptr_wrappers(builder: &mut MirBuilder) {
         builder.ret(Some(result));
     }
 
-    // VecPtr_sortBy(vec: *VecPtr, compare_fn: *u8, compare_env: *u8)
+    // VecPtr_sortBy(vec: *VecPtr, compare: closure)
     {
         let func_id = builder
             .begin_function("VecPtr_sortBy")
             .param("vec", ptr_u8.clone())
-            .param("compare_fn", ptr_u8.clone())
-            .param("compare_env", ptr_u8.clone())
+            .param("compare", ptr_u8.clone())
             .returns(void_ty)
             .build();
         builder.set_current_function(func_id);
         let entry = builder.create_block("entry");
         builder.set_insert_point(entry);
         let vec = builder.get_param(0);
-        let compare_fn = builder.get_param(1);
-        let compare_env = builder.get_param(2);
+        // The comparator is a closure record {fn_ptr, env}, as array_sort takes.
+        let closure = builder.get_param(1);
+        let compare_fn = builder.load(closure, ptr_u8.clone());
+        let offset_8 = builder.const_i64(8);
+        let env_slot = builder.ptr_add(closure, offset_8, ptr_u8.clone());
+        let compare_env = builder.load(env_slot, ptr_u8.clone());
         let extern_id = builder
             .get_function_by_name("rayzor_vec_ptr_sort_by")
             .expect("rayzor_vec_ptr_sort_by not found");

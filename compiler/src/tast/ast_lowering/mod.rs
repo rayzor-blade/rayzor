@@ -302,7 +302,6 @@ pub(crate) const TOPLEVEL_STDLIB_CLASSES: &[&str] = &[
     "Array",
     "Map",
     "List",
-    "Vector",
     // String handling
     "String",
     "StringBuf",

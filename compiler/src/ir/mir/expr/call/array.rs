@@ -165,7 +165,22 @@ impl<'a> HirToMirContext<'a> {
         // String element types. Route through haxe_array_join_typed
         // with the element's type tag so each element is converted
         // via Std.string first (1=Int 2=Bool 4=Float 5=String 6=Ref).
-        if vname == "join" && *is_method && args.len() == 2 {
+        // Only an array's (or an unknown receiver's) `join`: a user class
+        // or abstract may declare its own.
+        let receiver_is_arrayish = args
+            .first()
+            .and_then(|a| self.type_table.get(a.ty))
+            .is_none_or(|t| {
+                !matches!(
+                    t.kind,
+                    TypeKind::Class { .. }
+                        | TypeKind::Abstract { .. }
+                        | TypeKind::Interface { .. }
+                        | TypeKind::Anonymous { .. }
+                        | TypeKind::TypeAlias { .. }
+                )
+            });
+        if vname == "join" && *is_method && args.len() == 2 && receiver_is_arrayish {
             let elem_tag: i32 = {
                 let type_table = self.type_table;
                 type_table

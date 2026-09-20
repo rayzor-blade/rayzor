@@ -362,14 +362,33 @@ impl<'a> HirToMirContext<'a> {
 
         // Property with a custom getter: SymbolId lookup first, then by name.
         let mut property_info_owned = self.property_access_map.get(&field).cloned();
-        // An anonymous object's field is its own: a same-named property getter on
-        // some class (`StringBuf.length`) must not answer `{length: 0.5}.length`.
-        let receiver_is_anon = matches!(
-            self.type_table
-                .get(self.resolve_through_aliases(receiver_ty))
-                .map(|t| &t.kind),
-            Some(TypeKind::Anonymous { .. })
-        );
+        // An anonymous object's field is its own, and a built-in (Array,
+        // String, Map) has no user properties: a same-named property getter on
+        // some class (`StringBuf.length`, `Vector.length`) must not answer
+        // `{length: 0.5}.length` or an array's `length`.
+        // Inside an abstract's own method `this` still carries the abstract
+        // type; its underlying is what the field belongs to.
+        let receiver_is_anon = {
+            let mut ty = self.resolve_through_aliases(receiver_ty);
+            for _ in 0..2 {
+                match self.type_table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Abstract {
+                        underlying: Some(u),
+                        ..
+                    }) => ty = self.resolve_through_aliases(*u),
+                    _ => break,
+                }
+            }
+            matches!(
+                self.type_table.get(ty).map(|t| &t.kind),
+                Some(
+                    TypeKind::Anonymous { .. }
+                        | TypeKind::Array { .. }
+                        | TypeKind::String
+                        | TypeKind::Map { .. }
+                )
+            )
+        };
         if property_info_owned.is_none() && !receiver_is_anon {
             // Name-based fallback: SymbolIds may differ between import and user modules.
             // Prefer entries with `Method(...)` getters over `Default` — orphan entries
@@ -1536,6 +1555,9 @@ impl<'a> HirToMirContext<'a> {
         if self.map_index_info(object.ty).is_some() {
             return self.load_map_index_with_regs(obj_reg, idx_reg, object.ty);
         }
+        if let Some(class) = self.vec_index_class(object.ty) {
+            return self.load_vec_index_with_regs(&class, obj_reg, idx_reg, expr.ty);
+        }
 
         if matches!(
             self.type_table
@@ -1575,6 +1597,121 @@ impl<'a> HirToMirContext<'a> {
         }
 
         self.lower_index_access(obj_reg, idx_reg, expr.ty)
+    }
+
+    /// The monomorph (`VecI32`, `VecF64`, `VecPtr`, …) a `rayzor.Vec<T>`
+    /// receiver dispatches to, following aliases; None for anything else.
+    pub(crate) fn vec_index_class(&self, obj_ty: TypeId) -> Option<String> {
+        let resolved = self.resolve_through_aliases(obj_ty);
+        let (symbol_id, type_args) = match self.type_table.get(resolved).map(|t| &t.kind) {
+            Some(crate::tast::TypeKind::Class {
+                symbol_id,
+                type_args,
+                ..
+            })
+            | Some(crate::tast::TypeKind::Abstract {
+                symbol_id,
+                type_args,
+                ..
+            }) => (*symbol_id, type_args.clone()),
+            _ => return None,
+        };
+        let sym = self.symbol_table.get_symbol(symbol_id)?;
+        let qualified = sym
+            .qualified_name
+            .and_then(|q| self.string_interner.get(q))
+            .or_else(|| self.string_interner.get(sym.name))?;
+        if qualified.rsplit('.').next() != Some("Vec")
+            || !sym
+                .flags
+                .contains(crate::tast::symbols::SymbolFlags::EXTERN)
+        {
+            return None;
+        }
+        let suffix = match type_args
+            .first()
+            .and_then(|t| self.type_table.get(*t))
+            .map(|t| &t.kind)
+        {
+            Some(crate::tast::TypeKind::Int) => "I32",
+            Some(crate::tast::TypeKind::Float) => "F64",
+            Some(crate::tast::TypeKind::Bool) => "Bool",
+            Some(crate::tast::TypeKind::Class { symbol_id, .. })
+                if self
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|s| self.string_interner.get(s.name))
+                    == Some("Int64") =>
+            {
+                "I64"
+            }
+            _ => "Ptr",
+        };
+        Some(format!("Vec{}", suffix))
+    }
+
+    /// `v[i]` on a `rayzor.Vec<T>` is its `get`; the wrapper's own signature
+    /// says what it returns, and an element type narrower than the slot
+    /// (Int, Bool) is cast to what the reader expects.
+    pub(crate) fn load_vec_index_with_regs(
+        &mut self,
+        class: &str,
+        obj_reg: IrId,
+        idx_reg: IrId,
+        elem_ty: TypeId,
+    ) -> Option<IrId> {
+        let name = format!("{}_get", class);
+        let (params, ret) = self.get_stdlib_mir_wrapper_signature(&name)?;
+        let idx = self.coerce_reg_to(idx_reg, &IrType::I64)?;
+        let func = self.register_stdlib_mir_forward_ref(&name, params, ret.clone());
+        let value = self
+            .builder
+            .build_call_direct(func, vec![obj_reg, idx], ret.clone())?;
+        let want = self.convert_type(elem_ty);
+        if want != ret && !matches!(want, IrType::Ptr(_) | IrType::Any) {
+            return self.coerce_reg_to(value, &want);
+        }
+        Some(value)
+    }
+
+    /// `v[i] = x` on a `rayzor.Vec<T>` is its `set`.
+    pub(crate) fn store_vec_index_with_regs(
+        &mut self,
+        class: &str,
+        obj_reg: IrId,
+        idx_reg: IrId,
+        value: IrId,
+    ) -> Option<()> {
+        let name = format!("{}_set", class);
+        let (params, ret) = self.get_stdlib_mir_wrapper_signature(&name)?;
+        let idx = self.coerce_reg_to(idx_reg, &IrType::I64)?;
+        let value = match params.get(2) {
+            Some(want) => self.coerce_reg_to(value, want)?,
+            None => value,
+        };
+        let func = self.register_stdlib_mir_forward_ref(&name, params, ret.clone());
+        self.builder
+            .build_call_direct(func, vec![obj_reg, idx, value], ret);
+        Some(())
+    }
+
+    /// A register as `want`: integer widths cast, float bits and pointers
+    /// reinterpret, a match passes through.
+    pub(crate) fn coerce_reg_to(&mut self, reg: IrId, want: &IrType) -> Option<IrId> {
+        let have = self.builder.get_register_type(reg).unwrap_or(IrType::I64);
+        if have == *want {
+            return Some(reg);
+        }
+        match (&have, want) {
+            (IrType::F64, IrType::I64) | (IrType::I64, IrType::F64) => {
+                self.builder.build_bitcast(reg, want.clone())
+            }
+            (IrType::Ptr(_), IrType::Ptr(_)) | (IrType::Ptr(_), IrType::I64) => {
+                self.builder.build_bitcast(reg, want.clone())
+            }
+            (IrType::I64, IrType::Ptr(_)) => self.builder.build_cast(reg, have, want.clone()),
+            _ => self.builder.build_cast(reg, have, want.clone()),
+        }
     }
 
     /// For a Map-typed assignment target, return `(set_fn_name, key IrType)`.

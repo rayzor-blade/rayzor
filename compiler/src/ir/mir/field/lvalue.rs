@@ -55,8 +55,7 @@ impl<'a> HirToMirContext<'a> {
             HirLValue::Index { object, index } => {
                 if let Some(obj_reg) = self.lower_expression(object) {
                     if let Some(idx_reg) = self.lower_expression(index) {
-                        let elem_ty = object.ty;
-                        self.lower_index_access(obj_reg, idx_reg, elem_ty)
+                        self.load_index_with_regs(obj_reg, idx_reg, object.ty)
                     } else {
                         None
                     }
@@ -808,6 +807,10 @@ impl<'a> HirToMirContext<'a> {
         if self.map_index_info(object_ty).is_some() {
             return self.load_map_index_with_regs(obj_reg, idx_reg, object_ty);
         }
+        if let Some(class) = self.vec_index_class(object_ty) {
+            let elem = self.type_table.dynamic_type();
+            return self.load_vec_index_with_regs(&class, obj_reg, idx_reg, elem);
+        }
         self.lower_index_access(obj_reg, idx_reg, object_ty)
     }
 
@@ -829,6 +832,10 @@ impl<'a> HirToMirContext<'a> {
         // cover it and zero-filled, which is gigabytes for one
         // insert. With a real Map behind it the write simply went
         // nowhere and the value was silently lost.
+        if let Some(class) = self.vec_index_class(object_ty) {
+            self.store_vec_index_with_regs(&class, obj_reg, idx_reg, value);
+            return;
+        }
         if let Some((set_fn_name, key_ir_type)) = self.map_index_set_info(object_ty) {
             let ptr_void = IrType::Ptr(Box::new(IrType::Void));
             let key_reg = self.coerce_map_key(idx_reg, &key_ir_type);

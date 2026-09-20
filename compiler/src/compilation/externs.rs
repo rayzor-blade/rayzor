@@ -82,6 +82,24 @@ impl CompilationUnit {
             if !is_extern {
                 continue;
             }
+            // A `@:generic` extern class binds per monomorph (`Vec<Int>` ->
+            // `VecI32`); one bare symbol per method would shadow those rows.
+            let is_generic = self
+                .symbol_table
+                .get_symbol(class.symbol_id)
+                .is_some_and(|s| s.flags.contains(crate::tast::symbols::SymbolFlags::GENERIC));
+            if is_generic {
+                let short = self
+                    .symbol_table
+                    .get_symbol(class.symbol_id)
+                    .and_then(|s| self.string_interner.get(s.name))
+                    .unwrap_or_default();
+                if !short.is_empty()
+                    && !builtin_mapping.get_monomorphized_variants(short).is_empty()
+                {
+                    continue;
+                }
+            }
 
             // Get the class's native name (from @:native metadata)
             let class_native_name = self

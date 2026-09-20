@@ -476,6 +476,14 @@ impl<'a> HirToMirContext<'a> {
                             );
                         }
 
+                        // VecPtr holds the raw pointers pushed into it; a
+                        // String element is not a box to open.
+                        if runtime_func.starts_with("VecPtr_")
+                            && matches!(resolved_expected, IrType::String)
+                        {
+                            return self.builder.build_bitcast(call_result, IrType::String);
+                        }
+
                         return self.maybe_unbox_for_extern_return(
                             call_result,
                             &mir_return_type,

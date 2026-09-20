@@ -184,7 +184,7 @@ VecF64 pop static=false ctor=false params=0 -> VecF64_pop
 VecF64 push static=false ctor=false params=1 -> VecF64_push
 VecF64 set static=false ctor=false params=2 -> VecF64_set
 VecF64 sort static=false ctor=false params=0 -> VecF64_sort
-VecF64 sortBy static=false ctor=false params=2 -> VecF64_sortBy
+VecF64 sortBy static=false ctor=false params=1 -> VecF64_sortBy
 VecI32 capacity static=false ctor=false params=0 -> VecI32_capacity
 VecI32 clear static=false ctor=false params=0 -> VecI32_clear
 VecI32 first static=false ctor=false params=0 -> VecI32_first
@@ -197,7 +197,7 @@ VecI32 pop static=false ctor=false params=0 -> VecI32_pop
 VecI32 push static=false ctor=false params=1 -> VecI32_push
 VecI32 set static=false ctor=false params=2 -> VecI32_set
 VecI32 sort static=false ctor=false params=0 -> VecI32_sort
-VecI32 sortBy static=false ctor=false params=2 -> VecI32_sortBy
+VecI32 sortBy static=false ctor=false params=1 -> VecI32_sortBy
 VecI64 clear static=false ctor=false params=0 -> VecI64_clear
 VecI64 first static=false ctor=false params=0 -> VecI64_first
 VecI64 get static=false ctor=false params=1 -> VecI64_get
@@ -218,7 +218,7 @@ VecPtr new static=true ctor=true params=0 -> VecPtr_new
 VecPtr pop static=false ctor=false params=0 -> VecPtr_pop
 VecPtr push static=false ctor=false params=1 -> VecPtr_push
 VecPtr set static=false ctor=false params=2 -> VecPtr_set
-VecPtr sortBy static=false ctor=false params=2 -> VecPtr_sortBy
+VecPtr sortBy static=false ctor=false params=1 -> VecPtr_sortBy
 _Internal box_bool static=true ctor=false params=1 -> haxe_box_bool_ptr
 _Internal box_float static=true ctor=false params=1 -> haxe_box_float_ptr
 _Internal box_int static=true ctor=false params=1 -> haxe_box_int_ptr

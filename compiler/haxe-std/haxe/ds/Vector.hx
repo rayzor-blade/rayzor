@@ -37,10 +37,10 @@ private typedef VectorData<T> =
 	java.NativeArray<T>
 	#elseif lua
 	lua.Table<Int, T>
-	#elseif eval
-	eval.Vector<T>
 	#elseif rayzor
 	rayzor.Vec<T>
+	#elseif eval
+	eval.Vector<T>
 	#else
 	Array<T>
 	#end;
@@ -80,10 +80,11 @@ abstract Vector<T>(VectorData<T>) {
 		this = python.Syntax.code("([{0}]*{1})", null, length);
 		#elseif lua
 		this = untyped __lua_table__({length: length});
-		#elseif eval
-		this = new eval.Vector(length);
 		#elseif rayzor
 		this = new rayzor.Vec<T>();
+		for (i in 0...length) this.push(cast null);
+		#elseif eval
+		this = new eval.Vector(length);
 		#else
 		this = [];
 		untyped this.length = length;
@@ -141,10 +142,10 @@ abstract Vector<T>(VectorData<T>) {
 		return this.unsafeGet(index);
 		#elseif python
 		return python.internal.ArrayImpl.unsafeGet(this, index);
-		#elseif eval
-		return this[index];
 		#elseif rayzor
 		return this.get(index);
+		#elseif eval
+		return this[index];
 		#else
 		return this[index];
 		#end
@@ -161,11 +162,11 @@ abstract Vector<T>(VectorData<T>) {
 		return this.unsafeSet(index, val);
 		#elseif python
 		return python.internal.ArrayImpl.unsafeSet(this, index, val);
-		#elseif eval
-		return this[index] = val;
 		#elseif rayzor
 		this.set(index, val);
 		return val;
+		#elseif eval
+		return this[index] = val;
 		#else
 		return this[index] = val;
 		#end
@@ -214,7 +215,7 @@ abstract Vector<T>(VectorData<T>) {
 		cs.system.Array.Copy(cast src, srcPos, cast dest, destPos, len);
 		#elseif cpp
 		dest.toData().blit(destPos, src.toData(), srcPos, len);
-		#elseif eval
+		#elseif (eval && !rayzor)
 		src.toData().blit(srcPos, dest.toData(), destPos, len);
 		#else
 		if (src == dest) {
@@ -253,7 +254,7 @@ abstract Vector<T>(VectorData<T>) {
 		return this.copy();
 		#elseif js
 		return this.slice(0);
-		#elseif eval
+		#elseif (eval && !rayzor)
 		return this.toArray();
 		#else
 		var a = new Array();
@@ -311,7 +312,7 @@ abstract Vector<T>(VectorData<T>) {
 		return cast array.copy();
 		#elseif js
 		return fromData(array.slice(0));
-		#elseif eval
+		#elseif (eval && !rayzor)
 		return fromData(eval.Vector.fromArrayCopy(array));
 		#else
 		// TODO: Optimize this for others?
@@ -330,7 +331,7 @@ abstract Vector<T>(VectorData<T>) {
 		`a == a.copy()` is always false.
 	**/
 	#if cs extern #end public inline function copy<T>():Vector<T> {
-		#if eval
+		#if (eval && !rayzor)
 		return fromData(this.copy());
 		#else
 		var r = new Vector<T>(length);
@@ -353,7 +354,7 @@ abstract Vector<T>(VectorData<T>) {
 		If `sep` is null, the result is unspecified.
 	**/
 	#if cs extern #end public inline function join<T>(sep:String):String {
-		#if (flash10 || cpp || eval)
+		#if (flash10 || cpp || (eval && !rayzor))
 		return this.join(sep);
 		#else
 		var b = new StringBuf();
@@ -376,7 +377,7 @@ abstract Vector<T>(VectorData<T>) {
 		If `f` is null, the result is unspecified.
 	**/
 	#if cs extern #end public inline function map<S>(f:T->S):Vector<S> {
-		#if eval
+		#if (eval && !rayzor)
 		return fromData(this.map(f));
 		#else
 		var length = length;
@@ -403,7 +404,9 @@ abstract Vector<T>(VectorData<T>) {
 		If `f` is null, the result is unspecified.
 	**/
 	public inline function sort(f:T->T->Int):Void {
-		#if (neko || cs || java || eval)
+		#if rayzor
+		this.sortBy(f);
+		#elseif (neko || cs || java || eval)
 		throw "not yet supported";
 		#elseif lua
 		haxe.ds.ArraySort.sort(cast this, f);

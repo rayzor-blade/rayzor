@@ -2791,8 +2791,8 @@ impl StdlibMapping {
                 types: &[PtrU8] => I32),
             map_method!(instance "VecI32", "sort" => "VecI32_sort", params: 0, mir_wrapper,
                 types: &[PtrU8]),
-            map_method!(instance "VecI32", "sortBy" => "VecI32_sortBy", params: 2, mir_wrapper,
-                types: &[PtrU8, PtrU8, PtrU8]),
+            map_method!(instance "VecI32", "sortBy" => "VecI32_sortBy", params: 1, mir_wrapper,
+                types: &[PtrU8, PtrU8]),
         ];
         self.register_from_tuples(vec_i32_mappings);
 
@@ -2845,8 +2845,8 @@ impl StdlibMapping {
                 types: &[PtrU8] => F64),
             map_method!(instance "VecF64", "sort" => "VecF64_sort", params: 0, mir_wrapper,
                 types: &[PtrU8]),
-            map_method!(instance "VecF64", "sortBy" => "VecF64_sortBy", params: 2, mir_wrapper,
-                types: &[PtrU8, PtrU8, PtrU8]),
+            map_method!(instance "VecF64", "sortBy" => "VecF64_sortBy", params: 1, mir_wrapper,
+                types: &[PtrU8, PtrU8]),
         ];
         self.register_from_tuples(vec_f64_mappings);
 
@@ -2872,8 +2872,8 @@ impl StdlibMapping {
                 types: &[PtrU8] => PtrU8),
             map_method!(instance "VecPtr", "last" => "VecPtr_last", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
-            map_method!(instance "VecPtr", "sortBy" => "VecPtr_sortBy", params: 2, mir_wrapper,
-                types: &[PtrU8, PtrU8, PtrU8]),
+            map_method!(instance "VecPtr", "sortBy" => "VecPtr_sortBy", params: 1, mir_wrapper,
+                types: &[PtrU8, PtrU8]),
         ];
         self.register_from_tuples(vec_ptr_mappings);
 
