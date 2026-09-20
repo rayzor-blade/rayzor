@@ -1149,6 +1149,22 @@ impl<'a> AstLowering<'a> {
                     } else {
                         None
                     };
+                    // An abstract keeps its arguments too: `new Vector<Float>(n)`
+                    // is a `Vector<Float>`, which is what tells a later
+                    // `v[i]` its element type.
+                    let abstract_instance = {
+                        let type_table = self.context.type_table.borrow();
+                        match type_table.get(base_class_type_id).map(|t| &t.kind) {
+                            Some(crate::tast::core::TypeKind::Abstract {
+                                symbol_id,
+                                underlying,
+                                type_args: existing,
+                            }) if existing.is_empty() || existing.len() == type_args.len() => {
+                                Some((*symbol_id, *underlying))
+                            }
+                            _ => None,
+                        }
+                    };
                     let symbol_id_opt = {
                         let type_table = self.context.type_table.borrow();
                         if let Some(base_type_info) = type_table.get(base_class_type_id) {
@@ -1167,6 +1183,12 @@ impl<'a> AstLowering<'a> {
                     };
                     if let Some(t) = via_annotation {
                         t
+                    } else if let Some((symbol_id, underlying)) = abstract_instance {
+                        self.context.type_table.borrow_mut().create_abstract_type(
+                            symbol_id,
+                            underlying,
+                            type_args.clone(),
+                        )
                     } else if let Some((symbol_id, is_array)) = symbol_id_opt {
                         if is_array && type_args.len() == 1 {
                             self.context

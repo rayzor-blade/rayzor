@@ -654,6 +654,11 @@ impl<'a> HirToMirContext<'a> {
                             sym_name, ret_ty
                         );
                         ret_ty
+                    } else if self.callee_returns_type_param(*symbol) {
+                        // An import whose declared return is a type parameter
+                        // hands back erased bits; typing the call as the
+                        // caller's Float would convert them, not reinterpret.
+                        IrType::I64
                     } else {
                         debug!(
                             "[FUNCTION_MAP] No stdlib signature found, using expr return type {:?}",
@@ -927,7 +932,8 @@ impl<'a> HirToMirContext<'a> {
                         type_table
                             .get(args[0].ty)
                             .map(|ti| match &ti.kind {
-                                TypeKind::Class { type_args, .. } => !type_args.is_empty(),
+                                TypeKind::Class { type_args, .. }
+                                | TypeKind::Abstract { type_args, .. } => !type_args.is_empty(),
                                 TypeKind::GenericInstance { .. } => true,
                                 TypeKind::TypeParameter { .. } => true,
                                 _ => false,
@@ -939,7 +945,7 @@ impl<'a> HirToMirContext<'a> {
 
                     if receiver_is_generic {
                         if let Some(call_result) = result {
-                            if actual_return_type == IrType::I64 {
+                            if matches!(actual_return_type, IrType::I64 | IrType::TypeVar(_)) {
                                 let expected_ir_type = self.convert_type(expr.ty);
                                 if expected_ir_type != IrType::I64 {
                                     // Path 1: AST resolved type (e.g., Box<Int> → Ptr)

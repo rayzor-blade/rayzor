@@ -748,7 +748,15 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Check if function has @:arrayAccess metadata
+    /// `@:arrayAccess`, or its operator spelling `@:op([])`.
     pub(crate) fn has_array_access_metadata(&self, metadata: &[parser::Metadata]) -> bool {
-        metadata.iter().any(|m| m.name == "arrayAccess")
+        metadata.iter().any(|m| {
+            m.name == "arrayAccess"
+                || (m.name == "op"
+                    && matches!(
+                        m.params.first().map(|p| &p.kind),
+                        Some(parser::ExprKind::Array(items)) if items.is_empty()
+                    ))
+        })
     }
 }

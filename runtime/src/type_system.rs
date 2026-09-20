@@ -136,7 +136,9 @@ impl DynamicValue {
 /// `tag_is_*` predicate.
 pub(crate) fn dynamic_box_at(p: *mut u8) -> Option<DynamicValue> {
     let addr = p as usize;
-    if addr < 0x1000 || (addr & 7) != 0 {
+    // Erased slots also carry raw f64 bits; a finite double's exponent sits
+    // above the 47-bit user address space, so it is never a box.
+    if addr < 0x1000 || (addr & 7) != 0 || (addr >> 47) != 0 {
         return None;
     }
     Some(unsafe { *(p as *const DynamicValue) })

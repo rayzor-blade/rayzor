@@ -524,6 +524,26 @@ impl<'a> HirToMirContext<'a> {
                         *arg_reg = cast_reg;
                     }
                 }
+                // An erased slot takes a Float's bits, not its value.
+                if matches!(expected_ty, IrType::I64 | IrType::TypeVar(_)) {
+                    match self.builder.get_register_type(*arg_reg) {
+                        Some(IrType::F64) => {
+                            if let Some(bits) = self.builder.build_bitcast(*arg_reg, IrType::I64) {
+                                *arg_reg = bits;
+                            }
+                        }
+                        Some(IrType::F32) => {
+                            if let Some(wide) =
+                                self.builder.build_cast(*arg_reg, IrType::F32, IrType::F64)
+                            {
+                                if let Some(bits) = self.builder.build_bitcast(wide, IrType::I64) {
+                                    *arg_reg = bits;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 // A `Dynamic` or `Null<scalar>` formal is a box slot: a scalar
                 // bound for it travels boxed, never as its bits.
                 if matches!(expected_ty, IrType::Ptr(inner) if matches!(**inner, IrType::U8)) {

@@ -946,8 +946,36 @@ impl<'a> TastToHirContext<'a> {
             })
             .collect();
 
-        // Abstract constructors use value-wrap at the call site (new MyInt(42) → 42).
-        // Don't lower the constructor body since `this = value` isn't a standard assignment.
+        // A constructor computes the underlying value. It is lowered as a
+        // method: `this` is the receiver slot, which the body assigns and the
+        // appended return hands back. `new A(x)` calls it with a zero receiver
+        // when the body is more than a single `this = e`.
+        let underlying = abstract_decl
+            .underlying_type
+            .unwrap_or_else(|| self.get_dynamic_type());
+        let mut hir_methods = hir_methods;
+        for ctor in &abstract_decl.constructors {
+            let mut function = self.lower_function(ctor);
+            function.return_type = underlying;
+            if let Some(body) = &mut function.body {
+                if let Some(trailing) = body.expr.take() {
+                    body.statements.push(HirStatement::Expr(*trailing));
+                }
+                body.statements.push(HirStatement::Return(Some(HirExpr::new(
+                    HirExprKind::This,
+                    underlying,
+                    crate::tast::LifetimeId::invalid(),
+                    ctor.source_location,
+                ))));
+            }
+            hir_methods.push(HirMethod {
+                function,
+                visibility: self.convert_visibility(ctor.visibility),
+                is_static: false,
+                is_override: false,
+                is_abstract: false,
+            });
+        }
         let hir_constructor = None;
 
         let hir_abstract = HirAbstract {
@@ -1512,10 +1540,15 @@ impl<'a> TastToHirContext<'a> {
                             debug!(": Successfully inlined array access set method!");
                             // Convert to expression statement
                             return HirStatement::Expr(inlined);
-                        } else {
-                            debug!(": Failed to inline array access set method");
-                            // Fall through to normal assignment
                         }
+                        let call = self.call_abstract_method(
+                            array,
+                            set_method,
+                            &args,
+                            value.expr_type,
+                            target.source_location,
+                        );
+                        return HirStatement::Expr(call);
                     }
                 }
 
@@ -1969,12 +2002,14 @@ impl<'a> TastToHirContext<'a> {
                     ) {
                         debug!(": Successfully inlined array access get method!");
                         return inlined;
-                    } else {
-                        debug!(
-                            ": Failed to inline array access get method, falling back to method call"
-                        );
-                        // TODO: Fall back to method call if inlining fails
                     }
+                    return self.call_abstract_method(
+                        array,
+                        get_method,
+                        &[(**index).clone()],
+                        expr.expr_type,
+                        expr.source_location,
+                    );
                 }
 
                 // Default: convert to normal array index operation
@@ -2230,6 +2265,14 @@ impl<'a> TastToHirContext<'a> {
                 {
                     return value;
                 }
+                if let Some(call) = self.call_abstract_constructor(
+                    *class_type,
+                    arguments,
+                    expr.expr_type,
+                    expr.source_location,
+                ) {
+                    return call;
+                }
 
                 HirExprKind::New {
                     class_type: *class_type,
@@ -2294,13 +2337,15 @@ impl<'a> TastToHirContext<'a> {
                                 right.expr_type, // Return value is typically the assigned value
                                 expr.source_location,
                             ) {
-                                // debug!(": Successfully inlined array access set method in BinaryOp!");
-                                // Return the inlined set method call
                                 return inlined;
-                            } else {
-                                // debug!(": Failed to inline array access set method in BinaryOp");
-                                // Fall through to normal assignment
                             }
+                            return self.call_abstract_method(
+                                array,
+                                set_method,
+                                &args,
+                                right.expr_type,
+                                expr.source_location,
+                            );
                         }
                     }
                 }
@@ -5140,6 +5185,41 @@ impl<'a> TastToHirContext<'a> {
         }
     }
 
+    /// `receiver.method(args)` as a HIR call, for an `@:arrayAccess` method
+    /// that could not be inlined (an imported abstract's, or a body that is
+    /// more than one expression).
+    fn call_abstract_method(
+        &mut self,
+        receiver: &TypedExpression,
+        method: SymbolId,
+        arguments: &[TypedExpression],
+        result_type: TypeId,
+        location: SourceLocation,
+    ) -> HirExpr {
+        let mut args = vec![self.lower_expression(receiver)];
+        args.extend(arguments.iter().map(|a| self.lower_expression(a)));
+        HirExpr::new(
+            HirExprKind::Call {
+                target: CallTarget::Method { method },
+                callee: Box::new(HirExpr::new(
+                    HirExprKind::Variable {
+                        symbol: method,
+                        capture_mode: None,
+                    },
+                    result_type,
+                    self.current_lifetime,
+                    location,
+                )),
+                type_args: Vec::new(),
+                args,
+                is_method: true,
+            },
+            result_type,
+            self.current_lifetime,
+            location,
+        )
+    }
+
     /// Find a method with @:arrayAccess metadata for array access operations
     /// Returns (method_symbol, abstract_symbol) if found
     /// method_name should be "get" for read access or "set" for write access
@@ -5168,8 +5248,8 @@ impl<'a> TastToHirContext<'a> {
 
             // Found the abstract, now search for a method with @:arrayAccess metadata
             for method in &abstract_def.methods {
-                // Check if this method has @:arrayAccess metadata
-                if method.metadata.is_array_access {
+                // A bodyless declaration cannot be called; array semantics stay.
+                if method.metadata.is_array_access && !method.body.is_empty() {
                     // Check if the method name matches what we're looking for
                     if let Some(name_str) = self.string_interner.get(method.name) {
                         if name_str == method_name {
@@ -5188,7 +5268,31 @@ impl<'a> TastToHirContext<'a> {
             }
         }
 
-        None
+        // An imported abstract: its `@:arrayAccess` methods are flagged on
+        // their symbols; a read takes one index, a write two.
+        if current_file
+            .abstracts
+            .iter()
+            .any(|a| a.symbol_id == abstract_symbol)
+        {
+            return None;
+        }
+        let arity = if method_name == "set" { 2 } else { 1 };
+        let scope = self.symbol_table.get_symbol(abstract_symbol)?.scope_id;
+        let table = self.type_table.borrow();
+        self.symbol_table
+            .symbols_in_scope(scope)
+            .into_iter()
+            .find(|s| {
+                s.kind == crate::tast::SymbolKind::Function
+                    && s.flags
+                        .contains(crate::tast::symbols::SymbolFlags::ARRAY_ACCESS)
+                    && matches!(
+                        table.get(s.type_id).map(|t| &t.kind),
+                        Some(TypeKind::Function { params, .. }) if params.len() == arity
+                    )
+            })
+            .map(|s| (s.id, abstract_symbol))
     }
 
     /// Whether an expression needs ordinary lowering to preserve its scope
@@ -5406,6 +5510,108 @@ impl<'a> TastToHirContext<'a> {
             .map(|arg| self.lower_expression(arg))
             .collect();
         self.expand_abstract_constructor_with_args(class_type, &arguments, result_type)
+    }
+
+    /// `new A(args)` on an abstract whose constructor body is not a single
+    /// `this = e`: a call to the constructor lowered as a method, with a zero
+    /// of the underlying type in the receiver slot. Overloads pick by arity.
+    fn call_abstract_constructor(
+        &mut self,
+        class_type: TypeId,
+        arguments: &[TypedExpression],
+        result_type: TypeId,
+        location: SourceLocation,
+    ) -> Option<HirExpr> {
+        use crate::tast::core::TypeKind;
+        let current_file = self.current_file?;
+        let (symbol_id, underlying) = {
+            let table = self.type_table.borrow();
+            match table.get(class_type).map(|t| &t.kind) {
+                Some(TypeKind::Abstract {
+                    symbol_id,
+                    underlying,
+                    ..
+                }) => (*symbol_id, *underlying),
+                _ => return None,
+            }
+        };
+        // This file's abstract, else an imported one through the shared
+        // symbol table: `new_<arity>` names an overload, `new` the first.
+        let (ctor_symbol, underlying) = match current_file
+            .abstracts
+            .iter()
+            .find(|a| a.symbol_id == symbol_id)
+        {
+            Some(abstract_def) => {
+                let bodied = || {
+                    abstract_def
+                        .constructors
+                        .iter()
+                        .filter(|c| !c.body.is_empty())
+                };
+                let ctor = bodied()
+                    .find(|c| c.parameters.len() == arguments.len())
+                    .or_else(|| bodied().find(|c| c.parameters.len() >= arguments.len()))?;
+                (ctor.symbol_id, underlying.or(abstract_def.underlying_type)?)
+            }
+            None => {
+                let scope = self.symbol_table.get_symbol(symbol_id)?.scope_id;
+                let by_arity = self
+                    .string_interner
+                    .intern(&format!("new_{}", arguments.len()));
+                let plain = self.string_interner.intern("new");
+                let ctor = self
+                    .symbol_table
+                    .lookup_symbol(scope, by_arity)
+                    .or_else(|| self.symbol_table.lookup_symbol(scope, plain))
+                    .filter(|s| s.kind == crate::tast::SymbolKind::Function)?
+                    .id;
+                let underlying = underlying.or_else(|| {
+                    self.type_table
+                        .borrow()
+                        .resolve_abstract_underlying(symbol_id)
+                })?;
+                (ctor, underlying)
+            }
+        };
+        let zero = {
+            let table = self.type_table.borrow();
+            match table.get(underlying).map(|t| &t.kind) {
+                Some(TypeKind::Int) => HirExprKind::Literal(HirLiteral::Int(0)),
+                Some(TypeKind::Float) => HirExprKind::Literal(HirLiteral::Float(0.0)),
+                Some(TypeKind::Bool) => HirExprKind::Literal(HirLiteral::Bool(false)),
+                _ => HirExprKind::Null,
+            }
+        };
+        let mut args = vec![HirExpr::new(
+            zero,
+            underlying,
+            self.current_lifetime,
+            location,
+        )];
+        args.extend(arguments.iter().map(|a| self.lower_expression(a)));
+        Some(HirExpr::new(
+            HirExprKind::Call {
+                target: CallTarget::Method {
+                    method: ctor_symbol,
+                },
+                callee: Box::new(HirExpr::new(
+                    HirExprKind::Variable {
+                        symbol: ctor_symbol,
+                        capture_mode: None,
+                    },
+                    result_type,
+                    self.current_lifetime,
+                    location,
+                )),
+                type_args: Vec::new(),
+                args,
+                is_method: true,
+            },
+            result_type,
+            self.current_lifetime,
+            location,
+        ))
     }
 
     fn expand_abstract_constructor_with_args(
@@ -5672,6 +5878,23 @@ impl<'a> TastToHirContext<'a> {
         let mut found_abstract: Option<&crate::tast::node::TypedAbstract> = None;
         let mut found_method: Option<&crate::tast::node::TypedFunction> = None;
 
+        // The receiver's own abstract, for the by-name fallback: a class
+        // method and an unrelated abstract's method may share a name. A
+        // receiver typed as some other named type never inlines by name; one
+        // whose type decayed (an operator result read as its underlying) may.
+        let (receiver_abstract, receiver_is_named) = {
+            let table = self.type_table.borrow();
+            match table.get(receiver.expr_type).map(|t| &t.kind) {
+                Some(TypeKind::Abstract { symbol_id, .. }) => (Some(*symbol_id), true),
+                Some(
+                    TypeKind::Class { .. }
+                    | TypeKind::Interface { .. }
+                    | TypeKind::Enum { .. }
+                    | TypeKind::Anonymous { .. },
+                ) => (None, true),
+                _ => (None, false),
+            }
+        };
         for abstract_def in &current_file.abstracts {
             // Try to find method by symbol ID first
             if let Some(method) = abstract_def
@@ -5683,11 +5906,13 @@ impl<'a> TastToHirContext<'a> {
                 found_method = Some(method);
                 break;
             }
-            // Fallback: match by name
-            if let Some(method) = abstract_def.methods.iter().find(|m| m.name == method_name) {
-                found_abstract = Some(abstract_def);
-                found_method = Some(method);
-                break;
+            // Fallback: match by name, on the receiver's abstract only
+            if receiver_abstract == Some(abstract_def.symbol_id) || !receiver_is_named {
+                if let Some(method) = abstract_def.methods.iter().find(|m| m.name == method_name) {
+                    found_abstract = Some(abstract_def);
+                    found_method = Some(method);
+                    break;
+                }
             }
         }
 
@@ -5734,22 +5959,24 @@ impl<'a> TastToHirContext<'a> {
                     value: Some(expr), ..
                 }) => Some(expr),
                 Some(TypedStatement::Expression { expression, .. }) => {
-                    // Unwrap Expression(Block([Return(...)]))
-                    if let TypedExpressionKind::Block { statements, .. } = &expression.kind {
-                        if statements.len() == 1 {
-                            if let TypedStatement::Return {
-                                value: Some(expr), ..
-                            } = &statements[0]
+                    match &expression.kind {
+                        // Unwrap Expression(Block([Return(...)]))
+                        TypedExpressionKind::Block { statements, .. } => {
+                            if let [
+                                TypedStatement::Return {
+                                    value: Some(expr), ..
+                                },
+                            ] = statements.as_slice()
                             {
                                 Some(expr)
                             } else {
                                 None
                             }
-                        } else {
-                            None
                         }
-                    } else {
-                        None
+                        // `function read(i) return this[i];` carries the
+                        // return as an expression.
+                        TypedExpressionKind::Return { value: Some(expr) } => Some(expr.as_ref()),
+                        _ => None,
                     }
                 }
                 _ => None,
@@ -5757,7 +5984,6 @@ impl<'a> TastToHirContext<'a> {
         } else {
             None
         };
-
         if let Some(return_expr) = return_expr {
             let inlined = self.inline_expression_deep(
                 return_expr,
@@ -6410,6 +6636,32 @@ impl<'a> TastToHirContext<'a> {
                 }
 
                 current_expr
+            }
+
+            // `this[i]` in an `@:arrayAccess` body: both sides carry
+            // substitutions.
+            TypedExpressionKind::ArrayAccess { array, index } => {
+                let object = self.inline_expression_deep(
+                    array,
+                    this_replacement,
+                    param_map,
+                    array.expr_type,
+                );
+                let index = self.inline_expression_deep(
+                    index,
+                    this_replacement,
+                    param_map,
+                    index.expr_type,
+                );
+                HirExpr::new(
+                    HirExprKind::Index {
+                        object: Box::new(object),
+                        index: Box::new(index),
+                    },
+                    expr.expr_type,
+                    self.current_lifetime,
+                    expr.source_location,
+                )
             }
 
             // For other expressions, lower them normally

@@ -527,7 +527,37 @@ impl<'a> AstLowering<'a> {
                     if func.name == "new" {
                         // Constructor
                         match self.lower_function_from_field(field, func) {
-                            Ok(typed_function) => {
+                            Ok(mut typed_function) => {
+                                // Overloaded constructors (`extern overload
+                                // function new`) share the `new` symbol; each
+                                // past the first gets its own, named by arity,
+                                // so the call site can pick one.
+                                if constructors.iter().any(|c: &TypedFunction| {
+                                    c.symbol_id == typed_function.symbol_id
+                                }) {
+                                    let name = self.context.intern_string(&format!(
+                                        "new_{}",
+                                        typed_function.parameters.len()
+                                    ));
+                                    let sym = self
+                                        .context
+                                        .symbol_table
+                                        .create_function_in_scope(name, abstract_scope);
+                                    if let Some(scope) =
+                                        self.context.scope_tree.get_scope_mut(abstract_scope)
+                                    {
+                                        scope.add_symbol(sym, name);
+                                    }
+                                    let ty = self
+                                        .context
+                                        .symbol_table
+                                        .get_symbol(typed_function.symbol_id)
+                                        .map(|s| s.type_id)
+                                        .unwrap_or_else(TypeId::invalid);
+                                    self.context.symbol_table.update_symbol_type(sym, ty);
+                                    typed_function.symbol_id = sym;
+                                    typed_function.name = name;
+                                }
                                 constructors.push(typed_function);
                             }
                             Err(e) => self.context.add_error(e),

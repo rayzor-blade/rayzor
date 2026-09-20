@@ -356,6 +356,8 @@ impl SymbolFlags {
     /// skip these: the symbol exists in every compilation, but naming it
     /// without the import never resolves to it.
     pub const QUALIFIED_ONLY: Self = Self(1 << 25);
+    /// `@:arrayAccess` — an abstract method that `a[i]` / `a[i] = v` calls.
+    pub const ARRAY_ACCESS: Self = Self(1 << 26);
 
     pub const fn is_wasm_export(self) -> bool {
         self.contains(Self::WASM_EXPORT)

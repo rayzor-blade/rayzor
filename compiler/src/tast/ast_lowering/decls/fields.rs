@@ -698,6 +698,12 @@ impl<'a> AstLowering<'a> {
 
         // Check for @:arrayAccess metadata
         let is_array_access = self.has_array_access_metadata(&field.meta);
+        if is_array_access {
+            self.context.symbol_table.add_symbol_flags(
+                function_symbol,
+                crate::tast::symbols::SymbolFlags::ARRAY_ACCESS,
+            );
+        }
 
         // Check for @:from / @:to metadata (abstract implicit conversions)
         let is_from_conversion = field.meta.iter().any(|m| m.name == "from");

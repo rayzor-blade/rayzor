@@ -2061,6 +2061,11 @@ impl<'a> HirToMirContext<'a> {
             crate::tast::TypeKind::Class {
                 symbol_id,
                 type_args,
+            }
+            | crate::tast::TypeKind::Abstract {
+                symbol_id,
+                type_args,
+                ..
             } => (*symbol_id, type_args.clone()),
             crate::tast::TypeKind::GenericInstance {
                 base_type,
