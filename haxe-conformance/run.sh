@@ -288,9 +288,54 @@ import sys
 src, dst, cls, target_pkgs = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 text = open(src, encoding='utf-8', errors='replace').read()
 lines = text.split('\n')
+import re
+
+# The same lines with comments blanked (`//` to end of line, `/* */` across
+# lines, strings left alone), for discovery only: a commented-out
+# `function test()` is not a member, and its braces do not nest.
+def blank_comments(src_text):
+    out, i, n = [], 0, len(src_text)
+    in_block = in_line = False
+    quote = None
+    while i < n:
+        c = src_text[i]
+        nxt = src_text[i + 1] if i + 1 < n else ''
+        if in_block:
+            if c == '*' and nxt == '/':
+                in_block = False
+                i += 2
+                continue
+            out.append('\n' if c == '\n' else ' ')
+        elif in_line:
+            if c == '\n':
+                in_line = False
+                out.append(c)
+            else:
+                out.append(' ')
+        elif quote:
+            out.append(c)
+            if c == '\\' and i + 1 < n:
+                out.append(nxt)
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c == '/' and nxt == '*':
+            in_block = True
+            out.append('  ')
+            i += 1
+        elif c == '/' and nxt == '/':
+            in_line = True
+            out.append('  ')
+            i += 1
+        else:
+            if c in '"\'':
+                quote = c
+            out.append(c)
+        i += 1
+    return ''.join(out)
+code = blank_comments(text).split('\n')
 # Find the closing brace of `class <cls>` specifically -- a file often declares
 # private helper types after it, and the last brace belongs to one of those.
-import re
 
 # Which lines are live for us. A `#if cpp` branch is dead here and its `#else`
 # is live; a condition naming anything else (macro, sys, static, a version
@@ -325,7 +370,7 @@ def branch_is_ours(cond):
 
 live = [True] * len(lines)
 stack = []            # (this_branch_live, any_branch_taken_yet)
-for i, l in enumerate(lines):
+for i, l in enumerate(code):
     st = l.strip()
     m = re.match(r'#(if|elseif|else|end)\b(.*)', st)
     if m:
@@ -346,13 +391,13 @@ for i, l in enumerate(lines):
         continue
     live[i] = all(f[0] for f in stack) if stack else True
 
-start = next(i for i, l in enumerate(lines) if re.search(r'\bclass\s+%s\b' % cls, l))
+start = next(i for i, l in enumerate(code) if re.search(r'\bclass\s+%s\b' % cls, l))
 depth = 0
 opened = False
 last = len(lines) - 1
 for i in range(start, len(lines)):
-    depth += lines[i].count('{') - lines[i].count('}')
-    if '{' in lines[i]:
+    depth += code[i].count('{') - code[i].count('}')
+    if '{' in code[i]:
         opened = True
     if opened and depth <= 0:
         last = i
@@ -370,13 +415,13 @@ methods = []
 depth = 0
 for i in range(start, last):
     depth_before = depth
-    depth += lines[i].count('{') - lines[i].count('}')
+    depth += code[i].count('{') - code[i].count('}')
     if not live[i] or depth_before != 1:
         continue
-    m = re.search(r'\bfunction\s+(test[A-Za-z0-9_]*)\s*\(', lines[i])
+    m = re.search(r'\bfunction\s+(test[A-Za-z0-9_]*)\s*\(', code[i])
     if not m or any(name == m.group(1) for name, _ in methods):
         continue
-    is_static = re.search(r'\bstatic\b', lines[i][:m.start()]) is not None
+    is_static = re.search(r'\bstatic\b', code[i][:m.start()]) is not None
     methods.append((m.group(1), is_static))
 if not methods:
     sys.exit(3)
