@@ -73,6 +73,20 @@ impl<'a> HirToMirContext<'a> {
         let needs_boxing = target_is_dynamic && !value_is_dynamic;
 
         if !needs_boxing {
+            // A `Null<scalar>` slot is a box whatever the typer called the
+            // value: `len = b.length - pos` types as Null<Int> yet the
+            // register holds the difference itself.
+            let target_is_optional_scalar = match self.type_table.get(target_ty).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => {
+                    self.optional_inner_is_boxable_primitive(*inner_type)
+                }
+                _ => false,
+            };
+            if target_is_optional_scalar {
+                if let Some(boxed) = self.box_scalar_register(value) {
+                    return Some(boxed);
+                }
+            }
             return Some(value);
         }
 

@@ -854,6 +854,21 @@ impl<'a> AstLowering<'a> {
         })
     }
 
+    /// Haxe types `?x:Int` -- optional, no default -- as `Null<Int>`; a
+    /// parameter with a default keeps its basic type, as does a reference.
+    pub(crate) fn optional_param_type(&self, param: &FunctionParam, ty: TypeId) -> TypeId {
+        if !param.optional || param.default_value.is_some() {
+            return ty;
+        }
+        let mut tt = self.context.type_table.borrow_mut();
+        match tt.get(ty).map(|t| &t.kind) {
+            Some(crate::tast::core::TypeKind::Int)
+            | Some(crate::tast::core::TypeKind::Float)
+            | Some(crate::tast::core::TypeKind::Bool) => tt.create_optional_type(ty),
+            _ => ty,
+        }
+    }
+
     pub(crate) fn lower_parameter(
         &mut self,
         parameter: &FunctionParam,
@@ -885,7 +900,8 @@ impl<'a> AstLowering<'a> {
         }
 
         let param_type = if let Some(type_annotation) = &parameter.type_hint {
-            self.lower_type(type_annotation)?
+            let ty = self.lower_type(type_annotation)?;
+            self.optional_param_type(parameter, ty)
         } else if let Some(ty) = inferred {
             ty
         } else {
@@ -965,7 +981,8 @@ impl<'a> AstLowering<'a> {
 
         // Resolve parameter type
         let param_type = if let Some(type_hint) = &param.type_hint {
-            self.lower_type(type_hint)?
+            let ty = self.lower_type(type_hint)?;
+            self.optional_param_type(param, ty)
         } else {
             self.context.type_table.borrow().dynamic_type()
         };

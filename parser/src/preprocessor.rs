@@ -32,6 +32,10 @@ impl Default for PreprocessorConfig {
         // We support system access
         defines.insert("sys".to_string());
 
+        // Strings hold Unicode (UTF-8 bytes, code points through addChar and
+        // fromCharCode), so the stdlib takes its unicode branches; not utf16.
+        defines.insert("target.unicode".to_string());
+
         // Add debug in debug builds
         #[cfg(debug_assertions)]
         defines.insert("debug".to_string());

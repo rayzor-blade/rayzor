@@ -319,8 +319,10 @@ impl<'a> AstLowering<'a> {
                     .iter()
                     .map(|p| {
                         if let Some(ref type_hint) = p.type_hint {
-                            self.lower_type(type_hint)
-                                .unwrap_or_else(|_| self.context.type_table.borrow().dynamic_type())
+                            let ty = self.lower_type(type_hint).unwrap_or_else(|_| {
+                                self.context.type_table.borrow().dynamic_type()
+                            });
+                            self.optional_param_type(p, ty)
                         } else {
                             self.context.type_table.borrow().dynamic_type()
                         }

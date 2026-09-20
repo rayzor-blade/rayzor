@@ -1444,17 +1444,6 @@ impl<'a> HirToMirContext<'a> {
                             if runtime_func_opt.is_none() {
                                 if let Some((owner, true)) = &source_owner {
                                     let key = format!("{owner}.{method_name}");
-                                    let mut arg_regs = Vec::new();
-                                    let mut param_types = Vec::new();
-                                    for arg in static_args {
-                                        if let Some(reg) = self.lower_expression(arg) {
-                                            arg_regs.push(reg);
-                                            param_types.push(self.convert_type(arg.ty));
-                                        }
-                                    }
-                                    // Trailing optional parameters the call leaves
-                                    // out take the zero of their declared type, as
-                                    // `fill_default_args` gives a cross-module call.
                                     let declared: Vec<Option<String>> = self
                                         .static_sig_index
                                         .as_ref()
@@ -1464,12 +1453,47 @@ impl<'a> HirToMirContext<'a> {
                                                 .map(|k| k.to_vec())
                                         })
                                         .unwrap_or_default();
+                                    let mut arg_regs = Vec::new();
+                                    let mut param_types = Vec::new();
+                                    for (i, arg) in static_args.iter().enumerate() {
+                                        if let Some(reg) = self.lower_expression(arg) {
+                                            // A `Null<scalar>`/`Dynamic` formal is a box
+                                            // slot; the declaration says so where the
+                                            // callee's own signature has not arrived.
+                                            let box_slot = matches!(
+                                                declared.get(i).and_then(|k| k.as_deref()),
+                                                Some("Null") | Some("Dynamic")
+                                            );
+                                            let boxed = if box_slot {
+                                                self.box_scalar_register(reg)
+                                            } else {
+                                                None
+                                            };
+                                            match boxed {
+                                                Some(b) => {
+                                                    arg_regs.push(b);
+                                                    param_types
+                                                        .push(IrType::Ptr(Box::new(IrType::U8)));
+                                                }
+                                                None => {
+                                                    arg_regs.push(reg);
+                                                    param_types.push(self.convert_type(arg.ty));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Trailing optional parameters the call leaves
+                                    // out take the zero of their declared type, as
+                                    // `fill_default_args` gives a cross-module call.
                                     for name in declared.iter().skip(arg_regs.len()) {
                                         let (ty, zero) = match name.as_deref() {
                                             Some("Int") => (IrType::I32, IrValue::I32(0)),
                                             Some("Float") => (IrType::F64, IrValue::F64(0.0)),
                                             Some("Bool") => (IrType::Bool, IrValue::Bool(false)),
                                             Some("String") => (IrType::String, IrValue::I64(0)),
+                                            Some("Null") | Some("Dynamic") => {
+                                                (IrType::Ptr(Box::new(IrType::U8)), IrValue::Null)
+                                            }
                                             _ => (IrType::I64, IrValue::I64(0)),
                                         };
                                         let Some(reg) = self.builder.build_const(zero) else {

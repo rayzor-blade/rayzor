@@ -1205,14 +1205,39 @@ impl<'a> HirToMirContext<'a> {
         // Primitive arithmetic must not run on raw DynamicValue* pointers, so
         // unbox Null<T> operands using each operand's OWN inner primitive type —
         // expr.ty may still be Optional after typechecking unified to Null<Int>.
-        if matches!(
+        // A comparison against a scalar (`parsed >= 128`) unboxes the same way;
+        // one against `null` keeps the box, which is what it tests.
+        let scalar_side = |ctx: &Self, e: &HirExpr| {
+            matches!(
+                ctx.type_table.get(e.ty).map(|t| &t.kind),
+                Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool)
+            ) || ctx.is_optional_primitive(e.ty)
+        };
+        let is_arith = matches!(
             op,
             HirBinaryOp::Add
                 | HirBinaryOp::Sub
                 | HirBinaryOp::Mul
                 | HirBinaryOp::Div
                 | HirBinaryOp::Mod
-        ) {
+                | HirBinaryOp::BitAnd
+                | HirBinaryOp::BitOr
+                | HirBinaryOp::BitXor
+                | HirBinaryOp::Shl
+                | HirBinaryOp::Shr
+                | HirBinaryOp::Ushr
+        );
+        let is_scalar_cmp = matches!(
+            op,
+            HirBinaryOp::Lt
+                | HirBinaryOp::Gt
+                | HirBinaryOp::Le
+                | HirBinaryOp::Ge
+                | HirBinaryOp::Eq
+                | HirBinaryOp::Ne
+        ) && scalar_side(self, lhs)
+            && scalar_side(self, rhs);
+        if is_arith || is_scalar_cmp {
             if self.is_optional_primitive(lhs.ty) {
                 if let Some(inner) = self.optional_inner_type(lhs.ty) {
                     if let Some(unboxed) = self.maybe_unbox_optional(lhs_reg, lhs.ty, inner) {

@@ -32,7 +32,7 @@ class Main {
         var methods = new Defaults();
         expect("trailing default", methods.trailing(2), "2/dflt");
         expect("explicit trailing", methods.trailing(2, "given"), "2/given");
-        expect("skipped leading optional", methods.leading("value"), "0/value");
+        expect("skipped leading optional", methods.leading("value"), "null/value");
         expect("explicit leading optional", methods.leading(3, "value"), "3/value");
 
         if (failures == 0) {

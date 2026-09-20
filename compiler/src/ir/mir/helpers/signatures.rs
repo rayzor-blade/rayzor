@@ -199,10 +199,28 @@ impl<'a> HirToMirContext<'a> {
             return;
         }
 
-        let bindable = |a: &IrType, p: &IrType| -> bool {
-            let a_ref = matches!(a, IrType::Ptr(_) | IrType::String | IrType::Any);
-            let p_ref = matches!(p, IrType::Ptr(_) | IrType::String | IrType::Any);
-            a_ref == p_ref
+        // Whether an argument of one type may fill a parameter of another,
+        // read from the Haxe types: a `Null<Int>` slot takes an Int, never a
+        // String, whatever both look like as registers.
+        let shape = |ty: TypeId| -> u8 {
+            let mut ty = ty;
+            for _ in 0..4 {
+                match self.type_table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            match self.type_table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool) => 1,
+                Some(TypeKind::String) => 2,
+                Some(TypeKind::Dynamic) | Some(TypeKind::TypeParameter { .. }) | None => 0,
+                _ => 3,
+            }
+        };
+        let bindable = |a: TypeId, p: TypeId| -> bool {
+            let (a, p) = (shape(a), shape(p));
+            a == 0 || p == 0 || a == p
         };
 
         let mut plan: Vec<Option<usize>> = Vec::with_capacity(param_types.len());
@@ -212,10 +230,8 @@ impl<'a> HirToMirContext<'a> {
                 plan.push(None);
                 continue;
             }
-            let arg_ir = self.convert_type(arg_types[next_arg]);
-            let param_ir = self.convert_type(*p_ty);
             let can_skip = optional.get(p_idx).copied().unwrap_or(false);
-            if !bindable(&arg_ir, &param_ir) && can_skip {
+            if !bindable(arg_types[next_arg], *p_ty) && can_skip {
                 plan.push(None);
             } else {
                 plan.push(Some(next_arg));

@@ -524,6 +524,13 @@ impl<'a> HirToMirContext<'a> {
                         *arg_reg = cast_reg;
                     }
                 }
+                // A `Dynamic` or `Null<scalar>` formal is a box slot: a scalar
+                // bound for it travels boxed, never as its bits.
+                if matches!(expected_ty, IrType::Ptr(inner) if matches!(**inner, IrType::U8)) {
+                    if let Some(boxed) = self.box_scalar_register(*arg_reg) {
+                        *arg_reg = boxed;
+                    }
+                }
             }
         }
     }
@@ -613,13 +620,15 @@ impl<'a> HirToMirContext<'a> {
         let start = if skip_first { 1 } else { 0 };
         for (i, arg_reg) in arg_regs.iter_mut().enumerate().skip(start) {
             // A generic formal survives as `TypeVar` where the callee's own
-            // signature is known, and as the erased I64 otherwise.
-            if !matches!(
-                param_types.get(i),
-                Some(IrType::I64) | Some(IrType::TypeVar(_))
-            ) {
-                continue;
-            }
+            // signature is known, and as the erased I64 otherwise; a scalar
+            // formal takes the scalar itself.
+            let formal = match param_types.get(i) {
+                Some(IrType::I64) | Some(IrType::TypeVar(_)) => None,
+                Some(t @ (IrType::I32 | IrType::F64 | IrType::F32 | IrType::Bool)) => {
+                    Some(t.clone())
+                }
+                _ => continue,
+            };
             if !matches!(
                 self.builder.get_register_type(*arg_reg),
                 Some(IrType::Ptr(_))
@@ -636,9 +645,23 @@ impl<'a> HirToMirContext<'a> {
             if !self.optional_inner_is_boxable_primitive(inner) {
                 continue;
             }
-            if let Some(scalar) = self.maybe_unbox_optional(*arg_reg, hir_ty, inner) {
-                if let Some(erased) = self.coerce_to_i64(scalar, inner) {
-                    *arg_reg = erased;
+            let Some(scalar) = self.maybe_unbox_optional(*arg_reg, hir_ty, inner) else {
+                continue;
+            };
+            match formal {
+                None => {
+                    if let Some(erased) = self.coerce_to_i64(scalar, inner) {
+                        *arg_reg = erased;
+                    }
+                }
+                Some(formal) => {
+                    let have = self.builder.get_register_type(scalar);
+                    *arg_reg = match have {
+                        Some(h) if h != formal => {
+                            self.builder.build_cast(scalar, h, formal).unwrap_or(scalar)
+                        }
+                        _ => scalar,
+                    };
                 }
             }
         }

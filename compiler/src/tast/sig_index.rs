@@ -326,6 +326,14 @@ impl StaticSigIndex {
                 parser::Type::Optional { inner, .. } | parser::Type::Parenthesis { inner, .. } => {
                     t = Some(inner)
                 }
+                // `?x:Int` without a default is `Null<Int>`: a box slot.
+                parser::Type::Path { path, .. }
+                    if p.optional
+                        && p.default_value.is_none()
+                        && matches!(path.name.as_str(), "Int" | "Float" | "Bool") =>
+                {
+                    return Some("Null".to_string());
+                }
                 parser::Type::Path { path, .. } => return Some(path.name.clone()),
                 _ => break,
             }
