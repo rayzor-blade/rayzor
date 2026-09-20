@@ -100,15 +100,32 @@ impl<'a> HirToMirContext<'a> {
         // into the literal's own `expr.ty`, this yields None and elements are
         // stored as raw class pointers. Fixing it needs typechecker-side
         // Class→Interface coercion, or the target type plumbed down here.
-        let elem_iface_sym = {
-            let element_type_id = {
-                let type_table = self.type_table;
-                type_table.get(array_type).and_then(|t| match &t.kind {
-                    TypeKind::Array { element_type } => Some(*element_type),
+        let element_type_id = {
+            let type_table = self.type_table;
+            type_table.get(array_type).and_then(|t| match &t.kind {
+                TypeKind::Array { element_type } => Some(*element_type),
+                _ => None,
+            })
+        };
+        let elem_iface_sym = element_type_id.and_then(|et| self.get_interface_symbol(et));
+        // A literal whose elements all carry one concrete Haxe type is
+        // homogeneous whatever registers they arrive in (a String literal
+        // and `String.fromCharCode(..)` differ as registers, not as values).
+        // The literal's own type is only its first element's, so every
+        // element is read.
+        let typed_homogeneous = {
+            let kind_tag = |ty: TypeId| -> Option<u8> {
+                match self.type_table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Int) => Some(1),
+                    Some(TypeKind::Float) => Some(2),
+                    Some(TypeKind::Bool) => Some(3),
+                    Some(TypeKind::String) => Some(4),
+                    Some(TypeKind::Class { symbol_id, .. }) => Some(5 + symbol_id.as_raw() as u8),
                     _ => None,
-                })
+                }
             };
-            element_type_id.and_then(|et| self.get_interface_symbol(et))
+            let first = elements.first().and_then(|e| kind_tag(e.ty));
+            first.is_some() && elements.iter().all(|e| kind_tag(e.ty) == first)
         };
         // The HaxeArray struct must live on the heap: a stack allocation is a
         // use-after-free once the array is stored in a global and read back
@@ -230,12 +247,12 @@ impl<'a> HirToMirContext<'a> {
                         Some((v, t, hir_kind))
                     })
                     .collect();
-            let heterogeneous = {
+            let heterogeneous = !typed_homogeneous && {
                 let normalize = |t: &Option<IrType>| match t {
                     Some(IrType::I32) | Some(IrType::I64) => 1u8,
                     Some(IrType::F32) | Some(IrType::F64) => 2u8,
                     Some(IrType::Bool) => 3u8,
-                    Some(IrType::Ptr(_)) => 4u8,
+                    Some(IrType::Ptr(_)) | Some(IrType::String) => 4u8,
                     _ => 5u8,
                 };
                 let first = lowered

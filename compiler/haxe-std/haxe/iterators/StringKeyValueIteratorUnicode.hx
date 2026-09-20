@@ -62,6 +62,17 @@ class StringKeyValueIteratorUnicode {
 			byteOffset++;
 		}
 		return {key: charOffset++, value: c};
+		#elseif rayzor
+		// Strings are UTF-8 bytes; decode one code point.
+		var c = StringTools.fastCodeAt(s, byteOffset++);
+		if (c >= 0xC0) {
+			var extra = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : 1;
+			c &= extra == 3 ? 0x07 : extra == 2 ? 0x0F : 0x1F;
+			while (extra-- > 0 && byteOffset < s.length) {
+				c = (c << 6) | (StringTools.fastCodeAt(s, byteOffset++) & 0x3F);
+			}
+		}
+		return {key: charOffset++, value: c};
 		#else
 		return {key: charOffset++, value: StringTools.fastCodeAt(s, byteOffset++)};
 		#end

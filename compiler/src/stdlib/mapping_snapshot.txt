@@ -12,7 +12,7 @@ Array length static=false ctor=false params=0 -> array_length
 Array map static=false ctor=false params=1 -> array_map
 Array pop static=false ctor=false params=0 -> array_pop
 Array push static=false ctor=false params=1 -> array_push
-Array remove static=false ctor=false params=1 -> haxe_array_remove
+Array remove static=false ctor=false params=1 -> haxe_array_remove_value
 Array resize static=false ctor=false params=1 -> array_resize
 Array reverse static=false ctor=false params=0 -> haxe_array_reverse
 Array shift static=false ctor=false params=0 -> array_shift

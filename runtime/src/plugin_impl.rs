@@ -164,6 +164,14 @@ register_symbol!("haxe_array_pop_i64", crate::haxe_array::haxe_array_pop_i64);
 register_symbol!("haxe_array_pop_ptr", crate::haxe_array::haxe_array_pop_ptr);
 register_symbol!("haxe_array_insert", crate::haxe_array::haxe_array_insert);
 register_symbol!("haxe_array_remove", crate::haxe_array::haxe_array_remove);
+register_symbol!(
+    "haxe_array_remove_value",
+    crate::haxe_array::haxe_array_remove_value
+);
+register_symbol!(
+    "haxe_array_remove_at",
+    crate::haxe_array::haxe_array_remove_at
+);
 register_symbol!("haxe_array_reverse", crate::haxe_array::haxe_array_reverse);
 
 // Operations

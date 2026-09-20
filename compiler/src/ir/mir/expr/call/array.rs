@@ -46,7 +46,9 @@ impl<'a> HirToMirContext<'a> {
             .get_symbol(*symbol)
             .and_then(|s| self.string_interner.get(s.name))
             .unwrap_or("?");
-        if matches!(vname, "contains" | "indexOf" | "lastIndexOf") && *is_method && args.len() >= 2
+        if matches!(vname, "contains" | "indexOf" | "lastIndexOf" | "remove")
+            && *is_method
+            && args.len() >= 2
         {
             let string_elements = self.type_table.get(args[0].ty).is_some_and(|t| {
                 matches!(&t.kind, TypeKind::Array { element_type }
@@ -79,11 +81,28 @@ impl<'a> HirToMirContext<'a> {
                     vec![arr, value, from, reverse],
                     IrType::I64,
                 )?;
-                return if vname == "contains" {
-                    let zero = self.builder.build_const(IrValue::I64(0))?;
-                    self.builder.build_cmp(CompareOp::Ge, index, zero)
-                } else {
-                    Some(index)
+                return match vname {
+                    "contains" => {
+                        let zero = self.builder.build_const(IrValue::I64(0))?;
+                        self.builder.build_cmp(CompareOp::Ge, index, zero)
+                    }
+                    // `remove(s)` drops the first equal string; false when none.
+                    "remove" => {
+                        let zero = self.builder.build_const(IrValue::I64(0))?;
+                        let found = self.builder.build_cmp(CompareOp::Ge, index, zero)?;
+                        let clamped = self.builder.build_select(found, index, zero)?;
+                        let remove = self.get_or_register_extern_function(
+                            "haxe_array_remove_at",
+                            vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I64, IrType::Bool],
+                            IrType::Bool,
+                        );
+                        self.builder.build_call_direct(
+                            remove,
+                            vec![arr, clamped, found],
+                            IrType::Bool,
+                        )
+                    }
+                    _ => Some(index),
                 };
             }
         }

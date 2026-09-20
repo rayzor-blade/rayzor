@@ -666,6 +666,27 @@ pub extern "C" fn haxe_array_remove(arr: *mut HaxeArray, index: usize) -> bool {
     }
 }
 
+/// `Array.remove(x)`: drop the first element equal to `x`, by bits, as
+/// `indexOf` compares. False when none is.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_remove_value(arr: *mut HaxeArray, value: i64) -> bool {
+    let index = haxe_array_index_of(arr, value, 0);
+    if index < 0 {
+        return false;
+    }
+    haxe_array_remove(arr, index as usize)
+}
+
+/// `Array.remove(s)` over strings: the compiler found `index` (or nothing,
+/// `found` false) by string equality; drop that element.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_remove_at(arr: *mut HaxeArray, index: i64, found: bool) -> bool {
+    if !found || index < 0 {
+        return false;
+    }
+    haxe_array_remove(arr, index as usize)
+}
+
 /// Reverse array in place
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_reverse(arr: *mut HaxeArray) {

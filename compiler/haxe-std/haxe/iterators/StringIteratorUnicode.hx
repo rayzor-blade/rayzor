@@ -59,6 +59,17 @@ class StringIteratorUnicode {
 			offset++;
 		}
 		return c;
+		#elseif rayzor
+		// Strings are UTF-8 bytes; decode one code point.
+		var c = StringTools.unsafeCodeAt(s, offset++);
+		if (c >= 0xC0) {
+			var extra = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : 1;
+			c &= extra == 3 ? 0x07 : extra == 2 ? 0x0F : 0x1F;
+			while (extra-- > 0 && offset < s.length) {
+				c = (c << 6) | (StringTools.unsafeCodeAt(s, offset++) & 0x3F);
+			}
+		}
+		return c;
 		#else
 		return StringTools.unsafeCodeAt(s, offset++);
 		#end

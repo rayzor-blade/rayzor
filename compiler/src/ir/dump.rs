@@ -26,6 +26,17 @@ pub fn dump_module(module: &IrModule) -> String {
         writeln!(out, "{}", dump_function(func)).unwrap();
     }
 
+    let mut extern_ids: Vec<_> = module.extern_functions.keys().collect();
+    extern_ids.sort_by_key(|id| id.0);
+    for &id in &extern_ids {
+        writeln!(
+            out,
+            "; extern fn{} = @{}",
+            id.0, module.extern_functions[id].name
+        )
+        .unwrap();
+    }
+
     out
 }
 

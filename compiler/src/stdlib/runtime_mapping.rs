@@ -1228,6 +1228,35 @@ macro_rules! map_method {
         )
     };
 
+    // Instance method returning a primitive with raw-bits value params
+    // (`Array.remove(x)`: the element's own bits, whatever its type).
+    (instance $class:expr, $method:expr => $runtime:expr, params: $params:expr, returns: primitive, raw_value_params: $raw_mask:expr) => {
+        (
+            MethodSignature {
+                class: $class,
+                method: $method,
+                is_static: false,
+                is_constructor: false,
+                param_count: $params,
+            },
+            RuntimeFunctionCall {
+                runtime_name: $runtime,
+                needs_out_param: false,
+                has_self_param: true,
+                param_count: $params,
+                has_return: true,
+                params_need_ptr_conversion: 0,
+                raw_value_params: $raw_mask,
+                returns_raw_value: false,
+                extend_to_i64_params: 0,
+                param_types: None,
+                return_type: None,
+                is_mir_wrapper: false,
+                source: FunctionSource::Builtin,
+            },
+        )
+    };
+
     // Instance method returning complex type (String, Array)
     (instance $class:expr, $method:expr => $runtime:expr, params: $params:expr, returns: complex) => {
         (
@@ -1906,7 +1935,7 @@ impl StdlibMapping {
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I64]),
             // remove(x:T): arg[0]=array, arg[1]=value (needs ptr conversion)
             // Bitmask: 0b10 = bit 1 set
-            map_method!(instance "Array", "remove" => "haxe_array_remove", params: 1, returns: primitive, ptr_params: 0b10),
+            map_method!(instance "Array", "remove" => "haxe_array_remove_value", params: 1, returns: primitive, raw_value_params: 0b10),
             // Extraction methods
             // Array.slice uses MIR wrapper that handles out-param allocation
             // slice(pos): omitted end -> "to length". Routes to a wrapper that
