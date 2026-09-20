@@ -1598,7 +1598,7 @@ unsafe fn array_to_string_typed(
         let data = arr_ref.ptr as *const i64;
         for i in 0..arr_ref.len {
             if i > 0 {
-                s.push_str(", ");
+                s.push(',');
             }
             s.push_str(&render(*data.add(i)));
         }
@@ -1627,7 +1627,7 @@ pub extern "C" fn haxe_array_to_string_f64(arr: *const HaxeArray) -> *mut HaxeSt
         let data = arr_ref.ptr as *const f64;
         for i in 0..arr_ref.len {
             if i > 0 {
-                s.push_str(", ");
+                s.push(',');
             }
             let v = *data.add(i);
             s.push_str(&crate::haxe_sys::format_f64_for_string(v));
@@ -1671,7 +1671,7 @@ pub extern "C" fn haxe_array_to_string(arr: *const HaxeArray) -> *mut HaxeString
         let data = arr_ref.ptr as *const i64;
         for i in 0..arr_ref.len {
             if i > 0 {
-                s.push_str(", ");
+                s.push(',');
             }
             let val = *data.add(i);
             s.push_str(&crate::haxe_sys::format_array_slot_for_string(val));

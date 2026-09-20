@@ -281,7 +281,7 @@ pub extern "C" fn haxe_trace_array(arr_ptr: *mut u8) {
         let mut result = String::from("[");
         for i in 0..arr.len {
             if i > 0 {
-                result.push_str(", ");
+                result.push(',');
             }
             if arr.elem_size == 8 {
                 let val = *(arr.ptr.add(i * 8) as *const i64);

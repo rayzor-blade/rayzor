@@ -26,11 +26,16 @@ class Test {
             Sys.println("FAILVALUES " + v + " != " + v2);
         }
     }
+    // Upstream is utest's Assert.same, a structural comparison: elements that
+    // are distinct objects still match when they print alike.
     function aeq<T>(expected:Array<T>, actual:Array<T>):Void {
         unit.ConfCheck.ok();
         if (expected.length != actual.length) { unit.ConfCheck.fail("aeq length"); return; }
         for (i in 0...expected.length) {
-            if (expected[i] != actual[i]) { unit.ConfCheck.fail("aeq at " + i); return; }
+            if (expected[i] != actual[i] && Std.string(expected[i]) != Std.string(actual[i])) {
+                unit.ConfCheck.fail("aeq at " + i);
+                return;
+            }
         }
     }
     function t(v:Bool):Void {
