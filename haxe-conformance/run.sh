@@ -298,6 +298,10 @@ import re
 # Only method DISCOVERY uses this -- the source is copied through verbatim and
 # rayzor's own preprocessor decides what to compile.
 targets = set(target_pkgs.split('|'))
+# What the compiler defines (parser/src/preprocessor.rs) and the test-only
+# defines no rayzor build sets. Anything else stays undecidable.
+defined = {'rayzor', 'sys', 'static', 'eval', 'target_unicode'}
+undefined = {'flash_test_swc', 'macro', 'utf16', 'target_utf16', 'interp', 'cppia'}
 def branch_is_ours(cond):
     # We are none of the targets, so evaluate the condition with every target
     # name false and see what it says. `#if cpp` is dead, `#if !cpp` is LIVE --
@@ -310,11 +314,12 @@ def branch_is_ours(cond):
         return True
     py = re.sub(r'&&', ' and ', re.sub(r'\|\|', ' or ', expr))
     py = re.sub(r'!(?=[A-Za-z_(])', ' not ', py)
+    py = py.replace('target.', 'target_')
     names = set(re.findall(r'[A-Za-z_][A-Za-z0-9_]*', py)) - {'and', 'or', 'not'}
-    if not names or not names <= targets:
+    if not names or not names <= targets | defined | undefined:
         return True
     try:
-        return bool(eval(py, {'__builtins__': {}}, {n: False for n in names}))
+        return bool(eval(py, {'__builtins__': {}}, {n: n in defined for n in names}))
     except Exception:
         return True
 
