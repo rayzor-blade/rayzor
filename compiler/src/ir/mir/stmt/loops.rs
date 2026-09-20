@@ -237,7 +237,9 @@ impl<'a> HirToMirContext<'a> {
             "[lower_while_loop] Lowering condition expression, kind={:?}",
             std::mem::discriminant(&condition.kind)
         );
-        let cond_result = self.lower_expression(condition);
+        let cond_result = self
+            .lower_expression(condition)
+            .and_then(|r| self.truth_of(r, condition.ty));
         debug!("[lower_while_loop] Condition result: {:?}", cond_result);
         if cond_result.is_none() {
             debug!(
@@ -584,7 +586,9 @@ impl<'a> HirToMirContext<'a> {
         self.loop_carried_symbols.pop();
 
         self.builder.switch_to_block(cond_block);
-        let cond_result = self.lower_expression(condition);
+        let cond_result = self
+            .lower_expression(condition)
+            .and_then(|r| self.truth_of(r, condition.ty));
 
         // The block we are in after condition evaluation is the one that branches
         // to body/exit.

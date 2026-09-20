@@ -256,7 +256,10 @@ impl<'a> HirToMirContext<'a> {
 
         debug!("var_initial_values.len() = {}", var_initial_values.len());
 
-        if let Some(cond_reg) = self.lower_expression(condition) {
+        if let Some(cond_reg) = self
+            .lower_expression(condition)
+            .and_then(|r| self.truth_of(r, condition.ty))
+        {
             // Branch-phi for effectful Call results; rationale in
             // lower_conditional_typed.
             let cond_eval_block = match self.builder.current_block() {

@@ -28,6 +28,7 @@ impl<'a> HirToMirContext<'a> {
         let merge = self.builder.create_block()?;
 
         let lhs_val = self.lower_expression(lhs)?;
+        let lhs_val = self.truth_of(lhs_val, lhs.ty)?;
 
         // Build false_val before branching so it lives in this block's scope.
         let false_val = self.builder.build_bool(false)?;
@@ -39,6 +40,7 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder.switch_to_block(eval_rhs);
         let rhs_val = self.lower_expression(rhs)?;
+        let rhs_val = self.truth_of(rhs_val, rhs.ty)?;
         let rhs_block = self.builder.current_block()?;
         self.builder.build_branch(merge)?;
 
@@ -59,6 +61,7 @@ impl<'a> HirToMirContext<'a> {
         let merge = self.builder.create_block()?;
 
         let lhs_val = self.lower_expression(lhs)?;
+        let lhs_val = self.truth_of(lhs_val, lhs.ty)?;
 
         // Build true_val before branching so it lives in this block's scope.
         let true_val = self.builder.build_bool(true)?;
@@ -70,6 +73,7 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder.switch_to_block(eval_rhs);
         let rhs_val = self.lower_expression(rhs)?;
+        let rhs_val = self.truth_of(rhs_val, rhs.ty)?;
         let rhs_block = self.builder.current_block()?;
         self.builder.build_branch(merge)?;
 
@@ -298,6 +302,7 @@ impl<'a> HirToMirContext<'a> {
         let opt_prim = self.is_optional_primitive(lhs.ty);
 
         let lhs_val = self.lower_expression(lhs)?;
+        let lhs_val = self.truth_of(lhs_val, lhs.ty)?;
 
         // Null check: lhs != 0 (null pointers and null values are 0). The zero
         // takes the LHS type to avoid a type mismatch in the comparison.
@@ -376,6 +381,7 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder.switch_to_block(eval_rhs);
         let rhs_val = self.lower_expression(rhs)?;
+        let rhs_val = self.truth_of(rhs_val, rhs.ty)?;
         let rhs_block = self.builder.current_block()?;
         self.builder.build_branch(merge)?;
 
@@ -421,6 +427,7 @@ impl<'a> HirToMirContext<'a> {
         let symbol_map_before = self.symbol_map.clone();
 
         let cond_val = self.lower_expression(cond)?;
+        let cond_val = self.truth_of(cond_val, cond.ty)?;
 
         // Branch-phi for effectful Call results.
         //

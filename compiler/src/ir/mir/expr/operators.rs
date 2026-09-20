@@ -213,6 +213,9 @@ impl<'a> HirToMirContext<'a> {
             }
             _ => {
                 let mut operand_reg = self.lower_expression(operand)?;
+                if matches!(op, HirUnaryOp::Not) {
+                    operand_reg = self.truth_of(operand_reg, operand.ty)?;
+                }
                 let result_type = self.convert_type(expr.ty);
                 if matches!(op, HirUnaryOp::Neg) && result_type.is_float() {
                     let operand_type = self

@@ -378,6 +378,13 @@ impl<'a> HirToMirContext<'a> {
                     return Some(raw);
                 }
             }
+            // An Int index into an i64 slot is widened; left as i32 the upper
+            // half of the register is whatever the caller last held there.
+            if actual_ty.is_integer() && expected_ty.is_integer() {
+                return self
+                    .builder
+                    .build_cast(value, actual_ty.clone(), expected_ty.clone());
+            }
             return Some(value);
         }
 
@@ -1024,6 +1031,32 @@ impl<'a> HirToMirContext<'a> {
         false
     }
 
+    /// A `Null<Bool>` read where a Bool is needed (`if (q)`, `!q`, `a && q`):
+    /// the box is opened, null reading as false. Anything else passes through.
+    pub(crate) fn truth_of(&mut self, reg: IrId, hir_ty: TypeId) -> Option<IrId> {
+        use crate::tast::TypeKind;
+        let mut ty = hir_ty;
+        for _ in 0..4 {
+            match self.type_table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                _ => break,
+            }
+        }
+        let boxed_bool = matches!(
+            self.type_table.get(ty).map(|t| &t.kind),
+            Some(TypeKind::Optional { inner_type })
+                if matches!(self.type_table.get(*inner_type).map(|t| &t.kind), Some(TypeKind::Bool))
+        );
+        if !boxed_bool || !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_))) {
+            return Some(reg);
+        }
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let unbox =
+            self.get_or_register_extern_function("haxe_unbox_bool_ptr", vec![ptr_u8], IrType::Bool);
+        self.builder
+            .build_call_direct(unbox, vec![reg], IrType::Bool)
+    }
+
     /// Unbox the return of an erased generic method, resolving T from the
     /// receiver's type argument.
     ///
@@ -1057,6 +1090,7 @@ impl<'a> HirToMirContext<'a> {
             match type_table.get(receiver_ty).map(|ti| &ti.kind) {
                 Some(TypeKind::Class { type_args, .. })
                 | Some(TypeKind::GenericInstance { type_args, .. })
+                | Some(TypeKind::Abstract { type_args, .. })
                     if type_args.len() == 1 =>
                 {
                     Some(self.convert_type(type_args[0]))

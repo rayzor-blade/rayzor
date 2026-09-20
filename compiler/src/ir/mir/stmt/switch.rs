@@ -171,7 +171,10 @@ impl<'a> HirToMirContext<'a> {
                         .build_cond_branch(pattern_matches, guard_block, next_test);
 
                     self.builder.switch_to_block(guard_block);
-                    let guard_val = match self.lower_expression(guard) {
+                    let guard_val = match self
+                        .lower_expression(guard)
+                        .and_then(|v| self.truth_of(v, guard.ty))
+                    {
                         Some(v) => v,
                         None => {
                             self.builder.build_branch(next_test);
@@ -642,6 +645,7 @@ impl<'a> HirToMirContext<'a> {
                     scrutinee_type,
                 )?;
                 let guard_val = self.lower_expression(condition)?;
+                let guard_val = self.truth_of(guard_val, condition.ty)?;
                 self.builder
                     .build_binop(BinaryOp::And, pattern_match, guard_val)
             }
