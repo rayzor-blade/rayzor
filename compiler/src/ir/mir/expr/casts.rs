@@ -586,10 +586,25 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// `haxe_std_is` on a Dynamic box against the runtime id of `expected`.
+    fn runtime_type_check(&mut self, boxed: IrId, expected: TypeId) -> Option<IrId> {
+        let rt_type_id = self.runtime_type_id(expected);
+        let type_id_const = self.builder.build_const(IrValue::I64(rt_type_id as i64))?;
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let is_func_id = self.get_or_register_extern_function(
+            "haxe_std_is",
+            vec![ptr_u8, IrType::I64],
+            IrType::Bool,
+        );
+        self.builder
+            .build_call_direct(is_func_id, vec![boxed, type_id_const], IrType::Bool)
+    }
+
     pub(crate) fn lower_type_check(&mut self, expr: &HirExpr) -> Option<IrId> {
         let HirExprKind::TypeCheck { expr, expected } = &expr.kind else {
             unreachable!("lower_type_check on a non-TypeCheck expression")
         };
+        let expected = &self.canonical_type_ref(*expected);
         // `expr is Type` resolves at compile time for statically-typed code.
         let source_kind = {
             let type_table = self.type_table;
@@ -604,32 +619,31 @@ impl<'a> HirToMirContext<'a> {
             // Dynamic source: runtime type check via haxe_std_is
             (Some(TypeKind::Dynamic), _) => {
                 let value_reg = self.lower_expression(expr)?;
-                let rt_type_id = self.runtime_type_id(*expected);
-                let type_id_const = self.builder.build_const(IrValue::I64(rt_type_id as i64))?;
-                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                let is_func_id = self.get_or_register_extern_function(
-                    "haxe_std_is",
-                    vec![ptr_u8, IrType::I64],
-                    IrType::Bool,
-                );
-                self.builder.build_call_direct(
-                    is_func_id,
-                    vec![value_reg, type_id_const],
-                    IrType::Bool,
-                )
+                self.runtime_type_check(value_reg, *expected)
+            }
+            // A type parameter is decided by the instance's binding: box it
+            // with the tag the monomorphizer fills in, then test at runtime.
+            // One this function does not declare keeps the permissive answer.
+            (Some(TypeKind::TypeParameter { symbol_id, .. }), _) => {
+                let symbol_id = *symbol_id;
+                let value_reg = self.lower_expression(expr)?;
+                match self.box_type_param_for_dynamic(value_reg, symbol_id) {
+                    Some(boxed) => self.runtime_type_check(boxed, *expected),
+                    None => self.builder.build_const(IrValue::Bool(true)),
+                }
             }
             // Same type kind → always true (but null check needed for refs)
             _ if expr.ty == *expected => self.builder.build_const(IrValue::Bool(true)),
-            // Primitive type checks
+            // Primitive type checks; an Int is a Float.
             (Some(TypeKind::Int), Some(TypeKind::Int))
+            | (Some(TypeKind::Int), Some(TypeKind::Float))
             | (Some(TypeKind::Float), Some(TypeKind::Float))
             | (Some(TypeKind::Bool), Some(TypeKind::Bool))
             | (Some(TypeKind::String), Some(TypeKind::String)) => {
                 self.builder.build_const(IrValue::Bool(true))
             }
             // Cross-primitive: always false
-            (Some(TypeKind::Int), Some(TypeKind::Float))
-            | (Some(TypeKind::Float), Some(TypeKind::Int))
+            (Some(TypeKind::Float), Some(TypeKind::Int))
             | (Some(TypeKind::Int), Some(TypeKind::String))
             | (Some(TypeKind::String), Some(TypeKind::Int))
             | (Some(TypeKind::Float), Some(TypeKind::String))

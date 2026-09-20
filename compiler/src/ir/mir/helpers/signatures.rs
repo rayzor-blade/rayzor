@@ -584,7 +584,19 @@ impl<'a> HirToMirContext<'a> {
                             Some(TypeKind::Dynamic)
                         ) || param_is_optional_scalar
                     };
-                    if param_is_dynamic {
+                    // A `T` into a generic callee's Dynamic formal stays raw: an
+                    // unannotated parameter of a generic function decays to
+                    // Dynamic while its body reads the slot as the `T` it is.
+                    let erased_into_generic = matches!(
+                        self.type_table.get(resolved_arg).map(|t| &t.kind),
+                        Some(TypeKind::TypeParameter { .. })
+                    ) && self
+                        .builder
+                        .module
+                        .functions
+                        .get(&func_id)
+                        .is_some_and(|f| !f.signature.type_params.is_empty());
+                    if param_is_dynamic && !erased_into_generic {
                         if let Some(boxed) =
                             self.maybe_box_value(arg_reg, arg_expr.ty, param_type_id)
                         {

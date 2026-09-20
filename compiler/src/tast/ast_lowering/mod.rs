@@ -38,29 +38,31 @@ use std::fmt;
 use std::rc::Rc;
 use tracing::warn;
 
-/// Record every `this.<field> = <param>` in an expression tree, marking a
-/// parameter ambiguous once it is seen feeding a second field.
+/// Record every `this.<field> = <param>` (or bare `<field> = <param>`) in an
+/// expression tree, marking a parameter ambiguous once it is seen feeding a
+/// second field.
 fn collect_this_field_stores<'a>(
     expr: &'a Expr,
     params: &std::collections::BTreeSet<&str>,
     out: &mut BTreeMap<&'a str, Option<&'a str>>,
 ) {
     if let ExprKind::Assign { left, right, .. } = &expr.kind {
-        if let (
-            ExprKind::Field {
-                expr: recv, field, ..
-            },
-            ExprKind::Ident(name),
-        ) = (&left.kind, &right.kind)
-        {
-            if matches!(recv.kind, ExprKind::This) && params.contains(name.as_str()) {
+        if let ExprKind::Ident(name) = &right.kind {
+            let field = match &left.kind {
+                ExprKind::Field {
+                    expr: recv, field, ..
+                } if matches!(recv.kind, ExprKind::This) => Some(field.as_str()),
+                ExprKind::Ident(field) if !params.contains(field.as_str()) => Some(field.as_str()),
+                _ => None,
+            };
+            if let Some(field) = field.filter(|_| params.contains(name.as_str())) {
                 out.entry(name.as_str())
                     .and_modify(|slot| {
-                        if slot.is_some_and(|f| f != field.as_str()) {
+                        if slot.is_some_and(|f| f != field) {
                             *slot = None;
                         }
                     })
-                    .or_insert(Some(field.as_str()));
+                    .or_insert(Some(field));
             }
         }
     }

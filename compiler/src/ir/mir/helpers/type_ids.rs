@@ -22,6 +22,29 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// A type named as a value (`Std.isOfType(v, Int)`) is the StdTypes
+    /// abstract or the String class, not the primitive kind; this hands
+    /// back the primitive so kind-based matching sees Int/Float/Bool/String.
+    pub(crate) fn canonical_type_ref(&self, type_id: TypeId) -> TypeId {
+        let type_table = self.type_table;
+        let symbol_id = match type_table.get(type_id).map(|t| &t.kind) {
+            Some(TypeKind::Abstract { symbol_id, .. })
+            | Some(TypeKind::Class { symbol_id, .. }) => *symbol_id,
+            _ => return type_id,
+        };
+        let name = self
+            .symbol_table
+            .get_symbol(symbol_id)
+            .and_then(|s| self.string_interner.get(s.name));
+        match name {
+            Some("Int") => type_table.int_type(),
+            Some("Float") => type_table.float_type(),
+            Some("Bool") => type_table.bool_type(),
+            Some("String") => type_table.string_type(),
+            _ => type_id,
+        }
+    }
+
     /// Map a compiler TypeId to the runtime's type_id constant.
     /// Used for anonymous object shape descriptors.
     /// Runtime type IDs: 0=Void, 1=Null, 2=Bool, 3=Int, 4=Float, 5=String
@@ -75,6 +98,10 @@ impl<'a> HirToMirContext<'a> {
             // The runtime's `TYPE_ARRAY`, so a boxed array is recognisable as
             // one by every reader; a context-local id was recognisable by none.
             Some(TypeKind::Array { .. }) => TYPE_ARRAY,
+            Some(TypeKind::Abstract { .. }) => match self.canonical_type_ref(type_id) {
+                canonical if canonical != type_id => self.runtime_type_id(canonical),
+                _ => 0,
+            },
             _ => 0, // default to void/unknown
         }
     }

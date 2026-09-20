@@ -233,7 +233,13 @@ impl<'a> HirToMirContext<'a> {
                 Some(value)
             }
 
-            // Abstract, TypeParam, etc. — skip boxing for unsupported types
+            Some(TypeKind::TypeParameter { symbol_id, .. }) => {
+                let symbol_id = *symbol_id;
+                self.box_type_param_for_dynamic(value, symbol_id)
+                    .or(Some(value))
+            }
+
+            // Abstract etc. — skip boxing for unsupported types
             _ => {
                 debug!(
                     "[BOXING] Unsupported type for boxing: {:?}",
@@ -242,6 +248,51 @@ impl<'a> HirToMirContext<'a> {
                 Some(value)
             }
         }
+    }
+
+    /// A `T` bound for a Dynamic slot: its raw bits and a placeholder tag the
+    /// monomorphizer replaces with the instance's binding. None for a `T` the
+    /// current function does not declare -- nothing would fill the tag in.
+    pub(crate) fn box_type_param_for_dynamic(
+        &mut self,
+        value: IrId,
+        symbol_id: SymbolId,
+    ) -> Option<IrId> {
+        let tp_name = self
+            .symbol_table
+            .get_symbol(symbol_id)
+            .and_then(|sym| self.string_interner.get(sym.name))
+            .map(|s| s.to_string())?;
+        let bound = self
+            .builder
+            .current_function()
+            .is_some_and(|f| f.signature.type_params.iter().any(|tp| tp.name == tp_name));
+        if !bound {
+            return None;
+        }
+        if self.boxed_value_regs.contains(&value) {
+            return Some(value);
+        }
+        let v64 = match self.builder.get_register_type(value) {
+            Some(IrType::I32) => self.builder.build_cast(value, IrType::I32, IrType::I64)?,
+            Some(IrType::Bool) => self.builder.build_cast(value, IrType::Bool, IrType::I64)?,
+            Some(IrType::F64) | Some(IrType::Ptr(_)) | Some(IrType::String) => {
+                self.builder.build_bitcast(value, IrType::I64)?
+            }
+            _ => value,
+        };
+        let tag_reg = self.builder.build_const(IrValue::I32(0))?;
+        if let Some(func) = self.builder.current_function_mut() {
+            func.type_param_tag_fixups.push((tag_reg, tp_name));
+        }
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let box_func = self.get_or_register_extern_function(
+            "haxe_box_typed_ptr",
+            vec![IrType::I64, IrType::I32],
+            ptr_u8.clone(),
+        );
+        self.builder
+            .build_call_direct(box_func, vec![v64, tag_reg], ptr_u8)
     }
 
     /// Box a value for extern function calls when the expected type is a pointer but the actual type is a primitive.

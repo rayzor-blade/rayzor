@@ -1260,6 +1260,16 @@ impl<'a> HirToMirContext<'a> {
             }
         };
 
+        // Still a type parameter: the tag is the instance's to fill in.
+        if let Some(TypeKind::TypeParameter { symbol_id, .. }) =
+            self.type_table.get(concrete_type_id).map(|t| &t.kind)
+        {
+            let symbol_id = *symbol_id;
+            if let Some(boxed) = self.box_type_param_for_dynamic(value, symbol_id) {
+                return Some(boxed);
+            }
+        }
+
         let ir_type = self.convert_type(concrete_type_id);
         let (is_string, is_enum, is_function, is_class_like) = {
             let type_table = self.type_table;

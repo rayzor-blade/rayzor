@@ -1706,6 +1706,10 @@ pub extern "C" fn haxe_std_is(value_ptr: *mut u8, expected_type_id: i64) -> bool
     if type_id_matches_with_hierarchy(actual_type_id, expected_type_id) {
         return true;
     }
+    // An Int is a Float.
+    if actual_type_id == TYPE_INT.0 as i64 && expected_type_id == TYPE_FLOAT.0 as i64 {
+        return true;
+    }
     if class_implements_interface_id(actual_type_id, expected_type_id) {
         return true;
     }
@@ -3175,9 +3179,16 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
             let boxed = Box::new(dynamic);
             Box::into_raw(boxed) as *mut u8
         }
+        // A class instance carries its id in its header; any other pointer
+        // (array, anon) has no header to read and boxes untyped.
         Some(ValueTag::Reference) => {
-            // Reference type: value is an object pointer, box with generic reference type
-            haxe_box_reference_ptr(value as *mut u8, 0)
+            let p = value as *mut u8;
+            if p.is_null() {
+                return Box::into_raw(Box::new(haxe_box_null())) as *mut u8;
+            }
+            let header = haxe_object_get_type_id(p) as u32;
+            let tag = if is_class_type(header) { header } else { 0 };
+            haxe_box_reference_ptr(p, tag)
         }
         // Unresolved, or a tag from outside the space.
         _ => haxe_box_int_ptr(value),
