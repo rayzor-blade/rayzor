@@ -5124,7 +5124,13 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 offset,
                 ty,
             } => {
-                let ptr_val = self.get_value(*ptr)?.into_pointer_value();
+                // An array element holding a pointer arrives as its i64 slot.
+                let ptr_raw = self.get_value(*ptr)?;
+                let ptr_val = if ptr_raw.is_int_value() {
+                    self.address_as_pointer(*ptr, ptr_raw.into_int_value(), "ptradd")?
+                } else {
+                    ptr_raw.into_pointer_value()
+                };
                 let offset_raw = self.get_value(*offset)?;
                 let offset_val = if offset_raw.is_float_value() {
                     self.builder
@@ -6279,6 +6285,17 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             &format!("global_float_{}", dest.as_u32()),
                         )
                         .map_err(|e| format!("Failed to cast global to float: {}", e))?
+                } else if llvm_ty.is_int_type() && llvm_ty.into_int_type().get_bit_width() < 64 {
+                    // The store zero-extended; a narrower int reads back at
+                    // its own width or a negative Int becomes a huge i64.
+                    self.builder
+                        .build_int_truncate(
+                            result.into_int_value(),
+                            llvm_ty.into_int_type(),
+                            &format!("global_trunc_{}", dest.as_u32()),
+                        )
+                        .map_err(|e| format!("Failed to narrow global: {}", e))?
+                        .into()
                 } else {
                     result
                 };
