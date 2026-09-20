@@ -27,6 +27,9 @@ class VectorAndAbstractCtors {
         var c = v.copy(); c[0] = 9;
         check("copy", Std.string(c[0]) + Std.string(v[0]), "95");
         check("map", Std.string(v.map(x -> x * 10).toArray()), "[50,10,30]");
+        check("join", v.join("-"), "5-1-3");
+        var sorted = v.copy(); sorted.sort((a, b) -> a - b);
+        check("sort", Std.string(sorted.toArray()), "[1,3,5]");
         var e = new Vector<Int>(3); e.fill(7);
         check("fill", Std.string(e.toArray()), "[7,7,7]");
         var w = new Vector<Int>(4); Vector.blit(v, 0, w, 1, 3);
@@ -37,6 +40,7 @@ class VectorAndAbstractCtors {
         check("fromArrayCopy", Std.string(g[1] + g.length), "4.5");
         var s = new Vector<String>(2, "z"); s[1] = "q";
         check("string", s[0] + s[1], "zq");
+        check("string join", s.join(","), "z,q");
         var d = new Vector<Int>(2, 4);
         check("default", Std.string(d[0] + d[1]), "8");
         var o = new Vector<{x:Int}>(1); o[0] = {x: 42};

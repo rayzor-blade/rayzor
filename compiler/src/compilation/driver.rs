@@ -1373,6 +1373,12 @@ impl CompilationUnit {
         let mut monomorphizer = Monomorphizer::new();
         monomorphizer.monomorphize_module(&mut mir_module);
         add_profile_ms(&mut self.typecheck_timings.monomorphize_ms, t_monomorphize);
+        // RAYZOR_DUMP_MIR_MONO=1 dumps the module after specialization.
+        if std::env::var("RAYZOR_DUMP_MIR_MONO").is_ok() {
+            eprintln!("=== MIR DUMP (post-mono) for {} ===", filename);
+            eprintln!("{}", crate::ir::dump::dump_module(&mir_module));
+            eprintln!("=== END MIR DUMP ===");
+        }
         // let mono_stats = monomorphizer.stats();
         // if mono_stats.generic_functions_found > 0 || mono_stats.instantiations_created > 0 {
         //     debug!("DEBUG: Monomorphization stats: {} generic functions, {} instantiations, {} call sites rewritten",

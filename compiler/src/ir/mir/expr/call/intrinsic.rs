@@ -370,6 +370,34 @@ impl<'a> HirToMirContext<'a> {
             );
 
             if is_array_type {
+                // A known element type formats every slot as that type; only an
+                // Array<Dynamic> is left to the slot-shape guesser.
+                let element_type = match &hir_type_kind {
+                    Some(crate::tast::core::TypeKind::Array { element_type }) => *element_type,
+                    _ => self.type_table.dynamic_type(),
+                };
+                let formatter = self.array_to_string_fn(element_type);
+                if formatter != "haxe_array_to_string" {
+                    let ptr_string = IrType::Ptr(Box::new(IrType::String));
+                    let to_string_id = self.get_or_register_extern_function(
+                        formatter,
+                        vec![IrType::Ptr(Box::new(IrType::Void))],
+                        ptr_string.clone(),
+                    );
+                    let text = self.builder.build_call_direct(
+                        to_string_id,
+                        vec![arg_reg],
+                        ptr_string.clone(),
+                    )?;
+                    let trace_id = self.get_or_register_extern_function(
+                        "haxe_trace_string_struct",
+                        vec![ptr_string.clone()],
+                        IrType::Void,
+                    );
+                    return self
+                        .builder
+                        .build_call_direct(trace_id, vec![text], IrType::Void);
+                }
                 let trace_array_id = self.get_or_register_extern_function(
                     "haxe_trace_array",
                     vec![IrType::Ptr(Box::new(IrType::Void))],
@@ -667,8 +695,12 @@ impl<'a> HirToMirContext<'a> {
 
             if is_array {
                 let arg_reg = self.lower_expression(arg)?;
+                let element_type = match hir_type_kind.as_ref() {
+                    Some(TypeKind::Array { element_type }) => *element_type,
+                    _ => self.type_table.dynamic_type(),
+                };
                 let conv_fn = self.get_or_register_extern_function(
-                    "haxe_array_to_string",
+                    self.array_to_string_fn(element_type),
                     vec![IrType::Ptr(Box::new(IrType::Void))],
                     IrType::Ptr(Box::new(IrType::String)),
                 );

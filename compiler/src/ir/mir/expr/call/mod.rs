@@ -801,12 +801,12 @@ impl<'a> HirToMirContext<'a> {
                         let class_type_args = {
                             let type_table = self.type_table;
                             if let Some(receiver_info) = type_table.get(receiver_type) {
-                                if let crate::tast::TypeKind::Class { type_args, .. } =
-                                    &receiver_info.kind
-                                {
-                                    type_args.clone()
-                                } else {
-                                    Vec::new()
+                                match &receiver_info.kind {
+                                    crate::tast::TypeKind::Class { type_args, .. }
+                                    | crate::tast::TypeKind::Abstract { type_args, .. } => {
+                                        type_args.clone()
+                                    }
+                                    _ => Vec::new(),
                                 }
                             } else {
                                 Vec::new()

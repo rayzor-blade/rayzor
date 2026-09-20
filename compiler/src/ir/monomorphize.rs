@@ -725,6 +725,7 @@ impl Monomorphizer {
                     if let IrInstruction::CallDirect {
                         func_id: callee_id,
                         type_args,
+                        args,
                         ..
                     } = inst
                     {
@@ -742,10 +743,28 @@ impl Monomorphizer {
                             .get(callee_id)
                             .map_or(false, |f| !f.signature.type_params.is_empty());
                         if funcs_with_fixups.contains(callee_id) || callee_is_generic {
-                            // Specialize this callee with our substitution map
                             if let Some(callee) = module.functions.get(callee_id).cloned() {
+                                // A callee with its OWN type parameters
+                                // (`StringBuf.add<T>`) binds them from the
+                                // arguments it is handed; the caller's `T` is
+                                // another type that happens to share the name.
+                                let own_map = if callee_is_generic {
+                                    self.extract_generic_call(inst, &[*callee_id], &func, module)
+                                        .map(|(_, type_args)| {
+                                            callee
+                                                .signature
+                                                .type_params
+                                                .iter()
+                                                .map(|tp| tp.name.clone())
+                                                .zip(type_args)
+                                                .collect::<BTreeMap<String, IrType>>()
+                                        })
+                                } else {
+                                    None
+                                };
+                                let callee_map = own_map.as_ref().unwrap_or(&sub_map);
                                 let (new_id, is_new) =
-                                    self.instantiate_with_sub_map(&callee, &sub_map);
+                                    self.instantiate_with_sub_map(&callee, callee_map);
                                 rewrites.push((*block_id, inst_idx, new_id));
                                 // Only insert newly created functions into the module
                                 if is_new {
@@ -882,7 +901,7 @@ impl Monomorphizer {
         module: &mut IrModule,
         requests: &BTreeMap<MonoKey, Vec<CallSiteLocation>>,
     ) {
-        let mut param_tys: BTreeMap<IrFunctionId, Vec<IrType>> = BTreeMap::new();
+        let mut param_tys: BTreeMap<IrFunctionId, (Vec<IrType>, IrType)> = BTreeMap::new();
         let mut by_block: BTreeMap<(IrFunctionId, IrBlockId), Vec<(usize, IrFunctionId)>> =
             BTreeMap::new();
         for (key, locations) in requests {
@@ -892,11 +911,14 @@ impl Monomorphizer {
             };
             if let Some(f) = module.functions.get(&specialized_id) {
                 param_tys.entry(specialized_id).or_insert_with(|| {
-                    f.signature
-                        .parameters
-                        .iter()
-                        .map(|p| p.ty.clone())
-                        .collect()
+                    (
+                        f.signature
+                            .parameters
+                            .iter()
+                            .map(|p| p.ty.clone())
+                            .collect(),
+                        f.signature.return_type.clone(),
+                    )
                 });
             }
             for loc in locations {
@@ -920,7 +942,7 @@ impl Monomorphizer {
                 next = next.max(reg.0 + 1);
             }
             for (index, specialized_id) in sites {
-                let ptys = match param_tys.get(&specialized_id) {
+                let (ptys, ret_ty) = match param_tys.get(&specialized_id) {
                     Some(p) => p,
                     None => continue,
                 };
@@ -978,17 +1000,31 @@ impl Monomorphizer {
                     Some(b) => b,
                     None => continue,
                 };
+                let mut retyped: Option<IrId> = None;
                 if let Some(IrInstruction::CallDirect {
                     func_id: callee,
                     type_args,
                     args,
+                    dest,
                     ..
                 }) = block.instructions.get_mut(index)
                 {
                     *callee = specialized_id;
                     type_args.clear();
                     *args = new_args;
+                    retyped = *dest;
                     self.stats.call_sites_rewritten += 1;
+                }
+                // The result register was typed for the erased callee (an i64
+                // slot); the instance returns its concrete type, and the
+                // backend widens or reinterprets from the recorded type.
+                if let Some(dest) = retyped {
+                    if *ret_ty != IrType::Void {
+                        func.register_types.insert(dest, ret_ty.clone());
+                        if let Some(local) = func.locals.get_mut(&dest) {
+                            local.ty = ret_ty.clone();
+                        }
+                    }
                 }
                 for (k, inst) in coercions.into_iter().enumerate() {
                     block.instructions.insert(index + k, inst);

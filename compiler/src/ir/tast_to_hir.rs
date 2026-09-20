@@ -5524,16 +5524,30 @@ impl<'a> TastToHirContext<'a> {
     ) -> Option<HirExpr> {
         use crate::tast::core::TypeKind;
         let current_file = self.current_file?;
-        let (symbol_id, underlying) = {
+        let (symbol_id, underlying, type_args) = {
             let table = self.type_table.borrow();
             match table.get(class_type).map(|t| &t.kind) {
                 Some(TypeKind::Abstract {
                     symbol_id,
                     underlying,
-                    ..
-                }) => (*symbol_id, *underlying),
+                    type_args,
+                }) => (*symbol_id, *underlying, type_args.clone()),
                 _ => return None,
             }
+        };
+        // The instance's arguments, so `new Vector<Int>(n)` specializes the
+        // constructor for Int rather than for the erased slot it is handed.
+        let type_args: Vec<TypeId> = {
+            let table = self.type_table.borrow();
+            type_args
+                .into_iter()
+                .filter(|t| {
+                    !matches!(
+                        table.get(*t).map(|i| &i.kind),
+                        Some(TypeKind::TypeParameter { .. })
+                    )
+                })
+                .collect()
         };
         // This file's abstract, else an imported one through the shared
         // symbol table: `new_<arity>` names an overload, `new` the first.
@@ -5604,7 +5618,7 @@ impl<'a> TastToHirContext<'a> {
                     self.current_lifetime,
                     location,
                 )),
-                type_args: Vec::new(),
+                type_args,
                 args,
                 is_method: true,
             },
@@ -6031,10 +6045,16 @@ impl<'a> TastToHirContext<'a> {
             // If it's a variable reference, check if it's a parameter
             TypedExpressionKind::Variable { symbol_id, .. } => {
                 if let Some(replacement) = param_map.get(symbol_id) {
-                    // println!("DEBUG inline_expression_deep: Substituting variable {:?} with: {:?}", symbol_id, replacement);
                     replacement.clone()
+                } else if self
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .is_some_and(|s| self.string_interner.get(s.name) == Some("this"))
+                {
+                    // An implicit receiver the typer spelled as the `this`
+                    // variable (a bare `get(0)` inside the abstract).
+                    this_replacement.clone()
                 } else {
-                    // println!("DEBUG inline_expression_deep: Variable {:?} not in param_map, lowering normally", symbol_id);
                     // Not a parameter, lower normally
                     self.lower_expression(expr)
                 }

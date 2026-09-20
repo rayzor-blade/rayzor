@@ -135,7 +135,8 @@ impl<'a> HirToMirContext<'a> {
                     .get(rt)
                     .map(|t| match &t.kind {
                         TypeKind::GenericInstance { type_args, .. }
-                        | TypeKind::Class { type_args, .. } => !type_args.is_empty(),
+                        | TypeKind::Class { type_args, .. }
+                        | TypeKind::Abstract { type_args, .. } => !type_args.is_empty(),
                         _ => false,
                     })
                     .unwrap_or(false)
@@ -223,7 +224,8 @@ impl<'a> HirToMirContext<'a> {
                             .get(receiver_type)
                             .and_then(|t| match &t.kind {
                                 TypeKind::GenericInstance { type_args, .. }
-                                | TypeKind::Class { type_args, .. } => {
+                                | TypeKind::Class { type_args, .. }
+                                | TypeKind::Abstract { type_args, .. } => {
                                     if type_args.is_empty() {
                                         None
                                     } else {

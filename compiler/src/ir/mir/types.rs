@@ -688,6 +688,24 @@ impl<'a> HirToMirContext<'a> {
         self.normalize_dynamic_args_for_erased_formals(func_id, arg_regs, arg_types, skip_first);
     }
 
+    /// The array formatter for a statically known element type; the untyped
+    /// one guesses what each raw slot holds and reads a zero as `null`.
+    pub(crate) fn array_to_string_fn(&self, element_type: TypeId) -> &'static str {
+        let mut ty = element_type;
+        for _ in 0..4 {
+            match self.type_table.get(ty).map(|t| &t.kind) {
+                Some(crate::tast::TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                _ => break,
+            }
+        }
+        match self.type_table.get(ty).map(|t| &t.kind) {
+            Some(crate::tast::TypeKind::Int) => "haxe_array_to_string_i64",
+            Some(crate::tast::TypeKind::Bool) => "haxe_array_to_string_bool",
+            Some(crate::tast::TypeKind::Float) => "haxe_array_to_string_f64",
+            _ => "haxe_array_to_string",
+        }
+    }
+
     /// Like convert_type but returns TypeVar for TypeParameter types that match
     /// a known type param name. This preserves generic type info in function signatures
     /// so the monomorphizer can specialize them.
@@ -756,15 +774,7 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             if let Some(TypeKind::Array { element_type }) = type_kind.as_ref() {
-                // The untyped formatter guesses what a raw slot holds and
-                // reads 0 as `null`, so `[0, 2, 4]` printed `[null, 2, 4]`.
-                // A statically known element type leaves nothing to guess.
-                let runtime_name = match self.type_table.get(*element_type).map(|t| &t.kind) {
-                    Some(TypeKind::Int) => "haxe_array_to_string_i64",
-                    Some(TypeKind::Bool) => "haxe_array_to_string_bool",
-                    Some(TypeKind::Float) => "haxe_array_to_string_f64",
-                    _ => "haxe_array_to_string",
-                };
+                let runtime_name = self.array_to_string_fn(*element_type);
                 let func_id = self.get_or_register_extern_function(
                     runtime_name,
                     vec![IrType::Ptr(Box::new(IrType::Void))],
