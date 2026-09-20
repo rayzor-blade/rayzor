@@ -87,7 +87,7 @@ impl<'a> AstLowering<'a> {
     /// ends at the first class from another module -- one hop resolves and the
     /// grandparent does not. The signature index records `extends` by name for
     /// every file it has seen, which is what crosses that boundary.
-    fn parent_class_symbol(&self, class_symbol: SymbolId) -> Option<SymbolId> {
+    pub(crate) fn parent_class_symbol(&self, class_symbol: SymbolId) -> Option<SymbolId> {
         if let Some(&parent) = self.class_parents.get(&class_symbol) {
             return Some(parent);
         }
@@ -294,8 +294,20 @@ impl<'a> AstLowering<'a> {
         // Try to resolve method from receiver's type
         match &receiver.kind {
             TypedExpressionKind::This { this_type } => {
-                let _ = this_type;
-                if let Some(class_symbol) = self.context.class_context_stack.last() {
+                // In an abstract over a built-in (`Rest<T>` over an array)
+                // `this.toString()` is the built-in's method, not the
+                // abstract's own; over a class the abstract's methods keep
+                // answering first, as the runtime-mapped Map relies on.
+                let over_builtin = self
+                    .context
+                    .class_context_stack
+                    .last()
+                    .and_then(|s| self.context.symbol_table.get_symbol(*s))
+                    .is_some_and(|s| s.kind == crate::tast::symbols::SymbolKind::Abstract)
+                    && self.resolve_type_to_class_symbol(*this_type).is_none();
+                if over_builtin {
+                    // Fall through to the receiver-type fallbacks below.
+                } else if let Some(class_symbol) = self.context.class_context_stack.last() {
                     if let Some(methods) = self.class_methods.get(class_symbol) {
                         if let Some((_, method_symbol, _)) =
                             methods.iter().find(|(name, _, _)| *name == method_name)
@@ -2097,7 +2109,10 @@ impl<'a> AstLowering<'a> {
                     }
                 }
                 // Regular function call
-                let mut func_expr = self.lower_expression(expr)?;
+                self.lowering_callee = true;
+                let func_expr = self.lower_expression(expr);
+                self.lowering_callee = false;
+                let mut func_expr = func_expr?;
 
                 // Check if this is an enum constructor call and instantiate its type
                 if let TypedExpressionKind::Variable { symbol_id } = &func_expr.kind {
@@ -3239,7 +3254,33 @@ impl<'a> AstLowering<'a> {
     /// Pack the arguments past the fixed formals into the `haxe.Rest<T>`
     /// array the last formal takes. A spread argument, already a Rest, and a
     /// call with too few arguments are left alone.
-    fn pack_rest_args(
+    /// Both types are primitives (Bool/Int/Float/String) and no Haxe
+    /// conversion joins them.
+    fn primitive_mismatch(&self, arg: TypeId, formal: TypeId) -> bool {
+        let shape = |mut ty: TypeId| -> Option<u8> {
+            let tt = self.context.type_table.borrow();
+            for _ in 0..4 {
+                match tt.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Bool) => Some(0),
+                Some(TypeKind::Int) => Some(1),
+                Some(TypeKind::Float) => Some(2),
+                Some(TypeKind::String) => Some(3),
+                _ => None,
+            }
+        };
+        match (shape(arg), shape(formal)) {
+            (Some(a), Some(f)) => a != f && !(a == 1 && f == 2),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn pack_rest_args(
         &mut self,
         mut args: Vec<TypedExpression>,
         formals: Option<&[TypeId]>,
@@ -3255,6 +3296,27 @@ impl<'a> AstLowering<'a> {
             return args;
         };
         let fixed = formals.len() - 1;
+        let location = self.context.create_location_from_span(call.span);
+        // An argument of another primitive type skips an optional scalar
+        // formal (`foo("x")` on `?b:Bool, ...rest:String`): a Haxe program
+        // that typechecks has no other reading of the mismatch.
+        let mut i = 0;
+        while i < fixed && i < args.len() {
+            if self.primitive_mismatch(args[i].expr_type, formals[i]) {
+                args.insert(
+                    i,
+                    TypedExpression {
+                        kind: TypedExpressionKind::Null,
+                        expr_type: self.context.type_table.borrow().dynamic_type(),
+                        usage: VariableUsage::Copy,
+                        lifetime_id: crate::tast::LifetimeId::first(),
+                        source_location: location.clone(),
+                        metadata: ExpressionMetadata::default(),
+                    },
+                );
+            }
+            i += 1;
+        }
         if args.len() < fixed {
             return args;
         }
@@ -3263,7 +3325,6 @@ impl<'a> AstLowering<'a> {
         }
         let tail = args.split_off(fixed);
         let array_ty = self.context.type_table.borrow_mut().create_array_type(elem);
-        let location = self.context.create_location_from_span(call.span);
         let literal = TypedExpression {
             expr_type: array_ty,
             kind: TypedExpressionKind::ArrayLiteral { elements: tail },
@@ -3488,6 +3549,21 @@ impl<'a> AstLowering<'a> {
                 },
             )),
         }
+    }
+
+    /// The declared parameter types of a class's constructor.
+    pub(crate) fn constructor_param_types(&self, class_type: TypeId) -> Option<Vec<TypeId>> {
+        let class_symbol = self.resolve_type_to_class_symbol(class_type)?;
+        let ctor = self
+            .class_constructor_symbols
+            .get(&class_symbol)
+            .copied()
+            .or_else(|| {
+                self.context
+                    .symbol_table
+                    .get_class_constructor(class_symbol)
+            })?;
+        self.function_param_types_from_symbol(ctor)
     }
 
     pub(crate) fn function_param_types_from_symbol(&self, sym_id: SymbolId) -> Option<Vec<TypeId>> {

@@ -461,6 +461,13 @@ impl<'a> AstLowering<'a> {
         callee: &Expr,
     ) -> Option<Vec<TypeId>> {
         match &callee.kind {
+            // `super(...)`: the parent's constructor.
+            ExprKind::Super => {
+                let class_sym = *self.context.class_context_stack.last()?;
+                let parent = self.parent_class_symbol(class_sym)?;
+                let parent_ty = self.context.symbol_table.get_symbol(parent)?.type_id;
+                self.constructor_param_types(parent_ty)
+            }
             ExprKind::Ident(name) => {
                 let name_interned = self.context.string_interner.intern(name);
                 // Direct scope lookup first: free functions and locals/params

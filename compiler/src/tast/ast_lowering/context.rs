@@ -55,6 +55,7 @@ impl<'a> AstLowering<'a> {
             pending_usings: Vec::new(),
             // (class_fields will be seeded below if global_class_fields provided)
             in_static_method: false,
+            lowering_callee: false,
             class_type_params: BTreeMap::new(),
             class_constructor_symbols: BTreeMap::new(),
             inferred_param_types: BTreeMap::new(),

@@ -1004,6 +1004,9 @@ pub struct AstLowering<'a> {
     pub pending_usings: Vec<String>,
     /// Whether we're currently lowering a static method body (no `this` available)
     in_static_method: bool,
+    /// Set while a call's callee expression lowers: a bare method name there
+    /// stays a direct binding rather than a bound closure value.
+    lowering_callee: bool,
     /// Ordered type parameter TypeIds for each generic class (class_symbol → [TypeParam TypeIds])
     class_type_params: BTreeMap<SymbolId, Vec<TypeId>>,
     /// Constructor symbol for each class (class_symbol → constructor SymbolId)

@@ -264,10 +264,35 @@ impl<'a> AstLowering<'a> {
             });
         }
 
-        // Body: return f(bound_args..., unbound_args...). A bare instance
-        // method of the enclosing class (`tryOverflow.bind(a)`) is called on
-        // `this`, spelled out so the lambda captures it like any other call.
-        let implicit_this_method = match &receiver.kind {
+        // Body: return f(bound_args..., unbound_args...). A method value
+        // (`tryOverflow.bind(a)`, `this.m.bind(a)`, `o.m.bind(a)`) is called
+        // on its receiver, spelled out so the lambda captures it like any
+        // other call; a bare name means `this`.
+        // `this` is spelled as the variable so the lambda captures it.
+        let this_var = |this_: &mut Self| {
+            let this_name = this_.context.intern_string("this");
+            let this_symbol = this_
+                .resolve_symbol_in_scope_hierarchy(this_name)
+                .unwrap_or_else(|| this_.context.symbol_table.create_variable(this_name));
+            let this_type = this_
+                .context
+                .class_context_stack
+                .last()
+                .and_then(|cs| this_.context.symbol_table.get_symbol(*cs))
+                .map(|s| s.type_id)
+                .unwrap_or_else(|| this_.context.type_table.borrow().dynamic_type());
+            TypedExpression {
+                expr_type: this_type,
+                kind: TypedExpressionKind::Variable {
+                    symbol_id: this_symbol,
+                },
+                usage: VariableUsage::Copy,
+                lifetime_id: crate::tast::LifetimeId::default(),
+                source_location: location,
+                metadata: ExpressionMetadata::default(),
+            }
+        };
+        let bound_method = match &receiver.kind {
             TypedExpressionKind::Variable { symbol_id } => self
                 .context
                 .class_context_stack
@@ -278,32 +303,25 @@ impl<'a> AstLowering<'a> {
                         .iter()
                         .find(|(_, sym, is_static)| sym == symbol_id && !is_static)
                         .map(|(_, sym, _)| *sym)
-                }),
+                })
+                .map(|method_symbol| (this_var(self), method_symbol)),
+            TypedExpressionKind::MethodReference {
+                receiver: method_receiver,
+                method_symbol,
+            } => {
+                let receiver_expr =
+                    if matches!(method_receiver.kind, TypedExpressionKind::This { .. }) {
+                        this_var(self)
+                    } else {
+                        (**method_receiver).clone()
+                    };
+                Some((receiver_expr, *method_symbol))
+            }
             _ => None,
         };
-        let call_kind = if let Some(method_symbol) = implicit_this_method {
-            let this_name = self.context.intern_string("this");
-            let this_symbol = self
-                .resolve_symbol_in_scope_hierarchy(this_name)
-                .unwrap_or_else(|| self.context.symbol_table.create_variable(this_name));
-            let this_type = self
-                .context
-                .class_context_stack
-                .last()
-                .and_then(|cs| self.context.symbol_table.get_symbol(*cs))
-                .map(|s| s.type_id)
-                .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+        let call_kind = if let Some((receiver_expr, method_symbol)) = bound_method {
             TypedExpressionKind::MethodCall {
-                receiver: Box::new(TypedExpression {
-                    expr_type: this_type,
-                    kind: TypedExpressionKind::Variable {
-                        symbol_id: this_symbol,
-                    },
-                    usage: VariableUsage::Copy,
-                    lifetime_id: crate::tast::LifetimeId::default(),
-                    source_location: location,
-                    metadata: ExpressionMetadata::default(),
-                }),
+                receiver: Box::new(receiver_expr),
                 method_symbol,
                 arguments: call_args,
                 type_arguments: Vec::new(),

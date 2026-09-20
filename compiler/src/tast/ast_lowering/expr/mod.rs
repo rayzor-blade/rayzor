@@ -603,6 +603,35 @@ impl<'a> AstLowering<'a> {
                         false
                     };
 
+                // An instance method named bare as a VALUE (`fn = inst`) is
+                // `this.inst`: the closure must carry its receiver. A call's
+                // callee keeps its own binding.
+                let is_instance_method = !self.lowering_callee
+                    && self
+                        .context
+                        .class_context_stack
+                        .last()
+                        .and_then(|class_symbol| self.class_methods.get(class_symbol))
+                        .is_some_and(|methods| {
+                            methods
+                                .iter()
+                                .any(|(_, sym, is_static)| *sym == symbol_id && !is_static)
+                        });
+                if is_instance_method && !self.in_static_method {
+                    let field_expr = Expr {
+                        kind: ExprKind::Field {
+                            expr: Box::new(Expr {
+                                kind: ExprKind::This,
+                                span: expression.span,
+                            }),
+                            field: name.clone(),
+                            is_optional: false,
+                        },
+                        span: expression.span,
+                    };
+                    return self.lower_expression(&field_expr);
+                }
+
                 if is_instance_field && !self.in_static_method {
                     // Create implicit `this` receiver for instance field access
                     // in non-static methods/constructors.
@@ -906,6 +935,8 @@ impl<'a> AstLowering<'a> {
                     .iter()
                     .map(|arg| self.lower_expression(arg))
                     .collect::<Result<Vec<_>, _>>()?;
+                let ctor_params = self.constructor_param_types(base_class_type_id);
+                let arg_exprs = self.pack_rest_args(arg_exprs, ctor_params.as_deref(), expression);
 
                 // Lower type arguments from params
                 let mut type_args = params
