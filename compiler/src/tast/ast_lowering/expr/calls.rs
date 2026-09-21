@@ -1157,27 +1157,80 @@ impl<'a> AstLowering<'a> {
             (p, a)
         };
 
-        let arg_exprs = args
-            .iter()
-            .enumerate()
-            .map(|(i, arg)| {
-                let hint = expected_param_types
-                    .as_ref()
-                    .and_then(|ps| ps.get(i).cloned())
-                    .flatten();
+        // A function literal bound for a formal written over the callee's
+        // type parameters (`sort<T>(a:Array<T>, cmp:T->T->Int)`) takes them
+        // as Haxe binds them from the other arguments, so the literal's body
+        // types on Int, not on an erased T. Those arguments lower first.
+        let is_literal = |e: &Expr| {
+            let mut e = e;
+            while let ExprKind::Paren(inner) = &e.kind {
+                e = inner;
+            }
+            matches!(e.kind, ExprKind::Function(_) | ExprKind::Arrow { .. })
+        };
+        let hint_has_type_params = |slf: &Self, hint: &Option<Vec<TypeId>>| {
+            hint.as_ref().is_some_and(|ps| {
+                let tt = slf.context.type_table.borrow();
+                ps.iter().any(|p| slf.type_mentions_type_param(&tt, *p))
+            })
+        };
+        let mut generic_literal_positions: Vec<usize> = Vec::new();
+        if let Some(ps) = &expected_param_types {
+            for (i, arg) in args.iter().enumerate() {
+                let hint = ps.get(i).cloned().flatten();
+                if is_literal(arg) && hint_has_type_params(self, &hint) {
+                    generic_literal_positions.push(i);
+                }
+            }
+        }
+        let mut lowered: Vec<Option<TypedExpression>> = vec![None; args.len()];
+        let mut lower_arg =
+            |slf: &mut Self, i: usize, hint: Option<Vec<TypeId>>| -> Result<TypedExpression, _> {
                 let arg_type_hint = expected_arg_types
                     .as_ref()
                     .and_then(|ts| ts.get(i).copied());
-                self.expected_lambda_params_stack.push(hint);
-                self.expected_arg_type_stack.push(arg_type_hint);
-                let result = self
-                    .lower_value_expression(arg)
-                    .map(|typed| self.instantiate_function_reference(typed, arg_type_hint));
-                self.expected_arg_type_stack.pop();
-                self.expected_lambda_params_stack.pop();
+                slf.expected_lambda_params_stack.push(hint);
+                slf.expected_arg_type_stack.push(arg_type_hint);
+                let result = slf
+                    .lower_value_expression(&args[i])
+                    .map(|typed| slf.instantiate_function_reference(typed, arg_type_hint));
+                slf.expected_arg_type_stack.pop();
+                slf.expected_lambda_params_stack.pop();
                 result
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            };
+        for i in 0..args.len() {
+            if generic_literal_positions.contains(&i) {
+                continue;
+            }
+            let hint = expected_param_types
+                .as_ref()
+                .and_then(|ps| ps.get(i).cloned())
+                .flatten();
+            lowered[i] = Some(lower_arg(self, i, hint)?);
+        }
+        if !generic_literal_positions.is_empty() {
+            let mut bindings: BTreeMap<SymbolId, TypeId> = BTreeMap::new();
+            if let Some(formals) = &expected_arg_types {
+                for (i, typed) in lowered.iter().enumerate() {
+                    if let (Some(formal), Some(typed)) = (formals.get(i), typed) {
+                        self.bind_type_params(*formal, typed.expr_type, &mut bindings);
+                    }
+                }
+            }
+            for &i in &generic_literal_positions {
+                let hint = expected_param_types
+                    .as_ref()
+                    .and_then(|ps| ps.get(i).cloned())
+                    .flatten()
+                    .map(|ps| {
+                        ps.into_iter()
+                            .map(|p| self.substitute_bound_type_params(p, &bindings))
+                            .collect::<Vec<_>>()
+                    });
+                lowered[i] = Some(lower_arg(self, i, hint)?);
+            }
+        }
+        let arg_exprs: Vec<TypedExpression> = lowered.into_iter().flatten().collect();
 
         // Trailing arguments bound for a `...rest` parameter travel as one
         // `haxe.Rest<T>` array; a spread argument already is one.
@@ -3316,6 +3369,143 @@ impl<'a> AstLowering<'a> {
         match (shape(arg), shape(formal)) {
             (Some(a), Some(f)) => a != f && !(a == 1 && f == 2),
             _ => false,
+        }
+    }
+
+    /// Whether a type is, or is built over, a type parameter.
+    pub(crate) fn type_mentions_type_param(&self, tt: &crate::tast::TypeTable, ty: TypeId) -> bool {
+        match tt.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::TypeParameter { .. }) => true,
+            Some(TypeKind::Array { element_type }) => {
+                self.type_mentions_type_param(tt, *element_type)
+            }
+            Some(TypeKind::Optional { inner_type }) => {
+                self.type_mentions_type_param(tt, *inner_type)
+            }
+            Some(TypeKind::Function {
+                params,
+                return_type,
+                ..
+            }) => {
+                params.iter().any(|p| self.type_mentions_type_param(tt, *p))
+                    || self.type_mentions_type_param(tt, *return_type)
+            }
+            Some(TypeKind::Class { type_args, .. })
+            | Some(TypeKind::Interface { type_args, .. })
+            | Some(TypeKind::Abstract { type_args, .. })
+            | Some(TypeKind::GenericInstance { type_args, .. }) => type_args
+                .iter()
+                .any(|a| self.type_mentions_type_param(tt, *a)),
+            _ => false,
+        }
+    }
+
+    /// Bind the type parameters a formal mentions to what the actual argument
+    /// has in their place: a bare `T` to the argument's type, `Array<T>` to
+    /// the element type, a generic's arguments position by position.
+    pub(crate) fn bind_type_params(
+        &self,
+        formal: TypeId,
+        actual: TypeId,
+        out: &mut BTreeMap<SymbolId, TypeId>,
+    ) {
+        let tt = self.context.type_table.borrow();
+        let mut work = vec![(formal, actual)];
+        while let Some((f, a)) = work.pop() {
+            match (tt.get(f).map(|t| &t.kind), tt.get(a).map(|t| &t.kind)) {
+                (Some(TypeKind::TypeParameter { symbol_id, .. }), Some(kind)) => {
+                    let concrete = !matches!(
+                        kind,
+                        TypeKind::Dynamic
+                            | TypeKind::Unknown
+                            | TypeKind::TypeParameter { .. }
+                            | TypeKind::Placeholder { .. }
+                    );
+                    if concrete {
+                        out.entry(*symbol_id).or_insert(a);
+                    }
+                }
+                (
+                    Some(TypeKind::Array { element_type: fe }),
+                    Some(TypeKind::Array { element_type: ae }),
+                ) => work.push((*fe, *ae)),
+                (
+                    Some(TypeKind::Optional { inner_type: fi }),
+                    Some(TypeKind::Optional { inner_type: ai }),
+                ) => work.push((*fi, *ai)),
+                (
+                    Some(TypeKind::Class { type_args: fa, .. }),
+                    Some(TypeKind::Class { type_args: aa, .. }),
+                )
+                | (
+                    Some(TypeKind::Abstract { type_args: fa, .. }),
+                    Some(TypeKind::Abstract { type_args: aa, .. }),
+                )
+                | (
+                    Some(TypeKind::GenericInstance { type_args: fa, .. }),
+                    Some(TypeKind::GenericInstance { type_args: aa, .. }),
+                ) => work.extend(fa.iter().copied().zip(aa.iter().copied())),
+                _ => {}
+            }
+        }
+    }
+
+    /// `ty` with every bound type parameter replaced. Arrays, optionals and
+    /// function types are rebuilt; a generic's arguments are left as they are.
+    pub(crate) fn substitute_bound_type_params(
+        &self,
+        ty: TypeId,
+        bindings: &BTreeMap<SymbolId, TypeId>,
+    ) -> TypeId {
+        if bindings.is_empty() {
+            return ty;
+        }
+        let kind = self
+            .context
+            .type_table
+            .borrow()
+            .get(ty)
+            .map(|t| t.kind.clone());
+        match kind {
+            Some(TypeKind::TypeParameter { symbol_id, .. }) => {
+                bindings.get(&symbol_id).copied().unwrap_or(ty)
+            }
+            Some(TypeKind::Array { element_type }) => {
+                let e = self.substitute_bound_type_params(element_type, bindings);
+                if e == element_type {
+                    ty
+                } else {
+                    self.context.type_table.borrow_mut().create_array_type(e)
+                }
+            }
+            Some(TypeKind::Optional { inner_type }) => {
+                let i = self.substitute_bound_type_params(inner_type, bindings);
+                if i == inner_type {
+                    ty
+                } else {
+                    self.context.type_table.borrow_mut().create_optional_type(i)
+                }
+            }
+            Some(TypeKind::Function {
+                params,
+                return_type,
+                ..
+            }) => {
+                let new_params: Vec<TypeId> = params
+                    .iter()
+                    .map(|p| self.substitute_bound_type_params(*p, bindings))
+                    .collect();
+                let new_ret = self.substitute_bound_type_params(return_type, bindings);
+                if new_params == params && new_ret == return_type {
+                    ty
+                } else {
+                    self.context
+                        .type_table
+                        .borrow_mut()
+                        .create_function_type(new_params, new_ret)
+                }
+            }
+            _ => ty,
         }
     }
 

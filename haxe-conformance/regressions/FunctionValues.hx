@@ -30,7 +30,10 @@ class FunctionValues {
         check("dynamic string", describe(shout, "hey") + " " + describe(s -> s + "?", "hey"), "HEY! hey?");
         var hd:Dynamic = half;
         check("dynamic float", hd(5) + " " + hd(2.5), "2.5 1.25");
-        check("generic", applyT(compare, 5, 2) + " " + applyT((a:Int, b:Int) -> a - b, 5, 2), "3 3");
+        check("generic", applyT(compare, 5, 2) + " " + applyT((a, b) -> a - b, 5, 2) + " " + applyT((a, b) -> a.length - b.length, "hello", "hi"), "3 3 3");
+        var names = ["b", "a", "c"]; names.sort((x, y) -> x < y ? -1 : 1);
+        var names2 = ["b", "a", "c"]; haxe.ds.ArraySort.sort(names2, (x, y) -> x < y ? -1 : 1);
+        check("generic lambda over strings", names.join("") + names2.join(""), "abcabc");
         var f = compare;
         check("local", f(5, 2) + " " + apply(f, 5, 2) + " " + applyT(f, 5, 2), "3 3 3");
         var h = half, s = shout, o = isOdd;
