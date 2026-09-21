@@ -2056,6 +2056,17 @@ impl<'a> HirToMirContext<'a> {
             _ => return None,
         };
 
+        // A typedef of the receiver's type carries the instantiation in its
+        // target (`V<String>` = `Vector<String>`).
+        let mut receiver_type_id = receiver_type_id;
+        for _ in 0..4 {
+            match type_table.get(receiver_type_id).map(|t| &t.kind) {
+                Some(crate::tast::TypeKind::TypeAlias { target_type, .. }) => {
+                    receiver_type_id = *target_type
+                }
+                _ => break,
+            }
+        }
         let recv_info = type_table.get(receiver_type_id)?;
         let (class_symbol, concrete_args) = match &recv_info.kind {
             crate::tast::TypeKind::Class {

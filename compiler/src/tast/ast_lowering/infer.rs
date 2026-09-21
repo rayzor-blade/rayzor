@@ -603,9 +603,24 @@ impl<'a> AstLowering<'a> {
                 // instead of collapsing to Dynamic — a Dynamic-typed read
                 // boxes the extracted scalar (`cast i8 -> *void`) and poisons
                 // all downstream arithmetic typing.
+                // A typedef of the receiver's type (`V<T> = Vector<T>`) is
+                // its target, arguments included.
+                let receiver_ty = {
+                    let type_table = self.context.type_table.borrow();
+                    let mut t = array.expr_type;
+                    for _ in 0..4 {
+                        match type_table.get(t).map(|i| &i.kind) {
+                            Some(crate::tast::core::TypeKind::TypeAlias {
+                                target_type, ..
+                            }) => t = *target_type,
+                            _ => break,
+                        }
+                    }
+                    t
+                };
                 let accessor_sym = {
                     let type_table = self.context.type_table.borrow();
-                    match type_table.get(array.expr_type).map(|t| &t.kind) {
+                    match type_table.get(receiver_ty).map(|t| &t.kind) {
                         Some(crate::tast::core::TypeKind::Array { element_type }) => {
                             return Ok(*element_type);
                         }
@@ -651,9 +666,7 @@ impl<'a> AstLowering<'a> {
                 };
                 if let Some(class_sym) = accessor_sym {
                     if let Some(get_sym) = self.find_wrapper_get_method(class_sym) {
-                        if let Ok(ret) =
-                            self.infer_method_call_return_type(get_sym, array.expr_type)
-                        {
+                        if let Ok(ret) = self.infer_method_call_return_type(get_sym, receiver_ty) {
                             if ret.is_valid() {
                                 return Ok(ret);
                             }

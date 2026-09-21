@@ -231,6 +231,26 @@ impl<'a> AstLowering<'a> {
                         span,
                     };
                 }
+                parser::Pattern::Null => {
+                    condition = parser::Expr {
+                        kind: parser::ExprKind::Binary {
+                            left: Box::new(condition),
+                            op: parser::BinaryOp::And,
+                            right: Box::new(parser::Expr {
+                                kind: parser::ExprKind::Binary {
+                                    left: Box::new(at(index)),
+                                    op: parser::BinaryOp::Eq,
+                                    right: Box::new(parser::Expr {
+                                        kind: parser::ExprKind::Null,
+                                        span,
+                                    }),
+                                },
+                                span,
+                            }),
+                        },
+                        span,
+                    };
+                }
                 // A nested pattern needs a matcher of its own, which the
                 // length check alone cannot stand in for.
                 _ => return None,

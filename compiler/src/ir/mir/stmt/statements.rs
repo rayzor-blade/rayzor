@@ -852,21 +852,22 @@ impl<'a> HirToMirContext<'a> {
                             value
                         };
 
-                        let value = if let HirLValue::Variable(sym) = lhs {
-                            if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
-                                let target_ty = sym_info.type_id;
-                                if target_ty != TypeId::invalid() {
-                                    self.maybe_abstract_from_convert(value, rhs_ty, target_ty)
-                                        .or_else(|| {
-                                            self.maybe_abstract_to_convert(value, rhs_ty, target_ty)
-                                        })
-                                        .unwrap_or(value)
-                                } else {
-                                    value
-                                }
-                            } else {
-                                value
-                            }
+                        // A local or a field typed as an abstract takes the value
+                        // through its `@:from`/`@:to` conversions.
+                        let abstract_target = match lhs {
+                            HirLValue::Variable(sym) | HirLValue::Field { field: sym, .. } => self
+                                .symbol_table
+                                .get_symbol(*sym)
+                                .map(|s| s.type_id)
+                                .filter(|t| *t != TypeId::invalid()),
+                            _ => None,
+                        };
+                        let value = if let Some(target_ty) = abstract_target {
+                            self.maybe_abstract_from_convert(value, rhs_ty, target_ty)
+                                .or_else(|| {
+                                    self.maybe_abstract_to_convert(value, rhs_ty, target_ty)
+                                })
+                                .unwrap_or(value)
                         } else {
                             value
                         };

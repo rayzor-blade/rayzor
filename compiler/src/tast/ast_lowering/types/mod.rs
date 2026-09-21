@@ -224,11 +224,13 @@ impl<'a> AstLowering<'a> {
                                     return Ok(imap);
                                 }
                             }
-                            // A typedef of an array (`NativeRest<T> = Array<T>`)
-                            // or of an extern class (`VectorData<T> =
-                            // rayzor.Vec<T>`) is its target, so its methods
-                            // are the target's; other typedefs keep the class
-                            // kind their values are laid out with.
+                            // A typedef of an array (`NativeRest<T> = Array<T>`),
+                            // of an extern class (`VectorData<T> = rayzor.Vec<T>`)
+                            // or of an abstract (`V<T> = haxe.ds.Vector<T>`) is
+                            // its target with this use's arguments, so its
+                            // methods and constructor are the target's; other
+                            // typedefs keep the class kind their values are
+                            // laid out with.
                             let alias_target = {
                                 let tt = self.context.type_table.borrow();
                                 tt.types_for_symbol(symbol_id)
@@ -242,12 +244,11 @@ impl<'a> AstLowering<'a> {
                                         })
                                     })
                                     .filter(|target| match tt.get(*target).map(|t| &t.kind) {
-                                        Some(crate::tast::core::TypeKind::Array { .. }) => true,
+                                        Some(crate::tast::core::TypeKind::Array { .. })
+                                        | Some(crate::tast::core::TypeKind::Abstract { .. }) => {
+                                            true
+                                        }
                                         Some(crate::tast::core::TypeKind::Class {
-                                            symbol_id: target_sym,
-                                            ..
-                                        })
-                                        | Some(crate::tast::core::TypeKind::Abstract {
                                             symbol_id: target_sym,
                                             ..
                                         }) => self

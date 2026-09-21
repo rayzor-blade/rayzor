@@ -1070,9 +1070,13 @@ impl<'a> HirToMirContext<'a> {
                 .map(|t| self.convert_type(t))
                 .unwrap_or(IrType::I32);
             // The slot takes what an assignment would store: a `Null<Int>`
-            // field holds a box, not the raw scalar.
+            // field holds a box, not the raw scalar, and an abstract field
+            // its `@:from` conversion.
             let value_reg = field_type_id
                 .and_then(|t| self.maybe_box_value(value_reg, field_init.value.ty, t))
+                .unwrap_or(value_reg);
+            let value_reg = field_type_id
+                .and_then(|t| self.maybe_abstract_from_convert(value_reg, field_init.value.ty, t))
                 .unwrap_or(value_reg);
             if let Some(field_ptr) = self
                 .builder

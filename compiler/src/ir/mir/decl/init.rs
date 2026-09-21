@@ -122,6 +122,25 @@ impl<'a> HirToMirContext<'a> {
                 })
             });
 
+            // A static typed as an abstract with `@:from` conversions takes
+            // its initializer through them, as a local does.
+            let declared_ty = self.symbol_table.get_symbol(*symbol).map(|s| s.type_id);
+            let declared_abstract = declared_ty.is_some_and(|t| {
+                matches!(
+                    self.type_table.get(t).map(|ti| &ti.kind),
+                    Some(TypeKind::Abstract { .. })
+                ) && t != init_expr.ty
+            });
+            if let (Some(gid), true, Some(declared)) = (global_id, declared_abstract, declared_ty) {
+                if let Some(value) = self.lower_expression(init_expr) {
+                    let converted = self
+                        .maybe_abstract_from_convert(value, init_expr.ty, declared)
+                        .unwrap_or(value);
+                    self.builder.build_store_global(gid, converted);
+                }
+                continue;
+            }
+
             if let Some(gid) = global_id {
                 if let Some(cv) = const_val {
                     if let Some(val_reg) = self.builder.build_const(cv) {

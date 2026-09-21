@@ -5113,9 +5113,16 @@ impl<'a> TastToHirContext<'a> {
         operand_type: TypeId,
         operator: &UnaryOperator,
     ) -> Option<(SymbolId, SymbolId)> {
-        // Check if this type is an abstract type
+        // Check if this type is an abstract type, through any typedef.
         let type_table = self.type_table.borrow();
-        let type_info = type_table.get(operand_type)?;
+        let mut ty = operand_type;
+        for _ in 0..4 {
+            match type_table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                _ => break,
+            }
+        }
+        let type_info = type_table.get(ty)?;
         let abstract_symbol = match &type_info.kind {
             TypeKind::Abstract { symbol_id, .. } => *symbol_id,
             _ => return None, // Not an abstract type
@@ -5228,9 +5235,16 @@ impl<'a> TastToHirContext<'a> {
         operand_type: TypeId,
         method_name: &str,
     ) -> Option<(SymbolId, SymbolId)> {
-        // Check if this type is an abstract type
+        // Check if this type is an abstract type, through any typedef.
         let type_table = self.type_table.borrow();
-        let type_info = type_table.get(operand_type)?;
+        let mut ty = operand_type;
+        for _ in 0..4 {
+            match type_table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                _ => break,
+            }
+        }
+        let type_info = type_table.get(ty)?;
         let abstract_symbol = match &type_info.kind {
             TypeKind::Abstract { symbol_id, .. } => *symbol_id,
             _ => return None, // Not an abstract type
@@ -5526,7 +5540,16 @@ impl<'a> TastToHirContext<'a> {
         let current_file = self.current_file?;
         let (symbol_id, underlying, type_args) = {
             let table = self.type_table.borrow();
-            match table.get(class_type).map(|t| &t.kind) {
+            // `new VI(n)` through `typedef VI = Vector<Int>` is the abstract's
+            // constructor as much as `new Vector<Int>(n)` is.
+            let mut ty = class_type;
+            for _ in 0..4 {
+                match table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            match table.get(ty).map(|t| &t.kind) {
                 Some(TypeKind::Abstract {
                     symbol_id,
                     underlying,

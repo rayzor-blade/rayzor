@@ -81,7 +81,19 @@ impl<'a> HirToMirContext<'a> {
                 let global_id = self.builder.module.alloc_global_id();
 
                 let initializer = if let Some(ref init_expr) = field.init {
-                    let constant_init = self.try_evaluate_constant_init(init_expr);
+                    // A literal bound for an abstract of another type is not
+                    // a constant: it goes through the abstract's `@:from` in
+                    // __init__.
+                    let converts_at_init = matches!(
+                        self.type_table.get(field.ty).map(|t| &t.kind),
+                        Some(TypeKind::Abstract { .. })
+                    ) && init_expr.ty != field.ty
+                        && !self.is_int64_type(field.ty);
+                    let constant_init = if converts_at_init {
+                        None
+                    } else {
+                        self.try_evaluate_constant_init(init_expr)
+                    };
                     if constant_init.is_none() {
                         // Non-constant static field initializers must run through __init__
                         // so Haxe-style `static var x = new Foo()` works without manual setup.
