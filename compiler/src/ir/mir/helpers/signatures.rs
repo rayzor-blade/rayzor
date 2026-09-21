@@ -517,8 +517,9 @@ impl<'a> HirToMirContext<'a> {
 
     /// Check if an expression produces a value backed by an anon view, and if so,
     /// materialize it into a real AnonObject handle. Used at escape points (call args).
-    /// A known box typed Dynamic, converted for a formal that is not Dynamic:
-    /// an erased `T` takes the payload as slot bits, a concrete type unboxes.
+    /// A known box typed Dynamic, unboxed for a concrete formal. An erased
+    /// `T` keeps the box: a local generic reaches the monomorphizer, which
+    /// binds T to Dynamic and compares the boxes structurally.
     fn unbox_known_box_for_formal(
         &mut self,
         arg_reg: IrId,
@@ -532,17 +533,7 @@ impl<'a> HirToMirContext<'a> {
             return None;
         }
         match self.type_table.get(param_ty).map(|t| &t.kind) {
-            Some(TypeKind::Dynamic) | None => None,
-            Some(TypeKind::TypeParameter { .. }) => {
-                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                let f = self.get_or_register_extern_function(
-                    "haxe_dynamic_to_slot",
-                    vec![ptr_u8],
-                    IrType::I64,
-                );
-                self.builder
-                    .build_call_direct(f, vec![arg_reg], IrType::I64)
-            }
+            Some(TypeKind::Dynamic) | Some(TypeKind::TypeParameter { .. }) | None => None,
             _ => self
                 .maybe_unbox_value(arg_reg, arg_ty, param_ty)
                 .filter(|out| *out != arg_reg),

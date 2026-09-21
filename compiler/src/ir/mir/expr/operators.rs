@@ -769,7 +769,7 @@ impl<'a> HirToMirContext<'a> {
                     let marked_box = |ty: &Option<IrType>| matches!(ty, Some(IrType::Ptr(inner)) if **inner == IrType::Dynamic);
                     let boxed_operand = |slf: &Self, expr: &HirExpr, reg| {
                         let ty = slf.builder.get_register_type(reg);
-                        if marked_box(&ty) {
+                        if marked_box(&ty) || slf.boxed_value_regs.contains(&reg) {
                             return true;
                         }
                         match &expr.kind {
@@ -805,6 +805,59 @@ impl<'a> HirToMirContext<'a> {
                         }
                         let f = self.builder.build_const(IrValue::Bool(false))?;
                         return self.builder.build_cmp(CompareOp::Eq, eq, f);
+                    }
+
+                    // Two pointer-shaped Dynamic operands, neither known to be
+                    // a scalar: the runtime reads each as the box it is or the
+                    // raw slot it is, so a String concatenates, an Int stays an
+                    // Int and a decayed raw value is not dereferenced.
+                    if !is_concrete(lhs_reg) && !is_concrete(rhs_reg) {
+                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                        let as_ptr = |slf: &mut Self, reg: IrId| -> Option<IrId> {
+                            match slf.builder.get_register_type(reg) {
+                                Some(IrType::Ptr(inner)) if *inner == IrType::U8 => Some(reg),
+                                Some(other) => slf.builder.build_cast(reg, other, ptr_u8.clone()),
+                                None => Some(reg),
+                            }
+                        };
+                        let l = as_ptr(self, lhs_reg)?;
+                        let r = as_ptr(self, rhs_reg)?;
+                        let arith = match op {
+                            HirBinaryOp::Add => Some(0),
+                            HirBinaryOp::Sub => Some(1),
+                            HirBinaryOp::Mul => Some(2),
+                            HirBinaryOp::Div => Some(3),
+                            HirBinaryOp::Mod => Some(4),
+                            _ => None,
+                        };
+                        if let Some(code) = arith {
+                            let f = self.get_or_register_extern_function(
+                                "haxe_dynamic_arith",
+                                vec![IrType::I32, ptr_u8.clone(), ptr_u8.clone()],
+                                ptr_u8.clone(),
+                            );
+                            let code = self.builder.build_const(IrValue::I32(code))?;
+                            let out =
+                                self.builder
+                                    .build_call_direct(f, vec![code, l, r], ptr_u8)?;
+                            self.boxed_value_regs.insert(out);
+                            return Some(out);
+                        }
+                        let cmp_op = match op {
+                            HirBinaryOp::Lt => CompareOp::Lt,
+                            HirBinaryOp::Le => CompareOp::Le,
+                            HirBinaryOp::Gt => CompareOp::Gt,
+                            HirBinaryOp::Ge => CompareOp::Ge,
+                            _ => unreachable!(),
+                        };
+                        let f = self.get_or_register_extern_function(
+                            "haxe_dynamic_order",
+                            vec![ptr_u8.clone(), ptr_u8],
+                            IrType::I32,
+                        );
+                        let order = self.builder.build_call_direct(f, vec![l, r], IrType::I32)?;
+                        let zero = self.builder.build_const(IrValue::I32(0))?;
+                        return self.builder.build_cmp(cmp_op, order, zero);
                     }
 
                     if lhs_boxed && rhs_boxed {

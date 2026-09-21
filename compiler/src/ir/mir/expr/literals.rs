@@ -766,15 +766,6 @@ impl<'a> HirToMirContext<'a> {
 
         let total_field_count = named_fields.len();
 
-        // Build shape key as comma-joined sorted field names
-        let shape_key: String = named_fields
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-
-        let shape_id = Self::anon_shape_id(&shape_key);
-
         // Build shape descriptor string: "name1:type_id1,name2:type_id2,..."
         // Type IDs: 0=Void, 1=Null, 2=Bool, 3=Int, 4=Float, 5=String
         let descriptor = {
@@ -791,6 +782,7 @@ impl<'a> HirToMirContext<'a> {
             }
             parts.join(",")
         };
+        let shape_id = Self::anon_shape_id(&descriptor);
 
         // Register rayzor_ensure_shape extern: (shape_id: u32, descriptor: HaxeString*) -> void
         let ensure_shape_id = self.get_or_register_extern_function(

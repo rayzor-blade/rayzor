@@ -149,12 +149,13 @@ impl<'a> HirToMirContext<'a> {
         Some(Self::fnv1a_class_type_id(&key))
     }
 
-    /// The runtime shape id of an anonymous structure, from its sorted field
-    /// names. Hashed rather than counted so every module -- and every cached
-    /// artifact -- names one shape by one id; a counter restarts per module,
-    /// and the runtime keeps the first descriptor registered under an id.
-    /// Biased above the ids the runtime allocates itself and below
-    /// `DYNAMIC_SHAPE` (`u32::MAX`).
+    /// The runtime shape id of an anonymous structure, from its descriptor
+    /// (sorted field names with their runtime types). Hashed rather than
+    /// counted so every module -- and every cached artifact -- names one
+    /// shape by one id; a counter restarts per module, and the runtime keeps
+    /// the first descriptor registered under an id, so `{n: 5}` and
+    /// `{n: true}` must not share one. Biased above the ids the runtime
+    /// allocates itself and below `DYNAMIC_SHAPE` (`u32::MAX`).
     pub(crate) fn anon_shape_id(shape_key: &str) -> u32 {
         let mut hash: u32 = 0x811c9dc5;
         for b in shape_key.as_bytes() {

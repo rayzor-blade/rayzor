@@ -45,6 +45,20 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn lower_variable_expr(&mut self, expr: &HirExpr) -> Option<IrId> {
+        let reg = self.lower_variable_expr_inner(expr)?;
+        // A read of a binding tracked as a box yields a register known to
+        // hold one, whatever slot it was reloaded from.
+        if let HirExprKind::Variable { symbol, .. } = &expr.kind {
+            if self.boxed_dynamic_symbols.contains(symbol)
+                && matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_)))
+            {
+                self.boxed_value_regs.insert(reg);
+            }
+        }
+        Some(reg)
+    }
+
+    fn lower_variable_expr_inner(&mut self, expr: &HirExpr) -> Option<IrId> {
         let HirExprKind::Variable { symbol, .. } = &expr.kind else {
             unreachable!("lower_variable_expr on a non-Variable expression")
         };

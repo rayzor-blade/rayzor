@@ -629,9 +629,29 @@ impl<'a> HirToMirContext<'a> {
                 continue;
             }
             // A register KNOWN to hold a box hands over its whole payload (a
-            // String box its pointer); an unknown one only a scalar's value,
-            // since a raw object also starts with a plausible tag.
-            let unbox_fn = if self.boxed_value_regs.contains(arg_reg) {
+            // String box its pointer) when another erased argument binds the
+            // type parameter to a concrete type; with only Dynamic arguments
+            // the parameter IS Dynamic and the slot keeps the box. An unknown
+            // register hands over only a scalar's value, since a raw object
+            // also starts with a plausible tag.
+            let known_box = self.boxed_value_regs.contains(arg_reg);
+            let concrete_sibling = arg_types.iter().enumerate().any(|(j, t)| {
+                j != i
+                    && j >= start
+                    && matches!(param_types.get(j), Some(IrType::I64 | IrType::TypeVar(_)))
+                    && t.is_some_and(|t| {
+                        !matches!(
+                            self.type_table.get(t).map(|ti| &ti.kind),
+                            None | Some(TypeKind::Dynamic)
+                                | Some(TypeKind::TypeParameter { .. })
+                                | Some(TypeKind::Unknown)
+                        )
+                    })
+            });
+            if known_box && !concrete_sibling {
+                continue;
+            }
+            let unbox_fn = if known_box {
                 "haxe_dynamic_to_slot"
             } else {
                 "haxe_unbox_scalar_or_addr"

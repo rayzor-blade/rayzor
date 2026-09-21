@@ -60,14 +60,6 @@ impl<'a> HirToMirContext<'a> {
 
         let total_field_count = target_fields.len();
 
-        let shape_key: String = target_fields
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-
-        let shape_id = Self::anon_shape_id(&shape_key);
-
         let descriptor = {
             let mut parts = Vec::with_capacity(target_fields.len());
             for (name, type_id) in &target_fields {
@@ -76,6 +68,7 @@ impl<'a> HirToMirContext<'a> {
             }
             parts.join(",")
         };
+        let shape_id = Self::anon_shape_id(&descriptor);
 
         let ensure_shape_id = self.get_or_register_extern_function(
             "rayzor_ensure_shape",
@@ -259,14 +252,6 @@ impl<'a> HirToMirContext<'a> {
         // materialize_anon_view, which would need a temporary symbol.
         let total_field_count = target_fields.len();
 
-        let shape_key: String = target_fields
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-
-        let shape_id = Self::anon_shape_id(&shape_key);
-
         let descriptor = {
             let mut parts = Vec::with_capacity(target_fields.len());
             for (name, type_id) in &target_fields {
@@ -275,6 +260,7 @@ impl<'a> HirToMirContext<'a> {
             }
             parts.join(",")
         };
+        let shape_id = Self::anon_shape_id(&descriptor);
 
         let ensure_shape_id = self.get_or_register_extern_function(
             "rayzor_ensure_shape",
@@ -400,14 +386,6 @@ impl<'a> HirToMirContext<'a> {
 
         let total_field_count = target_fields.len();
 
-        let shape_key: String = target_fields
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-
-        let shape_id = Self::anon_shape_id(&shape_key);
-
         let descriptor = {
             let mut parts = Vec::with_capacity(target_fields.len());
             for (name, type_id) in &target_fields {
@@ -416,6 +394,7 @@ impl<'a> HirToMirContext<'a> {
             }
             parts.join(",")
         };
+        let shape_id = Self::anon_shape_id(&descriptor);
 
         let ensure_shape_id = self.get_or_register_extern_function(
             "rayzor_ensure_shape",

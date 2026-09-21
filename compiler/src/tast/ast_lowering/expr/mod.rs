@@ -823,12 +823,14 @@ impl<'a> AstLowering<'a> {
                 };
 
                 // Monomorph rewrite: `var x = null` takes the type of its
-                // first plain assignment.
+                // first plain assignment that has one (`x = null` first keeps
+                // waiting).
                 if matches!(op, parser::AssignOp::Assign) {
                     if let TypedExpressionKind::Variable { symbol_id } = &target_expr.kind {
-                        if self.null_inferred.remove(symbol_id) {
+                        if self.null_inferred.contains(symbol_id) {
                             if let Some(t) = self.null_local_binding(value_expr.expr_type) {
                                 self.context.symbol_table.update_symbol_type(*symbol_id, t);
+                                self.null_inferred.remove(symbol_id);
                             }
                         }
                     }

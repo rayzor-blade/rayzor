@@ -297,6 +297,8 @@ enum ParamUse<'a> {
     Bool,
     String,
     Hint(&'a Type),
+    /// Stored into an element of this class's array field: its element type.
+    ElementOf(&'a str),
 }
 
 /// The parameter an expression names: the parameter itself, or a local
@@ -467,6 +469,21 @@ fn collect_param_operator_uses<'a>(
                     if let Some(u) = literal_use(right) {
                         note(left, u, uses);
                     }
+                    // `field[i] = p` / `this.field[i] = p`
+                    if let ExprKind::Index { expr: base, .. } = &left.kind {
+                        let field = match &base.kind {
+                            ExprKind::Ident(f) if !params.contains_key(f.as_str()) => {
+                                Some(f.as_str())
+                            }
+                            ExprKind::Field {
+                                expr: recv, field, ..
+                            } if matches!(recv.kind, ExprKind::This) => Some(field.as_str()),
+                            _ => None,
+                        };
+                        if let Some(f) = field {
+                            note(right, ParamUse::ElementOf(f), uses);
+                        }
+                    }
                 }
                 A::AddAssign => {
                     let u = match literal_use(right) {
@@ -617,6 +634,184 @@ fn collect_param_operator_uses<'a>(
         | ExprKind::Inline(inner) => visit(inner, uses),
         _ => {}
     }
+}
+
+/// Visit every sub-expression of `expr` in pre-order, entering nested
+/// function literals too.
+fn walk_expr<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
+    f(expr);
+    let mut go = |e: &'a Expr| walk_expr(e, f);
+    match &expr.kind {
+        ExprKind::Field { expr: e, .. }
+        | ExprKind::Unary { expr: e, .. }
+        | ExprKind::Return(Some(e))
+        | ExprKind::Throw(e)
+        | ExprKind::Cast { expr: e, .. }
+        | ExprKind::TypeCheck { expr: e, .. }
+        | ExprKind::Untyped(e)
+        | ExprKind::Meta { expr: e, .. }
+        | ExprKind::Paren(e)
+        | ExprKind::Inline(e)
+        | ExprKind::Spread(e)
+        | ExprKind::Macro(e)
+        | ExprKind::Reify(e)
+        | ExprKind::Arrow { expr: e, .. } => go(e),
+        ExprKind::Index { expr: a, index: b }
+        | ExprKind::Binary {
+            left: a, right: b, ..
+        }
+        | ExprKind::Assign {
+            left: a, right: b, ..
+        }
+        | ExprKind::While { cond: a, body: b }
+        | ExprKind::DoWhile { body: a, cond: b } => {
+            go(a);
+            go(b);
+        }
+        ExprKind::Call { expr: callee, args } => {
+            go(callee);
+            args.iter().for_each(go);
+        }
+        ExprKind::New { args, .. } | ExprKind::Array(args) | ExprKind::Tuple(args) => {
+            args.iter().for_each(go)
+        }
+        ExprKind::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            go(cond);
+            go(then_expr);
+            go(else_expr);
+        }
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            go(cond);
+            go(then_branch);
+            if let Some(e) = else_branch {
+                go(e);
+            }
+        }
+        ExprKind::Map(pairs) => {
+            for (k, v) in pairs {
+                go(k);
+                go(v);
+            }
+        }
+        ExprKind::Object(fields) => fields.iter().for_each(|f| go(&f.expr)),
+        ExprKind::StringInterpolation(parts) => {
+            for part in parts {
+                if let StringPart::Interpolation(e) = part {
+                    go(e);
+                }
+            }
+        }
+        ExprKind::Block(elements) => {
+            for element in elements {
+                if let BlockElement::Expr(e) = element {
+                    go(e);
+                }
+            }
+        }
+        ExprKind::Var { expr: init, .. } | ExprKind::Final { expr: init, .. } => {
+            if let Some(e) = init {
+                go(e);
+            }
+        }
+        ExprKind::For { iter, body, .. } => {
+            go(iter);
+            go(body);
+        }
+        ExprKind::Switch {
+            expr: subject,
+            cases,
+            default,
+        } => {
+            go(subject);
+            for case in cases {
+                if let Some(g) = &case.guard {
+                    go(g);
+                }
+                go(&case.body);
+            }
+            if let Some(d) = default {
+                go(d);
+            }
+        }
+        ExprKind::Try {
+            expr: body,
+            catches,
+            finally_block,
+        } => {
+            go(body);
+            for c in catches {
+                if let Some(f) = &c.filter {
+                    go(f);
+                }
+                go(&c.body);
+            }
+            if let Some(f) = finally_block {
+                go(f);
+            }
+        }
+        ExprKind::ArrayComprehension { for_parts, expr: e } => {
+            for_parts.iter().for_each(|p| go(&p.iter));
+            go(e);
+        }
+        ExprKind::MapComprehension {
+            for_parts,
+            key,
+            value,
+        } => {
+            for_parts.iter().for_each(|p| go(&p.iter));
+            go(key);
+            go(value);
+        }
+        ExprKind::CompilerSpecific { code, args, .. } => {
+            go(code);
+            args.iter().for_each(go);
+        }
+        ExprKind::DollarIdent { arg: Some(e), .. } => go(e),
+        ExprKind::Function(func) => {
+            if let Some(body) = &func.body {
+                go(body);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The methods of this class a body calls by bare name, `this.m(..)` or
+/// `Cls.m(..)`, including calls made from nested functions.
+fn collect_same_class_calls<'a>(
+    body: &'a Expr,
+    class_name: &str,
+    out: &mut std::collections::BTreeSet<&'a str>,
+) {
+    walk_expr(body, &mut |e| {
+        if let ExprKind::Call { expr: callee, .. } = &e.kind {
+            match &callee.kind {
+                ExprKind::Ident(name) => {
+                    out.insert(name.as_str());
+                }
+                ExprKind::Field {
+                    expr: recv, field, ..
+                } => match &recv.kind {
+                    ExprKind::This => {
+                        out.insert(field.as_str());
+                    }
+                    ExprKind::Ident(cls) if cls == class_name => {
+                        out.insert(field.as_str());
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    });
 }
 
 /// Top-level Haxe standard library classes that are always implicitly

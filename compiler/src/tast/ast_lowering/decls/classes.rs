@@ -400,12 +400,27 @@ impl<'a> AstLowering<'a> {
 
         self.infer_unannotated_param_types(class_decl, class_symbol);
 
-        for field in &class_decl.fields {
+        // Bodies lower callee-first, so a caller declared above a method
+        // whose return type is inferred sees that type rather than Dynamic.
+        // Declaration order is kept for everything the lowered list feeds.
+        let mut lowered: BTreeMap<usize, TypedFunction> = BTreeMap::new();
+        for index in self.method_lowering_order(class_decl, class_symbol) {
+            let field = &class_decl.fields[index];
+            if let ClassFieldKind::Function(func) = &field.kind {
+                match self.lower_function_from_field(field, func) {
+                    Ok(typed_function) => {
+                        lowered.insert(index, typed_function);
+                    }
+                    Err(e) => self.context.add_error(e),
+                }
+            }
+        }
+
+        for (index, field) in class_decl.fields.iter().enumerate() {
             match &field.kind {
                 ClassFieldKind::Function(func) => {
-                    // Handle functions as methods or constructors
-                    match self.lower_function_from_field(field, func) {
-                        Ok(typed_function) => {
+                    match lowered.remove(&index) {
+                        Some(typed_function) => {
                             if func.name == "new" {
                                 constructors.push(typed_function);
                             } else {
@@ -436,7 +451,7 @@ impl<'a> AstLowering<'a> {
                                 methods.push(typed_function);
                             }
                         }
-                        Err(e) => self.context.add_error(e),
+                        None => {}
                     }
                 }
                 _ => {}
@@ -828,6 +843,79 @@ impl<'a> AstLowering<'a> {
         Ok(TypedDeclaration::Class(typed_class))
     }
 
+    /// Field indices of the class's functions, callees before callers when
+    /// the callee's return type is left to inference; otherwise declaration
+    /// order. A cycle falls back to declaration order.
+    fn method_lowering_order(&self, class_decl: &ClassDecl, class_symbol: SymbolId) -> Vec<usize> {
+        let class_name = self
+            .context
+            .symbol_table
+            .get_symbol(class_symbol)
+            .and_then(|s| self.context.string_interner.get(s.name))
+            .unwrap_or("")
+            .to_string();
+        let by_name: BTreeMap<&str, usize> = class_decl
+            .fields
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| match &f.kind {
+                ClassFieldKind::Function(func)
+                    if func.return_type.is_none() && func.body.is_some() =>
+                {
+                    Some((func.name.as_str(), i))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut order = Vec::new();
+        let mut done = vec![false; class_decl.fields.len()];
+        let mut on_path = vec![false; class_decl.fields.len()];
+        fn visit(
+            index: usize,
+            class_decl: &ClassDecl,
+            class_name: &str,
+            by_name: &BTreeMap<&str, usize>,
+            done: &mut [bool],
+            on_path: &mut [bool],
+            order: &mut Vec<usize>,
+        ) {
+            if done[index] || on_path[index] {
+                return;
+            }
+            on_path[index] = true;
+            if let ClassFieldKind::Function(func) = &class_decl.fields[index].kind {
+                if let Some(body) = &func.body {
+                    let mut callees = std::collections::BTreeSet::new();
+                    collect_same_class_calls(body, class_name, &mut callees);
+                    for callee in callees {
+                        if let Some(&target) = by_name.get(callee) {
+                            visit(
+                                target, class_decl, class_name, by_name, done, on_path, order,
+                            );
+                        }
+                    }
+                }
+            }
+            on_path[index] = false;
+            done[index] = true;
+            order.push(index);
+        }
+        for (index, field) in class_decl.fields.iter().enumerate() {
+            if matches!(field.kind, ClassFieldKind::Function(_)) {
+                visit(
+                    index,
+                    class_decl,
+                    &class_name,
+                    &by_name,
+                    &mut done,
+                    &mut on_path,
+                    &mut order,
+                );
+            }
+        }
+        order
+    }
+
     /// Recover types for the unannotated parameters of every method in the
     /// class and rewrite the registered signatures with them, before any body
     /// is lowered. Recording the result in `inferred_param_types` is what
@@ -1059,6 +1147,24 @@ impl<'a> AstLowering<'a> {
         out
     }
 
+    /// The element type of this class's `Array<T>` field named `field`.
+    fn class_array_field_element(&self, field: &str) -> Option<TypeId> {
+        let class_symbol = *self.context.class_context_stack.last()?;
+        let key = self.context.string_interner.get_id(field)?;
+        let field_symbol = self.class_fields.get(&class_symbol).and_then(|fields| {
+            fields
+                .iter()
+                .find(|(name, _, _)| *name == key)
+                .map(|(_, sym, _)| *sym)
+        })?;
+        let field_ty = self.context.symbol_table.get_symbol(field_symbol)?.type_id;
+        let tt = self.context.type_table.borrow();
+        match tt.get(field_ty).map(|t| &t.kind) {
+            Some(TypeKind::Array { element_type }) => Some(*element_type),
+            _ => None,
+        }
+    }
+
     /// Merge what the operator uses of `params` in `body` say into `out`:
     /// a parameter whose uses disagree, or disagree with an answer already
     /// there, is removed. `"" + p` only counts on its own.
@@ -1091,6 +1197,10 @@ impl<'a> AstLowering<'a> {
                     ParamUse::Hint(t) => match self.lower_type(t) {
                         Ok(ty) => ty,
                         Err(_) => continue,
+                    },
+                    ParamUse::ElementOf(field) => match self.class_array_field_element(field) {
+                        Some(ty) => ty,
+                        None => continue,
                     },
                 };
                 concat_only = false;

@@ -281,6 +281,12 @@ impl<'a> HirToMirContext<'a> {
                                     self.boxed_dynamic_symbols.insert(*symbol);
                                 }
                             } else if let HirPattern::Variable { symbol, .. } = pattern {
+                                // A binding initialised from a register known to
+                                // hold a box (a Dynamic call's result) is read
+                                // as a box.
+                                if self.boxed_value_regs.contains(&value_reg) {
+                                    self.boxed_dynamic_symbols.insert(*symbol);
+                                }
                                 // A Ptr(U8) from a Dynamic-typed expression is a raw anon
                                 // handle (e.g. haxe_ereg_matched_pos_anon); track it so field
                                 // access skips haxe_unbox_reference_ptr.

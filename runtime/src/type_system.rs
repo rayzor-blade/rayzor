@@ -3091,6 +3091,92 @@ pub extern "C" fn haxe_dynamic_equals(a: *mut u8, b: *mut u8) -> bool {
     da.value_ptr == db.value_ptr
 }
 
+/// A Dynamic operand's number: a box's numeric payload, a null box 0, and a
+/// raw slot (no box at that address) its bits as an integer. None for a box
+/// holding something that is not a number.
+fn dynamic_number(p: *mut u8) -> Option<f64> {
+    if p.is_null() {
+        return Some(0.0);
+    }
+    match dynamic_value_if_boxed(p) {
+        Some(d) if d.type_id == TYPE_NULL => Some(0.0),
+        Some(d) if d.type_id == TYPE_INT || d.type_id == TYPE_BOOL => {
+            Some(haxe_unbox_int(d) as f64)
+        }
+        Some(d) if d.type_id == TYPE_FLOAT => Some(haxe_unbox_float(d)),
+        Some(_) => None,
+        None => Some(p as usize as i64 as f64),
+    }
+}
+
+fn dynamic_is_integral(p: *mut u8) -> bool {
+    match dynamic_value_if_boxed(p) {
+        Some(d) => d.type_id == TYPE_INT || d.type_id == TYPE_BOOL || d.type_id == TYPE_NULL,
+        None => true,
+    }
+}
+
+/// `a OP b` on two Dynamic operands (0 add, 1 sub, 2 mul, 3 div, 4 mod).
+/// `+` with a String on either side concatenates; two integral operands
+/// (other than `/`) give an Int box, anything else a Float box.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_dynamic_arith(op: i32, a: *mut u8, b: *mut u8) -> *mut u8 {
+    let is_string =
+        |p: *mut u8| dynamic_value_if_boxed(p).is_some_and(|d| d.type_id == TYPE_STRING);
+    if op == 0 && (is_string(a) || is_string(b)) {
+        // The two HaxeString definitions share one layout.
+        let sa = haxe_std_string_ptr(a) as *const crate::string::HaxeString;
+        let sb = haxe_std_string_ptr(b) as *const crate::string::HaxeString;
+        let joined = crate::string::haxe_string_concat(sa, sb);
+        return haxe_box_haxestring_ptr(joined as *mut u8);
+    }
+    let (Some(x), Some(y)) = (dynamic_number(a), dynamic_number(b)) else {
+        return Box::into_raw(Box::new(haxe_box_null())) as *mut u8;
+    };
+    let integral = op != 3 && dynamic_is_integral(a) && dynamic_is_integral(b);
+    let r = match op {
+        0 => x + y,
+        1 => x - y,
+        2 => x * y,
+        3 => x / y,
+        _ => x % y,
+    };
+    if integral {
+        haxe_box_int_ptr(r as i64)
+    } else {
+        haxe_box_float_ptr(r)
+    }
+}
+
+/// Ordering of two Dynamic operands: numbers numerically, Strings by
+/// value, else by address. -1, 0 or 1.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_dynamic_order(a: *mut u8, b: *mut u8) -> i32 {
+    let strings = match (dynamic_value_if_boxed(a), dynamic_value_if_boxed(b)) {
+        (Some(x), Some(y)) if x.type_id == TYPE_STRING && y.type_id == TYPE_STRING => Some((x, y)),
+        _ => None,
+    };
+    if let Some((x, y)) = strings {
+        return crate::haxe_string::haxe_string_compare(
+            x.value_ptr as *const crate::haxe_string::HaxeString,
+            y.value_ptr as *const crate::haxe_string::HaxeString,
+        )
+        .signum();
+    }
+    match (dynamic_number(a), dynamic_number(b)) {
+        (Some(x), Some(y)) => {
+            if x < y {
+                -1
+            } else if x > y {
+                1
+            } else {
+                0
+            }
+        }
+        _ => (a as usize).cmp(&(b as usize)) as i32,
+    }
+}
+
 /// Equality between a tag-described raw slot and a Dynamic operand.
 ///
 /// A generic body erases its type parameter to one i64 whose meaning only the
