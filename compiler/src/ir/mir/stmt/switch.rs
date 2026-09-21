@@ -279,6 +279,84 @@ impl<'a> HirToMirContext<'a> {
         let _ = entry_block;
     }
 
+    /// Tag and field test of a non-null boxed enum value against a
+    /// constructor pattern; the caller has already excluded null.
+    fn lower_boxed_constructor_test(
+        &mut self,
+        enum_ptr: IrId,
+        variant_discriminant: i64,
+        fields: &[HirPattern],
+    ) -> Option<IrId> {
+        // Load tag at offset 0
+        let zero_offset = self.builder.build_int(0, IrType::I64)?;
+        let tag_gep = self.builder.build_gep(
+            enum_ptr,
+            vec![zero_offset],
+            IrType::Ptr(Box::new(IrType::I8)),
+        )?;
+        let tag_ptr = self
+            .builder
+            .build_bitcast(tag_gep, IrType::Ptr(Box::new(IrType::I32)))?;
+        let tag_val = self.builder.build_load(tag_ptr, IrType::I32)?;
+
+        let expected_tag = self.builder.build_int(variant_discriminant, IrType::I32)?;
+        let tag_matches = self
+            .builder
+            .build_cmp(CompareOp::Eq, tag_val, expected_tag)?;
+
+        if fields.is_empty() || fields.iter().all(|f| matches!(f, HirPattern::Wildcard)) {
+            return Some(tag_matches);
+        }
+
+        // Field extraction must short-circuit behind the tag check: other
+        // variants may have smaller allocations (None is 8 bytes of tag),
+        // so loading at offset 8+ is out of bounds when the tag differs.
+        let false_val = self.builder.build_const(IrValue::Bool(false))?;
+        let tag_check_block = self.builder.current_block()?;
+        let fields_block = self.builder.create_block()?;
+        let merge_block = self.builder.create_block()?;
+        self.builder
+            .build_cond_branch(tag_matches, fields_block, merge_block);
+
+        // fields_block: tag matched, extract and test fields.
+        self.builder.switch_to_block(fields_block);
+        let mut all_fields_match = None;
+
+        for (i, field_pattern) in fields.iter().enumerate() {
+            // Field at byte offset 8 + i*8
+            let field_offset = self.builder.build_int((8 + i * 8) as i64, IrType::I64)?;
+            let field_gep = self.builder.build_gep(
+                enum_ptr,
+                vec![field_offset],
+                IrType::Ptr(Box::new(IrType::I8)),
+            )?;
+            let field_ptr = self
+                .builder
+                .build_bitcast(field_gep, IrType::Ptr(Box::new(IrType::I64)))?;
+            let field_val = self.builder.build_load(field_ptr, IrType::I64)?;
+
+            let field_match = self.lower_pattern_test(field_val, field_pattern)?;
+            all_fields_match = Some(match all_fields_match {
+                Some(prev) => self.builder.build_binop(BinaryOp::And, prev, field_match)?,
+                None => field_match,
+            });
+        }
+
+        let fields_result = all_fields_match.unwrap_or(tag_matches);
+        self.builder.build_branch(merge_block);
+        let fields_exit_block = self.builder.current_block()?;
+
+        // merge_block: phi(fields_result | false).
+        self.builder.switch_to_block(merge_block);
+        let result = self.builder.build_phi(merge_block, IrType::Bool)?;
+        self.builder
+            .add_phi_incoming(merge_block, result, fields_exit_block, fields_result);
+        self.builder
+            .add_phi_incoming(merge_block, result, tag_check_block, false_val);
+
+        Some(result)
+    }
+
     pub(crate) fn lower_pattern_test(
         &mut self,
         scrutinee: IrId,
@@ -365,77 +443,35 @@ impl<'a> HirToMirContext<'a> {
                     .builder
                     .build_bitcast(scrutinee, IrType::Ptr(Box::new(IrType::I8)))?;
 
-                // Load tag at offset 0
-                let zero_offset = self.builder.build_int(0, IrType::I64)?;
-                let tag_gep = self.builder.build_gep(
-                    enum_ptr,
-                    vec![zero_offset],
-                    IrType::Ptr(Box::new(IrType::I8)),
-                )?;
-                let tag_ptr = self
-                    .builder
-                    .build_bitcast(tag_gep, IrType::Ptr(Box::new(IrType::I32)))?;
-                let tag_val = self.builder.build_load(tag_ptr, IrType::I32)?;
-
-                let expected_tag = self.builder.build_int(variant_discriminant, IrType::I32)?;
-                let tag_matches = self
-                    .builder
-                    .build_cmp(CompareOp::Eq, tag_val, expected_tag)?;
-
-                if fields.is_empty() || fields.iter().all(|f| matches!(f, HirPattern::Wildcard)) {
-                    return Some(tag_matches);
-                }
-
-                // Field extraction must short-circuit behind the tag check: other
-                // variants may have smaller allocations (None is 8 bytes of tag),
-                // so loading at offset 8+ is out of bounds when the tag differs.
-                let false_val = self.builder.build_const(IrValue::Bool(false))?;
-                let tag_check_block = self.builder.current_block()?;
-                let fields_block = self.builder.create_block()?;
-                let merge_block = self.builder.create_block()?;
+                // A null value (`T1(null)` against `T1(T1(_))`) matches no
+                // constructor; its tag is never read.
+                let null_ptr = self.builder.build_const(IrValue::Null)?;
+                let not_null = self.builder.build_cmp(CompareOp::Ne, enum_ptr, null_ptr)?;
+                let false_for_null = self.builder.build_const(IrValue::Bool(false))?;
+                let null_check_block = self.builder.current_block()?;
+                let tag_block = self.builder.create_block()?;
+                let outer_merge = self.builder.create_block()?;
                 self.builder
-                    .build_cond_branch(tag_matches, fields_block, merge_block);
-
-                // fields_block: tag matched, extract and test fields.
-                self.builder.switch_to_block(fields_block);
-                let mut all_fields_match = None;
-
-                for (i, field_pattern) in fields.iter().enumerate() {
-                    // Field at byte offset 8 + i*8
-                    let field_offset = self.builder.build_int((8 + i * 8) as i64, IrType::I64)?;
-                    let field_gep = self.builder.build_gep(
-                        enum_ptr,
-                        vec![field_offset],
-                        IrType::Ptr(Box::new(IrType::I8)),
-                    )?;
-                    let field_ptr = self
-                        .builder
-                        .build_bitcast(field_gep, IrType::Ptr(Box::new(IrType::I64)))?;
-                    let field_val = self.builder.build_load(field_ptr, IrType::I64)?;
-
-                    let field_match = self.lower_pattern_test(field_val, field_pattern)?;
-                    all_fields_match = Some(match all_fields_match {
-                        Some(prev) => self.builder.build_binop(BinaryOp::And, prev, field_match)?,
-                        None => field_match,
-                    });
-                }
-
-                let fields_result = all_fields_match.unwrap_or(tag_matches);
-                self.builder.build_branch(merge_block);
-                let fields_exit_block = self.builder.current_block()?;
-
-                // merge_block: phi(fields_result | false).
-                self.builder.switch_to_block(merge_block);
-                let result = self.builder.build_phi(merge_block, IrType::Bool)?;
+                    .build_cond_branch(not_null, tag_block, outer_merge);
+                self.builder.switch_to_block(tag_block);
+                let inner =
+                    self.lower_boxed_constructor_test(enum_ptr, variant_discriminant, fields);
+                let inner_exit = self.builder.current_block()?;
+                self.builder.build_branch(outer_merge);
+                self.builder.switch_to_block(outer_merge);
+                let result = self.builder.build_phi(outer_merge, IrType::Bool)?;
                 self.builder.add_phi_incoming(
-                    merge_block,
+                    outer_merge,
                     result,
-                    fields_exit_block,
-                    fields_result,
+                    inner_exit,
+                    inner.unwrap_or(false_for_null),
                 );
-                self.builder
-                    .add_phi_incoming(merge_block, result, tag_check_block, false_val);
-
+                self.builder.add_phi_incoming(
+                    outer_merge,
+                    result,
+                    null_check_block,
+                    false_for_null,
+                );
                 Some(result)
             }
 

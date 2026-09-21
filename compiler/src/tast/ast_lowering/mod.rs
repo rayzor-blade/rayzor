@@ -299,6 +299,8 @@ enum ParamUse<'a> {
     Hint(&'a Type),
     /// Stored into an element of this class's array field: its element type.
     ElementOf(&'a str),
+    /// Matched against an enum constructor pattern: that constructor's enum.
+    EnumOf(&'a str),
 }
 
 /// The parameter an expression names: the parameter itself, or a local
@@ -583,6 +585,15 @@ fn collect_param_operator_uses<'a>(
             cases,
             default,
         } => {
+            // A subject matched against a constructor pattern is that enum.
+            if let Some(ctor) = cases.iter().find_map(|c| {
+                c.patterns.iter().find_map(|p| match p {
+                    parser::Pattern::Constructor { path, .. } => Some(path.name.as_str()),
+                    _ => None,
+                })
+            }) {
+                note(subject, ParamUse::EnumOf(ctor), uses);
+            }
             visit(subject, uses);
             for case in cases {
                 if let Some(g) = &case.guard {

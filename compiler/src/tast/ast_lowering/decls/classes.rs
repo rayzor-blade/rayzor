@@ -1147,6 +1147,23 @@ impl<'a> AstLowering<'a> {
         out
     }
 
+    /// The enum an unqualified constructor name resolves to in scope.
+    fn enum_of_constructor(&self, ctor: &str) -> Option<TypeId> {
+        let key = self.context.string_interner.get_id(ctor)?;
+        let sym = self.resolve_symbol_in_scope_hierarchy(key)?;
+        let symbol = self.context.symbol_table.get_symbol(sym)?;
+        if symbol.kind != crate::tast::symbols::SymbolKind::EnumVariant {
+            return None;
+        }
+        let tt = self.context.type_table.borrow();
+        match tt.get(symbol.type_id).map(|t| &t.kind) {
+            // A variant's type is the enum, or a function returning it.
+            Some(TypeKind::Enum { .. }) => Some(symbol.type_id),
+            Some(TypeKind::Function { return_type, .. }) => Some(*return_type),
+            _ => None,
+        }
+    }
+
     /// The element type of this class's `Array<T>` field named `field`.
     fn class_array_field_element(&self, field: &str) -> Option<TypeId> {
         let class_symbol = *self.context.class_context_stack.last()?;
@@ -1199,6 +1216,10 @@ impl<'a> AstLowering<'a> {
                         Err(_) => continue,
                     },
                     ParamUse::ElementOf(field) => match self.class_array_field_element(field) {
+                        Some(ty) => ty,
+                        None => continue,
+                    },
+                    ParamUse::EnumOf(ctor) => match self.enum_of_constructor(ctor) {
                         Some(ty) => ty,
                         None => continue,
                     },

@@ -55,6 +55,7 @@ impl<'a> HirToMirContext<'a> {
             let target_is_optional_scalar = match type_table.get(target_ty).map(|t| &t.kind) {
                 Some(TypeKind::Optional { inner_type }) => {
                     self.optional_inner_is_boxable_primitive(*inner_type)
+                        || self.optional_inner_is_type_param(*inner_type)
                 }
                 _ => false,
             };
@@ -79,6 +80,7 @@ impl<'a> HirToMirContext<'a> {
             let target_is_optional_scalar = match self.type_table.get(target_ty).map(|t| &t.kind) {
                 Some(TypeKind::Optional { inner_type }) => {
                     self.optional_inner_is_boxable_primitive(*inner_type)
+                        || self.optional_inner_is_type_param(*inner_type)
                 }
                 _ => false,
             };
@@ -323,6 +325,45 @@ impl<'a> HirToMirContext<'a> {
         let dynamic_ty = self.type_table.dynamic_type();
         self.maybe_box_value(value, hir_ty, dynamic_ty)
             .filter(|boxed| *boxed != value)
+    }
+
+    /// A `Null<scalar>` (or `Null<T>`) register opened for arithmetic: the
+    /// scalar out of the box, as an I32/F64/Bool register. None when the
+    /// type is not a nullable scalar or the register is not a pointer.
+    pub(crate) fn open_nullable_scalar(&mut self, reg: IrId, ty: TypeId) -> Option<IrId> {
+        use crate::tast::TypeKind;
+        let inner = match self.type_table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => *inner_type,
+            _ => return None,
+        };
+        if !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_))) {
+            return None;
+        }
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let (unbox_fn, out) = match self.type_table.get(inner).map(|t| &t.kind) {
+            Some(TypeKind::Int) | Some(TypeKind::TypeParameter { .. }) => {
+                ("haxe_unbox_int_ptr", IrType::I64)
+            }
+            Some(TypeKind::Float) => ("haxe_unbox_float_ptr", IrType::F64),
+            Some(TypeKind::Bool) => ("haxe_unbox_bool_ptr", IrType::Bool),
+            _ => return None,
+        };
+        let f = self.get_or_register_extern_function(unbox_fn, vec![ptr_u8], out.clone());
+        let raw = self.builder.build_call_direct(f, vec![reg], out.clone())?;
+        if matches!(out, IrType::I64) {
+            self.builder.build_cast(raw, IrType::I64, IrType::I32)
+        } else {
+            Some(raw)
+        }
+    }
+
+    /// `Null<T>` over a type parameter: the slot is a box (`convert_type`
+    /// gives it the box pointer type), so a scalar written there is boxed.
+    pub(crate) fn optional_inner_is_type_param(&self, inner: TypeId) -> bool {
+        matches!(
+            self.type_table.get(inner).map(|t| &t.kind),
+            Some(crate::tast::TypeKind::TypeParameter { .. })
+        )
     }
 
     /// A box for a register that holds a scalar, whatever the typer called

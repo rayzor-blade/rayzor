@@ -65,12 +65,21 @@ impl<'a> HirToMirContext<'a> {
                 {
                     let obj_reg = self.lower_expression(object)?;
                     let idx_reg = self.lower_expression(index)?;
-                    let old_value = self.load_index_with_regs(obj_reg, idx_reg, object.ty)?;
+                    let loaded = self.load_index_with_regs(obj_reg, idx_reg, object.ty)?;
+                    // A `Null<scalar>` element is a box: open it, count, close it.
+                    let opened = self.open_nullable_scalar(loaded, operand.ty);
+                    let old_value = opened.unwrap_or(loaded);
                     let one = self.builder.build_const(IrValue::I32(1))?;
                     let new_value = if is_increment {
                         self.builder.build_binop(BinaryOp::Add, old_value, one)?
                     } else {
                         self.builder.build_binop(BinaryOp::Sub, old_value, one)?
+                    };
+                    let (old_value, new_value, stored) = if opened.is_some() {
+                        let stored = self.box_scalar_register(new_value)?;
+                        (loaded, stored, stored)
+                    } else {
+                        (old_value, new_value, new_value)
                     };
                     let result_type = self.convert_type(expr.ty);
                     let src_loc = self.convert_source_location(&expr.source_location);
@@ -86,7 +95,7 @@ impl<'a> HirToMirContext<'a> {
                             },
                         );
                     }
-                    self.store_index_with_regs(obj_reg, idx_reg, object.ty, new_value);
+                    self.store_index_with_regs(obj_reg, idx_reg, object.ty, stored);
                     return Some(match op {
                         HirUnaryOp::PostIncr | HirUnaryOp::PostDecr => old_value,
                         _ => new_value,
@@ -122,12 +131,20 @@ impl<'a> HirToMirContext<'a> {
                     (field_receiver_is_enum_type, &operand.kind)
                 {
                     let obj_reg = self.lower_expression(object)?;
-                    let old_value = self.lower_field_expr_with_receiver(operand, obj_reg)?;
+                    let loaded = self.lower_field_expr_with_receiver(operand, obj_reg)?;
+                    let opened = self.open_nullable_scalar(loaded, operand.ty);
+                    let old_value = opened.unwrap_or(loaded);
                     let one = self.builder.build_const(IrValue::I32(1))?;
                     let new_value = if is_increment {
                         self.builder.build_binop(BinaryOp::Add, old_value, one)?
                     } else {
                         self.builder.build_binop(BinaryOp::Sub, old_value, one)?
+                    };
+                    let (old_value, new_value, stored) = if opened.is_some() {
+                        let stored = self.box_scalar_register(new_value)?;
+                        (loaded, stored, stored)
+                    } else {
+                        (old_value, new_value, new_value)
                     };
                     let result_type = self.convert_type(expr.ty);
                     let src_loc = self.convert_source_location(&expr.source_location);
@@ -143,20 +160,27 @@ impl<'a> HirToMirContext<'a> {
                             },
                         );
                     }
-                    self.store_field_with_regs(obj_reg, object, field, new_value);
+                    self.store_field_with_regs(obj_reg, object, field, stored);
                     return Some(match op {
                         HirUnaryOp::PostIncr | HirUnaryOp::PostDecr => old_value,
                         _ => new_value,
                     });
                 }
 
-                let old_value = self.lower_expression(operand)?;
+                let loaded = self.lower_expression(operand)?;
+                let opened = self.open_nullable_scalar(loaded, operand.ty);
+                let old_value = opened.unwrap_or(loaded);
                 let one = self.builder.build_const(IrValue::I32(1))?;
 
                 let new_value = if is_increment {
                     self.builder.build_binop(BinaryOp::Add, old_value, one)?
                 } else {
                     self.builder.build_binop(BinaryOp::Sub, old_value, one)?
+                };
+                let (old_value, new_value) = if opened.is_some() {
+                    (loaded, self.box_scalar_register(new_value)?)
+                } else {
+                    (old_value, new_value)
                 };
 
                 let result_type = self.convert_type(expr.ty);

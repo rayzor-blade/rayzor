@@ -712,15 +712,74 @@ impl<'a> HirToMirContext<'a> {
             let Some(Some(hir_ty)) = arg_types.get(i).copied() else {
                 continue;
             };
+            // A `Null<scalar>` by type, or a register known to hold a box the
+            // typer called the bare scalar (`n++` on a `Null<Int>`).
             let inner = match self.type_table.get(hir_ty).map(|t| &t.kind) {
                 Some(TypeKind::Optional { inner_type }) => *inner_type,
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+                    if self.boxed_value_regs.contains(arg_reg) =>
+                {
+                    hir_ty
+                }
                 _ => continue,
             };
+            // `Null<T>` over an unbound type parameter: the box holds a scalar
+            // of a kind only the runtime knows; its payload is the slot.
+            if self.optional_inner_is_type_param(inner) {
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let f = self.get_or_register_extern_function(
+                    "haxe_dynamic_to_slot",
+                    vec![ptr_u8],
+                    IrType::I64,
+                );
+                if let Some(bits) = self
+                    .builder
+                    .build_call_direct(f, vec![*arg_reg], IrType::I64)
+                {
+                    *arg_reg = match formal {
+                        Some(IrType::F64) => self
+                            .builder
+                            .build_bitcast(bits, IrType::F64)
+                            .unwrap_or(bits),
+                        Some(f) => self
+                            .builder
+                            .build_cast(bits, IrType::I64, f)
+                            .unwrap_or(bits),
+                        None => bits,
+                    };
+                }
+                continue;
+            }
             if !self.optional_inner_is_boxable_primitive(inner) {
                 continue;
             }
-            let Some(scalar) = self.maybe_unbox_optional(*arg_reg, hir_ty, inner) else {
-                continue;
+            let scalar = if inner == hir_ty {
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let (f, out) = match self.type_table.get(inner).map(|t| &t.kind) {
+                    Some(TypeKind::Float) => ("haxe_unbox_float_ptr", IrType::F64),
+                    Some(TypeKind::Bool) => ("haxe_unbox_bool_ptr", IrType::Bool),
+                    _ => ("haxe_unbox_int_ptr", IrType::I64),
+                };
+                let f = self.get_or_register_extern_function(f, vec![ptr_u8], out.clone());
+                let Some(raw) = self
+                    .builder
+                    .build_call_direct(f, vec![*arg_reg], out.clone())
+                else {
+                    continue;
+                };
+                if matches!(out, IrType::I64) {
+                    match self.builder.build_cast(raw, IrType::I64, IrType::I32) {
+                        Some(v) => v,
+                        None => continue,
+                    }
+                } else {
+                    raw
+                }
+            } else {
+                match self.maybe_unbox_optional(*arg_reg, hir_ty, inner) {
+                    Some(s) => s,
+                    None => continue,
+                }
             };
             match formal {
                 None => {
