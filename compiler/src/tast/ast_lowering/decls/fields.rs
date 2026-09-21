@@ -910,6 +910,12 @@ impl<'a> AstLowering<'a> {
             self.optional_param_type(parameter, ty)
         } else if let Some(ty) = inferred {
             ty
+        } else if let Some(ty) = parameter
+            .default_value
+            .as_deref()
+            .and_then(|d| self.literal_type(d))
+        {
+            ty
         } else {
             self.context.type_table.borrow().dynamic_type()
         };
@@ -935,6 +941,26 @@ impl<'a> AstLowering<'a> {
             ownership: crate::tast::ParamOwnership::from_metadata(&parameter.meta),
             source_location: self.context.create_location_from_span(parameter.span),
         })
+    }
+
+    /// The type of a literal default value; None for anything else.
+    pub(crate) fn literal_type(&self, expr: &Expr) -> Option<TypeId> {
+        let tt = self.context.type_table.borrow();
+        match &expr.kind {
+            ExprKind::Int(_) => Some(tt.int_type()),
+            ExprKind::Float(_) => Some(tt.float_type()),
+            ExprKind::Bool(_) => Some(tt.bool_type()),
+            ExprKind::String(_) => Some(tt.string_type()),
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                expr: inner,
+            } => match &inner.kind {
+                ExprKind::Int(_) => Some(tt.int_type()),
+                ExprKind::Float(_) => Some(tt.float_type()),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Lower a function parameter, forcing its type to `param_type` (used

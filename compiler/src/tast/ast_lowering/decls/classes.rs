@@ -935,6 +935,18 @@ impl<'a> AstLowering<'a> {
         class_symbol: SymbolId,
     ) -> BTreeMap<InternedString, TypeId> {
         let mut out = self.param_types_from_field_stores(func);
+        for param in &func.params {
+            if param.type_hint.is_some() {
+                continue;
+            }
+            if let Some(ty) = param
+                .default_value
+                .as_deref()
+                .and_then(|d| self.literal_type(d))
+            {
+                out.insert(self.context.intern_string(&param.name), ty);
+            }
+        }
         let unannotated: std::collections::BTreeSet<&str> = func
             .params
             .iter()
@@ -1006,6 +1018,57 @@ impl<'a> AstLowering<'a> {
                     }
                     _ => agreed = Some(formal),
                 }
+            }
+            if conflict {
+                out.remove(&param_key);
+            } else if let Some(ty) = agreed {
+                out.insert(param_key, ty);
+            }
+        }
+
+        // Operator uses decide what is left, and veto a store or call
+        // answer they disagree with.
+        // A defaulted parameter has the default's type already.
+        let mut names: BTreeMap<&str, &str> = func
+            .params
+            .iter()
+            .filter(|p| p.type_hint.is_none() && p.default_value.is_none())
+            .map(|p| (p.name.as_str(), p.name.as_str()))
+            .collect();
+        while collect_param_copies(body, &mut names) {}
+        let mut op_uses: BTreeMap<&str, Vec<ParamUse>> = BTreeMap::new();
+        collect_param_operator_uses(body, &names, func.return_type.as_ref(), &mut op_uses);
+        for (param, sites) in op_uses {
+            if shadowed.contains(param) {
+                continue;
+            }
+            let param_key = self.context.intern_string(param);
+            let mut agreed: Option<TypeId> = out.get(&param_key).copied();
+            let mut conflict = false;
+            // `"" + p` stringifies anything, so it only counts on its own.
+            let mut concat_only = true;
+            for site in &sites {
+                let ty = match site {
+                    ParamUse::Int => self.context.type_table.borrow().int_type(),
+                    ParamUse::Float => self.context.type_table.borrow().float_type(),
+                    ParamUse::Bool => self.context.type_table.borrow().bool_type(),
+                    ParamUse::String => continue,
+                    ParamUse::Hint(t) => match self.lower_type(t) {
+                        Ok(ty) => ty,
+                        Err(_) => continue,
+                    },
+                };
+                concat_only = false;
+                match agreed {
+                    Some(seen) if seen != ty => {
+                        conflict = true;
+                        break;
+                    }
+                    _ => agreed = Some(ty),
+                }
+            }
+            if concat_only && agreed.is_none() && !sites.is_empty() {
+                agreed = Some(self.context.type_table.borrow().string_type());
             }
             if conflict {
                 out.remove(&param_key);

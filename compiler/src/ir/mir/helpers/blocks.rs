@@ -149,6 +149,7 @@ impl<'a> HirToMirContext<'a> {
             move_event_order: self.move_event_order,
             move_events_func: self.move_events_func,
             borrow_roots: self.borrow_roots.clone(),
+            current_function_return_type: self.current_function_return_type,
         }
     }
 
@@ -173,6 +174,7 @@ impl<'a> HirToMirContext<'a> {
         self.strict_move_locals = state.strict_move_locals;
         self.move_symbols = state.move_symbols;
         self.move_events = state.move_events;
+        self.current_function_return_type = state.current_function_return_type;
         self.move_event_order = state.move_event_order;
         self.move_events_func = state.move_events_func;
         self.borrow_roots = state.borrow_roots;

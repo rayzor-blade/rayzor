@@ -417,42 +417,11 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// Generate (or return cached) a virtual/interface dispatch thunk.
-    ///
-    /// Thunk ABI is `(env, this, ...args)`: the indirect-call convention used by
-    /// vtable slots prepends a closure env that class methods don't declare, so
-    /// the thunk drops `env` and forwards to the real method.
-    /// One erased argument, converted to what the real callee declares.
-    ///
-    /// A scalar arrives boxed at an erased boundary, so the runtime decides:
-    /// an Int or Bool comes back as its value, a reference keeps its address.
-    fn adapt_erased_arg(&mut self, reg: IrId, want: &IrType) -> Option<IrId> {
-        if matches!(want, IrType::I64) {
-            return Some(reg);
-        }
-        if want.is_integer() || matches!(want, IrType::Bool) {
-            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-            let as_ptr = self.builder.build_cast(reg, IrType::I64, ptr_u8.clone())?;
-            let unbox = self.get_or_register_extern_function(
-                "haxe_unbox_scalar_or_addr",
-                vec![ptr_u8],
-                IrType::I64,
-            );
-            let raw = self
-                .builder
-                .build_call_direct(unbox, vec![as_ptr], IrType::I64)?;
-            return self.builder.build_cast(raw, IrType::I64, want.clone());
-        }
-        self.builder.build_cast(reg, IrType::I64, want.clone())
-    }
-
-    /// A plain function used as a closure VALUE, wrapped in the erased ABI
-    /// every indirect closure call speaks: `(env, i64..) -> i64`.
-    ///
-    /// `FunctionRef` stores the bare function as `{fn_ptr, env = null}`, but
-    /// CallIndirect always prepends the env and types every slot i64. A static
-    /// callee has no env parameter and real parameter types, so without this
-    /// adapter it reads the null env as its first argument.
+    /// A plain function used as a closure VALUE, wrapped in the shape a
+    /// lambda of the same type has: `(env, declared params..) -> declared
+    /// return`. Every indirect call loads `{fn_ptr, env}` from the closure
+    /// and prepends the env; a static function declares no env, so without
+    /// the adapter it reads the env as its first argument.
     pub(crate) fn ensure_closure_value_adapter(
         &mut self,
         target: IrFunctionId,
@@ -470,7 +439,7 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or_else(|| func.name.clone()),
             )
         };
-        // A closure whose target already speaks the erased ABI needs nothing.
+        // A target that already takes an env needs nothing.
         if target_sig
             .parameters
             .iter()
@@ -481,10 +450,10 @@ impl<'a> HirToMirContext<'a> {
 
         let mut sig_builder = FunctionSignatureBuilder::new()
             .param("env".to_string(), ptr_u8.clone())
-            .returns(IrType::I64)
+            .returns(target_sig.return_type.clone())
             .calling_convention(CallingConvention::Haxe);
-        for i in 0..target_sig.parameters.len() {
-            sig_builder = sig_builder.param(format!("a{i}"), IrType::I64);
+        for param in &target_sig.parameters {
+            sig_builder = sig_builder.param(param.name.clone(), param.ty.clone());
         }
         let adapter_sig = sig_builder.build();
 
@@ -510,65 +479,21 @@ impl<'a> HirToMirContext<'a> {
             .builder
             .start_function(adapter_symbol, adapter_name, adapter_sig);
 
-        let mut ok = true;
-        let mut call_args = Vec::with_capacity(target_sig.parameters.len());
-        for i in 0..target_sig.parameters.len() {
-            let Some(reg) = self
-                .builder
-                .current_function()
-                .and_then(|f| f.get_param_reg(i + 1))
-            else {
-                ok = false;
-                break;
-            };
-            let want = target_sig.parameters[i].ty.clone();
-            match self.adapt_erased_arg(reg, &want) {
-                Some(arg) => call_args.push(arg),
-                None => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-
-        if ok {
+        let call_args: Option<Vec<IrId>> = self.builder.current_function().and_then(|f| {
+            (0..target_sig.parameters.len())
+                .map(|i| f.get_param_reg(i + 1))
+                .collect()
+        });
+        let ok = call_args.is_some();
+        if let Some(call_args) = call_args {
             let ret_ty = target_sig.return_type.clone();
             if matches!(ret_ty, IrType::Void) {
                 self.builder
                     .build_call_direct(target, call_args, IrType::Void);
-                let zero = self.builder.build_const(IrValue::I64(0));
-                self.builder.build_return(zero);
+                self.builder.build_return(None);
             } else {
-                let result = self
-                    .builder
-                    .build_call_direct(target, call_args, ret_ty.clone());
-                // The caller reads an erased result as a Dynamic and hands it
-                // to `haxe_std_string_ptr`, so a scalar goes back BOXED; a
-                // raw 1 would be dereferenced as an address.
-                let erased = result.and_then(|r| {
-                    let kind = if matches!(ret_ty, IrType::Bool) {
-                        Some(PrimBoxKind::Bool)
-                    } else if matches!(ret_ty, IrType::F32 | IrType::F64) {
-                        Some(PrimBoxKind::Float)
-                    } else if ret_ty.is_integer() {
-                        Some(PrimBoxKind::Int)
-                    } else {
-                        None
-                    };
-                    match kind {
-                        Some(kind) => {
-                            let boxed = self.box_primitive_as_dynamic(r, ret_ty.clone(), kind)?;
-                            let boxed_ty = self
-                                .builder
-                                .get_register_type(boxed)
-                                .unwrap_or(IrType::Ptr(Box::new(IrType::U8)));
-                            self.builder.build_cast(boxed, boxed_ty, IrType::I64)
-                        }
-                        None if matches!(ret_ty, IrType::I64) => Some(r),
-                        None => self.builder.build_cast(r, ret_ty.clone(), IrType::I64),
-                    }
-                });
-                self.builder.build_return(erased);
+                let result = self.builder.build_call_direct(target, call_args, ret_ty);
+                self.builder.build_return(result);
             }
         }
 
@@ -585,6 +510,11 @@ impl<'a> HirToMirContext<'a> {
         Some(adapter_id)
     }
 
+    /// Generate (or return cached) a virtual/interface dispatch thunk.
+    ///
+    /// Thunk ABI is `(env, this, ...args)`: the indirect-call convention used by
+    /// vtable slots prepends a closure env that class methods don't declare, so
+    /// the thunk drops `env` and forwards to the real method.
     pub(crate) fn ensure_vtable_dispatch_thunk(
         &mut self,
         method_func_id: IrFunctionId,

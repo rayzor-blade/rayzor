@@ -773,6 +773,7 @@ pub(crate) struct SavedLoweringState {
     move_event_order: u32,
     move_events_func: Option<crate::ir::IrFunctionId>,
     borrow_roots: BTreeMap<SymbolId, SymbolId>,
+    current_function_return_type: Option<TypeId>,
 }
 
 /// Process-global class field layouts, keyed by NAME.

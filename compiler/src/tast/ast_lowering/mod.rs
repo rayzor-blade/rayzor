@@ -286,6 +286,339 @@ fn collect_param_call_uses<'a>(
     }
 }
 
+/// What an operator use says about an unannotated parameter, the way Haxe
+/// unifies the monomorph: arithmetic, comparison, bit ops, `++`, `-x` and an
+/// array index make it Int; `"s" + p` makes it String; a condition or `!p`
+/// makes it Bool; `var x:T = p` and `return p` take the declared type.
+#[derive(Clone, Copy, Debug)]
+enum ParamUse<'a> {
+    Int,
+    Float,
+    Bool,
+    String,
+    Hint(&'a Type),
+}
+
+/// The parameter an expression names: the parameter itself, or a local
+/// declared as a plain copy of it (`var i = from`), whose uses are its uses.
+fn param_ident<'a>(expr: &'a Expr, params: &BTreeMap<&'a str, &'a str>) -> Option<&'a str> {
+    match &expr.kind {
+        ExprKind::Ident(name) => params.get(name.as_str()).copied(),
+        ExprKind::Paren(inner) => param_ident(inner, params),
+        _ => None,
+    }
+}
+
+/// Extend `names` (name -> parameter) with every `var x = <name>` copy in
+/// the tree, to a fixpoint. A hinted or reassigned declaration is not a copy.
+fn collect_param_copies<'a>(expr: &'a Expr, names: &mut BTreeMap<&'a str, &'a str>) -> bool {
+    let mut changed = false;
+    let mut visit =
+        |e: &'a Expr, names: &mut BTreeMap<&'a str, &'a str>| collect_param_copies(e, names);
+    match &expr.kind {
+        ExprKind::Var {
+            name,
+            type_hint: None,
+            expr: Some(init),
+        }
+        | ExprKind::Final {
+            name,
+            type_hint: None,
+            expr: Some(init),
+        } => {
+            if let Some(p) = param_ident(init, names) {
+                if !names.contains_key(name.as_str()) {
+                    names.insert(name.as_str(), p);
+                    changed = true;
+                }
+            }
+        }
+        ExprKind::Var { name, .. } | ExprKind::Final { name, .. } => {
+            // A declaration that shadows a tracked name ends its tracking.
+            if names
+                .get(name.as_str())
+                .is_some_and(|p| *p != name.as_str())
+            {
+                names.remove(name.as_str());
+                changed = true;
+            }
+        }
+        ExprKind::Block(elements) => {
+            for element in elements {
+                if let BlockElement::Expr(e) = element {
+                    changed |= visit(e, names);
+                }
+            }
+        }
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            changed |= visit(cond, names);
+            changed |= visit(then_branch, names);
+            if let Some(e) = else_branch {
+                changed |= visit(e, names);
+            }
+        }
+        ExprKind::While { cond, body } | ExprKind::DoWhile { body, cond } => {
+            changed |= visit(cond, names);
+            changed |= visit(body, names);
+        }
+        ExprKind::For { body, .. } => changed |= visit(body, names),
+        ExprKind::Try {
+            expr: body,
+            catches,
+            finally_block,
+        } => {
+            changed |= visit(body, names);
+            for c in catches {
+                changed |= visit(&c.body, names);
+            }
+            if let Some(f) = finally_block {
+                changed |= visit(f, names);
+            }
+        }
+        ExprKind::Switch { cases, default, .. } => {
+            for case in cases {
+                changed |= visit(&case.body, names);
+            }
+            if let Some(d) = default {
+                changed |= visit(d, names);
+            }
+        }
+        _ => {}
+    }
+    changed
+}
+
+fn literal_use(expr: &Expr) -> Option<ParamUse<'static>> {
+    match &expr.kind {
+        ExprKind::Int(_) => Some(ParamUse::Int),
+        ExprKind::Float(_) => Some(ParamUse::Float),
+        ExprKind::String(_) | ExprKind::StringInterpolation(_) => Some(ParamUse::String),
+        ExprKind::Bool(_) => Some(ParamUse::Bool),
+        ExprKind::Paren(inner) => literal_use(inner),
+        _ => None,
+    }
+}
+
+/// Record every operator use of a parameter in an expression tree. Nested
+/// functions are not entered: their own parameters can shadow.
+fn collect_param_operator_uses<'a>(
+    expr: &'a Expr,
+    params: &BTreeMap<&'a str, &'a str>,
+    return_hint: Option<&'a Type>,
+    uses: &mut BTreeMap<&'a str, Vec<ParamUse<'a>>>,
+) {
+    let mut note =
+        |e: &'a Expr, use_: ParamUse<'a>, uses: &mut BTreeMap<&'a str, Vec<ParamUse<'a>>>| {
+            if let Some(p) = param_ident(e, params) {
+                uses.entry(p).or_default().push(use_);
+            }
+        };
+    let mut visit = |e: &'a Expr, uses: &mut BTreeMap<&'a str, Vec<ParamUse<'a>>>| {
+        collect_param_operator_uses(e, params, return_hint, uses)
+    };
+    match &expr.kind {
+        ExprKind::Binary { left, op, right } => {
+            use parser::BinaryOp as B;
+            let side = |e: &'a Expr, other: &'a Expr| -> Option<ParamUse<'a>> {
+                match op {
+                    B::Add => match literal_use(other) {
+                        Some(ParamUse::String) => Some(ParamUse::String),
+                        _ => Some(ParamUse::Int),
+                    },
+                    B::Sub | B::Mul | B::Div | B::Mod => Some(ParamUse::Int),
+                    B::Lt | B::Le | B::Gt | B::Ge => Some(ParamUse::Int),
+                    B::BitAnd | B::BitOr | B::BitXor | B::Shl | B::Shr | B::Ushr => {
+                        Some(ParamUse::Int)
+                    }
+                    B::And | B::Or => Some(ParamUse::Bool),
+                    B::Eq | B::NotEq => literal_use(other),
+                    _ => None,
+                }
+                .filter(|_| param_ident(e, params).is_some())
+            };
+            if let Some(u) = side(left, right) {
+                note(left, u, uses);
+            }
+            if let Some(u) = side(right, left) {
+                note(right, u, uses);
+            }
+            visit(left, uses);
+            visit(right, uses);
+        }
+        ExprKind::Unary { op, expr: inner } => {
+            use parser::UnaryOp as U;
+            let u = match op {
+                U::Not => ParamUse::Bool,
+                U::Neg | U::BitNot | U::PreIncr | U::PreDecr | U::PostIncr | U::PostDecr => {
+                    ParamUse::Int
+                }
+            };
+            note(inner, u, uses);
+            visit(inner, uses);
+        }
+        ExprKind::Assign { left, op, right } => {
+            use parser::AssignOp as A;
+            match op {
+                A::Assign => {
+                    if let Some(u) = literal_use(right) {
+                        note(left, u, uses);
+                    }
+                }
+                A::AddAssign => {
+                    let u = match literal_use(right) {
+                        Some(ParamUse::String) => ParamUse::String,
+                        _ => ParamUse::Int,
+                    };
+                    note(left, u, uses);
+                }
+                _ => note(left, ParamUse::Int, uses),
+            }
+            visit(left, uses);
+            visit(right, uses);
+        }
+        ExprKind::Index { expr: base, index } => {
+            note(index, ParamUse::Int, uses);
+            visit(base, uses);
+            visit(index, uses);
+        }
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            note(cond, ParamUse::Bool, uses);
+            visit(cond, uses);
+            visit(then_branch, uses);
+            if let Some(e) = else_branch {
+                visit(e, uses);
+            }
+        }
+        ExprKind::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            note(cond, ParamUse::Bool, uses);
+            visit(cond, uses);
+            visit(then_expr, uses);
+            visit(else_expr, uses);
+        }
+        ExprKind::While { cond, body } | ExprKind::DoWhile { body, cond } => {
+            note(cond, ParamUse::Bool, uses);
+            visit(cond, uses);
+            visit(body, uses);
+        }
+        ExprKind::Var {
+            type_hint,
+            expr: init,
+            ..
+        }
+        | ExprKind::Final {
+            type_hint,
+            expr: init,
+            ..
+        } => {
+            if let (Some(t), Some(init)) = (type_hint, init) {
+                note(init, ParamUse::Hint(t), uses);
+            }
+            if let Some(init) = init {
+                visit(init, uses);
+            }
+        }
+        ExprKind::Return(Some(inner)) => {
+            if let Some(t) = return_hint {
+                note(inner, ParamUse::Hint(t), uses);
+            }
+            visit(inner, uses);
+        }
+        ExprKind::Call { expr: callee, args } => {
+            visit(callee, uses);
+            for arg in args {
+                visit(arg, uses);
+            }
+        }
+        ExprKind::For { iter, body, .. } => {
+            visit(iter, uses);
+            visit(body, uses);
+        }
+        ExprKind::Try {
+            expr: body,
+            catches,
+            finally_block,
+        } => {
+            visit(body, uses);
+            for c in catches {
+                if let Some(f) = &c.filter {
+                    visit(f, uses);
+                }
+                visit(&c.body, uses);
+            }
+            if let Some(f) = finally_block {
+                visit(f, uses);
+            }
+        }
+        ExprKind::Switch {
+            expr: subject,
+            cases,
+            default,
+        } => {
+            visit(subject, uses);
+            for case in cases {
+                if let Some(g) = &case.guard {
+                    visit(g, uses);
+                }
+                visit(&case.body, uses);
+            }
+            if let Some(d) = default {
+                visit(d, uses);
+            }
+        }
+        ExprKind::Block(elements) => {
+            for element in elements {
+                if let BlockElement::Expr(e) = element {
+                    visit(e, uses);
+                }
+            }
+        }
+        ExprKind::New { args, .. } | ExprKind::Array(args) | ExprKind::Tuple(args) => {
+            for arg in args {
+                visit(arg, uses);
+            }
+        }
+        ExprKind::Map(pairs) => {
+            for (k, v) in pairs {
+                visit(k, uses);
+                visit(v, uses);
+            }
+        }
+        ExprKind::Object(fields) => {
+            for f in fields {
+                visit(&f.expr, uses);
+            }
+        }
+        ExprKind::StringInterpolation(parts) => {
+            for part in parts {
+                if let StringPart::Interpolation(e) = part {
+                    visit(e, uses);
+                }
+            }
+        }
+        ExprKind::Field { expr: inner, .. }
+        | ExprKind::Throw(inner)
+        | ExprKind::Cast { expr: inner, .. }
+        | ExprKind::TypeCheck { expr: inner, .. }
+        | ExprKind::Untyped(inner)
+        | ExprKind::Meta { expr: inner, .. }
+        | ExprKind::Paren(inner)
+        | ExprKind::Inline(inner) => visit(inner, uses),
+        _ => {}
+    }
+}
+
 /// Top-level Haxe standard library classes that are always implicitly
 /// available, matching the `.hx` files in the haxe-std root. Registered as
 /// resolvable symbols wherever the full declarations have not been loaded;

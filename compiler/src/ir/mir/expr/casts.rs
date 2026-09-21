@@ -195,9 +195,28 @@ impl<'a> HirToMirContext<'a> {
 
         // Unsafe casts are a direct cast instruction with no runtime check; safe
         // casts fall through to the type-specific handlers even when the MIR
-        // types match, since Class→Class needs hierarchy verification.
+        // types match, since Class→Class needs hierarchy verification. A
+        // Dynamic is a box, so a scalar cast to it is boxed, not reinterpreted.
         if !*is_safe {
             let value_reg = self.lower_expression(expr)?;
+            let target_is_dynamic = matches!(
+                self.type_table.get(*target).map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            );
+            if target_is_dynamic {
+                if let Some(boxed) = self.maybe_box_value(value_reg, expr.ty, *target) {
+                    return Some(boxed);
+                }
+            }
+            // An erased slot keeps a float's bits; a numeric conversion would
+            // turn the value into its truncation.
+            let target_is_type_param = matches!(
+                self.type_table.get(*target).map(|t| &t.kind),
+                Some(TypeKind::TypeParameter { .. })
+            );
+            if target_is_type_param && matches!(from_type, IrType::F64 | IrType::F32) {
+                return self.builder.build_bitcast(value_reg, to_type);
+            }
             return self.builder.build_cast(value_reg, from_type, to_type);
         }
 

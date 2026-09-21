@@ -2484,6 +2484,22 @@ pub extern "C" fn haxe_dynamic_is_null(ptr: *mut u8) -> bool {
     }
 }
 
+/// A Dynamic read as a condition: null and a false or zero box are false,
+/// any other box or raw non-zero value is true.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_dynamic_truthy(ptr: *mut u8) -> bool {
+    if ptr.is_null() {
+        return false;
+    }
+    match dynamic_value_if_boxed(ptr) {
+        Some(d) if d.type_id == TYPE_NULL => false,
+        Some(d) if d.type_id == TYPE_BOOL => haxe_unbox_bool(d),
+        Some(d) if d.type_id == TYPE_INT => haxe_unbox_int(d) != 0,
+        Some(_) => true,
+        None => true,
+    }
+}
+
 /// Parse a String to an Int
 /// Implements Std.parseInt(x:String):Null<Int>
 /// Returns the parsed value, or i64::MIN as a sentinel for null

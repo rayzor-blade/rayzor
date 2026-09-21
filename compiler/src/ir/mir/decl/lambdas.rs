@@ -118,12 +118,12 @@ impl<'a> HirToMirContext<'a> {
         params: &[HirParam],
         body: &HirExpr,
         captures: &[HirCapture],
-        _lambda_type: TypeId, // No longer needed - type inferred from MIR
+        lambda_type: TypeId,
     ) -> Option<IrFunctionId> {
         // Pass 1: Create skeleton with placeholder signature
         let context = self.generate_lambda_skeleton(params, captures);
 
         // Pass 2: Lower body and infer return type from actual MIR
-        self.lower_lambda_body(context, params, body)
+        self.lower_lambda_body(context, params, body, lambda_type)
     }
 }

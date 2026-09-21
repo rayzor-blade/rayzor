@@ -2120,9 +2120,21 @@ impl<'a> AstLowering<'a> {
                         }
                     }
                 }
-                // Regular function call
-                self.lowering_callee = true;
+                // Regular function call. A function literal called in place
+                // takes its unannotated parameter types from the arguments.
+                let mut callee_literal = expr;
+                while let ExprKind::Paren(inner) = &callee_literal.kind {
+                    callee_literal = inner;
+                }
+                let iife_hint = matches!(
+                    callee_literal.kind,
+                    ExprKind::Function(_) | ExprKind::Arrow { .. }
+                )
+                .then(|| arg_exprs.iter().map(|a| a.expr_type).collect::<Vec<_>>());
+                self.lowering_callee = iife_hint.is_none();
+                self.expected_lambda_params_stack.push(iife_hint);
                 let func_expr = self.lower_expression(expr);
+                self.expected_lambda_params_stack.pop();
                 self.lowering_callee = false;
                 let mut func_expr = func_expr?;
 

@@ -119,6 +119,40 @@ impl<'a> HirToMirContext<'a> {
 
     /// The closure inside a function box held in a Dynamic, for an indirect
     /// call; any other register is returned as it is.
+    /// A Dynamic value handed to a function-typed slot: the closure record
+    /// comes out of its box (a raw record passes through `haxe_unbox_if_tag`
+    /// unchanged). None when the types do not ask for it.
+    pub(crate) fn maybe_unbox_function_for_target(
+        &mut self,
+        reg: IrId,
+        value_ty: TypeId,
+        target_ty: TypeId,
+    ) -> Option<IrId> {
+        let value_is_dynamic = matches!(
+            self.type_table.get(value_ty).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        );
+        let target_is_function = matches!(
+            self.type_table.get(target_ty).map(|t| &t.kind),
+            Some(TypeKind::Function { .. })
+        );
+        if !value_is_dynamic || !target_is_function {
+            return None;
+        }
+        if !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_))) {
+            return None;
+        }
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let unbox = self.get_or_register_extern_function(
+            "haxe_unbox_if_tag",
+            vec![ptr_u8.clone(), IrType::U32],
+            ptr_u8.clone(),
+        );
+        let tag = self.builder.build_const(IrValue::U32(u32::MAX - 1))?;
+        self.builder
+            .build_call_direct(unbox, vec![reg, tag], ptr_u8)
+    }
+
     pub(crate) fn unbox_dynamic_function(&mut self, reg: IrId, callee: &HirExpr) -> IrId {
         let let_boxed = matches!(&callee.kind, HirExprKind::Variable { symbol, .. }
             if self.boxed_dynamic_symbols.contains(symbol));

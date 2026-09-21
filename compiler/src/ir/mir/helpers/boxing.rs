@@ -1093,17 +1093,24 @@ impl<'a> HirToMirContext<'a> {
                 _ => break,
             }
         }
-        let boxed_bool = matches!(
-            self.type_table.get(ty).map(|t| &t.kind),
+        let unbox_fn = match self.type_table.get(ty).map(|t| &t.kind) {
             Some(TypeKind::Optional { inner_type })
-                if matches!(self.type_table.get(*inner_type).map(|t| &t.kind), Some(TypeKind::Bool))
-        );
-        if !boxed_bool || !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_))) {
+                if matches!(
+                    self.type_table.get(*inner_type).map(|t| &t.kind),
+                    Some(TypeKind::Bool)
+                ) =>
+            {
+                "haxe_unbox_bool_ptr"
+            }
+            // A Dynamic condition is a box (a raw value passes through).
+            Some(TypeKind::Dynamic) => "haxe_dynamic_truthy",
+            _ => return Some(reg),
+        };
+        if !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_))) {
             return Some(reg);
         }
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-        let unbox =
-            self.get_or_register_extern_function("haxe_unbox_bool_ptr", vec![ptr_u8], IrType::Bool);
+        let unbox = self.get_or_register_extern_function(unbox_fn, vec![ptr_u8], IrType::Bool);
         self.builder
             .build_call_direct(unbox, vec![reg], IrType::Bool)
     }

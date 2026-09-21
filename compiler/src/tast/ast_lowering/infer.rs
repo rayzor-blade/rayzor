@@ -1240,6 +1240,34 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// A function literal's result type: the inferred one, unless the
+    /// enclosing function is declared to return a function returning
+    /// Dynamic -- a Dynamic result is a box, so the literal must be typed to
+    /// build one. A formal's function type is not consulted: an unresolved
+    /// type parameter there also reads as Dynamic.
+    pub(crate) fn expected_lambda_return(&self, inferred: TypeId) -> TypeId {
+        let Some(expected) = self.context.expected_return_type else {
+            return inferred;
+        };
+        let tt = self.context.type_table.borrow();
+        let Some(TypeKind::Function { return_type, .. }) = tt.get(expected).map(|t| &t.kind) else {
+            return inferred;
+        };
+        let expected_is_dynamic = matches!(
+            tt.get(*return_type).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        );
+        let inferred_is_concrete = matches!(
+            tt.get(inferred).map(|t| &t.kind),
+            Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
+        );
+        if expected_is_dynamic && inferred_is_concrete {
+            *return_type
+        } else {
+            inferred
+        }
+    }
+
     pub(crate) fn infer_return_type_from_body(&self, body: &[TypedStatement]) -> TypeId {
         // The first return site is not necessarily the informative one:
         // `if (l.length == 1) return l.first(); return OpBlock(l);` returns

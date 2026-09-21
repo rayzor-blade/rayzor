@@ -1773,21 +1773,27 @@ impl<'a> AstLowering<'a> {
                     // that, and every later use of the binding then takes the
                     // Dynamic path: a field read would unbox a value that was
                     // never boxed and dereference the result.
-                    // Only a class or interface target is adopted. An abstract
-                    // reached this way would be routed through its @:from
-                    // conversions, which is a different operation than
-                    // reinterpreting the value.
+                    // A class, interface or type-parameter target is adopted
+                    // as is; an abstract as its underlying type, since `cast`
+                    // reinterprets and never runs the abstract's @:from.
                     let from_context = self
                         .expected_arg_type_stack
                         .last()
                         .copied()
                         .flatten()
                         .or(self.context.expected_return_type)
-                        .filter(|ty| {
-                            matches!(
-                                self.context.type_table.borrow().get(*ty).map(|t| &t.kind),
-                                Some(TypeKind::Class { .. }) | Some(TypeKind::Interface { .. })
-                            )
+                        .and_then(|ty| {
+                            let tt = self.context.type_table.borrow();
+                            match tt.get(ty).map(|t| &t.kind) {
+                                Some(TypeKind::Class { .. })
+                                | Some(TypeKind::Interface { .. })
+                                | Some(TypeKind::TypeParameter { .. }) => Some(ty),
+                                Some(TypeKind::Abstract {
+                                    underlying: Some(underlying),
+                                    ..
+                                }) => Some(*underlying),
+                                _ => None,
+                            }
                         });
                     match from_context {
                         Some(ty) => (ty, CastKind::Unsafe),
@@ -1856,7 +1862,8 @@ impl<'a> AstLowering<'a> {
                 let return_type = if let Some(ret_type) = &func.return_type {
                     self.lower_type(ret_type)?
                 } else {
-                    self.infer_return_type_from_body(&body)
+                    let inferred = self.infer_return_type_from_body(&body);
+                    self.expected_lambda_return(inferred)
                 };
 
                 // Exit the function scope
@@ -1933,6 +1940,7 @@ impl<'a> AstLowering<'a> {
                     }];
                     (body, return_type)
                 };
+                let return_type = self.expected_lambda_return(return_type);
 
                 // Exit the function scope
                 self.context.exit_scope();

@@ -247,6 +247,7 @@ impl<'a> HirToMirContext<'a> {
         context: LambdaContext,
         params: &[HirParam],
         body: &HirExpr,
+        lambda_type: TypeId,
     ) -> Option<IrFunctionId> {
         let LambdaContext {
             func_id,
@@ -256,6 +257,23 @@ impl<'a> HirToMirContext<'a> {
         } = context;
 
         let saved_state = self.save_state();
+        // A lambda typed to return Dynamic boxes its `return`s against that,
+        // not against the enclosing function's result. Other return types
+        // keep the enclosing context: a `Null<Int>` result would box a value
+        // its callers still read raw.
+        let declared_return = match self.type_table.get(lambda_type).map(|t| &t.kind) {
+            Some(TypeKind::Function { return_type, .. }) => Some(*return_type),
+            _ => None,
+        }
+        .filter(|ret| {
+            matches!(
+                self.type_table.get(*ret).map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            )
+        });
+        if declared_return.is_some() {
+            self.current_function_return_type = declared_return;
+        }
 
         // Switch to lambda context
         self.builder.current_function = Some(func_id);
@@ -372,6 +390,20 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             _ => self.lower_expression(body),
+        };
+        // The implicit result of an expression body is a `return` too.
+        let body_result = match (body_result, declared_return) {
+            (Some(reg), Some(ret_ty)) => {
+                let value_ty = match &body.kind {
+                    crate::ir::hir::HirExprKind::Block(block) => match &block.statements[..] {
+                        [crate::ir::hir::HirStatement::Expr(e)] if block.expr.is_none() => e.ty,
+                        _ => block.expr.as_ref().map(|e| e.ty).unwrap_or(body.ty),
+                    },
+                    _ => body.ty,
+                };
+                self.maybe_box_value(reg, value_ty, ret_ty).or(Some(reg))
+            }
+            (r, _) => r,
         };
 
         // Infer return type from actual generated code (borrows function immutably)

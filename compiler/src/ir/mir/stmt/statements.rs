@@ -269,6 +269,9 @@ impl<'a> HirToMirContext<'a> {
                         // Auto-box if assigning concrete value to Dynamic variable
                         // Auto-unbox if assigning Dynamic value to concrete variable
                         let final_value = if let Some(target_ty) = var_type {
+                            let value_reg = self
+                                .maybe_unbox_function_for_target(value_reg, init_ty, target_ty)
+                                .unwrap_or(value_reg);
                             let after_box = self
                                 .maybe_box_value(value_reg, init_ty, target_ty)
                                 .unwrap_or(value_reg);
@@ -1099,6 +1102,13 @@ impl<'a> HirToMirContext<'a> {
                         // pointer's address as the value.
                         if let Some(unboxed) =
                             self.maybe_unbox_optional_for_target(val, e.ty, fn_ret_ty)
+                        {
+                            return Some(unboxed);
+                        }
+                        // A Dynamic returned as a function type: the closure
+                        // comes out of its box.
+                        if let Some(unboxed) =
+                            self.maybe_unbox_function_for_target(val, e.ty, fn_ret_ty)
                         {
                             return Some(unboxed);
                         }
