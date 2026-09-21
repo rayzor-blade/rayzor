@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1789834001,"nonce":"8Lepn142/GzNwROEcHNO9XYCXGg=","added":["bug","area:mir"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1789953002,"nonce":"ohdmFJe8PH1cKrdVIkpWPey+JOQ=","message":"Fixed in e762f2e7 (haxe.ds.Vector over rayzor.Vec) and 9e76c2d5 (abstract constructors with bodies): new Vector\u003cArray\u003cFloat\u003e\u003e(1); v[0] = [1.5]; v[0] prints [1.5].","files":null}]}
