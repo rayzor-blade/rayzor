@@ -891,9 +891,30 @@ impl<'a> AstLowering<'a> {
                 // );
                 Ok(non_void_types[0])
             }
-            TypedExpressionKind::Try { try_expr, .. } => {
-                // Try expression type is the type of the try block
-                Ok(try_expr.expr_type)
+            TypedExpressionKind::Try {
+                try_expr,
+                catch_clauses,
+                ..
+            } => {
+                // The try block's type, unless that block only throws (Void):
+                // then a catch body's value is the expression's.
+                let try_ty = try_expr.expr_type;
+                let try_is_void = matches!(
+                    self.context
+                        .type_table
+                        .borrow()
+                        .get(try_ty)
+                        .map(|t| &t.kind),
+                    None | Some(TypeKind::Void) | Some(TypeKind::Unknown)
+                );
+                if try_is_void {
+                    for clause in catch_clauses {
+                        if let Some(ty) = self.statement_value_type(&clause.body) {
+                            return Ok(ty);
+                        }
+                    }
+                }
+                Ok(try_ty)
             }
             TypedExpressionKind::VarDeclarationExpr { var_type, .. } => Ok(*var_type),
             TypedExpressionKind::FinalDeclarationExpr { var_type, .. } => Ok(*var_type),
@@ -1279,6 +1300,23 @@ impl<'a> AstLowering<'a> {
         } else {
             inferred
         }
+    }
+
+    /// The value a statement used as a block's result carries: an expression
+    /// statement's type, or a block's last statement's. None for Void.
+    fn statement_value_type(&self, stmt: &TypedStatement) -> Option<TypeId> {
+        let ty = match stmt {
+            TypedStatement::Expression { expression, .. } => expression.expr_type,
+            TypedStatement::Block { statements, .. } => {
+                return statements.last().and_then(|s| self.statement_value_type(s));
+            }
+            _ => return None,
+        };
+        let concrete = !matches!(
+            self.context.type_table.borrow().get(ty).map(|t| &t.kind),
+            None | Some(TypeKind::Void) | Some(TypeKind::Unknown)
+        );
+        concrete.then_some(ty)
     }
 
     pub(crate) fn infer_return_type_from_body(&self, body: &[TypedStatement]) -> TypeId {

@@ -581,7 +581,15 @@ impl<'a> TastToHirContext<'a> {
         // defaults (`var x:T = expr;`) at the top of its body — without
         // this, those defaults would silently never execute.
         if let Some(constructor) = class.constructors.first() {
-            hir_constructor = Some(self.lower_constructor(constructor, &class.fields));
+            let mut ctor = self.lower_constructor(constructor, &class.fields);
+            // A constructor with no `super()` has a parent without one of its
+            // own (Haxe requires the call otherwise); the parent's
+            // declaration-site defaults still run, through its synthesised
+            // constructor.
+            if ctor.super_call.is_none() && class.super_class.is_some() {
+                ctor.super_call = Some(HirSuperCall { args: Vec::new() });
+            }
+            hir_constructor = Some(ctor);
         } else if class
             .fields
             .iter()

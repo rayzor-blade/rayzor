@@ -962,7 +962,11 @@ impl<'a> HirToMirContext<'a> {
                             // entries are rebuilt across compilation contexts;
                             // `class_parent_map` is keyed by stable SymbolIds, so
                             // resolve through it to the name, then constructor_name_map.
-                            if let Some(&parent_sym) = self.class_parent_map.get(&class_symbol) {
+                            // A parent without a constructor of its own hands the
+                            // call to the nearest ancestor that has one.
+                            let mut ancestor = self.class_parent_map.get(&class_symbol).copied();
+                            for _ in 0..16 {
+                                let Some(parent_sym) = ancestor else { break };
                                 if let Some(sym_info) = self.symbol_table.get_symbol(parent_sym) {
                                     if let Some(qual_name) = sym_info
                                         .qualified_name
@@ -979,6 +983,7 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                     }
                                 }
+                                ancestor = self.class_parent_map.get(&parent_sym).copied();
                             }
                             None
                         });
@@ -1035,7 +1040,7 @@ impl<'a> HirToMirContext<'a> {
                     );
                     self.builder
                         .build_call_direct(stub_id, arg_regs, crate::ir::IrType::Void);
-                } else {
+                } else if !super_call.args.is_empty() {
                     self.add_error(
                         &format!(
                             "Parent constructor not found for TypeId {:?}",
@@ -1044,6 +1049,8 @@ impl<'a> HirToMirContext<'a> {
                         crate::tast::SourceLocation::unknown(),
                     );
                 }
+                // An implicit `super()` to a chain with no constructor at all
+                // has nothing to run.
             }
         }
 

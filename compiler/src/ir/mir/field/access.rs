@@ -1211,6 +1211,8 @@ impl<'a> HirToMirContext<'a> {
                 Some(crate::tast::TypeKind::Float) => (IrType::F64, IrType::F64),
                 Some(crate::tast::TypeKind::Int) => (IrType::I64, IrType::I32),
                 Some(crate::tast::TypeKind::Bool) => (IrType::I64, IrType::Bool),
+                // A Dynamic element is a box: the slot is its address.
+                Some(crate::tast::TypeKind::Dynamic) => (IrType::I64, ptr_u8.clone()),
                 _ => {
                     let t = IrType::I64;
                     (t.clone(), t)
