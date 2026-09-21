@@ -517,6 +517,38 @@ impl<'a> HirToMirContext<'a> {
 
     /// Check if an expression produces a value backed by an anon view, and if so,
     /// materialize it into a real AnonObject handle. Used at escape points (call args).
+    /// A known box typed Dynamic, converted for a formal that is not Dynamic:
+    /// an erased `T` takes the payload as slot bits, a concrete type unboxes.
+    fn unbox_known_box_for_formal(
+        &mut self,
+        arg_reg: IrId,
+        arg_ty: TypeId,
+        param_ty: TypeId,
+    ) -> Option<IrId> {
+        if !matches!(
+            self.type_table.get(arg_ty).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            return None;
+        }
+        match self.type_table.get(param_ty).map(|t| &t.kind) {
+            Some(TypeKind::Dynamic) | None => None,
+            Some(TypeKind::TypeParameter { .. }) => {
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let f = self.get_or_register_extern_function(
+                    "haxe_dynamic_to_slot",
+                    vec![ptr_u8],
+                    IrType::I64,
+                );
+                self.builder
+                    .build_call_direct(f, vec![arg_reg], IrType::I64)
+            }
+            _ => self
+                .maybe_unbox_value(arg_reg, arg_ty, param_ty)
+                .filter(|out| *out != arg_reg),
+        }
+    }
+
     /// Also handles direct class→anon or wider-anon→anon conversion at call boundaries
     /// when the callee expects an anonymous-typed parameter.
     pub(crate) fn maybe_materialize_for_call(
@@ -562,6 +594,15 @@ impl<'a> HirToMirContext<'a> {
                         self.unbox_optional_for_erased_formal(arg_reg, resolved_arg, resolved_param)
                     {
                         return erased;
+                    }
+                    // A register KNOWN to hold a box (a Dynamic call's result)
+                    // handed to a typed or erased formal comes out of it.
+                    if self.boxed_value_regs.contains(&arg_reg) {
+                        if let Some(out) =
+                            self.unbox_known_box_for_formal(arg_reg, resolved_arg, resolved_param)
+                        {
+                            return out;
+                        }
                     }
 
                     // Concrete → Dynamic at the call boundary must box, as Let/Assign and

@@ -972,6 +972,21 @@ impl<'a> AstLowering<'a> {
             .get(&class_symbol)
             .cloned()
             .unwrap_or_default();
+        // A call through a parameter declared with a function type
+        // (`cmp:Int->Int->Int`) has formals too.
+        let typed_fn_params: BTreeMap<&str, TypeId> = func
+            .params
+            .iter()
+            .filter_map(|p| {
+                let hint = p.type_hint.as_ref()?;
+                let ty = self.lower_type(hint).ok()?;
+                let is_fn = matches!(
+                    self.context.type_table.borrow().get(ty).map(|t| &t.kind),
+                    Some(TypeKind::Function { .. })
+                );
+                is_fn.then_some((p.name.as_str(), ty))
+            })
+            .collect();
         for (param, sites) in uses {
             let param_key = self.context.intern_string(param);
             if shadowed.contains(param) {
@@ -982,18 +997,17 @@ impl<'a> AstLowering<'a> {
             let mut conflict = false;
             for (method, index) in sites {
                 let method_key = self.context.intern_string(method);
-                let Some(&(_, method_symbol, _)) =
-                    methods.iter().find(|(name, _, _)| *name == method_key)
-                else {
-                    continue;
-                };
-                let Some(fn_type) = self
-                    .context
-                    .symbol_table
-                    .get_symbol(method_symbol)
-                    .map(|s| s.type_id)
-                else {
-                    continue;
+                let fn_type = match methods.iter().find(|(name, _, _)| *name == method_key) {
+                    Some(&(_, method_symbol, _)) => {
+                        match self.context.symbol_table.get_symbol(method_symbol) {
+                            Some(sym) => sym.type_id,
+                            None => continue,
+                        }
+                    }
+                    None => match typed_fn_params.get(method) {
+                        Some(ty) => *ty,
+                        None => continue,
+                    },
                 };
                 let formal = {
                     let tt = self.context.type_table.borrow();
@@ -1027,17 +1041,39 @@ impl<'a> AstLowering<'a> {
         }
 
         // Operator uses decide what is left, and veto a store or call
-        // answer they disagree with.
-        // A defaulted parameter has the default's type already.
-        let mut names: BTreeMap<&str, &str> = func
+        // answer they disagree with. A defaulted parameter has the default's
+        // type already.
+        let unannotated: Vec<&str> = func
             .params
             .iter()
             .filter(|p| p.type_hint.is_none() && p.default_value.is_none())
-            .map(|p| (p.name.as_str(), p.name.as_str()))
+            .map(|p| p.name.as_str())
             .collect();
+        self.apply_param_operator_uses(
+            body,
+            &unannotated,
+            func.return_type.as_ref(),
+            &shadowed,
+            &mut out,
+        );
+        out
+    }
+
+    /// Merge what the operator uses of `params` in `body` say into `out`:
+    /// a parameter whose uses disagree, or disagree with an answer already
+    /// there, is removed. `"" + p` only counts on its own.
+    pub(crate) fn apply_param_operator_uses(
+        &mut self,
+        body: &Expr,
+        params: &[&str],
+        return_hint: Option<&Type>,
+        shadowed: &std::collections::BTreeSet<&str>,
+        out: &mut BTreeMap<InternedString, TypeId>,
+    ) {
+        let mut names: BTreeMap<&str, &str> = params.iter().map(|p| (*p, *p)).collect();
         while collect_param_copies(body, &mut names) {}
         let mut op_uses: BTreeMap<&str, Vec<ParamUse>> = BTreeMap::new();
-        collect_param_operator_uses(body, &names, func.return_type.as_ref(), &mut op_uses);
+        collect_param_operator_uses(body, &names, return_hint, &mut op_uses);
         for (param, sites) in op_uses {
             if shadowed.contains(param) {
                 continue;
@@ -1045,7 +1081,6 @@ impl<'a> AstLowering<'a> {
             let param_key = self.context.intern_string(param);
             let mut agreed: Option<TypeId> = out.get(&param_key).copied();
             let mut conflict = false;
-            // `"" + p` stringifies anything, so it only counts on its own.
             let mut concat_only = true;
             for site in &sites {
                 let ty = match site {
@@ -1076,7 +1111,6 @@ impl<'a> AstLowering<'a> {
                 out.insert(param_key, ty);
             }
         }
-        out
     }
 
     /// Lower a parameter

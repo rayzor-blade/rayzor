@@ -1112,6 +1112,16 @@ impl<'a> HirToMirContext<'a> {
                         {
                             return Some(unboxed);
                         }
+                        // A register known to hold a box, returned as a
+                        // concrete type, comes out of it. Only a KNOWN box:
+                        // a Dynamic by decay may be the raw value already.
+                        if self.boxed_value_regs.contains(&val) {
+                            if let Some(unboxed) = self.maybe_unbox_value(val, e.ty, fn_ret_ty) {
+                                if unboxed != val {
+                                    return Some(unboxed);
+                                }
+                            }
+                        }
                         // Interface return wrapping: the auto-wrap in `lower_expression` only
                         // fires when `expr.ty` is the interface, but `return classInstance`
                         // keeps `expr.ty` as the class, so wrap the raw class pointer here

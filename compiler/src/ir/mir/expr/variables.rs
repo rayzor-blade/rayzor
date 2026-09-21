@@ -109,14 +109,18 @@ impl<'a> HirToMirContext<'a> {
             // out of the function's own code.
             // CallIndirect prepends an env and types every slot i64; a plain
             // function has neither. Reference an adapter that speaks that ABI.
+            let fn_ty = self.symbol_table.get_symbol(*symbol).map(|s| s.type_id);
             if let Some(adapter) = self.ensure_closure_value_adapter(func_id) {
+                self.closure_targets.insert(adapter, fn_ty);
                 return self.builder.build_function_ref(adapter);
             }
+            self.closure_targets.insert(func_id, fn_ty);
             return self.builder.build_function_ref(func_id);
         }
         // A bodyless mapped static (`Reflect.compare`) has no function of its
         // own to reference; a function shaped like this use of it stands in.
         if let Some(thunk_id) = self.mapped_static_function_ref(*symbol, expr.ty) {
+            self.closure_targets.insert(thunk_id, Some(expr.ty));
             return self.builder.build_function_ref(thunk_id);
         }
 

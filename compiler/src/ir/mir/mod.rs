@@ -245,8 +245,14 @@ pub struct HirToMirContext<'a> {
     /// `(this, ...args)`. These thunks use `(env, this, ...args)` and forward to
     /// the real method, ignoring `env`.
     vtable_dispatch_thunks: BTreeMap<IrFunctionId, IrFunctionId>,
-    /// Erased-ABI adapters for a plain function used as a closure value.
+    /// Adapters giving a plain function used as a closure value a lambda's shape.
     closure_value_adapters: BTreeMap<IrFunctionId, IrFunctionId>,
+    /// Every function a closure record of this module points at, with its
+    /// Haxe function type when known; module init registers their slot- and
+    /// box-shaped entries with the runtime.
+    closure_targets: BTreeMap<IrFunctionId, Option<TypeId>>,
+    closure_slot_entries: BTreeMap<IrFunctionId, Option<IrFunctionId>>,
+    closure_dynamic_entries: BTreeMap<IrFunctionId, Option<IrFunctionId>>,
 
     /// Mapping from qualified class name to constructor IrFunctionId
     /// This is a fallback when TypeIds don't match (e.g., across separately compiled files)
@@ -1378,6 +1384,9 @@ impl<'a> HirToMirContext<'a> {
             method_ref_thunks: BTreeMap::new(),
             vtable_dispatch_thunks: BTreeMap::new(),
             closure_value_adapters: BTreeMap::new(),
+            closure_targets: BTreeMap::new(),
+            closure_slot_entries: BTreeMap::new(),
+            closure_dynamic_entries: BTreeMap::new(),
             constructor_name_map: BTreeMap::new(),
             constructor_owner_map: BTreeMap::new(),
             current_hir_types: hir_types,

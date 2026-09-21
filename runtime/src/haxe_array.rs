@@ -1098,8 +1098,10 @@ pub extern "C" fn haxe_array_map(
             panic!("Failed to allocate memory for Array.map result");
         }
 
-        // Cast fn_ptr to callable function pointer
-        let callback: extern "C" fn(*mut u8, i64) -> i64 = std::mem::transmute(fn_ptr);
+        // The slot-shaped entry: a callback declared on i32, Bool or f64
+        // reads its argument and returns its result as a 64-bit slot.
+        let callback: extern "C" fn(*mut u8, i64) -> i64 =
+            std::mem::transmute(crate::closure_entries::closure_slot_code(fn_ptr));
 
         for i in 0..len {
             // Read element as i64
@@ -1155,7 +1157,8 @@ pub extern "C" fn haxe_array_filter(
             panic!("Failed to allocate memory for Array.filter result");
         }
 
-        let callback: extern "C" fn(*mut u8, i64) -> i64 = std::mem::transmute(fn_ptr);
+        let callback: extern "C" fn(*mut u8, i64) -> i64 =
+            std::mem::transmute(crate::closure_entries::closure_slot_code(fn_ptr));
 
         let mut out_len = 0usize;
         for i in 0..len {
@@ -1706,7 +1709,8 @@ pub extern "C" fn haxe_array_sort(arr: *mut HaxeArray, fn_ptr: usize, env_ptr: *
             return;
         }
 
-        let callback: extern "C" fn(*mut u8, i64, i64) -> i32 = std::mem::transmute(fn_ptr);
+        let callback: extern "C" fn(*mut u8, i64, i64) -> i64 =
+            std::mem::transmute(crate::closure_entries::closure_slot_code(fn_ptr));
 
         // Simple insertion sort for now (stable, in-place)
         // Elements are i64 (8 bytes each)

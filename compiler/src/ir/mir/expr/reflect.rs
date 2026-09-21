@@ -74,6 +74,7 @@ impl<'a> HirToMirContext<'a> {
 
             if let Some(func_id) = resolved_func {
                 // CallIndirect expects a closure object {fn_ptr, env_ptr}, not a raw fn address.
+                self.closure_targets.insert(func_id, None);
                 self.builder
                     .build_function_ref(func_id)
                     .or_else(|| self.lower_expression(func_expr))?

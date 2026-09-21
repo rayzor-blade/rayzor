@@ -100,6 +100,17 @@ impl<'a> HirToMirContext<'a> {
         // closure inside it, not to the box's tag.
         let func_ptr = self.unbox_dynamic_function(func_ptr, callee);
 
+        // A callee typed Dynamic has no signature to call by: every argument
+        // travels as a box to the closure's box-shaped entry, and the result
+        // comes back as one.
+        let callee_is_dynamic = matches!(
+            self.type_table.get(callee.ty).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        );
+        if callee_is_dynamic {
+            return self.lower_dynamic_closure_call(func_ptr, args, &arg_regs);
+        }
+
         // Signature from the callee's function type, else from the arguments.
         let param_types: Vec<IrType> = {
             let type_table = self.type_table;
@@ -151,5 +162,55 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder
             .build_call_indirect(func_ptr, arg_regs, func_signature)
+    }
+
+    /// `f(args)` with `f: Dynamic`: box the arguments, take the closure's
+    /// box-shaped entry view and call it as `(box..) -> box`.
+    fn lower_dynamic_closure_call(
+        &mut self,
+        closure: IrId,
+        args: &[HirExpr],
+        arg_regs: &[IrId],
+    ) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let dynamic_ty = self.type_table.dynamic_type();
+        let mut boxed_args = Vec::with_capacity(arg_regs.len());
+        for (a, reg) in args.iter().zip(arg_regs) {
+            let boxed = self.maybe_box_value(*reg, a.ty, dynamic_ty).unwrap_or(*reg);
+            let boxed = match self.builder.get_register_type(boxed) {
+                Some(IrType::Ptr(_)) | None => boxed,
+                Some(other) => self
+                    .builder
+                    .build_cast(boxed, other, ptr_u8.clone())
+                    .unwrap_or(boxed),
+            };
+            boxed_args.push(boxed);
+        }
+        let closure = match self.builder.get_register_type(closure) {
+            Some(IrType::Ptr(_)) => closure,
+            Some(other) => self
+                .builder
+                .build_cast(closure, other, ptr_u8.clone())
+                .unwrap_or(closure),
+            None => closure,
+        };
+        let view_fn = self.get_or_register_extern_function(
+            "haxe_closure_dynamic_view",
+            vec![ptr_u8.clone()],
+            ptr_u8.clone(),
+        );
+        let view = self
+            .builder
+            .build_call_direct(view_fn, vec![closure], ptr_u8.clone())?;
+        let signature = IrType::Function {
+            params: vec![ptr_u8.clone(); boxed_args.len()],
+            return_type: Box::new(ptr_u8),
+            varargs: false,
+        };
+        let result = self
+            .builder
+            .build_call_indirect(view, boxed_args, signature)?;
+        self.boxed_value_regs.insert(result);
+        Some(result)
     }
 }

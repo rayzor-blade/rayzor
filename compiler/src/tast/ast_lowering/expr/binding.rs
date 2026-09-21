@@ -36,9 +36,8 @@ impl<'a> AstLowering<'a> {
         }
         // A use happened on an empty-inferred array. Resolve the element type:
         // cheap syntactic peek first, then lower Call/Field/Index args (e.g.
-        // `a.push(x.getFlat(i))`) for their type — the lowered result is
-        // discarded (the push re-lowers it). Lambdas etc. are left to a later
-        // peekable push (avoids double-lowering a closure).
+        // `a.push(x.getFlat(i))`) and function literals for their type — the
+        // lowered result is discarded (the push re-lowers it).
         let elem_ty = self.peek_ast_expr_type(elem_ast).or_else(|| {
             if matches!(
                 &elem_ast.kind,
@@ -46,6 +45,8 @@ impl<'a> AstLowering<'a> {
                     | ExprKind::Field { .. }
                     | ExprKind::Index { .. }
                     | ExprKind::New { .. }
+                    | ExprKind::Function(_)
+                    | ExprKind::Arrow { .. }
             ) {
                 self.lower_expression(elem_ast).ok().map(|te| te.expr_type)
             } else {

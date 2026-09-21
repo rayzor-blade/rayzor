@@ -427,14 +427,19 @@ impl<'a> HirToMirContext<'a> {
         // Generate reflective constructor wrappers for Type.createInstance().
         self.generate_constructor_reflect_wrappers();
 
-        if !self.class_vtables.is_empty() || !self.constructor_reflect_wrappers.is_empty() {
-            self.generate_vtable_init_function();
-        }
-
         // Generate __init__ whenever the module has globals so repeated executions
         // can restore static state even if every initializer is constant/defaulted.
         if !self.dynamic_globals.is_empty() || !self.builder.module.globals.is_empty() {
             self.generate_module_init_function();
+        }
+
+        // After __init__: a static initializer's lambda is a closure target
+        // too, and __vtable_init__ registers every target's entries.
+        if !self.class_vtables.is_empty()
+            || !self.constructor_reflect_wrappers.is_empty()
+            || !self.closure_targets.is_empty()
+        {
+            self.generate_vtable_init_function();
         }
 
         if self.errors.is_empty() {

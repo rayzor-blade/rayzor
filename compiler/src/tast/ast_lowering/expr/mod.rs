@@ -1838,11 +1838,39 @@ impl<'a> AstLowering<'a> {
                     .expected_lambda_params_stack
                     .last()
                     .and_then(|p| p.clone());
+                // With no expected signature, an unannotated parameter takes
+                // what its operator uses in the body imply, as Haxe would.
+                let inferred_params = match (&expected_params, &func.body) {
+                    (None, Some(body)) => {
+                        let names: Vec<&str> = func
+                            .params
+                            .iter()
+                            .filter(|p| p.type_hint.is_none())
+                            .map(|p| p.name.as_str())
+                            .collect();
+                        let mut out = BTreeMap::new();
+                        self.apply_param_operator_uses(
+                            body,
+                            &names,
+                            func.return_type.as_ref(),
+                            &std::collections::BTreeSet::new(),
+                            &mut out,
+                        );
+                        out
+                    }
+                    _ => BTreeMap::new(),
+                };
 
                 // Lower parameters - they will be automatically registered in the function scope
                 let mut parameters = Vec::new();
                 for (i, param) in func.params.iter().enumerate() {
-                    let expected_ty = expected_params.as_ref().and_then(|ps| ps.get(i).copied());
+                    let expected_ty = expected_params
+                        .as_ref()
+                        .and_then(|ps| ps.get(i).copied())
+                        .or_else(|| {
+                            let key = self.context.intern_string(&param.name);
+                            inferred_params.get(&key).copied()
+                        });
                     let param_result = if param.type_hint.is_none() && expected_ty.is_some() {
                         self.lower_function_param_with_type(param, expected_ty.unwrap())?
                     } else {
@@ -1886,19 +1914,39 @@ impl<'a> AstLowering<'a> {
                     .expected_lambda_params_stack
                     .last()
                     .and_then(|p| p.clone());
+                let inferred_params = if expected_params.is_none() {
+                    let names: Vec<&str> = params
+                        .iter()
+                        .filter(|p| p.type_hint.is_none())
+                        .map(|p| p.name.as_str())
+                        .collect();
+                    let mut out = BTreeMap::new();
+                    self.apply_param_operator_uses(
+                        expr,
+                        &names,
+                        None,
+                        &std::collections::BTreeSet::new(),
+                        &mut out,
+                    );
+                    out
+                } else {
+                    BTreeMap::new()
+                };
 
                 let mut typed_params = Vec::new();
                 for (i, param) in params.iter().enumerate() {
                     let param_interned = self.context.string_interner.intern(&param.name);
 
                     // Use type annotation if present, then expected-from-context,
-                    // otherwise fall back to dynamic.
+                    // then the body's operator uses, otherwise fall back to dynamic.
                     let param_type = if let Some(ref type_hint) = param.type_hint {
                         self.lower_type(type_hint)?
                     } else if let Some(expected) =
                         expected_params.as_ref().and_then(|ps| ps.get(i).copied())
                     {
                         expected
+                    } else if let Some(inferred) = inferred_params.get(&param_interned) {
+                        *inferred
                     } else {
                         self.context.type_table.borrow().dynamic_type()
                     };

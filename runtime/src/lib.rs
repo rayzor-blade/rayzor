@@ -53,6 +53,7 @@ pub mod socket; // Networking (Socket, Host — TCP/DNS)
 pub mod ssl; // SSL/TLS (sys.ssl.Socket, Certificate, Key, Digest)
 // Note: ArrayIterator/ArrayKeyValueIterator are compiled as regular Haxe classes.
 // The array_iterator module is kept for potential future use but not registered.
+pub mod closure_entries; // Slot- and box-shaped entry points for closures
 pub mod crash_diagnostics;
 pub mod haxe_array; // Dynamic Array API
 pub mod haxe_math; // Math functions

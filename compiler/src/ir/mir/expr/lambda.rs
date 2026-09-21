@@ -221,6 +221,8 @@ impl<'a> HirToMirContext<'a> {
             filtered_captures.iter().map(|c| (*c).clone()).collect();
         let lambda_func_id =
             self.generate_lambda_function(params, body, &filtered_captures_slice, lambda_type)?;
+        self.closure_targets
+            .insert(lambda_func_id, Some(lambda_type));
 
         let result = self
             .builder
@@ -472,6 +474,11 @@ impl<'a> HirToMirContext<'a> {
                 self.ensure_method_ref_thunk_with_sig(id, sig)?
             }
         };
+        let method_ty = self
+            .symbol_table
+            .get_symbol(method_symbol)
+            .map(|s| s.type_id);
+        self.closure_targets.insert(thunk_id, method_ty);
         self.builder
             .build_make_closure(thunk_id, vec![receiver_reg])
     }

@@ -524,6 +524,32 @@ impl<'a> HirToMirContext<'a> {
                         *arg_reg = cast_reg;
                     }
                 }
+                // A register known to hold a box (a Dynamic call's result)
+                // bound for anything but a box slot comes out of it: an erased
+                // slot takes the payload's bits, a String its pointer, a
+                // scalar its value.
+                let expects_box = matches!(expected_ty, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void));
+                if self.boxed_value_regs.contains(arg_reg) && !expects_box {
+                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                    let (f, ret) = match expected_ty {
+                        IrType::F64 | IrType::F32 => ("haxe_dynamic_to_f64", IrType::F64),
+                        IrType::Bool => ("haxe_dynamic_truthy", IrType::Bool),
+                        _ => ("haxe_dynamic_to_slot", IrType::I64),
+                    };
+                    let f = self.get_or_register_extern_function(f, vec![ptr_u8], ret.clone());
+                    if let Some(out) =
+                        self.builder
+                            .build_call_direct(f, vec![*arg_reg], ret.clone())
+                    {
+                        *arg_reg = if ret == *expected_ty {
+                            out
+                        } else {
+                            self.builder
+                                .build_cast(out, ret, expected_ty.clone())
+                                .unwrap_or(out)
+                        };
+                    }
+                }
                 // An erased slot takes a Float's bits, not its value.
                 if matches!(expected_ty, IrType::I64 | IrType::TypeVar(_)) {
                     match self.builder.get_register_type(*arg_reg) {
@@ -602,8 +628,16 @@ impl<'a> HirToMirContext<'a> {
             ) {
                 continue;
             }
+            // A register KNOWN to hold a box hands over its whole payload (a
+            // String box its pointer); an unknown one only a scalar's value,
+            // since a raw object also starts with a plausible tag.
+            let unbox_fn = if self.boxed_value_regs.contains(arg_reg) {
+                "haxe_dynamic_to_slot"
+            } else {
+                "haxe_unbox_scalar_or_addr"
+            };
             let unbox = self.get_or_register_extern_function(
-                "haxe_unbox_scalar_or_addr",
+                unbox_fn,
                 vec![IrType::Ptr(Box::new(IrType::U8))],
                 IrType::I64,
             );

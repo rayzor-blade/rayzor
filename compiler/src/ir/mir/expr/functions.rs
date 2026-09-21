@@ -616,6 +616,7 @@ impl<'a> HirToMirContext<'a> {
 
         // Create closure object (MakeClosure instruction)
         // MakeClosure allocates struct { fn_ptr: i64, env_ptr: i64 } on heap
+        self.closure_targets.insert(inner_func_id, None);
         let closure_reg = match self
             .builder
             .build_make_closure(inner_func_id, captured_values)

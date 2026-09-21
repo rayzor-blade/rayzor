@@ -21,6 +21,28 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+/// The two shapes a closure's alternate entry can have.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryShape {
+    Slot,
+    Dynamic,
+}
+
+/// What a closure's declared parameter or result holds.
+#[derive(Clone, PartialEq, Eq)]
+enum SlotKind {
+    /// A Dynamic: already a box.
+    Dynamic,
+    Scalar(IrType),
+    Float(IrType),
+    Bool,
+    String(IrType),
+    Reference(IrType),
+    /// An erased type parameter: raw bits.
+    Erased,
+    Void,
+}
+
 impl<'a> HirToMirContext<'a> {
     /// A mapped static method taken as a value: a function shaped like the
     /// reference's own type that boxes its arguments for the runtime's
@@ -59,8 +81,10 @@ impl<'a> HirToMirContext<'a> {
                 return Some(*func_id);
             }
         }
+        // A closure target: the env every indirect call passes comes first.
         let ret_ir = self.convert_type(ret_ty);
         let mut sig_builder = FunctionSignatureBuilder::new()
+            .param("env".to_string(), IrType::Ptr(Box::new(IrType::U8)))
             .returns(ret_ir.clone())
             .calling_convention(CallingConvention::Haxe);
         for (i, t) in param_tys.iter().enumerate() {
@@ -95,7 +119,7 @@ impl<'a> HirToMirContext<'a> {
             match self
                 .builder
                 .current_function()
-                .and_then(|f| f.get_param_reg(i))
+                .and_then(|f| f.get_param_reg(i + 1))
             {
                 Some(reg) => params.push(reg),
                 None => {
@@ -510,6 +534,372 @@ impl<'a> HirToMirContext<'a> {
         Some(adapter_id)
     }
 
+    /// The slot-shaped entry of a closure target, `(env, i64..) -> i64`:
+    /// what the runtime's array helpers call. None when the declared shape
+    /// already is one (every parameter and the result a 64-bit slot).
+    pub(crate) fn ensure_closure_slot_entry(
+        &mut self,
+        target: IrFunctionId,
+        fn_type: Option<TypeId>,
+    ) -> Option<IrFunctionId> {
+        if let Some(cached) = self.closure_slot_entries.get(&target) {
+            return *cached;
+        }
+        let sig = self
+            .builder
+            .module
+            .functions
+            .get(&target)?
+            .signature
+            .clone();
+        let is_slot = |ty: &IrType| matches!(ty, IrType::I64 | IrType::Ptr(_) | IrType::Void);
+        let entry =
+            if sig.parameters.iter().skip(1).all(|p| is_slot(&p.ty)) && is_slot(&sig.return_type) {
+                None
+            } else {
+                self.build_closure_entry(target, &sig, fn_type, EntryShape::Slot)
+            };
+        self.closure_slot_entries.insert(target, entry);
+        entry
+    }
+
+    /// The box-shaped entry of a closure target, `(env, box..) -> box`: what
+    /// a call through a Dynamic-typed value reaches.
+    pub(crate) fn ensure_closure_dynamic_entry(
+        &mut self,
+        target: IrFunctionId,
+        fn_type: Option<TypeId>,
+    ) -> Option<IrFunctionId> {
+        if let Some(cached) = self.closure_dynamic_entries.get(&target) {
+            return *cached;
+        }
+        let sig = self
+            .builder
+            .module
+            .functions
+            .get(&target)?
+            .signature
+            .clone();
+        let entry = self.build_closure_entry(target, &sig, fn_type, EntryShape::Dynamic);
+        self.closure_dynamic_entries.insert(target, entry);
+        entry
+    }
+
+    /// What a declared parameter or result holds, from its Haxe type when
+    /// the closure's function type is known, else from its MIR type alone
+    /// (where a pointer-to-void is read as Dynamic).
+    fn slot_kind(&self, haxe_ty: Option<TypeId>, ir_ty: &IrType) -> SlotKind {
+        let mut cur = haxe_ty;
+        for _ in 0..4 {
+            let Some(ty) = cur else { break };
+            match self.type_table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Dynamic) => return SlotKind::Dynamic,
+                Some(TypeKind::Int) => return SlotKind::Scalar(ir_ty.clone()),
+                Some(TypeKind::Float) => return SlotKind::Float(ir_ty.clone()),
+                Some(TypeKind::Bool) => return SlotKind::Bool,
+                Some(TypeKind::String) => return SlotKind::String(ir_ty.clone()),
+                Some(TypeKind::TypeParameter { .. }) => return SlotKind::Erased,
+                Some(TypeKind::Optional { inner_type }) => {
+                    return if self.optional_inner_is_boxable_primitive(*inner_type) {
+                        SlotKind::Dynamic
+                    } else {
+                        self.slot_kind(Some(*inner_type), ir_ty)
+                    };
+                }
+                Some(TypeKind::TypeAlias { target_type, .. }) => cur = Some(*target_type),
+                Some(TypeKind::Abstract {
+                    underlying: Some(u),
+                    ..
+                }) => cur = Some(*u),
+                Some(TypeKind::Class { .. })
+                | Some(TypeKind::Interface { .. })
+                | Some(TypeKind::Anonymous { .. })
+                | Some(TypeKind::Array { .. })
+                | Some(TypeKind::Function { .. }) => return SlotKind::Reference(ir_ty.clone()),
+                _ => break,
+            }
+        }
+        match ir_ty {
+            IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void) => SlotKind::Dynamic,
+            IrType::Ptr(inner) if matches!(**inner, IrType::String) => {
+                SlotKind::String(ir_ty.clone())
+            }
+            IrType::String => SlotKind::String(ir_ty.clone()),
+            IrType::Ptr(_) => SlotKind::Reference(ir_ty.clone()),
+            IrType::I64 => SlotKind::Erased,
+            IrType::F64 | IrType::F32 => SlotKind::Float(ir_ty.clone()),
+            IrType::Bool => SlotKind::Bool,
+            IrType::Void => SlotKind::Void,
+            other => SlotKind::Scalar(other.clone()),
+        }
+    }
+
+    fn build_closure_entry(
+        &mut self,
+        target: IrFunctionId,
+        target_sig: &IrFunctionSignature,
+        fn_type: Option<TypeId>,
+        shape: EntryShape,
+    ) -> Option<IrFunctionId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let (slot_ty, suffix) = match shape {
+            EntryShape::Slot => (IrType::I64, "slot"),
+            EntryShape::Dynamic => (ptr_u8.clone(), "dyn"),
+        };
+        // Every closure target takes its env first.
+        let env_ty = target_sig.parameters.first()?.ty.clone();
+        let declared: Vec<IrType> = target_sig.parameters[1..]
+            .iter()
+            .map(|p| p.ty.clone())
+            .collect();
+        let (haxe_params, haxe_ret) = match fn_type
+            .and_then(|t| self.type_table.get(t))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Function {
+                params,
+                return_type,
+                ..
+            }) if params.len() == declared.len() => (params.clone(), Some(*return_type)),
+            _ => (Vec::new(), None),
+        };
+        let arg_kinds: Vec<SlotKind> = declared
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| self.slot_kind(haxe_params.get(i).copied(), ty))
+            .collect();
+        let ret_kind = if matches!(target_sig.return_type, IrType::Void) {
+            SlotKind::Void
+        } else {
+            self.slot_kind(haxe_ret, &target_sig.return_type)
+        };
+        let target_qname = {
+            let func = self.builder.module.functions.get(&target)?;
+            func.qualified_name
+                .clone()
+                .unwrap_or_else(|| func.name.clone())
+        };
+
+        let mut sig_builder = FunctionSignatureBuilder::new()
+            .param("env".to_string(), ptr_u8.clone())
+            .returns(slot_ty.clone())
+            .calling_convention(CallingConvention::Haxe);
+        for i in 0..declared.len() {
+            sig_builder = sig_builder.param(format!("a{i}"), slot_ty.clone());
+        }
+        let entry_sig = sig_builder.build();
+
+        let entry_symbol = SymbolId::from_raw(u32::MAX - 7000 - self.next_wrapper_id);
+        self.next_wrapper_id += 1;
+        let sanitized: String = target_qname
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let entry_name = format!("__closure_{suffix}_entry__{sanitized}");
+
+        let saved_current_function = self.builder.current_function;
+        let saved_current_block = self.builder.current_block;
+        let saved_symbol_map = self.symbol_map.clone();
+        let saved_strict_move_locals = self.strict_move_locals.clone();
+        self.symbol_map.clear();
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
+        self.strict_move_locals.clear();
+        self.reset_move_recorder();
+
+        let entry_id = self
+            .builder
+            .start_function(entry_symbol, entry_name, entry_sig);
+
+        let param_regs: Option<Vec<IrId>> = self
+            .builder
+            .current_function()
+            .and_then(|f| (0..=declared.len()).map(|i| f.get_param_reg(i)).collect());
+        let mut ok = param_regs.is_some();
+        if let Some(param_regs) = param_regs {
+            let mut call_args = Vec::with_capacity(declared.len() + 1);
+            let env = param_regs[0];
+            call_args.push(if env_ty == ptr_u8 {
+                env
+            } else {
+                self.builder
+                    .build_cast(env, ptr_u8.clone(), env_ty.clone())
+                    .unwrap_or(env)
+            });
+            for (reg, (want, kind)) in param_regs[1..].iter().zip(declared.iter().zip(&arg_kinds)) {
+                match self.closure_entry_arg(*reg, want, kind, shape) {
+                    Some(arg) => call_args.push(arg),
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                let ret_ty = target_sig.return_type.clone();
+                let result = if matches!(ret_ty, IrType::Void) {
+                    self.builder
+                        .build_call_direct(target, call_args, IrType::Void);
+                    None
+                } else {
+                    self.builder
+                        .build_call_direct(target, call_args, ret_ty.clone())
+                };
+                let out = self.closure_entry_result(result, &ret_ty, &ret_kind, shape);
+                ok = out.is_some();
+                self.builder.build_return(out);
+            }
+        }
+
+        self.check_move_flow();
+        self.builder.finish_function();
+        self.builder.current_function = saved_current_function;
+        self.builder.current_block = saved_current_block;
+        self.symbol_map = saved_symbol_map;
+        self.strict_move_locals = saved_strict_move_locals;
+        ok.then_some(entry_id)
+    }
+
+    /// One entry argument converted to the declared parameter.
+    fn closure_entry_arg(
+        &mut self,
+        reg: IrId,
+        want: &IrType,
+        kind: &SlotKind,
+        shape: EntryShape,
+    ) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        match shape {
+            EntryShape::Slot => match kind {
+                SlotKind::Erased => Some(reg),
+                SlotKind::Float(IrType::F32) => {
+                    let f = self.builder.build_bitcast(reg, IrType::F64)?;
+                    self.builder.build_cast(f, IrType::F64, IrType::F32)
+                }
+                SlotKind::Float(_) => self.builder.build_bitcast(reg, IrType::F64),
+                _ if matches!(want, IrType::I64) => Some(reg),
+                _ => self.builder.build_cast(reg, IrType::I64, want.clone()),
+            },
+            EntryShape::Dynamic => match kind {
+                SlotKind::Dynamic => {
+                    if *want == ptr_u8 {
+                        Some(reg)
+                    } else {
+                        self.builder.build_cast(reg, ptr_u8, want.clone())
+                    }
+                }
+                SlotKind::Bool => {
+                    let f = self.get_or_register_extern_function(
+                        "haxe_dynamic_truthy",
+                        vec![ptr_u8],
+                        IrType::Bool,
+                    );
+                    self.builder.build_call_direct(f, vec![reg], IrType::Bool)
+                }
+                SlotKind::Float(_) => {
+                    let f = self.get_or_register_extern_function(
+                        "haxe_dynamic_to_f64",
+                        vec![ptr_u8],
+                        IrType::F64,
+                    );
+                    let v = self.builder.build_call_direct(f, vec![reg], IrType::F64)?;
+                    if matches!(want, IrType::F32) {
+                        self.builder.build_cast(v, IrType::F64, IrType::F32)
+                    } else {
+                        Some(v)
+                    }
+                }
+                _ => {
+                    let f = self.get_or_register_extern_function(
+                        "haxe_dynamic_to_slot",
+                        vec![ptr_u8],
+                        IrType::I64,
+                    );
+                    let bits = self.builder.build_call_direct(f, vec![reg], IrType::I64)?;
+                    if matches!(want, IrType::I64) {
+                        Some(bits)
+                    } else {
+                        self.builder.build_cast(bits, IrType::I64, want.clone())
+                    }
+                }
+            },
+        }
+    }
+
+    /// The target's result converted to the entry's shape.
+    fn closure_entry_result(
+        &mut self,
+        result: Option<IrId>,
+        ret_ty: &IrType,
+        kind: &SlotKind,
+        shape: EntryShape,
+    ) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        match shape {
+            EntryShape::Slot => match (result, kind) {
+                (None, _) => self.builder.build_const(IrValue::I64(0)),
+                (Some(r), SlotKind::Erased) => Some(r),
+                (Some(r), SlotKind::Float(IrType::F32)) => {
+                    let f = self.builder.build_cast(r, IrType::F32, IrType::F64)?;
+                    self.builder.build_bitcast(f, IrType::I64)
+                }
+                (Some(r), SlotKind::Float(_)) => self.builder.build_bitcast(r, IrType::I64),
+                (Some(r), _) if matches!(ret_ty, IrType::I64) => Some(r),
+                (Some(r), _) => self.builder.build_cast(r, ret_ty.clone(), IrType::I64),
+            },
+            EntryShape::Dynamic => {
+                let Some(r) = result else {
+                    return self.builder.build_const(IrValue::Null);
+                };
+                let (box_fn, param_ty, arg) = match kind {
+                    SlotKind::Void => return self.builder.build_const(IrValue::Null),
+                    SlotKind::Dynamic => {
+                        return if *ret_ty == ptr_u8 {
+                            Some(r)
+                        } else {
+                            self.builder.build_cast(r, ret_ty.clone(), ptr_u8)
+                        };
+                    }
+                    SlotKind::Bool => ("haxe_box_bool_ptr", IrType::Bool, Some(r)),
+                    SlotKind::Float(IrType::F32) => (
+                        "haxe_box_float_ptr",
+                        IrType::F64,
+                        self.builder.build_cast(r, IrType::F32, IrType::F64),
+                    ),
+                    SlotKind::Float(_) => ("haxe_box_float_ptr", IrType::F64, Some(r)),
+                    SlotKind::String(_) => (
+                        "haxe_box_haxestring_ptr",
+                        ptr_u8.clone(),
+                        self.builder.build_bitcast(r, ptr_u8.clone()),
+                    ),
+                    SlotKind::Reference(_) => {
+                        let bits = self.builder.build_cast(r, ret_ty.clone(), IrType::I64)?;
+                        let tag = self.builder.build_const(IrValue::I32(6))?;
+                        let f = self.get_or_register_extern_function(
+                            "haxe_box_typed_ptr",
+                            vec![IrType::I64, IrType::I32],
+                            ptr_u8.clone(),
+                        );
+                        return self.builder.build_call_direct(f, vec![bits, tag], ptr_u8);
+                    }
+                    SlotKind::Scalar(_) | SlotKind::Erased => (
+                        "haxe_box_int_ptr",
+                        IrType::I64,
+                        if matches!(ret_ty, IrType::I64) {
+                            Some(r)
+                        } else {
+                            self.builder.build_cast(r, ret_ty.clone(), IrType::I64)
+                        },
+                    ),
+                };
+                let arg = arg?;
+                let f =
+                    self.get_or_register_extern_function(box_fn, vec![param_ty], ptr_u8.clone());
+                self.builder.build_call_direct(f, vec![arg], ptr_u8)
+            }
+        }
+    }
+
     /// Generate (or return cached) a virtual/interface dispatch thunk.
     ///
     /// Thunk ABI is `(env, this, ...args)`: the indirect-call convention used by
@@ -904,6 +1294,22 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn generate_vtable_init_function(&mut self) {
+        // The alternate entries of every closure target, built before the
+        // init body so they are whole functions when it references them.
+        let closure_entries: Vec<(IrFunctionId, Option<IrFunctionId>, Option<IrFunctionId>)> = self
+            .closure_targets
+            .clone()
+            .into_iter()
+            .map(|(target, fn_type)| {
+                (
+                    target,
+                    self.ensure_closure_slot_entry(target, fn_type),
+                    self.ensure_closure_dynamic_entry(target, fn_type),
+                )
+            })
+            .filter(|(_, slot, dynamic)| slot.is_some() || dynamic.is_some())
+            .collect();
+
         // __vtable_init__ registers class vtables at startup; the backend calls
         // it before main(), same as __init__.
         let sig = FunctionSignatureBuilder::new()
@@ -1184,6 +1590,27 @@ impl<'a> HirToMirContext<'a> {
             if let (Some(tid), Some(cptr)) = (type_id_reg, closure_ptr) {
                 self.builder
                     .build_call_direct(register_ctor_fn, vec![tid, cptr], IrType::Void);
+            }
+        }
+
+        // Closure entries, keyed by the code pointer each record carries.
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let register_entries_fn = self.get_or_register_extern_function(
+            "haxe_closure_register_entries",
+            vec![ptr_u8.clone(), ptr_u8.clone(), ptr_u8.clone()],
+            IrType::Void,
+        );
+        for (target, slot, dynamic) in closure_entries {
+            let mut record = |this: &mut Self, f: Option<IrFunctionId>| match f {
+                Some(id) => this.builder.build_function_ref(id),
+                None => this.builder.build_const(IrValue::Null),
+            };
+            let target_rec = record(self, Some(target));
+            let slot_rec = record(self, slot);
+            let dynamic_rec = record(self, dynamic);
+            if let (Some(t), Some(s), Some(d)) = (target_rec, slot_rec, dynamic_rec) {
+                self.builder
+                    .build_call_direct(register_entries_fn, vec![t, s, d], IrType::Void);
             }
         }
 
