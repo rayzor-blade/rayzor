@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1789949666,"nonce":"LFZ3XYIOO5Q7YC/z3cxZY/FKibc=","message":"Open items split out: c3fb406 (Dynamic call sites + runtime closure ABI), 5e6d0b3 (lambda against generic formal), 400d468 (forward-declared inferred return).","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1789949666,"nonce":"P7/doh7myycYlOE0afG+zELYZng=","status":2}]}
