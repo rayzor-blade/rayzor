@@ -696,6 +696,7 @@ mod tests {
                 span: Span::new(0, 0),
             }],
             span: Span::new(0, 0),
+            compile_time: true,
         };
         assert_eq!(extract_build_macro_name(&meta), "myBuildMacro");
     }
@@ -716,6 +717,7 @@ mod tests {
                 span: Span::new(0, 0),
             }],
             span: Span::new(0, 0),
+            compile_time: true,
         };
         assert_eq!(extract_build_macro_name(&meta), "MacroUtils.build");
     }
@@ -747,6 +749,7 @@ mod tests {
                 span: Span::new(0, 0),
             }],
             span: Span::new(0, 0),
+            compile_time: true,
         };
         assert_eq!(extract_build_macro_name(&meta), "tink.Json.build");
     }
@@ -782,6 +785,7 @@ mod tests {
                 span: Span::new(0, 0),
             }],
             span: Span::new(0, 0),
+            compile_time: true,
         };
         assert_eq!(extract_build_macro_name(&meta), "pkg.M.make");
     }

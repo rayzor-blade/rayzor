@@ -191,6 +191,8 @@ pub struct Metadata {
     pub name: String,
     pub params: Vec<Expr>,
     pub span: Span,
+    /// Written `@:name` (compiler metadata) rather than `@name`.
+    pub compile_time: bool,
 }
 
 /// Class declaration

@@ -1351,7 +1351,7 @@ impl CompilationUnit {
         file_merge_ms =
             finish_profile_ms(&mut self.typecheck_timings.stdlib_merge_ms, t_stdlib_merge);
 
-        super::runtime_metadata::attach(&mut mir_module, ast_file, source).map_err(|message| {
+        super::runtime_metadata::attach(&mut mir_module, ast_file).map_err(|message| {
             vec![CompilationError {
                 message,
                 location: SourceLocation::unknown(),

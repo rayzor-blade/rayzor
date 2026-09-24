@@ -41,15 +41,10 @@ fn constant(expr: &Expr) -> Option<Value> {
     }
 }
 
-fn metadata(entries: &[Metadata], source: &str) -> Result<Value, String> {
+fn metadata(entries: &[Metadata]) -> Result<Value, String> {
     let mut result = Map::new();
     for entry in entries {
-        // The parser normalizes away ':'. Its span retains the distinction
-        // between @runtime and @:compiler annotations.
-        if source
-            .get(entry.span.start..entry.span.end)
-            .is_some_and(|s| s.trim_start().starts_with("@:"))
-        {
+        if entry.compile_time {
             continue;
         }
         let args = entry
@@ -70,7 +65,7 @@ fn metadata(entries: &[Metadata], source: &str) -> Result<Value, String> {
     Ok(Value::Object(result))
 }
 
-pub(super) fn attach(module: &mut IrModule, file: &HaxeFile, source: &str) -> Result<(), String> {
+pub(super) fn attach(module: &mut IrModule, file: &HaxeFile) -> Result<(), String> {
     let package = file
         .package
         .as_ref()
@@ -105,7 +100,7 @@ pub(super) fn attach(module: &mut IrModule, file: &HaxeFile, source: &str) -> Re
                 | ClassFieldKind::Final { name, .. }
                 | ClassFieldKind::Property { name, .. } => name,
             };
-            let value = metadata(&field.meta, source)?;
+            let value = metadata(&field.meta)?;
             if value.as_object().is_some_and(|v| !v.is_empty()) {
                 if field.modifiers.contains(&Modifier::Static) {
                     statics.insert(name.clone(), value);
@@ -115,13 +110,13 @@ pub(super) fn attach(module: &mut IrModule, file: &HaxeFile, source: &str) -> Re
             }
         }
         for ctor in constructors {
-            let value = metadata(&ctor.meta, source)?;
+            let value = metadata(&ctor.meta)?;
             if value.as_object().is_some_and(|v| !v.is_empty()) {
                 instance.insert(ctor.name.clone(), value);
             }
         }
         for (kind, data) in [
-            ("type", metadata(meta, source)?),
+            ("type", metadata(meta)?),
             ("fields", Value::Object(instance)),
             ("statics", Value::Object(statics)),
         ] {
@@ -143,7 +138,7 @@ mod tests {
         let parser::TypeDeclaration::Class(class) = &file.declarations[0] else {
             panic!("class")
         };
-        let value = super::metadata(&class.meta, source).unwrap();
+        let value = super::metadata(&class.meta).unwrap();
         assert_eq!(
             value,
             serde_json::json!({"tag": null, "answer": [42], "nested": [{"text": "hello", "values": [1, 2]}]})

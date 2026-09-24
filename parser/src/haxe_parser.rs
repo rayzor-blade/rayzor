@@ -1551,6 +1551,7 @@ fn metadata<'a>(full: &'a str, input: &'a str) -> PResult<'a, Metadata> {
             name,
             params: params.unwrap_or_default(),
             span: Span::new(start, end),
+            compile_time: has_colon.is_some(),
         },
     ))
 }

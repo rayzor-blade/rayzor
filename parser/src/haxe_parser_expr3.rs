@@ -432,6 +432,7 @@ fn single_metadata_for_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Me
             name,
             params: params.unwrap_or_default(),
             span: Span::new(start, end),
+            compile_time: has_colon.is_some(),
         },
     ))
 }

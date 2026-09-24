@@ -374,6 +374,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
     fn parse_metadata(&mut self, params_must_be_adjacent: bool) -> Result<Metadata, ParseError> {
         let start = self.stream.current_offset();
+        let compile_time = self.stream.at(TokenKind::AtColon);
 
         self.stream.advance(); // skip @ or @:
 
@@ -422,7 +423,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
         let span = self.stream.span_from(start);
 
-        Ok(Metadata { name, params, span })
+        Ok(Metadata {
+            name,
+            params,
+            span,
+            compile_time,
+        })
     }
 
     /// Parse access and modifiers: `public static inline`
