@@ -58,8 +58,37 @@ pub fn process_build_macros_with_class_registry(
     let mut diagnostics = Vec::new();
     let mut applied_count = 0;
 
+    let file_pack: Vec<String> = file
+        .package
+        .as_ref()
+        .map(|p| p.path.clone())
+        .unwrap_or_default();
+    let file_module = std::path::Path::new(&file.filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
     // Collect @:autoBuild interfaces first
     let auto_build_interfaces = collect_auto_build_interfaces(&file);
+    // Which @:autoBuild types each class sits below, decided before the
+    // declarations are taken apart.
+    let auto_build_targets: std::collections::BTreeMap<String, Vec<usize>> = file
+        .declarations
+        .iter()
+        .filter_map(|d| match d {
+            TypeDeclaration::Class(c) => Some(c),
+            _ => None,
+        })
+        .map(|c| {
+            let hits = auto_build_interfaces
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| class_implements_in(&file.declarations, c, &a.interface_name))
+                .map(|(i, _)| i)
+                .collect();
+            (c.name.clone(), hits)
+        })
+        .collect();
 
     // Process each declaration
     let mut new_decls = Vec::with_capacity(file.declarations.len());
@@ -75,7 +104,14 @@ pub fn process_build_macros_with_class_registry(
                     .collect();
 
                 for meta in &build_metas {
-                    match apply_build_macro(&mut class, meta, registry, class_registry.clone()) {
+                    match apply_build_macro(
+                        &mut class,
+                        meta,
+                        registry,
+                        class_registry.clone(),
+                        &file_pack,
+                        &file_module,
+                    ) {
                         Ok(()) => {
                             applied_count += 1;
                             diagnostics.push(MacroDiagnostic::info(
@@ -93,13 +129,19 @@ pub fn process_build_macros_with_class_registry(
                 }
 
                 // Check for @:autoBuild from implemented interfaces
-                for auto_build in &auto_build_interfaces {
-                    if class_implements(&class, &auto_build.interface_name) {
+                let targets = auto_build_targets
+                    .get(&class.name)
+                    .cloned()
+                    .unwrap_or_default();
+                for (index, auto_build) in auto_build_interfaces.iter().enumerate() {
+                    if targets.contains(&index) {
                         match apply_build_macro(
                             &mut class,
                             &auto_build.build_meta,
                             registry,
                             class_registry.clone(),
+                            &file_pack,
+                            &file_module,
                         ) {
                             Ok(()) => {
                                 applied_count += 1;
@@ -151,6 +193,8 @@ fn apply_build_macro(
     meta: &Metadata,
     registry: &MacroRegistry,
     class_registry: Option<Arc<super::class_registry::ClassRegistry>>,
+    pack: &[String],
+    module: &str,
 ) -> Result<(), MacroError> {
     let location = super::errors::span_to_location(meta.span);
 
@@ -169,11 +213,22 @@ fn apply_build_macro(
     // Step 3: Set up context with build class info
     let mut context = MacroContext::new();
     context.set_call_position(location);
+    let mut class_pack = pack.to_vec();
+    if matches!(class.access, Some(parser::Access::Private)) {
+        class_pack.push(format!("_{}", module));
+    }
+    let qualified_name = class_pack
+        .iter()
+        .cloned()
+        .chain(std::iter::once(class.name.clone()))
+        .collect::<Vec<_>>()
+        .join(".");
     context.set_build_class(BuildClassContext {
         class_name: class.name.clone(),
-        qualified_name: class.name.clone(),
+        qualified_name,
         symbol_id: None,
         fields: build_fields,
+        pack: class_pack,
     });
     context.current_class = Some(class.name.clone());
 
@@ -252,41 +307,88 @@ struct AutoBuildInfo {
 
 /// Collect all interfaces with @:autoBuild metadata
 fn collect_auto_build_interfaces(file: &HaxeFile) -> Vec<AutoBuildInfo> {
+    // `@:autoBuild(call)` on a class or interface carries the build call
+    // itself; it is applied as `@:build(call)` to every type below it.
     let mut result = Vec::new();
     for decl in &file.declarations {
-        if let TypeDeclaration::Interface(iface) = decl {
-            for meta in &iface.meta {
-                if meta.name == "autoBuild" || meta.name == ":autoBuild" {
-                    // The @:autoBuild meta should contain or reference a @:build macro
-                    // In Haxe, @:autoBuild on an interface means any implementing class
-                    // gets the interface's @:build macro applied
-                    if let Some(build_meta) = find_build_meta_on_interface(iface) {
-                        result.push(AutoBuildInfo {
-                            interface_name: iface.name.clone(),
-                            build_meta: build_meta.clone(),
-                        });
-                    }
-                }
+        let (name, meta) = match decl {
+            TypeDeclaration::Interface(iface) => (&iface.name, &iface.meta),
+            TypeDeclaration::Class(class) => (&class.name, &class.meta),
+            _ => continue,
+        };
+        for m in meta {
+            if m.name != "autoBuild" && m.name != ":autoBuild" {
+                continue;
             }
+            // A bare `@:autoBuild` propagates the type's own `@:build`.
+            let build_meta = if m.params.is_empty() {
+                match meta
+                    .iter()
+                    .find(|b| b.name == "build" || b.name == ":build")
+                {
+                    Some(b) => b.clone(),
+                    None => continue,
+                }
+            } else {
+                Metadata {
+                    name: "build".to_string(),
+                    params: m.params.clone(),
+                    span: m.span,
+                    compile_time: true,
+                }
+            };
+            result.push(AutoBuildInfo {
+                interface_name: name.clone(),
+                build_meta,
+            });
         }
     }
     result
 }
 
-/// Find @:build metadata on an interface (for @:autoBuild propagation)
-fn find_build_meta_on_interface(iface: &InterfaceDecl) -> Option<&Metadata> {
-    iface
-        .meta
-        .iter()
-        .find(|m| m.name == "build" || m.name == ":build")
+/// The declared name of a type reference.
+fn type_name(t: &parser::Type) -> Option<&str> {
+    match t {
+        parser::Type::Path { path, .. } => Some(&path.name),
+        _ => None,
+    }
 }
 
-/// Check if a class implements a given interface (by name)
-fn class_implements(class: &ClassDecl, interface_name: &str) -> bool {
-    class.implements.iter().any(|t| {
-        // Check if the type path matches the interface name
-        format!("{:?}", t).contains(interface_name)
-    })
+/// Whether `class` extends or implements `ancestor`, directly or through
+/// other types this file declares.
+fn class_implements_in(file_decls: &[TypeDeclaration], class: &ClassDecl, ancestor: &str) -> bool {
+    let mut pending: Vec<String> = class
+        .extends
+        .iter()
+        .chain(class.implements.iter())
+        .filter_map(|t| type_name(t).map(str::to_string))
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        if name == ancestor {
+            return true;
+        }
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        for decl in file_decls {
+            match decl {
+                TypeDeclaration::Class(c) if c.name == name => pending.extend(
+                    c.extends
+                        .iter()
+                        .chain(c.implements.iter())
+                        .filter_map(|t| type_name(t).map(str::to_string)),
+                ),
+                TypeDeclaration::Interface(i) if i.name == name => pending.extend(
+                    i.extends
+                        .iter()
+                        .filter_map(|t| type_name(t).map(str::to_string)),
+                ),
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 // ==========================================================

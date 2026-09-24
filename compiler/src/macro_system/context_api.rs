@@ -178,6 +178,9 @@ pub struct BuildClassContext {
     pub symbol_id: Option<SymbolId>,
     /// Fields of the class before macro modification
     pub fields: Vec<BuildField>,
+    /// The class's path as haxe names it: its package, plus `_Module` for a
+    /// private type.
+    pub pack: Vec<String>,
 }
 
 /// A field representation for build macros
@@ -489,7 +492,16 @@ impl MacroContext {
                 );
                 // Mirror tink-style class metadata where reasonable.
                 if let Some(build) = &self.build_class {
-                    obj.insert("pack".to_string(), MacroValue::Array(Arc::new(Vec::new())));
+                    obj.insert(
+                        "pack".to_string(),
+                        MacroValue::Array(Arc::new(
+                            build
+                                .pack
+                                .iter()
+                                .map(|p| MacroValue::String(Arc::from(p.as_str())))
+                                .collect(),
+                        )),
+                    );
                     obj.insert(
                         "module".to_string(),
                         MacroValue::String(Arc::from(build.qualified_name.as_str())),
@@ -1370,6 +1382,7 @@ mod tests {
                 doc: None,
                 meta: Vec::new(),
             }],
+            pack: vec!["com".to_string()],
         });
 
         let result = ctx.get_build_fields(SourceLocation::unknown());

@@ -43,6 +43,9 @@ pub struct ClassRegistry {
     classes: BTreeMap<String, ClassInfo>,
     /// short_name → qualified_name (for unambiguous lookups)
     short_name_index: BTreeMap<String, String>,
+    /// Static variables' current values, `Class.field` → value. Shared by
+    /// every macro call of one expansion, as macro-time statics are.
+    statics: std::sync::Mutex<BTreeMap<String, super::value::MacroValue>>,
 }
 
 impl ClassRegistry {
@@ -50,6 +53,31 @@ impl ClassRegistry {
         Self {
             classes: BTreeMap::new(),
             short_name_index: BTreeMap::new(),
+            statics: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// The static variable `name` declared by `class_name`, with the class's
+    /// qualified name.
+    pub fn find_static_var(&self, class_name: &str, name: &str) -> Option<(String, Arc<Expr>)> {
+        let class = self.find_class(class_name)?;
+        let var = class.static_vars.iter().find(|v| v.name == name)?;
+        let init = var.init_expr.clone().unwrap_or_else(|| {
+            Arc::new(Expr {
+                kind: parser::ExprKind::Null,
+                span: parser::Span::default(),
+            })
+        });
+        Some((class.qualified_name.clone(), init))
+    }
+
+    pub fn static_value(&self, key: &str) -> Option<super::value::MacroValue> {
+        self.statics.lock().ok()?.get(key).cloned()
+    }
+
+    pub fn set_static(&self, key: String, value: super::value::MacroValue) {
+        if let Ok(mut statics) = self.statics.lock() {
+            statics.insert(key, value);
         }
     }
 

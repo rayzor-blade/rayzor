@@ -113,19 +113,37 @@ impl CompilationUnit {
         > = None;
         let ast_file_owned;
         let ast_file = if macro_expansion_needed {
+            // Macros read user and import files as macro code sees them,
+            // `#if macro` members included; the file being compiled keeps
+            // its own parse.
+            let view = |f: &HaxeFile| {
+                self.macro_context_view(f, None)
+                    .unwrap_or_else(|| f.clone())
+            };
+            let current_view = self.macro_context_view(ast_file, None);
             let mut class_registry = crate::macro_system::ClassRegistry::new();
             class_registry.register_files(&self.stdlib_files);
-            class_registry.register_files(&self.import_hx_files);
-            class_registry.register_files(&self.loaded_import_haxe_files);
-            class_registry.register_file(ast_file);
+            class_registry
+                .register_files(&self.import_hx_files.iter().map(view).collect::<Vec<_>>());
+            class_registry.register_files(
+                &self
+                    .loaded_import_haxe_files
+                    .iter()
+                    .map(view)
+                    .collect::<Vec<_>>(),
+            );
+            class_registry.register_file(current_view.as_ref().unwrap_or(ast_file));
             // Phase 2 fix: pass user files AND macro-bearing import files as
             // "dependency" files so cross-file macros (e.g.
             // `import tink.Json` + `tink.Json.parse(...)`) are discovered.
             // Without this, only the current file's macros are in the registry
             // and cross-file calls silently fall through.
             let mut dep_files: Vec<HaxeFile> = Vec::new();
-            dep_files.extend(self.user_files.iter().cloned());
-            dep_files.extend(self.loaded_import_haxe_files.iter().cloned());
+            dep_files.extend(self.user_files.iter().map(view));
+            dep_files.extend(self.loaded_import_haxe_files.iter().map(view));
+            if let Some(v) = current_view {
+                dep_files.push(v);
+            }
             let (expansion, kept_expander) =
                 crate::macro_system::expander::expand_macros_with_dependencies_keep(
                     ast_file.clone(),

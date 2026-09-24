@@ -189,7 +189,18 @@ impl MacroExpander {
 
         // Phase 2: Identify and process @:build/@:autoBuild metadata
         let build_macros = collect_build_macros(&file);
-        if !build_macros.is_empty() {
+        // `@:autoBuild` applies to the types below its own, which carry no
+        // `@:build` of their own.
+        let has_auto_build = file.declarations.iter().any(|d| {
+            let meta = match d {
+                parser::TypeDeclaration::Class(c) => &c.meta,
+                parser::TypeDeclaration::Interface(i) => &i.meta,
+                _ => return false,
+            };
+            meta.iter()
+                .any(|m| m.name == "autoBuild" || m.name == ":autoBuild")
+        });
+        if !build_macros.is_empty() || has_auto_build {
             for bm in &build_macros {
                 self.context.diagnostics.push(MacroDiagnostic::info(
                     format!(
@@ -221,7 +232,7 @@ impl MacroExpander {
         // This is critical for performance and stability: the walk drains and rebuilds
         // every declaration, which is wasteful for the vast majority of files that
         // contain no macro invocations.
-        if self.registry.macro_count() == 0 && build_macros.is_empty() {
+        if self.registry.macro_count() == 0 && build_macros.is_empty() && !has_auto_build {
             let diagnostics = self.context.take_diagnostics();
             return ExpansionResult {
                 file,
@@ -952,8 +963,11 @@ impl MacroExpander {
             expanded_args.push(expanded);
         }
 
-        // Memoization: check if we've already expanded this exact call
-        let args_hash = hash_exprs(&expanded_args);
+        // Memoization is per call site: a macro may read its position, the
+        // local class or state an earlier call left, so two sites with the
+        // same arguments still expand separately.
+        let args_hash = hash_exprs(&expanded_args)
+            ^ ((call_expr.span.start as u64) << 32 | call_expr.span.end as u64).rotate_left(17);
         let cache_key = (name.to_string(), args_hash);
         if let Some(cached) = self.call_cache.get(&cache_key) {
             self.expansions_count += 1;

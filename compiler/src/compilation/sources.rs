@@ -23,6 +23,44 @@ impl CompilationUnit {
         Ok(file)
     }
 
+    /// The file as macro code sees it: re-parsed with `macro` defined when
+    /// one of its conditions names `macro`, so a `#if macro` member exists
+    /// for the macros that use it. `None` when the view is the file itself.
+    pub(crate) fn macro_context_view(
+        &self,
+        file: &parser::HaxeFile,
+        source: Option<&str>,
+    ) -> Option<parser::HaxeFile> {
+        let read;
+        let source = match source {
+            Some(s) => s,
+            None => {
+                read = std::fs::read_to_string(&file.filename).ok()?;
+                &read
+            }
+        };
+        let names_macro = source.lines().any(|line| {
+            let line = line.trim_start();
+            (line.starts_with("#if") || line.starts_with("#elseif"))
+                && line
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .any(|word| word == "macro")
+        });
+        if !names_macro {
+            return None;
+        }
+        let mut config = self.preprocessor_config();
+        config.defines.insert("macro".to_string());
+        let parsed = parser::haxe_parser::parse_haxe_file_with_config(
+            &file.filename,
+            source,
+            true,
+            true,
+            &config,
+        );
+        parsed.ok()
+    }
+
     /// Load standard library files
     /// This should be called FIRST, before any user files are added
     pub fn load_stdlib(&mut self) -> Result<(), String> {

@@ -1081,6 +1081,7 @@ fn test_context_build_class() {
                 meta: vec![],
             },
         ],
+        pack: vec!["com".to_string(), "example".to_string()],
     });
 
     let build = ctx.build_class.as_ref().unwrap();
