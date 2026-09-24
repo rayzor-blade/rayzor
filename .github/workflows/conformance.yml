@@ -47,7 +47,7 @@ jobs:
     # the default six hours would sit on a runner that long before saying so.
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install LLVM 21
         run: |
@@ -92,7 +92,7 @@ jobs:
 
       # Keyed on the pin, so a corpus bump is what invalidates it.
       - name: Cache the Haxe corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: haxe-conformance/corpus
           key: haxe-corpus-${{ hashFiles('haxe-conformance/corpus.pin', 'haxe-conformance/fetch.sh') }}
@@ -155,7 +155,7 @@ jobs:
 
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: conformance-results
           path: conformance-out/

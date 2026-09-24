@@ -22,7 +22,7 @@ jobs:
     name: Build & Bundle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # --- Install LLVM 21 for Rayzor ---
       - name: Install LLVM 21
@@ -75,7 +75,7 @@ jobs:
           ./target/release/rayzor preblade --out .rayzor/blade/stdlib
 
       - name: Upload precompiled bundles and stdlib cache
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: precompiled-bundles
           path: |
@@ -84,7 +84,7 @@ jobs:
           retention-days: 1
 
       - name: Upload rayzor binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rayzor-binaries
           path: |
@@ -114,11 +114,11 @@ jobs:
           # else exercises the allocator on a hot path.
           - binarytrees
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # --- Install Haxe 4 + HashLink + hxcpp ---
       - name: Install Haxe 4.3.6
-        uses: krdlab/setup-haxe@v1
+        uses: krdlab/setup-haxe@v2
         with:
           haxe-version: 4.3.6
 
@@ -177,7 +177,7 @@ jobs:
           sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
 
       - name: Download precompiled bundles and stdlib cache
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: precompiled-bundles
           path: .
@@ -188,7 +188,7 @@ jobs:
           ls -la .rayzor/blade/stdlib/stdlib.bsym || echo "No bsym found"
 
       - name: Download rayzor binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: rayzor-binaries
           path: target/release
@@ -209,7 +209,7 @@ jobs:
       # into the single results file downstream consumers expect.
       - name: Upload partial results (${{ matrix.kernel }})
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: benchmark-partial-${{ matrix.kernel }}
           path: compiler/benchmarks/results/
@@ -217,7 +217,7 @@ jobs:
 
       - name: Upload partial charts (${{ matrix.kernel }})
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: benchmark-charts-${{ matrix.kernel }}
           path: compiler/benchmarks/charts/
@@ -229,7 +229,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The benchmark runner is linked against LLVM dynamically even when it
       # only redraws charts, so the collector needs the same shared library as
@@ -242,7 +242,7 @@ jobs:
           sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
 
       - name: Download rayzor binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: rayzor-binaries
           path: target/release
@@ -251,7 +251,7 @@ jobs:
         run: chmod +x target/release/examples/benchmark_runner
 
       - name: Download partial results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: benchmark-partial-*
           path: partials
@@ -291,7 +291,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: benchmark-results
           path: compiler/benchmarks/results/
@@ -299,7 +299,7 @@ jobs:
 
       - name: Upload benchmark charts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: benchmark-charts
           path: compiler/benchmarks/charts/
