@@ -1059,7 +1059,7 @@ impl MacroExpander {
                 // Rest parameter: collect remaining args into an array
                 MacroValue::Array(Arc::new(arg_values[i..].to_vec()))
             } else if let Some(val) = arg_values.get(i) {
-                val.clone()
+                macro_def.bind_argument(i, val.clone())
             } else if param.optional {
                 MacroValue::Null
             } else {

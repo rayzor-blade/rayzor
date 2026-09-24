@@ -1,11 +1,8 @@
 // Custom annotations: a macro reads `@:name(params) expr` off the expression it
 // was handed. The reified form is EMeta(s:MetadataEntry, e:Expr), matching
-// haxe.macro.Expr, with MetadataEntry = { name, params, pos }.
-//
-// KNOWN LIMIT, asserted below so it is visible rather than folded away: the
-// annotation must be the OUTERMOST node of the macro's argument. Parenthesising
-// it hides it, because EParenthesis is not reified and the walk stops at an
-// opaque Expr.
+// haxe.macro.Expr, with MetadataEntry = { name, params, pos }. A compiler
+// annotation's name keeps its colon (`@:mine` is ":mine"), and a parenthesised
+// annotation sits under EParenthesis, so a match on EMeta does not see it.
 import haxe.macro.Expr;
 
 class Ann {
@@ -34,8 +31,8 @@ class Ann {
 
 class Main {
     static function main():Void {
-        eq("name", Ann.nameOf(@:mine 1), "mine");
-        eq("name.other", Ann.nameOf(@:other 1), "other");
+        eq("name", Ann.nameOf(@:mine 1), ":mine");
+        eq("name.other", Ann.nameOf(@:other 1), ":other");
         eq("name.bare", Ann.nameOf(1), "none");
 
         eqi("arity.0", Ann.arity(@:tag 1), 0);
@@ -47,10 +44,10 @@ class Main {
         eqi("unwrap", Ann.unwrap(@:whatever 20 + 3), 23);
 
         // Stacked metadata nests; the outermost is what a single match sees.
-        eq("stacked", Ann.nameOf(@:outer @:inner 1), "outer");
+        eq("stacked", Ann.nameOf(@:outer @:inner 1), ":outer");
 
-        // Documented limit -- parenthesised metadata is not visible yet.
-        eq("parens.limit", Ann.nameOf((@:mine 1)), "none");
+        // The outer node is EParenthesis.
+        eq("parens", Ann.nameOf((@:mine 1)), "none");
 
         Sys.println("macro annotations ok");
     }

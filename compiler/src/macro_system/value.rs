@@ -246,6 +246,13 @@ impl MacroValue {
                 let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
                 format!("[{}]", parts.join(","))
             }
+            // A caught compiler error prints as its message, as haxe.macro.Error does.
+            MacroValue::Object(fields) if matches!(fields.get("__type__"), Some(MacroValue::String(t)) if &**t == "haxe.macro.Error") => {
+                fields
+                    .get("message")
+                    .map(|m| m.to_display_string())
+                    .unwrap_or_default()
+            }
             MacroValue::Object(fields) => {
                 let parts: Vec<String> = fields
                     .iter()

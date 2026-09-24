@@ -66,6 +66,12 @@ pub trait MacroTyper {
     /// Rebuild a typedef instance from its handle and fresh arguments —
     /// the reconstruction half of the round trip above.
     fn instantiate_alias(&mut self, def: TypeId, args: Vec<TypeId>) -> Option<TypeId>;
+
+    /// How `receiver.name` is accessed: whether the receiver is a class
+    /// (else a structure) and whether the field is a method.
+    fn field_access_kind(&mut self, _receiver: TypeId, _name: &str) -> Option<(bool, bool)> {
+        None
+    }
 }
 
 /// A scoped, non-owning handle to the live typer.
@@ -619,8 +625,64 @@ impl MacroContext {
         // The expression itself, so `Context.storeTypedExpr` can give back what
         // was typed. A real typed AST is not kept, and this round trip is what
         // the `storeTypedExpr(typeExpr(e))` idiom actually needs.
-        obj.insert("expr".to_string(), MacroValue::Expr(Arc::new(expr.clone())));
+        let source = MacroValue::Expr(Arc::new(expr.clone()));
+        obj.insert("__source__".to_string(), source.clone());
+        let typed_def = self.typed_field_access(expr).unwrap_or(source);
+        obj.insert("expr".to_string(), typed_def);
         Ok(MacroValue::Object(Arc::new(obj)))
+    }
+
+    /// `TField(e, access)` for a field read, the typed shape macros inspect:
+    /// FInstance / FClosure on a class, FAnon / FClosure(null) on a structure.
+    fn typed_field_access(&mut self, expr: &parser::Expr) -> Option<MacroValue> {
+        let parser::ExprKind::Field {
+            expr: receiver,
+            field,
+            ..
+        } = &expr.kind
+        else {
+            return None;
+        };
+        let typer = self.typer.as_mut()?;
+        let receiver_ty = typer.get().type_expr_in_scope(receiver).ok()?;
+        let (on_class, is_method) = typer.get().field_access_kind(receiver_ty, field)?;
+        let enum_value = |e: &str, v: &str, args: Vec<MacroValue>| {
+            MacroValue::Enum(Arc::from(e), Arc::from(v), Arc::new(args))
+        };
+        let mut field_info = BTreeMap::new();
+        field_info.insert(
+            "name".to_string(),
+            MacroValue::String(Arc::from(field.as_str())),
+        );
+        let cf = MacroValue::Object(Arc::new(field_info));
+        let class_ref = MacroValue::Type(receiver_ty);
+        let no_params = MacroValue::Array(Arc::new(Vec::new()));
+        let access = match (on_class, is_method) {
+            (true, false) => enum_value("FieldAccess", "FInstance", vec![class_ref, no_params, cf]),
+            (true, true) => {
+                let mut co = BTreeMap::new();
+                co.insert("c".to_string(), class_ref);
+                co.insert("params".to_string(), no_params);
+                enum_value(
+                    "FieldAccess",
+                    "FClosure",
+                    vec![MacroValue::Object(Arc::new(co)), cf],
+                )
+            }
+            (false, true) => enum_value("FieldAccess", "FClosure", vec![MacroValue::Null, cf]),
+            (false, false) => enum_value("FieldAccess", "FAnon", vec![cf]),
+        };
+        let mut typed_receiver = BTreeMap::new();
+        typed_receiver.insert("t".to_string(), MacroValue::Type(receiver_ty));
+        typed_receiver.insert(
+            "__source__".to_string(),
+            MacroValue::Expr(Arc::new((**receiver).clone())),
+        );
+        Some(enum_value(
+            "TypedExprDef",
+            "TField",
+            vec![MacroValue::Object(Arc::new(typed_receiver)), access],
+        ))
     }
 
     /// `Context.parse(expr, pos)` — Parse a string as Haxe code
@@ -848,8 +910,8 @@ impl MacroContext {
             // was given. Haxe stores a typed AST and returns a reference to it;
             // re-expanding the source expression is the same thing to every
             // caller that does not inspect the result.
-            "storeTypedExpr" => match args.first() {
-                Some(MacroValue::Object(fields)) => match fields.get("expr") {
+            "storeTypedExpr" | "getTypedExpr" => match args.first() {
+                Some(MacroValue::Object(fields)) => match fields.get("__source__") {
                     Some(expr @ MacroValue::Expr(_)) => Ok(expr.clone()),
                     _ => Err(MacroError::ContextError {
                         method: "storeTypedExpr".to_string(),
@@ -860,8 +922,8 @@ impl MacroContext {
                 },
                 Some(expr @ MacroValue::Expr(_)) => Ok(expr.clone()),
                 _ => Err(MacroError::ContextError {
-                    method: "storeTypedExpr".to_string(),
-                    message: "storeTypedExpr expects a typed expression".to_string(),
+                    method: method.to_string(),
+                    message: "Invalid expression".to_string(),
                     location,
                 }),
             },

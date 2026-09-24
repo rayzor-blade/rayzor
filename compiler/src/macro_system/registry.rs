@@ -1,6 +1,6 @@
 use super::bytecode::{BytecodeCompiler, Chunk, CompiledClassInfo};
 use super::errors::{MacroDiagnostic, MacroError};
-use super::value::MacroParam;
+use super::value::{MacroParam, MacroValue};
 use crate::tast::SourceLocation;
 use parser::{ClassDecl, ClassField, ClassFieldKind, Expr, HaxeFile, Modifier, TypeDeclaration};
 use std::collections::BTreeMap;
@@ -59,6 +59,9 @@ pub struct MacroDefinition {
     pub qualified_name: String,
     /// Parameters
     pub params: Vec<MacroParam>,
+    /// Per parameter: declared with a non-`Expr` type, so it receives the
+    /// argument's constant value rather than its expression.
+    pub value_params: Vec<bool>,
     /// The function body AST (Arc for O(1) clone on each macro invocation)
     pub body: Arc<Expr>,
     /// Whether this is a @:build macro
@@ -76,6 +79,18 @@ pub struct MacroDefinition {
     pub imports: std::sync::Arc<std::collections::BTreeMap<String, String>>,
     /// Source location of the definition
     pub location: SourceLocation,
+}
+
+impl MacroDefinition {
+    /// Argument `i` as its parameter receives it: the expression itself, or
+    /// its constant value when the parameter is declared with a non-`Expr`
+    /// type.
+    pub fn bind_argument(&self, i: usize, arg: MacroValue) -> MacroValue {
+        match (&arg, self.value_params.get(i)) {
+            (MacroValue::Expr(e), Some(true)) => super::expr_adt::constant_of(e).unwrap_or(arg),
+            _ => arg,
+        }
+    }
 }
 
 /// Entry for a pending @:build macro application
@@ -250,10 +265,20 @@ impl MacroRegistry {
                 }
             };
 
+            let value_params = func
+                .params
+                .iter()
+                .map(|p| {
+                    p.type_hint
+                        .as_ref()
+                        .is_some_and(|t| !super::expr_adt::is_expr_type(t))
+                })
+                .collect();
             let definition = MacroDefinition {
                 name: func.name.clone(),
                 qualified_name: qualified_name.clone(),
                 params,
+                value_params,
                 body,
                 is_build_macro: false,
                 source_file: source_file.to_string(),

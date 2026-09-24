@@ -64,6 +64,7 @@ pub mod context_api;
 pub mod environment;
 pub mod errors;
 pub mod expander;
+pub mod expr_adt;
 pub mod interpreter;
 pub mod registry;
 pub mod reification;

@@ -610,6 +610,24 @@ impl MacroInterpreter {
                     captures: BTreeMap::new(),
                 })))
             }
+            // `Binop.OpAdd`, `ExprDef.EBreak`: a qualified no-argument constructor.
+            ExprKind::Field {
+                expr: base, field, ..
+            } if path_ends_with_expr_enum(base)
+                && !matches!(&base.kind, ExprKind::Ident(b) if self.env.get(b).is_some()) =>
+            {
+                match expr_enum_value(field) {
+                    Some(enum_name) => Ok(MacroValue::Enum(
+                        Arc::from(enum_name),
+                        Arc::from(field.as_str()),
+                        Arc::new(Vec::new()),
+                    )),
+                    None => {
+                        let base_val = self.eval_expr(base)?;
+                        self.field_access(&base_val, field, location)
+                    }
+                }
+            }
             ExprKind::Field {
                 expr: base, field, ..
             } => {
@@ -1288,6 +1306,11 @@ impl MacroInterpreter {
         args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        let args: Vec<MacroValue> = args
+            .into_iter()
+            .enumerate()
+            .map(|(i, arg)| def.bind_argument(i, arg))
+            .collect();
         // Fast path: already promoted to bytecode → execute via VM
         if let Some(vm) = &mut self.vm {
             if let Some(chunk) = self.registry.get_compiled(&def.qualified_name) {
@@ -1706,7 +1729,18 @@ impl MacroInterpreter {
                 // typed Type ("Null<Int>", "String"). Answerable only while
                 // the live typer is installed; its absence surfaces as the
                 // deferral signal, same as Context.typeof.
-                "toString" => match args.first() {
+                "toString" => match args.first().map(|a| match a {
+                    // `TInst(c, tl)` rebuilt around a class handle.
+                    MacroValue::Enum(_, variant, payload)
+                        if matches!(&**variant, "TInst" | "TAbstract" | "TType" | "TEnum") =>
+                    {
+                        match payload.first() {
+                            Some(t @ MacroValue::Type(_)) => t,
+                            _ => a,
+                        }
+                    }
+                    other => other,
+                }) {
                     Some(MacroValue::Type(id)) => {
                         let rendered = self
                             .macro_context
@@ -1848,6 +1882,10 @@ impl MacroInterpreter {
                 );
                 fields.insert("pos".to_string(), MacroValue::Position(other.location()));
                 fields.insert("childErrors".to_string(), MacroValue::Null);
+                fields.insert(
+                    "__type__".to_string(),
+                    MacroValue::String(Arc::from("haxe.macro.Error")),
+                );
                 MacroValue::Object(Arc::new(fields))
             }
         }
@@ -2914,6 +2952,12 @@ impl MacroInterpreter {
                 let pattern_val = self.eval_expr(expr)?;
                 Ok(value == &pattern_val)
             }
+            // A haxe.macro no-argument constructor (`OpAdd`, `FArrow`) is a
+            // constructor pattern, not a capture.
+            parser::Pattern::Var(name) if expr_enum_value(name).is_some() => {
+                Ok(matches!(value, MacroValue::Enum(_, variant, args)
+                    if &**variant == name.as_str() && args.is_empty()))
+            }
             parser::Pattern::Var(name) => {
                 // Variable pattern always matches, binding the value
                 self.env.define(name, value.clone());
@@ -3105,46 +3149,75 @@ impl MacroInterpreter {
     }
 }
 
-/// Collect all free variable references from an expression AST.
-///
-/// Walks the expression tree and collects all `Ident` names that appear,
-/// excluding names that are bound by local `var` declarations or function parameters.
-/// This is used for selective closure capture — only variables actually referenced
-/// in the closure body need to be captured from the enclosing scope.
-/// Recognise enum-constructor calls from `haxe.macro.Expr.FieldType` —
-/// e.g. `FFun({args, ret, expr})` — and report the variant tag we want
-/// to surface as the `kind` field of the resulting object. None means
-/// the identifier isn't an enum constructor and should fall through to
-/// the normal undefined-variable error.
-/// The haxe.macro.Expr constructors a macro can BUILD, as (enum, variant).
-///
-/// Mirrors what `ast_bridge::expr_kind_to_value` produces in the other
-/// direction, so an Expr taken apart by a macro can be put back together.
-/// Deliberately limited to the variants that mapping covers -- adding a name
-/// here without the matching arm in `value_to_expr` would build a value nothing
-/// can turn back into an Expr.
-/// Whether a callee's base names the ExprDef or Constant enum, however it is
-/// spelled -- bare, or through the full `haxe.macro.Expr.ExprDef` path the
-/// corpus uses.
+/// Whether a callee's base names one of haxe.macro's value enums, however it
+/// is spelled -- bare, or through the full `haxe.macro.Expr.ExprDef` path.
 fn path_ends_with_expr_enum(base: &Expr) -> bool {
-    match &base.kind {
-        ExprKind::Ident(b) => b == "ExprDef" || b == "Constant" || b == "Type",
-        ExprKind::Field { field, .. } => {
-            field == "ExprDef" || field == "Constant" || field == "Type"
-        }
-        _ => false,
-    }
+    let name = match &base.kind {
+        ExprKind::Ident(b) => b,
+        ExprKind::Field { field, .. } => field,
+        _ => return false,
+    };
+    matches!(
+        name.as_str(),
+        "ExprDef"
+            | "Constant"
+            | "Type"
+            | "Binop"
+            | "Unop"
+            | "FunctionKind"
+            | "EFieldKind"
+            | "StringLiteralKind"
+            | "QuoteStatus"
+            | "TypeParam"
+    )
 }
 
+/// The haxe.macro constructors a macro can build with arguments, as
+/// (enum, variant). `expr_adt` turns every ExprDef among them back into
+/// syntax.
 fn expr_enum_ctor(name: &str) -> Option<(&'static str, &'static str)> {
+    const EXPR_DEFS: &[&str] = &[
+        "EConst",
+        "EArray",
+        "EBinop",
+        "EField",
+        "EParenthesis",
+        "EObjectDecl",
+        "EArrayDecl",
+        "ECall",
+        "ENew",
+        "EUnop",
+        "EVars",
+        "EFunction",
+        "EBlock",
+        "EFor",
+        "EIf",
+        "EWhile",
+        "ESwitch",
+        "ETry",
+        "EReturn",
+        "EUntyped",
+        "EThrow",
+        "ECast",
+        "EDisplay",
+        "ETernary",
+        "ECheckType",
+        "EMeta",
+        "EIs",
+    ];
+    if let Some(v) = EXPR_DEFS.iter().find(|v| **v == name) {
+        return Some(("ExprDef", v));
+    }
     match name {
-        "EConst" => Some(("ExprDef", "EConst")),
-        "ECall" => Some(("ExprDef", "ECall")),
-        "EField" => Some(("ExprDef", "EField")),
         "CInt" => Some(("Constant", "CInt")),
         "CFloat" => Some(("Constant", "CFloat")),
         "CString" => Some(("Constant", "CString")),
         "CIdent" => Some(("Constant", "CIdent")),
+        "CRegexp" => Some(("Constant", "CRegexp")),
+        "OpAssignOp" => Some(("Binop", "OpAssignOp")),
+        "FNamed" => Some(("FunctionKind", "FNamed")),
+        "TPType" => Some(("TypeParam", "TPType")),
+        "TPExpr" => Some(("TypeParam", "TPExpr")),
         // haxe.macro.Type — constructed when a macro rebuilds a type value it
         // took apart (`TType(td, [mono])`). Matching projects the same shape,
         // and Context.unify coerces it back to a TypeId.
@@ -3159,6 +3232,11 @@ fn expr_enum_ctor(name: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// Recognise enum-constructor calls from `haxe.macro.Expr.FieldType` —
+/// e.g. `FFun({args, ret, expr})` — and report the variant tag we want
+/// to surface as the `kind` field of the resulting object. None means
+/// the identifier isn't an enum constructor and should fall through to
+/// the normal undefined-variable error.
 fn enum_ctor_tag(name: &str) -> Option<&'static str> {
     match name {
         // haxe.macro.Expr.FieldType
@@ -3227,6 +3305,12 @@ fn enum_ident_as_string(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Collect all free variable references from an expression AST.
+///
+/// Walks the expression tree and collects all `Ident` names that appear,
+/// excluding names that are bound by local `var` declarations or function parameters.
+/// This is used for selective closure capture — only variables actually referenced
+/// in the closure body need to be captured from the enclosing scope.
 fn collect_free_vars(
     expr: &Expr,
     bound: &mut std::collections::BTreeSet<String>,
@@ -4093,6 +4177,8 @@ fn expr_enum_value(name: &str) -> Option<&'static str> {
         | "OpGte" | "OpLt" | "OpLte" | "OpAnd" | "OpOr" | "OpXor" | "OpBoolAnd" | "OpBoolOr"
         | "OpShl" | "OpShr" | "OpUShr" | "OpMod" | "OpInterval" | "OpArrow" | "OpIn"
         | "OpNullCoal" => "Binop",
+        "EBreak" | "EContinue" => "ExprDef",
+        "FAnonymous" | "FArrow" => "FunctionKind",
         "OpIncrement" | "OpDecrement" | "OpNot" | "OpNeg" | "OpNegBits" | "OpSpread" => "Unop",
         "Unquoted" | "Quoted" => "QuoteStatus",
         "Normal" | "Safe" => "EFieldKind",

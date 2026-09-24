@@ -59,6 +59,65 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         }
     }
 
+    fn field_access_kind(&mut self, receiver: TypeId, name: &str) -> Option<(bool, bool)> {
+        use crate::tast::core::TypeKind;
+        let mut ty = receiver;
+        for _ in 0..8 {
+            let kind = self
+                .lowering
+                .context
+                .type_table
+                .borrow()
+                .get(ty)
+                .map(|t| t.kind.clone())?;
+            match kind {
+                TypeKind::String => return Some((true, name != "length")),
+                TypeKind::Array { .. } => return Some((true, name != "length")),
+                TypeKind::Anonymous { fields } => {
+                    let field = fields.iter().find(|f| {
+                        self.lowering.context.string_interner.get(f.name) == Some(name)
+                    })?;
+                    let is_method = matches!(
+                        self.lowering
+                            .context
+                            .type_table
+                            .borrow()
+                            .get(field.type_id)
+                            .map(|t| &t.kind),
+                        Some(TypeKind::Function { .. })
+                    );
+                    return Some((false, is_method));
+                }
+                TypeKind::TypeAlias { target_type, .. } => ty = target_type,
+                TypeKind::Optional { inner_type } => ty = inner_type,
+                TypeKind::Class { symbol_id, .. } => {
+                    let resolved = self
+                        .lowering
+                        .context
+                        .type_table
+                        .borrow()
+                        .resolve_type_alias(symbol_id);
+                    let dynamic = self.lowering.context.type_table.borrow().dynamic_type();
+                    if resolved != dynamic && resolved != ty {
+                        ty = resolved;
+                        continue;
+                    }
+                    let interned = self.lowering.context.intern_string(name);
+                    if self
+                        .lowering
+                        .resolve_class_method_symbol(symbol_id, interned)
+                        .is_some()
+                    {
+                        return Some((true, true));
+                    }
+                    return Some((true, false));
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
     fn type_display(&mut self, id: TypeId) -> String {
         render_type(
             id,

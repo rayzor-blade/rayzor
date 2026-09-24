@@ -802,7 +802,21 @@ impl<'a, 'b> RdParser<'a, 'b> {
                         span: Span::new(start, end),
                     });
                 }
-                let inner = self.parse_expression()?;
+                let mut inner = self.parse_expression()?;
+                // `macro a => b`: OpArrow, the loosest operator. Only read here,
+                // where no map literal or extractor pattern claims the `=>`.
+                if self.stream.eat(TokenKind::FatArrow).is_some() {
+                    let right = self.parse_expression()?;
+                    let span = inner.span.merge(right.span);
+                    inner = Expr {
+                        kind: ExprKind::Binary {
+                            left: Box::new(inner),
+                            op: BinaryOp::Arrow,
+                            right: Box::new(right),
+                        },
+                        span,
+                    };
+                }
                 let end = inner.span.end;
                 Ok(Expr {
                     kind: ExprKind::Macro(Box::new(inner)),
