@@ -108,6 +108,14 @@ impl<'a> HirToMirContext<'a> {
             })
         };
         let elem_iface_sym = element_type_id.and_then(|et| self.get_interface_symbol(et));
+        // An `Array<Dynamic>` holds references as boxes. Scalars stay raw: the
+        // reflection helpers and erased-generic readers take them that way.
+        let dynamic_elements = element_type_id.is_some_and(|et| {
+            matches!(
+                self.type_table.get(et).map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            )
+        });
         // A literal whose elements all carry one concrete Haxe type is
         // homogeneous whatever registers they arrive in (a String literal
         // and `String.fromCharCode(..)` differ as registers, not as values).
@@ -217,7 +225,14 @@ impl<'a> HirToMirContext<'a> {
                 elements
                     .iter()
                     .map(|elem| {
-                        let v = self.lower_expression(elem)?;
+                        // A nested literal is only ever read dynamically from
+                        // here, so its own elements are boxes too.
+                        let v = match &elem.kind {
+                            HirExprKind::Array { elements: inner } if dynamic_elements => {
+                                self.lower_array_literal(inner, array_type)?
+                            }
+                            _ => self.lower_expression(elem)?,
+                        };
                         let v = if let Some(iface_sym) = elem_iface_sym {
                             let class_sym = self.get_class_symbol(elem.ty);
                             if let Some(class_sym) = class_sym {
@@ -236,6 +251,21 @@ impl<'a> HirToMirContext<'a> {
                             } else {
                                 v
                             }
+                        } else {
+                            v
+                        };
+                        let v = if dynamic_elements
+                            && !matches!(
+                                self.type_table.get(elem.ty).map(|t| &t.kind),
+                                Some(TypeKind::Dynamic)
+                                    | Some(TypeKind::Unknown)
+                                    | Some(TypeKind::Int)
+                                    | Some(TypeKind::Float)
+                                    | Some(TypeKind::Bool)
+                                    | None
+                            ) {
+                            let dynamic = self.type_table.dynamic_type();
+                            self.maybe_box_value(v, elem.ty, dynamic).unwrap_or(v)
                         } else {
                             v
                         };

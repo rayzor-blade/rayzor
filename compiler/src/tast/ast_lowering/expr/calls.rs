@@ -817,6 +817,70 @@ impl<'a> AstLowering<'a> {
         None
     }
 
+    /// An array literal passed for `Array<Dynamic>` is that array, and its
+    /// elements are boxed when it is built.
+    fn retype_dynamic_array_literal(
+        &self,
+        arg: TypedExpression,
+        formal: Option<TypeId>,
+    ) -> TypedExpression {
+        use crate::tast::core::TypeKind;
+        let Some(formal_ty) = formal else {
+            return arg;
+        };
+        if !matches!(arg.kind, TypedExpressionKind::ArrayLiteral { .. }) {
+            return arg;
+        }
+        let formal_is_dynamic_array = {
+            let tt = self.context.type_table.borrow();
+            matches!(
+                tt.get(formal_ty).map(|t| &t.kind),
+                Some(TypeKind::Array { element_type })
+                    if matches!(tt.get(*element_type).map(|t| &t.kind), Some(TypeKind::Dynamic))
+            )
+        };
+        if formal_is_dynamic_array {
+            TypedExpression {
+                expr_type: formal_ty,
+                ..arg
+            }
+        } else {
+            arg
+        }
+    }
+
+    /// Whether the callee is an extern, or a method of an extern class: the
+    /// runtime implements those and reads an argument array's slots raw.
+    fn callee_is_extern(&mut self, callee: &Expr) -> bool {
+        use crate::tast::symbols::SymbolFlags;
+        let is_extern = |slf: &Self, sym: SymbolId| {
+            slf.context
+                .symbol_table
+                .get_symbol(sym)
+                .is_some_and(|s| s.flags.contains(SymbolFlags::EXTERN))
+        };
+        match &callee.kind {
+            ExprKind::Field {
+                expr: obj, field, ..
+            } => {
+                let ExprKind::Ident(cls_name) = &obj.kind else {
+                    return false;
+                };
+                let cls_name = self.context.string_interner.intern(cls_name);
+                let Some(cls) = self.resolve_class_like_symbol_by_name(cls_name) else {
+                    return false;
+                };
+                if is_extern(self, cls) {
+                    return true;
+                }
+                let method = self.context.string_interner.intern(field);
+                self.resolve_class_method_symbol(cls, method)
+                    .is_some_and(|m| is_extern(self, m))
+            }
+            _ => false,
+        }
+    }
+
     fn boxing_param_types(&mut self, callee: &Expr) -> Option<Vec<TypeId>> {
         match &callee.kind {
             ExprKind::Ident(name) => {
@@ -1252,6 +1316,7 @@ impl<'a> AstLowering<'a> {
             if boxing_formals.is_none() && expected_arg_types.is_none() {
                 arg_exprs
             } else {
+                let callee_is_extern = self.callee_is_extern(expr);
                 let mut coerced: Vec<TypedExpression> = Vec::with_capacity(arg_exprs.len());
                 for (i, a) in arg_exprs.into_iter().enumerate() {
                     let formal = boxing_formals
@@ -1259,6 +1324,11 @@ impl<'a> AstLowering<'a> {
                         .and_then(|f| f.get(i).copied())
                         .or_else(|| expected_arg_types.as_ref().and_then(|f| f.get(i).copied()));
                     let a = self.coerce_arg_via_abstract_from(a, formal);
+                    let a = if callee_is_extern {
+                        a
+                    } else {
+                        self.retype_dynamic_array_literal(a, formal)
+                    };
                     coerced.push(self.coerce_arg_to_dynamic_param(a, formal));
                 }
                 coerced

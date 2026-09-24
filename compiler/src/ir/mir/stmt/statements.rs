@@ -129,7 +129,15 @@ impl<'a> HirToMirContext<'a> {
                                 _ => None,
                             })
                         };
-                        if target_is_iface_array.is_some() {
+                        let target_is_dynamic_array = matches!(
+                            self.type_table.get(*target_ty).map(|t| &t.kind),
+                            Some(TypeKind::Array { element_type })
+                                if matches!(
+                                    self.type_table.get(*element_type).map(|t| &t.kind),
+                                    Some(TypeKind::Dynamic)
+                                )
+                        );
+                        if target_is_iface_array.is_some() || target_is_dynamic_array {
                             self.lower_array_literal(elements, *target_ty)
                         } else {
                             self.lower_expression(init_expr)
