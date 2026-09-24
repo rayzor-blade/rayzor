@@ -132,35 +132,130 @@ impl<'a> AstLowering<'a> {
         subject: &parser::Expr,
     ) -> parser::Expr {
         use parser::ExprKind as K;
+        let sub = |e: &parser::Expr| Box::new(Self::substitute_extractor_placeholder(e, subject));
+        let sub_opt = |e: &Option<Box<parser::Expr>>| {
+            e.as_ref()
+                .map(|e| Box::new(Self::substitute_extractor_placeholder(e, subject)))
+        };
         let replaced = match &expr.kind {
             K::Ident(name) if name == "_" => return subject.clone(),
             K::Binary { left, op, right } => K::Binary {
-                left: Box::new(Self::substitute_extractor_placeholder(left, subject)),
+                left: sub(left),
                 op: *op,
-                right: Box::new(Self::substitute_extractor_placeholder(right, subject)),
+                right: sub(right),
             },
             K::Unary { op, expr: inner } => K::Unary {
                 op: *op,
-                expr: Box::new(Self::substitute_extractor_placeholder(inner, subject)),
+                expr: sub(inner),
             },
-            K::Paren(inner) => K::Paren(Box::new(Self::substitute_extractor_placeholder(
-                inner, subject,
-            ))),
+            K::Paren(inner) => K::Paren(sub(inner)),
             K::Field {
                 expr: obj,
                 field,
                 is_optional,
             } => K::Field {
-                expr: Box::new(Self::substitute_extractor_placeholder(obj, subject)),
+                expr: sub(obj),
                 field: field.clone(),
                 is_optional: *is_optional,
             },
+            K::Index { expr: obj, index } => K::Index {
+                expr: sub(obj),
+                index: sub(index),
+            },
             K::Call { expr: callee, args } => K::Call {
-                expr: Box::new(Self::substitute_extractor_placeholder(callee, subject)),
+                expr: sub(callee),
                 args: args
                     .iter()
                     .map(|a| Self::substitute_extractor_placeholder(a, subject))
                     .collect(),
+            },
+            K::Assign { left, op, right } => K::Assign {
+                left: sub(left),
+                op: *op,
+                right: sub(right),
+            },
+            K::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => K::Ternary {
+                cond: sub(cond),
+                then_expr: sub(then_expr),
+                else_expr: sub(else_expr),
+            },
+            K::Array(elements) => K::Array(
+                elements
+                    .iter()
+                    .map(|e| Self::substitute_extractor_placeholder(e, subject))
+                    .collect(),
+            ),
+            K::Block(elements) => K::Block(
+                elements
+                    .iter()
+                    .map(|element| match element {
+                        parser::BlockElement::Expr(e) => parser::BlockElement::Expr(
+                            Self::substitute_extractor_placeholder(e, subject),
+                        ),
+                        other => other.clone(),
+                    })
+                    .collect(),
+            ),
+            K::Var {
+                name,
+                type_hint,
+                expr: init,
+            } => K::Var {
+                name: name.clone(),
+                type_hint: type_hint.clone(),
+                expr: sub_opt(init),
+            },
+            K::Return(value) => K::Return(sub_opt(value)),
+            K::Throw(value) => K::Throw(sub(value)),
+            K::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => K::If {
+                cond: sub(cond),
+                then_branch: sub(then_branch),
+                else_branch: sub_opt(else_branch),
+            },
+            K::While { cond, body } => K::While {
+                cond: sub(cond),
+                body: sub(body),
+            },
+            K::DoWhile { body, cond } => K::DoWhile {
+                body: sub(body),
+                cond: sub(cond),
+            },
+            K::Try {
+                expr: body,
+                catches,
+                finally_block,
+            } => K::Try {
+                expr: sub(body),
+                catches: catches
+                    .iter()
+                    .map(|c| parser::Catch {
+                        body: Self::substitute_extractor_placeholder(&c.body, subject),
+                        ..c.clone()
+                    })
+                    .collect(),
+                finally_block: sub_opt(finally_block),
+            },
+            K::Cast {
+                expr: inner,
+                type_hint,
+            } => K::Cast {
+                expr: sub(inner),
+                type_hint: type_hint.clone(),
+            },
+            K::TypeCheck {
+                expr: inner,
+                type_hint,
+            } => K::TypeCheck {
+                expr: sub(inner),
+                type_hint: type_hint.clone(),
             },
             _ => return expr.clone(),
         };
@@ -170,201 +265,262 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    /// An extractor case `EXPR => VALUE` matches when EXPR, applied to the
-    /// value being switched on, equals VALUE. There is no case value to
-    /// compare against, so it becomes a wildcard guarded by that equality.
-    /// The length check, element comparisons and bindings an array pattern
-    /// stands for.
-    fn array_pattern_parts(
-        &mut self,
-        elements: &[parser::Pattern],
-        subject: &parser::Expr,
-    ) -> Option<Result<(TypedExpression, Vec<(String, parser::Expr)>), LoweringError>> {
-        let span = subject.span;
-        let at = |index: usize| parser::Expr {
-            kind: parser::ExprKind::Index {
-                expr: Box::new(subject.clone()),
-                index: Box::new(parser::Expr {
-                    kind: parser::ExprKind::Int(index as i64),
-                    span,
-                }),
-            },
-            span,
-        };
-        let mut condition = parser::Expr {
-            kind: parser::ExprKind::Binary {
-                left: Box::new(parser::Expr {
-                    kind: parser::ExprKind::Field {
-                        expr: Box::new(subject.clone()),
-                        field: "length".to_string(),
-                        is_optional: false,
-                    },
-                    span,
-                }),
-                op: parser::BinaryOp::Eq,
-                right: Box::new(parser::Expr {
-                    kind: parser::ExprKind::Int(elements.len() as i64),
-                    span,
-                }),
-            },
-            span,
-        };
-        let mut bindings = Vec::new();
-        for (index, element) in elements.iter().enumerate() {
-            match element {
-                parser::Pattern::Var(name) => bindings.push((name.clone(), at(index))),
-                parser::Pattern::Underscore => {}
-                parser::Pattern::Const(value) => {
-                    condition = parser::Expr {
-                        kind: parser::ExprKind::Binary {
-                            left: Box::new(condition),
-                            op: parser::BinaryOp::And,
-                            right: Box::new(parser::Expr {
-                                kind: parser::ExprKind::Binary {
-                                    left: Box::new(at(index)),
-                                    op: parser::BinaryOp::Eq,
-                                    right: Box::new(value.clone()),
-                                },
-                                span,
-                            }),
-                        },
-                        span,
-                    };
-                }
-                parser::Pattern::Null => {
-                    condition = parser::Expr {
-                        kind: parser::ExprKind::Binary {
-                            left: Box::new(condition),
-                            op: parser::BinaryOp::And,
-                            right: Box::new(parser::Expr {
-                                kind: parser::ExprKind::Binary {
-                                    left: Box::new(at(index)),
-                                    op: parser::BinaryOp::Eq,
-                                    right: Box::new(parser::Expr {
-                                        kind: parser::ExprKind::Null,
-                                        span,
-                                    }),
-                                },
-                                span,
-                            }),
-                        },
-                        span,
-                    };
-                }
-                // A nested pattern needs a matcher of its own, which the
-                // length check alone cannot stand in for.
-                _ => return None,
-            }
+    /// Whether a pattern needs the guard desugaring: it binds with `name =`
+    /// or runs an extractor somewhere inside.
+    fn pattern_needs_guard(pattern: &parser::Pattern) -> bool {
+        use parser::Pattern as P;
+        match pattern {
+            P::Extractor { .. } | P::Bind { .. } => true,
+            P::Array(items) | P::Or(items) => items.iter().any(Self::pattern_needs_guard),
+            P::ArrayRest { elements, .. } => elements.iter().any(Self::pattern_needs_guard),
+            P::Object { fields } => fields.iter().any(|(_, p)| Self::pattern_needs_guard(p)),
+            P::Constructor { params, .. } => params.iter().any(Self::pattern_needs_guard),
+            _ => false,
         }
-        Some(
-            self.lower_expression(&condition)
-                .map(|guard| (guard, bindings)),
-        )
     }
 
+    /// A pattern as a test on `subject` and the names it binds to parts of
+    /// `subject`. The test is `None` when the pattern always matches. `None`
+    /// overall means the pattern needs the real matcher (an enum
+    /// constructor, a type check, a rest element).
+    fn pattern_guard_parts(
+        &mut self,
+        pattern: &parser::Pattern,
+        subject: &parser::Expr,
+    ) -> Option<(Option<parser::Expr>, Vec<(String, parser::Expr)>)> {
+        use parser::Pattern as P;
+        let span = subject.span;
+        let expr = |kind| parser::Expr { kind, span };
+        let eq = |left: &parser::Expr, right: parser::Expr| {
+            expr(parser::ExprKind::Binary {
+                left: Box::new(left.clone()),
+                op: parser::BinaryOp::Eq,
+                right: Box::new(right),
+            })
+        };
+        let field = |name: &str| {
+            expr(parser::ExprKind::Field {
+                expr: Box::new(subject.clone()),
+                field: name.to_string(),
+                is_optional: false,
+            })
+        };
+        match pattern {
+            P::Underscore => Some((None, Vec::new())),
+            P::Null => Some((Some(eq(subject, expr(parser::ExprKind::Null))), Vec::new())),
+            P::Var(name) => {
+                if self.names_enum_variant(name) {
+                    let constructor = P::Constructor {
+                        path: parser::TypePath {
+                            package: Vec::new(),
+                            name: name.clone(),
+                            sub: None,
+                        },
+                        params: Vec::new(),
+                    };
+                    self.pattern_guard_parts(&constructor, subject)
+                } else {
+                    Some((None, vec![(name.clone(), subject.clone())]))
+                }
+            }
+            P::Const(value) => match &value.kind {
+                // An object read as a literal: a name in a field captures,
+                // anything else compares.
+                parser::ExprKind::Object(fields) => {
+                    let mut tests = Vec::new();
+                    let mut bindings = Vec::new();
+                    for f in fields {
+                        let inner = match &f.expr.kind {
+                            parser::ExprKind::Ident(n) if n == "_" => P::Underscore,
+                            parser::ExprKind::Ident(n) => P::Var(n.clone()),
+                            parser::ExprKind::Null => P::Null,
+                            _ => P::Const(f.expr.clone()),
+                        };
+                        let (test, bound) = self.pattern_guard_parts(&inner, &field(&f.name))?;
+                        tests.extend(test);
+                        bindings.extend(bound);
+                    }
+                    Some((Self::conjoin(tests, span), bindings))
+                }
+                _ => Some((Some(eq(subject, value.clone())), Vec::new())),
+            },
+            P::Object { fields } => {
+                let mut tests = Vec::new();
+                let mut bindings = Vec::new();
+                for (name, inner) in fields {
+                    let (test, bound) = self.pattern_guard_parts(inner, &field(name))?;
+                    tests.extend(test);
+                    bindings.extend(bound);
+                }
+                Some((Self::conjoin(tests, span), bindings))
+            }
+            // `switch [a, b]` matches each element against its own
+            // expression, whatever their types; nothing is indexed.
+            P::Array(elements) if matches!(&subject.kind, parser::ExprKind::Array(items) if items.len() == elements.len()) =>
+            {
+                let parser::ExprKind::Array(items) = &subject.kind else {
+                    return None;
+                };
+                let mut tests = Vec::new();
+                let mut bindings = Vec::new();
+                for (inner, item) in elements.iter().zip(items) {
+                    let (test, bound) = self.pattern_guard_parts(inner, item)?;
+                    tests.extend(test);
+                    bindings.extend(bound);
+                }
+                Some((Self::conjoin(tests, span), bindings))
+            }
+            P::Array(elements) => {
+                let length = eq(
+                    &field("length"),
+                    expr(parser::ExprKind::Int(elements.len() as i64)),
+                );
+                let mut tests = vec![length];
+                let mut bindings = Vec::new();
+                for (index, inner) in elements.iter().enumerate() {
+                    let at = expr(parser::ExprKind::Index {
+                        expr: Box::new(subject.clone()),
+                        index: Box::new(expr(parser::ExprKind::Int(index as i64))),
+                    });
+                    let (test, bound) = self.pattern_guard_parts(inner, &at)?;
+                    tests.extend(test);
+                    bindings.extend(bound);
+                }
+                Some((Self::conjoin(tests, span), bindings))
+            }
+            // Alternatives that bind would each need their own bindings.
+            P::Or(alternatives) => {
+                let mut tests = Vec::new();
+                for alt in alternatives {
+                    let (test, bound) = self.pattern_guard_parts(alt, subject)?;
+                    if !bound.is_empty() {
+                        return None;
+                    }
+                    tests.push(test?);
+                }
+                let any = tests.into_iter().reduce(|a, b| {
+                    expr(parser::ExprKind::Binary {
+                        left: Box::new(a),
+                        op: parser::BinaryOp::Or,
+                        right: Box::new(b),
+                    })
+                });
+                Some((any, Vec::new()))
+            }
+            P::Bind { name, pattern } => {
+                let (test, mut bindings) = self.pattern_guard_parts(pattern, subject)?;
+                bindings.insert(0, (name.clone(), subject.clone()));
+                Some((test, bindings))
+            }
+            P::Extractor {
+                expr: extractor,
+                value,
+            } => {
+                let extracted = expr(parser::ExprKind::Paren(Box::new(
+                    Self::substitute_extractor_placeholder(extractor, subject),
+                )));
+                self.pattern_guard_parts(value, &extracted)
+            }
+            // The enum test stays with the real matcher: an inner `switch`
+            // binds each argument to a fresh name, and the argument patterns
+            // are tested (and their names bound) through those.
+            P::Constructor { path, params } => {
+                static NEXT: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let base = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let fresh: Vec<String> = (0..params.len())
+                    .map(|i| format!("__pattern{base}_{i}"))
+                    .collect();
+                let mut tests = Vec::new();
+                let mut inner_bindings = Vec::new();
+                for (param, name) in params.iter().zip(&fresh) {
+                    let arg = expr(parser::ExprKind::Ident(name.clone()));
+                    let (test, bound) = self.pattern_guard_parts(param, &arg)?;
+                    tests.extend(test);
+                    inner_bindings.extend(bound);
+                }
+                // `case N1:` is written, and matched, as a bare name.
+                let shape = if params.is_empty() && path.package.is_empty() {
+                    P::Var(path.name.clone())
+                } else {
+                    P::Constructor {
+                        path: path.clone(),
+                        params: fresh.iter().cloned().map(P::Var).collect(),
+                    }
+                };
+                let within = |body: parser::Expr, otherwise: parser::Expr| {
+                    expr(parser::ExprKind::Switch {
+                        expr: Box::new(subject.clone()),
+                        cases: vec![parser::Case {
+                            patterns: vec![shape.clone()],
+                            guard: None,
+                            body,
+                            span,
+                        }],
+                        default: Some(Box::new(otherwise)),
+                    })
+                };
+                let matched = Self::conjoin(tests, span)
+                    .unwrap_or_else(|| expr(parser::ExprKind::Bool(true)));
+                let test = within(matched, expr(parser::ExprKind::Bool(false)));
+                let bindings = inner_bindings
+                    .into_iter()
+                    .map(|(name, accessor)| (name, within(accessor, expr(parser::ExprKind::Null))))
+                    .collect();
+                Some((Some(test), bindings))
+            }
+            P::ArrayRest { .. } | P::Type { .. } => None,
+        }
+    }
+
+    fn conjoin(tests: Vec<parser::Expr>, span: parser::Span) -> Option<parser::Expr> {
+        tests.into_iter().reduce(|a, b| parser::Expr {
+            kind: parser::ExprKind::Binary {
+                left: Box::new(a),
+                op: parser::BinaryOp::And,
+                right: Box::new(b),
+            },
+            span,
+        })
+    }
+
+    fn names_enum_variant(&mut self, name: &str) -> bool {
+        let interned = self.context.intern_string(name);
+        if self
+            .resolve_enum_constructor_from_discriminant(interned)
+            .is_some()
+        {
+            return true;
+        }
+        self.resolve_symbol_in_scope_hierarchy(interned)
+            .and_then(|sym| self.context.symbol_table.get_symbol(sym))
+            .is_some_and(|sy| sy.kind == crate::tast::symbols::SymbolKind::EnumVariant)
+    }
+
+    /// An array or object pattern, or any pattern that binds with `name =`
+    /// or runs an extractor, becomes a wildcard case guarded by its test,
+    /// with its bindings declared ahead of the body.
     fn extractor_case_guard(
         &mut self,
         pattern: &parser::Pattern,
         subject: &parser::Expr,
     ) -> Option<Result<(TypedExpression, Vec<(String, parser::Expr)>), LoweringError>> {
-        // `case [a, b]:` and `case [1, 2]:` destructure the value being
-        // switched on. Lowering them to an array LITERAL and comparing made
-        // them match nothing at all, in expression and statement form alike.
-        if let parser::Pattern::Array(elements) = pattern {
-            // A shape this cannot destructure keeps the older handling rather
-            // than becoming a compile error.
-            return self.array_pattern_parts(elements, subject);
-        }
-        let parser::Pattern::Extractor { expr, value } = pattern else {
+        let destructures = match pattern {
+            parser::Pattern::Array(_) | parser::Pattern::Object { .. } => true,
+            parser::Pattern::Const(value) => {
+                matches!(&value.kind, parser::ExprKind::Object(fields) if !fields.is_empty())
+            }
+            _ => false,
+        };
+        if !destructures && !Self::pattern_needs_guard(pattern) {
             return None;
-        };
-        let extracted = Self::substitute_extractor_placeholder(expr, subject);
-        let span = expr.span;
-        let field = |obj: &parser::Expr, name: &str| parser::Expr {
-            kind: parser::ExprKind::Field {
-                expr: Box::new(obj.clone()),
-                field: name.to_string(),
-                is_optional: false,
-            },
-            span,
-        };
-
-        // `EXPR => [a, b]` and `EXPR => {f: a}` BIND out of what was
-        // extracted rather than compare against it. The names come from the
-        // value side, which the parser read as a literal.
-        match &value.kind {
-            parser::ExprKind::Array(elements)
-                if !elements.is_empty()
-                    && elements
-                        .iter()
-                        .all(|e| matches!(&e.kind, parser::ExprKind::Ident(_))) =>
-            {
-                let mut bindings = Vec::with_capacity(elements.len());
-                for (index, element) in elements.iter().enumerate() {
-                    let parser::ExprKind::Ident(name) = &element.kind else {
-                        continue;
-                    };
-                    bindings.push((
-                        name.clone(),
-                        parser::Expr {
-                            kind: parser::ExprKind::Index {
-                                expr: Box::new(extracted.clone()),
-                                index: Box::new(parser::Expr {
-                                    kind: parser::ExprKind::Int(index as i64),
-                                    span,
-                                }),
-                            },
-                            span,
-                        },
-                    ));
-                }
-                // Only an extraction of the right length matches.
-                let condition = parser::Expr {
-                    kind: parser::ExprKind::Binary {
-                        left: Box::new(field(&extracted, "length")),
-                        op: parser::BinaryOp::Eq,
-                        right: Box::new(parser::Expr {
-                            kind: parser::ExprKind::Int(elements.len() as i64),
-                            span,
-                        }),
-                    },
-                    span,
-                };
-                Some(self.lower_expression(&condition).map(|g| (g, bindings)))
-            }
-            parser::ExprKind::Object(fields)
-                if !fields.is_empty()
-                    && fields
-                        .iter()
-                        .all(|f| matches!(&f.expr.kind, parser::ExprKind::Ident(_))) =>
-            {
-                let bindings = fields
-                    .iter()
-                    .filter_map(|f| match &f.expr.kind {
-                        parser::ExprKind::Ident(name) => {
-                            Some((name.clone(), field(&extracted, &f.name)))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                let always = parser::Expr {
-                    kind: parser::ExprKind::Bool(true),
-                    span,
-                };
-                Some(self.lower_expression(&always).map(|g| (g, bindings)))
-            }
-            _ => {
-                let condition = parser::Expr {
-                    kind: parser::ExprKind::Binary {
-                        left: Box::new(extracted),
-                        op: parser::BinaryOp::Eq,
-                        right: value.clone(),
-                    },
-                    span,
-                };
-                Some(self.lower_expression(&condition).map(|g| (g, Vec::new())))
-            }
         }
+        let (test, bindings) = self.pattern_guard_parts(pattern, subject)?;
+        let test = test.unwrap_or(parser::Expr {
+            kind: parser::ExprKind::Bool(true),
+            span: subject.span,
+        });
+        Some(self.lower_expression(&test).map(|g| (g, bindings)))
     }
 
     /// Lower a switch case

@@ -416,7 +416,10 @@ impl CompilationUnit {
                 }
                 parser::Pattern::Extractor { expr, value } => {
                     extract_expr_deps(expr, deps);
-                    extract_expr_deps(value, deps);
+                    extract_pattern_deps(value, deps);
+                }
+                parser::Pattern::Bind { pattern, .. } => {
+                    extract_pattern_deps(pattern, deps);
                 }
                 _ => {}
             }

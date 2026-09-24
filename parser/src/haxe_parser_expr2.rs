@@ -1223,7 +1223,7 @@ fn pattern<'a>(full: &'a str, input: &'a str) -> PResult<'a, Pattern> {
                                     rest,
                                     Pattern::Extractor {
                                         expr: Box::new(expr),
-                                        value: Box::new(value),
+                                        value: Box::new(Pattern::Const(value)),
                                     },
                                 )),
                                 Err(_) => {

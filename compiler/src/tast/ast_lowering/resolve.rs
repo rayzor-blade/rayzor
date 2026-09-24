@@ -692,6 +692,18 @@ impl<'a> AstLowering<'a> {
                     .as_ref()
                     .and_then(|e| self.find_return_type_in_expression(e))
             }),
+            TypedExpressionKind::Switch {
+                cases,
+                default_case,
+                ..
+            } => cases
+                .iter()
+                .find_map(|c| self.find_return_type_in_statement(&c.body))
+                .or_else(|| {
+                    default_case
+                        .as_ref()
+                        .and_then(|d| self.find_return_type_in_expression(d))
+                }),
             // A try in statement position is an expression here; its body
             // and catch bodies may return.
             TypedExpressionKind::Try {

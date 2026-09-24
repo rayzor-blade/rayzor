@@ -922,8 +922,13 @@ pub enum Pattern {
     Or(Vec<Pattern>),
     /// Underscore pattern: `_`
     Underscore,
-    /// Extractor pattern: `_.method() => value` or `~/regex/.match(_) => true`
-    Extractor { expr: Box<Expr>, value: Box<Expr> },
+    /// Extractor pattern: `_.method() => pattern` or `~/regex/.match(_) => true`
+    Extractor {
+        expr: Box<Expr>,
+        value: Box<Pattern>,
+    },
+    /// Binder: `name = pattern` matches the pattern and binds the value to `name`
+    Bind { name: String, pattern: Box<Pattern> },
 }
 
 /// Catch clause

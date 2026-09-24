@@ -1525,7 +1525,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
             if let Ok(expr) = self.parse_expression()
                 && self.stream.eat(TokenKind::FatArrow).is_some()
             {
-                let value = self.parse_expression()?;
+                // The right side is itself a pattern, and may be another
+                // extractor: `_ * 2 => _ + 1 => 15`.
+                let value = self.parse_case_pattern()?;
                 return Ok(Pattern::Extractor {
                     expr: Box::new(expr),
                     value: Box::new(value),
@@ -1688,10 +1690,29 @@ impl<'a, 'b> RdParser<'a, 'b> {
                             span: Span::default(),
                         }))
                     }
+                } else if self.stream.eat(TokenKind::Assign).is_some() {
+                    // Binder: `v = pattern` matches the pattern and names the value.
+                    let pattern = self.parse_case_pattern()?;
+                    Ok(Pattern::Bind {
+                        name,
+                        pattern: Box::new(pattern),
+                    })
                 } else {
                     // Simple identifier — variable capture
                     Ok(Pattern::Var(name))
                 }
+            }
+            // An object read as a literal stays one; only fields that need
+            // pattern syntax (an extractor or a binder) make it an object pattern.
+            TokenKind::LBrace => {
+                let saved = self.stream.save();
+                if let Ok(expr) = self.parse_expression()
+                    && !object_literal_has_binder(&expr)
+                {
+                    return Ok(Pattern::Const(expr));
+                }
+                self.stream.restore(saved);
+                self.parse_object_pattern()
             }
             _ => {
                 // Fallback: parse as expression and wrap as Const
@@ -1699,6 +1720,29 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 Ok(Pattern::Const(expr))
             }
         }
+    }
+
+    /// `{name: pattern, ...}`
+    fn parse_object_pattern(&mut self) -> Result<Pattern, ParseError> {
+        self.stream.expect(TokenKind::LBrace)?;
+        let mut fields = Vec::new();
+        while !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof() {
+            let name = match self.stream.peek().kind {
+                TokenKind::StringLit => {
+                    let text = self.stream.current_text();
+                    text[1..text.len() - 1].to_string()
+                }
+                _ => self.stream.current_text().to_string(),
+            };
+            self.stream.advance();
+            self.stream.expect(TokenKind::Colon)?;
+            fields.push((name, self.parse_case_pattern()?));
+            if !self.stream.at(TokenKind::RBrace) {
+                self.stream.expect(TokenKind::Comma)?;
+            }
+        }
+        self.stream.expect(TokenKind::RBrace)?;
+        Ok(Pattern::Object { fields })
     }
 
     fn parse_do_while_expr(&mut self) -> Result<Expr, ParseError> {
@@ -1991,4 +2035,16 @@ fn takes_postfix(expr: &Expr) -> bool {
             | ExprKind::Try { .. }
             | ExprKind::Function(_)
     )
+}
+
+/// Whether an object literal read in pattern position assigns in a field,
+/// `{x: x = "foo"}`, which in a pattern is a binder, not an assignment.
+fn object_literal_has_binder(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Object(fields) => fields.iter().any(|f| match &f.expr.kind {
+            ExprKind::Assign { .. } => true,
+            _ => object_literal_has_binder(&f.expr),
+        }),
+        _ => false,
+    }
 }

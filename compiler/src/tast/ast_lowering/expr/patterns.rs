@@ -45,10 +45,7 @@ impl<'a> AstLowering<'a> {
                 patterns.iter().any(|p| self.pattern_has_variables(p))
             }
             Pattern::Const(_) | Pattern::Null | Pattern::Underscore => false,
-            Pattern::Extractor { .. } => {
-                // Extractors might bind variables - for now assume they do
-                true
-            }
+            Pattern::Extractor { .. } | Pattern::Bind { .. } => true,
         }
     }
 
@@ -209,11 +206,8 @@ impl<'a> AstLowering<'a> {
                 // These patterns don't bind variables
                 Ok(vec![])
             }
-            Pattern::Extractor { .. } => {
-                // Extractors are complex - for now skip binding
-                // TODO: Implement extractor pattern variable binding
-                Ok(vec![])
-            }
+            // Bound by the guard desugaring in switch.rs, not here.
+            Pattern::Extractor { .. } | Pattern::Bind { .. } => Ok(vec![]),
         }
     }
 
@@ -774,8 +768,8 @@ impl<'a> AstLowering<'a> {
                 })
             }
 
-            Pattern::Extractor { .. } => {
-                // Extractor patterns require runtime evaluation - not implemented
+            Pattern::Extractor { .. } | Pattern::Bind { .. } => {
+                // Reached only where the guard desugaring in switch.rs declined.
                 Err(LoweringError::IncompleteImplementation {
                     feature: format!("Extractor pattern to expression conversion: {:?}", pattern),
                     location: SourceLocation::new(0, 0, 0, 0),
