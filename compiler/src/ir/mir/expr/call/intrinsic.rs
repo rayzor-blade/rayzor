@@ -364,6 +364,25 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
+            // An anonymous object is a raw reference; traceAny formats boxes,
+            // so box it first, as Std.string does.
+            if matches!(
+                &hir_type_kind,
+                Some(crate::tast::core::TypeKind::Anonymous { .. })
+            ) && matches!(actual_reg_type, IrType::Ptr(_))
+            {
+                let dynamic = self.type_table.dynamic_type();
+                let boxed = self.maybe_box_value(arg_reg, arg.ty, dynamic)?;
+                let trace_any_id = self.get_or_register_extern_function(
+                    "haxe_trace_any",
+                    vec![IrType::Ptr(Box::new(IrType::U8))],
+                    IrType::Void,
+                );
+                return self
+                    .builder
+                    .build_call_direct(trace_any_id, vec![boxed], IrType::Void);
+            }
+
             let is_array_type = matches!(
                 &hir_type_kind,
                 Some(crate::tast::core::TypeKind::Array { .. })

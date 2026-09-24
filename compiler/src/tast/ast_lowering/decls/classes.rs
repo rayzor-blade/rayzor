@@ -1581,27 +1581,6 @@ impl<'a> AstLowering<'a> {
             }
         }
 
-        /// The initialiser of the last `var name = ...` the body declares.
-        fn local_init<'a>(
-            expr: &'a parser::haxe_ast::Expr,
-            name: &str,
-        ) -> Option<&'a parser::haxe_ast::Expr> {
-            match &expr.kind {
-                ExprKind::Var {
-                    name: n,
-                    expr: Some(init),
-                    ..
-                } if n == name => Some(init),
-                ExprKind::Block(elements) => {
-                    elements.iter().rev().find_map(|element| match element {
-                        parser::BlockElement::Expr(e) => local_init(e, name),
-                        _ => None,
-                    })
-                }
-                _ => None,
-            }
-        }
-
         let body = func.body.as_ref()?;
         let returned = returned_expr(body)?;
         // `return OpStr(p)` / `return None`: the enum's own type. Resolved by
@@ -1657,7 +1636,13 @@ impl<'a> AstLowering<'a> {
         use parser::haxe_ast::ExprKind;
 
         let body = func.body.as_ref()?;
-        let ExprKind::Object(fields) = &returned_expr(body)?.kind else {
+        let returned = returned_expr(body)?;
+        // Directly (`return {...}`) or through a local (`var v = {...}; return v`).
+        let object = match &returned.kind {
+            ExprKind::Ident(name) => local_init(body, name)?,
+            _ => returned,
+        };
+        let ExprKind::Object(fields) = &object.kind else {
             return None;
         };
         if fields.is_empty() {
@@ -1688,6 +1673,26 @@ impl<'a> AstLowering<'a> {
             &self.context.type_table,
             field_types,
         ))
+    }
+}
+
+/// The initialiser of the last `var name = ...` the body declares.
+fn local_init<'a>(
+    expr: &'a parser::haxe_ast::Expr,
+    name: &str,
+) -> Option<&'a parser::haxe_ast::Expr> {
+    use parser::haxe_ast::ExprKind;
+    match &expr.kind {
+        ExprKind::Var {
+            name: n,
+            expr: Some(init),
+            ..
+        } if n == name => Some(init),
+        ExprKind::Block(elements) => elements.iter().rev().find_map(|element| match element {
+            parser::BlockElement::Expr(e) => local_init(e, name),
+            _ => None,
+        }),
+        _ => None,
     }
 }
 
