@@ -2237,6 +2237,29 @@ register_symbol!(
     crate::type_system::haxe_dynamic_is_null
 );
 register_symbol!(
+    "haxe_dynamic_truthy",
+    crate::type_system::haxe_dynamic_truthy
+);
+register_symbol!("haxe_dynamic_arith", crate::type_system::haxe_dynamic_arith);
+register_symbol!("haxe_dynamic_order", crate::type_system::haxe_dynamic_order);
+register_symbol!(
+    "haxe_dynamic_to_slot",
+    crate::closure_entries::haxe_dynamic_to_slot
+);
+register_symbol!(
+    "haxe_dynamic_to_f64",
+    crate::closure_entries::haxe_dynamic_to_f64
+);
+register_symbol!(
+    "haxe_closure_register_entries",
+    crate::closure_entries::haxe_closure_register_entries
+);
+register_symbol!(
+    "haxe_closure_dynamic_view",
+    crate::closure_entries::haxe_closure_dynamic_view
+);
+register_symbol!("rayzor_mem_prefetch", crate::haxe_sys::rayzor_mem_prefetch);
+register_symbol!(
     "haxe_enum_to_string",
     crate::type_system::haxe_enum_to_string
 );
@@ -2266,3 +2289,106 @@ register_symbol!(
     "rayzor_mem_release_free_pages",
     crate::haxe_sys::rayzor_mem_release_free_pages
 );
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeSymbol;
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    /// Exports the compiler never names; they stay out of the inventory.
+    const HOST_ONLY: &[&str] = &[
+        "haxe_array_iterator_has_next",
+        "haxe_array_iterator_new",
+        "haxe_array_iterator_next",
+        "haxe_array_kv_iterator_has_next",
+        "haxe_array_kv_iterator_new",
+        "haxe_array_kv_iterator_next",
+        "haxe_box_cstring_ptr",
+        "haxe_bytes_sub_i64",
+        "haxe_string_concat_sret",
+        "haxe_string_split",
+        "haxe_vec_capacity",
+        "haxe_vec_clear",
+        "haxe_vec_free",
+        "haxe_vec_get",
+        "haxe_vec_len",
+        "haxe_vec_new",
+        "haxe_vec_push",
+        "haxe_vec_reserve",
+        "haxe_vec_set",
+        "rayzor_dump_alloc_graph",
+        "rayzor_dump_alloc_stats",
+        "rayzor_free",
+        "rayzor_jit_cleanup",
+        "rayzor_malloc",
+        "rayzor_object_alloc",
+        "rayzor_object_free",
+        "rayzor_profile_start",
+        "rayzor_profile_stop",
+        "rayzor_realloc",
+        "rayzor_set_trace_enabled",
+        "rayzor_set_trace_prefix",
+        "sys_mutex_new",
+    ];
+
+    fn collect_exports(dir: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect_exports(&path, out);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let Some(at) = line.find("extern \"C\" fn ") else {
+                    continue;
+                };
+                if !line.trim_start().starts_with("pub") {
+                    continue;
+                }
+                let exported = lines[i.saturating_sub(3)..i]
+                    .iter()
+                    .any(|l| l.contains("no_mangle"));
+                if !exported {
+                    continue;
+                }
+                let name: String = line[at + "extern \"C\" fn ".len()..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                out.push(name);
+            }
+        }
+    }
+
+    /// Windows resolves JIT symbols from this inventory alone, with no
+    /// process-symbol fallback, so every export must be registered.
+    #[test]
+    fn every_export_is_registered() {
+        let registered: HashSet<&str> = inventory::iter::<RuntimeSymbol>
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        let mut exports = Vec::new();
+        collect_exports(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut exports,
+        );
+        assert!(exports.len() > 100, "export scan found too few symbols");
+        let missing: Vec<&String> = exports
+            .iter()
+            .filter(|n| !registered.contains(n.as_str()) && !HOST_ONLY.contains(&n.as_str()))
+            // Registered only when the feature compiles them in.
+            .filter(|n| cfg!(feature = "tcc-runtime") || !n.starts_with("rayzor_tcc_"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "unregistered runtime exports: {missing:?}"
+        );
+    }
+}
