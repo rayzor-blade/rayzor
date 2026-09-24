@@ -469,8 +469,8 @@ impl MacroInterpreter {
             // --- Throw ---
             ExprKind::Throw(inner) => {
                 let val = self.eval_expr(inner)?;
-                Err(MacroError::RuntimeError {
-                    message: format!("uncaught exception: {}", val.to_display_string()),
+                Err(MacroError::Thrown {
+                    value: Box::new(val),
                     location,
                 })
             }
@@ -500,9 +500,9 @@ impl MacroInterpreter {
                     // right ending is a stricter typechecker, then this
                     // becomes uncatchable so the probe answers for real.
                     Err(e) if !e.is_control_flow() => {
-                        // Try to match a catch block (use first matching catch)
-                        let err_val = MacroValue::String(Arc::from(e.to_string().as_str()));
-                        if let Some(catch) = catches.first() {
+                        // The first catch whose type admits the error takes it.
+                        let err_val = Self::caught_value(&e);
+                        if let Some(catch) = catches.iter().find(|c| Self::catch_admits(c, &e)) {
                             self.env.push_scope();
                             self.env.define(&catch.var, err_val);
                             let catch_result = self.eval_expr(&catch.body);
@@ -1585,6 +1585,75 @@ impl MacroInterpreter {
                 }
                 Ok(None)
             }
+        }
+    }
+
+    /// What a catch binds: the thrown value itself, or for an error the
+    /// compiler raised, a `haxe.macro.Error` shaped object.
+    fn caught_value(e: &MacroError) -> MacroValue {
+        match e {
+            MacroError::Thrown { value, .. } => (**value).clone(),
+            other => {
+                let mut fields = BTreeMap::new();
+                fields.insert(
+                    "message".to_string(),
+                    MacroValue::String(Arc::from(Self::error_message(other).as_str())),
+                );
+                fields.insert("pos".to_string(), MacroValue::Position(other.location()));
+                fields.insert("childErrors".to_string(), MacroValue::Null);
+                MacroValue::Object(Arc::new(fields))
+            }
+        }
+    }
+
+    /// An error's message as haxe reports it, without the interpreter's framing.
+    fn error_message(e: &MacroError) -> String {
+        match e {
+            MacroError::TypeError { message, .. }
+            | MacroError::RuntimeError { message, .. }
+            | MacroError::ContextError { message, .. }
+            | MacroError::ReificationError { message, .. } => message.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    /// Whether a catch clause's type admits the error. The typer-deferral
+    /// signal is admitted only by a catch-all, so a typed `Error` catch lets
+    /// the call defer and then sees the typer's real error.
+    fn catch_admits(catch: &parser::Catch, e: &MacroError) -> bool {
+        let name = match &catch.type_hint {
+            None => return true,
+            Some(parser::Type::Path { path, .. }) => {
+                let mut parts = path.package.clone();
+                parts.push(path.name.clone());
+                if let Some(sub) = &path.sub {
+                    parts.push(sub.clone());
+                }
+                parts.join(".")
+            }
+            Some(_) => return true,
+        };
+        let short = name.rsplit('.').next().unwrap_or(&name);
+        if matches!(short, "Dynamic" | "Any") {
+            return true;
+        }
+        match e {
+            MacroError::NeedsTyper { .. } => false,
+            MacroError::Thrown { value, .. } => match short {
+                "String" => matches!(**value, MacroValue::String(_)),
+                "Int" => matches!(**value, MacroValue::Int(_)),
+                "Float" => matches!(**value, MacroValue::Int(_) | MacroValue::Float(_)),
+                "Bool" => matches!(**value, MacroValue::Bool(_)),
+                _ => !matches!(
+                    **value,
+                    MacroValue::String(_)
+                        | MacroValue::Int(_)
+                        | MacroValue::Float(_)
+                        | MacroValue::Bool(_)
+                        | MacroValue::Null
+                ),
+            },
+            _ => matches!(short, "Error" | "Exception"),
         }
     }
 

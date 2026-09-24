@@ -105,6 +105,12 @@ pub enum MacroError {
     /// Division by zero during macro evaluation
     DivisionByZero { location: SourceLocation },
 
+    /// A value thrown by the macro's own `throw`
+    Thrown {
+        value: Box<super::value::MacroValue>,
+        location: SourceLocation,
+    },
+
     /// Return from macro function
     Return {
         value: Option<Box<super::value::MacroValue>>,
@@ -134,6 +140,7 @@ impl MacroError {
             MacroError::UndefinedVariable { location, .. } => *location,
             MacroError::UnsupportedOperation { location, .. } => *location,
             MacroError::DivisionByZero { location } => *location,
+            MacroError::Thrown { location, .. } => *location,
             MacroError::Return { .. } => SourceLocation::unknown(),
             MacroError::Break => SourceLocation::unknown(),
             MacroError::Continue => SourceLocation::unknown(),
@@ -179,6 +186,7 @@ impl MacroError {
             MacroError::UndefinedVariable { .. } => "E0710",
             MacroError::UnsupportedOperation { .. } => "E0711",
             MacroError::DivisionByZero { .. } => "E0712",
+            MacroError::Thrown { .. } => "E0704",
             MacroError::Return { .. } | MacroError::Break | MacroError::Continue => "E0700",
         }
     }
@@ -237,6 +245,9 @@ impl fmt::Display for MacroError {
             }
             MacroError::NeedsTyper { .. } => {
                 write!(f, "needs the live typer; deferred to lowering")
+            }
+            MacroError::Thrown { value, .. } => {
+                write!(f, "uncaught exception: {}", value.to_display_string())
             }
             MacroError::ArgumentCountMismatch {
                 macro_name,
