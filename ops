@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1790281496,"nonce":"EE0XyOIazqzOAlkW7UX+ZLyDfgs=","message":"Fixed in 93927d08. Conformance 652 -\u003e 653, 0 lost.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1790281496,"nonce":"PSjxY+18a7wT01S9+YF5PobWUYA=","status":2}]}
