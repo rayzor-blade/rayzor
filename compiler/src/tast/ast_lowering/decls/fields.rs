@@ -895,6 +895,9 @@ impl<'a> AstLowering<'a> {
             .context
             .symbol_table
             .create_variable_in_scope(param_name, self.context.current_scope);
+        if parameter.type_hint.is_none() && inferred.is_none() {
+            self.untyped_params.insert(param_symbol);
+        }
 
         // Add parameter to the current (function) scope so it can be resolved
         if let Some(scope) = self

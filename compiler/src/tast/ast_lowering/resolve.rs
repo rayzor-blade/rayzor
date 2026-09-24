@@ -334,6 +334,23 @@ impl<'a> AstLowering<'a> {
     /// Try to resolve an enum constructor using the switch discriminant type
     /// This is needed for Haxe pattern matching where `case Some(v):` needs to
     /// be resolved as `Option.Some` based on the switch expression's type
+    /// The constructor `name` of the enum `ty`, as a nested pattern names one.
+    pub(crate) fn resolve_enum_constructor_of(
+        &mut self,
+        ty: TypeId,
+        name: InternedString,
+    ) -> Option<SymbolId> {
+        // An optional constructor argument (`?q:Quote`) names Quote's values.
+        let ty = match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+            Some(crate::tast::core::TypeKind::Optional { inner_type }) => *inner_type,
+            _ => ty,
+        };
+        let saved = self.context.switch_discriminant_type.replace(ty);
+        let found = self.resolve_enum_constructor_from_discriminant(name);
+        self.context.switch_discriminant_type = saved;
+        found
+    }
+
     pub(crate) fn resolve_enum_constructor_from_discriminant(
         &self,
         constructor_name: InternedString,

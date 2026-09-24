@@ -342,6 +342,11 @@ impl<'a> AstLowering<'a> {
                     // case that can be read straight off the syntax.
                     self.anonymous_return_type_from_ast(func)
                         .or_else(|| self.constructed_return_type_from_ast(func))
+                        .or_else(|| {
+                            let body = func.body.as_deref()?;
+                            is_string_expr(returned_expr(body)?)
+                                .then(|| self.context.type_table.borrow().string_type())
+                        })
                         .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type())
                 };
                 let function_type = self
@@ -1697,6 +1702,41 @@ fn local_init<'a>(
 }
 
 /// The expression a function body returns, where the syntax alone shows it.
+/// Whether an expression is a String by its syntax alone: a string literal,
+/// a concatenation with one, or a branch construct with such a branch (the
+/// branches share one type, and only String unifies with String).
+fn is_string_expr(expr: &parser::haxe_ast::Expr) -> bool {
+    use parser::haxe_ast::{BinaryOp, ExprKind};
+    match &expr.kind {
+        ExprKind::String(_) | ExprKind::StringInterpolation(_) => true,
+        ExprKind::Binary {
+            left,
+            op: BinaryOp::Add,
+            right,
+        } => is_string_expr(left) || is_string_expr(right),
+        ExprKind::Paren(inner) | ExprKind::Meta { expr: inner, .. } => is_string_expr(inner),
+        ExprKind::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => is_string_expr(then_expr) || is_string_expr(else_expr),
+        ExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => is_string_expr(then_branch) || is_string_expr(else_branch),
+        ExprKind::Switch { cases, default, .. } => {
+            cases.iter().any(|c| is_string_expr(&c.body))
+                || default.as_deref().is_some_and(is_string_expr)
+        }
+        ExprKind::Block(elements) => matches!(
+            elements.last(),
+            Some(parser::BlockElement::Expr(e)) if is_string_expr(e)
+        ),
+        _ => false,
+    }
+}
+
 fn returned_expr(expr: &parser::haxe_ast::Expr) -> Option<&parser::haxe_ast::Expr> {
     use parser::haxe_ast::ExprKind;
     match &expr.kind {

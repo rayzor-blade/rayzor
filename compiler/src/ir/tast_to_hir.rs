@@ -4828,6 +4828,25 @@ impl<'a> TastToHirContext<'a> {
                     };
                 }
 
+                // Not bound by AST lowering: a constructor with no arguments.
+                if let Some(sym) = self
+                    .symbol_table
+                    .lookup_symbol(crate::tast::ScopeId::first(), name_interned)
+                    .filter(|s| s.kind == crate::tast::symbols::SymbolKind::EnumVariant)
+                {
+                    let enum_type = self
+                        .symbol_table
+                        .find_parent_enum_for_constructor(sym.id)
+                        .and_then(|parent_id| self.symbol_table.get_symbol(parent_id))
+                        .map(|parent_sym| parent_sym.type_id)
+                        .unwrap_or(TypeId::invalid());
+                    return HirPattern::Constructor {
+                        enum_type,
+                        variant: name_interned,
+                        fields: Vec::new(),
+                    };
+                }
+
                 // Fall back to scope-based lookup
                 let found = self
                     .symbol_table
@@ -6866,6 +6885,9 @@ impl<'a> TastToHirContext<'a> {
                 if locally_defined.contains(sym) {
                     return false;
                 }
+                if *sym == SymbolId::from_raw(0) {
+                    return true;
+                }
 
                 // Only lexical bindings live in a closure environment. Enum
                 // constructors, fields and named functions can all appear as
@@ -6896,15 +6918,18 @@ impl<'a> TastToHirContext<'a> {
                 // of the closure boundary (`var x; () -> x = ...`). Immutable
                 // bindings, fields and type/function symbols can keep their
                 // value representation; object mutation still aliases through
-                // the captured object pointer.
+                // the captured object pointer. `this` is never rebound.
                 let mode = self
                     .symbol_table
                     .get_symbol(symbol)
+                    .filter(|_| symbol != SymbolId::from_raw(0))
                     .map(|sym| {
+                        let is_this = self.string_interner.get(sym.name) == Some("this");
                         if matches!(
                             sym.kind,
                             crate::tast::SymbolKind::Variable | crate::tast::SymbolKind::Parameter
                         ) && sym.mutability != crate::tast::Mutability::Immutable
+                            && !is_this
                         {
                             HirCaptureMode::ByMutableRef
                         } else {
@@ -7068,6 +7093,10 @@ impl<'a> TastToHirContext<'a> {
             TypedExpressionKind::Variable { symbol_id, .. } => {
                 // Store the variable with its type from the expression
                 refs.insert(*symbol_id, expr.expr_type);
+            }
+            // The receiver, in the slot `HirExprKind::This` reads.
+            TypedExpressionKind::This { this_type } => {
+                refs.insert(SymbolId::from_raw(0), *this_type);
             }
             TypedExpressionKind::FieldAccess { object, .. } => {
                 // Field access like msg.value - need to capture the object (msg)
@@ -7270,7 +7299,6 @@ impl<'a> TastToHirContext<'a> {
             }
             // Leaf / non-variable-referencing kinds.
             TypedExpressionKind::Literal { .. }
-            | TypedExpressionKind::This { .. }
             | TypedExpressionKind::Super { .. }
             | TypedExpressionKind::Null
             | TypedExpressionKind::Break

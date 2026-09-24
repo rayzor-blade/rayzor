@@ -1556,6 +1556,9 @@ pub struct AstLowering<'a> {
     /// the signature a caller types against and the parameter the body is
     /// lowered with agree.
     inferred_param_types: BTreeMap<SymbolId, BTreeMap<InternedString, TypeId>>,
+    /// Parameters the source left unannotated and no use typed: monomorphs
+    /// a call may still unify.
+    untyped_params: std::collections::BTreeSet<SymbolId>,
     /// Stack of expected lambda parameter types per active call-arg position.
     /// Pushed before lowering an argument expression to a function whose formal
     /// parameter at that position is a function type with concrete parameter

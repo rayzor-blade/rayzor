@@ -94,6 +94,7 @@ impl<'a> HirToMirContext<'a> {
         let mut case_incoming: Vec<(IrBlockId, BTreeMap<SymbolId, IrId>)> = Vec::new();
 
         for (i, case) in cases.iter().enumerate() {
+            let mut bound = false;
             let test_block = case_test_blocks[i];
             let body_block = case_body_blocks[i];
             let next_test = case_test_blocks
@@ -171,6 +172,16 @@ impl<'a> HirToMirContext<'a> {
                         .build_cond_branch(pattern_matches, guard_block, next_test);
 
                     self.builder.switch_to_block(guard_block);
+                    // The guard reads the pattern's variables; this block
+                    // dominates the body, which reuses the bindings.
+                    if !case.patterns.is_empty() {
+                        self.bind_pattern_with_scrutinee_type(
+                            &case.patterns[0],
+                            scrut_val,
+                            Some(scrutinee.ty),
+                        );
+                        bound = true;
+                    }
                     let guard_val = match self
                         .lower_expression(guard)
                         .and_then(|v| self.truth_of(v, guard.ty))
@@ -201,7 +212,7 @@ impl<'a> HirToMirContext<'a> {
 
             self.builder.switch_to_block(body_block);
             // Bind pattern variables (extract enum fields into variable symbols)
-            if !case.patterns.is_empty() {
+            if !bound && !case.patterns.is_empty() {
                 self.bind_pattern_with_scrutinee_type(
                     &case.patterns[0],
                     scrut_val,

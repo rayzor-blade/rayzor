@@ -2275,6 +2275,8 @@ impl<'a> AstLowering<'a> {
                         }
                     } else {
                         // No static extension found, use regular method call
+                        let mut arg_exprs = arg_exprs;
+                        self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
                         let type_arguments =
                             self.infer_call_type_arguments(method_symbol, &arg_exprs);
                         TypedExpressionKind::MethodCall {
@@ -2287,6 +2289,8 @@ impl<'a> AstLowering<'a> {
                     }
                 } else {
                     // Method was found on the receiver, use it
+                    let mut arg_exprs = arg_exprs;
+                    self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
                     let type_arguments = self.infer_call_type_arguments(method_symbol, &arg_exprs);
                     TypedExpressionKind::MethodCall {
                         receiver: Box::new(receiver_expr),
@@ -2645,6 +2649,8 @@ impl<'a> AstLowering<'a> {
                                 source_location: self.context.create_location(),
                                 metadata: ExpressionMetadata::default(),
                             };
+                            let mut arg_exprs = arg_exprs;
+                            self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
                             let type_arguments =
                                 self.infer_call_type_arguments(method_symbol, &arg_exprs);
                             TypedExpressionKind::MethodCall {
@@ -2672,6 +2678,18 @@ impl<'a> AstLowering<'a> {
 
                 // A bare call to an inherited method lands here, as a
                 // FunctionCall over the callee symbol rather than a MethodCall.
+                let mut arg_exprs = arg_exprs;
+                let callee_symbol = match &func_expr.kind {
+                    TypedExpressionKind::Variable { symbol_id } => Some(*symbol_id),
+                    TypedExpressionKind::FieldAccess { field_symbol, .. }
+                    | TypedExpressionKind::StaticFieldAccess { field_symbol, .. } => {
+                        Some(*field_symbol)
+                    }
+                    _ => None,
+                };
+                if let Some(callee) = callee_symbol {
+                    self.unify_dynamic_arguments(callee, &mut arg_exprs);
+                }
                 let type_arguments = match &func_expr.kind {
                     TypedExpressionKind::Variable { symbol_id } => {
                         self.infer_call_type_arguments(*symbol_id, &arg_exprs)
@@ -3219,6 +3237,80 @@ impl<'a> AstLowering<'a> {
     /// One type parameter only: `TypeKind::Function` does not record the order
     /// in which a callee declares its type parameters, and MIR consumes these
     /// positionally, so with two variables nothing here says which is which.
+    /// A Dynamic parameter passed for a formal that is a bare type variable,
+    /// which another argument binds to String, is read as a String: an
+    /// unannotated parameter is a monomorph Haxe unifies with it, and the
+    /// specialized callee reads the slot as one. Only such a parameter and
+    /// only String: any other Dynamic is often a decayed value, and String's
+    /// conversion tells a box from a raw value by tag.
+    pub(crate) fn unify_dynamic_arguments(
+        &self,
+        callee_symbol: SymbolId,
+        arguments: &mut [TypedExpression],
+    ) {
+        use crate::tast::core::TypeKind;
+        let Some(fn_type) = self
+            .context
+            .symbol_table
+            .get_symbol(callee_symbol)
+            .map(|s| s.type_id)
+            .filter(|t| t.is_valid())
+        else {
+            return;
+        };
+        let tt = self.context.type_table.borrow();
+        let Some(TypeKind::Function { params, .. }) = tt.get(fn_type).map(|i| &i.kind) else {
+            return;
+        };
+        let var_of = |ty: TypeId| match tt.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::TypeParameter { symbol_id, .. }) => Some(*symbol_id),
+            _ => None,
+        };
+        let is_dynamic =
+            |ty: TypeId| matches!(tt.get(ty).map(|t| &t.kind), Some(TypeKind::Dynamic));
+        let is_string = |ty: TypeId| matches!(tt.get(ty).map(|t| &t.kind), Some(TypeKind::String));
+        let mut bound: BTreeMap<SymbolId, Option<TypeId>> = BTreeMap::new();
+        for (declared, argument) in params.iter().zip(arguments.iter()) {
+            if let Some(var) = var_of(*declared) {
+                if is_string(argument.expr_type) {
+                    let entry = bound.entry(var).or_insert(Some(argument.expr_type));
+                    if *entry != Some(argument.expr_type) {
+                        *entry = None;
+                    }
+                }
+            }
+        }
+        let targets: Vec<(usize, TypeId)> = params
+            .iter()
+            .zip(arguments.iter())
+            .enumerate()
+            .filter_map(|(i, (declared, argument))| {
+                let ty = (*bound.get(&var_of(*declared)?)?)?;
+                let TypedExpressionKind::Variable { symbol_id } = &argument.kind else {
+                    return None;
+                };
+                (self.untyped_params.contains(symbol_id) && is_dynamic(argument.expr_type))
+                    .then_some((i, ty))
+            })
+            .collect();
+        drop(tt);
+        for (i, target_type) in targets {
+            let argument = arguments[i].clone();
+            arguments[i] = TypedExpression {
+                expr_type: target_type,
+                usage: argument.usage.clone(),
+                lifetime_id: argument.lifetime_id,
+                source_location: argument.source_location,
+                metadata: argument.metadata.clone(),
+                kind: TypedExpressionKind::Cast {
+                    expression: Box::new(argument),
+                    target_type,
+                    cast_kind: CastKind::Unsafe,
+                },
+            };
+        }
+    }
+
     pub(crate) fn infer_call_type_arguments(
         &self,
         callee_symbol: SymbolId,

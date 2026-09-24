@@ -2966,6 +2966,12 @@ pub extern "C" fn haxe_dynamic_tag(ptr: *mut u8) -> u32 {
 pub extern "C" fn haxe_unbox_if_tag(ptr: *mut u8, tag: u32) -> *mut u8 {
     match dynamic_box_at(ptr) {
         Some(d) if d.type_id.0 == tag => d.value_ptr,
+        // A scalar read as a String is its string, as `Std.string` spells it.
+        Some(d)
+            if tag == TYPE_STRING.0 && matches!(d.type_id, TYPE_INT | TYPE_FLOAT | TYPE_BOOL) =>
+        {
+            haxe_std_string_ptr(ptr) as *mut u8
+        }
         _ => ptr,
     }
 }

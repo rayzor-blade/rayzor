@@ -59,6 +59,7 @@ impl<'a> AstLowering<'a> {
             class_type_params: BTreeMap::new(),
             class_constructor_symbols: BTreeMap::new(),
             inferred_param_types: BTreeMap::new(),
+            untyped_params: std::collections::BTreeSet::new(),
             expected_lambda_params_stack: Vec::new(),
             expected_arg_type_stack: Vec::new(),
             suppress_callee_hint: false,

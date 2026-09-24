@@ -69,6 +69,13 @@ impl<'a> AstLowering<'a> {
         match pattern {
             Pattern::Var(var_name) => {
                 let interned_name = self.context.intern_string(var_name);
+                // A constructor of the expected enum is matched, not bound.
+                if expected_type.is_some_and(|ty| {
+                    self.resolve_enum_constructor_of(ty, interned_name)
+                        .is_some()
+                }) {
+                    return Ok(Vec::new());
+                }
                 let type_id = expected_type.unwrap_or(TypeId::invalid());
                 let var_symbol = self.context.symbol_table.create_variable_with_type(
                     interned_name,
