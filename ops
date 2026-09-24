@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1790280690,"nonce":"I4/VCeg7kHBtZBf5xo6rI/1AwLk=","added":["bug","area:macro"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1790280690,"nonce":"XoxARiB2am4zz1XROwkjLf1jttQ=","message":"Fixed in a5eae7cd. Conformance 647 -\u003e 652, 0 lost.","files":null}]}
