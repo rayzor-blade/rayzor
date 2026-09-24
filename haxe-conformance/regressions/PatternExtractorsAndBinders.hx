@@ -36,6 +36,8 @@ class PatternExtractorsAndBinders {
         var k = Album(["a"]);
         check("constructor", (switch {kind: k, y: 1960} { case {y: _ < 1970 => true, kind: kind = Album(tracks)}: "album " + tracks.length; case _: "no"; }) + " " + (switch k { case kk = Single(b): b; case _: "not single"; }), "album 1 not single");
         check("return in switch", C.viaPattern(), "foo");
+        var single = Single("x");
+        check("string argument", (switch single { case Single("x"): "yes"; case _: "no"; }) + " " + single.match(Single('y')), "yes false");
         var d:Array<Dynamic> = ["x", "yz"];
         var n:Array<Dynamic> = [[1, 2]];
         check("dynamic literals", d[1].length + " " + n[0].length + " " + nested([["a"]]) + " " + nested([["b"]]) + " " + nested([[]]), "2 2 match no match no match");

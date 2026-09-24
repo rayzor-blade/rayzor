@@ -396,6 +396,31 @@ impl<'a> HirToMirContext<'a> {
                     _ => TypeId::from_raw(1),                  // Default to Int
                 };
                 let lit_val = self.lower_literal(lit, default_type)?;
+                // A string matches by its contents, not its address.
+                if matches!(lit, HirLiteral::String(_)) {
+                    let string_ptr = IrType::Ptr(Box::new(IrType::String));
+                    let as_string = |slf: &mut Self, reg: IrId| -> Option<IrId> {
+                        match slf.builder.get_register_type(reg) {
+                            Some(IrType::Ptr(_)) | Some(IrType::String) => {
+                                slf.builder.build_bitcast(reg, string_ptr.clone())
+                            }
+                            Some(other) => slf.builder.build_cast(reg, other, string_ptr.clone()),
+                            None => Some(reg),
+                        }
+                    };
+                    let lhs = as_string(self, scrutinee)?;
+                    let rhs = as_string(self, lit_val)?;
+                    let compare = self.get_or_register_extern_function(
+                        "haxe_string_compare",
+                        vec![string_ptr.clone(), string_ptr.clone()],
+                        IrType::I32,
+                    );
+                    let ordering =
+                        self.builder
+                            .build_call_direct(compare, vec![lhs, rhs], IrType::I32)?;
+                    let zero = self.builder.build_const(IrValue::I32(0))?;
+                    return self.builder.build_cmp(CompareOp::Eq, ordering, zero);
+                }
                 // TODO: Use proper comparison based on type
                 self.builder.build_cmp(CompareOp::Eq, scrutinee, lit_val)
             }

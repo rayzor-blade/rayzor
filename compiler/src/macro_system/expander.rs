@@ -344,7 +344,26 @@ impl MacroExpander {
                 iface.fields = new_fields;
                 (TypeDeclaration::Interface(iface), changed)
             }
-            // Enums, typedefs, abstracts don't contain expression bodies to expand
+            // An abstract's methods are expanded like a class's, and its macro
+            // functions are compile-time only as a class's are.
+            TypeDeclaration::Abstract(mut abs) => {
+                let mut changed = false;
+                let mut new_fields = Vec::with_capacity(abs.fields.len());
+                for field in abs.fields.drain(..) {
+                    if field.modifiers.contains(&parser::Modifier::Macro) {
+                        changed = true;
+                        continue;
+                    }
+                    let (expanded, did_change) = self.expand_class_field(field);
+                    if did_change {
+                        changed = true;
+                    }
+                    new_fields.push(expanded);
+                }
+                abs.fields = new_fields;
+                (TypeDeclaration::Abstract(abs), changed)
+            }
+            // Enums and typedefs don't contain expression bodies to expand
             other => (other, false),
         }
     }

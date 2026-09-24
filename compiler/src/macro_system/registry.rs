@@ -161,8 +161,22 @@ impl MacroRegistry {
                 TypeDeclaration::Typedef(_) => {
                     // Typedefs can't have macro functions
                 }
-                TypeDeclaration::Abstract(_) => {
-                    // Abstracts could have macro functions; scan similar to class
+                TypeDeclaration::Abstract(abs) => {
+                    let qualified = if package_prefix.is_empty() {
+                        abs.name.clone()
+                    } else {
+                        format!("{}.{}", package_prefix, abs.name)
+                    };
+                    for field in &abs.fields {
+                        if field.modifiers.contains(&Modifier::Macro) {
+                            self.register_macro_field(
+                                field,
+                                &qualified,
+                                source_file,
+                                &file_imports,
+                            )?;
+                        }
+                    }
                 }
                 TypeDeclaration::Conditional(_) => {
                     // Skip conditional compilation blocks for now

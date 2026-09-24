@@ -115,6 +115,19 @@ impl Reifier {
                 "EConst",
                 vec![self.ctor("Constant", "CIdent", vec![(**arg).clone()])],
             ),
+            // `$v{literal}`: the literal as an expression. A computed value
+            // would need its runtime type, which this does not build.
+            ExprKind::DollarIdent {
+                name,
+                arg: Some(arg),
+            } if name == "v" => match &arg.kind {
+                ExprKind::Int(i) => self.constant("CInt", &i.to_string()),
+                ExprKind::Float(f) => self.constant("CFloat", &f.to_string()),
+                ExprKind::String(s) => self.constant("CString", s),
+                ExprKind::Bool(b) => self.constant("CIdent", if *b { "true" } else { "false" }),
+                ExprKind::Null => self.constant("CIdent", "null"),
+                _ => return None,
+            },
             // `$e` / `${e}`: an expression value spliced in as it is.
             ExprKind::DollarIdent { name, arg: None } => self.ident(name),
             ExprKind::DollarIdent {
