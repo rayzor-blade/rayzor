@@ -11,6 +11,8 @@ pub mod beadie_jit;
 pub mod c_backend;
 pub mod cranelift_backend;
 mod instruction_lowering;
+#[cfg(target_arch = "x86_64")]
+mod jit_memory;
 pub mod llvm_aot_backend;
 pub mod llvm_jit_backend;
 pub mod mir_interpreter;

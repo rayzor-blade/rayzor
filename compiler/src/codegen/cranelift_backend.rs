@@ -346,6 +346,8 @@ impl CraneliftBackend {
 
         // Create JIT builder with ISA
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        #[cfg(target_arch = "x86_64")]
+        builder.memory_provider(Box::new(super::jit_memory::ReachableMemoryProvider::new()));
 
         // Register runtime symbols from plugins
         let mut symbol_addr_range: Option<(usize, usize)> = None;
