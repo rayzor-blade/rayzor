@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1790257456,"nonce":"4uqF8SKdeUahIPJh0X+g996axyg=","message":"Fixed in e7315c43. Conformance 623 -\u003e 624 (Issue4886 PASS), 0 lost, suite 206/0/2.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1790257456,"nonce":"E0QsT9RRsTvfrPjwMjIpVxKSg2s=","status":2}]}
