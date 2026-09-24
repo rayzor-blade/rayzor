@@ -33,7 +33,7 @@ impl<'a> AstLowering<'a> {
     /// or an identifier. Mirrors the pattern parser: a bare dotted name is
     /// `Var` whatever its case (a later stage decides constructor or binding),
     /// a call is a constructor, and `_` is the wildcard.
-    fn pattern_from_expr(expr: &Expr) -> Option<parser::haxe_ast::Pattern> {
+    pub(crate) fn pattern_from_expr(expr: &Expr) -> Option<parser::haxe_ast::Pattern> {
         use parser::haxe_ast::{Pattern, TypePath};
         fn dotted_path(expr: &Expr) -> Option<Vec<String>> {
             match &expr.kind {
@@ -61,6 +61,31 @@ impl<'a> AstLowering<'a> {
                     .map(Self::pattern_from_expr)
                     .collect::<Option<Vec<_>>>()?,
             )),
+            ExprKind::Object(fields) => Some(Pattern::Object {
+                fields: fields
+                    .iter()
+                    .map(|f| Some((f.name.clone(), Self::pattern_from_expr(&f.expr)?)))
+                    .collect::<Option<Vec<_>>>()?,
+            }),
+            ExprKind::Paren(inner) => Self::pattern_from_expr(inner),
+            ExprKind::Unary {
+                op: parser::UnaryOp::Neg,
+                ..
+            } => Some(Pattern::Const(expr.clone())),
+            ExprKind::Binary {
+                left,
+                op: parser::BinaryOp::BitOr,
+                right,
+            } => {
+                let mut alternatives = Vec::new();
+                for side in [left, right] {
+                    match Self::pattern_from_expr(side)? {
+                        Pattern::Or(inner) => alternatives.extend(inner),
+                        other => alternatives.push(other),
+                    }
+                }
+                Some(Pattern::Or(alternatives))
+            }
             ExprKind::Call { expr: callee, args } => {
                 let mut parts = dotted_path(callee)?;
                 let name = parts.pop()?;
@@ -1324,6 +1349,10 @@ impl<'a> AstLowering<'a> {
                         .and_then(|f| f.get(i).copied())
                         .or_else(|| expected_arg_types.as_ref().and_then(|f| f.get(i).copied()));
                     let a = self.coerce_arg_via_abstract_from(a, formal);
+                    let a = match formal {
+                        Some(f) => self.retype_literal_to(a, f),
+                        None => a,
+                    };
                     let a = if callee_is_extern {
                         a
                     } else {
@@ -1581,11 +1610,18 @@ impl<'a> AstLowering<'a> {
                                     &arg_exprs,
                                 );
 
+                                let type_arguments =
+                                    self.structural_call_type_arguments(method_symbol, &arg_exprs);
+                                let expr_type = self.return_type_with_type_args(
+                                    method_symbol,
+                                    &type_arguments,
+                                    expr_type,
+                                );
                                 let kind = TypedExpressionKind::StaticMethodCall {
                                     class_symbol,
                                     method_symbol,
                                     arguments: arg_exprs,
-                                    type_arguments: Vec::new(),
+                                    type_arguments,
                                 };
 
                                 let usage = VariableUsage::Copy;
@@ -1734,6 +1770,70 @@ impl<'a> AstLowering<'a> {
                                 self.resolve_class_like_symbol_by_name(class_name_interned)
                             });
 
+                        // `haxe.macro.ExprDef.EConst(..)`: a qualified enum's constructor.
+                        if let Some(symbol_id) = symbol_id_opt
+                            && self
+                                .context
+                                .symbol_table
+                                .get_symbol(symbol_id)
+                                .is_some_and(|s| s.kind == crate::tast::symbols::SymbolKind::Enum)
+                        {
+                            let variant_name = self.context.intern_string(field);
+                            let variant = self
+                                .context
+                                .symbol_table
+                                .get_enum_variants(symbol_id)
+                                .and_then(|variants| {
+                                    variants.iter().copied().find(|v| {
+                                        self.context
+                                            .symbol_table
+                                            .get_symbol(*v)
+                                            .is_some_and(|s| s.name == variant_name)
+                                    })
+                                });
+                            if let Some(variant_id) = variant {
+                                let variant_type = self
+                                    .context
+                                    .symbol_table
+                                    .get_symbol(variant_id)
+                                    .map(|s| s.type_id)
+                                    .unwrap_or_else(|| {
+                                        self.context.type_table.borrow().dynamic_type()
+                                    });
+                                let func_expr = TypedExpression {
+                                    expr_type: variant_type,
+                                    kind: TypedExpressionKind::Variable {
+                                        symbol_id: variant_id,
+                                    },
+                                    usage: VariableUsage::Borrow,
+                                    lifetime_id: crate::tast::LifetimeId::first(),
+                                    source_location: self.context.create_location(),
+                                    metadata: ExpressionMetadata::default(),
+                                };
+                                let func_expr = self.instantiate_enum_constructor_type(
+                                    variant_id, &arg_exprs, func_expr,
+                                )?;
+                                let kind = TypedExpressionKind::FunctionCall {
+                                    function: Box::new(func_expr),
+                                    arguments: arg_exprs,
+                                    type_arguments: Vec::new(),
+                                };
+                                let expr_type = self.infer_expression_type(&kind)?;
+                                let usage = self.determine_variable_usage(&kind);
+                                let lifetime_id = self.assign_lifetime(&kind, &expr_type);
+                                let metadata = self.analyze_expression_metadata(&kind);
+                                return Ok(TypedExpression {
+                                    expr_type,
+                                    kind,
+                                    usage,
+                                    lifetime_id,
+                                    source_location: self
+                                        .context
+                                        .span_to_location(&expression.span),
+                                    metadata,
+                                });
+                            }
+                        }
                         if let Some(symbol_id) = symbol_id_opt {
                             if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
                                 // For TypeAlias, resolve through the alias chain to find
@@ -1992,11 +2092,18 @@ impl<'a> AstLowering<'a> {
                                         method_symbol,
                                         &arg_exprs,
                                     );
+                                    let type_arguments = self
+                                        .structural_call_type_arguments(method_symbol, &arg_exprs);
+                                    let expr_type = self.return_type_with_type_args(
+                                        method_symbol,
+                                        &type_arguments,
+                                        expr_type,
+                                    );
                                     let kind = TypedExpressionKind::StaticMethodCall {
                                         class_symbol,
                                         method_symbol,
                                         arguments: arg_exprs,
-                                        type_arguments: Vec::new(),
+                                        type_arguments,
                                     };
 
                                     let usage = VariableUsage::Copy;
@@ -2505,11 +2612,13 @@ impl<'a> AstLowering<'a> {
 
                         let kind = if is_static {
                             // Static methods: create StaticMethodCall with the class symbol
+                            let type_arguments =
+                                self.structural_call_type_arguments(method_symbol, &arg_exprs);
                             TypedExpressionKind::StaticMethodCall {
                                 class_symbol,
                                 method_symbol,
                                 arguments: arg_exprs,
-                                type_arguments: Vec::new(),
+                                type_arguments,
                             }
                         } else {
                             // Instance methods: create MethodCall with implicit `this` receiver
@@ -2585,6 +2694,14 @@ impl<'a> AstLowering<'a> {
 
         // Build the TypedExpression for the non-early-return paths
         let expr_type = self.infer_expression_type(&kind)?;
+        let expr_type = match &kind {
+            TypedExpressionKind::StaticMethodCall {
+                method_symbol,
+                type_arguments,
+                ..
+            } => self.return_type_with_type_args(*method_symbol, type_arguments, expr_type),
+            _ => expr_type,
+        };
         let usage = self.determine_variable_usage(&kind);
         let lifetime_id = self.assign_lifetime(&kind, &expr_type);
         let metadata = self.analyze_expression_metadata(&kind);
@@ -3125,22 +3242,269 @@ impl<'a> AstLowering<'a> {
         };
 
         drop(table);
+        // Values bind first; a function literal's own types were read off
+        // these same formals, so it only fills what the values left open.
+        let is_function = |slf: &Self, ty: TypeId| {
+            matches!(
+                slf.context.type_table.borrow().get(ty).map(|t| &t.kind),
+                Some(TypeKind::Function { .. })
+            )
+        };
         let mut bindings: Vec<(SymbolId, TypeId)> = Vec::new();
         for (declared, argument) in params.iter().zip(arguments.iter()) {
-            self.unify_type_args(*declared, argument.expr_type, 0, &mut bindings);
+            if !is_function(self, argument.expr_type) {
+                self.unify_type_args(*declared, argument.expr_type, 0, &mut bindings);
+            }
         }
-        let Some(&(first_var, first_ty)) = bindings.first() else {
+        for (declared, argument) in params.iter().zip(arguments.iter()) {
+            if is_function(self, argument.expr_type) {
+                let mut from_function = Vec::new();
+                self.unify_type_args(*declared, argument.expr_type, 0, &mut from_function);
+                for (var, ty) in from_function {
+                    if !bindings.iter().any(|(v, _)| *v == var) {
+                        bindings.push((var, ty));
+                    }
+                }
+            }
+        }
+        // Every variable the signature mentions, each bound and every
+        // occurrence agreeing; anything else is left unspecialized rather
+        // than specialized wrongly. Type parameter symbols are created in
+        // declaration order, so their ids give the order type_args take.
+        let mut mentioned = std::collections::BTreeSet::new();
+        self.collect_type_param_symbols(fn_type, 0, &mut mentioned);
+        let mut resolved: BTreeMap<SymbolId, TypeId> = BTreeMap::new();
+        for (var, ty) in bindings {
+            if *resolved.entry(var).or_insert(ty) != ty {
+                return Vec::new();
+            }
+        }
+        if resolved.is_empty() || mentioned.iter().any(|v| !resolved.contains_key(v)) {
+            return Vec::new();
+        }
+        mentioned.iter().map(|v| resolved[v]).collect()
+    }
+
+    /// Type arguments for a static call when one of the callee's type
+    /// variables appears only nested in its parameters (`Iterable<A>`): the
+    /// monomorphizer infers a variable only from a parameter that is exactly
+    /// it, so everything else keeps that inference.
+    fn structural_call_type_arguments(
+        &self,
+        callee_symbol: SymbolId,
+        arguments: &[TypedExpression],
+    ) -> Vec<TypeId> {
+        use crate::tast::core::TypeKind;
+        let Some(fn_type) = self
+            .context
+            .symbol_table
+            .get_symbol(callee_symbol)
+            .map(|s| s.type_id)
+            .filter(|t| t.is_valid())
+        else {
             return Vec::new();
         };
-        // One variable, every occurrence agreeing. Anything else is left
-        // unspecialized rather than specialized wrongly.
-        if bindings
-            .iter()
-            .any(|(var, ty)| *var != first_var || *ty != first_ty)
+        let params = match self
+            .context
+            .type_table
+            .borrow()
+            .get(fn_type)
+            .map(|t| &t.kind)
         {
+            Some(TypeKind::Function { params, .. }) => params.clone(),
+            _ => return Vec::new(),
+        };
+        let mut mentioned = std::collections::BTreeSet::new();
+        for p in &params {
+            self.collect_type_param_symbols(*p, 0, &mut mentioned);
+        }
+        let direct: std::collections::BTreeSet<SymbolId> = {
+            let tt = self.context.type_table.borrow();
+            params
+                .iter()
+                .filter_map(|p| match tt.get(*p).map(|t| &t.kind) {
+                    Some(TypeKind::TypeParameter { symbol_id, .. }) => Some(*symbol_id),
+                    _ => None,
+                })
+                .collect()
+        };
+        if mentioned.is_subset(&direct) {
             return Vec::new();
         }
-        vec![first_ty]
+        // A structure argument (`{iterator: ..}`) is iterated through the
+        // runtime's stepper, whose values the erased body already reads.
+        let structural_argument = arguments.iter().any(|a| {
+            matches!(
+                self.context
+                    .type_table
+                    .borrow()
+                    .get(a.expr_type)
+                    .map(|t| &t.kind),
+                Some(TypeKind::Anonymous { .. })
+            )
+        });
+        if structural_argument {
+            return Vec::new();
+        }
+        self.infer_call_type_arguments(callee_symbol, arguments)
+    }
+
+    /// A call's return type with the type arguments it was specialized with
+    /// in place of the callee's type variables.
+    fn return_type_with_type_args(
+        &self,
+        callee_symbol: SymbolId,
+        type_arguments: &[TypeId],
+        ret: TypeId,
+    ) -> TypeId {
+        if type_arguments.is_empty() {
+            return ret;
+        }
+        let Some(fn_type) = self
+            .context
+            .symbol_table
+            .get_symbol(callee_symbol)
+            .map(|s| s.type_id)
+        else {
+            return ret;
+        };
+        let declared_ret = match self
+            .context
+            .type_table
+            .borrow()
+            .get(fn_type)
+            .map(|t| &t.kind)
+        {
+            Some(crate::tast::core::TypeKind::Function { return_type, .. }) => *return_type,
+            _ => return ret,
+        };
+        let mut mentioned = std::collections::BTreeSet::new();
+        self.collect_type_param_symbols(fn_type, 0, &mut mentioned);
+        if mentioned.len() != type_arguments.len() {
+            return ret;
+        }
+        let bindings: Vec<(SymbolId, TypeId)> = mentioned
+            .into_iter()
+            .zip(type_arguments.iter().copied())
+            .collect();
+        let substituted = self.substitute_alias_args(declared_ret, &bindings);
+        let mut left = std::collections::BTreeSet::new();
+        self.collect_type_param_symbols(substituted, 0, &mut left);
+        if left.is_empty() { substituted } else { ret }
+    }
+
+    /// The type parameters a type mentions anywhere inside it.
+    fn collect_type_param_symbols(
+        &self,
+        ty: TypeId,
+        depth: u32,
+        out: &mut std::collections::BTreeSet<SymbolId>,
+    ) {
+        use crate::tast::core::TypeKind;
+        if depth > 8 {
+            return;
+        }
+        let kind = self
+            .context
+            .type_table
+            .borrow()
+            .get(ty)
+            .map(|t| t.kind.clone());
+        let children: Vec<TypeId> = match kind {
+            Some(TypeKind::TypeParameter { symbol_id, .. }) => {
+                out.insert(symbol_id);
+                Vec::new()
+            }
+            Some(TypeKind::Array { element_type }) => vec![element_type],
+            Some(TypeKind::Optional { inner_type }) => vec![inner_type],
+            Some(TypeKind::Function {
+                params,
+                return_type,
+                ..
+            }) => params
+                .into_iter()
+                .chain(std::iter::once(return_type))
+                .collect(),
+            Some(TypeKind::Anonymous { fields }) => fields.iter().map(|f| f.type_id).collect(),
+            Some(TypeKind::Class { type_args, .. })
+            | Some(TypeKind::Abstract { type_args, .. })
+            | Some(TypeKind::TypeAlias { type_args, .. })
+            | Some(TypeKind::GenericInstance { type_args, .. }) => type_args,
+            _ => Vec::new(),
+        };
+        for child in children {
+            self.collect_type_param_symbols(child, depth + 1, out);
+        }
+    }
+
+    /// What `iterator()` returning `iter` yields, bound against `element`:
+    /// an `Iterator<X>` or a structure with `next():X` binds X.
+    fn unify_iterator_element(
+        &self,
+        iter: TypeId,
+        element: TypeId,
+        depth: u32,
+        out: &mut Vec<(SymbolId, TypeId)>,
+    ) {
+        use crate::tast::core::TypeKind;
+        if depth > 8 {
+            return;
+        }
+        let kind = self
+            .context
+            .type_table
+            .borrow()
+            .get(iter)
+            .map(|t| t.kind.clone());
+        match kind {
+            Some(TypeKind::Anonymous { fields }) => {
+                if let Some(f) = fields
+                    .iter()
+                    .find(|f| self.context.string_interner.get(f.name) == Some("next"))
+                {
+                    let ret = match self
+                        .context
+                        .type_table
+                        .borrow()
+                        .get(f.type_id)
+                        .map(|t| &t.kind)
+                    {
+                        Some(TypeKind::Function { return_type, .. }) => Some(*return_type),
+                        _ => None,
+                    };
+                    if let Some(ret) = ret {
+                        self.unify_type_args(ret, element, depth + 1, out);
+                    }
+                }
+            }
+            Some(TypeKind::TypeAlias {
+                symbol_id,
+                target_type,
+                type_args,
+            }) => {
+                let bindings = self.alias_bindings(symbol_id, &type_args);
+                let expanded = self.substitute_alias_args(target_type, &bindings);
+                if expanded != iter {
+                    self.unify_iterator_element(expanded, element, depth + 1, out);
+                }
+            }
+            Some(TypeKind::Class {
+                symbol_id,
+                type_args,
+            }) => {
+                let resolved = self
+                    .context
+                    .type_table
+                    .borrow()
+                    .resolve_type_alias(symbol_id);
+                if resolved != iter {
+                    let bindings = self.alias_bindings(symbol_id, &type_args);
+                    let expanded = self.substitute_alias_args(resolved, &bindings);
+                    self.unify_iterator_element(expanded, element, depth + 1, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Walk a declared type and the actual beside it, recording what each
@@ -3214,6 +3578,27 @@ impl<'a> AstLowering<'a> {
                     }
                 }
             }
+            // A structure against an array: `iterator()` yields its elements.
+            (TypeKind::Anonymous { fields: df }, TypeKind::Array { element_type }) => {
+                if let Some(f) = df
+                    .iter()
+                    .find(|f| self.context.string_interner.get(f.name) == Some("iterator"))
+                {
+                    let ret = match self
+                        .context
+                        .type_table
+                        .borrow()
+                        .get(f.type_id)
+                        .map(|t| &t.kind)
+                    {
+                        Some(TypeKind::Function { return_type, .. }) => Some(*return_type),
+                        _ => None,
+                    };
+                    if let Some(ret) = ret {
+                        self.unify_iterator_element(ret, *element_type, depth + 1, out);
+                    }
+                }
+            }
             // A structure against a class: the class's methods of those names.
             (TypeKind::Anonymous { fields: df }, TypeKind::Class { symbol_id, .. }) => {
                 for f in df {
@@ -3273,6 +3658,23 @@ impl<'a> AstLowering<'a> {
                 if expanded != declared {
                     self.unify_type_args(expanded, actual, depth + 1, out);
                 }
+            }
+            // `Iterable<T>` / `Iterator<T>` against an array: T is its element.
+            (
+                TypeKind::Class {
+                    symbol_id,
+                    type_args,
+                },
+                TypeKind::Array { element_type },
+            ) if type_args.len() == 1
+                && self
+                    .context
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|s| self.context.string_interner.get(s.name))
+                    .is_some_and(|n| n == "Iterable" || n == "Iterator") =>
+            {
+                self.unify_type_args(type_args[0], *element_type, depth + 1, out)
             }
             // A typedef pre-registered as a class keeps that symbol kind; its
             // declaration is the alias to expand.
@@ -3479,44 +3881,10 @@ impl<'a> AstLowering<'a> {
         actual: TypeId,
         out: &mut BTreeMap<SymbolId, TypeId>,
     ) {
-        let tt = self.context.type_table.borrow();
-        let mut work = vec![(formal, actual)];
-        while let Some((f, a)) = work.pop() {
-            match (tt.get(f).map(|t| &t.kind), tt.get(a).map(|t| &t.kind)) {
-                (Some(TypeKind::TypeParameter { symbol_id, .. }), Some(kind)) => {
-                    let concrete = !matches!(
-                        kind,
-                        TypeKind::Dynamic
-                            | TypeKind::Unknown
-                            | TypeKind::TypeParameter { .. }
-                            | TypeKind::Placeholder { .. }
-                    );
-                    if concrete {
-                        out.entry(*symbol_id).or_insert(a);
-                    }
-                }
-                (
-                    Some(TypeKind::Array { element_type: fe }),
-                    Some(TypeKind::Array { element_type: ae }),
-                ) => work.push((*fe, *ae)),
-                (
-                    Some(TypeKind::Optional { inner_type: fi }),
-                    Some(TypeKind::Optional { inner_type: ai }),
-                ) => work.push((*fi, *ai)),
-                (
-                    Some(TypeKind::Class { type_args: fa, .. }),
-                    Some(TypeKind::Class { type_args: aa, .. }),
-                )
-                | (
-                    Some(TypeKind::Abstract { type_args: fa, .. }),
-                    Some(TypeKind::Abstract { type_args: aa, .. }),
-                )
-                | (
-                    Some(TypeKind::GenericInstance { type_args: fa, .. }),
-                    Some(TypeKind::GenericInstance { type_args: aa, .. }),
-                ) => work.extend(fa.iter().copied().zip(aa.iter().copied())),
-                _ => {}
-            }
+        let mut found = Vec::new();
+        self.unify_type_args(formal, actual, 0, &mut found);
+        for (var, ty) in found {
+            out.entry(var).or_insert(ty);
         }
     }
 

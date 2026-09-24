@@ -649,7 +649,7 @@ fn collect_param_operator_uses<'a>(
 
 /// Visit every sub-expression of `expr` in pre-order, entering nested
 /// function literals too.
-fn walk_expr<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
+pub(crate) fn walk_expr<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     f(expr);
     let mut go = |e: &'a Expr| walk_expr(e, f);
     match &expr.kind {

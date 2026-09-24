@@ -1355,44 +1355,9 @@ impl<'a> AstLowering<'a> {
                                     }
                                 }
                                 parser::ExprKind::Function(func) if !func.name.is_empty() => {
-                                    // `function foo() {...}` in statement position
-                                    // declares `foo`. The expression form yields an
-                                    // anonymous literal, so without binding the name
-                                    // here the declaration is unreachable and every
-                                    // later call reports an unknown name.
-                                    match self.lower_expression(expr) {
-                                        Ok(typed_expr) => {
-                                            let fn_name = self.context.intern_string(&func.name);
-                                            let fn_type = typed_expr.expr_type;
-                                            let fn_symbol = self
-                                                .context
-                                                .symbol_table
-                                                .create_variable_with_type(
-                                                    fn_name,
-                                                    self.context.current_scope,
-                                                    fn_type,
-                                                );
-                                            if let Some(scope) = self
-                                                .context
-                                                .scope_tree
-                                                .get_scope_mut(self.context.current_scope)
-                                            {
-                                                scope.add_symbol(fn_symbol, fn_name);
-                                            }
-                                            statements.push(TypedStatement::VarDeclaration {
-                                                symbol_id: fn_symbol,
-                                                var_type: fn_type,
-                                                initializer: Some(typed_expr),
-                                                mutability:
-                                                    crate::tast::symbols::Mutability::Mutable,
-                                                source_location: self
-                                                    .context
-                                                    .span_to_location(&expr.span),
-                                            });
-                                        }
-                                        Err(e) => {
-                                            self.collected_errors.push(e);
-                                        }
+                                    match self.lower_named_local_function(expr, func) {
+                                        Ok(declared) => statements.extend(declared),
+                                        Err(e) => self.collected_errors.push(e),
                                     }
                                 }
                                 _ => {
@@ -1526,7 +1491,11 @@ impl<'a> AstLowering<'a> {
                     self.context.expected_new_type_hint = self.context.expected_return_type;
                     let lowered = self.lower_value_expression(expr);
                     self.context.expected_new_type_hint = prev_hint;
-                    Some(Box::new(lowered?))
+                    let lowered = match self.context.expected_return_type {
+                        Some(ret) => self.retype_literal_to(lowered?, ret),
+                        None => lowered?,
+                    };
+                    Some(Box::new(lowered))
                 } else {
                     None
                 };
@@ -1825,6 +1794,12 @@ impl<'a> AstLowering<'a> {
                 }
             }
             ExprKind::Function(func) => {
+                if let Some(rewritten) = Self::literal_with_entry_defaults(func) {
+                    return self.lower_expression(&Expr {
+                        kind: ExprKind::Function(rewritten),
+                        span: expression.span,
+                    });
+                }
                 // Function expression/lambda - create a new scope for the function body
                 let function_scope = self.context.enter_scope(ScopeKind::Function);
 
@@ -2207,7 +2182,10 @@ impl<'a> AstLowering<'a> {
                     self.expected_arg_type_stack.pop();
                     self.expected_lambda_params_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;
-                    result?
+                    match declared_type {
+                        Some(dt) => self.retype_literal_to(result?, dt),
+                        None => result?,
+                    }
                 } else {
                     // Default to null if no initializer
                     TypedExpression {
@@ -2427,8 +2405,10 @@ impl<'a> AstLowering<'a> {
                 self.lower_expression(expr)?.kind
             }
             ExprKind::Macro(expr) => {
-                // Macro expression: macro expr
-                // Lower as macro expression in TAST
+                // Outside a macro body, `macro e` is a value built at run time.
+                if let Some(built) = Self::runtime_reification(expr) {
+                    return self.lower_expression(&built);
+                }
                 let inner_expr = self.lower_expression(expr)?;
                 let macro_name = self.context.intern_string("macro");
                 let macro_symbol = self.context.symbol_table.create_variable(macro_name);
@@ -2868,4 +2848,354 @@ mod fields;
 mod loops;
 mod operators;
 mod patterns;
+mod reify;
 mod switch;
+
+impl<'a> AstLowering<'a> {
+    /// `function foo() {...}` in statement position declares `foo`. The name
+    /// is in scope inside its own body, closures nested in it included: a
+    /// function that names itself is declared first and assigned after, so
+    /// its closure captures the variable rather than the literal being built.
+    pub(crate) fn lower_named_local_function(
+        &mut self,
+        expr: &Expr,
+        func: &parser::Function,
+    ) -> Result<Vec<TypedStatement>, LoweringError> {
+        let names_itself = func.body.as_ref().is_some_and(|body| {
+            let mut found = false;
+            crate::tast::ast_lowering::walk_expr(body, &mut |e| {
+                if matches!(&e.kind, ExprKind::Ident(n) if *n == func.name) {
+                    found = true;
+                }
+            });
+            found
+        });
+        let fn_name = self.context.intern_string(&func.name);
+        let location = self.context.span_to_location(&expr.span);
+        if !names_itself {
+            let typed_expr = self.lower_expression(expr)?;
+            let fn_type = typed_expr.expr_type;
+            let fn_symbol = self.context.symbol_table.create_variable_with_type(
+                fn_name,
+                self.context.current_scope,
+                fn_type,
+            );
+            if let Some(scope) = self
+                .context
+                .scope_tree
+                .get_scope_mut(self.context.current_scope)
+            {
+                scope.add_symbol(fn_symbol, fn_name);
+            }
+            return Ok(vec![TypedStatement::VarDeclaration {
+                symbol_id: fn_symbol,
+                var_type: fn_type,
+                initializer: Some(typed_expr),
+                mutability: crate::tast::symbols::Mutability::Mutable,
+                source_location: location,
+            }]);
+        }
+        // A fully annotated signature types the name before its body is
+        // read, so a call through it inside the body returns the real type.
+        let annotated = match &func.return_type {
+            Some(ret) if func.params.iter().all(|p| p.type_hint.is_some()) => {
+                let params = func
+                    .params
+                    .iter()
+                    .map(|p| self.lower_type(p.type_hint.as_ref().expect("checked above")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let ret = self.lower_type(ret)?;
+                Some(
+                    self.context
+                        .type_table
+                        .borrow_mut()
+                        .create_function_type(params, ret),
+                )
+            }
+            _ => None,
+        };
+        let placeholder =
+            annotated.unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+        let fn_symbol = self.context.symbol_table.create_variable_with_type(
+            fn_name,
+            self.context.current_scope,
+            placeholder,
+        );
+        if let Some(scope) = self
+            .context
+            .scope_tree
+            .get_scope_mut(self.context.current_scope)
+        {
+            scope.add_symbol(fn_symbol, fn_name);
+        }
+        let typed_expr = self.lower_expression(expr)?;
+        let fn_type = typed_expr.expr_type;
+        self.context
+            .symbol_table
+            .update_symbol_type(fn_symbol, fn_type);
+        let target = TypedExpression {
+            kind: TypedExpressionKind::Variable {
+                symbol_id: fn_symbol,
+            },
+            expr_type: fn_type,
+            usage: VariableUsage::Borrow,
+            lifetime_id: LifetimeId::from_raw(1),
+            source_location: location,
+            metadata: ExpressionMetadata::default(),
+        };
+        let null = TypedExpression {
+            kind: TypedExpressionKind::Null,
+            ..target.clone()
+        };
+        Ok(vec![
+            TypedStatement::VarDeclaration {
+                symbol_id: fn_symbol,
+                var_type: fn_type,
+                initializer: Some(null),
+                mutability: crate::tast::symbols::Mutability::Mutable,
+                source_location: location,
+            },
+            TypedStatement::Assignment {
+                target,
+                value: typed_expr,
+                source_location: location,
+            },
+        ])
+    }
+}
+
+impl<'a> AstLowering<'a> {
+    /// A function literal is only called through a value, which carries no
+    /// defaults: a defaulted parameter arrives as null. The literal takes it
+    /// as a hidden optional parameter and binds the declared name on entry,
+    /// `var a:T = default; if (__opt_a != null) a = __opt_a;`, so the body
+    /// sees `a` with its declared type.
+    fn literal_with_entry_defaults(func: &parser::Function) -> Option<parser::Function> {
+        let defaulted = |p: &parser::FunctionParam| {
+            p.default_value
+                .as_ref()
+                .is_some_and(|d| !matches!(d.kind, ExprKind::Null))
+        };
+        if !func.params.iter().any(defaulted) {
+            return None;
+        }
+        let span = func.span;
+        let mk = |kind| Expr { kind, span };
+        let mut params = Vec::with_capacity(func.params.len());
+        let mut prelude = Vec::new();
+        for param in &func.params {
+            if !defaulted(param) {
+                params.push(param.clone());
+                continue;
+            }
+            let hidden = format!("__opt_{}", param.name);
+            let nullable = param.type_hint.as_ref().map(|t| parser::Type::Path {
+                path: parser::TypePath {
+                    package: Vec::new(),
+                    name: "Null".to_string(),
+                    sub: None,
+                },
+                params: vec![t.clone()],
+                span,
+            });
+            params.push(parser::FunctionParam {
+                name: hidden.clone(),
+                type_hint: nullable,
+                optional: true,
+                default_value: None,
+                ..param.clone()
+            });
+            prelude.push(parser::BlockElement::Expr(mk(ExprKind::Var {
+                name: param.name.clone(),
+                type_hint: param.type_hint.clone(),
+                expr: param.default_value.clone(),
+            })));
+            let incoming = mk(ExprKind::Ident(hidden));
+            prelude.push(parser::BlockElement::Expr(mk(ExprKind::If {
+                cond: Box::new(mk(ExprKind::Binary {
+                    left: Box::new(incoming.clone()),
+                    op: BinaryOp::NotEq,
+                    right: Box::new(mk(ExprKind::Null)),
+                })),
+                then_branch: Box::new(mk(ExprKind::Assign {
+                    left: Box::new(mk(ExprKind::Ident(param.name.clone()))),
+                    op: parser::AssignOp::Assign,
+                    right: Box::new(incoming),
+                })),
+                else_branch: None,
+            })));
+        }
+        let body = func.body.as_ref().map(|body| {
+            let mut elements = prelude;
+            match &body.kind {
+                ExprKind::Block(inner) => elements.extend(inner.iter().cloned()),
+                _ => elements.push(parser::BlockElement::Expr(match &body.kind {
+                    ExprKind::Return(_) => (**body).clone(),
+                    _ => mk(ExprKind::Return(Some(body.clone()))),
+                })),
+            }
+            Box::new(mk(ExprKind::Block(elements)))
+        });
+        Some(parser::Function {
+            params,
+            body,
+            ..func.clone()
+        })
+    }
+}
+
+impl<'a> AstLowering<'a> {
+    /// The structure a type stands for, through aliases, typedefs registered
+    /// as classes, and `Null<T>`.
+    fn structure_fields(&self, ty: TypeId) -> Option<Vec<crate::tast::core::AnonymousField>> {
+        use crate::tast::core::TypeKind;
+        let tt = self.context.type_table.borrow();
+        let mut ty = ty;
+        for _ in 0..8 {
+            match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Anonymous { fields }) => return Some(fields.clone()),
+                Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                Some(TypeKind::Class { symbol_id, .. }) => {
+                    let resolved = tt.resolve_type_alias(*symbol_id);
+                    if resolved == ty || resolved == tt.dynamic_type() {
+                        return None;
+                    }
+                    ty = resolved;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// The element type of an array type, through aliases and `Null<T>`.
+    fn array_element_of(&self, ty: TypeId) -> Option<TypeId> {
+        use crate::tast::core::TypeKind;
+        let tt = self.context.type_table.borrow();
+        let mut ty = ty;
+        for _ in 0..8 {
+            match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Array { element_type }) => return Some(*element_type),
+                Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                Some(TypeKind::Class { symbol_id, .. }) => {
+                    let resolved = tt.resolve_type_alias(*symbol_id);
+                    if resolved == ty || resolved == tt.dynamic_type() {
+                        return None;
+                    }
+                    ty = resolved;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// An object literal bound where a structure is expected takes that
+    /// structure's type, nested literals included, so it is laid out with
+    /// the optional fields it omits and reads through the type find them.
+    pub(crate) fn retype_literal_to(
+        &self,
+        mut expr: TypedExpression,
+        target: TypeId,
+    ) -> TypedExpression {
+        // An abstract over a structure holds the structure itself.
+        let underlying = match self
+            .context
+            .type_table
+            .borrow()
+            .get(target)
+            .map(|t| &t.kind)
+        {
+            Some(crate::tast::core::TypeKind::Abstract {
+                underlying: Some(u),
+                ..
+            }) => Some(*u),
+            _ => None,
+        };
+        if let Some(u) = underlying
+            && matches!(expr.kind, TypedExpressionKind::ObjectLiteral { .. })
+        {
+            return self.retype_literal_to(expr, u);
+        }
+        match &mut expr.kind {
+            TypedExpressionKind::ObjectLiteral { fields } => {
+                let Some(target_fields) = self.structure_fields(target) else {
+                    return expr;
+                };
+                // A field the structure lacks means the literal is not it.
+                if !fields
+                    .iter()
+                    .all(|f| target_fields.iter().any(|t| t.name == f.name))
+                {
+                    return expr;
+                }
+                for field in fields.iter_mut() {
+                    if let Some(t) = target_fields.iter().find(|t| t.name == field.name) {
+                        let value = std::mem::replace(
+                            &mut field.value,
+                            TypedExpression {
+                                kind: TypedExpressionKind::Null,
+                                ..expr_placeholder(target)
+                            },
+                        );
+                        field.value = self.retype_literal_to(value, t.type_id);
+                    }
+                }
+                // Only a literal that leaves out an optional field is laid
+                // out differently from its own type.
+                let omits_optional = target_fields
+                    .iter()
+                    .any(|t| t.optional && !fields.iter().any(|f| f.name == t.name));
+                if !omits_optional {
+                    return expr;
+                }
+                // A typedef registered as a class (one that names itself)
+                // is laid out as the structure it resolves to.
+                expr.expr_type = {
+                    let tt = self.context.type_table.borrow();
+                    match tt.get(target).map(|t| &t.kind) {
+                        Some(crate::tast::core::TypeKind::Class { symbol_id, .. }) => {
+                            let resolved = tt.resolve_type_alias(*symbol_id);
+                            if resolved == tt.dynamic_type() {
+                                target
+                            } else {
+                                resolved
+                            }
+                        }
+                        _ => target,
+                    }
+                };
+                expr
+            }
+            TypedExpressionKind::ArrayLiteral { elements } => {
+                if let Some(element) = self.array_element_of(target) {
+                    for slot in elements.iter_mut() {
+                        let value = std::mem::replace(
+                            slot,
+                            TypedExpression {
+                                kind: TypedExpressionKind::Null,
+                                ..expr_placeholder(target)
+                            },
+                        );
+                        *slot = self.retype_literal_to(value, element);
+                    }
+                }
+                expr
+            }
+            _ => expr,
+        }
+    }
+}
+
+fn expr_placeholder(ty: TypeId) -> TypedExpression {
+    TypedExpression {
+        kind: TypedExpressionKind::Null,
+        expr_type: ty,
+        usage: VariableUsage::Copy,
+        lifetime_id: LifetimeId::from_raw(1),
+        source_location: SourceLocation::unknown(),
+        metadata: ExpressionMetadata::default(),
+    }
+}

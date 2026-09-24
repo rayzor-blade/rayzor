@@ -501,18 +501,21 @@ impl<'a> AstLowering<'a> {
                 // whose symbol is a Class. Look up the method in that class.
                 if let ExprKind::Ident(cls_name) = &obj.kind {
                     let cls_name_interned = self.context.string_interner.intern(cls_name);
-                    if let Some(sym) = self
+                    // A class this module never declared (`Lambda`) is not in
+                    // scope by name; the class resolver still finds it.
+                    let class_sym = self
                         .context
                         .symbol_table
                         .lookup_symbol(self.context.current_scope, cls_name_interned)
-                    {
-                        if sym.kind == crate::tast::symbols::SymbolKind::Class {
-                            let method_name = self.context.string_interner.intern(field);
-                            if let Some(method_sym) =
-                                self.resolve_class_method_symbol(sym.id, method_name)
-                            {
-                                return self.function_param_types_from_symbol(method_sym);
-                            }
+                        .filter(|s| s.kind == crate::tast::symbols::SymbolKind::Class)
+                        .map(|s| s.id)
+                        .or_else(|| self.resolve_class_like_symbol_by_name(cls_name_interned));
+                    if let Some(class_sym) = class_sym {
+                        let method_name = self.context.string_interner.intern(field);
+                        if let Some(method_sym) =
+                            self.resolve_class_method_symbol(class_sym, method_name)
+                        {
+                            return self.function_param_types_from_symbol(method_sym);
                         }
                     }
                 }

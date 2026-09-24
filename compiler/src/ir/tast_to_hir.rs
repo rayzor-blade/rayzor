@@ -4358,7 +4358,14 @@ impl<'a> TastToHirContext<'a> {
             TypedExpressionKind::Try { .. } => "try-catch expression".to_string(),
             TypedExpressionKind::VarDeclarationExpr { .. } => "variable declaration".to_string(),
             TypedExpressionKind::FinalDeclarationExpr { .. } => "final declaration".to_string(),
-            _ => "unsupported expression type".to_string(),
+            other => {
+                let debug = format!("{:?}", other);
+                let variant = debug
+                    .split(|c: char| !c.is_alphanumeric())
+                    .next()
+                    .unwrap_or("");
+                format!("unsupported expression type {}", variant)
+            }
         }
     }
 

@@ -274,7 +274,12 @@ impl<'a> AstLowering<'a> {
             P::Array(items) | P::Or(items) => items.iter().any(Self::pattern_needs_guard),
             P::ArrayRest { elements, .. } => elements.iter().any(Self::pattern_needs_guard),
             P::Object { fields } => fields.iter().any(|(_, p)| Self::pattern_needs_guard(p)),
-            P::Constructor { params, .. } => params.iter().any(Self::pattern_needs_guard),
+            // The ordinary matcher compares an object argument as a literal.
+            P::Constructor { params, .. } => params.iter().any(|p| {
+                Self::pattern_needs_guard(p)
+                    || matches!(p, P::Object { .. })
+                    || matches!(p, P::Const(v) if matches!(v.kind, parser::ExprKind::Object(_)))
+            }),
             _ => false,
         }
     }
@@ -308,6 +313,20 @@ impl<'a> AstLowering<'a> {
         match pattern {
             P::Underscore => Some((None, Vec::new())),
             P::Null => Some((Some(eq(subject, expr(parser::ExprKind::Null))), Vec::new())),
+            // `E.A` in a pattern names a value, never a capture.
+            P::Var(name) if name.contains('.') => {
+                let mut parts: Vec<String> = name.split('.').map(str::to_string).collect();
+                let last = parts.pop()?;
+                let constructor = P::Constructor {
+                    path: parser::TypePath {
+                        package: parts,
+                        name: last,
+                        sub: None,
+                    },
+                    params: Vec::new(),
+                };
+                self.pattern_guard_parts(&constructor, subject)
+            }
             P::Var(name) => {
                 if self.names_enum_variant(name) {
                     let constructor = P::Constructor {
@@ -325,17 +344,13 @@ impl<'a> AstLowering<'a> {
             }
             P::Const(value) => match &value.kind {
                 // An object read as a literal: a name in a field captures,
-                // anything else compares.
+                // anything else compares. A null never matches it.
                 parser::ExprKind::Object(fields) => {
-                    let mut tests = Vec::new();
+                    let mut tests = vec![Self::not_null(subject)];
                     let mut bindings = Vec::new();
                     for f in fields {
-                        let inner = match &f.expr.kind {
-                            parser::ExprKind::Ident(n) if n == "_" => P::Underscore,
-                            parser::ExprKind::Ident(n) => P::Var(n.clone()),
-                            parser::ExprKind::Null => P::Null,
-                            _ => P::Const(f.expr.clone()),
-                        };
+                        let inner = Self::pattern_from_expr(&f.expr)
+                            .unwrap_or_else(|| P::Const(f.expr.clone()));
                         let (test, bound) = self.pattern_guard_parts(&inner, &field(&f.name))?;
                         tests.extend(test);
                         bindings.extend(bound);
@@ -345,7 +360,7 @@ impl<'a> AstLowering<'a> {
                 _ => Some((Some(eq(subject, value.clone())), Vec::new())),
             },
             P::Object { fields } => {
-                let mut tests = Vec::new();
+                let mut tests = vec![Self::not_null(subject)];
                 let mut bindings = Vec::new();
                 for (name, inner) in fields {
                     let (test, bound) = self.pattern_guard_parts(inner, &field(name))?;
@@ -375,7 +390,7 @@ impl<'a> AstLowering<'a> {
                     &field("length"),
                     expr(parser::ExprKind::Int(elements.len() as i64)),
                 );
-                let mut tests = vec![length];
+                let mut tests = vec![Self::not_null(subject), length];
                 let mut bindings = Vec::new();
                 for (index, inner) in elements.iter().enumerate() {
                     let at = expr(parser::ExprKind::Index {
@@ -439,9 +454,20 @@ impl<'a> AstLowering<'a> {
                     tests.extend(test);
                     inner_bindings.extend(bound);
                 }
-                // `case N1:` is written, and matched, as a bare name.
+                // `case N1:` is written, and matched, as a bare name, and
+                // `case E.A:` as the qualified constant.
                 let shape = if params.is_empty() && path.package.is_empty() {
                     P::Var(path.name.clone())
+                } else if params.is_empty() {
+                    let mut chain = expr(parser::ExprKind::Ident(path.package[0].clone()));
+                    for part in path.package[1..].iter().chain(std::iter::once(&path.name)) {
+                        chain = expr(parser::ExprKind::Field {
+                            expr: Box::new(chain),
+                            field: part.clone(),
+                            is_optional: false,
+                        });
+                    }
+                    P::Const(chain)
                 } else {
                     P::Constructor {
                         path: path.clone(),
@@ -470,6 +496,20 @@ impl<'a> AstLowering<'a> {
                 Some((Some(test), bindings))
             }
             P::ArrayRest { .. } | P::Type { .. } => None,
+        }
+    }
+
+    fn not_null(subject: &parser::Expr) -> parser::Expr {
+        parser::Expr {
+            kind: parser::ExprKind::Binary {
+                left: Box::new(subject.clone()),
+                op: parser::BinaryOp::NotEq,
+                right: Box::new(parser::Expr {
+                    kind: parser::ExprKind::Null,
+                    span: subject.span,
+                }),
+            },
+            span: subject.span,
         }
     }
 

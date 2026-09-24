@@ -1100,6 +1100,12 @@ impl<'a> AstLowering<'a> {
                                         }
                                     }
                                 }
+                                parser::ExprKind::Function(func) if !func.name.is_empty() => {
+                                    match self.lower_named_local_function(expr, func) {
+                                        Ok(declared) => statements.extend(declared),
+                                        Err(e) => self.collected_errors.push(e),
+                                    }
+                                }
                                 parser::ExprKind::Return(_) => {
                                     // Return expression - convert to TypedStatement::Return
                                     // so infer_return_type_from_body can extract the return type

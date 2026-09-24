@@ -249,6 +249,13 @@ impl<'a> AstLowering<'a> {
                                 });
                             }
                         }
+                    } else if package_parts
+                        .last()
+                        .is_some_and(|p| p.starts_with(|c: char| c.is_ascii_uppercase()))
+                    {
+                        // `pkg.Type.value`: the last "package" part is a type,
+                        // so a shorter split names it with this as its field.
+                        continue;
                     } else if package_parts.len() >= 2
                         || (!package_parts.is_empty()
                             && matches!(

@@ -295,6 +295,37 @@ impl<'a> HirToMirContext<'a> {
                 result_type.clone()
             };
 
+            // Type arguments the call site bound (`fold(it:Iterable<A>, ..)`)
+            // specialize the callee, as on the direct path.
+            let HirExprKind::Call { type_args, .. } = &expr.kind else {
+                unreachable!()
+            };
+            // Only a generic callee is given type arguments; an imported one
+            // may not show its type parameters until the modules merge.
+            if !type_args.is_empty() {
+                let ir_type_args: Vec<IrType> =
+                    type_args.iter().map(|t| self.convert_type(*t)).collect();
+                let result = self.builder.build_call_direct_with_type_args(
+                    func_id,
+                    arg_regs,
+                    actual_return_type,
+                    ir_type_args,
+                )?;
+                // A generic body returns an erased i64; a float result needs
+                // its bits moved into the float register.
+                let reg_type = self
+                    .builder
+                    .get_register_type(result)
+                    .unwrap_or(IrType::I64);
+                let result = if matches!(reg_type, IrType::F64 | IrType::F32) {
+                    self.builder.build_bitcast(result, reg_type)?
+                } else {
+                    result
+                };
+                self.set_class_hint_for_return(result, expr.ty);
+                return Some(result);
+            }
+
             let result = self
                 .builder
                 .build_call_direct(func_id, arg_regs, actual_return_type);

@@ -1413,10 +1413,23 @@ impl<'a> HirToMirContext<'a> {
                     .first()
                     .map(|s| s.definition_location)
                     .unwrap_or(SourceLocation::unknown());
+                let receiver: String = self
+                    .type_table
+                    .get(receiver_ty)
+                    .map(|t| format!("{:?}", t.kind))
+                    .unwrap_or_default()
+                    .chars()
+                    .take(120)
+                    .collect();
+                let in_function = self
+                    .builder
+                    .current_function()
+                    .map(|f| format!(" (receiver `{}`, in `{}`)", receiver, f.name))
+                    .unwrap_or_default();
                 self.add_error(
                     &format!(
-                        "E0803: ambiguous field access: `{}` exists on multiple classes ({}) and the receiver's class could not be resolved. Annotate the receiver's type",
-                        target_name_str, owners
+                        "E0803: ambiguous field access: `{}` exists on multiple classes ({}) and the receiver's class could not be resolved{}. Annotate the receiver's type",
+                        target_name_str, owners, in_function
                     ),
                     loc,
                 );
@@ -1921,6 +1934,16 @@ impl<'a> HirToMirContext<'a> {
             }
             match type_table.get(current).map(|t| &t.kind) {
                 Some(TypeKind::TypeAlias { target_type, .. }) => current = *target_type,
+                // A typedef referenced before its declaration is registered as
+                // a class; the alias it declares is what it names.
+                Some(TypeKind::Class { symbol_id, .. })
+                    if {
+                        let resolved = type_table.resolve_type_alias(*symbol_id);
+                        resolved != type_table.dynamic_type() && resolved != current
+                    } =>
+                {
+                    current = type_table.resolve_type_alias(*symbol_id)
+                }
                 // `Null<T>` of a reference type is the same raw pointer as `T`, so
                 // its members resolve through `T`; a scalar's `Null` is a box.
                 Some(TypeKind::Optional { inner_type })

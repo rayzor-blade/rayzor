@@ -136,22 +136,22 @@ impl<'a> HirToMirContext<'a> {
         };
         let return_type = Box::new(self.convert_type(expr.ty));
 
-        // A function value carries no defaults: `fill_default_args` works from
-        // the callee's IrFunctionId, which a call through a pointer does not
-        // have. Emitting the call anyway hands the backend fewer arguments than
-        // the signature declares, which Cranelift reports as a failed assertion
-        // inside its ABI code rather than as anything the author can act on.
-        if arg_regs.len() < param_types.len() {
-            self.errors.push(LoweringError {
-                message: format!(
-                    "function value called with {} of {} arguments; a parameter's \
-                     default value is only applied when the function is called by name",
-                    arg_regs.len(),
-                    param_types.len()
-                ),
-                location: expr.source_location.clone(),
-            });
-            return None;
+        // Haxe accepts a short call only when the missing parameters are
+        // optional; they travel as null (a zero of their slot type), and a
+        // literal with a default applies it on receiving null.
+        for missing in param_types.iter().skip(arg_regs.len()) {
+            let value = match missing {
+                IrType::F64 => self.builder.build_const(IrValue::F64(0.0))?,
+                IrType::F32 => self.builder.build_const(IrValue::F32(0.0))?,
+                IrType::Bool => self.builder.build_const(IrValue::Bool(false))?,
+                IrType::I32 => self.builder.build_const(IrValue::I32(0))?,
+                IrType::I64 => self.builder.build_const(IrValue::I64(0))?,
+                other => {
+                    let null = self.builder.build_const(IrValue::Null)?;
+                    self.builder.build_bitcast(null, other.clone())?
+                }
+            };
+            arg_regs.push(value);
         }
 
         let func_signature = IrType::Function {
