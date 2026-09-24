@@ -428,8 +428,43 @@ impl<'a> Lexer<'a> {
                 self.pos += 1; // consume closing quote
                 return Ok(Token::new(TokenKind::StringLit, start, self.pos));
             }
+            // `'...${expr}...'`: the interpolated expression may hold strings
+            // of its own, quotes included, so it is skipped as code.
+            if quote == b'\'' && ch == b'$' && self.source.get(self.pos + 1) == Some(&b'{') {
+                self.pos += 2;
+                self.skip_interpolated_code(start)?;
+                continue;
+            }
             self.pos += 1;
         }
+    }
+
+    /// Skip past the `}` closing an interpolation, over nested braces and strings.
+    fn skip_interpolated_code(&mut self, start: usize) -> Result<(), LexError> {
+        let mut depth = 1usize;
+        while self.pos < self.source.len() {
+            match self.source[self.pos] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.pos += 1;
+                        return Ok(());
+                    }
+                }
+                q @ (b'"' | b'\'') => {
+                    self.pos += 1;
+                    self.lex_string(q, self.pos - 1)?;
+                    continue;
+                }
+                _ => {}
+            }
+            self.pos += 1;
+        }
+        Err(LexError {
+            message: "unterminated string literal".to_string(),
+            offset: start,
+        })
     }
 
     fn lex_number(&mut self, start: usize) -> Result<Token, LexError> {

@@ -1220,12 +1220,45 @@ impl<'a, 'b> RdParser<'a, 'b> {
         {
             let body = self.parse_expression()?;
             let end = body.span.end;
+            let span = Span::new(start, end);
+            // An optional or defaulted parameter needs a function literal's
+            // parameter handling; `(a = 1) -> e` is `function(a = 1) return e`.
+            if params
+                .iter()
+                .any(|p| p.optional || p.default_value.is_some())
+            {
+                let body = match body.kind {
+                    ExprKind::Block(_) => body,
+                    _ => Expr {
+                        span: body.span,
+                        kind: ExprKind::Return(Some(Box::new(body))),
+                    },
+                };
+                return Ok(Expr {
+                    kind: ExprKind::Function(Function {
+                        name: String::new(),
+                        type_params: Vec::new(),
+                        params,
+                        return_type: None,
+                        body: Some(Box::new(body)),
+                        span,
+                    }),
+                    span,
+                });
+            }
+            let params = params
+                .into_iter()
+                .map(|p| ArrowParam {
+                    name: p.name,
+                    type_hint: p.type_hint,
+                })
+                .collect();
             return Ok(Expr {
                 kind: ExprKind::Arrow {
                     params,
                     expr: Box::new(body),
                 },
-                span: Span::new(start, end),
+                span,
             });
         }
         // Restore and parse as regular paren expression
@@ -1288,13 +1321,15 @@ impl<'a, 'b> RdParser<'a, 'b> {
         })
     }
 
-    /// Try to parse arrow function parameters: `(a:Int, b:String)`
-    fn try_parse_arrow_params(&mut self) -> Result<Vec<ArrowParam>, ParseError> {
+    /// Try to parse arrow function parameters: `(a:Int, ?b:String, c = 1)`
+    fn try_parse_arrow_params(&mut self) -> Result<Vec<FunctionParam>, ParseError> {
         let mut params = Vec::new();
         loop {
             if self.stream.at(TokenKind::RParen) {
                 break;
             }
+            let param_start = self.stream.current_offset();
+            let optional = self.stream.eat(TokenKind::Question).is_some();
             let name = self.stream.current_text().to_string();
             if !self.stream.at(TokenKind::Ident) {
                 return Err(ParseError::new(
@@ -1308,7 +1343,20 @@ impl<'a, 'b> RdParser<'a, 'b> {
             } else {
                 None
             };
-            params.push(ArrowParam { name, type_hint });
+            let default_value = if self.stream.eat(TokenKind::Assign).is_some() {
+                Some(Box::new(self.parse_ternary()?))
+            } else {
+                None
+            };
+            params.push(FunctionParam {
+                meta: Vec::new(),
+                name,
+                type_hint,
+                optional,
+                rest: false,
+                default_value,
+                span: self.stream.span_from(param_start),
+            });
             if !self.stream.at(TokenKind::RParen) && self.stream.eat(TokenKind::Comma).is_none() {
                 return Err(ParseError::new("expected , or )", self.stream.peek().span));
             }
@@ -1380,25 +1428,16 @@ impl<'a, 'b> RdParser<'a, 'b> {
             if bytes[i] == b'$' && i + 1 < bytes.len() {
                 // Flush literal
                 if !current.is_empty() {
-                    parts.push(StringPart::Literal(std::mem::take(&mut current)));
+                    parts.push(StringPart::Literal(unescape_string(&std::mem::take(
+                        &mut current,
+                    ))));
                 }
 
                 if bytes[i + 1] == b'{' {
                     // ${expr} — find matching }
                     i += 2;
                     let expr_start = i;
-                    let mut depth = 1;
-                    while i < bytes.len() && depth > 0 {
-                        if bytes[i] == b'{' {
-                            depth += 1;
-                        }
-                        if bytes[i] == b'}' {
-                            depth -= 1;
-                        }
-                        if depth > 0 {
-                            i += 1;
-                        }
-                    }
+                    i = interpolation_end(bytes, i);
                     let expr_str = &inner[expr_start..i];
                     if i < bytes.len() {
                         i += 1;
@@ -1471,7 +1510,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         }
 
         if !current.is_empty() {
-            parts.push(StringPart::Literal(current));
+            parts.push(StringPart::Literal(unescape_string(&current)));
         }
 
         parts
@@ -2047,4 +2086,45 @@ fn object_literal_has_binder(expr: &Expr) -> bool {
         }),
         _ => false,
     }
+}
+
+/// The index of the `}` closing an interpolation whose code starts at
+/// `start`, over nested braces and strings (single-quoted ones with
+/// interpolations of their own). `bytes.len()` when unclosed.
+fn interpolation_end(bytes: &[u8], start: usize) -> usize {
+    let mut i = start;
+    let mut depth = 1usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            q @ (b'"' | b'\'') => {
+                i = string_end(bytes, i + 1, q);
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// The index just past the quote closing a string whose body starts at `i`.
+fn string_end(bytes: &[u8], mut i: usize, quote: u8) -> usize {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            c if c == quote => return i + 1,
+            b'$' if quote == b'\'' && bytes.get(i + 1) == Some(&b'{') => {
+                i = interpolation_end(bytes, i + 2) + 1;
+            }
+            _ => i += 1,
+        }
+    }
+    bytes.len()
 }
