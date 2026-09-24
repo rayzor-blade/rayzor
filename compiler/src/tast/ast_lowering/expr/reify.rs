@@ -289,6 +289,7 @@ impl Reifier {
             BinaryOp::Range => "OpInterval",
             BinaryOp::Arrow => "OpArrow",
             BinaryOp::NullCoal => "OpNullCoal",
+            BinaryOp::In => "OpIn",
             BinaryOp::Is => return None,
         };
         Some(self.ctor("Binop", name, vec![]))

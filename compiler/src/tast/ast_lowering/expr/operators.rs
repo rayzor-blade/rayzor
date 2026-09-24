@@ -48,6 +48,10 @@ impl<'a> AstLowering<'a> {
                 Ok(BinaryOperator::Eq)
             }
             BinaryOp::NullCoal => Ok(BinaryOperator::NullCoal),
+            BinaryOp::In => Err(LoweringError::IncompleteImplementation {
+                feature: "the `in` operator (defined by an abstract's @:op(a in b))".to_string(),
+                location: SourceLocation::unknown(),
+            }),
         }
     }
 

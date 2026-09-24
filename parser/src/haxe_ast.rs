@@ -1004,6 +1004,7 @@ pub enum BinaryOp {
     Arrow,    // `=>`
     Is,       // `is` type check operator
     NullCoal, // `??`
+    In,       // `in`, defined by an abstract's `@:op(a in b)`
 }
 
 /// Assignment operators

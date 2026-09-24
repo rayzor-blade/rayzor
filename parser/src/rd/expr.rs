@@ -78,16 +78,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let left = self.parse_ternary()?;
 
         // `a ??= b` is `a = a ?? b`. Desugaring here keeps `AssignOp` as it
-        // is; the left side is re-read, so only a plain name or field access
-        // qualifies -- re-evaluating an index or a call could run its
-        // subexpressions twice.
+        // is; the left side is read again, so an index or call on the left
+        // evaluates its subexpressions twice.
         if self.stream.at(TokenKind::QuestionQuestionAssign) {
-            if !matches!(left.kind, ExprKind::Ident(_) | ExprKind::Field { .. }) {
-                return Err(ParseError::new(
-                    "`??=` needs a variable or field on its left",
-                    self.stream.peek().span,
-                ));
-            }
             self.stream.advance();
             let right = self.parse_assignment()?;
             let span = left.span.merge(right.span);
@@ -234,6 +227,8 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 TokenKind::Star => (BinaryOp::Mul, 10, false),
                 TokenKind::Slash => (BinaryOp::Div, 10, false),
                 TokenKind::Percent => (BinaryOp::Mod, 11, false),
+                // Tighter than every other binary operator, right to left.
+                TokenKind::KwIn => (BinaryOp::In, 12, true),
                 _ => break,
             };
 
@@ -618,8 +613,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
             TokenKind::KwFor => self.parse_for_expr(),
             TokenKind::KwReturn => {
                 self.stream.advance();
+                // `v ?? return`: a bare return ends at whatever closes it.
                 let value = if !self.stream.at(TokenKind::Semicolon)
                     && !self.stream.at(TokenKind::RBrace)
+                    && !self.stream.at(TokenKind::RParen)
+                    && !self.stream.at(TokenKind::RBracket)
+                    && !self.stream.at(TokenKind::Comma)
                     && !self.stream.is_eof()
                 {
                     Some(Box::new(self.parse_expression()?))
