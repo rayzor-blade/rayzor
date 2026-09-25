@@ -248,14 +248,11 @@ fn apply_build_macro(
         // in a build macro fails with `undefined variable: 'Context'`
         // because @:build is dispatched before the caller's import_map
         // could ever matter.
+        // The body resolves names through its own module's imports.
         let mut interp = if let Some(cr) = class_registry {
-            MacroInterpreter::with_class_registry(
-                registry.clone(),
-                std::collections::BTreeMap::new(),
-                cr,
-            )
+            MacroInterpreter::with_class_registry(registry.clone(), (*def.imports).clone(), cr)
         } else {
-            MacroInterpreter::new(registry.clone())
+            MacroInterpreter::with_imports(registry.clone(), (*def.imports).clone())
         };
         // Seed the macro_class_stack with the macro's defining class so
         // the interpreter's bare-identifier fallback (see interpreter.rs
@@ -275,9 +272,24 @@ fn apply_build_macro(
             Err(e) if e.is_control_flow() => MacroValue::Null,
             Err(e) => return Err(e),
         }
+    } else if let (Some(cr), Some(call)) = (class_registry, meta.params.first()) {
+        // An ordinary static function may build a class too: evaluate the
+        // `@:build(...)` call itself against the class registry.
+        let mut interp =
+            MacroInterpreter::with_class_registry(registry.clone(), Default::default(), cr);
+        interp.macro_context = Some(context);
+        match interp.eval_expr(call) {
+            Ok(val) => val,
+            Err(MacroError::Return { value: Some(v) }) => *v,
+            Err(MacroError::UndefinedVariable { .. }) => {
+                return Err(MacroError::UndefinedMacro {
+                    name: macro_name,
+                    location,
+                });
+            }
+            Err(e) => return Err(e),
+        }
     } else {
-        // Macro not found — this could be from another file
-        // For now, return the original fields unchanged
         return Err(MacroError::UndefinedMacro {
             name: macro_name,
             location,

@@ -1416,10 +1416,9 @@ pub fn expand_macros_with_dependencies(
     // registry before we expand the main file. Errors from scanning
     // dependencies are ignored — they'll surface when the dep file is
     // compiled on its own.
+    // The file's own macro-context view is scanned too: a macro declared
+    // without a body outside `#if macro` has its body only there.
     for dep in dependency_files {
-        if dep.filename == file.filename {
-            continue; // skip the file we're about to expand
-        }
         let _ = expander.registry.scan_and_register(dep, &dep.filename);
     }
 
@@ -1436,10 +1435,9 @@ pub fn expand_macros_with_dependencies_keep(
     dependency_files: &[HaxeFile],
 ) -> (ExpansionResult, MacroExpander) {
     let mut expander = MacroExpander::with_class_registry(class_registry);
+    // The file's own macro-context view is scanned too: a macro declared
+    // without a body outside `#if macro` has its body only there.
     for dep in dependency_files {
-        if dep.filename == file.filename {
-            continue;
-        }
         let _ = expander.registry.scan_and_register(dep, &dep.filename);
     }
     let result = expander.expand_file(file);

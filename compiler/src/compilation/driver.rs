@@ -121,7 +121,22 @@ impl CompilationUnit {
                     .unwrap_or_else(|| f.clone())
             };
             let current_view = self.macro_context_view(ast_file, None);
+            // A module named only in `@:build(pkg.Mod.f())` is never imported,
+            // so its macros would be unknown when the build runs.
+            let build_modules: Vec<HaxeFile> = build_macro_module_paths(ast_file)
+                .into_iter()
+                .filter_map(|path| {
+                    let file = self
+                        .namespace_resolver
+                        .resolve_qualified_path_to_file_force(&path)?;
+                    let name = file.to_string_lossy().to_string();
+                    let source = std::fs::read_to_string(&file).ok()?;
+                    self.parse_file(&name, &source).ok()
+                })
+                .map(|f| view(&f))
+                .collect();
             let mut class_registry = crate::macro_system::ClassRegistry::new();
+            class_registry.register_files(&build_modules);
             class_registry.register_files(&self.stdlib_files);
             class_registry
                 .register_files(&self.import_hx_files.iter().map(view).collect::<Vec<_>>());
@@ -138,7 +153,7 @@ impl CompilationUnit {
             // `import tink.Json` + `tink.Json.parse(...)`) are discovered.
             // Without this, only the current file's macros are in the registry
             // and cross-file calls silently fall through.
-            let mut dep_files: Vec<HaxeFile> = Vec::new();
+            let mut dep_files: Vec<HaxeFile> = build_modules;
             dep_files.extend(self.user_files.iter().map(view));
             dep_files.extend(self.loaded_import_haxe_files.iter().map(view));
             if let Some(v) = current_view {
@@ -1782,4 +1797,48 @@ impl CompilationUnit {
 
         Ok(all_typed_files)
     }
+}
+
+/// The modules `@:build` / `@:autoBuild` calls in `file` name: for
+/// `pkg.Mod.f()`, `pkg.Mod` and, for a sub-type, `pkg.Mod.Sub`'s module.
+fn build_macro_module_paths(file: &HaxeFile) -> Vec<String> {
+    fn dotted(e: &parser::Expr) -> Option<Vec<String>> {
+        match &e.kind {
+            parser::ExprKind::Ident(name) => Some(vec![name.clone()]),
+            parser::ExprKind::Field { expr, field, .. } => {
+                let mut path = dotted(expr)?;
+                path.push(field.clone());
+                Some(path)
+            }
+            _ => None,
+        }
+    }
+    let metas = file.declarations.iter().flat_map(|decl| match decl {
+        parser::TypeDeclaration::Class(c) => c.meta.iter().collect::<Vec<_>>(),
+        parser::TypeDeclaration::Interface(i) => i.meta.iter().collect(),
+        parser::TypeDeclaration::Abstract(a) => a.meta.iter().collect(),
+        parser::TypeDeclaration::Enum(e) => e.meta.iter().collect(),
+        parser::TypeDeclaration::Typedef(t) => t.meta.iter().collect(),
+        _ => Vec::new(),
+    });
+    let mut paths = Vec::new();
+    for meta in metas {
+        if !matches!(meta.name.trim_start_matches(':'), "build" | "autoBuild") {
+            continue;
+        }
+        let Some(parser::ExprKind::Call { expr, .. }) = meta.params.first().map(|p| &p.kind) else {
+            continue;
+        };
+        let Some(mut path) = dotted(expr) else {
+            continue;
+        };
+        path.pop();
+        while path.len() > 1 {
+            paths.push(path.join("."));
+            path.pop();
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }

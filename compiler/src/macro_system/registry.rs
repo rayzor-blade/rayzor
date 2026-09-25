@@ -255,15 +255,12 @@ impl MacroRegistry {
                 .map(|p| MacroParam::from_function_param(p))
                 .collect();
 
-            let body = match &func.body {
-                Some(body) => Arc::new(body.as_ref().clone()),
-                None => {
-                    return Err(MacroError::InvalidDefinition {
-                        message: format!("macro function '{}' must have a body", qualified_name),
-                        location: SourceLocation::new(0, 0, 0, field.span.start as u32),
-                    });
-                }
+            // A bodyless declaration (the non-macro side of `#if macro`)
+            // names a macro whose body the macro-context view registers.
+            let Some(body) = func.body.as_ref() else {
+                return Ok(());
             };
+            let body = Arc::new(body.as_ref().clone());
 
             let value_params = func
                 .params

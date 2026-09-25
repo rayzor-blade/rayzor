@@ -844,6 +844,12 @@ impl MacroInterpreter {
             }
 
             // --- Macro expression ---
+            ExprKind::Macro(inner) if matches!(inner.kind, ExprKind::TypeDecl(_)) => {
+                let ExprKind::TypeDecl(decl) = &inner.kind else {
+                    unreachable!()
+                };
+                self.type_definition_value(decl)
+            }
             ExprKind::Macro(inner) => {
                 // macro expr — reify the expression, resolving dollar-idents from the environment
                 // e.g., `macro trace($e{msg})` resolves $e{msg} using the current env
@@ -1218,6 +1224,83 @@ impl MacroInterpreter {
     }
 
     /// Call a MacroValue::Function
+    /// `macro class ...` at macro time: a TypeDefinition whose fields have
+    /// the object shape build macros return, their expressions reified.
+    fn type_definition_value(
+        &mut self,
+        decl: &parser::TypeDeclaration,
+    ) -> Result<MacroValue, MacroError> {
+        let (name, fields) = match decl {
+            parser::TypeDeclaration::Class(c) => (c.name.clone(), c.fields.clone()),
+            parser::TypeDeclaration::Interface(i) => (i.name.clone(), i.fields.clone()),
+            parser::TypeDeclaration::Typedef(t) => (t.name.clone(), Vec::new()),
+            _ => (String::new(), Vec::new()),
+        };
+        let string = |v: &str| MacroValue::String(Arc::from(v));
+        let mut values = Vec::with_capacity(fields.len());
+        for field in &fields {
+            let mut access = Vec::new();
+            match field.access {
+                Some(parser::Access::Public) => access.push(string("Public")),
+                Some(parser::Access::Private) => access.push(string("Private")),
+                None => {}
+            }
+            for m in &field.modifiers {
+                access.push(string(match m {
+                    parser::Modifier::Static => "Static",
+                    parser::Modifier::Inline => "Inline",
+                    parser::Modifier::Macro => "Macro",
+                    parser::Modifier::Dynamic => "Dynamic",
+                    parser::Modifier::Override => "Override",
+                    parser::Modifier::Final => "Final",
+                    parser::Modifier::Extern => "Extern",
+                }));
+            }
+            let (field_name, kind_tag, expr) = match &field.kind {
+                parser::ClassFieldKind::Var { name, expr, .. }
+                | parser::ClassFieldKind::Final { name, expr, .. } => {
+                    (name.clone(), "FVar", expr.clone())
+                }
+                parser::ClassFieldKind::Property { name, .. } => (name.clone(), "FProp", None),
+                parser::ClassFieldKind::Function(func) => {
+                    (func.name.clone(), "FFun", func.body.as_deref().cloned())
+                }
+            };
+            let expr = match expr {
+                Some(e) => {
+                    let prepared = self.pre_eval_dollar_args(e)?;
+                    ReificationEngine::reify_expr(&prepared, &self.env)?
+                }
+                None => MacroValue::Null,
+            };
+            let mut kind = BTreeMap::new();
+            kind.insert("kind".to_string(), string(kind_tag));
+            kind.insert("expr".to_string(), expr);
+            let mut value = BTreeMap::new();
+            value.insert("name".to_string(), string(&field_name));
+            value.insert("access".to_string(), MacroValue::Array(Arc::new(access)));
+            value.insert("kind".to_string(), MacroValue::Object(Arc::new(kind)));
+            value.insert("doc".to_string(), MacroValue::Null);
+            value.insert("meta".to_string(), MacroValue::Array(Arc::new(Vec::new())));
+            value.insert(
+                "pos".to_string(),
+                MacroValue::Position(span_to_location(field.span)),
+            );
+            values.push(MacroValue::Object(Arc::new(value)));
+        }
+        let mut td = BTreeMap::new();
+        td.insert("pack".to_string(), MacroValue::Array(Arc::new(Vec::new())));
+        td.insert("name".to_string(), string(&name));
+        td.insert("fields".to_string(), MacroValue::Array(Arc::new(values)));
+        td.insert(
+            "params".to_string(),
+            MacroValue::Array(Arc::new(Vec::new())),
+        );
+        td.insert("meta".to_string(), MacroValue::Array(Arc::new(Vec::new())));
+        td.insert("pos".to_string(), MacroValue::Null);
+        Ok(MacroValue::Object(Arc::new(td)))
+    }
+
     /// ExprTools.map / iter / toString over an expression value.
     fn expr_tools(
         &mut self,
@@ -1819,6 +1902,19 @@ impl MacroInterpreter {
                 }
                 _ => Ok(None),
             },
+            // `formatString(s, pos)`: `s` read as a single-quoted string,
+            // its `$` interpolations and all.
+            "haxe.macro.MacroStringTools" | "MacroStringTools" if method == "formatString" => {
+                let text = match args.first() {
+                    Some(MacroValue::String(t)) => t.to_string(),
+                    Some(other) => ast_bridge::unwrap_expr_value(other).to_display_string(),
+                    None => String::new(),
+                };
+                let code = format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"));
+                super::context_api::MacroContext::new()
+                    .parse(&code, location)
+                    .map(Some)
+            }
             "haxe.macro.ExprTools" | "ExprTools"
                 if matches!(method, "map" | "iter" | "toString") =>
             {
@@ -2118,6 +2214,8 @@ impl MacroInterpreter {
     ) -> Result<MacroValue, MacroError> {
         match method {
             "length" => Ok(MacroValue::Int(arr.len() as i64)),
+            // `haxe.Rest<T>.toArray()`: a rest parameter is held as an array.
+            "toArray" | "copy" => Ok(MacroValue::Array(Arc::new(arr.to_vec()))),
             "push" => {
                 // Arrays in our system are immutable values — push returns a new array
                 let mut new_arr = arr.to_vec();
