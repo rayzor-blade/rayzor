@@ -1560,6 +1560,17 @@ impl<'a> TastToHirContext<'a> {
                     }
                 }
 
+                if let TypedExpressionKind::FieldAccess {
+                    object,
+                    field_symbol,
+                    is_optional: false,
+                } = &target.kind
+                    && let Some(call) =
+                        self.resolve_operator_call(object, *field_symbol, Some(value), target)
+                {
+                    return HirStatement::Expr(call);
+                }
+
                 // Default: normal assignment
                 HirStatement::Assign {
                     lhs: self.lower_lvalue(target),
@@ -1866,6 +1877,11 @@ impl<'a> TastToHirContext<'a> {
                         ))
                     }
                 } else {
+                    if let Some(call) =
+                        self.resolve_operator_call(object, *field_symbol, None, expr)
+                    {
+                        return call;
+                    }
                     HirExprKind::Field {
                         object: Box::new(self.lower_expression(object)),
                         field: *field_symbol,
@@ -2325,6 +2341,17 @@ impl<'a> TastToHirContext<'a> {
                 operator,
                 right,
             } => {
+                if *operator == BinaryOperator::Assign
+                    && let TypedExpressionKind::FieldAccess {
+                        object,
+                        field_symbol,
+                        is_optional: false,
+                    } = &left.kind
+                    && let Some(call) =
+                        self.resolve_operator_call(object, *field_symbol, Some(right), expr)
+                {
+                    return call;
+                }
                 // ARRAY ACCESS OVERLOADING: Check if this is an assignment to array access with @:arrayAccess set method
                 if *operator == BinaryOperator::Assign {
                     if let TypedExpressionKind::ArrayAccess { array, index } = &left.kind {
@@ -2370,10 +2397,12 @@ impl<'a> TastToHirContext<'a> {
                 // @:op rewrite for SIMD vector arithmetic so it falls through to the
                 // plain binary lowering, which hir_to_mir turns into a VectorBinOp once
                 // it sees the vector-typed operand registers.
+                // A field read through `@:op(a.b)` has the resolver's type.
+                let left_type = self.resolved_type(left);
                 let op_method = self
-                    .find_binary_operator_method(left.expr_type, operator)
+                    .find_binary_operator_method(left_type, operator)
                     .filter(|(method, _, _)| {
-                        self.operator_method_accepts(*method, left.expr_type, right.expr_type)
+                        self.operator_method_accepts(*method, left_type, right.expr_type)
                     });
                 let owner_name_id = op_method
                     .as_ref()
@@ -5005,7 +5034,7 @@ impl<'a> TastToHirContext<'a> {
             let formal_takes_string = matches!(
                 table.get(*formal).map(|t| &t.kind),
                 Some(TypeKind::String | TypeKind::Dynamic | TypeKind::TypeParameter { .. })
-            );
+            ) || matches!(primitive_of(*formal), Some(TypeKind::String));
             if !formal_takes_string {
                 return false;
             }
@@ -5264,6 +5293,105 @@ impl<'a> TastToHirContext<'a> {
     /// Find a method with @:arrayAccess metadata for array access operations
     /// Returns (method_symbol, abstract_symbol) if found
     /// method_name should be "get" for read access or "set" for write access
+    /// `x.name` (or `x.name = value`) on an abstract with no member of that
+    /// name, through its `@:op(a.b)` method: `x.resolve("name"[, value])`.
+    fn resolve_operator_call(
+        &mut self,
+        object: &TypedExpression,
+        field_symbol: SymbolId,
+        value: Option<&TypedExpression>,
+        expr: &TypedExpression,
+    ) -> Option<HirExpr> {
+        let arity = if value.is_some() { 2 } else { 1 };
+        let (method_symbol, result_type) =
+            self.resolve_operator_method(self.resolved_type(object), field_symbol, arity)?;
+        let name = self.symbol_table.get_symbol(field_symbol)?.name;
+        let name_literal = TypedExpression {
+            kind: TypedExpressionKind::Literal {
+                value: crate::tast::node::LiteralValue::String(
+                    self.string_interner.get(name)?.to_string(),
+                ),
+            },
+            expr_type: self.type_table.borrow().string_type(),
+            ..expr.clone()
+        };
+        let mut args = vec![name_literal];
+        args.extend(value.cloned());
+        let location = expr.source_location;
+        Some(
+            self.try_inline_abstract_method(object, method_symbol, &args, result_type, location)
+                .unwrap_or_else(|| {
+                    self.call_abstract_method(object, method_symbol, &args, result_type, location)
+                }),
+        )
+    }
+
+    /// An expression's type, with a field read through `@:op(a.b)` taking
+    /// the resolver's result type.
+    fn resolved_type(&self, expr: &TypedExpression) -> TypeId {
+        match &expr.kind {
+            TypedExpressionKind::FieldAccess {
+                object,
+                field_symbol,
+                is_optional: false,
+            } => self
+                .resolve_operator_method(self.resolved_type(object), *field_symbol, 1)
+                .map_or(expr.expr_type, |(_, ty)| ty),
+            _ => expr.expr_type,
+        }
+    }
+
+    /// The `@:op(a.b)` method taking `arity` arguments that `field_symbol`
+    /// resolves through on a receiver of `object_type`, and its result type.
+    fn resolve_operator_method(
+        &self,
+        object_type: TypeId,
+        field_symbol: SymbolId,
+        arity: usize,
+    ) -> Option<(SymbolId, TypeId)> {
+        let abstract_symbol = {
+            let table = self.type_table.borrow();
+            let mut ty = object_type;
+            for _ in 0..4 {
+                match table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            match table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Abstract { symbol_id, .. }) => *symbol_id,
+                _ => return None,
+            }
+        };
+        let name = self.symbol_table.get_symbol(field_symbol)?.name;
+        let abstract_def = self
+            .current_file?
+            .abstracts
+            .iter()
+            .find(|a| a.symbol_id == abstract_symbol)?;
+        let is_member = abstract_def
+            .fields
+            .iter()
+            .map(|f| (f.symbol_id, f.name))
+            .chain(abstract_def.methods.iter().map(|m| (m.symbol_id, m.name)))
+            .any(|(sym, n)| sym == field_symbol || n == name);
+        if is_member {
+            return None;
+        }
+        abstract_def
+            .methods
+            .iter()
+            .find(|m| {
+                !m.is_static
+                    && m.parameters.len() == arity
+                    && m.metadata
+                        .operator_metadata
+                        .iter()
+                        .any(|(op, _)| op == "a.b")
+            })
+            .map(|m| (m.symbol_id, m.return_type))
+    }
+
     fn find_array_access_method(
         &self,
         operand_type: TypeId,
@@ -5313,6 +5441,16 @@ impl<'a> TastToHirContext<'a> {
                         }
                     }
                 }
+            }
+            // Any other name: a read takes one index, a write two.
+            let arity = if method_name == "set" { 2 } else { 1 };
+            if let Some(method) = abstract_def.methods.iter().find(|m| {
+                m.metadata.is_array_access
+                    && !m.body.is_empty()
+                    && !m.is_static
+                    && m.parameters.len() == arity
+            }) {
+                return Some((method.symbol_id, abstract_symbol));
             }
         }
 
@@ -6739,6 +6877,43 @@ impl<'a> TastToHirContext<'a> {
                     self.current_lifetime,
                     expr.source_location,
                 )
+            }
+
+            // `'$this.$name'`: the parts carry substitutions.
+            TypedExpressionKind::StringInterpolation { parts } => {
+                let string_type = self.get_string_type();
+                let location = expr.source_location;
+                let empty = self.intern_str("");
+                let mut result = HirExpr::new(
+                    HirExprKind::Literal(HirLiteral::String(empty)),
+                    string_type,
+                    self.current_lifetime,
+                    location,
+                );
+                for part in parts {
+                    let part_expr = match part {
+                        StringInterpolationPart::String(text) => HirExpr::new(
+                            HirExprKind::Literal(HirLiteral::String(self.intern_str(text))),
+                            string_type,
+                            self.current_lifetime,
+                            location,
+                        ),
+                        StringInterpolationPart::Expression(e) => {
+                            self.inline_expression_deep(e, this_replacement, param_map, e.expr_type)
+                        }
+                    };
+                    result = HirExpr::new(
+                        HirExprKind::Binary {
+                            op: HirBinaryOp::Add,
+                            lhs: Box::new(result),
+                            rhs: Box::new(part_expr),
+                        },
+                        string_type,
+                        self.current_lifetime,
+                        location,
+                    );
+                }
+                result
             }
 
             // For other expressions, lower them normally

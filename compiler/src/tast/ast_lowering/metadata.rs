@@ -329,6 +329,10 @@ impl<'a> AstLowering<'a> {
         let mut operator_metadata = Vec::new();
 
         for meta in metadata {
+            // `@:resolve` is the older spelling of `@:op(a.b)`.
+            if meta.name == "resolve" {
+                operator_metadata.push(("a.b".to_string(), Vec::new()));
+            }
             if meta.name == "op" {
                 // @:op(A + B) - operator expression is the first parameter
                 if !meta.params.is_empty() {

@@ -859,17 +859,23 @@ impl<'a> AstLowering<'a> {
                     | parser::AssignOp::MulAssign
                     | parser::AssignOp::DivAssign
                     | parser::AssignOp::ModAssign
-                        if matches!(
-                            self.context
-                                .type_table
-                                .borrow()
-                                .get(target_expr.expr_type)
-                                .map(|t| &t.kind),
-                            Some(TypeKind::Abstract { .. })
-                        ) =>
+                        if {
+                            let tt = self.context.type_table.borrow();
+                            let is_abstract = |ty: TypeId| {
+                                matches!(
+                                    tt.get(ty).map(|t| &t.kind),
+                                    Some(TypeKind::Abstract { .. })
+                                )
+                            };
+                            is_abstract(target_expr.expr_type)
+                                || matches!(&target_expr.kind,
+                                    TypedExpressionKind::FieldAccess { object, .. }
+                                        if is_abstract(object.expr_type))
+                        } =>
                     {
                         // Preserve the operator until HIR overload resolution. An
-                        // op= overload may mutate its receiver and return Void.
+                        // op= overload may mutate its receiver and return Void; a
+                        // field of an abstract may resolve through `@:op(a.b)`.
                         let operator = match op {
                             parser::AssignOp::AddAssign => BinaryOperator::AddAssign,
                             parser::AssignOp::SubAssign => BinaryOperator::SubAssign,
@@ -2734,6 +2740,13 @@ impl<'a> AstLowering<'a> {
             }
             parser::ExprKind::Paren(inner) => {
                 format!("({})", self.expr_to_string(inner))
+            }
+            parser::ExprKind::Field {
+                expr: object,
+                field,
+                ..
+            } => {
+                format!("{}.{}", self.expr_to_string(object), field)
             }
             parser::ExprKind::Tuple(elements) => {
                 let parts: Vec<_> = elements.iter().map(|e| self.expr_to_string(e)).collect();
