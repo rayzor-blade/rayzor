@@ -2266,12 +2266,14 @@ impl<'a> AstLowering<'a> {
                         // with receiver as first argument
                         let mut new_args = vec![receiver_expr];
                         new_args.extend(arg_exprs);
+                        let type_arguments =
+                            self.structural_call_type_arguments(static_method_symbol, &new_args);
 
                         TypedExpressionKind::StaticMethodCall {
                             class_symbol,
                             method_symbol: static_method_symbol,
                             arguments: new_args,
-                            type_arguments: Vec::new(),
+                            type_arguments,
                         }
                     } else {
                         // No static extension found, use regular method call
@@ -3415,7 +3417,21 @@ impl<'a> AstLowering<'a> {
                 })
                 .collect()
         };
-        if mentioned.is_subset(&direct) {
+        // The monomorphizer reads a variable off a direct parameter's
+        // argument only when that argument is a primitive.
+        let primitive_directs = {
+            let tt = self.context.type_table.borrow();
+            params.iter().zip(arguments.iter()).all(|(p, a)| {
+                !matches!(
+                    tt.get(*p).map(|t| &t.kind),
+                    Some(TypeKind::TypeParameter { .. })
+                ) || matches!(
+                    tt.get(a.expr_type).map(|t| &t.kind),
+                    Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
+                )
+            })
+        };
+        if mentioned.is_subset(&direct) && primitive_directs {
             return Vec::new();
         }
         // A structure argument (`{iterator: ..}`) is iterated through the
