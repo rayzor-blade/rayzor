@@ -90,6 +90,12 @@ pub struct MacroExpander {
     call_cache: BTreeMap<(String, u64), Expr>,
     /// Call sites deferred to lowering (typer-dependent macro bodies).
     deferred: Vec<DeferredMacroCall>,
+    /// Classes with a deferred call: their later calls defer too, so calls
+    /// sharing the class's macro-time statics still run in source order.
+    deferred_classes: std::collections::BTreeSet<String>,
+    /// The ordinary methods of the class being walked: a bare call to one of
+    /// them is that method, even where some macro shares its name.
+    own_methods: std::collections::BTreeSet<String>,
     /// Import map for the current file: short name → qualified name
     import_map: BTreeMap<String, String>,
     /// Class registry for macro interpreter fallback dispatch
@@ -107,6 +113,8 @@ impl MacroExpander {
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
             deferred: Vec::new(),
+            deferred_classes: std::collections::BTreeSet::new(),
+            own_methods: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
             class_registry: Arc::new(ClassRegistry::new()),
         }
@@ -122,6 +130,8 @@ impl MacroExpander {
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
             deferred: Vec::new(),
+            deferred_classes: std::collections::BTreeSet::new(),
+            own_methods: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
             class_registry: Arc::new(ClassRegistry::new()),
         }
@@ -137,6 +147,8 @@ impl MacroExpander {
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
             deferred: Vec::new(),
+            deferred_classes: std::collections::BTreeSet::new(),
+            own_methods: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
             class_registry: Arc::new(class_registry),
         }
@@ -314,6 +326,7 @@ impl MacroExpander {
         match decl {
             TypeDeclaration::Class(mut class) => {
                 let mut changed = false;
+                self.own_methods = ordinary_methods(&class.fields);
                 let mut new_fields = Vec::with_capacity(class.fields.len());
                 for field in class.fields.drain(..) {
                     // Strip macro function definitions — they're compile-time only
@@ -348,6 +361,7 @@ impl MacroExpander {
             // functions are compile-time only as a class's are.
             TypeDeclaration::Abstract(mut abs) => {
                 let mut changed = false;
+                self.own_methods = ordinary_methods(&abs.fields);
                 let mut new_fields = Vec::with_capacity(abs.fields.len());
                 for field in abs.fields.drain(..) {
                     if field.modifiers.contains(&parser::Modifier::Macro) {
@@ -475,8 +489,25 @@ impl MacroExpander {
 
             // --- Function calls that might be macro calls ---
             ExprKind::Call { expr: callee, args } => {
-                if let Some(macro_name) = extract_macro_call_name(callee) {
+                if let Some(macro_name) = extract_macro_call_name(callee)
+                    .filter(|name| name.contains('.') || !self.own_methods.contains(name))
+                {
                     if self.registry.is_macro(&macro_name) {
+                        let class = self
+                            .registry
+                            .find_macro_by_name(&macro_name)
+                            .and_then(|def| def.qualified_name.rsplit_once('.'))
+                            .map(|(class, _)| class.to_string());
+                        if class
+                            .as_ref()
+                            .is_some_and(|c| self.deferred_classes.contains(c))
+                        {
+                            self.deferred.push(DeferredMacroCall {
+                                name: macro_name,
+                                span: expr.span,
+                            });
+                            return Ok((expr, false));
+                        }
                         match self.expand_macro_call(&macro_name, args, &expr) {
                             Ok(expanded) => {
                                 self.expansions_count += 1;
@@ -490,6 +521,7 @@ impl MacroExpander {
                                     name: macro_name,
                                     span: expr.span,
                                 });
+                                self.deferred_classes.extend(class);
                                 return Ok((expr, false));
                             }
                             Err(e) => return Err(e),
@@ -1207,6 +1239,18 @@ fn hash_exprs(exprs: &[Expr]) -> u64 {
         format!("{:?}", expr.kind).hash(&mut hasher);
     }
     hasher.finish()
+}
+
+/// The names of a type's methods that are not macros.
+fn ordinary_methods(fields: &[parser::ClassField]) -> std::collections::BTreeSet<String> {
+    fields
+        .iter()
+        .filter(|f| !f.modifiers.contains(&parser::Modifier::Macro))
+        .filter_map(|f| match &f.kind {
+            ClassFieldKind::Function(func) => Some(func.name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Extract the name of a potential macro call from a callee expression.

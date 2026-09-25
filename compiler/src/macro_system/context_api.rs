@@ -872,39 +872,35 @@ impl MacroContext {
             // anything with parameters, a function arrow or a structure gives
             // null, which the signature already allows.
             "toComplexType" => {
-                let Some(MacroValue::Type(id)) = args.first().cloned() else {
-                    return Err(MacroError::ContextError {
-                        method: "toComplexType".to_string(),
-                        message: "toComplexType expects a Type argument".to_string(),
-                        location,
-                    });
+                let id = match args.first() {
+                    Some(MacroValue::Type(id)) => *id,
+                    Some(MacroValue::Enum(_, _, payload))
+                        if matches!(payload.first(), Some(MacroValue::Type(_))) =>
+                    {
+                        let Some(MacroValue::Type(id)) = payload.first() else {
+                            unreachable!()
+                        };
+                        *id
+                    }
+                    _ => {
+                        return Err(MacroError::ContextError {
+                            method: "toComplexType".to_string(),
+                            message: "toComplexType expects a Type argument".to_string(),
+                            location,
+                        });
+                    }
                 };
                 let Some(typer) = self.typer.as_mut() else {
                     return Err(MacroError::NeedsTyper { location });
                 };
                 let spelling = typer.get().type_display(id);
-                if spelling.is_empty() || spelling.contains(['<', '{', '(', '>', '-']) {
+                // A monomorph has no syntax.
+                if spelling.is_empty() || spelling.contains("Unknown<") {
                     return Ok(MacroValue::Null);
                 }
-                let mut pack: Vec<&str> = spelling.split('.').collect();
-                let name = pack.pop().unwrap_or("").to_string();
-                let mut obj = BTreeMap::new();
-                obj.insert("kind".to_string(), MacroValue::String("TPath".into()));
-                obj.insert(
-                    "pack".to_string(),
-                    MacroValue::Array(Arc::new(
-                        pack.into_iter()
-                            .map(|p| MacroValue::String(p.into()))
-                            .collect(),
-                    )),
-                );
-                obj.insert("name".to_string(), MacroValue::String(name.into()));
-                obj.insert(
-                    "params".to_string(),
-                    MacroValue::Array(Arc::new(Vec::new())),
-                );
-                obj.insert("sub".to_string(), MacroValue::Null);
-                Ok(MacroValue::Object(Arc::new(obj)))
+                Ok(parse_type_spelling(&spelling)
+                    .map(|t| super::expr_adt::complex_type_of(&t))
+                    .unwrap_or(MacroValue::Null))
             }
             // `Context.storeTypedExpr(t)` — hand back the expression `typeExpr`
             // was given. Haxe stores a typed AST and returns a reference to it;
@@ -1213,6 +1209,19 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
     obj.insert("meta".to_string(), MacroValue::Array(Arc::new(meta)));
 
     MacroValue::Object(Arc::new(obj))
+}
+
+/// A type spelled as Haxe source, parsed back to its syntax.
+fn parse_type_spelling(spelling: &str) -> Option<parser::Type> {
+    let wrapper = format!("class __MacroType__ {{ static var __t__ : {}; }}", spelling);
+    let file = parser::parse_haxe_file("__macro_type__", &wrapper, false).ok()?;
+    let parser::TypeDeclaration::Class(class) = file.declarations.first()? else {
+        return None;
+    };
+    match &class.fields.first()?.kind {
+        parser::ClassFieldKind::Var { type_hint, .. } => type_hint.clone(),
+        _ => None,
+    }
 }
 
 /// Extract the body expression from a parsed wrapper file

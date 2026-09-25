@@ -671,6 +671,7 @@ fn render_type(
         TypeKind::Dynamic => "Dynamic".to_string(),
         TypeKind::Unknown => "Unknown<0>".to_string(),
         TypeKind::Error => "<error>".to_string(),
+        TypeKind::ConstArgument { value } => interner.get(value).unwrap_or("?").to_string(),
         TypeKind::Class {
             symbol_id,
             type_args,

@@ -582,9 +582,22 @@ impl<'a> AstLowering<'a> {
                 // Wildcard types are used in type parameters, return Unknown type
                 Ok(self.context.type_table.borrow().unknown_type())
             }
-            // A `@:const` argument names no type; the value it binds is not
-            // modelled yet, so the slot resolves as unknown.
-            Type::Const { .. } => Ok(self.context.type_table.borrow().unknown_type()),
+            // A `@:const` argument: the constant, kept by its spelling.
+            Type::Const { value, .. } => {
+                let spelling = match &value.kind {
+                    parser::ExprKind::Int(i) => i.to_string(),
+                    parser::ExprKind::Float(f) => f.to_string(),
+                    parser::ExprKind::String(text) => format!("\"{}\"", text),
+                    parser::ExprKind::Bool(b) => b.to_string(),
+                    _ => return Ok(self.context.type_table.borrow().unknown_type()),
+                };
+                let value = self.context.intern_string(&spelling);
+                Ok(self
+                    .context
+                    .type_table
+                    .borrow_mut()
+                    .create_type(crate::tast::core::TypeKind::ConstArgument { value }))
+            }
         }
     }
 

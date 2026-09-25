@@ -109,6 +109,12 @@ pub enum TypeKind {
         name: InternedString,
     },
 
+    /// A constant in a type-argument position (`VarChar<123>`), bound by a
+    /// `@:const` type parameter. `value` is its source spelling.
+    ConstArgument {
+        value: InternedString,
+    },
+
     // === Generic Types ===
     /// Type parameter: T, U, etc.
     TypeParameter {
@@ -683,7 +689,7 @@ impl TypeTable {
             | TypeKind::Error => {
                 // No additional data to hash
             }
-            TypeKind::Placeholder { name } => {
+            TypeKind::Placeholder { name } | TypeKind::ConstArgument { value: name } => {
                 name.hash(&mut hasher);
             }
             TypeKind::Class {

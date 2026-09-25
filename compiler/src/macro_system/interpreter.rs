@@ -1725,6 +1725,13 @@ impl MacroInterpreter {
                 _ => Ok(None),
             },
             "haxe.macro.TypeTools" | "TypeTools" => match method {
+                "toComplexType" => {
+                    let result = match self.macro_context.as_mut() {
+                        Some(ctx) => ctx.dispatch("toComplexType", args, location)?,
+                        None => return Err(MacroError::NeedsTyper { location }),
+                    };
+                    Ok(Some(result))
+                }
                 // `TypeTools.toString(t)` — the source-level spelling of a
                 // typed Type ("Null<Int>", "String"). Answerable only while
                 // the live typer is installed; its absence surfaces as the
