@@ -41,6 +41,12 @@ impl<'a> HirToMirContext<'a> {
             *fell_through = true;
             return None;
         };
+        // A local holding a function (`function append(v) ...`) is called
+        // through its value, whatever stdlib function shares its name.
+        if self.is_local_value(*symbol) {
+            *fell_through = true;
+            return None;
+        }
         if !*is_method || self.effective_static_call_args(args).len() != args.len() {
             if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
                 if let Some(method_name) = self.string_interner.get(sym_info.name) {

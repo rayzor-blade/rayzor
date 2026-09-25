@@ -69,6 +69,17 @@ mod super_call;
 mod virtual_dispatch;
 
 impl<'a> HirToMirContext<'a> {
+    /// A local variable or parameter bound in the function being lowered.
+    pub(crate) fn is_local_value(&self, symbol: SymbolId) -> bool {
+        self.symbol_map.contains_key(&symbol)
+            && self.symbol_table.get_symbol(symbol).is_some_and(|s| {
+                matches!(
+                    s.kind,
+                    crate::tast::SymbolKind::Variable | crate::tast::SymbolKind::Parameter
+                )
+            })
+    }
+
     pub(crate) fn lower_call(&mut self, expr: &HirExpr) -> Option<IrId> {
         let HirExprKind::Call {
             callee,
@@ -301,8 +312,8 @@ impl<'a> HirToMirContext<'a> {
 
             // Fall back to qualified-name lookup: symbol ids differ between modules, and
             // an intra-module static call site can carry a different symbol than the
-            // method definition.
-            if func_id_opt.is_none() {
+            // method definition. A local value is called through itself, never by name.
+            if func_id_opt.is_none() && !self.is_local_value(*symbol) {
                 if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
                     if let Some(qual_name) = sym_info.qualified_name {
                         if let Some(qual_name_str) = self.string_interner.get(qual_name) {
@@ -544,7 +555,8 @@ impl<'a> HirToMirContext<'a> {
             // Fallback for extern class static methods (e.g. NativeStackTrace.exceptionStack()).
             // StaticFieldAccess becomes Variable in HIR, bypassing the Field-callee stdlib
             // dispatch. Prefer symbol qualified_name, then class-less name fallback.
-            if func_id_opt.is_none() {
+            // A local holding a function is never a stdlib static of its name.
+            if func_id_opt.is_none() && !self.is_local_value(*symbol) {
                 if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
                     if let Some(method_name) = self.string_interner.get(sym_info.name) {
                         let static_args = self.effective_static_call_args(args);
@@ -1266,7 +1278,7 @@ impl<'a> HirToMirContext<'a> {
                     debug!("[FUNCTION_MAP] Result: {:?}", result);
                     return result;
                 }
-            } else {
+            } else if !self.is_local_value(*symbol) {
                 // Not in function_map: may be a stdlib static method (Math.sin, Sys.println),
                 // searched for across every stdlib class that has static methods.
                 if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {

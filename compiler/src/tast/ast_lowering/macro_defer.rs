@@ -176,7 +176,11 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         let resolved = self.lowering.lower_type(&annotation);
         self.lowering.collected_errors.truncate(before);
         self.lowering.context.errors.truncate(ctx_before);
-        resolved.map_err(|e| e.to_compilation_error().message)
+        let id = resolved.map_err(|e| e.to_compilation_error().message)?;
+        Ok(with_unknown_parameters(
+            self.lowering.context.type_table,
+            id,
+        ))
     }
 
     fn fresh_monomorph(&mut self) -> TypeId {
@@ -765,4 +769,49 @@ fn render_type(
         ),
         other => format!("{:?}", other),
     }
+}
+
+/// A generic type named without arguments has a fresh unknown for each
+/// of its own parameters, as `getType("haxe.macro.ExprOf")` gives in Haxe.
+fn with_unknown_parameters(
+    type_table: &std::cell::RefCell<crate::tast::TypeTable>,
+    id: TypeId,
+) -> TypeId {
+    use crate::tast::TypeKind;
+    let mut tt = type_table.borrow_mut();
+    let Some(kind) = tt.get(id).map(|t| t.kind.clone()) else {
+        return id;
+    };
+    let is_param = |tt: &crate::tast::TypeTable, a: &TypeId| {
+        matches!(
+            tt.get(*a).map(|t| &t.kind),
+            Some(TypeKind::TypeParameter { .. })
+        )
+    };
+    let unknown = tt.unknown_type();
+    let fresh = |args: &[TypeId]| args.iter().map(|_| unknown).collect::<Vec<_>>();
+    let kind = match kind {
+        TypeKind::Class {
+            symbol_id,
+            type_args,
+        } if !type_args.is_empty() && type_args.iter().all(|a| is_param(&tt, a)) => {
+            TypeKind::Class {
+                symbol_id,
+                type_args: fresh(&type_args),
+            }
+        }
+        TypeKind::TypeAlias {
+            symbol_id,
+            target_type,
+            type_args,
+        } if !type_args.is_empty() && type_args.iter().all(|a| is_param(&tt, a)) => {
+            TypeKind::TypeAlias {
+                symbol_id,
+                target_type,
+                type_args: fresh(&type_args),
+            }
+        }
+        _ => return id,
+    };
+    tt.create_type(kind)
 }
