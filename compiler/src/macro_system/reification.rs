@@ -280,6 +280,8 @@ impl ReificationEngine {
         span: Span,
     ) -> Result<Expr, MacroError> {
         let location = span_to_location(span);
+        // `${expr}` is `$e{expr}`.
+        let name = if name.is_empty() { "e" } else { name };
 
         match (name, arg) {
             // $v{expr}, $i{expr}, $e{expr}, $a{expr}, $p{expr}, $b{expr}
@@ -408,6 +410,7 @@ impl ReificationEngine {
     /// argument expression.
     pub fn splice_value(kind: &str, value: MacroValue, span: Span) -> Result<Expr, MacroError> {
         let location = span_to_location(span);
+        let kind = if kind.is_empty() { "e" } else { kind };
 
         match kind {
             // $v{value} — convert value to a constant expression

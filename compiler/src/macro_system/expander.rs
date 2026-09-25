@@ -98,6 +98,8 @@ pub struct MacroExpander {
     own_methods: std::collections::BTreeSet<String>,
     /// Import map for the current file: short name → qualified name
     import_map: BTreeMap<String, String>,
+    /// The current file's imports as written.
+    file_imports: Vec<parser::Import>,
     /// Class registry for macro interpreter fallback dispatch
     class_registry: Arc<ClassRegistry>,
 }
@@ -116,6 +118,7 @@ impl MacroExpander {
             deferred_classes: std::collections::BTreeSet::new(),
             own_methods: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
+            file_imports: Vec::new(),
             class_registry: Arc::new(ClassRegistry::new()),
         }
     }
@@ -133,6 +136,7 @@ impl MacroExpander {
             deferred_classes: std::collections::BTreeSet::new(),
             own_methods: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
+            file_imports: Vec::new(),
             class_registry: Arc::new(ClassRegistry::new()),
         }
     }
@@ -150,6 +154,7 @@ impl MacroExpander {
             deferred_classes: std::collections::BTreeSet::new(),
             own_methods: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
+            file_imports: Vec::new(),
             class_registry: Arc::new(class_registry),
         }
     }
@@ -190,6 +195,7 @@ impl MacroExpander {
 
         // Build import map from file imports for macro interpreter resolution
         self.import_map = super::interpreter::build_import_map(&file.imports);
+        self.file_imports = file.imports.clone();
 
         // Phase 1: Scan and register macro definitions from this file
         if let Err(e) = self.registry.scan_and_register(&file, &file.filename) {
@@ -1074,6 +1080,7 @@ impl MacroExpander {
             self.import_map.clone(),
             self.class_registry.clone(),
         );
+        interp.local_imports = self.file_imports.clone();
 
         // During a deferred re-expansion the live typer is installed on THIS
         // context; the interpreter builds its own, so hand the typer across

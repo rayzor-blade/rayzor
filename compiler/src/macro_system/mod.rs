@@ -66,6 +66,7 @@ pub mod errors;
 pub mod expander;
 pub mod expr_adt;
 pub mod interpreter;
+pub mod printer;
 pub mod registry;
 pub mod reification;
 pub mod value;

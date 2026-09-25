@@ -264,11 +264,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
         // could not mean anything.
         //
         // `@:a @:b e` nests outermost-first, so the innermost metadata sits
-        // closest to the expression it annotates.
+        // closest to the expression it annotates. As in Haxe, `e` is a whole
+        // expression: `@:m x = 1` annotates the assignment.
         if matches!(self.stream.peek().kind, TokenKind::At | TokenKind::AtColon) {
             let metas = self.parse_metadata_list_expr();
             if !metas.is_empty() {
-                let inner = self.parse_unary()?;
+                let inner = self.parse_expression()?;
                 let mut expr = inner;
                 for meta in metas.into_iter().rev() {
                     expr = Expr {

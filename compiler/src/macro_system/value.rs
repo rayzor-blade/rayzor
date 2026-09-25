@@ -260,12 +260,13 @@ impl MacroValue {
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
-            MacroValue::Enum(enum_name, variant, args) => {
+            // `Ctor` or `Ctor(a,b)`, as Std.string spells an enum value.
+            MacroValue::Enum(_, variant, args) => {
                 if args.is_empty() {
-                    format!("{}.{}", enum_name, variant)
+                    variant.to_string()
                 } else {
                     let parts: Vec<String> = args.iter().map(|v| v.to_display_string()).collect();
-                    format!("{}.{}({})", enum_name, variant, parts.join(", "))
+                    format!("{}({})", variant, parts.join(","))
                 }
             }
             MacroValue::Expr(_) => {

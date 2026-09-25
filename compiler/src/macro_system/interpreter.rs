@@ -65,6 +65,8 @@ pub struct MacroInterpreter {
     /// Import map: short class name → fully qualified name
     /// e.g., "Context" → "haxe.macro.Context"
     import_map: BTreeMap<String, String>,
+    /// The calling module's own imports, as written: `Context.getLocalImports`.
+    pub local_imports: Vec<parser::Import>,
     /// Class registry for fallback dispatch to any imported/user class
     class_registry: Option<Arc<ClassRegistry>>,
     /// Cache of extracted class data for constructor calls (avoids re-cloning)
@@ -117,6 +119,7 @@ impl MacroInterpreter {
             import_map: BTreeMap::new(),
             class_registry: None,
             class_data_cache: BTreeMap::new(),
+            local_imports: Vec::new(),
             vm,
             scheduler,
             macro_context: None,
@@ -136,6 +139,7 @@ impl MacroInterpreter {
             import_map,
             class_registry: None,
             class_data_cache: BTreeMap::new(),
+            local_imports: Vec::new(),
             vm,
             scheduler,
             macro_context: None,
@@ -161,6 +165,7 @@ impl MacroInterpreter {
             import_map,
             class_registry: Some(class_registry),
             class_data_cache: BTreeMap::new(),
+            local_imports: Vec::new(),
             vm,
             scheduler,
             macro_context: None,
@@ -1213,6 +1218,87 @@ impl MacroInterpreter {
     }
 
     /// Call a MacroValue::Function
+    /// ExprTools.map / iter / toString over an expression value.
+    fn expr_tools(
+        &mut self,
+        method: &str,
+        args: &[MacroValue],
+        location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        let e = args.first().cloned().unwrap_or(MacroValue::Null);
+        if method == "toString" {
+            let printed = super::printer::Printer::new().print_expr(&e);
+            return Ok(MacroValue::String(Arc::from(printed.as_str())));
+        }
+        let f = args.get(1).cloned().unwrap_or(MacroValue::Null);
+        let expr = super::expr_adt::expr_of(&e, parser::Span::default());
+        let def = ast_bridge::expr_kind_to_value(&expr.kind, expr.span);
+        let MacroValue::Enum(enum_name, variant, def_args) = &def else {
+            return Ok(if method == "map" { e } else { MacroValue::Null });
+        };
+        let mut mapped = Vec::with_capacity(def_args.len());
+        for arg in def_args.iter() {
+            mapped.push(self.map_child_exprs(arg, &f, location)?);
+        }
+        if method == "iter" {
+            return Ok(MacroValue::Null);
+        }
+        let rebuilt = MacroValue::Enum(enum_name.clone(), variant.clone(), Arc::new(mapped));
+        Ok(MacroValue::Expr(Arc::new(super::expr_adt::expr_of(
+            &rebuilt, expr.span,
+        ))))
+    }
+
+    /// Every expression directly inside `v` passed through `f`; types and
+    /// metadata parameters are left as they are, as ExprTools.map leaves them.
+    fn map_child_exprs(
+        &mut self,
+        v: &MacroValue,
+        f: &MacroValue,
+        location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        Ok(match v {
+            MacroValue::Expr(_) => self.call_value(f.clone(), vec![v.clone()], location)?,
+            MacroValue::Object(m) if is_expr_value(v) && m.contains_key("expr") => {
+                self.call_value(f.clone(), vec![v.clone()], location)?
+            }
+            MacroValue::Enum(e, _, _) if matches!(&**e, "ComplexType" | "TypeParam") => v.clone(),
+            MacroValue::Enum(e, name, args) => {
+                let mut out = Vec::with_capacity(args.len());
+                for a in args.iter() {
+                    out.push(self.map_child_exprs(a, f, location)?);
+                }
+                MacroValue::Enum(e.clone(), name.clone(), Arc::new(out))
+            }
+            MacroValue::Array(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for a in items.iter() {
+                    out.push(self.map_child_exprs(a, f, location)?);
+                }
+                MacroValue::Array(Arc::new(out))
+            }
+            // A metadata entry: its parameters are not sub-expressions.
+            MacroValue::Object(m)
+                if m.len() == 3 && m.contains_key("name") && m.contains_key("params") =>
+            {
+                v.clone()
+            }
+            MacroValue::Object(m) => {
+                let mut out = BTreeMap::new();
+                for (k, a) in m.iter() {
+                    let mapped = if matches!(k.as_str(), "type" | "ret" | "params" | "meta") {
+                        a.clone()
+                    } else {
+                        self.map_child_exprs(a, f, location)?
+                    };
+                    out.insert(k.clone(), mapped);
+                }
+                MacroValue::Object(Arc::new(out))
+            }
+            other => other.clone(),
+        })
+    }
+
     fn call_value(
         &mut self,
         func: MacroValue,
@@ -1464,6 +1550,15 @@ impl MacroInterpreter {
         // Resolve bare class names through imports
         let resolved = self.resolve_class_name(class_name);
         match resolved.as_str() {
+            "haxe.macro.Context" if method == "getLocalImports" => {
+                Ok(Some(local_imports_value(&self.local_imports)))
+            }
+            // `withImports(imports, usings, f)`: `f`'s result. Names inside
+            // are typed in the caller's scope, which is where they resolve.
+            "haxe.macro.Context" if method == "withImports" => {
+                let f = args.get(2).cloned().unwrap_or(MacroValue::Null);
+                self.call_value(f, Vec::new(), location).map(Some)
+            }
             "haxe.macro.Context" => {
                 // Use the stored macro_context if available (set by @:build
                 // pipeline so Context.getBuildFields() returns class fields).
@@ -1724,6 +1819,11 @@ impl MacroInterpreter {
                 }
                 _ => Ok(None),
             },
+            "haxe.macro.ExprTools" | "ExprTools"
+                if matches!(method, "map" | "iter" | "toString") =>
+            {
+                self.expr_tools(method, args, location).map(Some)
+            }
             "haxe.macro.TypeTools" | "TypeTools" => match method {
                 "toComplexType" => {
                     let result = match self.macro_context.as_mut() {
@@ -1957,6 +2057,12 @@ impl MacroInterpreter {
         args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        // `using haxe.macro.ExprTools` on an expression value.
+        if is_expr_value(base) && matches!(method, "map" | "iter" | "toString") {
+            let mut all = vec![base.clone()];
+            all.extend(args);
+            return self.expr_tools(method, &all, location);
+        }
         // Unwrap Expr-wrapped values so method calls work on concrete types
         // (e.g., s.charAt(0) where s is MacroValue::Expr(String("hello")))
         let unwrapped = if matches!(base, MacroValue::Expr(_)) {
@@ -3154,6 +3260,71 @@ impl MacroInterpreter {
         }
         Ok(())
     }
+}
+
+/// An expression value: a reified Expr, or an `{expr: ExprDef, pos}` object.
+fn is_expr_value(v: &MacroValue) -> bool {
+    match v {
+        MacroValue::Expr(_) => true,
+        MacroValue::Object(m) => {
+            matches!(m.get("expr"), Some(MacroValue::Enum(e, _, _)) if &**e == "ExprDef")
+        }
+        _ => false,
+    }
+}
+
+/// `Context.getLocalImports()`: each import as an ImportExpr, the latest
+/// first, the way Haxe lists them.
+fn local_imports_value(imports: &[parser::Import]) -> MacroValue {
+    let entries = imports
+        .iter()
+        .rev()
+        .map(|import| {
+            let mode = match &import.mode {
+                parser::ImportMode::Alias(alias) => MacroValue::Enum(
+                    Arc::from("ImportMode"),
+                    Arc::from("IAsName"),
+                    Arc::new(vec![MacroValue::String(Arc::from(alias.as_str()))]),
+                ),
+                parser::ImportMode::Wildcard | parser::ImportMode::WildcardWithExclusions(_) => {
+                    MacroValue::Enum(
+                        Arc::from("ImportMode"),
+                        Arc::from("IAll"),
+                        Arc::new(Vec::new()),
+                    )
+                }
+                parser::ImportMode::Normal | parser::ImportMode::Field(_) => MacroValue::Enum(
+                    Arc::from("ImportMode"),
+                    Arc::from("INormal"),
+                    Arc::new(Vec::new()),
+                ),
+            };
+            let mut segments = import.path.clone();
+            if let parser::ImportMode::Field(field) = &import.mode {
+                segments.push(field.clone());
+            }
+            let path = segments
+                .iter()
+                .map(|name| {
+                    let mut part = BTreeMap::new();
+                    part.insert(
+                        "name".to_string(),
+                        MacroValue::String(Arc::from(name.as_str())),
+                    );
+                    part.insert(
+                        "pos".to_string(),
+                        MacroValue::Position(span_to_location(import.span)),
+                    );
+                    MacroValue::Object(Arc::new(part))
+                })
+                .collect();
+            let mut entry = BTreeMap::new();
+            entry.insert("path".to_string(), MacroValue::Array(Arc::new(path)));
+            entry.insert("mode".to_string(), mode);
+            MacroValue::Object(Arc::new(entry))
+        })
+        .collect();
+    MacroValue::Array(Arc::new(entries))
 }
 
 /// Whether a callee's base names one of haxe.macro's value enums, however it
