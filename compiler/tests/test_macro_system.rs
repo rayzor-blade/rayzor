@@ -147,15 +147,16 @@ fn test_macro_value_display_string() {
     let arr = MacroValue::Array(Arc::new(vec![MacroValue::Int(1), MacroValue::Int(2)]));
     assert_eq!(arr.to_display_string(), "[1,2]");
 
+    // Std.string spells an enum value by its constructor alone.
     let enumv = MacroValue::Enum(Arc::from("Color"), Arc::from("Red"), Arc::new(vec![]));
-    assert_eq!(enumv.to_display_string(), "Color.Red");
+    assert_eq!(enumv.to_display_string(), "Red");
 
     let enumv_args = MacroValue::Enum(
         Arc::from("Option"),
         Arc::from("Some"),
-        Arc::new(vec![MacroValue::Int(5)]),
+        Arc::new(vec![MacroValue::Int(5), MacroValue::Int(6)]),
     );
-    assert_eq!(enumv_args.to_display_string(), "Option.Some(5)");
+    assert_eq!(enumv_args.to_display_string(), "Some(5,6)");
 }
 
 #[test]
