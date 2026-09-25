@@ -848,10 +848,11 @@ fn hoist_static_locals(fields: &mut Vec<ClassField>) {
         .collect();
     let mut hoisted = Vec::new();
     for field in fields.iter_mut() {
-        if let ClassFieldKind::Function(func) = &mut field.kind {
-            if let Some(body) = func.body.as_deref_mut() {
-                take_static_locals(body, &mut taken, &mut hoisted);
-            }
+        let ClassFieldKind::Function(func) = &mut field.kind else {
+            continue;
+        };
+        if let Some(body) = func.body.as_deref_mut() {
+            take_static_locals(body, &mut taken, &mut hoisted);
         }
     }
     fields.extend(hoisted);
