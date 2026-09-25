@@ -421,6 +421,9 @@ for i in range(start, last):
     m = re.search(r'\bfunction\s+(test[A-Za-z0-9_]*)\s*\(', code[i])
     if not m or any(name == m.group(1) for name, _ in methods):
         continue
+    # A macro function runs at compile time; the runner never calls one.
+    if re.search(r'\bmacro\b', code[i][:m.start()]):
+        continue
     is_static = re.search(r'\bstatic\b', code[i][:m.start()]) is not None
     methods.append((m.group(1), is_static))
 if not methods:
