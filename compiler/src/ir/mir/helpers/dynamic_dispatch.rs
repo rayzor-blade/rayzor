@@ -10,10 +10,10 @@ impl<'a> HirToMirContext<'a> {
     /// `Array`, else the same hash the boxing side derives from the
     /// qualified name.
     fn stdlib_class_tag(&self, class: &str) -> u32 {
-        if class == "Array" {
-            7
-        } else {
-            Self::fnv1a_class_type_id(class)
+        match class {
+            "Array" => 7,
+            "String" => 5,
+            _ => Self::fnv1a_class_type_id(class),
         }
     }
 
@@ -327,6 +327,8 @@ impl<'a> HirToMirContext<'a> {
         // register type alone cannot tell a string from an object.
         let ty = match call.return_type.as_ref() {
             Some(IrTypeDescriptor::String | IrTypeDescriptor::PtrString) => IrType::String,
+            // Every `toString` returns a String, whatever its row declares.
+            _ if method_name == "toString" => IrType::String,
             _ => self.builder.get_register_type(value).unwrap_or(IrType::I64),
         };
         let boxed = self.box_dispatch_value(value, ty, class, method_name)?;
@@ -362,10 +364,20 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.build_call_direct(box_fn, vec![as_ptr], ptr_u8)
             }
             _ => {
+                // The methods whose Haxe API returns a new Array.
+                let returns_array = matches!(
+                    (class, method_name),
+                    ("String", "split")
+                        | (
+                            "Array",
+                            "concat" | "copy" | "filter" | "map" | "slice" | "splice"
+                        )
+                );
                 let returned_class = self
                     .stdlib_mapping
                     .class_key(class)
-                    .and_then(|k| self.stdlib_mapping.return_class(k, method_name));
+                    .and_then(|k| self.stdlib_mapping.return_class(k, method_name))
+                    .or(returns_array.then_some("Array"));
                 let tag = returned_class.map_or(0, |c| self.stdlib_class_tag(c));
                 let tag_reg = self.builder.build_const(IrValue::U32(tag))?;
                 let as_ptr = self.builder.build_bitcast(value, ptr_u8.clone())?;

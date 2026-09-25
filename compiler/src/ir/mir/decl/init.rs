@@ -160,6 +160,10 @@ impl<'a> HirToMirContext<'a> {
                         self.builder.build_store_global(gid, store_val);
                     }
                 } else if let Some(init_value) = self.lower_expression(init_expr) {
+                    // Boxed for a Dynamic static as an assignment to it is.
+                    let init_value = declared_ty
+                        .and_then(|t| self.maybe_box_value(init_value, init_expr.ty, t))
+                        .unwrap_or(init_value);
                     self.builder.build_store_global(gid, init_value);
                 }
             }

@@ -3225,24 +3225,11 @@ impl<'a> AstLowering<'a> {
         self.context.symbol_table.update_symbol_type(*var, refined);
     }
 
-    /// Type arguments for a call to a generic method, recovered by matching the
-    /// declared parameter types against the actual argument types.
-    ///
-    /// The typer is the only place this is knowable. `Array<T>` lowers to an
-    /// opaque pointer in MIR, so by then the callee's signature AND the
-    /// argument registers are both `*void` and nothing says what T was. With
-    /// no type arguments the monomorphizer skips specialization, the backend
-    /// trap-stubs the generic template, and that stub cascades to every caller.
-    ///
-    /// One type parameter only: `TypeKind::Function` does not record the order
-    /// in which a callee declares its type parameters, and MIR consumes these
-    /// positionally, so with two variables nothing here says which is which.
-    /// A Dynamic parameter passed for a formal that is a bare type variable,
-    /// which another argument binds to String, is read as a String: an
-    /// unannotated parameter is a monomorph Haxe unifies with it, and the
-    /// specialized callee reads the slot as one. Only such a parameter and
-    /// only String: any other Dynamic is often a decayed value, and String's
-    /// conversion tells a box from a raw value by tag.
+    /// A Dynamic argument for a formal that is a bare type variable, which
+    /// another argument binds to String, is read as a String: Haxe unifies
+    /// the Dynamic with it, and the specialized callee reads the slot as one.
+    /// Only String: its conversion tells a box from a raw value by tag, where
+    /// any other target would unbox values that decayed to Dynamic raw.
     pub(crate) fn unify_dynamic_arguments(
         &self,
         callee_symbol: SymbolId,
@@ -3286,11 +3273,7 @@ impl<'a> AstLowering<'a> {
             .enumerate()
             .filter_map(|(i, (declared, argument))| {
                 let ty = (*bound.get(&var_of(*declared)?)?)?;
-                let TypedExpressionKind::Variable { symbol_id } = &argument.kind else {
-                    return None;
-                };
-                (self.untyped_params.contains(symbol_id) && is_dynamic(argument.expr_type))
-                    .then_some((i, ty))
+                is_dynamic(argument.expr_type).then_some((i, ty))
             })
             .collect();
         drop(tt);
@@ -3311,6 +3294,18 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// Type arguments for a call to a generic method, recovered by matching the
+    /// declared parameter types against the actual argument types.
+    ///
+    /// The typer is the only place this is knowable. `Array<T>` lowers to an
+    /// opaque pointer in MIR, so by then the callee's signature AND the
+    /// argument registers are both `*void` and nothing says what T was. With
+    /// no type arguments the monomorphizer skips specialization, the backend
+    /// trap-stubs the generic template, and that stub cascades to every caller.
+    ///
+    /// One type parameter only: `TypeKind::Function` does not record the order
+    /// in which a callee declares its type parameters, and MIR consumes these
+    /// positionally, so with two variables nothing here says which is which.
     pub(crate) fn infer_call_type_arguments(
         &self,
         callee_symbol: SymbolId,

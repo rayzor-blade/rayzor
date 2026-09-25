@@ -43,6 +43,86 @@ impl<'a> HirToMirContext<'a> {
             .or(Some(func_val))
     }
 
+    /// Element `idx` of callMethod's arguments array as raw slot bits: a box
+    /// in a mixed array gives up its payload, anything else is read as is.
+    fn call_method_slot(&mut self, array: IrId, idx: usize) -> Option<IrId> {
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let get = self.get_or_register_extern_function(
+            "haxe_array_get_i64",
+            vec![ptr_void, IrType::I64],
+            IrType::I64,
+        );
+        let unbox = self.get_or_register_extern_function(
+            "haxe_unbox_erased_return",
+            vec![ptr_u8.clone()],
+            IrType::I64,
+        );
+        let index = self.builder.build_const(IrValue::I64(idx as i64))?;
+        let raw = self
+            .builder
+            .build_call_direct(get, vec![array, index], IrType::I64)?;
+        let as_ptr = self.builder.build_cast(raw, IrType::I64, ptr_u8)?;
+        self.builder
+            .build_call_direct(unbox, vec![as_ptr], IrType::I64)
+    }
+
+    /// Argument `idx` of a callMethod call: read from the arguments array, or
+    /// the parameter's default when the array stops short of it.
+    fn call_method_arg(
+        &mut self,
+        array: IrId,
+        idx: usize,
+        default: Option<&HirExpr>,
+        target: &IrType,
+        read: impl FnOnce(&mut Self) -> Option<IrId>,
+    ) -> Option<IrId> {
+        let Some(default) = default else {
+            return read(self);
+        };
+        let len_fn = self.get_or_register_extern_function(
+            "haxe_array_length",
+            vec![IrType::Ptr(Box::new(IrType::Void))],
+            IrType::I64,
+        );
+        let len = self
+            .builder
+            .build_call_direct(len_fn, vec![array], IrType::I64)?;
+        let index = self.builder.build_const(IrValue::I64(idx as i64))?;
+        let present = self
+            .builder
+            .build_cmp(crate::ir::CompareOp::Lt, index, len)?;
+        let have = self.builder.create_block()?;
+        let missing = self.builder.create_block()?;
+        let merge = self.builder.create_block()?;
+        self.builder.build_cond_branch(present, have, missing)?;
+
+        self.builder.switch_to_block(have);
+        let given = read(self)?;
+        let from_have = self.builder.current_block()?;
+        self.builder.build_branch(merge)?;
+
+        self.builder.switch_to_block(missing);
+        let value = self.lower_expression(default)?;
+        let value = match self.builder.get_register_type(value) {
+            Some(ty) if &ty != target => self
+                .builder
+                .build_cast(value, ty, target.clone())
+                .unwrap_or(value),
+            _ => value,
+        };
+        let from_missing = self.builder.current_block()?;
+        self.builder.build_branch(merge)?;
+
+        self.builder.switch_to_block(merge);
+        let phi = self.builder.build_phi(merge, target.clone())?;
+        self.builder
+            .add_phi_incoming(merge, phi, from_have, given)?;
+        self.builder
+            .add_phi_incoming(merge, phi, from_missing, value)?;
+        Some(phi)
+    }
+
     /// Lower Reflect.callMethod(o, func, argsArray) without a runtime trampoline by
     /// generating an indirect call from compile-time function type information.
     pub(crate) fn lower_reflect_call_method(
@@ -61,6 +141,16 @@ impl<'a> HirToMirContext<'a> {
 
         let func_expr = &args[1];
         let args_array_expr = &args[2];
+        let callee = match &func_expr.kind {
+            HirExprKind::Variable { symbol, .. } => self.get_function_id(symbol),
+            HirExprKind::MethodReference { method_symbol, .. } => {
+                self.get_function_id(method_symbol)
+            }
+            _ => None,
+        };
+        let defaults: Vec<Option<HirExpr>> = callee
+            .and_then(|id| self.function_param_defaults.get(&id).cloned())
+            .unwrap_or_default();
         let func_ptr = if let HirExprKind::Variable { symbol, .. } = &func_expr.kind {
             let resolved_func = self.get_function_id(symbol).or_else(|| {
                 self.symbol_table
@@ -137,34 +227,36 @@ impl<'a> HirToMirContext<'a> {
                     };
                 vec![arr_arg]
             } else {
-                let array_get_i64_fn = this.get_or_register_extern_function(
-                    "haxe_array_get_i64",
-                    vec![IrType::Ptr(Box::new(IrType::Void)), IrType::I64],
-                    IrType::I64,
-                );
-
                 let mut unpacked = Vec::with_capacity(param_ir_types.len());
                 for (idx, target_ty) in param_ir_types.iter().enumerate() {
-                    let index_reg = this.builder.build_const(IrValue::I64(idx as i64))?;
-                    let raw_val = this.builder.build_call_direct(
-                        array_get_i64_fn,
-                        vec![args_array_ptr, index_reg],
-                        IrType::I64,
+                    let default = defaults.get(idx).cloned().flatten();
+                    let value = this.call_method_arg(
+                        args_array_ptr,
+                        idx,
+                        default.as_ref(),
+                        target_ty,
+                        |this| {
+                            let raw_val = this.call_method_slot(args_array_ptr, idx)?;
+                            let coerced = match target_ty {
+                                IrType::I64 => Some(raw_val),
+                                IrType::F64 => this.builder.build_bitcast(raw_val, IrType::F64),
+                                IrType::F32 => {
+                                    let as_i32 = this.builder.build_cast(
+                                        raw_val,
+                                        IrType::I64,
+                                        IrType::I32,
+                                    )?;
+                                    this.builder.build_bitcast(as_i32, IrType::F32)
+                                }
+                                _ => {
+                                    this.builder
+                                        .build_cast(raw_val, IrType::I64, target_ty.clone())
+                                }
+                            };
+                            Some(coerced.unwrap_or(raw_val))
+                        },
                     )?;
-                    let coerced = match target_ty {
-                        IrType::I64 => Some(raw_val),
-                        IrType::F64 => this.builder.build_bitcast(raw_val, IrType::F64),
-                        IrType::F32 => {
-                            let as_i32 =
-                                this.builder.build_cast(raw_val, IrType::I64, IrType::I32)?;
-                            this.builder.build_bitcast(as_i32, IrType::F32)
-                        }
-                        _ => this
-                            .builder
-                            .build_cast(raw_val, IrType::I64, target_ty.clone()),
-                    }
-                    .unwrap_or(raw_val);
-                    unpacked.push(coerced);
+                    unpacked.push(value);
                 }
                 unpacked
             };
@@ -271,23 +363,18 @@ impl<'a> HirToMirContext<'a> {
             args_array_reg
         };
 
-        let array_get_i64_fn = self.get_or_register_extern_function(
-            "haxe_array_get_i64",
-            vec![IrType::Ptr(Box::new(IrType::Void)), IrType::I64],
-            IrType::I64,
-        );
-
         for (idx, param_ty_id) in param_type_ids.iter().enumerate() {
-            let index_reg = self.builder.build_const(IrValue::I64(idx as i64))?;
-            let raw_val = self.builder.build_call_direct(
-                array_get_i64_fn,
-                vec![args_array_ptr, index_reg],
-                IrType::I64,
-            )?;
-            let coerced = self
-                .coerce_from_i64(raw_val, *param_ty_id)
-                .unwrap_or(raw_val);
-            call_args.push(coerced);
+            let default = defaults.get(idx).cloned().flatten();
+            let target_ty = self.convert_type(*param_ty_id);
+            let value =
+                self.call_method_arg(args_array_ptr, idx, default.as_ref(), &target_ty, |this| {
+                    let raw_val = this.call_method_slot(args_array_ptr, idx)?;
+                    Some(
+                        this.coerce_from_i64(raw_val, *param_ty_id)
+                            .unwrap_or(raw_val),
+                    )
+                })?;
+            call_args.push(value);
         }
 
         let func_signature = IrType::Function {
