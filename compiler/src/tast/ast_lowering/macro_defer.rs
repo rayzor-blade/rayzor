@@ -643,10 +643,11 @@ fn render_type(
         Some(t) => t.kind.clone(),
         None => return "<invalid-type>".to_string(),
     };
+    // A type in a package prints with its path, as TypeTools.toString does.
     let name_of = |symbol_id| {
         symbol_table
             .get_symbol(symbol_id)
-            .and_then(|sym| interner.get(sym.name))
+            .and_then(|sym| interner.get(sym.qualified_name.unwrap_or(sym.name)))
             .map(|n| n.to_string())
             .unwrap_or_else(|| "<unnamed>".to_string())
     };

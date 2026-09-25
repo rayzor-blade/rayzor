@@ -557,7 +557,16 @@ impl<'a> AstLowering<'a> {
                                 }
                             }
                         }
-                        if parent_enum_names.len() > 1 {
+                        // An enum of this very module outranks every other,
+                        // as Haxe resolves a bare name.
+                        let current_file = self.context.create_location().file_id;
+                        let declared_here = self
+                            .context
+                            .symbol_table
+                            .find_parent_enum_for_constructor(symbol_id)
+                            .and_then(|p| self.context.symbol_table.get_symbol(p))
+                            .is_some_and(|p| p.definition_location.file_id == current_file);
+                        if parent_enum_names.len() > 1 && !declared_here {
                             let candidates = parent_enum_names
                                 .iter()
                                 .map(|p| format!("{}.{}", p, name))
