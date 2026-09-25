@@ -274,10 +274,11 @@ impl<'a> AstLowering<'a> {
             P::Array(items) | P::Or(items) => items.iter().any(Self::pattern_needs_guard),
             P::ArrayRest { elements, .. } => elements.iter().any(Self::pattern_needs_guard),
             P::Object { fields } => fields.iter().any(|(_, p)| Self::pattern_needs_guard(p)),
-            // The ordinary matcher compares an object argument as a literal.
+            // The ordinary matcher compares an object argument as a literal
+            // and takes an array argument for a wildcard.
             P::Constructor { params, .. } => params.iter().any(|p| {
                 Self::pattern_needs_guard(p)
-                    || matches!(p, P::Object { .. })
+                    || matches!(p, P::Object { .. } | P::Array(_))
                     || matches!(p, P::Const(v) if matches!(v.kind, parser::ExprKind::Object(_)))
             }),
             _ => false,

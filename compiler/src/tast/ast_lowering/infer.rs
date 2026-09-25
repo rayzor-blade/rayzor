@@ -116,8 +116,21 @@ impl<'a> AstLowering<'a> {
             return None;
         }
         let type_table = self.context.type_table.borrow();
+        // Through `Null<T>` and typedefs (`?meta:Metadata`, Metadata an Array).
+        let mut receiver_type = receiver.expr_type;
+        for _ in 0..4 {
+            match type_table.get(receiver_type).map(|t| &t.kind) {
+                Some(crate::tast::core::TypeKind::Optional { inner_type }) => {
+                    receiver_type = *inner_type
+                }
+                Some(crate::tast::core::TypeKind::TypeAlias { target_type, .. }) => {
+                    receiver_type = *target_type
+                }
+                _ => break,
+            }
+        }
         if !matches!(
-            type_table.get(receiver.expr_type).map(|t| &t.kind),
+            type_table.get(receiver_type).map(|t| &t.kind),
             Some(crate::tast::core::TypeKind::Array { .. })
         ) {
             return None;

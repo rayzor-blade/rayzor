@@ -259,10 +259,418 @@ impl Reifier {
                 ],
             ),
             ExprKind::Throw(inner) => def("EThrow", vec![self.expr(inner)?]),
+            ExprKind::TypeDecl(decl) => self.type_definition(decl)?,
             ExprKind::Break => def("EBreak", vec![]),
             ExprKind::Continue => def("EContinue", vec![]),
             _ => return None,
         })
+    }
+
+    /// An object literal laid out as the haxe.macro.Expr typedef `name`.
+    fn typed(&self, name: &str, fields: Vec<(&str, Expr)>) -> Expr {
+        self.mk(ExprKind::TypeCheck {
+            expr: Box::new(self.object(fields)),
+            type_hint: parser::Type::Path {
+                path: parser::TypePath {
+                    package: vec!["haxe".to_string(), "macro".to_string(), "Expr".to_string()],
+                    name: name.to_string(),
+                    sub: None,
+                },
+                params: Vec::new(),
+                span: self.span,
+            },
+        })
+    }
+
+    fn null(&self) -> Expr {
+        self.mk(ExprKind::Null)
+    }
+
+    fn array(&self, items: Vec<Expr>) -> Expr {
+        self.mk(ExprKind::Array(items))
+    }
+
+    fn opt<T>(&self, value: Option<T>, f: impl FnOnce(T) -> Option<Expr>) -> Option<Expr> {
+        match value {
+            Some(v) => f(v),
+            None => Some(self.null()),
+        }
+    }
+
+    fn type_path(&self, path: &parser::TypePath, params: &[parser::Type]) -> Option<Expr> {
+        let params = params
+            .iter()
+            .map(|p| match p {
+                parser::Type::Const { value, .. } => {
+                    Some(self.ctor("TypeParam", "TPExpr", vec![self.expr(value)?]))
+                }
+                other => Some(self.ctor("TypeParam", "TPType", vec![self.complex_type(other)?])),
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(self.typed(
+            "TypePath",
+            vec![
+                (
+                    "pack",
+                    self.array(path.package.iter().map(|p| self.string(p)).collect()),
+                ),
+                ("name", self.string(&path.name)),
+                ("params", self.array(params)),
+                (
+                    "sub",
+                    match &path.sub {
+                        Some(sub) => self.string(sub),
+                        None => self.null(),
+                    },
+                ),
+            ],
+        ))
+    }
+
+    fn complex_type(&self, t: &parser::Type) -> Option<Expr> {
+        Some(match t {
+            parser::Type::Path { path, params, .. } => {
+                self.ctor("ComplexType", "TPath", vec![self.type_path(path, params)?])
+            }
+            parser::Type::Function { params, ret, .. } => self.ctor(
+                "ComplexType",
+                "TFunction",
+                vec![
+                    self.array(
+                        params
+                            .iter()
+                            .map(|p| self.complex_type(p))
+                            .collect::<Option<_>>()?,
+                    ),
+                    self.complex_type(ret)?,
+                ],
+            ),
+            parser::Type::Anonymous { fields, .. } => {
+                let fields = fields
+                    .iter()
+                    .map(|f| {
+                        let meta = if f.optional {
+                            vec![self.meta_entry(":optional", &[])?]
+                        } else {
+                            Vec::new()
+                        };
+                        Some(self.typed(
+                            "Field",
+                            vec![
+                                ("name", self.string(&f.name)),
+                                ("doc", self.null()),
+                                ("access", self.array(Vec::new())),
+                                (
+                                    "kind",
+                                    self.ctor(
+                                        "FieldType",
+                                        "FVar",
+                                        vec![self.complex_type(&f.type_hint)?, self.null()],
+                                    ),
+                                ),
+                                ("pos", self.null()),
+                                ("meta", self.array(meta)),
+                            ],
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                self.ctor("ComplexType", "TAnonymous", vec![self.array(fields)])
+            }
+            parser::Type::Optional { inner, .. } => {
+                self.ctor("ComplexType", "TOptional", vec![self.complex_type(inner)?])
+            }
+            parser::Type::Parenthesis { inner, .. } => {
+                self.ctor("ComplexType", "TParent", vec![self.complex_type(inner)?])
+            }
+            parser::Type::Intersection { left, right, .. } => self.ctor(
+                "ComplexType",
+                "TIntersection",
+                vec![self.array(vec![self.complex_type(left)?, self.complex_type(right)?])],
+            ),
+            parser::Type::Wildcard { .. } | parser::Type::Const { .. } => return None,
+        })
+    }
+
+    fn meta_entry(&self, name: &str, params: &[Expr]) -> Option<Expr> {
+        Some(self.typed(
+            "MetadataEntry",
+            vec![
+                ("name", self.string(name)),
+                ("params", self.list(params)?),
+                ("pos", self.null()),
+            ],
+        ))
+    }
+
+    fn metadata(&self, meta: &[parser::Metadata]) -> Option<Expr> {
+        Some(
+            self.array(
+                meta.iter()
+                    .map(|m| {
+                        let name = if m.compile_time {
+                            format!(":{}", m.name)
+                        } else {
+                            m.name.clone()
+                        };
+                        self.meta_entry(&name, &m.params)
+                    })
+                    .collect::<Option<_>>()?,
+            ),
+        )
+    }
+
+    fn type_params(&self, params: &[parser::TypeParam]) -> Option<Expr> {
+        Some(
+            self.array(
+                params
+                    .iter()
+                    .map(|p| {
+                        Some(self.typed(
+                            "TypeParamDecl",
+                            vec![
+                            ("name", self.string(&p.name)),
+                            (
+                                "constraints",
+                                self.array(
+                                    p.constraints
+                                        .iter()
+                                        .map(|c| self.complex_type(c))
+                                        .collect::<Option<_>>()?,
+                                ),
+                            ),
+                            ("params", self.array(Vec::new())),
+                            ("meta", self.metadata(&p.meta)?),
+                            (
+                                "defaultType",
+                                self.opt(p.default_type.as_ref(), |t| self.complex_type(t))?,
+                            ),
+                        ],
+                        ))
+                    })
+                    .collect::<Option<_>>()?,
+            ),
+        )
+    }
+
+    fn function(&self, f: &parser::Function) -> Option<Expr> {
+        let args = f
+            .params
+            .iter()
+            .map(|a| {
+                Some(self.typed(
+                    "FunctionArg",
+                    vec![
+                        ("name", self.string(&a.name)),
+                        ("opt", self.mk(ExprKind::Bool(a.optional))),
+                        (
+                            "type",
+                            self.opt(a.type_hint.as_ref(), |t| self.complex_type(t))?,
+                        ),
+                        (
+                            "value",
+                            self.opt(a.default_value.as_deref(), |e| self.expr(e))?,
+                        ),
+                        ("meta", self.metadata(&a.meta)?),
+                    ],
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(self.typed(
+            "Function",
+            vec![
+                ("args", self.array(args)),
+                (
+                    "ret",
+                    self.opt(f.return_type.as_ref(), |t| self.complex_type(t))?,
+                ),
+                ("expr", self.opt(f.body.as_deref(), |b| self.expr(b))?),
+                ("params", self.type_params(&f.type_params)?),
+            ],
+        ))
+    }
+
+    fn field(&self, f: &parser::ClassField) -> Option<Expr> {
+        use parser::{ClassFieldKind, Modifier};
+        let mut access = Vec::new();
+        match f.access {
+            Some(parser::Access::Public) => access.push("APublic"),
+            Some(parser::Access::Private) => access.push("APrivate"),
+            None => {}
+        }
+        for m in &f.modifiers {
+            access.push(match m {
+                Modifier::Static => "AStatic",
+                Modifier::Inline => "AInline",
+                Modifier::Macro => "AMacro",
+                Modifier::Dynamic => "ADynamic",
+                Modifier::Override => "AOverride",
+                Modifier::Final => "AFinal",
+                Modifier::Extern => "AExtern",
+            });
+        }
+        let (name, kind) = match &f.kind {
+            ClassFieldKind::Var {
+                name,
+                type_hint,
+                expr,
+            }
+            | ClassFieldKind::Final {
+                name,
+                type_hint,
+                expr,
+            } => {
+                if matches!(f.kind, ClassFieldKind::Final { .. }) && !access.contains(&"AFinal") {
+                    access.push("AFinal");
+                }
+                (
+                    name,
+                    self.ctor(
+                        "FieldType",
+                        "FVar",
+                        vec![
+                            self.opt(type_hint.as_ref(), |t| self.complex_type(t))?,
+                            self.opt(expr.as_ref(), |e| self.expr(e))?,
+                        ],
+                    ),
+                )
+            }
+            ClassFieldKind::Property {
+                name,
+                type_hint,
+                getter,
+                setter,
+            } => {
+                let spell = |a: &parser::PropertyAccess| match a {
+                    parser::PropertyAccess::Default => "default".to_string(),
+                    parser::PropertyAccess::Null => "null".to_string(),
+                    parser::PropertyAccess::Never => "never".to_string(),
+                    parser::PropertyAccess::Dynamic => "dynamic".to_string(),
+                    parser::PropertyAccess::Custom(name) => name.clone(),
+                };
+                (
+                    name,
+                    self.ctor(
+                        "FieldType",
+                        "FProp",
+                        vec![
+                            self.string(&spell(getter)),
+                            self.string(&spell(setter)),
+                            self.opt(type_hint.as_ref(), |t| self.complex_type(t))?,
+                            self.null(),
+                        ],
+                    ),
+                )
+            }
+            ClassFieldKind::Function(func) => (
+                &func.name,
+                self.ctor("FieldType", "FFun", vec![self.function(func)?]),
+            ),
+        };
+        Some(self.typed(
+            "Field",
+            vec![
+                ("name", self.string(name)),
+                ("doc", self.null()),
+                (
+                    "access",
+                    self.array(
+                        access
+                            .iter()
+                            .map(|a| self.ctor("Access", a, Vec::new()))
+                            .collect(),
+                    ),
+                ),
+                ("kind", kind),
+                ("pos", self.null()),
+                ("meta", self.metadata(&f.meta)?),
+            ],
+        ))
+    }
+
+    /// `macro class ...` as the TypeDefinition value it builds.
+    fn type_definition(&self, decl: &parser::TypeDeclaration) -> Option<Expr> {
+        use parser::TypeDeclaration;
+        let bool_expr = |b: bool| self.mk(ExprKind::Bool(b));
+        let (name, meta, params, kind, fields): (&str, _, _, Expr, &[parser::ClassField]) =
+            match decl {
+                TypeDeclaration::Class(c) => {
+                    let super_class = match &c.extends {
+                        Some(parser::Type::Path { path, params, .. }) => {
+                            self.type_path(path, params)?
+                        }
+                        _ => self.null(),
+                    };
+                    let interfaces = c
+                        .implements
+                        .iter()
+                        .map(|t| match t {
+                            parser::Type::Path { path, params, .. } => self.type_path(path, params),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    let kind = self.ctor(
+                        "TypeDefKind",
+                        "TDClass",
+                        vec![
+                            super_class,
+                            self.array(interfaces),
+                            bool_expr(false),
+                            bool_expr(c.modifiers.contains(&parser::Modifier::Final)),
+                            bool_expr(false),
+                        ],
+                    );
+                    (&c.name, &c.meta, &c.type_params, kind, &c.fields)
+                }
+                TypeDeclaration::Interface(i) => {
+                    let interfaces = i
+                        .extends
+                        .iter()
+                        .map(|t| match t {
+                            parser::Type::Path { path, params, .. } => self.type_path(path, params),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    let kind = self.ctor(
+                        "TypeDefKind",
+                        "TDClass",
+                        vec![
+                            self.null(),
+                            self.array(interfaces),
+                            bool_expr(true),
+                            bool_expr(false),
+                            bool_expr(false),
+                        ],
+                    );
+                    (&i.name, &i.meta, &i.type_params, kind, &i.fields)
+                }
+                TypeDeclaration::Typedef(t) => {
+                    let kind = self.ctor(
+                        "TypeDefKind",
+                        "TDAlias",
+                        vec![self.complex_type(&t.type_def)?],
+                    );
+                    (&t.name, &t.meta, &t.type_params, kind, &[])
+                }
+                _ => return None,
+            };
+        let fields = fields
+            .iter()
+            .map(|f| self.field(f))
+            .collect::<Option<Vec<_>>>()?;
+        Some(self.typed(
+            "TypeDefinition",
+            vec![
+                ("pack", self.array(Vec::new())),
+                ("name", self.string(name)),
+                ("doc", self.null()),
+                ("pos", self.null()),
+                ("meta", self.metadata(meta)?),
+                ("params", self.type_params(params)?),
+                ("isExtern", bool_expr(false)),
+                ("kind", kind),
+                ("fields", self.array(fields)),
+            ],
+        ))
     }
 
     fn binop(&self, op: BinaryOp) -> Option<Expr> {

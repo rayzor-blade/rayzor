@@ -850,6 +850,9 @@ pub enum ExprKind {
         value: Box<Expr>,
     },
 
+    /// A type declared in expression position: `macro class X { ... }`.
+    TypeDecl(Box<TypeDeclaration>),
+
     /// Compiler-specific code block: `__c__("code {0} {1}", arg0, arg1)`
     CompilerSpecific {
         target: String,

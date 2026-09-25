@@ -2158,6 +2158,7 @@ impl<'a> AstLowering<'a> {
 
                 // Not a static call, proceed with instance method call
                 let mut receiver_expr = self.lower_expression(obj_expr)?;
+                receiver_expr.expr_type = self.late_array_alias(receiver_expr.expr_type);
                 let method_name = self.context.intern_string(field);
 
                 // Deref coercion (method call): if the receiver is an
@@ -3225,6 +3226,73 @@ impl<'a> AstLowering<'a> {
             .borrow_mut()
             .create_class_type(outer_sym, vec![bound]);
         self.context.symbol_table.update_symbol_type(*var, refined);
+    }
+
+    /// A field typed with a typedef of Array that was registered as a class
+    /// (its use typed before its declaration) reads as that Array, keeping
+    /// any `Null<>` around it.
+    pub(crate) fn registered_alias_as_array(&self, ty: TypeId) -> TypeId {
+        use crate::tast::core::TypeKind;
+        let (inner, optional) = match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => (*inner_type, true),
+            _ => (ty, false),
+        };
+        let is_class = matches!(
+            self.context.type_table.borrow().get(inner).map(|t| &t.kind),
+            Some(TypeKind::Class { type_args, .. }) if type_args.is_empty()
+        );
+        if !is_class {
+            return ty;
+        }
+        let array = self.late_array_alias(inner);
+        if array == inner {
+            return ty;
+        }
+        if optional {
+            self.context
+                .type_table
+                .borrow_mut()
+                .create_optional_type(array)
+        } else {
+            array
+        }
+    }
+
+    /// A method receiver typed as a typedef of Array, possibly `Null<>`, is
+    /// the Array itself: its methods and element type are Array's. A typedef
+    /// whose use was typed before its declaration was registered as a class,
+    /// and is found through the alias type declared for its symbol.
+    fn late_array_alias(&self, ty: TypeId) -> TypeId {
+        use crate::tast::core::TypeKind;
+        let tt = self.context.type_table.borrow();
+        let is_array =
+            |t: TypeId| matches!(tt.get(t).map(|x| &x.kind), Some(TypeKind::Array { .. }));
+        let mut current = ty;
+        for _ in 0..4 {
+            current = match tt.get(current).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => *inner_type,
+                Some(TypeKind::TypeAlias { target_type, .. }) => *target_type,
+                Some(TypeKind::Class {
+                    symbol_id,
+                    type_args,
+                }) if type_args.is_empty() => {
+                    let Some(target) = tt.types_for_symbol(*symbol_id).and_then(|ts| {
+                        ts.iter().find_map(|t| match tt.get(*t).map(|ti| &ti.kind) {
+                            Some(TypeKind::TypeAlias { target_type, .. }) => Some(*target_type),
+                            _ => None,
+                        })
+                    }) else {
+                        return ty;
+                    };
+                    target
+                }
+                _ => break,
+            };
+            if is_array(current) {
+                return current;
+            }
+        }
+        ty
     }
 
     /// A Dynamic argument for a formal that is a bare type variable, which

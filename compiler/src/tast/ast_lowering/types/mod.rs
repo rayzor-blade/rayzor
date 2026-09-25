@@ -18,6 +18,22 @@ impl<'a> AstLowering<'a> {
     /// Lower a type annotation
     pub(crate) fn lower_type(&mut self, type_annotation: &Type) -> LoweringResult<TypeId> {
         match type_annotation {
+            // `pack.Module` with sub-type `Sub` is the path `pack.Module.Sub`,
+            // the form the parser gives it.
+            Type::Path { path, params, span } if path.sub.is_some() => {
+                let mut package = path.package.clone();
+                package.push(path.name.clone());
+                let normal = Type::Path {
+                    path: parser::TypePath {
+                        package,
+                        name: path.sub.clone().unwrap_or_default(),
+                        sub: None,
+                    },
+                    params: params.clone(),
+                    span: *span,
+                };
+                self.lower_type(&normal)
+            }
             Type::Path { path, params, .. } => {
                 let name = if path.package.is_empty() {
                     path.name.clone()

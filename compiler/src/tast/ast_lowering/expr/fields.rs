@@ -740,6 +740,7 @@ impl<'a> AstLowering<'a> {
 
         // Build the TypedExpression for the non-early-return path
         let expr_type = self.infer_expression_type(&kind)?;
+        let expr_type = self.registered_alias_as_array(expr_type);
         let usage = self.determine_variable_usage(&kind);
         let lifetime_id = self.assign_lifetime(&kind, &expr_type);
         let metadata = self.analyze_expression_metadata(&kind);

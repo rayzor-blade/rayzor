@@ -750,11 +750,27 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     });
                 }
                 // Class reification: `macro class Name<T> { members }` builds a
-                // TypeDefinition. Its body is ordinary class syntax that the
-                // expression grammar cannot read, and the members can use
-                // spellings (`final x = 0`, `<@:foo T>`, `<T = String>`) the
-                // declaration parser does not accept either, so the span is
-                // taken whole and left to the reification engine.
+                // TypeDefinition from ordinary declaration syntax.
+                if self.stream.at_any(&[
+                    TokenKind::KwClass,
+                    TokenKind::KwInterface,
+                    TokenKind::KwTypedef,
+                ]) {
+                    let saved = self.stream.save();
+                    if let Ok(decl) = self.parse_type_declaration() {
+                        let end = self.stream.current_offset();
+                        return Ok(Expr {
+                            kind: ExprKind::Macro(Box::new(Expr {
+                                kind: ExprKind::TypeDecl(Box::new(decl)),
+                                span: Span::new(start, end),
+                            })),
+                            span: Span::new(start, end),
+                        });
+                    }
+                    self.stream.restore(saved);
+                }
+                // A body the declaration parser cannot read keeps its span for
+                // the reification engine.
                 if self.stream.at(TokenKind::KwClass) {
                     self.stream.advance();
                     if self.stream.at(TokenKind::Ident) {
