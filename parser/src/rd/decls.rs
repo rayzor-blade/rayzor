@@ -430,6 +430,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         }
 
         self.stream.expect(TokenKind::RBrace)?;
+        hoist_static_locals(&mut fields);
         Ok(fields)
     }
 
@@ -828,5 +829,133 @@ impl<'a, 'b> RdParser<'a, 'b> {
             kind,
             span: self.stream.span_from(start),
         })
+    }
+}
+
+/// A function-local `static var` is one variable for the function, kept
+/// across calls: it becomes a private static field of the type, under the
+/// local's own name so the body's references find it. A name some member
+/// already uses stays an ordinary local.
+fn hoist_static_locals(fields: &mut Vec<ClassField>) {
+    let mut taken: std::collections::BTreeSet<String> = fields
+        .iter()
+        .map(|f| match &f.kind {
+            ClassFieldKind::Var { name, .. }
+            | ClassFieldKind::Final { name, .. }
+            | ClassFieldKind::Property { name, .. } => name.clone(),
+            ClassFieldKind::Function(func) => func.name.clone(),
+        })
+        .collect();
+    let mut hoisted = Vec::new();
+    for field in fields.iter_mut() {
+        if let ClassFieldKind::Function(func) = &mut field.kind {
+            if let Some(body) = func.body.as_deref_mut() {
+                take_static_locals(body, &mut taken, &mut hoisted);
+            }
+        }
+    }
+    fields.extend(hoisted);
+}
+
+fn take_static_locals(
+    expr: &mut Expr,
+    taken: &mut std::collections::BTreeSet<String>,
+    hoisted: &mut Vec<ClassField>,
+) {
+    match &mut expr.kind {
+        ExprKind::Block(elements) => {
+            for element in elements.iter_mut() {
+                let BlockElement::Expr(inner) = element else {
+                    continue;
+                };
+                let ExprKind::Meta { meta, expr: local } = &inner.kind else {
+                    take_static_locals(inner, taken, hoisted);
+                    continue;
+                };
+                if meta.name != "staticLocal" {
+                    take_static_locals(inner, taken, hoisted);
+                    continue;
+                }
+                let local = (**local).clone();
+                let span = inner.span;
+                let (name, kind) = match &local.kind {
+                    ExprKind::Var {
+                        name,
+                        type_hint,
+                        expr,
+                    } => (
+                        name.clone(),
+                        ClassFieldKind::Var {
+                            name: name.clone(),
+                            type_hint: type_hint.clone(),
+                            expr: expr.as_deref().cloned(),
+                        },
+                    ),
+                    ExprKind::Final {
+                        name,
+                        type_hint,
+                        expr,
+                    } => (
+                        name.clone(),
+                        ClassFieldKind::Final {
+                            name: name.clone(),
+                            type_hint: type_hint.clone(),
+                            expr: expr.as_deref().cloned(),
+                        },
+                    ),
+                    _ => {
+                        *inner = local;
+                        continue;
+                    }
+                };
+                if taken.insert(name) {
+                    hoisted.push(ClassField {
+                        meta: Vec::new(),
+                        access: Some(Access::Private),
+                        modifiers: vec![Modifier::Static],
+                        kind,
+                        span,
+                    });
+                    *inner = Expr {
+                        kind: ExprKind::Block(Vec::new()),
+                        span,
+                    };
+                } else {
+                    *inner = local;
+                }
+            }
+        }
+        ExprKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            take_static_locals(then_branch, taken, hoisted);
+            if let Some(e) = else_branch {
+                take_static_locals(e, taken, hoisted);
+            }
+        }
+        ExprKind::While { body, .. }
+        | ExprKind::DoWhile { body, .. }
+        | ExprKind::For { body, .. } => take_static_locals(body, taken, hoisted),
+        ExprKind::Switch { cases, default, .. } => {
+            for case in cases {
+                take_static_locals(&mut case.body, taken, hoisted);
+            }
+            if let Some(d) = default {
+                take_static_locals(d, taken, hoisted);
+            }
+        }
+        ExprKind::Try {
+            expr: body,
+            catches,
+            ..
+        } => {
+            take_static_locals(body, taken, hoisted);
+            for c in catches {
+                take_static_locals(&mut c.body, taken, hoisted);
+            }
+        }
+        _ => {}
     }
 }

@@ -1417,7 +1417,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     .as_ref()
                     .map(|e| e.span.end)
                     .unwrap_or(self.stream.current_offset());
-                Ok(Expr {
+                let local = Expr {
                     kind: if is_final {
                         ExprKind::Final {
                             name,
@@ -1430,6 +1430,19 @@ impl<'a, 'b> RdParser<'a, 'b> {
                             type_hint,
                             expr,
                         }
+                    },
+                    span: Span::new(start, end),
+                };
+                // Marked for the type body to hoist (decls.rs).
+                Ok(Expr {
+                    kind: ExprKind::Meta {
+                        meta: Metadata {
+                            name: "staticLocal".to_string(),
+                            params: Vec::new(),
+                            span: Span::new(start, end),
+                            compile_time: true,
+                        },
+                        expr: Box::new(local),
                     },
                     span: Span::new(start, end),
                 })

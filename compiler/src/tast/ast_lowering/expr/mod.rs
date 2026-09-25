@@ -2358,6 +2358,10 @@ impl<'a> AstLowering<'a> {
                     initializer: Box::new(initializer),
                 }
             }
+            // A static local the type body did not hoist is an ordinary local.
+            ExprKind::Meta { meta, expr } if meta.name == "staticLocal" => {
+                return self.lower_expression(expr);
+            }
             ExprKind::Meta { meta, expr } => {
                 // Metadata annotation: @:meta expr
                 if std::env::var("RAYZOR_META_LOG").is_ok_and(|v| v != "0") {
