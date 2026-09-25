@@ -15,6 +15,35 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// A function literal's own type parameters as fresh type variables,
+    /// keyed by name for `push_type_parameters`.
+    pub(crate) fn function_type_parameter_map(
+        &mut self,
+        type_params: &[TypeParam],
+    ) -> LoweringResult<BTreeMap<InternedString, TypeId>> {
+        let mut map = BTreeMap::new();
+        for tp in self.lower_type_parameters(type_params)? {
+            let constraint_kinds = tp
+                .constraints
+                .iter()
+                .map(|_| crate::tast::type_checker::ConstraintKind::Implements {
+                    interface_type: TypeId::invalid(),
+                })
+                .collect();
+            let symbol_id = self
+                .context
+                .symbol_table
+                .create_type_parameter(tp.name, constraint_kinds);
+            let type_id = self.context.type_table.borrow_mut().create_type_parameter(
+                symbol_id,
+                tp.constraints.clone(),
+                tp.variance.into(),
+            );
+            map.insert(tp.name, type_id);
+        }
+        Ok(map)
+    }
+
     /// Lower type parameters
     pub(crate) fn lower_type_parameters(
         &mut self,

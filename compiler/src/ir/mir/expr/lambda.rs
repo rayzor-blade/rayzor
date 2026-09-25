@@ -408,6 +408,18 @@ impl<'a> HirToMirContext<'a> {
             (r, _) => r,
         };
 
+        // A body with a value-less `return` returns nothing, whatever its tail.
+        let returns_nothing = self
+            .builder
+            .module
+            .functions
+            .get(&func_id)?
+            .cfg
+            .blocks
+            .values()
+            .any(|b| matches!(b.terminator, IrTerminator::Return { value: None }));
+        let body_result = if returns_nothing { None } else { body_result };
+
         // Infer return type from actual generated code (borrows function immutably)
         let return_type = {
             let lambda_func = self.builder.module.functions.get(&func_id)?;

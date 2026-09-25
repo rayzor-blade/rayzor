@@ -314,6 +314,11 @@ impl<'a> AstLowering<'a> {
                 };
 
                 // Pre-compute function type from AST signature for forward reference resolution
+                let generic = !func.type_params.is_empty();
+                if generic {
+                    let map = self.function_type_parameter_map(&func.type_params)?;
+                    self.context.push_type_parameters(map);
+                }
                 let param_types: Vec<TypeId> = func
                     .params
                     .iter()
@@ -349,6 +354,9 @@ impl<'a> AstLowering<'a> {
                         })
                         .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type())
                 };
+                if generic {
+                    self.context.pop_type_parameters();
+                }
                 let function_type = self
                     .context
                     .type_table
@@ -1280,6 +1288,36 @@ impl<'a> AstLowering<'a> {
         let Some(body) = func.body.as_deref() else {
             return BTreeMap::new();
         };
+
+        // An abstract constructor's `this = p` gives `p` the underlying type.
+        let underlying = match self.context.class_context_stack.last() {
+            Some(&owner) if func.name == "new" => self
+                .context
+                .type_table
+                .borrow()
+                .resolve_abstract_underlying(owner),
+            _ => None,
+        };
+        if let Some(underlying) = underlying {
+            let mut out = BTreeMap::new();
+            crate::tast::ast_lowering::walk_expr(body, &mut |e| {
+                if let ExprKind::Assign {
+                    left,
+                    op: parser::AssignOp::Assign,
+                    right,
+                } = &e.kind
+                    && matches!(left.kind, ExprKind::This)
+                    && let ExprKind::Ident(name) = &right.kind
+                    && unannotated.contains(name.as_str())
+                {
+                    out.insert(name.clone(), underlying);
+                }
+            });
+            return out
+                .into_iter()
+                .map(|(name, ty)| (self.context.intern_string(&name), ty))
+                .collect();
+        }
 
         // param -> the one field it feeds; `None` once a second one is seen.
         let mut targets: BTreeMap<&str, Option<&str>> = BTreeMap::new();

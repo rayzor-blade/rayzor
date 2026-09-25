@@ -650,8 +650,28 @@ fn collect_param_operator_uses<'a>(
 /// Visit every sub-expression of `expr` in pre-order, entering nested
 /// function literals too.
 pub(crate) fn walk_expr<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
-    f(expr);
-    let mut go = |e: &'a Expr| walk_expr(e, f);
+    walk_expr_pruned(expr, &mut |e| {
+        f(e);
+        true
+    });
+}
+
+/// Whether a function body has a value-less `return` of its own.
+pub(crate) fn has_bare_return(body: &Expr) -> bool {
+    let mut found = false;
+    walk_expr_pruned(body, &mut |e| {
+        found |= matches!(e.kind, ExprKind::Return(None));
+        !matches!(e.kind, ExprKind::Function(_) | ExprKind::Arrow { .. })
+    });
+    found
+}
+
+/// `walk_expr`, descending below a node only when `f` returns true for it.
+pub(crate) fn walk_expr_pruned<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr) -> bool) {
+    if !f(expr) {
+        return;
+    }
+    let mut go = |e: &'a Expr| walk_expr_pruned(e, f);
     match &expr.kind {
         ExprKind::Field { expr: e, .. }
         | ExprKind::Unary { expr: e, .. }

@@ -112,6 +112,11 @@ impl<'a> AstLowering<'a> {
         field: &str,
         is_optional: bool,
     ) -> LoweringResult<TypedExpression> {
+        if field == "new" {
+            if let Some(value) = self.lower_constructor_value(expression, expr)? {
+                return Ok(value);
+            }
+        }
         // Helper function to extract a fully qualified path from nested Field expressions
         // For example: rayzor.concurrent.Thread -> vec!["rayzor", "concurrent", "Thread"]
         fn extract_qualified_path(expr: &parser::Expr) -> Option<Vec<String>> {
@@ -757,6 +762,89 @@ impl<'a> AstLowering<'a> {
 
     /// Check if function has @:arrayAccess metadata
     /// `@:arrayAccess`, or its operator spelling `@:op([])`.
+    /// `C.new` as a value: `function(a, ..) return new C(a, ..)`, its
+    /// parameters typed from the constructor's.
+    fn lower_constructor_value(
+        &mut self,
+        expression: &Expr,
+        target: &Expr,
+    ) -> LoweringResult<Option<TypedExpression>> {
+        let ExprKind::Ident(name) = &target.kind else {
+            return Ok(None);
+        };
+        let interned = self.context.intern_string(name);
+        let Some(symbol) = self.resolve_class_like_symbol_by_name(interned) else {
+            return Ok(None);
+        };
+        let Some((kind, scope)) = self
+            .context
+            .symbol_table
+            .get_symbol(symbol)
+            .map(|s| (s.kind, s.scope_id))
+        else {
+            return Ok(None);
+        };
+        let ctor = match kind {
+            crate::tast::symbols::SymbolKind::Class => self
+                .class_constructor_symbols
+                .get(&symbol)
+                .copied()
+                .or_else(|| self.context.symbol_table.get_class_constructor(symbol)),
+            crate::tast::symbols::SymbolKind::Abstract => {
+                let new_name = self.context.intern_string("new");
+                self.context
+                    .symbol_table
+                    .lookup_symbol(scope, new_name)
+                    .filter(|s| s.kind == crate::tast::symbols::SymbolKind::Function)
+                    .map(|s| s.id)
+            }
+            _ => None,
+        };
+        let Some(param_types) = ctor.and_then(|c| self.function_param_types_from_symbol(c)) else {
+            return Ok(None);
+        };
+        let span = expression.span;
+        let at = |kind: ExprKind| Expr { kind, span };
+        let names: Vec<String> = (0..param_types.len())
+            .map(|i| format!("__ctor_arg{i}"))
+            .collect();
+        let construct = at(ExprKind::New {
+            type_path: parser::TypePath {
+                package: Vec::new(),
+                name: name.clone(),
+                sub: None,
+            },
+            params: Vec::new(),
+            args: names
+                .iter()
+                .map(|n| at(ExprKind::Ident(n.clone())))
+                .collect(),
+        });
+        let literal = at(ExprKind::Function(Function {
+            name: String::new(),
+            type_params: Vec::new(),
+            params: names
+                .iter()
+                .map(|n| FunctionParam {
+                    meta: Vec::new(),
+                    name: n.clone(),
+                    type_hint: None,
+                    optional: false,
+                    rest: false,
+                    default_value: None,
+                    span,
+                })
+                .collect(),
+            return_type: None,
+            body: Some(Box::new(at(ExprKind::Return(Some(Box::new(construct)))))),
+            span,
+        }));
+        self.expected_lambda_params_stack.push(Some(param_types));
+        let lowered = self.lower_expression(&literal);
+        self.expected_lambda_params_stack.pop();
+        lowered.map(Some)
+    }
+
     pub(crate) fn has_array_access_metadata(&self, metadata: &[parser::Metadata]) -> bool {
         metadata.iter().any(|m| {
             m.name == "arrayAccess"

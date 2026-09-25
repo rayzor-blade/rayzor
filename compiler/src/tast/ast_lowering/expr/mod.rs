@@ -1483,10 +1483,37 @@ impl<'a> AstLowering<'a> {
                 return self.lower_for_expression(expression, var, key_var.as_deref(), iter, body);
             }
             ExprKind::Array(elements) => {
-                let element_exprs = elements
+                let mut element_exprs = elements
                     .iter()
                     .map(|elem| self.lower_expression(elem))
                     .collect::<Result<Vec<_>, _>>()?;
+                // `[1, 2.5]` is Array<Float>: its Int elements widen.
+                let (int_t, float_t) = {
+                    let tt = self.context.type_table.borrow();
+                    (tt.int_type(), tt.float_type())
+                };
+                if element_exprs.iter().any(|e| e.expr_type == float_t)
+                    && element_exprs
+                        .iter()
+                        .all(|e| e.expr_type == float_t || e.expr_type == int_t)
+                {
+                    for e in element_exprs.iter_mut().filter(|e| e.expr_type == int_t) {
+                        let widened = match e.kind {
+                            TypedExpressionKind::Literal {
+                                value: LiteralValue::Int(n),
+                            } => TypedExpressionKind::Literal {
+                                value: LiteralValue::Float(n as f64),
+                            },
+                            _ => TypedExpressionKind::Cast {
+                                expression: Box::new(e.clone()),
+                                target_type: float_t,
+                                cast_kind: CastKind::Implicit,
+                            },
+                        };
+                        e.kind = widened;
+                        e.expr_type = float_t;
+                    }
+                }
 
                 TypedExpressionKind::ArrayLiteral {
                     elements: element_exprs,
@@ -1811,6 +1838,11 @@ impl<'a> AstLowering<'a> {
                 }
                 // Function expression/lambda - create a new scope for the function body
                 let function_scope = self.context.enter_scope(ScopeKind::Function);
+                let generic = !func.type_params.is_empty();
+                if generic {
+                    let map = self.function_type_parameter_map(&func.type_params)?;
+                    self.context.push_type_parameters(map);
+                }
 
                 // If the surrounding call set up an expected lambda signature
                 // (e.g. `parallelFor(3, function(i, n) {...})` where the
@@ -1875,12 +1907,21 @@ impl<'a> AstLowering<'a> {
                 // Determine return type: explicit annotation > infer from body > void
                 let return_type = if let Some(ret_type) = &func.return_type {
                     self.lower_type(ret_type)?
+                } else if func
+                    .body
+                    .as_deref()
+                    .is_some_and(crate::tast::ast_lowering::has_bare_return)
+                {
+                    self.context.type_table.borrow().void_type()
                 } else {
                     let inferred = self.infer_return_type_from_body(&body);
                     self.expected_lambda_return(inferred)
                 };
 
                 // Exit the function scope
+                if generic {
+                    self.context.pop_type_parameters();
+                }
                 self.map_first_uses.pop();
                 self.context.exit_scope();
 
@@ -1974,7 +2015,11 @@ impl<'a> AstLowering<'a> {
                     }];
                     (body, return_type)
                 };
-                let return_type = self.expected_lambda_return(return_type);
+                let return_type = if crate::tast::ast_lowering::has_bare_return(expr) {
+                    self.context.type_table.borrow().void_type()
+                } else {
+                    self.expected_lambda_return(return_type)
+                };
 
                 // Exit the function scope
                 self.context.exit_scope();

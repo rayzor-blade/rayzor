@@ -2721,6 +2721,17 @@ impl<'a> AstLowering<'a> {
                 type_arguments,
                 ..
             } => self.return_type_with_type_args(*method_symbol, type_arguments, expr_type),
+            // A local generic function: its result names the literal's own T.
+            TypedExpressionKind::FunctionCall {
+                function,
+                type_arguments,
+                ..
+            } => match &function.kind {
+                TypedExpressionKind::Variable { symbol_id } => {
+                    self.return_type_with_type_args(*symbol_id, type_arguments, expr_type)
+                }
+                _ => expr_type,
+            },
             _ => expr_type,
         };
         let usage = self.determine_variable_usage(&kind);
@@ -3436,10 +3447,40 @@ impl<'a> AstLowering<'a> {
                 return Vec::new();
             }
         }
+        // A variable only Dynamic arguments reach is Dynamic, as in Haxe.
+        let dynamic = self.context.type_table.borrow().dynamic_type();
+        for (declared, argument) in params.iter().zip(arguments.iter()) {
+            if let Some(var) = self.dynamic_bound_var(*declared, argument.expr_type, 0) {
+                resolved.entry(var).or_insert(dynamic);
+            }
+        }
         if resolved.is_empty() || mentioned.iter().any(|v| !resolved.contains_key(v)) {
             return Vec::new();
         }
         mentioned.iter().map(|v| resolved[v]).collect()
+    }
+
+    /// The type variable a formal binds when its argument carries only
+    /// Dynamic where the variable sits: `T` or `Array<T>` against Dynamic.
+    fn dynamic_bound_var(&self, declared: TypeId, actual: TypeId, depth: u32) -> Option<SymbolId> {
+        use crate::tast::core::TypeKind;
+        let tt = self.context.type_table.borrow();
+        let (d, a) = (&tt.get(declared)?.kind, &tt.get(actual)?.kind);
+        match (d, a) {
+            (TypeKind::TypeParameter { symbol_id, .. }, TypeKind::Dynamic) => Some(*symbol_id),
+            (TypeKind::Array { element_type }, TypeKind::Dynamic) if depth == 0 => {
+                match tt.get(*element_type).map(|t| &t.kind) {
+                    Some(TypeKind::TypeParameter { symbol_id, .. }) => Some(*symbol_id),
+                    _ => None,
+                }
+            }
+            (TypeKind::Array { element_type: de }, TypeKind::Array { element_type: ae }) => {
+                let (de, ae) = (*de, *ae);
+                drop(tt);
+                self.dynamic_bound_var(de, ae, depth + 1)
+            }
+            _ => None,
+        }
     }
 
     /// Type arguments for a static call when one of the callee's type

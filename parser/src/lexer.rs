@@ -33,9 +33,12 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a str) -> Self {
+        // A leading UTF-8 byte order mark is skipped, not stripped, so spans
+        // stay offsets into `source`.
+        let pos = if source.starts_with('\u{FEFF}') { 3 } else { 0 };
         Self {
             source: source.as_bytes(),
-            pos: 0,
+            pos,
         }
     }
 
