@@ -287,6 +287,13 @@ impl<'a> AstLowering<'a> {
         sig: &crate::tast::sig_index::StaticMethodSig,
     ) -> TypeId {
         let dynamic_type = self.context.type_table.borrow().dynamic_type();
+        let generic = match self.function_type_parameter_map(&sig.type_params) {
+            Ok(map) if !map.is_empty() => {
+                self.context.push_type_parameters(map);
+                true
+            }
+            _ => false,
+        };
         let param_types: Vec<TypeId> = sig
             .params
             .iter()
@@ -299,6 +306,9 @@ impl<'a> AstLowering<'a> {
             Some(t) => self.lower_type(t).unwrap_or(dynamic_type),
             None => dynamic_type,
         };
+        if generic {
+            self.context.pop_type_parameters();
+        }
         let fn_ty = self
             .context
             .type_table
