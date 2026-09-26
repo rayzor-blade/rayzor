@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1790424787,"nonce":"99l36iTsXFBnTc5yoXrNO3oJM3g=","added":["bug","area:mir"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1790442140,"nonce":"b7eGrsP50GqMbHBkNLFtGgDujeE=","message":"Enum constructor values fixed in fd32284cd3 (Issue4953/6177/6675). The @:callable abstract static var call (Issue5009 single-file) remains.","files":null}]}
