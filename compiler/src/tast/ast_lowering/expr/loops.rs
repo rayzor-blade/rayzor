@@ -15,6 +15,141 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// The abstract declaring the iterable's type, looked through generic
+    /// instances. An abstract over an Array (Rest, Vector) iterates as the
+    /// array it is.
+    fn iterable_abstract(&self, iterable_ty: TypeId) -> Option<SymbolId> {
+        let tt = self.context.type_table.borrow();
+        let mut ty = iterable_ty;
+        for _ in 0..8 {
+            match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::GenericInstance { base_type, .. }) => ty = *base_type,
+                Some(TypeKind::Abstract {
+                    symbol_id,
+                    underlying,
+                    ..
+                }) => {
+                    let mut under =
+                        underlying.or_else(|| tt.resolve_abstract_underlying(*symbol_id));
+                    for _ in 0..8 {
+                        match under.and_then(|u| tt.get(u)).map(|t| &t.kind) {
+                            Some(TypeKind::TypeAlias { target_type, .. }) => {
+                                under = Some(*target_type)
+                            }
+                            Some(TypeKind::GenericInstance { base_type, .. }) => {
+                                under = Some(*base_type)
+                            }
+                            _ => break,
+                        }
+                    }
+                    // An abstract over a class (Array, or an alias the typer
+                    // left as a class placeholder) or over an unresolved type
+                    // keeps the loop it had.
+                    let keeps_loop = matches!(
+                        under.and_then(|u| tt.get(u)).map(|t| &t.kind),
+                        None | Some(TypeKind::Array { .. })
+                            | Some(TypeKind::Class { .. })
+                            | Some(TypeKind::Placeholder { .. })
+                            | Some(TypeKind::Unknown)
+                    );
+                    return (!keeps_loop).then_some(*symbol_id);
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    fn abstract_has_method(&self, abstract_symbol: SymbolId, name: &str) -> bool {
+        let name = self.context.string_interner.intern(name);
+        self.resolve_class_method_symbol(abstract_symbol, name)
+            .is_some()
+    }
+
+    /// `iter.iterator()` for an abstract iterable that declares `iterator()`.
+    fn abstract_iterator_call(&self, iterable_ty: TypeId, iter: &Expr) -> Option<Expr> {
+        let abstract_symbol = self.iterable_abstract(iterable_ty)?;
+        if !self.abstract_has_method(abstract_symbol, "iterator") {
+            return None;
+        }
+        let span = iter.span;
+        Some(Expr {
+            kind: ExprKind::Call {
+                expr: Box::new(Expr {
+                    kind: ExprKind::Field {
+                        expr: Box::new(iter.clone()),
+                        field: "iterator".to_string(),
+                        is_optional: false,
+                    },
+                    span,
+                }),
+                args: Vec::new(),
+            },
+            span,
+        })
+    }
+
+    /// A loop over an abstract iterates what its own methods give: `iterator()`
+    /// when it declares one, else its `hasNext()`/`next()` on a local copy.
+    fn abstract_iteration(
+        &self,
+        iterable_ty: TypeId,
+        expression: &Expr,
+        var: &str,
+        iter: &Expr,
+        body: &Expr,
+    ) -> Option<Expr> {
+        if let Some(call) = self.abstract_iterator_call(iterable_ty, iter) {
+            return Some(Expr {
+                kind: ExprKind::For {
+                    var: var.to_string(),
+                    key_var: None,
+                    iter: Box::new(call),
+                    body: Box::new(body.clone()),
+                },
+                span: expression.span,
+            });
+        }
+        let abstract_symbol = self.iterable_abstract(iterable_ty)?;
+        let has = |name: &str| self.abstract_has_method(abstract_symbol, name);
+        let span = expression.span;
+        let mk = |kind: ExprKind| Expr { kind, span };
+        let call = |receiver: Expr, method: &str| {
+            mk(ExprKind::Call {
+                expr: Box::new(mk(ExprKind::Field {
+                    expr: Box::new(receiver),
+                    field: method.to_string(),
+                    is_optional: false,
+                })),
+                args: Vec::new(),
+            })
+        };
+        if !(has("hasNext") && has("next")) {
+            return None;
+        }
+        let it = format!("__iter_{}", span.start);
+        let local = || mk(ExprKind::Ident(it.clone()));
+        let step = mk(ExprKind::Block(vec![
+            parser::BlockElement::Expr(mk(ExprKind::Var {
+                name: var.to_string(),
+                type_hint: None,
+                expr: Some(Box::new(call(local(), "next"))),
+            })),
+            parser::BlockElement::Expr(body.clone()),
+        ]));
+        Some(mk(ExprKind::Block(vec![
+            parser::BlockElement::Expr(mk(ExprKind::Var {
+                name: it.clone(),
+                type_hint: None,
+                expr: Some(Box::new(iter.clone())),
+            })),
+            parser::BlockElement::Expr(mk(ExprKind::While {
+                cond: Box::new(call(local(), "hasNext")),
+                body: Box::new(step),
+            })),
+        ])))
+    }
+
     /// Lower a for-in loop expression (ExprKind::For).
     /// Extracted from lower_expression to reduce stack frame size.
     #[inline(never)]
@@ -185,6 +320,14 @@ impl<'a> AstLowering<'a> {
 
         // Lower the iterable expression first
         let iterable_expr = self.lower_expression(iter)?;
+
+        if key_var.is_none() {
+            if let Some(rewritten) =
+                self.abstract_iteration(iterable_expr.expr_type, expression, var, iter, body)
+            {
+                return self.lower_expression(&rewritten);
+            }
+        }
 
         // Check if the iterable is an Array type - if so, we inline the iterator pattern
         // to avoid needing to compile ArrayIterator with its generic type parameters
@@ -592,7 +735,12 @@ impl<'a> AstLowering<'a> {
 
         for for_part in for_parts {
             // Lower the iterator expression first
-            let typed_iterator = self.lower_expression(&for_part.iter)?;
+            let mut typed_iterator = self.lower_expression(&for_part.iter)?;
+            if let Some(call) =
+                self.abstract_iterator_call(typed_iterator.expr_type, &for_part.iter)
+            {
+                typed_iterator = self.lower_expression(&call)?;
+            }
 
             // Determine the element type from the iterator
             let (element_type, key_type) = self.infer_iterator_types(&typed_iterator)?;
@@ -681,7 +829,12 @@ impl<'a> AstLowering<'a> {
 
         for for_part in for_parts {
             // Lower the iterator expression first
-            let typed_iterator = self.lower_expression(&for_part.iter)?;
+            let mut typed_iterator = self.lower_expression(&for_part.iter)?;
+            if let Some(call) =
+                self.abstract_iterator_call(typed_iterator.expr_type, &for_part.iter)
+            {
+                typed_iterator = self.lower_expression(&call)?;
+            }
 
             // Determine the element type from the iterator
             let (element_type, key_type) = self.infer_iterator_types(&typed_iterator)?;

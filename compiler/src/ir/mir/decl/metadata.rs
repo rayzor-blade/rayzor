@@ -84,11 +84,14 @@ impl<'a> HirToMirContext<'a> {
                     // A literal bound for an abstract of another type is not
                     // a constant: it goes through the abstract's `@:from` in
                     // __init__.
-                    let converts_at_init = matches!(
+                    // A scalar into a Null<primitive> static is boxed there, too.
+                    let converts_at_init = (matches!(
                         self.type_table.get(field.ty).map(|t| &t.kind),
                         Some(TypeKind::Abstract { .. })
                     ) && init_expr.ty != field.ty
-                        && !self.is_int64_type(field.ty);
+                        && !self.is_int64_type(field.ty))
+                        || (self.is_optional_primitive(field.ty)
+                            && !matches!(init_expr.kind, HirExprKind::Null));
                     let constant_init = if converts_at_init {
                         None
                     } else {

@@ -1343,11 +1343,15 @@ impl<'a> HirToMirContext<'a> {
                 | HirBinaryOp::Ne
         ) && scalar_side(self, lhs)
             && scalar_side(self, rhs);
+        // An unboxed operand is typed by its inner primitive from here on.
+        let mut lhs_ty = lhs.ty;
+        let mut rhs_ty = rhs.ty;
         if is_arith || is_scalar_cmp {
             if self.is_optional_primitive(lhs.ty) {
                 if let Some(inner) = self.optional_inner_type(lhs.ty) {
                     if let Some(unboxed) = self.maybe_unbox_optional(lhs_reg, lhs.ty, inner) {
                         lhs_reg = unboxed;
+                        lhs_ty = inner;
                     }
                 }
             }
@@ -1355,13 +1359,14 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(inner) = self.optional_inner_type(rhs.ty) {
                     if let Some(unboxed) = self.maybe_unbox_optional(rhs_reg, rhs.ty, inner) {
                         rhs_reg = unboxed;
+                        rhs_ty = inner;
                     }
                 }
             }
         }
 
-        let lhs_type = self.convert_type(lhs.ty);
-        let rhs_type = self.convert_type(rhs.ty);
+        let lhs_type = self.convert_type(lhs_ty);
+        let rhs_type = self.convert_type(rhs_ty);
 
         let lhs_is_int = matches!(
             lhs_type,

@@ -905,8 +905,14 @@ impl<'a> HirToMirContext<'a> {
                             value
                         };
 
-                        // Wrap class instance in interface fat pointer if assigning to interface var
-                        let (value, wrapped_for_interface) = if let HirLValue::Variable(sym) = lhs {
+                        // Wrap class instance in interface fat pointer if assigning to an
+                        // interface-typed variable or field
+                        let (value, wrapped_for_interface) = if let HirLValue::Variable(sym)
+                        | HirLValue::Field {
+                            field: sym,
+                            ..
+                        } = lhs
+                        {
                             if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
                                 if sym_info.type_id != TypeId::invalid() {
                                     self.maybe_wrap_for_interface(value, rhs.ty, sym_info.type_id)

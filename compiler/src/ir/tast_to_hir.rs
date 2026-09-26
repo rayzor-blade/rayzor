@@ -50,6 +50,9 @@ pub struct TastToHirContext<'a> {
 
     /// Counter for generating unique temporary variable names
     temp_var_counter: u32,
+    /// The callee of the call being lowered: an enum constructor there is
+    /// constructed, not taken as a function value.
+    call_callee: Option<usize>,
 
     /// Current file being processed (for validation)
     current_file: Option<&'a TypedFile>,
@@ -152,6 +155,7 @@ impl<'a> TastToHirContext<'a> {
             loop_labels: Vec::new(),
             errors: Vec::new(),
             temp_var_counter: 0,
+            call_callee: None,
             current_file: None,
             stdlib_mapping: StdlibMapping::builtin(),
             inline_var_values: BTreeMap::new(),
@@ -1675,6 +1679,13 @@ impl<'a> TastToHirContext<'a> {
 
     /// Lower an expression
     fn lower_expression(&mut self, expr: &TypedExpression) -> HirExpr {
+        if let TypedExpressionKind::Variable { symbol_id } = &expr.kind {
+            if self.call_callee != Some(expr as *const TypedExpression as usize) {
+                if let Some(lambda) = self.enum_constructor_value(*symbol_id, expr) {
+                    return lambda;
+                }
+            }
+        }
         let kind = match &expr.kind {
             TypedExpressionKind::Literal { value } => {
                 HirExprKind::Literal(self.lower_literal(value))
@@ -2082,9 +2093,14 @@ impl<'a> TastToHirContext<'a> {
                     _ => CallTarget::Function,
                 };
 
+                let outer_callee = self
+                    .call_callee
+                    .replace(&**function as *const TypedExpression as usize);
+                let callee = self.lower_expression(function);
+                self.call_callee = outer_callee;
                 HirExprKind::Call {
                     target,
-                    callee: Box::new(self.lower_expression(function)),
+                    callee: Box::new(callee),
                     type_args: type_arguments.clone(),
                     args: arguments.iter().map(|a| self.lower_expression(a)).collect(),
                     is_method: false,
@@ -4439,6 +4455,86 @@ impl<'a> TastToHirContext<'a> {
     }
 
     /// Generate a unique temporary variable name
+    /// An enum constructor with arguments used as a value is the function
+    /// `(a, ..) -> Ctor(a, ..)`.
+    fn enum_constructor_value(
+        &mut self,
+        symbol: SymbolId,
+        expr: &TypedExpression,
+    ) -> Option<HirExpr> {
+        let variant = self.symbol_table.get_symbol(symbol)?;
+        if variant.kind != crate::tast::symbols::SymbolKind::EnumVariant {
+            return None;
+        }
+        // The variant's own signature: under an expected enum type the
+        // reference itself may be typed as the enum.
+        let fn_type = variant.type_id;
+        let (params, return_type) = match self.type_table.borrow().get(fn_type)?.kind {
+            crate::tast::TypeKind::Function {
+                ref params,
+                return_type,
+                ..
+            } if !params.is_empty() => (params.clone(), return_type),
+            _ => return None,
+        };
+        let loc = expr.source_location;
+        let lifetime = LifetimeId::first();
+        let mut hir_params = Vec::with_capacity(params.len());
+        let mut args = Vec::with_capacity(params.len());
+        for ty in params {
+            let (name, param_symbol) = self.gen_temp_var();
+            hir_params.push(HirParam {
+                symbol_id: param_symbol,
+                name,
+                ty,
+                default: None,
+                is_optional: false,
+                is_rest: false,
+                ownership: Default::default(),
+            });
+            args.push(HirExpr::new(
+                HirExprKind::Variable {
+                    symbol: param_symbol,
+                    capture_mode: None,
+                },
+                ty,
+                lifetime,
+                loc,
+            ));
+        }
+        let callee = HirExpr::new(
+            HirExprKind::Variable {
+                symbol,
+                capture_mode: None,
+            },
+            fn_type,
+            lifetime,
+            loc,
+        );
+        let body = HirExpr::new(
+            HirExprKind::Call {
+                callee: Box::new(callee),
+                type_args: Vec::new(),
+                args,
+                is_method: false,
+                target: CallTarget::Function,
+            },
+            return_type,
+            lifetime,
+            loc,
+        );
+        Some(HirExpr::new(
+            HirExprKind::Lambda {
+                params: hir_params,
+                body: Box::new(body),
+                captures: Vec::new(),
+            },
+            fn_type,
+            lifetime,
+            loc,
+        ))
+    }
+
     fn gen_temp_var(&mut self) -> (InternedString, SymbolId) {
         let name = format!("_tmp{}", self.temp_var_counter);
         self.temp_var_counter += 1;

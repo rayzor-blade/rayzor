@@ -474,6 +474,29 @@ impl<'a> AstLowering<'a> {
 
     /// The concrete map an unannotated `var x = new Map()` should construct,
     /// read off its first `set`; `None` leaves the declaration as it was.
+    /// The concrete map class a `Map<K,V>` annotation resolved to, for
+    /// building an empty-map literal `[]` as that class.
+    pub(crate) fn map_class_name(&self, target_ty: TypeId) -> Option<String> {
+        use crate::tast::core::TypeKind;
+        let tt = self.context.type_table.borrow();
+        match tt.get(target_ty).map(|t| &t.kind) {
+            Some(TypeKind::Class { symbol_id, .. })
+            | Some(TypeKind::Abstract { symbol_id, .. }) => self
+                .context
+                .symbol_table
+                .get_symbol(*symbol_id)
+                .and_then(|sy| self.context.string_interner.get(sy.name))
+                .filter(|n| {
+                    matches!(
+                        *n,
+                        "Map" | "StringMap" | "IntMap" | "ObjectMap" | "EnumValueMap"
+                    )
+                })
+                .map(|n| n.to_string()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn map_ctor_hint(&mut self, var_name: &str, init: &Expr) -> Option<TypeId> {
         if !is_bare_new_map(init) {
             return None;

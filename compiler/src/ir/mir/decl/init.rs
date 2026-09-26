@@ -144,6 +144,22 @@ impl<'a> HirToMirContext<'a> {
             if let Some(gid) = global_id {
                 if let Some(cv) = const_val {
                     if let Some(val_reg) = self.builder.build_const(cv) {
+                        // A folded constant into a nullable or Dynamic static is
+                        // boxed, as a computed initializer is.
+                        let boxed = declared_ty
+                            .and_then(|t| {
+                                let source = if self.is_optional_primitive(t) {
+                                    self.optional_inner_type(t).unwrap_or(init_expr.ty)
+                                } else {
+                                    init_expr.ty
+                                };
+                                self.maybe_box_value(val_reg, source, t)
+                            })
+                            .filter(|b| *b != val_reg);
+                        if let Some(boxed) = boxed {
+                            self.builder.build_store_global(gid, boxed);
+                            continue;
+                        }
                         let global_ty = self.builder.module.globals.get(&gid).map(|g| g.ty.clone());
                         let store_val = if let Some(ref gty) = global_ty {
                             let val_ty = self.builder.get_register_type(val_reg);

@@ -521,13 +521,19 @@ impl<'a> HirToMirContext<'a> {
         // deferred to runtime evaluation via `dynamic_globals`. A literal
         // bound for an abstract of another type is not a constant either:
         // it goes through the abstract's `@:from` at init.
-        let converts_at_init = matches!(
+        // A scalar into a Null<primitive> static is boxed at init, too.
+        let converts_at_init = (matches!(
             self.type_table.get(global.ty).map(|t| &t.kind),
             Some(TypeKind::Abstract { .. })
         ) && global
             .init
             .as_ref()
-            .is_some_and(|e| e.ty != global.ty && !self.is_int64_type(global.ty));
+            .is_some_and(|e| e.ty != global.ty && !self.is_int64_type(global.ty)))
+            || (self.is_optional_primitive(global.ty)
+                && global
+                    .init
+                    .as_ref()
+                    .is_some_and(|e| !matches!(e.kind, HirExprKind::Null)));
         let initializer = if let Some(init_expr) = &global.init {
             match &init_expr.kind {
                 _ if converts_at_init => {

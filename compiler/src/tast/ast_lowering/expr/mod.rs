@@ -2035,9 +2035,20 @@ impl<'a> AstLowering<'a> {
                 // For block bodies like () -> { ...; return x; }, use lower_function_body
                 // to get flat statements so return type inference works correctly.
                 // For simple expressions like () -> x * 2, lower as expression directly.
-                let (body, return_type) = if matches!(&expr.kind, ExprKind::Block(_)) {
+                // A block body without `return` yields its last expression.
+                let mut tail_is_value = false;
+                let (mut body, return_type) = if matches!(&expr.kind, ExprKind::Block(_)) {
                     let body = self.lower_function_body(expr)?;
-                    let return_type = self.infer_return_type_from_body(&body);
+                    let mut return_type = self.infer_return_type_from_body(&body);
+                    let void = self.context.type_table.borrow().void_type();
+                    if return_type == void && !crate::tast::ast_lowering::has_bare_return(expr) {
+                        if let Some(TypedStatement::Expression { expression, .. }) = body.last() {
+                            if expression.expr_type != void && expression.expr_type.is_valid() {
+                                return_type = expression.expr_type;
+                                tail_is_value = true;
+                            }
+                        }
+                    }
                     (body, return_type)
                 } else {
                     let body_expr = self.lower_expression(expr)?;
@@ -2053,6 +2064,18 @@ impl<'a> AstLowering<'a> {
                 } else {
                     self.expected_lambda_return(return_type)
                 };
+                if tail_is_value && return_type != self.context.type_table.borrow().void_type() {
+                    if let Some(TypedStatement::Expression {
+                        expression,
+                        source_location,
+                    }) = body.pop()
+                    {
+                        body.push(TypedStatement::Return {
+                            value: Some(expression),
+                            source_location,
+                        });
+                    }
+                }
 
                 // Exit the function scope
                 self.context.exit_scope();
@@ -2129,30 +2152,7 @@ impl<'a> AstLowering<'a> {
                 // array whatever the hint says, and `[k => v]` is a Map node already.
                 if let (Some(init_expr), Some(target_ty)) = (expr.as_ref(), declared_type) {
                     if matches!(&init_expr.kind, ExprKind::Array(e) if e.is_empty()) {
-                        use crate::tast::core::TypeKind;
-                        let map_class = {
-                            let tt = self.context.type_table.borrow();
-                            match tt.get(target_ty).map(|t| &t.kind) {
-                                Some(TypeKind::Class { symbol_id, .. })
-                                | Some(TypeKind::Abstract { symbol_id, .. }) => self
-                                    .context
-                                    .symbol_table
-                                    .get_symbol(*symbol_id)
-                                    .and_then(|sy| self.context.string_interner.get(sy.name))
-                                    .filter(|n| {
-                                        matches!(
-                                            *n,
-                                            "Map"
-                                                | "StringMap"
-                                                | "IntMap"
-                                                | "ObjectMap"
-                                                | "EnumValueMap"
-                                        )
-                                    })
-                                    .map(|n| n.to_string()),
-                                _ => None,
-                            }
-                        };
+                        let map_class = self.map_class_name(target_ty);
                         if let Some(class_name) = map_class {
                             let ctor = parser::Expr {
                                 kind: ExprKind::New {
@@ -2386,6 +2386,35 @@ impl<'a> AstLowering<'a> {
                     }
                 }
 
+                // `final m:Map<K,V> = []` is an empty map, as for `var`.
+                if let (Some(init_expr), Some(target_ty)) = (expr.as_ref(), declared_type) {
+                    if matches!(&init_expr.kind, ExprKind::Array(e) if e.is_empty()) {
+                        if let Some(class_name) = self.map_class_name(target_ty) {
+                            let ctor = parser::Expr {
+                                kind: ExprKind::New {
+                                    type_path: parser::TypePath {
+                                        package: Vec::new(),
+                                        name: class_name,
+                                        sub: None,
+                                    },
+                                    params: Vec::new(),
+                                    args: Vec::new(),
+                                },
+                                span: init_expr.span,
+                            };
+                            let rebuilt = parser::Expr {
+                                kind: ExprKind::Final {
+                                    name: name.clone(),
+                                    type_hint: type_hint.clone(),
+                                    expr: Some(Box::new(ctor)),
+                                },
+                                span: expression.span,
+                            };
+                            return self.lower_expression(&rebuilt);
+                        }
+                    }
+                }
+
                 // Final variables must have an initializer
                 let initializer = if let Some(init_expr) = expr {
                     // Annotation = expected type of the initializer (bare
@@ -2402,12 +2431,24 @@ impl<'a> AstLowering<'a> {
                             _ => None,
                         }
                     });
+                    // The annotation also types a `[]`/`new Map()` initializer, as for `var`.
+                    let prev_hint = self.context.expected_new_type_hint;
+                    let map_hint = if declared_type.is_none() {
+                        self.map_ctor_hint(name, init_expr)
+                    } else {
+                        None
+                    };
+                    self.context.expected_new_type_hint = declared_type.or(map_hint);
                     self.expected_lambda_params_stack.push(lambda_hint);
                     self.expected_arg_type_stack.push(declared_type);
                     let result = self.lower_value_expression(init_expr);
                     self.expected_arg_type_stack.pop();
                     self.expected_lambda_params_stack.pop();
-                    result?
+                    self.context.expected_new_type_hint = prev_hint;
+                    match declared_type {
+                        Some(dt) => self.retype_literal_to(result?, dt),
+                        None => result?,
+                    }
                 } else {
                     return Err(LoweringError::IncompleteImplementation {
                         feature: "Final declaration without initializer".to_string(),
