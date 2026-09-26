@@ -22,6 +22,61 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// A throw longjmps to the landing pad, which never sees registers the
+    /// try body assigned: the variables it references live in cells until the
+    /// continuation, so the catch reads what the try wrote. They leave
+    /// `tracked`, as their reads reload from the cell rather than merge.
+    fn spill_try_variables(
+        &mut self,
+        in_try: &std::collections::BTreeSet<SymbolId>,
+        tracked: &mut BTreeMap<SymbolId, (IrId, IrType)>,
+    ) -> Vec<SymbolId> {
+        let mut spilled = Vec::new();
+        for s in in_try {
+            if self.capture_cells.contains_key(s) {
+                continue;
+            }
+            let Some((reg, ty)) = tracked.get(s).cloned() else {
+                continue;
+            };
+            let declared = self
+                .symbol_table
+                .get_symbol(*s)
+                .map(|sym| self.convert_type(sym.type_id));
+            if declared.as_ref() != Some(&ty) {
+                continue;
+            }
+            self.boxed_capture_symbols.insert(*s);
+            if self.box_capture_binding(*s, reg).is_some() {
+                tracked.remove(s);
+                spilled.push(*s);
+            }
+        }
+        spilled
+    }
+
+    /// At the continuation the spilled variables are registers again: the
+    /// cell is created inside the region, so it dominates nothing after it.
+    fn unspill_try_variables(&mut self, spilled: &[SymbolId]) {
+        for s in spilled {
+            self.boxed_capture_symbols.remove(s);
+            let Some(cell) = self.capture_cells.remove(s) else {
+                continue;
+            };
+            let Some(ty) = self
+                .symbol_table
+                .get_symbol(*s)
+                .map(|sym| self.convert_type(sym.type_id))
+            else {
+                continue;
+            };
+            if let Some(loaded) = self.builder.build_load(cell, ty.clone()) {
+                let _ = self.builder.register_local(loaded, ty);
+                self.symbol_map.insert(*s, loaded);
+            }
+        }
+    }
+
     pub(crate) fn lower_try_catch(
         &mut self,
         try_block: &HirBlock,
@@ -77,6 +132,9 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
         }
+        let mut in_try = std::collections::BTreeSet::new();
+        self.collect_referenced_variables_in_block(try_block, &mut in_try);
+        let spilled = self.spill_try_variables(&in_try, &mut tc_pre);
         // Captured (exit_block, {var -> value}) for each non-terminated path.
         let mut tc_try_exit: Option<(IrBlockId, BTreeMap<SymbolId, IrId>)> = None;
         let mut tc_catch_exits: Vec<(IrBlockId, BTreeMap<SymbolId, IrId>)> = Vec::new();
@@ -413,6 +471,8 @@ impl<'a> HirToMirContext<'a> {
             || finally.is_some();
         if !reached {
             self.builder.build_unreachable();
+        } else {
+            self.unspill_try_variables(&spilled);
         }
     }
 
@@ -468,6 +528,9 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
         }
+        let mut in_try = std::collections::BTreeSet::new();
+        self.collect_referenced_variables_in_expr(try_expr, &mut in_try);
+        let spilled = self.spill_try_variables(&in_try, &mut tc_pre);
         // (exit_block, {var -> value}) captured at every path that reaches
         // the continuation, used to build the merge phis below.
         let mut tc_exits: Vec<(IrBlockId, BTreeMap<SymbolId, IrId>)> = Vec::new();
@@ -747,6 +810,7 @@ impl<'a> HirToMirContext<'a> {
                 self.symbol_map.insert(*s, phi_reg);
             }
         }
+        self.unspill_try_variables(&spilled);
         // A path that carries no value of its own -- the fallthrough where no
         // catch matched -- contributes the type's default, so the phi is
         // complete on every incoming edge.
