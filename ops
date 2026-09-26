@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1790400484,"nonce":"ZuhzFnC/j8q4fjTbUNliZfximy0=","added":["bug","area:tast","area:macro"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1790429190,"nonce":"Dz7Bf7sVYckYRqHel65gJabv6Ss=","message":"Module-level functions now infer their return type (9e81c14e98, Issue11446). Issue10716's macro static extensions still do not expand.","files":null}]}
