@@ -692,6 +692,31 @@ impl<'a> HirToMirContext<'a> {
                         None
                     };
 
+                    // A function-typed member is read by name: a class instance
+                    // under the structural type has a method there, not a slot.
+                    if let Some((_, member_ty)) = sorted_result
+                        && matches!(
+                            type_table.get(member_ty).map(|t| &t.kind),
+                            Some(TypeKind::Function { .. })
+                        )
+                    {
+                        let dynamic_ty = type_table.dynamic_type();
+                        let member = self.raw_anon_reflect_field_read(obj, field, dynamic_ty)?;
+                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                        let unwrap = self.get_or_register_extern_function(
+                            "haxe_unbox_if_tag",
+                            vec![ptr_u8.clone(), IrType::U32],
+                            ptr_u8.clone(),
+                        );
+                        let function_tag = self.builder.build_const(IrValue::U32(u32::MAX - 1))?;
+                        let closure = self.builder.build_call_direct(
+                            unwrap,
+                            vec![member, function_tag],
+                            ptr_u8.clone(),
+                        )?;
+                        let to = self.convert_type(member_ty);
+                        return self.builder.build_bitcast(closure, to);
+                    }
                     if let Some((sorted_idx, actual_field_ty)) = sorted_result {
                         let anon_get_id = self.get_or_register_extern_function(
                             "rayzor_anon_get_field_by_index",

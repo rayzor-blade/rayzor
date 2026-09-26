@@ -98,6 +98,9 @@ impl<'a> HirToMirContext<'a> {
             // The runtime's `TYPE_ARRAY`, so a boxed array is recognisable as
             // one by every reader; a context-local id was recognisable by none.
             Some(TypeKind::Array { .. }) => TYPE_ARRAY,
+            // The runtime's `TYPE_FUNCTION`, so a closure read back through
+            // Dynamic comes out as the record a dynamic call invokes.
+            Some(TypeKind::Function { .. }) => u32::MAX - 1,
             Some(TypeKind::Abstract { .. }) => match self.canonical_type_ref(type_id) {
                 canonical if canonical != type_id => self.runtime_type_id(canonical),
                 _ => 0,

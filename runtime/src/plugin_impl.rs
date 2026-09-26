@@ -2255,6 +2255,10 @@ register_symbol!(
     crate::closure_entries::haxe_closure_register_entries
 );
 register_symbol!(
+    "haxe_register_method",
+    crate::closure_entries::haxe_register_method
+);
+register_symbol!(
     "haxe_closure_dynamic_view",
     crate::closure_entries::haxe_closure_dynamic_view
 );

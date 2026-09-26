@@ -118,6 +118,9 @@ impl<'a> HirToMirContext<'a> {
         // can answer it from the boxed value's runtime tag.
         probe!(self.try_user_to_string_call(expr));
 
+        // A method called on a Dynamic or structural receiver, by name.
+        probe!(self.try_dynamic_member_call(expr));
+
         // call_label traces which path generated the call.
         self.builder.call_label = Some("CALL_START".to_string());
         let result_type = self.convert_type(expr.ty);

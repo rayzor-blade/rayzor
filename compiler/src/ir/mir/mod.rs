@@ -251,6 +251,12 @@ pub struct HirToMirContext<'a> {
     /// Haxe function type when known; module init registers their slot- and
     /// box-shaped entries with the runtime.
     closure_targets: BTreeMap<IrFunctionId, Option<TypeId>>,
+    /// Member names read by name through Dynamic; methods of these names get a
+    /// bound thunk the runtime can call.
+    dynamic_member_names: std::collections::BTreeSet<String>,
+    /// While a by-name member call lowers its statically bound fallback: the
+    /// receiver node and the register it already lowered to.
+    dynamic_member_fallback: Option<(usize, IrId)>,
     closure_slot_entries: BTreeMap<IrFunctionId, Option<IrFunctionId>>,
     closure_dynamic_entries: BTreeMap<IrFunctionId, Option<IrFunctionId>>,
 
@@ -1385,6 +1391,8 @@ impl<'a> HirToMirContext<'a> {
             vtable_dispatch_thunks: BTreeMap::new(),
             closure_value_adapters: BTreeMap::new(),
             closure_targets: BTreeMap::new(),
+            dynamic_member_names: std::collections::BTreeSet::new(),
+            dynamic_member_fallback: None,
             closure_slot_entries: BTreeMap::new(),
             closure_dynamic_entries: BTreeMap::new(),
             constructor_name_map: BTreeMap::new(),

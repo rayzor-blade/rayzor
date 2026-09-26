@@ -140,17 +140,7 @@ impl<'a> HirToMirContext<'a> {
         // optional; they travel as null (a zero of their slot type), and a
         // literal with a default applies it on receiving null.
         for missing in param_types.iter().skip(arg_regs.len()) {
-            let value = match missing {
-                IrType::F64 => self.builder.build_const(IrValue::F64(0.0))?,
-                IrType::F32 => self.builder.build_const(IrValue::F32(0.0))?,
-                IrType::Bool => self.builder.build_const(IrValue::Bool(false))?,
-                IrType::I32 => self.builder.build_const(IrValue::I32(0))?,
-                IrType::I64 => self.builder.build_const(IrValue::I64(0))?,
-                other => {
-                    let null = self.builder.build_const(IrValue::Null)?;
-                    self.builder.build_bitcast(null, other.clone())?
-                }
-            };
+            let value = self.zero_of(missing)?;
             arg_regs.push(value);
         }
 
@@ -162,6 +152,221 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder
             .build_call_indirect(func_ptr, arg_regs, func_signature)
+    }
+
+    /// `recv.m(args)` on a Dynamic or structurally typed receiver whose method
+    /// the typer could not resolve: `m` is read by name at run time (a closure
+    /// field, or a class method's bound thunk) and called through its
+    /// box-shaped entry. On a Dynamic receiver, names of builtin container,
+    /// string and iterator members keep their static binding, since the value
+    /// may be an array or a string, which has no methods by name.
+    pub(crate) fn try_dynamic_member_call(
+        &mut self,
+        expr: &HirExpr,
+        fell_through: &mut bool,
+    ) -> Option<IrId> {
+        const BUILTIN_MEMBERS: &[&str] = &[
+            "push",
+            "pop",
+            "shift",
+            "unshift",
+            "insert",
+            "remove",
+            "indexOf",
+            "lastIndexOf",
+            "contains",
+            "concat",
+            "join",
+            "reverse",
+            "slice",
+            "splice",
+            "sort",
+            "map",
+            "filter",
+            "iterator",
+            "keyValueIterator",
+            "copy",
+            "resize",
+            "toString",
+            "charAt",
+            "charCodeAt",
+            "substr",
+            "substring",
+            "split",
+            "toLowerCase",
+            "toUpperCase",
+            "get",
+            "set",
+            "exists",
+            "keys",
+            "clear",
+            "hasNext",
+            "next",
+        ];
+        const ITERATOR_MEMBERS: &[&str] = &["hasNext", "next", "iterator", "keyValueIterator"];
+        let HirExprKind::Call {
+            callee,
+            args,
+            is_method,
+            ..
+        } = &expr.kind
+        else {
+            unreachable!("try_dynamic_member_call on a non-Call expression")
+        };
+        let method = match &callee.kind {
+            HirExprKind::Variable { symbol, .. } if *is_method && !args.is_empty() => *symbol,
+            _ => {
+                *fell_through = true;
+                return None;
+            }
+        };
+        if self
+            .dynamic_member_fallback
+            .is_some_and(|(node, _)| node == &args[0] as *const HirExpr as usize)
+        {
+            *fell_through = true;
+            return None;
+        }
+        // `super.m()` and `this.m()` are the class's own methods.
+        let own_receiver = match &args[0].kind {
+            HirExprKind::Super | HirExprKind::This => true,
+            HirExprKind::Variable { symbol, .. } => self
+                .symbol_table
+                .get_symbol(*symbol)
+                .is_some_and(|s| self.string_interner.get(s.name) == Some("this")),
+            _ => false,
+        };
+        if own_receiver
+            || self.function_map.contains_key(&method)
+            || self.external_function_map.contains_key(&method)
+        {
+            *fell_through = true;
+            return None;
+        }
+        let receiver_ty = self.resolve_through_aliases(args[0].ty);
+        let (dynamic, structural) = match self.type_table.get(receiver_ty).map(|t| &t.kind) {
+            Some(TypeKind::Dynamic) => (true, false),
+            Some(TypeKind::Anonymous { .. }) => (false, true),
+            _ => (false, false),
+        };
+        let name = self
+            .symbol_table
+            .get_symbol(method)
+            .and_then(|s| self.string_interner.get(s.name))
+            .unwrap_or("");
+        let excluded = (dynamic && BUILTIN_MEMBERS.contains(&name))
+            || (structural && ITERATOR_MEMBERS.contains(&name));
+        if !(dynamic || structural) || name.is_empty() || excluded {
+            *fell_through = true;
+            return None;
+        }
+        let dynamic_ty = self.type_table.dynamic_type();
+        let receiver = self.lower_expression(&args[0])?;
+        let member = if dynamic {
+            self.dynamic_reflect_field_read(receiver, method, dynamic_ty)?
+        } else {
+            self.raw_anon_reflect_field_read(receiver, method, dynamic_ty)?
+        };
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let member = match self.builder.get_register_type(member) {
+            Some(IrType::Ptr(_)) | None => member,
+            Some(other) => self.builder.build_cast(member, other, ptr_u8.clone())?,
+        };
+        // The runtime's TYPE_FUNCTION box holds the closure record.
+        let unwrap = self.get_or_register_extern_function(
+            "haxe_unbox_if_tag",
+            vec![ptr_u8.clone(), IrType::U32],
+            ptr_u8.clone(),
+        );
+        let function_tag = self.builder.build_const(IrValue::U32(u32::MAX - 1))?;
+        let closure = self
+            .builder
+            .build_call_direct(unwrap, vec![member, function_tag], ptr_u8)?;
+        // A receiver that is not an object with this member (a class value, a
+        // null, a static extension's first argument) takes the statically
+        // bound call, over the receiver already lowered.
+        let null = self.builder.build_null()?;
+        let found = self.builder.build_cmp(CompareOp::Ne, closure, null)?;
+        let by_name = self.builder.create_block()?;
+        let bound = self.builder.create_block()?;
+        let merge = self.builder.create_block()?;
+        self.builder.build_cond_branch(found, by_name, bound)?;
+        let result_ty = self.convert_type(expr.ty);
+        let is_void = matches!(result_ty, IrType::Void);
+
+        self.builder.switch_to_block(by_name);
+        let dynamic_result = self.call_member_closure(closure, &args[1..], expr)?;
+        let dynamic_result = self.coerce_register(dynamic_result, &result_ty);
+        let by_name_exit = self.builder.current_block()?;
+        self.builder.build_branch(merge)?;
+
+        self.builder.switch_to_block(bound);
+        let outer = self
+            .dynamic_member_fallback
+            .replace((&args[0] as *const HirExpr as usize, receiver));
+        let bound_result = self.lower_call(expr);
+        self.dynamic_member_fallback = outer;
+        // No value: a void call, or a member with no static binding.
+        let bound_result = match bound_result {
+            _ if is_void => None,
+            Some(r) => Some(self.coerce_register(r, &result_ty)),
+            None => Some(self.zero_of(&result_ty)?),
+        };
+        let bound_exit = self.builder.current_block()?;
+        self.builder.build_branch(merge)?;
+
+        self.builder.switch_to_block(merge);
+        let Some(bound_result) = bound_result else {
+            return None;
+        };
+        let phi = self.builder.build_phi(merge, result_ty)?;
+        self.builder
+            .add_phi_incoming(merge, phi, by_name_exit, dynamic_result);
+        self.builder
+            .add_phi_incoming(merge, phi, bound_exit, bound_result);
+        if self.boxed_value_regs.contains(&dynamic_result) {
+            self.boxed_value_regs.insert(phi);
+        }
+        Some(phi)
+    }
+
+    fn call_member_closure(
+        &mut self,
+        closure: IrId,
+        call_args: &[HirExpr],
+        expr: &HirExpr,
+    ) -> Option<IrId> {
+        let dynamic_ty = self.type_table.dynamic_type();
+        let arg_regs: Vec<IrId> = call_args
+            .iter()
+            .map(|a| self.lower_expression(a))
+            .collect::<Option<_>>()?;
+        let result = self.lower_dynamic_closure_call(closure, call_args, &arg_regs)?;
+        self.maybe_unbox_value(result, dynamic_ty, expr.ty)
+    }
+
+    fn zero_of(&mut self, ty: &IrType) -> Option<IrId> {
+        match ty {
+            IrType::F64 => self.builder.build_const(IrValue::F64(0.0)),
+            IrType::F32 => self.builder.build_const(IrValue::F32(0.0)),
+            IrType::Bool => self.builder.build_const(IrValue::Bool(false)),
+            IrType::I32 => self.builder.build_const(IrValue::I32(0)),
+            IrType::I64 => self.builder.build_const(IrValue::I64(0)),
+            other => {
+                let null = self.builder.build_const(IrValue::Null)?;
+                self.builder.build_bitcast(null, other.clone())
+            }
+        }
+    }
+
+    fn coerce_register(&mut self, reg: IrId, ty: &IrType) -> IrId {
+        match self.builder.get_register_type(reg) {
+            Some(have) if &have != ty && !matches!(ty, IrType::Void) => self
+                .builder
+                .build_cast(reg, have, ty.clone())
+                .unwrap_or(reg),
+            _ => reg,
+        }
     }
 
     /// `f(args)` with `f: Dynamic`: box the arguments, take the closure's

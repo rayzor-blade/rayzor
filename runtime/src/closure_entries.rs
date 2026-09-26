@@ -61,6 +61,53 @@ pub extern "C" fn haxe_closure_register_entries(
     }
 }
 
+/// Instance methods reachable by name, `(class type id, name) -> code` of
+/// the method's bound thunk: `(env, args..)` with the receiver in `env[0]`.
+static METHODS: RwLock<Option<HashMap<(u32, String), usize>>> = RwLock::new(None);
+
+/// Register `record`'s code as the bound thunk of method `name` on class
+/// `type_id`.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_register_method(type_id: i64, name: *const u8, record: *const u8) {
+    let code = unsafe { record_code(record) };
+    if code == 0 || name.is_null() {
+        return;
+    }
+    let name = unsafe {
+        let hs = &*(name as *const crate::haxe_string::HaxeString);
+        if hs.ptr.is_null() {
+            return;
+        }
+        String::from_utf8_lossy(std::slice::from_raw_parts(hs.ptr, hs.len)).into_owned()
+    };
+    let mut guard = METHODS.write().unwrap();
+    guard
+        .get_or_insert_with(HashMap::new)
+        .insert((type_id as u32, name), code);
+}
+
+/// The bound thunk of method `name` on class `type_id`, if registered.
+pub(crate) fn method_code(type_id: u32, name: &str) -> Option<usize> {
+    let guard = METHODS.read().unwrap();
+    guard.as_ref()?.get(&(type_id, name.to_string())).copied()
+}
+
+/// A closure record `{code, env}` whose one-slot env holds `receiver`, the
+/// shape a compiled bound-method value has.
+pub(crate) fn bound_method_record(code: usize, receiver: *mut u8) -> *mut u8 {
+    unsafe {
+        let env = libc::malloc(8) as *mut usize;
+        let record = libc::malloc(16) as *mut usize;
+        if env.is_null() || record.is_null() {
+            return std::ptr::null_mut();
+        }
+        *env = receiver as usize;
+        *record = code;
+        *record.add(1) = env as usize;
+        record as *mut u8
+    }
+}
+
 fn lookup(code: usize) -> Entries {
     let guard = ENTRIES.read().unwrap();
     guard

@@ -172,7 +172,8 @@ pub extern "C" fn haxe_reflect_has_field(obj: *mut u8, field: *mut u8) -> bool {
 /// null on miss.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
-    if obj.is_null() {
+    // A class used as a value is its 32-bit type id, not an object.
+    if obj.is_null() || (obj as usize) >> 32 == 0 {
         return std::ptr::null_mut();
     }
     unsafe {
@@ -216,11 +217,32 @@ unsafe fn class_field_of(type_id: u32, obj: *mut u8, name: &str) -> *mut u8 {
                 box_class_field_as_dynamic(value, ty)
             }
             None if class_declares_method(type_id, name) => {
-                crate::type_system::haxe_box_reference_ptr(obj, TYPE_FUNCTION.0)
+                // A method with a registered thunk is a callable bound
+                // closure; otherwise a function-tagged box of the object.
+                let target = match method_code_in_chain(type_id, name) {
+                    Some(code) => crate::closure_entries::bound_method_record(code, obj),
+                    None => obj,
+                };
+                crate::type_system::haxe_box_reference_ptr(target, TYPE_FUNCTION.0)
             }
             None => std::ptr::null_mut(),
         }
     }
+}
+
+/// The bound thunk registered for `name` on the class or its nearest parent.
+fn method_code_in_chain(start_type_id: u32, name: &str) -> Option<usize> {
+    let mut current = Some(start_type_id);
+    while let Some(tid) = current {
+        if let Some(code) = crate::closure_entries::method_code(tid, name) {
+            return Some(code);
+        }
+        current = get_type_info(TypeId(tid))?
+            .class_info
+            .as_ref()?
+            .super_type_id;
+    }
+    None
 }
 
 /// Whether `name` is an instance method of the class or one of its parents.
@@ -250,7 +272,8 @@ fn class_declares_method(start_type_id: u32, name: &str) -> bool {
 /// taken as the object itself.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
-    if obj.is_null() {
+    // A class used as a value is its 32-bit type id, not an object.
+    if obj.is_null() || (obj as usize) >> 32 == 0 {
         return std::ptr::null_mut();
     }
     let Some(d) = dynamic_box_at(obj).filter(|d| d.tag_is_known()) else {

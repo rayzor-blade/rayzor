@@ -1294,6 +1294,50 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn generate_vtable_init_function(&mut self) {
+        // Instance methods read by name through Dynamic: a bound thunk each,
+        // registered below so the runtime can hand out a callable closure.
+        let dynamic_methods: Vec<(u32, String, IrFunctionId)> = {
+            let wanted: Vec<(SymbolId, SymbolId, String)> = self
+                .class_method_by_name
+                .iter()
+                .filter_map(|((class_sym, name), method_sym)| {
+                    let name = self.string_interner.get(*name)?.to_string();
+                    let is_static = self.symbol_table.get_symbol(*method_sym).is_some_and(|s| {
+                        s.flags.contains(crate::tast::symbols::SymbolFlags::STATIC)
+                    });
+                    (!is_static && self.dynamic_member_names.contains(&name)).then_some((
+                        *class_sym,
+                        *method_sym,
+                        name,
+                    ))
+                })
+                .collect();
+            let mut out = Vec::new();
+            for (class_sym, method_sym, name) in wanted {
+                let Some(&func_id) = self.function_map.get(&method_sym) else {
+                    continue;
+                };
+                let has_body = self
+                    .builder
+                    .module
+                    .functions
+                    .get(&func_id)
+                    .is_some_and(|f| !f.cfg.blocks.is_empty());
+                let Some(type_id) = self.deterministic_class_type_id(class_sym) else {
+                    continue;
+                };
+                if !has_body {
+                    continue;
+                }
+                if let Some(thunk) = self.ensure_method_ref_thunk(func_id) {
+                    let method_ty = self.symbol_table.get_symbol(method_sym).map(|s| s.type_id);
+                    self.closure_targets.entry(thunk).or_insert(method_ty);
+                    out.push((type_id, name, thunk));
+                }
+            }
+            out
+        };
+
         // The alternate entries of every closure target, built before the
         // init body so they are whole functions when it references them.
         let closure_entries: Vec<(IrFunctionId, Option<IrFunctionId>, Option<IrFunctionId>)> = self
@@ -1595,6 +1639,23 @@ impl<'a> HirToMirContext<'a> {
 
         // Closure entries, keyed by the code pointer each record carries.
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let register_method_fn = self.get_or_register_extern_function(
+            "haxe_register_method",
+            vec![IrType::I64, IrType::String, ptr_u8.clone()],
+            IrType::Void,
+        );
+        for (type_id, name, thunk) in dynamic_methods {
+            let tid = self.builder.build_const(IrValue::I64(type_id as i64));
+            let name = self.builder.build_const(IrValue::String(name));
+            let record = self.builder.build_function_ref(thunk);
+            if let (Some(tid), Some(name), Some(record)) = (tid, name, record) {
+                self.builder.build_call_direct(
+                    register_method_fn,
+                    vec![tid, name, record],
+                    IrType::Void,
+                );
+            }
+        }
         let register_entries_fn = self.get_or_register_extern_function(
             "haxe_closure_register_entries",
             vec![ptr_u8.clone(), ptr_u8.clone(), ptr_u8.clone()],

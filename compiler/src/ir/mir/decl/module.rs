@@ -438,6 +438,7 @@ impl<'a> HirToMirContext<'a> {
         if !self.class_vtables.is_empty()
             || !self.constructor_reflect_wrappers.is_empty()
             || !self.closure_targets.is_empty()
+            || !self.dynamic_member_names.is_empty()
         {
             self.generate_vtable_init_function();
         }

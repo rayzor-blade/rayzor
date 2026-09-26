@@ -58,6 +58,7 @@ impl<'a> HirToMirContext<'a> {
         // The box goes to the runtime whole: its tag says whether the value is
         // an array, a string, an anonymous object or a class instance, and
         // only the tag can -- an array's header read as an object faulted.
+        self.dynamic_member_names.insert(field_name_str.clone());
         let field_name_reg = self.builder.build_const(IrValue::String(field_name_str))?;
         let dynamic_field_id = self.get_or_register_extern_function(
             "haxe_dynamic_field",
@@ -162,6 +163,7 @@ impl<'a> HirToMirContext<'a> {
 
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
+        self.dynamic_member_names.insert(field_name_str.clone());
         let field_name_reg = self.builder.build_const(IrValue::String(field_name_str))?;
         let reflect_field_id = self.get_or_register_extern_function(
             "haxe_reflect_field",

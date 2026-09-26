@@ -864,6 +864,11 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn lower_expression_inner(&mut self, expr: &HirExpr) -> Option<IrId> {
+        if let Some((node, reg)) = self.dynamic_member_fallback {
+            if node == expr as *const HirExpr as usize {
+                return Some(reg);
+            }
+        }
         if matches!(&expr.kind, HirExprKind::Field { .. }) {
             debug!("[lower_expression] START - Field expression");
         }
