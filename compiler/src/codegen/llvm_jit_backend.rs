@@ -3583,10 +3583,12 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     let src_bits = llvm_value.into_int_value().get_type().get_bit_width();
                     let dst_bits = expected_ty.into_int_type().get_bit_width();
                     if src_bits < dst_bits {
+                        // Haxe Ints are signed; only a Bool (i1) widens by zero.
                         self.builder
-                            .build_int_z_extend(
+                            .build_int_cast_sign_flag(
                                 llvm_value.into_int_value(),
                                 expected_ty.into_int_type(),
+                                src_bits > 1,
                                 &cast_name,
                             )
                             .map_err(|e| format!("Failed to extend phi int: {}", e))?
@@ -3818,6 +3820,32 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                 }
                             }
                         }
+                    }
+                }
+                // A narrower Int into a slot the MIR types as a wider integer
+                // fills the whole slot: sign-extended, a Bool by zero.
+                if value_val.is_int_value() {
+                    let slot_bits = match register_types.get(ptr) {
+                        Some(IrType::Ptr(inner)) => match inner.as_ref() {
+                            IrType::I64 | IrType::U64 => Some(64),
+                            IrType::I32 | IrType::U32 => Some(32),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let v = value_val.into_int_value();
+                    let bits = v.get_type().get_bit_width();
+                    if let Some(slot_bits) = slot_bits.filter(|b| *b > bits) {
+                        value_val = self
+                            .builder
+                            .build_int_cast_sign_flag(
+                                v,
+                                self.context.custom_width_int_type(slot_bits),
+                                bits > 1,
+                                "store_ext",
+                            )
+                            .map_err(|e| format!("store extend failed: {}", e))?
+                            .into();
                     }
                 }
                 let store_inst = self
@@ -6332,11 +6360,13 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     // May need to extend smaller ints to i64
                     let int_val = raw_val.into_int_value();
                     if int_val.get_type().get_bit_width() < 64 {
+                        let signed = int_val.get_type().get_bit_width() > 1;
                         self.builder
-                            .build_int_z_extend(
+                            .build_int_cast_sign_flag(
                                 int_val,
                                 self.context.i64_type(),
-                                "global_store_zext",
+                                signed,
+                                "global_store_ext",
                             )
                             .map_err(|e| format!("Failed to extend int for global store: {}", e))?
                     } else {

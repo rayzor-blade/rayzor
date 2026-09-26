@@ -89,8 +89,9 @@ impl<'a> AstLowering<'a> {
         })
     }
 
-    /// A loop over an abstract iterates what its own methods give: `iterator()`
-    /// when it declares one, else its `hasNext()`/`next()` on a local copy.
+    /// A loop over an abstract that declares `iterator()` iterates what it
+    /// answers. (One with its own hasNext()/next() is not rewritten: a next()
+    /// that assigns `this` only advances when inlined.)
     fn abstract_iteration(
         &self,
         iterable_ty: TypeId,
@@ -99,55 +100,16 @@ impl<'a> AstLowering<'a> {
         iter: &Expr,
         body: &Expr,
     ) -> Option<Expr> {
-        if let Some(call) = self.abstract_iterator_call(iterable_ty, iter) {
-            return Some(Expr {
-                kind: ExprKind::For {
-                    var: var.to_string(),
-                    key_var: None,
-                    iter: Box::new(call),
-                    body: Box::new(body.clone()),
-                },
-                span: expression.span,
-            });
-        }
-        let abstract_symbol = self.iterable_abstract(iterable_ty)?;
-        let has = |name: &str| self.abstract_has_method(abstract_symbol, name);
-        let span = expression.span;
-        let mk = |kind: ExprKind| Expr { kind, span };
-        let call = |receiver: Expr, method: &str| {
-            mk(ExprKind::Call {
-                expr: Box::new(mk(ExprKind::Field {
-                    expr: Box::new(receiver),
-                    field: method.to_string(),
-                    is_optional: false,
-                })),
-                args: Vec::new(),
-            })
-        };
-        if !(has("hasNext") && has("next")) {
-            return None;
-        }
-        let it = format!("__iter_{}", span.start);
-        let local = || mk(ExprKind::Ident(it.clone()));
-        let step = mk(ExprKind::Block(vec![
-            parser::BlockElement::Expr(mk(ExprKind::Var {
-                name: var.to_string(),
-                type_hint: None,
-                expr: Some(Box::new(call(local(), "next"))),
-            })),
-            parser::BlockElement::Expr(body.clone()),
-        ]));
-        Some(mk(ExprKind::Block(vec![
-            parser::BlockElement::Expr(mk(ExprKind::Var {
-                name: it.clone(),
-                type_hint: None,
-                expr: Some(Box::new(iter.clone())),
-            })),
-            parser::BlockElement::Expr(mk(ExprKind::While {
-                cond: Box::new(call(local(), "hasNext")),
-                body: Box::new(step),
-            })),
-        ])))
+        let call = self.abstract_iterator_call(iterable_ty, iter)?;
+        Some(Expr {
+            kind: ExprKind::For {
+                var: var.to_string(),
+                key_var: None,
+                iter: Box::new(call),
+                body: Box::new(body.clone()),
+            },
+            span: expression.span,
+        })
     }
 
     /// Lower a for-in loop expression (ExprKind::For).

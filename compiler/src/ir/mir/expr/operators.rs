@@ -266,6 +266,39 @@ impl<'a> HirToMirContext<'a> {
                 if matches!(op, HirUnaryOp::Not) {
                     operand_reg = self.truth_of(operand_reg, operand.ty)?;
                 }
+                // `-x` on a Dynamic value negates the number in its box.
+                if matches!(op, HirUnaryOp::Neg)
+                    && matches!(
+                        self.builder.get_register_type(operand_reg),
+                        Some(IrType::Ptr(_))
+                    )
+                {
+                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                    let zero = self.builder.build_const(IrValue::I32(0))?;
+                    let boxed_zero = self.box_scalar_register(zero)?;
+                    let operand_ptr = match self.builder.get_register_type(operand_reg) {
+                        Some(IrType::Ptr(inner)) if *inner == IrType::U8 => operand_reg,
+                        Some(other) => {
+                            self.builder
+                                .build_cast(operand_reg, other, ptr_u8.clone())?
+                        }
+                        None => operand_reg,
+                    };
+                    let f = self.get_or_register_extern_function(
+                        "haxe_dynamic_arith",
+                        vec![IrType::I32, ptr_u8.clone(), ptr_u8.clone()],
+                        ptr_u8.clone(),
+                    );
+                    let sub = self.builder.build_const(IrValue::I32(1))?;
+                    let out = self.builder.build_call_direct(
+                        f,
+                        vec![sub, boxed_zero, operand_ptr],
+                        ptr_u8,
+                    )?;
+                    self.boxed_value_regs.insert(out);
+                    let dynamic_ty = self.type_table.dynamic_type();
+                    return self.maybe_unbox_value(out, dynamic_ty, expr.ty);
+                }
                 let result_type = self.convert_type(expr.ty);
                 if matches!(op, HirUnaryOp::Neg) && result_type.is_float() {
                     let operand_type = self
