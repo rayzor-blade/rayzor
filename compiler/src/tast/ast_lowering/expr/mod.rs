@@ -722,15 +722,33 @@ impl<'a> AstLowering<'a> {
                     }
                 } else {
                     let left_expr = self.lower_expression(left)?;
-                    // For ==/!= the LHS's static type is the expected type of
-                    // the RHS — disambiguates a bare enum-variant comparand
-                    // (`v == Red` with `v:ColorA`).
-                    let is_eq = matches!(op, BinaryOp::Eq | BinaryOp::NotEq);
+                    // For ==/!= and ?? the LHS's static type is the expected
+                    // type of the RHS — disambiguates a bare enum-variant
+                    // comparand (`v == Red` with `v:ColorA`) and types a
+                    // lambda fallback's parameters.
+                    let is_eq = matches!(op, BinaryOp::Eq | BinaryOp::NotEq | BinaryOp::NullCoal);
+                    // A lambda fallback of `??` takes the LHS's parameter types.
+                    let lambda_hint = if matches!(op, BinaryOp::NullCoal) {
+                        let tt = self.context.type_table.borrow();
+                        let mut ty = left_expr.expr_type;
+                        if let Some(TypeKind::Optional { inner_type }) = tt.get(ty).map(|t| &t.kind)
+                        {
+                            ty = *inner_type;
+                        }
+                        match tt.get(ty).map(|t| &t.kind) {
+                            Some(TypeKind::Function { params, .. }) => Some(params.clone()),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                     if is_eq {
                         self.expected_arg_type_stack.push(Some(left_expr.expr_type));
+                        self.expected_lambda_params_stack.push(lambda_hint);
                     }
                     let right_result = self.lower_expression(right);
                     if is_eq {
+                        self.expected_lambda_params_stack.pop();
                         self.expected_arg_type_stack.pop();
                     }
                     let right_expr = right_result?;

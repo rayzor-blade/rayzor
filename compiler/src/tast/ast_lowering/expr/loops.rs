@@ -1059,7 +1059,7 @@ impl<'a> AstLowering<'a> {
             Some(TypeKind::Map { value_type, .. }) => value_type,
             // A structure declaring `next()` is an iterator and one declaring
             // `iterator()` yields one; either way the element is what `next()`
-            // answers. A class reaches neither and stays Dynamic, as before.
+            // answers, whether declared structurally or by a class.
             // A bare parameter is kept Dynamic, as it was: a local typed by it
             // makes the enclosing template a stub until instantiated.
             Some(TypeKind::TypeAlias { .. })
@@ -1098,7 +1098,10 @@ impl<'a> AstLowering<'a> {
 
     fn structural_element_type(&self, ty: TypeId) -> Option<TypeId> {
         let next = self.context.string_interner.intern("next");
-        if let Some(elem) = self.structural_method_return_type(ty, next) {
+        if let Some(elem) = self
+            .structural_method_return_type(ty, next)
+            .or_else(|| self.class_method_return_type(ty, next))
+        {
             // A declaration restored from the cache can carry no parameter list
             // to bind against, leaving the element as the parameter itself; the
             // receiver's own argument is what that parameter stands for.
@@ -1114,6 +1117,7 @@ impl<'a> AstLowering<'a> {
             .structural_method_return_type(ty, iterator)
             .or_else(|| self.class_method_return_type(ty, iterator))?;
         self.structural_method_return_type(it, next)
+            .or_else(|| self.class_method_return_type(it, next))
     }
 
     /// The declared return type of a class's own method, for a receiver that

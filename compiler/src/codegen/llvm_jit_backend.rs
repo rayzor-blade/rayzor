@@ -6898,6 +6898,20 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         }
     }
 
+    /// A shift count taken modulo the operand width, as Haxe and Cranelift do;
+    /// LLVM leaves a shift by the width or more undefined.
+    fn mask_shift_count(
+        &self,
+        value: inkwell::values::IntValue<'ctx>,
+        count: inkwell::values::IntValue<'ctx>,
+    ) -> Result<inkwell::values::IntValue<'ctx>, String> {
+        let width = value.get_type().get_bit_width() as u64;
+        let mask = count.get_type().const_int(width - 1, false);
+        self.builder
+            .build_and(count, mask, "shift_count")
+            .map_err(|e| format!("Failed to mask shift count: {}", e))
+    }
+
     /// Compile binary operation
     /// The result_ty is the MIR type for the result, used to determine integer vs float ops
     fn compile_binop(
@@ -7248,6 +7262,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 } else {
                     right.into_int_value()
                 };
+                let right_int = self.mask_shift_count(left_int, right_int)?;
                 let result = self
                     .builder
                     .build_left_shift(left_int, right_int, &name)
@@ -7277,6 +7292,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 } else {
                     right.into_int_value()
                 };
+                let right_int = self.mask_shift_count(left_int, right_int)?;
                 let result = self
                     .builder
                     .build_right_shift(left_int, right_int, true, &name)
@@ -7307,6 +7323,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 } else {
                     right.into_int_value()
                 };
+                let right_int = self.mask_shift_count(left_int, right_int)?;
                 let result = self
                     .builder
                     .build_right_shift(left_int, right_int, false, &name)

@@ -635,13 +635,45 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// A class's instance slots with its ancestors'; inherited slots keep
+    /// their indices in the subclass layout.
+    fn struct_init_storage_fields(
+        &self,
+        class_symbol: SymbolId,
+    ) -> Option<Vec<(SymbolId, TypeId, u32)>> {
+        let mut fields = self.class_instance_fields.get(&class_symbol)?.clone();
+        let mut seen = vec![class_symbol];
+        let mut current = class_symbol;
+        while let Some(parent) = self.current_hir_types.values().find_map(|d| match d {
+            HirTypeDecl::Class(c) if c.symbol_id == current => c.extends_symbol.or_else(|| {
+                c.extends
+                    .and_then(|t| self.type_table.get(t))
+                    .and_then(|t| match &t.kind {
+                        TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                        _ => None,
+                    })
+            }),
+            _ => None,
+        }) {
+            if seen.contains(&parent) {
+                break;
+            }
+            seen.push(parent);
+            if let Some(inherited) = self.class_instance_fields.get(&parent) {
+                fields.extend(inherited.iter().copied());
+            }
+            current = parent;
+        }
+        Some(fields)
+    }
+
     fn lower_struct_init_class_literal(
         &mut self,
         fields: &[(InternedString, HirExpr)],
         class_type: TypeId,
         class_symbol: SymbolId,
     ) -> Option<IrId> {
-        let storage_fields = self.class_instance_fields.get(&class_symbol)?.clone();
+        let storage_fields = self.struct_init_storage_fields(class_symbol)?;
         let class_name = self
             .symbol_table
             .get_symbol(class_symbol)

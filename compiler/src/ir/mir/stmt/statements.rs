@@ -666,6 +666,21 @@ impl<'a> HirToMirContext<'a> {
                 }
                 let rhs_value = self.lower_expression(rhs);
                 self.object_literal_target_ty = prev_anon_target;
+                let slot_ty = match lhs {
+                    HirLValue::Variable(symbol) | HirLValue::Field { field: symbol, .. } => self
+                        .symbol_table
+                        .get_symbol(*symbol)
+                        .map(|s| s.type_id)
+                        .filter(|t| *t != TypeId::invalid()),
+                    HirLValue::Index { .. } => None,
+                };
+                let rhs_value = match (rhs_value, slot_ty) {
+                    (Some(v), Some(slot_ty)) if op.is_none() => Some(
+                        self.maybe_unbox_function_for_target(v, rhs.ty, slot_ty)
+                            .unwrap_or(v),
+                    ),
+                    (v, _) => v,
+                };
 
                 // Storing a borrow in a field keeps it alive past the call that
                 // lent it. An assignment to a LOCAL is not an escape - it is

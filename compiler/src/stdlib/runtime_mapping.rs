@@ -1958,7 +1958,7 @@ impl StdlibMapping {
             map_method!(instance "Array", "join" => "array_join", params: 1, returns: primitive),
             // Mutation methods — MIR wrappers handle Any→Ptr conversion
             map_method!(instance "Array", "shift" => "array_shift", params: 0, mir_wrapper,
-                types: &[PtrU8] => PtrU8),
+                types: &[PtrU8] => I64),
             // unshift: same fix shape as push — value typed I64 so the call-site
             // bitcast preserves f64 bits across the integer-typed slot.
             map_method!(instance "Array", "unshift" => "array_unshift", params: 1, mir_wrapper,

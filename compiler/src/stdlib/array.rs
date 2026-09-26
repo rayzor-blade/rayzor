@@ -739,17 +739,17 @@ fn build_array_last_index_of(builder: &mut MirBuilder) {
     }
 }
 
-/// Build: fn array_shift(arr: Any) -> Any
-/// Wrapper: removes and returns first element as boxed DynamicValue*
+/// Build: fn array_shift(arr: Any) -> i64
 fn build_array_shift(builder: &mut MirBuilder) {
     let ptr_void = IrType::Ptr(Box::new(IrType::Void));
-    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
+    // The raw slot, like `array_pop`: the call site casts it to T.
     let func_id = builder
         .begin_function("array_shift")
         .param("arr", IrType::Any)
-        .returns(ptr_u8.clone())
+        .returns(IrType::I64)
         .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
         .build();
 
     builder.set_current_function(func_id);
@@ -759,16 +759,15 @@ fn build_array_shift(builder: &mut MirBuilder) {
     let arr = builder.get_param(0);
     let arr_ptr = builder.cast(arr, IrType::Any, ptr_void.clone());
 
-    // Call haxe_array_shift_ptr which returns boxed DynamicValue*
     let shift_func = builder
-        .get_function_by_name("haxe_array_shift_ptr")
-        .expect("haxe_array_shift_ptr extern not found");
+        .get_function_by_name("haxe_array_shift")
+        .expect("haxe_array_shift extern not found");
 
     if let Some(result) = builder.call(shift_func, vec![arr_ptr]) {
         builder.ret(Some(result));
     } else {
-        let null_val = builder.const_value(crate::ir::IrValue::Null);
-        builder.ret(Some(null_val));
+        let zero_val = builder.const_value(crate::ir::IrValue::I64(0));
+        builder.ret(Some(zero_val));
     }
 }
 

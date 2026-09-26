@@ -4321,8 +4321,17 @@ impl<'a> AstLowering<'a> {
             }
             i += 1;
         }
-        if args.len() < fixed {
-            return args;
+        // Omitted optional fixed formals travel as null, so the rest array
+        // still lands in its own slot.
+        while args.len() < fixed {
+            args.push(TypedExpression {
+                kind: TypedExpressionKind::Null,
+                expr_type: self.context.type_table.borrow().dynamic_type(),
+                usage: VariableUsage::Copy,
+                lifetime_id: crate::tast::LifetimeId::first(),
+                source_location: location.clone(),
+                metadata: ExpressionMetadata::default(),
+            });
         }
         if args.len() == formals.len() && self.rest_elem_of(args[fixed].expr_type).is_some() {
             return args;

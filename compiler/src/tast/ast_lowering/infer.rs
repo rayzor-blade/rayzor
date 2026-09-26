@@ -1069,8 +1069,8 @@ impl<'a> AstLowering<'a> {
                                 .borrow_mut()
                                 .create_function_type(vec![element_type_copy], void_type))
                         }
-                        "pop" => {
-                            // pop(): T
+                        "pop" | "shift" => {
+                            // pop(): T, shift(): T
                             Ok(*element_type)
                         }
                         "length" => {

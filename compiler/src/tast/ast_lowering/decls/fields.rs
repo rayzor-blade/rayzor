@@ -440,18 +440,31 @@ impl<'a> AstLowering<'a> {
             parameters.push(self.lower_parameter(param)?);
         }
 
-        // Process return type
-        let return_type = if let Some(ret_type) = &func.return_type {
-            self.lower_type(ret_type)?
-        } else {
-            self.context.type_table.borrow().void_type()
+        let annotated_return_type = match &func.return_type {
+            Some(ret_type) => Some(self.lower_type(ret_type)?),
+            None => None,
         };
 
-        // Process body
         let body = if let Some(body_expr) = &func.body {
             vec![self.lower_expression_as_statement(body_expr)?]
         } else {
             Vec::new()
+        };
+
+        // Unannotated: inferred from the body, as for a method.
+        let return_type = match annotated_return_type {
+            Some(ret_type) => ret_type,
+            None => match body.first() {
+                Some(TypedStatement::Expression {
+                    expression:
+                        TypedExpression {
+                            kind: TypedExpressionKind::Block { statements, .. },
+                            ..
+                        },
+                    ..
+                }) => self.infer_return_type_from_body(statements),
+                _ => self.infer_return_type_from_body(&body),
+            },
         };
 
         self.context.pop_type_parameters();

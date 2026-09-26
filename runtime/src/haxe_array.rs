@@ -1293,9 +1293,11 @@ pub extern "C" fn haxe_array_shift(arr: *mut HaxeArray) -> i64 {
             return 0;
         }
 
-        // Read first element
-        let data = arr_ref.ptr as *const i64;
-        let first = *data;
+        let first = match arr_ref.elem_size {
+            8 => *(arr_ref.ptr as *const i64),
+            4 => *(arr_ref.ptr as *const i32) as i64,
+            _ => 0,
+        };
 
         // Shift all elements left by one
         if arr_ref.len > 1 {

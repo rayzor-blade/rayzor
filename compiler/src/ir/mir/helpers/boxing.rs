@@ -1250,6 +1250,17 @@ impl<'a> HirToMirContext<'a> {
             if matches!(actual_ty, IrType::I64) && matches!(expected_ty, IrType::I32) {
                 return self.builder.build_cast(value, IrType::I64, IrType::I32);
             }
+            // A raw 8-byte slot (Array.pop/shift) holding a Float's bits or a
+            // String.
+            if matches!(actual_ty, IrType::I64) {
+                match expected_ty {
+                    IrType::F64 => return self.builder.build_bitcast(value, IrType::F64),
+                    IrType::String => {
+                        return self.builder.build_cast(value, IrType::I64, IrType::String);
+                    }
+                    _ => {}
+                }
+            }
             // Map<K,Float>.get / .iterator and other raw-u64 returners hand back
             // an 8-byte bit pattern; a Float caller reinterprets those bits.
             if matches!(actual_ty, IrType::U64) && matches!(expected_ty, IrType::F64) {
