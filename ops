@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1790424787,"nonce":"oW4FWlT2M9sPiyYdaXoRrAgpF5E=","added":["bug","area:mir"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1790442140,"nonce":"hmfGK3unVYT1twpeZGX6QCpNXW8=","message":"Partially in fd32284cd3: for-in/comprehension over an abstract declaring iterator() or hasNext/next (non-class underlying). Remaining in 09019f0.","files":null}]}
