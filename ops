@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1790419022,"nonce":"L6EBv8d7pJl6nREur9UgY0YwGNs=","added":["bug","area:runtime","area:mir"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1790447404,"nonce":"FBQPehMtuz/kjo+AlkfOpwx8fZs=","message":"4e61b4eef3 registers @:native methods under their native name (overrides inherit it); Issue7844 passes. Statics through a class value remain.","files":null}]}
