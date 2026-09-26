@@ -132,6 +132,29 @@ opt-level = </span><span style="color:#E8B84B">2
       <p style="margin:14px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:680px">A project depending on native plugins must declare both the class paths and the native libraries; only one of the two fails to resolve at run time.</p>
 
 
+      <h2 id="macros" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Macros</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Macros run at compile time in rayzor's own interpreter. Expansion is deterministic. Modules expand one at a time, each in source order, and <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">@:build</span> and <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">@:autoBuild</span> run in declaration order. The same sources always produce the same program, whichever module is compiled first.</p>
+      <p style="margin:14px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">That guarantee differs from the Haxe compiler, where a macro's result can depend on the order modules are typed in. It also means some macro code behaves differently:</p>
+      <div style="margin-top:20px;border:1px solid #22242A;border-radius:12px;background:#0E1013;overflow:hidden">
+        <div style="padding:18px 22px;border-top:none">
+          <div style="font-size:15px;font-weight:600;color:#E9EAEE">Macro state is per module</div>
+          <p style="margin:8px 0 0;font-size:14.5px;line-height:1.65;color:#8A9099;text-wrap:pretty">Static variables of a macro class keep their values across calls within one module, but each module's macros start from the initial values. A registry that one module's build macros fill is empty when the next module expands.</p>
+        </div>
+        <div style="padding:18px 22px;border-top:1px solid #1A1C21">
+          <div style="font-size:15px;font-weight:600;color:#E9EAEE">Macros that ask the typer can run more than once</div>
+          <p style="margin:8px 0 0;font-size:14.5px;line-height:1.65;color:#8A9099;text-wrap:pretty">A macro that calls <span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;color:#C9CCD2">Context.typeof</span>, <span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;color:#C9CCD2">typeExpr</span>, <span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;color:#C9CCD2">getType</span> or <span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;color:#C9CCD2">unify</span> is expanded again when typing reaches its call site. Keep side effects out of these macros.</p>
+        </div>
+        <div style="padding:18px 22px;border-top:1px solid #1A1C21">
+          <div style="font-size:15px;font-weight:600;color:#E9EAEE">Context.defineType does not add the type yet</div>
+          <p style="margin:8px 0 0;font-size:14.5px;line-height:1.65;color:#8A9099;text-wrap:pretty">The call is accepted, but the type it defines is not part of the build. Declare the type in source instead.</p>
+        </div>
+        <div style="padding:18px 22px;border-top:1px solid #1A1C21">
+          <div style="font-size:15px;font-weight:600;color:#E9EAEE">No generation hooks</div>
+          <p style="margin:8px 0 0;font-size:14.5px;line-height:1.65;color:#8A9099;text-wrap:pretty"><span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;color:#C9CCD2">Context.onGenerate</span> and <span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;color:#C9CCD2">Context.onAfterTyping</span> are not available.</p>
+        </div>
+      </div>
+
+
       <div style="margin-top:64px;padding:26px 28px;border:1px solid #22242A;border-radius:12px;background:#0C0D10;display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:wrap">
         <div>
           <div style="font-size:16px;font-weight:600">Full reference lives in the repo</div>
@@ -150,6 +173,7 @@ opt-level = </span><span style="color:#E8B84B">2
         <a href="#memory" style="color:#8A9099" style-hover="color:#E9EAEE">Memory model</a>
         <a href="#artifacts" style="color:#8A9099" style-hover="color:#E9EAEE">Artifacts</a>
         <a href="#manifest" style="color:#8A9099" style-hover="color:#E9EAEE">Project manifest</a>
+        <a href="#macros" style="color:#8A9099" style-hover="color:#E9EAEE">Macros</a>
       </div>
     </aside>
   </div>
