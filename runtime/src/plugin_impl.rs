@@ -275,6 +275,8 @@ register_symbol!("haxe_math_floor", crate::haxe_math::haxe_math_floor);
 register_symbol!("haxe_math_ceil", crate::haxe_math::haxe_math_ceil);
 register_symbol!("haxe_math_round", crate::haxe_math::haxe_math_round);
 register_symbol!("haxe_math_fround", crate::haxe_math::haxe_math_fround);
+register_symbol!("haxe_math_ffloor", crate::haxe_math::haxe_math_ffloor);
+register_symbol!("haxe_math_fceil", crate::haxe_math::haxe_math_fceil);
 
 // Trigonometric
 register_symbol!("haxe_math_sin", crate::haxe_math::haxe_math_sin);

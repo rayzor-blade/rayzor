@@ -109,6 +109,35 @@ pub fn preprocess(source: &str, config: &PreprocessorConfig) -> String {
         let line = lines[i];
         let trimmed = line.trim_start();
 
+        // An inline `#if` inside an expression whose `#end` is on a later line
+        // (`var l = #if neko v.length #else __getField(v,\n "length") #end;`):
+        // the lines up to the balancing `#end` are one inline conditional.
+        let depth_of =
+            |l: &str| l.matches("#if ").count() as i32 - l.matches("#end").count() as i32;
+        if !trimmed.starts_with("#if ") && line.contains("#if ") && depth_of(line) > 0 {
+            let mut depth = depth_of(line);
+            let mut j = i;
+            let mut joined = line.to_string();
+            while depth > 0 && j + 1 < lines.len() {
+                j += 1;
+                joined.push('\n');
+                joined.push_str(lines[j]);
+                depth += depth_of(lines[j]);
+            }
+            if depth == 0 {
+                let processed = process_inline_conditionals(&joined, config);
+                let emitted = processed.lines().count().max(1);
+                result.push_str(&processed);
+                result.push('\n');
+                // Blank lines keep every later line at its source number.
+                for _ in emitted..(j - i + 1) {
+                    result.push('\n');
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+
         // Check if this line contains inline conditionals (e.g., return #if flash ... #else ... #end;)
         if line.contains("#if ") && line.contains("#end") {
             // Process inline conditional
@@ -596,6 +625,22 @@ mod tests {
         assert!(evaluate_condition("(rayzor && !nosuch)", &c));
         assert!(!evaluate_condition("(rayzor && nosuch)", &c));
         assert!(evaluate_condition("(rayzor || nosuch)", &c));
+    }
+
+    /// An inline `#if` whose `#end` is on a later line keeps its active arm
+    /// and the line count.
+    #[test]
+    fn inline_conditional_across_lines() {
+        let src = "var l = #if neko v.length #else get(v,\n\t\"length\") #end;\nnext();";
+        let out = preprocess(src, &cfg(&["neko"]));
+        assert!(!out.contains('#'), "{out}");
+        assert!(out.contains("v.length"), "{out}");
+        assert_eq!(out.lines().count(), 3, "{out}");
+        let out = preprocess(src, &cfg(&[]));
+        assert!(
+            out.contains("get(v,") && out.contains("\"length\")"),
+            "{out}"
+        );
     }
 
     /// `&&` binds tighter than `||`.

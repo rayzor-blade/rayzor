@@ -55,6 +55,23 @@ class Test {
     }
     function noAssert():Void { unit.ConfCheck.ok(); }
     function unspec(f:Void->Void):Void { unit.ConfCheck.ok(); }
+    // Upstream is utest's Assert.contains.
+    function allow<T>(v:T, values:Array<T>):Void {
+        unit.ConfCheck.ok();
+        if (values.indexOf(v) < 0) { unit.ConfCheck.fail("allow: value not in the allowed set"); }
+    }
+    function hf(c:Class<Dynamic>, n:String):Void {
+        t(Type.getInstanceFields(c).indexOf(n) >= 0);
+    }
+    function nhf(c:Class<Dynamic>, n:String):Void {
+        f(Type.getInstanceFields(c).indexOf(n) >= 0);
+    }
+    function hsf(c:Class<Dynamic>, n:String):Void {
+        t(Type.getClassFields(c).indexOf(n) >= 0);
+    }
+    function nhsf(c:Class<Dynamic>, n:String):Void {
+        f(Type.getClassFields(c).indexOf(n) >= 0);
+    }
     function exc(fn:Void->Void):Void {
         unit.ConfCheck.ok();
         try { fn(); unit.ConfCheck.fail("exc: no exception"); }

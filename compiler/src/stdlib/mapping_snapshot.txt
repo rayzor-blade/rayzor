@@ -66,6 +66,8 @@ Math atan2 static=true ctor=false params=2 -> haxe_math_atan2
 Math ceil static=true ctor=false params=1 -> haxe_math_ceil
 Math cos static=true ctor=false params=1 -> haxe_math_cos
 Math exp static=true ctor=false params=1 -> haxe_math_exp
+Math fceil static=true ctor=false params=1 -> haxe_math_fceil
+Math ffloor static=true ctor=false params=1 -> haxe_math_ffloor
 Math floor static=true ctor=false params=1 -> haxe_math_floor
 Math fround static=true ctor=false params=1 -> haxe_math_fround
 Math isFinite static=true ctor=false params=1 -> haxe_math_is_finite

@@ -175,6 +175,20 @@ impl Reifier {
                     .collect::<Option<Vec<_>>>()?;
                 def("EObjectDecl", vec![self.mk(ExprKind::Array(items))])
             }
+            // `e is T` is its own node, with T as a type.
+            ExprKind::Binary {
+                left,
+                op: BinaryOp::Is,
+                right,
+            } => {
+                let path = Self::expr_type_path(right)?;
+                let ty = parser::Type::Path {
+                    path,
+                    params: Vec::new(),
+                    span: right.span,
+                };
+                def("EIs", vec![self.expr(left)?, self.complex_type(&ty)?])
+            }
             ExprKind::Binary { left, op, right } => def(
                 "EBinop",
                 vec![self.binop(*op)?, self.expr(left)?, self.expr(right)?],
@@ -325,6 +339,32 @@ impl Reifier {
                 ),
             ],
         ))
+    }
+
+    /// `pack.Name` written as an expression, as a type path.
+    fn expr_type_path(e: &Expr) -> Option<parser::TypePath> {
+        let mut parts = Vec::new();
+        let mut cur = e;
+        loop {
+            match &cur.kind {
+                ExprKind::Ident(name) => {
+                    parts.push(name.clone());
+                    break;
+                }
+                ExprKind::Field { expr, field, .. } => {
+                    parts.push(field.clone());
+                    cur = expr;
+                }
+                _ => return None,
+            }
+        }
+        parts.reverse();
+        let name = parts.pop()?;
+        Some(parser::TypePath {
+            package: parts,
+            name,
+            sub: None,
+        })
     }
 
     fn complex_type(&self, t: &parser::Type) -> Option<Expr> {

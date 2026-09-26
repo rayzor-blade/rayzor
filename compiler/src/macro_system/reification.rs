@@ -39,6 +39,44 @@ impl ReificationEngine {
     ///
     /// Non-dollar expressions are returned as-is (they become literal AST nodes).
     /// Dollar identifiers are evaluated and their results are spliced into the output.
+    /// A list of expressions (array elements, call or `new` arguments) in
+    /// which `$a{exprs}` splices its elements in place.
+    fn process_list(elements: &[Expr], env: &Environment) -> Result<Vec<Expr>, MacroError> {
+        let mut out: Vec<Expr> = Vec::with_capacity(elements.len());
+        for e in elements {
+            if let ExprKind::DollarIdent {
+                name,
+                arg: Some(arg),
+            } = &e.kind
+            {
+                if name == "a" {
+                    match Self::eval_simple_expr(arg, env, e.span)? {
+                        MacroValue::Array(items) => {
+                            for item in items.iter() {
+                                out.push(match item {
+                                    MacroValue::Expr(inner) => (**inner).clone(),
+                                    other => ast_bridge::value_to_expr(other),
+                                });
+                            }
+                            continue;
+                        }
+                        other => {
+                            return Err(MacroError::ReificationError {
+                                message: format!(
+                                    "$a{{}} expects an Array, got {}",
+                                    other.type_name()
+                                ),
+                                location: span_to_location(e.span),
+                            });
+                        }
+                    }
+                }
+            }
+            out.push(Self::process_expr(e, env)?);
+        }
+        Ok(out)
+    }
+
     fn process_expr(expr: &Expr, env: &Environment) -> Result<Expr, MacroError> {
         match &expr.kind {
             // Dollar identifier — splice from environment
@@ -66,12 +104,10 @@ impl ReificationEngine {
 
             ExprKind::Call { expr: callee, args } => {
                 let new_callee = Self::process_expr(callee, env)?;
-                let new_args: Result<Vec<Expr>, MacroError> =
-                    args.iter().map(|a| Self::process_expr(a, env)).collect();
                 Ok(Expr {
                     kind: ExprKind::Call {
                         expr: Box::new(new_callee),
-                        args: new_args?,
+                        args: Self::process_list(args, env)?,
                     },
                     span: expr.span,
                 })
@@ -168,51 +204,10 @@ impl ReificationEngine {
                 })
             }
 
-            ExprKind::Array(elements) => {
-                // `$a{exprs}` inside an array literal is a SPLICE, not a
-                // nested array. `macro [$a{elements}]` must produce
-                // `[e1, e2, e3]`, not `[[e1, e2, e3]]`. Recognise the
-                // splice form and flatten its result into the parent
-                // array instead of recursing through it as a normal
-                // expression.
-                let mut new_elems: Vec<Expr> = Vec::with_capacity(elements.len());
-                for e in elements {
-                    if let ExprKind::DollarIdent {
-                        name,
-                        arg: Some(arg),
-                    } = &e.kind
-                    {
-                        if name == "a" {
-                            let val = Self::eval_simple_expr(arg, env, e.span)?;
-                            match val {
-                                MacroValue::Array(items) => {
-                                    for item in items.iter() {
-                                        new_elems.push(match item {
-                                            MacroValue::Expr(inner) => (**inner).clone(),
-                                            other => ast_bridge::value_to_expr(other),
-                                        });
-                                    }
-                                    continue;
-                                }
-                                other => {
-                                    return Err(MacroError::ReificationError {
-                                        message: format!(
-                                            "$a{{}} inside array literal expects Array, got {}",
-                                            other.type_name()
-                                        ),
-                                        location: span_to_location(e.span),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    new_elems.push(Self::process_expr(e, env)?);
-                }
-                Ok(Expr {
-                    kind: ExprKind::Array(new_elems),
-                    span: expr.span,
-                })
-            }
+            ExprKind::Array(elements) => Ok(Expr {
+                kind: ExprKind::Array(Self::process_list(elements, env)?),
+                span: expr.span,
+            }),
 
             ExprKind::Assign { left, op, right } => {
                 let new_left = Self::process_expr(left, env)?;
@@ -257,6 +252,116 @@ impl ReificationEngine {
                     span: expr.span,
                 })
             }
+
+            ExprKind::New {
+                type_path,
+                params,
+                args,
+            } => Ok(Expr {
+                kind: ExprKind::New {
+                    type_path: type_path.clone(),
+                    params: params.clone(),
+                    args: Self::process_list(args, env)?,
+                },
+                span: expr.span,
+            }),
+
+            ExprKind::Object(fields) => {
+                let fields = fields
+                    .iter()
+                    .map(|f| {
+                        Ok(parser::ObjectField {
+                            name: f.name.clone(),
+                            expr: Self::process_expr(&f.expr, env)?,
+                            span: f.span,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, MacroError>>()?;
+                Ok(Expr {
+                    kind: ExprKind::Object(fields),
+                    span: expr.span,
+                })
+            }
+
+            ExprKind::Meta { meta, expr: inner } => {
+                let mut meta = meta.clone();
+                meta.params = Self::process_list(&meta.params, env)?;
+                Ok(Expr {
+                    kind: ExprKind::Meta {
+                        meta,
+                        expr: Box::new(Self::process_expr(inner, env)?),
+                    },
+                    span: expr.span,
+                })
+            }
+
+            ExprKind::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => Ok(Expr {
+                kind: ExprKind::Ternary {
+                    cond: Box::new(Self::process_expr(cond, env)?),
+                    then_expr: Box::new(Self::process_expr(then_expr, env)?),
+                    else_expr: Box::new(Self::process_expr(else_expr, env)?),
+                },
+                span: expr.span,
+            }),
+
+            ExprKind::Cast {
+                expr: inner,
+                type_hint,
+            } => Ok(Expr {
+                kind: ExprKind::Cast {
+                    expr: Box::new(Self::process_expr(inner, env)?),
+                    type_hint: type_hint.clone(),
+                },
+                span: expr.span,
+            }),
+
+            ExprKind::TypeCheck {
+                expr: inner,
+                type_hint,
+            } => Ok(Expr {
+                kind: ExprKind::TypeCheck {
+                    expr: Box::new(Self::process_expr(inner, env)?),
+                    type_hint: type_hint.clone(),
+                },
+                span: expr.span,
+            }),
+
+            ExprKind::While { cond, body } => Ok(Expr {
+                kind: ExprKind::While {
+                    cond: Box::new(Self::process_expr(cond, env)?),
+                    body: Box::new(Self::process_expr(body, env)?),
+                },
+                span: expr.span,
+            }),
+
+            ExprKind::For {
+                var,
+                key_var,
+                iter,
+                body,
+            } => Ok(Expr {
+                kind: ExprKind::For {
+                    var: var.clone(),
+                    key_var: key_var.clone(),
+                    iter: Box::new(Self::process_expr(iter, env)?),
+                    body: Box::new(Self::process_expr(body, env)?),
+                },
+                span: expr.span,
+            }),
+
+            ExprKind::Throw(inner) => Ok(Expr {
+                kind: ExprKind::Throw(Box::new(Self::process_expr(inner, env)?)),
+                span: expr.span,
+            }),
+
+            ExprKind::Untyped(inner) => Ok(Expr {
+                kind: ExprKind::Untyped(Box::new(Self::process_expr(inner, env)?)),
+                span: expr.span,
+            }),
 
             // Leaf nodes — return as-is
             _ => Ok(expr.clone()),

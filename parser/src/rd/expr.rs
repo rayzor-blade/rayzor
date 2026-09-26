@@ -19,9 +19,9 @@ fn strip_numeric_noise(text: &str) -> String {
 
 /// An integer literal as Haxe reads it: a hex, binary or octal literal that
 /// fits 32 bits is an `Int` with those bits (`0xFFFFFFFF` is -1); a decimal
-/// literal past `Int`, or any literal past 32 bits, is a `Float`. A typed
-/// suffix (`9i32`) keeps the value as written, and `i64` makes the literal
-/// a `haxe.Int64.make(high, low)` call.
+/// literal past `Int`, or any literal past 32 bits, is a `Float`. An `i32`
+/// or `u32` suffix keeps the 32-bit pattern, `f64` makes a `Float`, and
+/// `i64` makes the literal a `haxe.Int64.make(high, low)` call.
 pub(crate) fn int_literal_kind(text: &str, span: Span) -> ExprKind {
     let suffixed = ["i32", "u32", "i64", "f64"]
         .iter()
@@ -56,6 +56,9 @@ pub(crate) fn int_literal_kind(text: &str, span: Span) -> ExprKind {
                 ],
             }
         }
+        Ok(v) if text.ends_with("f64") => ExprKind::Float(v as f64),
+        // `i32`/`u32` keep the 32-bit pattern: `0xFFFFFFFFi32` is -1.
+        Ok(v) if suffixed && v <= u32::MAX as u64 => ExprKind::Int(v as u32 as i32 as i64),
         Ok(v) if suffixed => ExprKind::Int(v as i64),
         Ok(v) if radix != 10 && v <= u32::MAX as u64 => ExprKind::Int(v as u32 as i32 as i64),
         Ok(v) if radix == 10 && v <= i32::MAX as u64 => ExprKind::Int(v as i64),

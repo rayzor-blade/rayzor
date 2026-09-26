@@ -3716,8 +3716,30 @@ impl<'a> TastToHirContext<'a> {
         self.module.imports.push(hir_import);
     }
 
-    fn lower_module_field(&mut self, _field: &TypedModuleField) {
-        // TODO: Implement module field lowering
+    /// A module-level var/final is a global initialized with the module.
+    fn lower_module_field(&mut self, field: &TypedModuleField) {
+        let (ty, init, is_const) = match &field.kind {
+            TypedModuleFieldKind::Var {
+                field_type,
+                initializer,
+                ..
+            } => (*field_type, initializer, false),
+            TypedModuleFieldKind::Final {
+                field_type,
+                initializer,
+            } => (*field_type, initializer, true),
+            TypedModuleFieldKind::Function(_) => return,
+        };
+        let init = init.as_ref().map(|e| self.lower_expression(e));
+        self.module.globals.insert(
+            field.symbol_id,
+            HirGlobal {
+                symbol_id: field.symbol_id,
+                ty,
+                init,
+                is_const,
+            },
+        );
     }
 
     fn lower_type_params(&mut self, params: &[TypedTypeParameter]) -> Vec<HirTypeParam> {

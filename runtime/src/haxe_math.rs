@@ -60,6 +60,18 @@ pub extern "C" fn haxe_math_round(x: f64) -> i32 {
     x.round() as i32
 }
 
+/// Floor, keeping the Float type (Haxe's Math.ffloor)
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_math_ffloor(x: f64) -> f64 {
+    x.floor()
+}
+
+/// Ceiling, keeping the Float type (Haxe's Math.fceil)
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_math_fceil(x: f64) -> f64 {
+    x.ceil()
+}
+
 /// Round to nearest integer, keeping the Float type (Haxe's Math.fround)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_fround(x: f64) -> f64 {

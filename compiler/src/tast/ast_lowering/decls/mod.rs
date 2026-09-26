@@ -207,7 +207,27 @@ impl<'a> AstLowering<'a> {
         };
 
         let interned_name = self.context.intern_string(&field_name);
-        let field_symbol = self.context.symbol_table.create_variable(interned_name);
+        // A module-level var/final is in the module's scope, as a class in the
+        // same file is, so the file's code finds it by its bare name.
+        let field_symbol = match &module_field.kind {
+            parser::ModuleFieldKind::Function(_) => {
+                self.context.symbol_table.create_variable(interned_name)
+            }
+            _ => {
+                let symbol = self
+                    .context
+                    .symbol_table
+                    .create_variable_in_scope(interned_name, self.context.current_scope);
+                if let Some(scope) = self
+                    .context
+                    .scope_tree
+                    .get_scope_mut(self.context.current_scope)
+                {
+                    scope.add_symbol(symbol, interned_name);
+                }
+                symbol
+            }
+        };
         let mut field_flags = self.extract_metadata_flags(&module_field.meta, field_symbol);
         for modifier in &module_field.modifiers {
             use crate::tast::symbols::SymbolFlags;
@@ -233,17 +253,21 @@ impl<'a> AstLowering<'a> {
                 type_hint,
                 expr,
             } => {
-                let field_type = if let Some(type_hint) = type_hint {
-                    self.lower_type(type_hint)?
-                } else {
-                    self.context.type_table.borrow().dynamic_type()
+                let declared = match type_hint {
+                    Some(type_hint) => Some(self.lower_type(type_hint)?),
+                    None => None,
                 };
-
                 let initializer = if let Some(expr) = expr {
                     Some(self.lower_expression(expr)?)
                 } else {
                     None
                 };
+                let field_type = declared
+                    .or_else(|| initializer.as_ref().map(|i| i.expr_type))
+                    .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+                self.context
+                    .symbol_table
+                    .update_symbol_type(field_symbol, field_type);
 
                 TypedModuleFieldKind::Var {
                     field_type,
@@ -256,17 +280,21 @@ impl<'a> AstLowering<'a> {
                 type_hint,
                 expr,
             } => {
-                let field_type = if let Some(type_hint) = type_hint {
-                    self.lower_type(type_hint)?
-                } else {
-                    self.context.type_table.borrow().dynamic_type()
+                let declared = match type_hint {
+                    Some(type_hint) => Some(self.lower_type(type_hint)?),
+                    None => None,
                 };
-
                 let initializer = if let Some(expr) = expr {
                     Some(self.lower_expression(expr)?)
                 } else {
                     None
                 };
+                let field_type = declared
+                    .or_else(|| initializer.as_ref().map(|i| i.expr_type))
+                    .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+                self.context
+                    .symbol_table
+                    .update_symbol_type(field_symbol, field_type);
 
                 TypedModuleFieldKind::Final {
                     field_type,

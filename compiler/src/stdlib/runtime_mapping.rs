@@ -2019,6 +2019,10 @@ impl StdlibMapping {
                 types: &[F64] => I32),
             map_method!(static "Math", "fround" => "haxe_math_fround", params: 1, returns: primitive,
                 types: &[F64] => F64),
+            map_method!(static "Math", "ffloor" => "haxe_math_ffloor", params: 1, returns: primitive,
+                types: &[F64] => F64),
+            map_method!(static "Math", "fceil" => "haxe_math_fceil", params: 1, returns: primitive,
+                types: &[F64] => F64),
             // Trigonometric
             map_method!(static "Math", "sin" => "haxe_math_sin", params: 1, returns: primitive,
                 types: &[F64] => F64),

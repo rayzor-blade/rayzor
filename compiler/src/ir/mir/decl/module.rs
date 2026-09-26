@@ -185,6 +185,16 @@ impl<'a> HirToMirContext<'a> {
         // field_index_map is fully populated after class registration (Pass 1).
         self.rebuild_fields_by_type_cache();
 
+        // Globals before any body, so a body reads a module-level var as the
+        // global it is. Sorted by symbol id: unsorted iteration makes
+        // function-id assignment non-deterministic when an initializer
+        // registers an extern function.
+        let mut sorted_globals: Vec<_> = hir_module.globals.iter().collect();
+        sorted_globals.sort_by_key(|(sid, _)| sid.as_raw());
+        for (symbol_id, global) in sorted_globals {
+            self.lower_global(*symbol_id, global);
+        }
+
         // Pass 2 lowers function bodies; function_map is complete by now.
 
         // Pass 2a: class methods and constructors
@@ -413,15 +423,6 @@ impl<'a> HirToMirContext<'a> {
         // Pass 2b: Lower module function bodies
         for (symbol_id, hir_func) in &hir_module.functions {
             self.lower_function_body(*symbol_id, hir_func, None, None);
-        }
-
-        // Sort globals by symbol id: unsorted iteration makes function-id
-        // assignment non-deterministic when an initializer registers an extern
-        // function.
-        let mut sorted_globals: Vec<_> = hir_module.globals.iter().collect();
-        sorted_globals.sort_by_key(|(sid, _)| sid.as_raw());
-        for (symbol_id, global) in sorted_globals {
-            self.lower_global(*symbol_id, global);
         }
 
         // Generate reflective constructor wrappers for Type.createInstance().

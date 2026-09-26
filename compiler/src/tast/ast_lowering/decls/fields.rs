@@ -918,6 +918,20 @@ impl<'a> AstLowering<'a> {
             scope.add_symbol(param_symbol, param_name);
         }
 
+        let default_value = if let Some(default) = &parameter.default_value {
+            Some(self.lower_expression(default)?)
+        } else {
+            None
+        };
+
+        // Unannotated, a parameter takes its default's type when that is a
+        // primitive (`v = CONST` with `inline static var CONST:Float`).
+        let default_primitive = default_value.as_ref().map(|d| d.expr_type).filter(|t| {
+            matches!(
+                self.context.type_table.borrow().get(*t).map(|ti| &ti.kind),
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
+            )
+        });
         let param_type = if let Some(type_annotation) = &parameter.type_hint {
             let ty = self.lower_type(type_annotation)?;
             self.optional_param_type(parameter, ty)
@@ -927,6 +941,7 @@ impl<'a> AstLowering<'a> {
             .default_value
             .as_deref()
             .and_then(|d| self.literal_type(d))
+            .or(default_primitive)
         {
             ty
         } else {
@@ -937,12 +952,6 @@ impl<'a> AstLowering<'a> {
         self.context
             .symbol_table
             .update_symbol_type(param_symbol, param_type);
-
-        let default_value = if let Some(default) = &parameter.default_value {
-            Some(self.lower_expression(default)?)
-        } else {
-            None
-        };
 
         Ok(TypedParameter {
             symbol_id: param_symbol,

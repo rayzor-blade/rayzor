@@ -132,6 +132,11 @@ cp "$SRC"/../*.hx "$SHARED/unit/" 2>/dev/null || true
 if [[ -d "$SRC/misc" ]]; then
   cp -R "$SRC"/misc/. "$SHARED/unit/issues/misc/" 2>/dev/null || true
 fi
+# A helper module beside the rows (Issue5192_Test.hx) that is not a row itself.
+find "$SRC" -maxdepth 1 -name '*.hx' ! -name 'Issue[0-9]*.hx' \
+  -exec cp {} "$SHARED/unit/issues/" \; 2>/dev/null || true
+find "$SRC" -maxdepth 1 -name 'Issue[0-9]*_*.hx' \
+  -exec cp {} "$SHARED/unit/issues/" \; 2>/dev/null || true
 cp "$SRC_ROOT"/*.hx "$SHARED/" 2>/dev/null || true
 [[ -d "$SRC_ROOT/scripthost" ]] && cp -R "$SRC_ROOT"/scripthost "$SHARED/" 2>/dev/null || true
 [[ -d "$SRC_ROOT/misc" ]] && cp -R "$SRC_ROOT"/misc "$SHARED/" 2>/dev/null || true

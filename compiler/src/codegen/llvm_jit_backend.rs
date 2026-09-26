@@ -1460,6 +1460,8 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             "haxe_math_log" => "llvm.log.f64",
             "haxe_math_pow" => "llvm.pow.f64",
             "haxe_math_fround" => "llvm.round.f64",
+            "haxe_math_ffloor" => "llvm.floor.f64",
+            "haxe_math_fceil" => "llvm.ceil.f64",
             _ => return Ok(None),
         };
 

@@ -223,6 +223,22 @@ impl<'a> AstLowering<'a> {
         self.lower_expression(expr)
     }
 
+    /// The elements of a `@:mergeBlock { .. }` block element.
+    fn merge_block_body(elem: &parser::BlockElement) -> Option<&Vec<parser::BlockElement>> {
+        let parser::BlockElement::Expr(e) = elem else {
+            return None;
+        };
+        match &e.kind {
+            ExprKind::Meta { meta, expr } if meta.name.trim_start_matches(':') == "mergeBlock" => {
+                match &expr.kind {
+                    ExprKind::Block(inner) => Some(inner),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn lower_expression(
         &mut self,
         expression: &Expr,
@@ -1309,6 +1325,25 @@ impl<'a> AstLowering<'a> {
             {
                 return self.lower_expression(&Expr {
                     kind: ExprKind::Object(Vec::new()),
+                    span: expression.span,
+                });
+            }
+            // `@:mergeBlock { .. }` inside a block contributes its elements to
+            // the enclosing block, so its declarations stay in scope after it.
+            ExprKind::Block(block_elements)
+                if block_elements
+                    .iter()
+                    .any(|e| Self::merge_block_body(e).is_some()) =>
+            {
+                let mut merged = Vec::with_capacity(block_elements.len());
+                for elem in block_elements {
+                    match Self::merge_block_body(elem) {
+                        Some(inner) => merged.extend(inner.iter().cloned()),
+                        None => merged.push(elem.clone()),
+                    }
+                }
+                return self.lower_expression(&Expr {
+                    kind: ExprKind::Block(merged),
                     span: expression.span,
                 });
             }

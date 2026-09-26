@@ -203,10 +203,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
         let type_params = self.parse_type_params()?;
 
+        // `extends A, B` and Haxe's `extends A extends B` both list parents.
         let mut extends = Vec::new();
-        if self.stream.eat(TokenKind::KwExtends).is_some() {
+        while self.stream.eat(TokenKind::KwExtends).is_some() {
             extends.push(self.parse_type()?);
-            // Allow comma-separated: extends A, B, C
             while self.stream.eat(TokenKind::Comma).is_some() {
                 extends.push(self.parse_type()?);
             }
