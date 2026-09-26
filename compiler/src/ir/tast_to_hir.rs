@@ -6194,6 +6194,10 @@ impl<'a> TastToHirContext<'a> {
             None
         };
         if let Some(return_expr) = return_expr {
+            // A body the inliner cannot substitute through is called instead.
+            if !self.inline_safe(return_expr, &param_map) {
+                return None;
+            }
             let inlined = self.inline_expression_deep(
                 return_expr,
                 &lowered_receiver,
@@ -6209,6 +6213,98 @@ impl<'a> TastToHirContext<'a> {
         // 3. Replace `this` and parameter references
         // For now, fall back to regular method call
         None
+    }
+
+    /// Whether `inline_expression_deep` substitutes `this` and every parameter
+    /// in `expr`: a kind it lowers as-is must not mention them, or they are
+    /// left unbound in the caller.
+    fn inline_safe(&self, expr: &TypedExpression, params: &BTreeMap<SymbolId, HirExpr>) -> bool {
+        let mentions = |e: &TypedExpression| {
+            let mut refs = std::collections::BTreeMap::new();
+            self.collect_var_refs_expr(e, &mut refs);
+            refs.keys().any(|s| {
+                *s == SymbolId::from_raw(0)
+                    || params.contains_key(s)
+                    || self
+                        .symbol_table
+                        .get_symbol(*s)
+                        .is_some_and(|sym| self.string_interner.get(sym.name) == Some("this"))
+            })
+        };
+        let all = |es: &[TypedExpression]| es.iter().all(|e| self.inline_safe(e, params));
+        match &expr.kind {
+            TypedExpressionKind::This { .. }
+            | TypedExpressionKind::Literal { .. }
+            | TypedExpressionKind::Variable { .. } => true,
+            TypedExpressionKind::MethodCall {
+                receiver,
+                arguments,
+                ..
+            } => self.inline_safe(receiver, params) && all(arguments),
+            TypedExpressionKind::BinaryOp { left, right, .. } => {
+                self.inline_safe(left, params) && self.inline_safe(right, params)
+            }
+            TypedExpressionKind::UnaryOp { operand, .. } => self.inline_safe(operand, params),
+            TypedExpressionKind::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.inline_safe(condition, params)
+                    && self.inline_safe(then_expr, params)
+                    && else_expr
+                        .as_ref()
+                        .is_none_or(|e| self.inline_safe(e, params))
+            }
+            TypedExpressionKind::ObjectLiteral { fields, .. } => {
+                fields.iter().all(|f| self.inline_safe(&f.value, params))
+            }
+            TypedExpressionKind::ArrayLiteral { elements } => all(elements),
+            TypedExpressionKind::New { arguments, .. }
+            | TypedExpressionKind::StaticMethodCall { arguments, .. } => all(arguments),
+            TypedExpressionKind::Cast { expression, .. } => self.inline_safe(expression, params),
+            TypedExpressionKind::ArrayAccess { array, index } => {
+                self.inline_safe(array, params) && self.inline_safe(index, params)
+            }
+            TypedExpressionKind::StringInterpolation { parts } => parts.iter().all(|p| match p {
+                StringInterpolationPart::Expression(e) => self.inline_safe(e, params),
+                StringInterpolationPart::String(_) => true,
+            }),
+            TypedExpressionKind::FieldAccess { object, .. } => {
+                let substituted = matches!(object.kind, TypedExpressionKind::This { .. })
+                    || matches!(&object.kind, TypedExpressionKind::Variable { symbol_id }
+                        if params.contains_key(symbol_id));
+                substituted || !mentions(object)
+            }
+            TypedExpressionKind::Switch {
+                discriminant,
+                cases,
+                default_case,
+            } => {
+                let statement_mentions = |stmt: &TypedStatement| {
+                    let mut refs = std::collections::BTreeMap::new();
+                    self.collect_var_refs_stmt(stmt, &mut refs);
+                    refs.keys()
+                        .any(|s| *s == SymbolId::from_raw(0) || params.contains_key(s))
+                };
+                self.inline_safe(discriminant, params)
+                    && default_case
+                        .as_ref()
+                        .is_none_or(|d| self.inline_safe(d, params))
+                    && cases.iter().all(|case| {
+                        case.guard
+                            .as_ref()
+                            .is_none_or(|g| self.inline_safe(g, params))
+                            && match &case.body {
+                                TypedStatement::Expression { expression, .. } => {
+                                    self.inline_safe(expression, params)
+                                }
+                                other => !statement_mentions(other),
+                            }
+                    })
+            }
+            _ => !mentions(expr),
+        }
     }
 
     /// Deeply inline an expression, replacing `this` and parameters with concrete HIR expressions
