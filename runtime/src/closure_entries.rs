@@ -145,6 +145,37 @@ pub extern "C" fn haxe_closure_dynamic_view(closure: *mut u8) -> *mut u8 {
     }
 }
 
+/// `Reflect.callMethod` on a function held as Dynamic: its box-shaped entry
+/// called with the array's elements. Missing trailing arguments arrive as
+/// null; the C ABI lets a callee ignore the extra registers.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_call_method_dynamic(
+    func: *mut u8,
+    args: *const crate::haxe_array::HaxeArray,
+) -> *mut u8 {
+    let closure = crate::type_system::haxe_unbox_if_tag(func, crate::type_system::TYPE_FUNCTION.0);
+    if closure.is_null() {
+        return std::ptr::null_mut();
+    }
+    let view = haxe_closure_dynamic_view(closure);
+    let (code, env) = unsafe { (*(view as *const usize), *(view as *const usize).add(1)) };
+    if code == 0 {
+        return std::ptr::null_mut();
+    }
+    let len = if args.is_null() {
+        0
+    } else {
+        crate::haxe_array::haxe_array_length(args)
+    };
+    let mut a = [0i64; 7];
+    for (i, slot) in a.iter_mut().enumerate().take(len) {
+        *slot = crate::haxe_array::haxe_array_get_i64(args, i);
+    }
+    let f: extern "C" fn(usize, i64, i64, i64, i64, i64, i64, i64) -> *mut u8 =
+        unsafe { std::mem::transmute(code) };
+    f(env, a[0], a[1], a[2], a[3], a[4], a[5], a[6])
+}
+
 /// A box's payload as a 64-bit slot: an Int or Bool as its value, a Float as
 /// its bits, a String or reference as its pointer. A non-box passes through.
 #[unsafe(no_mangle)]

@@ -1088,6 +1088,7 @@ impl<'a> AstLowering<'a> {
         &mut self,
         arg: TypedExpression,
         formal: Option<TypeId>,
+        box_string: bool,
     ) -> TypedExpression {
         use crate::tast::core::TypeKind;
         let Some(formal_ty) = formal else {
@@ -1098,10 +1099,11 @@ impl<'a> AstLowering<'a> {
             let formal_is_dyn =
                 matches!(tt.get(formal_ty).map(|t| &t.kind), Some(TypeKind::Dynamic));
             formal_is_dyn
-                && matches!(
-                    tt.get(arg.expr_type).map(|t| &t.kind),
-                    Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool)
-                )
+                && match tt.get(arg.expr_type).map(|t| &t.kind) {
+                    Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool) => true,
+                    Some(TypeKind::String) => box_string,
+                    _ => false,
+                }
         };
         if !should_box {
             return arg;
@@ -1352,6 +1354,10 @@ impl<'a> AstLowering<'a> {
                 arg_exprs
             } else {
                 let callee_is_extern = self.callee_is_extern(expr);
+                // Reflection reads its object as a box: a raw String there is
+                // indistinguishable from an object.
+                let reflect_callee = matches!(&expr.kind, ExprKind::Field { expr: obj, .. }
+                    if matches!(&obj.kind, ExprKind::Ident(c) if c == "Reflect"));
                 let mut coerced: Vec<TypedExpression> = Vec::with_capacity(arg_exprs.len());
                 for (i, a) in arg_exprs.into_iter().enumerate() {
                     let formal = boxing_formals
@@ -1374,7 +1380,11 @@ impl<'a> AstLowering<'a> {
                     } else {
                         self.retype_dynamic_array_literal(a, formal)
                     };
-                    coerced.push(self.coerce_arg_to_dynamic_param(a, formal));
+                    coerced.push(self.coerce_arg_to_dynamic_param(
+                        a,
+                        formal,
+                        reflect_callee && i == 0,
+                    ));
                 }
                 coerced
             }

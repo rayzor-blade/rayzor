@@ -152,9 +152,16 @@ impl<'a> HirToMirContext<'a> {
             .and_then(|id| self.function_param_defaults.get(&id).cloned())
             .unwrap_or_default();
         let func_ptr = if let HirExprKind::Variable { symbol, .. } = &func_expr.kind {
+            // A local or parameter holding a function is a value, whatever its name.
             let resolved_func = self.get_function_id(symbol).or_else(|| {
                 self.symbol_table
                     .get_symbol(*symbol)
+                    .filter(|sym| {
+                        !matches!(
+                            sym.kind,
+                            crate::tast::SymbolKind::Variable | crate::tast::SymbolKind::Parameter
+                        )
+                    })
                     .and_then(|sym| self.string_interner.get(sym.name))
                     .and_then(|name| {
                         self.find_function_by_name(name)
@@ -175,17 +182,30 @@ impl<'a> HirToMirContext<'a> {
             self.lower_expression(func_expr)?
         };
 
-        // Fallback path for makeVarArgs-style functions where the function type is
-        // erased/dynamic: call with a single Array argument.
+        // A function whose type is erased (held as Dynamic) is called through
+        // its box-shaped entry with the array's elements.
         let fallback_single_array_call = |this: &mut Self| -> Option<IrId> {
             let arr_arg = this.lower_expression(args_array_expr)?;
-            let sig = IrType::Function {
-                params: vec![this.convert_type(args_array_expr.ty)],
-                return_type: Box::new(result_type.clone()),
-                varargs: false,
+            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+            let as_ptr = |this: &mut Self, reg: IrId| match this.builder.get_register_type(reg) {
+                Some(IrType::Ptr(_)) | None => reg,
+                Some(other) => this
+                    .builder
+                    .build_cast(reg, other, ptr_u8.clone())
+                    .unwrap_or(reg),
             };
-            this.builder
-                .build_call_indirect(func_ptr, vec![arr_arg], sig)
+            let func = as_ptr(this, func_ptr);
+            let arr = as_ptr(this, arr_arg);
+            let call = this.get_or_register_extern_function(
+                "haxe_call_method_dynamic",
+                vec![ptr_u8.clone(), ptr_u8.clone()],
+                ptr_u8.clone(),
+            );
+            let result = this
+                .builder
+                .build_call_direct(call, vec![func, arr], ptr_u8.clone())?;
+            this.boxed_value_regs.insert(result);
+            this.maybe_unbox_for_extern_return(result, &ptr_u8, &result_type)
         };
 
         // One parameter takes the arguments array itself only when it is an

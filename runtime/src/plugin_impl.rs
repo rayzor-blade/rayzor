@@ -2262,6 +2262,10 @@ register_symbol!(
     "haxe_closure_dynamic_view",
     crate::closure_entries::haxe_closure_dynamic_view
 );
+register_symbol!(
+    "haxe_call_method_dynamic",
+    crate::closure_entries::haxe_call_method_dynamic
+);
 register_symbol!("rayzor_mem_prefetch", crate::haxe_sys::rayzor_mem_prefetch);
 register_symbol!(
     "haxe_enum_to_string",

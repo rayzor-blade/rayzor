@@ -635,6 +635,21 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// The class `class` extends, from its declaration in this module.
+    pub(crate) fn parent_class_symbol(&self, class: SymbolId) -> Option<SymbolId> {
+        self.current_hir_types.values().find_map(|d| match d {
+            HirTypeDecl::Class(c) if c.symbol_id == class => c.extends_symbol.or_else(|| {
+                c.extends
+                    .and_then(|t| self.type_table.get(t))
+                    .and_then(|t| match &t.kind {
+                        TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                        _ => None,
+                    })
+            }),
+            _ => None,
+        })
+    }
+
     /// A class's instance slots with its ancestors'; inherited slots keep
     /// their indices in the subclass layout.
     fn struct_init_storage_fields(
@@ -644,17 +659,7 @@ impl<'a> HirToMirContext<'a> {
         let mut fields = self.class_instance_fields.get(&class_symbol)?.clone();
         let mut seen = vec![class_symbol];
         let mut current = class_symbol;
-        while let Some(parent) = self.current_hir_types.values().find_map(|d| match d {
-            HirTypeDecl::Class(c) if c.symbol_id == current => c.extends_symbol.or_else(|| {
-                c.extends
-                    .and_then(|t| self.type_table.get(t))
-                    .and_then(|t| match &t.kind {
-                        TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                        _ => None,
-                    })
-            }),
-            _ => None,
-        }) {
+        while let Some(parent) = self.parent_class_symbol(current) {
             if seen.contains(&parent) {
                 break;
             }

@@ -111,6 +111,25 @@ impl<'a> HirToMirContext<'a> {
             };
             eprintln!("[calltarget] {} {} is_method={}", t, shape, is_method);
         }
+        // `Reflect.field(o, "m")` reads a method by name: its class then
+        // registers a bound thunk for `m`.
+        if let crate::ir::hir::CallTarget::Static { class, method } = _resolved_target {
+            let name_of = |s: &SymbolId| {
+                self.symbol_table
+                    .get_symbol(*s)
+                    .map(|sym| self.interned_str(sym.name))
+                    .unwrap_or("")
+            };
+            if name_of(class) == "Reflect" && matches!(name_of(method), "field" | "getProperty") {
+                if let Some(HirExprKind::Literal(HirLiteral::String(field))) =
+                    args.get(1).map(|a| &a.kind)
+                {
+                    let field = self.interned_str(*field).to_string();
+                    self.dynamic_member_names.insert(field);
+                }
+            }
+        }
+
         // @:shader wgsl() — intercept at Call entry point
         probe!(self.try_shader_call(expr));
 

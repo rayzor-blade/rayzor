@@ -216,16 +216,19 @@ unsafe fn class_field_of(type_id: u32, obj: *mut u8, name: &str) -> *mut u8 {
                 let value = std::ptr::read_unaligned(slot_ptr);
                 box_class_field_as_dynamic(value, ty)
             }
-            None if class_declares_method(type_id, name) => {
-                // A method with a registered thunk is a callable bound
-                // closure; otherwise a function-tagged box of the object.
-                let target = match method_code_in_chain(type_id, name) {
-                    Some(code) => crate::closure_entries::bound_method_record(code, obj),
-                    None => obj,
-                };
-                crate::type_system::haxe_box_reference_ptr(target, TYPE_FUNCTION.0)
-            }
-            None => std::ptr::null_mut(),
+            // A method with a registered thunk (under its run-time name,
+            // which `@:native` may change) is a callable bound closure;
+            // another declared method a function-tagged box of the object.
+            None => match method_code_in_chain(type_id, name) {
+                Some(code) => crate::type_system::haxe_box_reference_ptr(
+                    crate::closure_entries::bound_method_record(code, obj),
+                    TYPE_FUNCTION.0,
+                ),
+                None if class_declares_method(type_id, name) => {
+                    crate::type_system::haxe_box_reference_ptr(obj, TYPE_FUNCTION.0)
+                }
+                None => std::ptr::null_mut(),
+            },
         }
     }
 }

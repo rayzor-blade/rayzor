@@ -1145,6 +1145,33 @@ impl<'a> HirToMirContext<'a> {
     ///
     /// Returns `None` if the method's signature isn't available in
     /// this module (e.g. cross-module method from a `.blade` cache).
+    /// The `@:native` name of `class.name`, declared there or on the method
+    /// it overrides.
+    fn method_native_name(
+        &self,
+        class: SymbolId,
+        name: crate::tast::InternedString,
+    ) -> Option<crate::tast::InternedString> {
+        let mut current = Some(class);
+        let mut seen = Vec::new();
+        while let Some(class) = current {
+            if seen.contains(&class) {
+                break;
+            }
+            seen.push(class);
+            if let Some(native) = self
+                .class_method_by_name
+                .get(&(class, name))
+                .and_then(|m| self.symbol_table.get_symbol(*m))
+                .and_then(|m| m.native_name)
+            {
+                return Some(native);
+            }
+            current = self.parent_class_symbol(class);
+        }
+        None
+    }
+
     pub(crate) fn ensure_method_ref_thunk(
         &mut self,
         method_func_id: IrFunctionId,
@@ -1301,8 +1328,12 @@ impl<'a> HirToMirContext<'a> {
                 .class_method_by_name
                 .iter()
                 .filter_map(|((class_sym, name), method_sym)| {
-                    let name = self.string_interner.get(*name)?.to_string();
-                    let is_static = self.symbol_table.get_symbol(*method_sym).is_some_and(|s| {
+                    // A `@:native` method exists at run time under that name,
+                    // and so does an override of it.
+                    let method = self.symbol_table.get_symbol(*method_sym);
+                    let name = self.method_native_name(*class_sym, *name).unwrap_or(*name);
+                    let name = self.string_interner.get(name)?.to_string();
+                    let is_static = method.is_some_and(|s| {
                         s.flags.contains(crate::tast::symbols::SymbolFlags::STATIC)
                     });
                     (!is_static && self.dynamic_member_names.contains(&name)).then_some((
