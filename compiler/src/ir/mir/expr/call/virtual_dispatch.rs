@@ -84,6 +84,10 @@ impl<'a> HirToMirContext<'a> {
                         call_args.push(reg);
                     }
                 }
+                // Omitted trailing arguments take the method's declared defaults.
+                if let Some(&func_id) = self.function_map.get(symbol) {
+                    self.fill_default_args(func_id, &mut call_args, true);
+                }
                 let lookup_fn = self.get_or_register_extern_function(
                     "haxe_vtable_lookup",
                     vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
@@ -98,13 +102,10 @@ impl<'a> HirToMirContext<'a> {
                 // Parameter types follow the registers actually passed, so a
                 // coerced argument is not declared as the type it arrived with.
                 let mut param_types = vec![IrType::Ptr(Box::new(IrType::Void))];
-                for (i, arg) in args.iter().skip(1).enumerate() {
-                    let declared = self.convert_type(arg.ty);
-                    let passed = call_args
-                        .get(i + 1)
-                        .and_then(|r| self.builder.get_register_type(*r))
-                        .unwrap_or(declared);
-                    param_types.push(passed);
+                for (i, reg) in call_args.iter().enumerate().skip(1) {
+                    let declared = args.get(i).map(|a| self.convert_type(a.ty));
+                    let passed = self.builder.get_register_type(*reg).or(declared);
+                    param_types.push(passed.unwrap_or(IrType::I64));
                 }
                 let return_type = Box::new(self.convert_type(expr.ty));
                 let func_signature = IrType::Function {

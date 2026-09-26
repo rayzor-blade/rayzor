@@ -613,6 +613,15 @@ impl<'a> AstLowering<'a> {
                         return Some(*sym);
                     }
                 }
+                // An interface's methods live in its own scope, not these tables.
+                let is_interface = this
+                    .context
+                    .symbol_table
+                    .get_symbol(*class_sym)
+                    .is_some_and(|s| s.kind == crate::tast::symbols::SymbolKind::Interface);
+                if is_interface {
+                    return this.resolve_class_method_symbol(*class_sym, name);
+                }
                 None
             };
 
@@ -710,6 +719,11 @@ impl<'a> AstLowering<'a> {
             .map(|s| s.kind == crate::tast::symbols::SymbolKind::Function)
             .unwrap_or(false);
         if is_method {
+            if let Some(value) =
+                self.lower_interface_method_value(expression, expr, field, field_symbol, &obj_expr)?
+            {
+                return Ok(value);
+            }
             // The expression's type is the method's function type,
             // which the symbol already carries (or Dynamic as a
             // safe fallback for unresolved generic methods).
@@ -762,6 +776,105 @@ impl<'a> AstLowering<'a> {
 
     /// Check if function has @:arrayAccess metadata
     /// `@:arrayAccess`, or its operator spelling `@:op([])`.
+    /// `recv.m` on an interface receiver: `{ var r = recv; function(a, ..)
+    /// return r.m(a, ..); }`, so the call dispatches through the interface.
+    fn lower_interface_method_value(
+        &mut self,
+        expression: &Expr,
+        receiver: &Expr,
+        method: &str,
+        method_symbol: SymbolId,
+        lowered_receiver: &TypedExpression,
+    ) -> LoweringResult<Option<TypedExpression>> {
+        let is_interface = {
+            let tt = self.context.type_table.borrow();
+            let mut ty = lowered_receiver.expr_type;
+            for _ in 0..4 {
+                match tt.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            matches!(
+                tt.get(ty).map(|t| &t.kind),
+                Some(TypeKind::Interface { .. })
+            )
+        };
+        if !is_interface {
+            return Ok(None);
+        }
+        let Some(param_types) = self.function_param_types_from_symbol(method_symbol) else {
+            return Ok(None);
+        };
+        let returns_void = {
+            let tt = self.context.type_table.borrow();
+            let fn_ty = self
+                .context
+                .symbol_table
+                .get_symbol(method_symbol)
+                .map(|s| s.type_id);
+            match fn_ty.and_then(|t| tt.get(t)).map(|t| &t.kind) {
+                Some(TypeKind::Function { return_type, .. }) => {
+                    matches!(tt.get(*return_type).map(|t| &t.kind), Some(TypeKind::Void))
+                }
+                _ => false,
+            }
+        };
+        let span = expression.span;
+        let at = |kind: ExprKind| Expr { kind, span };
+        let recv = "__iface_recv".to_string();
+        let names: Vec<String> = (0..param_types.len())
+            .map(|i| format!("__iface_arg{i}"))
+            .collect();
+        let call = at(ExprKind::Call {
+            expr: Box::new(at(ExprKind::Field {
+                expr: Box::new(at(ExprKind::Ident(recv.clone()))),
+                field: method.to_string(),
+                is_optional: false,
+            })),
+            args: names
+                .iter()
+                .map(|n| at(ExprKind::Ident(n.clone())))
+                .collect(),
+        });
+        let body = if returns_void {
+            call
+        } else {
+            at(ExprKind::Return(Some(Box::new(call))))
+        };
+        let literal = at(ExprKind::Function(Function {
+            name: String::new(),
+            type_params: Vec::new(),
+            params: names
+                .iter()
+                .map(|n| FunctionParam {
+                    meta: Vec::new(),
+                    name: n.clone(),
+                    type_hint: None,
+                    optional: false,
+                    rest: false,
+                    default_value: None,
+                    span,
+                })
+                .collect(),
+            return_type: None,
+            body: Some(Box::new(body)),
+            span,
+        }));
+        let block = at(ExprKind::Block(vec![
+            BlockElement::Expr(at(ExprKind::Var {
+                name: recv,
+                type_hint: None,
+                expr: Some(Box::new(receiver.clone())),
+            })),
+            BlockElement::Expr(literal),
+        ]));
+        self.expected_lambda_params_stack.push(Some(param_types));
+        let lowered = self.lower_expression(&block);
+        self.expected_lambda_params_stack.pop();
+        lowered.map(Some)
+    }
+
     /// `C.new` as a value: `function(a, ..) return new C(a, ..)`, its
     /// parameters typed from the constructor's.
     fn lower_constructor_value(

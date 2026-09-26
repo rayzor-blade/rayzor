@@ -188,6 +188,16 @@ impl<'a> HirToMirContext<'a> {
                 .build_call_indirect(func_ptr, vec![arr_arg], sig)
         };
 
+        // One parameter takes the arguments array itself only when it is an
+        // Array (makeVarArgs); a known scalar parameter gets the first element.
+        let single_param_takes_array = match self.resolve_function_type_signature(func_expr.ty) {
+            Some((params, _)) if params.len() == 1 => self
+                .type_table
+                .get(params[0])
+                .is_some_and(|ti| matches!(ti.kind, crate::tast::TypeKind::Array { .. })),
+            Some(_) => false,
+            None => true,
+        };
         let lower_with_ir_signature = |this: &mut Self,
                                        param_ir_types: Vec<IrType>,
                                        return_ir: IrType|
@@ -210,7 +220,7 @@ impl<'a> HirToMirContext<'a> {
                     args_array_reg
                 };
 
-            let call_args: Vec<IrId> = if param_ir_types.len() == 1 {
+            let call_args: Vec<IrId> = if param_ir_types.len() == 1 && single_param_takes_array {
                 // makeVarArgs-style callback: pass args array directly.
                 let target_ty = param_ir_types[0].clone();
                 let arr_arg =

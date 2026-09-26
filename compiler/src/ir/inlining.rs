@@ -497,8 +497,42 @@ impl InliningPass {
                     _ => {}
                 }
             }
+            // A narrower integer argument widens into its own register: the
+            // caller's register keeps its type, so its arithmetic still wraps.
+            let is_int = |t: &IrType| {
+                matches!(
+                    t,
+                    IrType::I8
+                        | IrType::I16
+                        | IrType::I32
+                        | IrType::I64
+                        | IrType::U8
+                        | IrType::U16
+                        | IrType::U32
+                        | IrType::U64
+                )
+            };
+            if mapped == *arg
+                && let Some(from) = caller.register_types.get(arg).cloned()
+                && from != param.ty
+                && (is_int(&from) || from == IrType::Bool)
+                && is_int(&param.ty)
+            {
+                let wide = IrId::new(*next_reg_id);
+                *next_reg_id += 1;
+                arg_coercions.push(IrInstruction::Cast {
+                    dest: wide,
+                    src: *arg,
+                    from_ty: from,
+                    to_ty: param.ty.clone(),
+                });
+                caller.register_types.insert(wide, param.ty.clone());
+                mapped = wide;
+            }
             reg_map.insert(param.reg, mapped);
         }
+        let param_regs: std::collections::BTreeSet<IrId> =
+            callee.signature.parameters.iter().map(|p| p.reg).collect();
 
         // Allocate new registers for callee's internal values
         for block in callee.cfg.blocks.values() {
@@ -523,6 +557,11 @@ impl InliningPass {
         // Copy register types from callee to caller with remapped IDs,
         // applying type substitution for generic inline methods
         for (old_reg, new_reg) in &reg_map {
+            // A parameter maps onto a caller register; one the caller has typed
+            // keeps the caller's type.
+            if param_regs.contains(old_reg) && caller.register_types.contains_key(new_reg) {
+                continue;
+            }
             if let Some(ty) = callee.register_types.get(old_reg) {
                 let substituted = substitute_type_with_map(ty, &type_sub_map);
                 caller.register_types.insert(*new_reg, substituted);

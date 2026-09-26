@@ -338,6 +338,27 @@ pub extern "C" fn haxe_reflect_set_field(obj: *mut u8, field: *mut u8, value: *m
 /// pointer for `Object`, or the bitcast of the primitive value into
 /// `*mut u8` for `Int`/`Float`/`Bool`.
 unsafe fn raw_value_to_slot(value: *mut u8, ty: ParamType) -> u64 {
+    // A scalar that arrives boxed stores its payload, not the box.
+    if matches!(ty, ParamType::Int | ParamType::Bool | ParamType::Float)
+        && let Some(d) = dynamic_box_at(value)
+        && !d.value_ptr.is_null()
+    {
+        let payload = unsafe {
+            match (d.type_id, ty) {
+                (TYPE_INT, ParamType::Float) => {
+                    Some((*(d.value_ptr as *const i64) as f64).to_bits())
+                }
+                (TYPE_INT, _) => Some(*(d.value_ptr as *const i64) as u64),
+                (TYPE_FLOAT, ParamType::Float) => Some((*(d.value_ptr as *const f64)).to_bits()),
+                (TYPE_FLOAT, _) => Some(*(d.value_ptr as *const f64) as i64 as u64),
+                (TYPE_BOOL, _) => Some(*(d.value_ptr as *const bool) as u64),
+                _ => None,
+            }
+        };
+        if let Some(payload) = payload {
+            return payload;
+        }
+    }
     match ty {
         // Primitive payloads are bitcast into the `*mut u8` slot by
         // the caller (rayzor's Dynamic-arg ABI). Read the bits back

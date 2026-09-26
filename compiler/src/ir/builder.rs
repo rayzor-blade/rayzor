@@ -244,6 +244,18 @@ impl IrBuilder {
 
     /// Build a binary operation
     pub fn build_binop(&mut self, op: BinaryOp, left: IrId, right: IrId) -> Option<IrId> {
+        // Int meeting Int64 is Int64 arithmetic: the 32-bit side sign-extends.
+        // A shift's count does not decide the width of its result.
+        let shift = matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Ushr);
+        let (left, right) = match (self.get_register_type(left), self.get_register_type(right)) {
+            (Some(IrType::I32), Some(IrType::I64)) if !shift => {
+                (self.build_cast(left, IrType::I32, IrType::I64)?, right)
+            }
+            (Some(IrType::I64), Some(IrType::I32)) if !shift => {
+                (left, self.build_cast(right, IrType::I32, IrType::I64)?)
+            }
+            _ => (left, right),
+        };
         let dest = self.alloc_reg()?;
         // Infer result type from left operand (or right if left is unknown)
         // This is critical for LLVM backend to know whether to use int or float ops

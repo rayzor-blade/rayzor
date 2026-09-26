@@ -22,6 +22,48 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// `x + 1` or `x - 1` for `++`/`--`; a Dynamic operand is a box or a raw
+    /// slot, so it steps through the runtime's Dynamic arithmetic.
+    fn step_value(&mut self, old: IrId, operand_ty: TypeId, increment: bool) -> Option<IrId> {
+        let one = self.builder.build_const(IrValue::I32(1))?;
+        let is_dynamic = matches!(
+            self.type_table.get(operand_ty).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        );
+        if !is_dynamic {
+            let op = if increment {
+                BinaryOp::Add
+            } else {
+                BinaryOp::Sub
+            };
+            return self.builder.build_binop(op, old, one);
+        }
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let as_ptr = |slf: &mut Self, reg: IrId| -> Option<IrId> {
+            match slf.builder.get_register_type(reg) {
+                Some(IrType::Ptr(inner)) if *inner == IrType::U8 => Some(reg),
+                Some(other) => slf.builder.build_cast(reg, other, ptr_u8.clone()),
+                None => Some(reg),
+            }
+        };
+        let lhs = as_ptr(self, old)?;
+        let boxed_one = self.box_scalar_register(one)?;
+        let rhs = as_ptr(self, boxed_one)?;
+        let f = self.get_or_register_extern_function(
+            "haxe_dynamic_arith",
+            vec![IrType::I32, ptr_u8.clone(), ptr_u8.clone()],
+            ptr_u8.clone(),
+        );
+        let code = self
+            .builder
+            .build_const(IrValue::I32(if increment { 0 } else { 1 }))?;
+        let out = self
+            .builder
+            .build_call_direct(f, vec![code, lhs, rhs], ptr_u8)?;
+        self.boxed_value_regs.insert(out);
+        Some(out)
+    }
+
     pub(crate) fn lower_unary(&mut self, expr: &HirExpr) -> Option<IrId> {
         let HirExprKind::Unary { op, operand } = &expr.kind else {
             unreachable!("lower_unary on a non-Unary expression")
@@ -69,12 +111,7 @@ impl<'a> HirToMirContext<'a> {
                     // A `Null<scalar>` element is a box: open it, count, close it.
                     let opened = self.open_nullable_scalar(loaded, operand.ty);
                     let old_value = opened.unwrap_or(loaded);
-                    let one = self.builder.build_const(IrValue::I32(1))?;
-                    let new_value = if is_increment {
-                        self.builder.build_binop(BinaryOp::Add, old_value, one)?
-                    } else {
-                        self.builder.build_binop(BinaryOp::Sub, old_value, one)?
-                    };
+                    let new_value = self.step_value(old_value, operand.ty, is_increment)?;
                     let (old_value, new_value, stored) = if opened.is_some() {
                         let stored = self.box_scalar_register(new_value)?;
                         (loaded, stored, stored)
@@ -134,12 +171,7 @@ impl<'a> HirToMirContext<'a> {
                     let loaded = self.lower_field_expr_with_receiver(operand, obj_reg)?;
                     let opened = self.open_nullable_scalar(loaded, operand.ty);
                     let old_value = opened.unwrap_or(loaded);
-                    let one = self.builder.build_const(IrValue::I32(1))?;
-                    let new_value = if is_increment {
-                        self.builder.build_binop(BinaryOp::Add, old_value, one)?
-                    } else {
-                        self.builder.build_binop(BinaryOp::Sub, old_value, one)?
-                    };
+                    let new_value = self.step_value(old_value, operand.ty, is_increment)?;
                     let (old_value, new_value, stored) = if opened.is_some() {
                         let stored = self.box_scalar_register(new_value)?;
                         (loaded, stored, stored)
@@ -170,13 +202,7 @@ impl<'a> HirToMirContext<'a> {
                 let loaded = self.lower_expression(operand)?;
                 let opened = self.open_nullable_scalar(loaded, operand.ty);
                 let old_value = opened.unwrap_or(loaded);
-                let one = self.builder.build_const(IrValue::I32(1))?;
-
-                let new_value = if is_increment {
-                    self.builder.build_binop(BinaryOp::Add, old_value, one)?
-                } else {
-                    self.builder.build_binop(BinaryOp::Sub, old_value, one)?
-                };
+                let new_value = self.step_value(old_value, operand.ty, is_increment)?;
                 let (old_value, new_value) = if opened.is_some() {
                     (loaded, self.box_scalar_register(new_value)?)
                 } else {

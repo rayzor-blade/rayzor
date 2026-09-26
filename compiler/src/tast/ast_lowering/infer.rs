@@ -305,11 +305,24 @@ impl<'a> AstLowering<'a> {
                     }
                 }
 
+                // `Null<Int> - 1` is Int arithmetic: a nullable primitive
+                // operand types as its primitive.
+                let primitive = |ty: TypeId| match type_table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Optional { inner_type })
+                        if matches!(
+                            type_table.get(*inner_type).map(|t| &t.kind),
+                            Some(TypeKind::Int | TypeKind::Float | TypeKind::String)
+                        ) =>
+                    {
+                        *inner_type
+                    }
+                    _ => ty,
+                };
                 match operator {
                     BinaryOperator::Add => {
                         // Add can be either string concatenation or numeric addition
-                        let left_type = left.expr_type;
-                        let right_type = right.expr_type;
+                        let left_type = primitive(left.expr_type);
+                        let right_type = primitive(right.expr_type);
                         let dynamic_type = type_table.dynamic_type();
                         let string_type = type_table.string_type();
                         let int_type = type_table.int_type();
@@ -341,8 +354,8 @@ impl<'a> AstLowering<'a> {
                     | BinaryOperator::Div
                     | BinaryOperator::Mod => {
                         // Purely numeric operations
-                        let left_type = left.expr_type;
-                        let right_type = right.expr_type;
+                        let left_type = primitive(left.expr_type);
+                        let right_type = primitive(right.expr_type);
                         let dynamic_type = type_table.dynamic_type();
 
                         // If either operand is Dynamic, result is Dynamic
