@@ -64,7 +64,12 @@ pub extern "C" fn haxe_json_parse(str_ptr: *const u8) -> *mut u8 {
     };
 
     let mut parser = Parser { bytes, pos: 0 };
-    parser.parse_value()
+    let value = parser.parse_value();
+    parser.skip_whitespace();
+    if let Some(c) = parser.peek() {
+        parser.invalid_char(c);
+    }
+    value
 }
 
 /// Stringify a Dynamic value to JSON.
@@ -137,8 +142,13 @@ impl<'a> Parser<'a> {
             b'f' => self.parse_false(),
             b'n' => self.parse_null(),
             c if c == b'-' || c.is_ascii_digit() => self.parse_number(),
-            _ => std::ptr::null_mut(),
+            c => self.invalid_char(c),
         }
+    }
+
+    /// Malformed input throws, as upstream's JsonParser does.
+    fn invalid_char(&self, c: u8) -> ! {
+        crate::exception::throw_with_message(format!("Invalid char {} at position {}", c, self.pos))
     }
 
     // -- Object --

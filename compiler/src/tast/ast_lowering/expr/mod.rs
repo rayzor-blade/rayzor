@@ -954,6 +954,15 @@ impl<'a> AstLowering<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 let ctor_params = self.constructor_param_types(base_class_type_id);
                 let arg_exprs = self.pack_rest_args(arg_exprs, ctor_params.as_deref(), expression);
+                // An argument for an abstract-typed parameter goes through its `@:from`.
+                let arg_exprs: Vec<TypedExpression> = match &ctor_params {
+                    Some(params) => arg_exprs
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, a)| self.coerce_arg_via_abstract_from(a, params.get(i).copied()))
+                        .collect(),
+                    None => arg_exprs,
+                };
 
                 // Lower type arguments from params
                 let mut type_args = params
@@ -3255,7 +3264,34 @@ impl<'a> AstLowering<'a> {
                 }
                 expr
             }
-            _ => expr,
+            // An Int where a Float is expected is that Float.
+            _ => {
+                let (int_t, float_t) = {
+                    let tt = self.context.type_table.borrow();
+                    (tt.int_type(), tt.float_type())
+                };
+                let float_target = target == float_t;
+                if !float_target || expr.expr_type != int_t {
+                    return expr;
+                }
+                if let TypedExpressionKind::Literal {
+                    value: LiteralValue::Int(n),
+                } = expr.kind
+                {
+                    expr.kind = TypedExpressionKind::Literal {
+                        value: LiteralValue::Float(n as f64),
+                    };
+                } else {
+                    let inner = expr.clone();
+                    expr.kind = TypedExpressionKind::Cast {
+                        expression: Box::new(inner),
+                        target_type: float_t,
+                        cast_kind: CastKind::Implicit,
+                    };
+                }
+                expr.expr_type = float_t;
+                expr
+            }
         }
     }
 }

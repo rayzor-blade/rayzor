@@ -981,7 +981,7 @@ impl<'a> AstLowering<'a> {
     /// (`this()` on an abstract over a function type jumps through the
     /// integer 2). The clause form (`from Y`) is representation-compatible
     /// and correctly stays uncoerced.
-    fn coerce_arg_via_abstract_from(
+    pub(crate) fn coerce_arg_via_abstract_from(
         &mut self,
         arg: TypedExpression,
         formal: Option<TypeId>,
@@ -1342,7 +1342,7 @@ impl<'a> AstLowering<'a> {
         // (covers instance method calls and same-module callees). The latter is
         // the UNMODIFIED lambda-hint resolver — reused read-only here so the
         // boxing decision cannot affect closure inference.
-        let arg_exprs = {
+        let mut arg_exprs = {
             let boxing_formals = if self.suppress_callee_hint {
                 None
             } else {
@@ -1359,9 +1359,15 @@ impl<'a> AstLowering<'a> {
                         .and_then(|f| f.get(i).copied())
                         .or_else(|| expected_arg_types.as_ref().and_then(|f| f.get(i).copied()));
                     let a = self.coerce_arg_via_abstract_from(a, formal);
+                    // A top-level Int argument for a Float formal is left to the
+                    // call's own coercion; literals inside structures are retyped.
+                    let top_level_int_to_float = {
+                        let tt = self.context.type_table.borrow();
+                        a.expr_type == tt.int_type() && formal == Some(tt.float_type())
+                    };
                     let a = match formal {
-                        Some(f) => self.retype_literal_to(a, f),
-                        None => a,
+                        Some(f) if !top_level_int_to_float => self.retype_literal_to(a, f),
+                        _ => a,
                     };
                     let a = if callee_is_extern {
                         a
@@ -1620,8 +1626,8 @@ impl<'a> AstLowering<'a> {
                                     &arg_exprs,
                                 );
 
-                                let type_arguments =
-                                    self.structural_call_type_arguments(method_symbol, &arg_exprs);
+                                let type_arguments = self
+                                    .structural_call_type_arguments(method_symbol, &mut arg_exprs);
                                 let expr_type = self.return_type_with_type_args(
                                     method_symbol,
                                     &type_arguments,
@@ -2102,8 +2108,10 @@ impl<'a> AstLowering<'a> {
                                         method_symbol,
                                         &arg_exprs,
                                     );
-                                    let type_arguments = self
-                                        .structural_call_type_arguments(method_symbol, &arg_exprs);
+                                    let type_arguments = self.structural_call_type_arguments(
+                                        method_symbol,
+                                        &mut arg_exprs,
+                                    );
                                     let expr_type = self.return_type_with_type_args(
                                         method_symbol,
                                         &type_arguments,
@@ -2277,8 +2285,8 @@ impl<'a> AstLowering<'a> {
                         // with receiver as first argument
                         let mut new_args = vec![receiver_expr];
                         new_args.extend(arg_exprs);
-                        let type_arguments =
-                            self.structural_call_type_arguments(static_method_symbol, &new_args);
+                        let type_arguments = self
+                            .structural_call_type_arguments(static_method_symbol, &mut new_args);
 
                         TypedExpressionKind::StaticMethodCall {
                             class_symbol,
@@ -2292,6 +2300,11 @@ impl<'a> AstLowering<'a> {
                         self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
                         let type_arguments =
                             self.infer_call_type_arguments(method_symbol, &arg_exprs);
+                        self.widen_int_literals_for_type_args(
+                            method_symbol,
+                            &type_arguments,
+                            &mut arg_exprs,
+                        );
                         TypedExpressionKind::MethodCall {
                             receiver: Box::new(receiver_expr),
                             method_symbol,
@@ -2305,6 +2318,11 @@ impl<'a> AstLowering<'a> {
                     let mut arg_exprs = arg_exprs;
                     self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
                     let type_arguments = self.infer_call_type_arguments(method_symbol, &arg_exprs);
+                    self.widen_int_literals_for_type_args(
+                        method_symbol,
+                        &type_arguments,
+                        &mut arg_exprs,
+                    );
                     TypedExpressionKind::MethodCall {
                         receiver: Box::new(receiver_expr),
                         method_symbol,
@@ -2630,7 +2648,7 @@ impl<'a> AstLowering<'a> {
                         let kind = if is_static {
                             // Static methods: create StaticMethodCall with the class symbol
                             let type_arguments =
-                                self.structural_call_type_arguments(method_symbol, &arg_exprs);
+                                self.structural_call_type_arguments(method_symbol, &mut arg_exprs);
                             TypedExpressionKind::StaticMethodCall {
                                 class_symbol,
                                 method_symbol,
@@ -2666,6 +2684,11 @@ impl<'a> AstLowering<'a> {
                             self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
                             let type_arguments =
                                 self.infer_call_type_arguments(method_symbol, &arg_exprs);
+                            self.widen_int_literals_for_type_args(
+                                method_symbol,
+                                &type_arguments,
+                                &mut arg_exprs,
+                            );
                             TypedExpressionKind::MethodCall {
                                 receiver: Box::new(receiver),
                                 method_symbol,
@@ -2715,6 +2738,9 @@ impl<'a> AstLowering<'a> {
                     }
                     _ => Vec::new(),
                 };
+                if let Some(callee) = callee_symbol {
+                    self.widen_int_literals_for_type_args(callee, &type_arguments, &mut arg_exprs);
+                }
                 TypedExpressionKind::FunctionCall {
                     function: Box::new(func_expr),
                     arguments: arg_exprs,
@@ -3452,10 +3478,28 @@ impl<'a> AstLowering<'a> {
         let mut mentioned = std::collections::BTreeSet::new();
         self.collect_type_param_symbols(fn_type, 0, &mut mentioned);
         let mut resolved: BTreeMap<SymbolId, TypeId> = BTreeMap::new();
+        // Int and Float bound to one variable unify to Float, as in Haxe. Not
+        // when the Float is an array element: an array filled through Dynamic
+        // may hold raw Ints its Float reads cannot tell apart.
+        let (int_t, float_t) = {
+            let tt = self.context.type_table.borrow();
+            (tt.int_type(), tt.float_type())
+        };
+        let float_element = arguments.iter().any(|a| {
+            a.expr_type == float_t && matches!(a.kind, TypedExpressionKind::ArrayAccess { .. })
+        });
         for (var, ty) in bindings {
-            if *resolved.entry(var).or_insert(ty) != ty {
-                return Vec::new();
+            let prev = *resolved.entry(var).or_insert(ty);
+            if prev == ty {
+                continue;
             }
+            if !float_element
+                && ((prev == int_t && ty == float_t) || (prev == float_t && ty == int_t))
+            {
+                resolved.insert(var, float_t);
+                continue;
+            }
+            return Vec::new();
         }
         // A variable only Dynamic arguments reach is Dynamic, as in Haxe.
         let dynamic = self.context.type_table.borrow().dynamic_type();
@@ -3468,6 +3512,75 @@ impl<'a> AstLowering<'a> {
             return Vec::new();
         }
         mentioned.iter().map(|v| resolved[v]).collect()
+    }
+
+    /// `eq(1.0, 1)`: an Int passed for a type variable bound to Float is a
+    /// Float, as the erased slot is read by that binding.
+    fn widen_int_literals_for_type_args(
+        &self,
+        callee_symbol: SymbolId,
+        type_arguments: &[TypeId],
+        arguments: &mut [TypedExpression],
+    ) {
+        use crate::tast::core::TypeKind;
+        if type_arguments.is_empty() {
+            return;
+        }
+        let Some(fn_type) = self
+            .context
+            .symbol_table
+            .get_symbol(callee_symbol)
+            .map(|s| s.type_id)
+        else {
+            return;
+        };
+        let params = match self
+            .context
+            .type_table
+            .borrow()
+            .get(fn_type)
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Function { params, .. }) => params.clone(),
+            _ => return,
+        };
+        let mut mentioned = std::collections::BTreeSet::new();
+        self.collect_type_param_symbols(fn_type, 0, &mut mentioned);
+        if mentioned.len() != type_arguments.len() {
+            return;
+        }
+        let bound: BTreeMap<SymbolId, TypeId> = mentioned
+            .into_iter()
+            .zip(type_arguments.iter().copied())
+            .collect();
+        let tt = self.context.type_table.borrow();
+        let float = tt.float_type();
+        for (formal, argument) in params.iter().zip(arguments.iter_mut()) {
+            let Some(TypeKind::TypeParameter { symbol_id, .. }) = tt.get(*formal).map(|t| &t.kind)
+            else {
+                continue;
+            };
+            if bound.get(symbol_id) != Some(&float) {
+                continue;
+            }
+            if let TypedExpressionKind::Literal {
+                value: LiteralValue::Int(n),
+            } = argument.kind
+            {
+                argument.kind = TypedExpressionKind::Literal {
+                    value: LiteralValue::Float(n as f64),
+                };
+                argument.expr_type = float;
+            } else if argument.expr_type == tt.int_type() {
+                let inner = argument.clone();
+                argument.kind = TypedExpressionKind::Cast {
+                    expression: Box::new(inner),
+                    target_type: float,
+                    cast_kind: CastKind::Implicit,
+                };
+                argument.expr_type = float;
+            }
+        }
     }
 
     /// The type variable a formal binds when its argument carries only
@@ -3500,9 +3613,11 @@ impl<'a> AstLowering<'a> {
     fn structural_call_type_arguments(
         &self,
         callee_symbol: SymbolId,
-        arguments: &[TypedExpression],
+        arguments: &mut [TypedExpression],
     ) -> Vec<TypeId> {
         use crate::tast::core::TypeKind;
+        let inferred = self.infer_call_type_arguments(callee_symbol, arguments);
+        self.widen_int_literals_for_type_args(callee_symbol, &inferred, arguments);
         let Some(fn_type) = self
             .context
             .symbol_table
@@ -4451,6 +4566,19 @@ impl<'a> AstLowering<'a> {
                 self.context
                     .symbol_table
                     .get_class_constructor(class_symbol)
+            })
+            .or_else(|| {
+                // An abstract's constructor lives in the abstract's own scope.
+                let sym = self.context.symbol_table.get_symbol(class_symbol)?;
+                if sym.kind != crate::tast::symbols::SymbolKind::Abstract {
+                    return None;
+                }
+                let new_name = self.context.string_interner.intern("new");
+                self.context
+                    .symbol_table
+                    .lookup_symbol(sym.scope_id, new_name)
+                    .filter(|s| s.kind == crate::tast::symbols::SymbolKind::Function)
+                    .map(|s| s.id)
             })?;
         self.function_param_types_from_symbol(ctor)
     }

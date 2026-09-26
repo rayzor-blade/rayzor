@@ -147,7 +147,17 @@ impl<'a> HirToMirContext<'a> {
                         // optional fields the literal omits; pass it down so the writer's slot
                         // layout matches what readers compute from the typedef.
                         let prev_target = self.object_literal_target_ty.take();
-                        if matches!(&init_expr.kind, HirExprKind::ObjectLiteral { .. }) {
+                        // Also through the implicit cast that wraps a literal bound
+                        // for an abstract over a (`@:structInit`) class.
+                        let literal = match &init_expr.kind {
+                            HirExprKind::Cast { expr, .. }
+                                if type_hint.is_some_and(|t| self.is_abstract_over_class(t)) =>
+                            {
+                                expr.as_ref()
+                            }
+                            _ => init_expr,
+                        };
+                        if matches!(&literal.kind, HirExprKind::ObjectLiteral { .. }) {
                             self.object_literal_target_ty = *type_hint;
                         }
                         let v = self.lower_expression(init_expr);

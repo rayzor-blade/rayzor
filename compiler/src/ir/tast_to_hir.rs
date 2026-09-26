@@ -6290,12 +6290,18 @@ impl<'a> TastToHirContext<'a> {
 
                 // Otherwise, substitute receiver and arguments and create call
                 // println!("DEBUG inline_expression_deep: Creating Call expression for method");
-                let lowered_receiver = self.inline_expression_deep(
+                let mut lowered_receiver = self.inline_expression_deep(
                     inner_receiver,
                     this_replacement,
                     param_map,
                     inner_receiver.expr_type,
                 );
+                // `this.m()` in an abstract calls `m` on the underlying value.
+                if matches!(inner_receiver.kind, TypedExpressionKind::This { .. })
+                    && inner_receiver.expr_type.is_valid()
+                {
+                    lowered_receiver.ty = inner_receiver.expr_type;
+                }
                 let lowered_args: Vec<HirExpr> = arguments
                     .iter()
                     .map(|arg| {

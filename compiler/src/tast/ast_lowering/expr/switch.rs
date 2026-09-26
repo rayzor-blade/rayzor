@@ -601,7 +601,7 @@ impl<'a> AstLowering<'a> {
                 // raw payload is spuriously `haxe_unbox_int_ptr`'d at return
                 // → SIGSEGV. The case VALUE still matches `first_pattern`.
                 let bind_pattern = self.pick_concrete_binding_pattern(case, first_pattern);
-                let var_bindings = self.bind_pattern_variables(bind_pattern)?;
+                let var_bindings = self.bind_case_pattern_variables(bind_pattern)?;
 
                 // For constructor patterns, create the constructor expression
                 let case_expr =
@@ -706,7 +706,7 @@ impl<'a> AstLowering<'a> {
                 // raw payload is spuriously `haxe_unbox_int_ptr`'d at return
                 // → SIGSEGV. The case VALUE still matches `first_pattern`.
                 let bind_pattern = self.pick_concrete_binding_pattern(case, first_pattern);
-                let var_bindings = self.bind_pattern_variables(bind_pattern)?;
+                let var_bindings = self.bind_case_pattern_variables(bind_pattern)?;
 
                 // For constructor patterns, create the constructor expression
                 let case_expr =

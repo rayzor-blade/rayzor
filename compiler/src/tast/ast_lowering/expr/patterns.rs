@@ -49,6 +49,26 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// A switch case's bindings: `case var x` captures the subject, so it
+    /// takes the subject's type (a Dynamic subject stays untyped).
+    pub(crate) fn bind_case_pattern_variables(
+        &mut self,
+        pattern: &parser::Pattern,
+    ) -> Result<Vec<(InternedString, SymbolId)>, LoweringError> {
+        let subject = self.context.switch_discriminant_type.filter(|ty| {
+            !matches!(
+                self.context.type_table.borrow().get(*ty).map(|t| &t.kind),
+                None | Some(TypeKind::Dynamic) | Some(TypeKind::Unknown)
+            )
+        });
+        match (pattern, subject) {
+            (parser::Pattern::Var(_), Some(ty)) => {
+                self.bind_pattern_variables_typed(pattern, Some(ty))
+            }
+            _ => self.bind_pattern_variables(pattern),
+        }
+    }
+
     /// Bind pattern variables in the current scope
     pub(crate) fn bind_pattern_variables(
         &mut self,
@@ -60,7 +80,7 @@ impl<'a> AstLowering<'a> {
     /// Bind pattern variables, propagating an expected type when known
     /// (e.g. for `case JString(s):` where `s` should be typed as String
     /// from the JString variant's parameter type).
-    fn bind_pattern_variables_typed(
+    pub(crate) fn bind_pattern_variables_typed(
         &mut self,
         pattern: &parser::Pattern,
         expected_type: Option<TypeId>,

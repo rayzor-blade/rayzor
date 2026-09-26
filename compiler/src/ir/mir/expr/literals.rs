@@ -714,6 +714,24 @@ impl<'a> HirToMirContext<'a> {
         Some(object)
     }
 
+    /// An abstract whose underlying type is a class.
+    pub(crate) fn is_abstract_over_class(&self, ty: TypeId) -> bool {
+        let ty = self.resolve_through_aliases(ty);
+        match self.type_table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Abstract {
+                underlying: Some(u),
+                ..
+            }) => {
+                let u = self.resolve_through_aliases(*u);
+                matches!(
+                    self.type_table.get(u).map(|t| &t.kind),
+                    Some(TypeKind::Class { .. })
+                )
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn lower_object_literal(
         &mut self,
         fields: &[(InternedString, HirExpr)],
@@ -739,7 +757,21 @@ impl<'a> HirToMirContext<'a> {
         // arg), prefer that — otherwise optional fields are silently dropped
         // from the slot layout and reader/writer slot indices diverge.
         let effective_ty = self.object_literal_target_ty.unwrap_or(expr_type);
-        let resolved_ty = self.resolve_through_aliases(effective_ty);
+        let mut resolved_ty = self.resolve_through_aliases(effective_ty);
+        // An abstract over a `@:structInit` class is built as that class.
+        if let Some(TypeKind::Abstract {
+            underlying: Some(u),
+            ..
+        }) = self.type_table.get(resolved_ty).map(|t| &t.kind)
+        {
+            let underlying = self.resolve_through_aliases(*u);
+            if matches!(
+                self.type_table.get(underlying).map(|t| &t.kind),
+                Some(TypeKind::Class { .. })
+            ) {
+                resolved_ty = underlying;
+            }
+        }
         let class_symbol = self
             .type_table
             .get(resolved_ty)

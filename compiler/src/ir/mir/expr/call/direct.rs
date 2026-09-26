@@ -166,8 +166,34 @@ impl<'a> HirToMirContext<'a> {
                         })
                         .collect()
                 } else {
+                    // A `Null<scalar>` argument for a scalar formal is opened.
+                    let formals: Vec<IrType> = self
+                        .builder
+                        .module
+                        .functions
+                        .get(&func_id)
+                        .map(|f| {
+                            f.signature
+                                .parameters
+                                .iter()
+                                .map(|p| p.ty.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     args.iter()
-                        .filter_map(|a| self.lower_expression(a))
+                        .enumerate()
+                        .filter_map(|(i, a)| {
+                            let reg = self.lower_expression(a)?;
+                            let scalar_formal = matches!(
+                                formals.get(i),
+                                Some(IrType::I32 | IrType::F64 | IrType::F32 | IrType::Bool)
+                            );
+                            Some(if scalar_formal {
+                                self.open_nullable_scalar(reg, a.ty).unwrap_or(reg)
+                            } else {
+                                reg
+                            })
+                        })
                         .collect()
                 };
 
