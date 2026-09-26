@@ -62,6 +62,10 @@ pub struct MacroInterpreter {
     max_call_depth: usize,
     /// Accumulated trace output
     trace_output: Vec<String>,
+    /// Types `Context.defineType` defined during this interpreter's run.
+    pub(crate) defined_types: Vec<super::context_api::DefinedType>,
+    /// `onAfterTyping`/`onGenerate` callbacks registered during this run.
+    pub(crate) hooks: Vec<(String, MacroValue)>,
     /// Import map: short class name → fully qualified name
     /// e.g., "Context" → "haxe.macro.Context"
     import_map: BTreeMap<String, String>,
@@ -116,6 +120,8 @@ impl MacroInterpreter {
             call_depth: 0,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
             trace_output: Vec::new(),
+            defined_types: Vec::new(),
+            hooks: Vec::new(),
             import_map: BTreeMap::new(),
             class_registry: None,
             class_data_cache: BTreeMap::new(),
@@ -136,6 +142,8 @@ impl MacroInterpreter {
             call_depth: 0,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
             trace_output: Vec::new(),
+            defined_types: Vec::new(),
+            hooks: Vec::new(),
             import_map,
             class_registry: None,
             class_data_cache: BTreeMap::new(),
@@ -162,6 +170,8 @@ impl MacroInterpreter {
             call_depth: 0,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
             trace_output: Vec::new(),
+            defined_types: Vec::new(),
+            hooks: Vec::new(),
             import_map,
             class_registry: Some(class_registry),
             class_data_cache: BTreeMap::new(),
@@ -626,6 +636,9 @@ impl MacroInterpreter {
                         Arc::from(enum_name),
                         Arc::from(field.as_str()),
                         Arc::new(Vec::new()),
+                    )),
+                    None if enum_ident_as_string(field).is_some() => Ok(MacroValue::String(
+                        Arc::from(enum_ident_as_string(field).unwrap_or_default()),
                     )),
                     None => {
                         let base_val = self.eval_expr(base)?;
@@ -1154,14 +1167,19 @@ impl MacroInterpreter {
             }
             ExprKind::Field {
                 expr: base, field, ..
-            } if expr_enum_ctor(field).is_some() && path_ends_with_expr_enum(base) => {
+            } if (expr_enum_ctor(field).is_some() || enum_ctor_tag(field).is_some())
+                && path_ends_with_expr_enum(base) =>
+            {
                 // `ExprDef.EConst(...)` and `Constant.CIdent(...)`: the same
                 // constructors as above, written qualified.
                 let mut arg_vals = Vec::with_capacity(args.len());
                 for a in args {
                     arg_vals.push(self.eval_expr(a)?);
                 }
-                let (enum_name, variant) = expr_enum_ctor(field).unwrap();
+                let Some((enum_name, variant)) = expr_enum_ctor(field) else {
+                    let tag = enum_ctor_tag(field).unwrap_or_default();
+                    return Ok(build_enum_ctor_value(tag, &arg_vals));
+                };
                 Ok(MacroValue::Enum(
                     Arc::from(enum_name),
                     Arc::from(variant),
@@ -1266,6 +1284,20 @@ impl MacroInterpreter {
                     (func.name.clone(), "FFun", func.body.as_deref().cloned())
                 }
             };
+            // A function's parameters and declared return type ride along.
+            let signature = match &field.kind {
+                parser::ClassFieldKind::Function(func) => Some((
+                    func.params
+                        .iter()
+                        .map(super::expr_adt::arg_value)
+                        .collect::<Vec<_>>(),
+                    func.return_type
+                        .as_ref()
+                        .map(super::expr_adt::complex_type_of)
+                        .unwrap_or(MacroValue::Null),
+                )),
+                _ => None,
+            };
             let expr = match expr {
                 Some(e) => {
                     let prepared = self.pre_eval_dollar_args(e)?;
@@ -1276,6 +1308,10 @@ impl MacroInterpreter {
             let mut kind = BTreeMap::new();
             kind.insert("kind".to_string(), string(kind_tag));
             kind.insert("expr".to_string(), expr);
+            if let Some((args, ret)) = signature {
+                kind.insert("args".to_string(), MacroValue::Array(Arc::new(args)));
+                kind.insert("ret".to_string(), ret);
+            }
             let mut value = BTreeMap::new();
             value.insert("name".to_string(), string(&field_name));
             value.insert("access".to_string(), MacroValue::Array(Arc::new(access)));
@@ -1382,7 +1418,7 @@ impl MacroInterpreter {
         })
     }
 
-    fn call_value(
+    pub(crate) fn call_value(
         &mut self,
         func: MacroValue,
         args: Vec<MacroValue>,
@@ -1646,12 +1682,11 @@ impl MacroInterpreter {
                 // Use the stored macro_context if available (set by @:build
                 // pipeline so Context.getBuildFields() returns class fields).
                 // Fall back to a fresh empty context for expression macros.
-                let result = if let Some(ref mut ctx) = self.macro_context {
-                    ctx.dispatch(method, args, location)?
-                } else {
-                    let mut ctx = super::context_api::MacroContext::new();
-                    ctx.dispatch(method, args, location)?
-                };
+                let mut fresh = super::context_api::MacroContext::new();
+                let ctx = self.macro_context.as_mut().unwrap_or(&mut fresh);
+                let result = ctx.dispatch(method, args, location)?;
+                self.defined_types.extend(ctx.take_defined_types());
+                self.hooks.extend(ctx.take_hooks());
                 Ok(Some(result))
             }
             "Std" => match method {
@@ -2477,6 +2512,26 @@ impl MacroInterpreter {
         // returns the object itself. This lets Haxe macro idioms like
         // `Context.getLocalClass().get().name` work when the underlying
         // class is modeled as an Object.
+        // A `MetaAccess`: the entries behind `get()`, `has(name)`, `extract(name)`.
+        if let Some(MacroValue::Array(entries)) = obj.get("__meta__") {
+            let wanted = _args.first().map(|n| n.to_display_string());
+            let named = |e: &MacroValue| match (e, &wanted) {
+                (MacroValue::Object(o), Some(w)) => {
+                    o.get("name").map(|n| n.to_display_string()).as_deref() == Some(w.as_str())
+                }
+                _ => false,
+            };
+            match method {
+                "get" => return Ok(MacroValue::Array(entries.clone())),
+                "has" => return Ok(MacroValue::Bool(entries.iter().any(named))),
+                "extract" => {
+                    return Ok(MacroValue::Array(Arc::new(
+                        entries.iter().filter(|e| named(e)).cloned().collect(),
+                    )));
+                }
+                _ => {}
+            }
+        }
         if method == "get" && _args.is_empty() && !obj.contains_key("__type__") {
             return Ok(MacroValue::Object(Arc::new(obj.clone())));
         }
@@ -3445,6 +3500,10 @@ fn path_ends_with_expr_enum(base: &Expr) -> bool {
             | "StringLiteralKind"
             | "QuoteStatus"
             | "TypeParam"
+            | "TypeDefKind"
+            | "Access"
+            | "FieldType"
+            | "ComplexType"
     )
 }
 
@@ -3493,6 +3552,15 @@ fn expr_enum_ctor(name: &str) -> Option<(&'static str, &'static str)> {
         "OpAssignOp" => Some(("Binop", "OpAssignOp")),
         "FNamed" => Some(("FunctionKind", "FNamed")),
         "TPType" => Some(("TypeParam", "TPType")),
+        "TDClass" | "TDAbstract" | "TDAlias" | "TDField" => Some((
+            "TypeDefKind",
+            match name {
+                "TDClass" => "TDClass",
+                "TDAbstract" => "TDAbstract",
+                "TDAlias" => "TDAlias",
+                _ => "TDField",
+            },
+        )),
         "TPExpr" => Some(("TypeParam", "TPExpr")),
         // haxe.macro.Type — constructed when a macro rebuilds a type value it
         // took apart (`TType(td, [mono])`). Matching projects the same shape,
@@ -4458,6 +4526,7 @@ fn expr_enum_value(name: &str) -> Option<&'static str> {
         "OpIncrement" | "OpDecrement" | "OpNot" | "OpNeg" | "OpNegBits" | "OpSpread" => "Unop",
         "Unquoted" | "Quoted" => "QuoteStatus",
         "Normal" | "Safe" => "EFieldKind",
+        "TDStructure" | "TDEnum" => "TypeDefKind",
         _ => return None,
     })
 }

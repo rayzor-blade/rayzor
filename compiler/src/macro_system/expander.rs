@@ -69,6 +69,8 @@ pub struct ExpansionResult {
     pub expansion_origins: Vec<ExpansionOrigin>,
     /// Call sites deferred to lowering, where the typer is live.
     pub deferred: Vec<DeferredMacroCall>,
+    /// `onAfterTyping`/`onGenerate` callbacks, run once the compile is typed.
+    pub hooks: Vec<(String, MacroValue)>,
 }
 
 /// Top-level macro expansion orchestrator.
@@ -90,6 +92,11 @@ pub struct MacroExpander {
     call_cache: BTreeMap<(String, u64), Expr>,
     /// Call sites deferred to lowering (typer-dependent macro bodies).
     deferred: Vec<DeferredMacroCall>,
+    /// Types `Context.defineType` defined while expanding this file; they
+    /// join the file's declarations when expansion finishes.
+    defined_types: Vec<super::context_api::DefinedType>,
+    /// `onAfterTyping`/`onGenerate` callbacks registered while expanding.
+    hooks: Vec<(String, MacroValue)>,
     /// Classes with a deferred call: their later calls defer too, so calls
     /// sharing the class's macro-time statics still run in source order.
     deferred_classes: std::collections::BTreeSet<String>,
@@ -115,6 +122,8 @@ impl MacroExpander {
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
             deferred: Vec::new(),
+            defined_types: Vec::new(),
+            hooks: Vec::new(),
             deferred_classes: std::collections::BTreeSet::new(),
             own_methods: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
@@ -133,6 +142,8 @@ impl MacroExpander {
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
             deferred: Vec::new(),
+            defined_types: Vec::new(),
+            hooks: Vec::new(),
             deferred_classes: std::collections::BTreeSet::new(),
             own_methods: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
@@ -151,6 +162,8 @@ impl MacroExpander {
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
             deferred: Vec::new(),
+            defined_types: Vec::new(),
+            hooks: Vec::new(),
             deferred_classes: std::collections::BTreeSet::new(),
             own_methods: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
@@ -258,6 +271,7 @@ impl MacroExpander {
                 expansions_count: 0,
                 expansion_origins: Vec::new(),
                 deferred: Vec::new(),
+                hooks: Vec::new(),
             };
         }
 
@@ -303,6 +317,10 @@ impl MacroExpander {
             ));
         }
 
+        for defined in std::mem::take(&mut self.defined_types) {
+            file.declarations.push(defined_declaration(&defined));
+        }
+
         let diagnostics = self.context.take_diagnostics();
         let expansion_origins = std::mem::take(&mut self.expansion_origins);
 
@@ -312,6 +330,7 @@ impl MacroExpander {
             expansions_count: self.expansions_count,
             expansion_origins,
             deferred: std::mem::take(&mut self.deferred),
+            hooks: std::mem::take(&mut self.hooks),
         }
     }
 
@@ -514,6 +533,9 @@ impl MacroExpander {
                             });
                             return Ok((expr, false));
                         }
+                        // A call parked for the typer is undone, so the re-expansion
+                        // is the only run that takes effect.
+                        let statics = self.class_registry.statics_snapshot();
                         match self.expand_macro_call(&macro_name, args, &expr) {
                             Ok(expanded) => {
                                 self.expansions_count += 1;
@@ -523,6 +545,7 @@ impl MacroExpander {
                             // error: park the call site untouched and let
                             // lowering re-expand it with the typer live.
                             Err(e) if is_typer_dependent(&e) => {
+                                self.class_registry.restore_statics(statics);
                                 self.deferred.push(DeferredMacroCall {
                                     name: macro_name,
                                     span: expr.span,
@@ -1126,6 +1149,8 @@ impl MacroExpander {
         interp.set_import_map((*macro_def.imports).clone());
         let result = interp.eval_expr(&macro_def.body);
         interp.set_import_map(caller_imports);
+        let defined = std::mem::take(&mut interp.defined_types);
+        let hooks = std::mem::take(&mut interp.hooks);
 
         if class_context.is_some() {
             interp.pop_macro_class();
@@ -1154,6 +1179,9 @@ impl MacroExpander {
             Err(e) => Err(e),
         }?;
 
+        self.defined_types.extend(defined);
+        self.hooks.extend(hooks);
+
         // Record expansion origin for diagnostics
         self.expansion_origins.push(ExpansionOrigin {
             macro_name: name.to_string(),
@@ -1179,6 +1207,154 @@ impl Default for MacroExpander {
 // ==========================================================
 // Helper functions
 // ==========================================================
+
+/// Runs the `onAfterTyping` callbacks, then the `onGenerate` ones, each in
+/// registration order, with every type the compile declared as a
+/// `ModuleType`. Returns what they reported, or the error that stopped them.
+pub fn run_generation_hooks(
+    hooks: &[(String, MacroValue)],
+    files: &[HaxeFile],
+    statics: super::class_registry::MacroStatics,
+) -> Result<Vec<MacroDiagnostic>, MacroError> {
+    let mut class_registry = ClassRegistry::new();
+    class_registry.use_statics(statics);
+    class_registry.register_files(files);
+    let types = MacroValue::Array(Arc::new(files.iter().flat_map(module_types).collect()));
+    let mut interp = MacroInterpreter::with_class_registry(
+        MacroRegistry::new(),
+        BTreeMap::new(),
+        Arc::new(class_registry),
+    );
+    interp.macro_context = Some(MacroContext::new());
+    for phase in ["onAfterTyping", "onGenerate"] {
+        for (_, callback) in hooks.iter().filter(|(h, _)| h == phase) {
+            match interp.call_value(
+                callback.clone(),
+                vec![types.clone()],
+                SourceLocation::unknown(),
+            ) {
+                Ok(_) => {}
+                Err(e) if e.is_control_flow() => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    let mut diagnostics = interp
+        .macro_context
+        .as_mut()
+        .map(|c| c.take_diagnostics())
+        .unwrap_or_default();
+    for line in interp.take_trace_output() {
+        diagnostics.push(MacroDiagnostic::info(
+            format!("[macro trace] {}", line),
+            SourceLocation::unknown(),
+        ));
+    }
+    Ok(diagnostics)
+}
+
+/// A file's declarations as `ModuleType` values: `TClassDecl(ref)` and the
+/// like, whose `get()` is the type with its `name`, `pack`, `module` and `meta`.
+fn module_types(file: &HaxeFile) -> Vec<MacroValue> {
+    let pack: Vec<String> = file
+        .package
+        .as_ref()
+        .map(|p| p.path.clone())
+        .unwrap_or_default();
+    let string = |v: &str| MacroValue::String(Arc::from(v));
+    file.declarations
+        .iter()
+        .filter_map(|decl| {
+            let (ctor, name, meta, is_interface) = match decl {
+                parser::TypeDeclaration::Class(c) => ("TClassDecl", &c.name, &c.meta, false),
+                parser::TypeDeclaration::Interface(i) => ("TClassDecl", &i.name, &i.meta, true),
+                parser::TypeDeclaration::Enum(e) => ("TEnumDecl", &e.name, &e.meta, false),
+                parser::TypeDeclaration::Typedef(t) => ("TTypeDecl", &t.name, &t.meta, false),
+                parser::TypeDeclaration::Abstract(a) => ("TAbstract", &a.name, &a.meta, false),
+                _ => return None,
+            };
+            let entries = meta
+                .iter()
+                .map(|m| {
+                    let mut entry = BTreeMap::new();
+                    let name = if m.compile_time {
+                        format!(":{}", m.name.trim_start_matches(':'))
+                    } else {
+                        m.name.clone()
+                    };
+                    entry.insert("name".to_string(), string(&name));
+                    entry.insert(
+                        "params".to_string(),
+                        MacroValue::Array(Arc::new(
+                            m.params
+                                .iter()
+                                .map(|p| MacroValue::Expr(Arc::new(p.clone())))
+                                .collect(),
+                        )),
+                    );
+                    MacroValue::Object(Arc::new(entry))
+                })
+                .collect();
+            let mut meta_access = BTreeMap::new();
+            meta_access.insert("__meta__".to_string(), MacroValue::Array(Arc::new(entries)));
+            let mut module = pack.clone();
+            module.push(name.clone());
+            let mut ty = BTreeMap::new();
+            ty.insert("name".to_string(), string(name));
+            ty.insert(
+                "pack".to_string(),
+                MacroValue::Array(Arc::new(pack.iter().map(|p| string(p)).collect())),
+            );
+            ty.insert("module".to_string(), string(&module.join(".")));
+            ty.insert(
+                "meta".to_string(),
+                MacroValue::Object(Arc::new(meta_access)),
+            );
+            ty.insert("isInterface".to_string(), MacroValue::Bool(is_interface));
+            Some(MacroValue::Enum(
+                Arc::from("ModuleType"),
+                Arc::from(ctor),
+                Arc::new(vec![MacroValue::Object(Arc::new(ty))]),
+            ))
+        })
+        .collect()
+}
+
+/// A type `Context.defineType` defined, as a declaration of the module whose
+/// macro defined it.
+fn defined_declaration(defined: &super::context_api::DefinedType) -> parser::TypeDeclaration {
+    let fields = defined
+        .field_values
+        .iter()
+        .filter_map(super::build_macros::value_to_class_field)
+        .collect();
+    let class = parser::ClassDecl {
+        meta: Vec::new(),
+        access: None,
+        modifiers: Vec::new(),
+        name: defined.name.clone(),
+        type_params: Vec::new(),
+        extends: None,
+        implements: Vec::new(),
+        fields,
+        span: parser::Span::default(),
+    };
+    match defined.kind {
+        super::context_api::DefinedTypeKind::Interface => {
+            parser::TypeDeclaration::Interface(parser::InterfaceDecl {
+                meta: class.meta,
+                access: class.access,
+                modifiers: class.modifiers,
+                name: class.name,
+                type_params: class.type_params,
+                extends: Vec::new(),
+                fields: class.fields,
+                span: class.span,
+            })
+        }
+        _ => parser::TypeDeclaration::Class(class),
+    }
+}
 
 /// Hash a slice of expressions for memoization cache key.
 ///

@@ -147,6 +147,9 @@ pub struct MacroContext {
 
     /// Types defined by the macro via defineType()
     pub defined_types: Vec<DefinedType>,
+    /// `onAfterTyping`/`onGenerate` callbacks registered by this context's
+    /// macros, as (hook, callback).
+    pub(crate) hooks: Vec<(String, MacroValue)>,
 
     /// Fields modified/added by @:build macros
     pub build_fields: Option<Vec<BuildField>>,
@@ -267,6 +270,9 @@ pub struct DefinedType {
     pub kind: DefinedTypeKind,
     /// Fields for class/interface types
     pub fields: Vec<BuildField>,
+    /// The fields as the macro built them, for lowering the type into the
+    /// module.
+    pub field_values: Vec<MacroValue>,
     /// Position where defineType was called
     pub pos: SourceLocation,
 }
@@ -299,6 +305,7 @@ impl MacroContext {
             mono_bindings: BTreeMap::new(),
             diagnostics: Vec::new(),
             defined_types: Vec::new(),
+            hooks: Vec::new(),
             build_fields: None,
         }
     }
@@ -326,6 +333,7 @@ impl MacroContext {
                 mono_bindings: BTreeMap::new(),
                 diagnostics: Vec::new(),
                 defined_types: Vec::new(),
+                hooks: Vec::new(),
                 build_fields: None,
             }
         }
@@ -1001,6 +1009,13 @@ impl MacroContext {
                 }
             }
             "getBuildFields" => self.get_build_fields(location),
+            // Run once, after every module is typed, by the compile driver.
+            "onAfterTyping" | "onGenerate" => {
+                if let Some(callback) = args.first() {
+                    self.hooks.push((method.to_string(), callback.clone()));
+                }
+                Ok(MacroValue::Null)
+            }
             "defineType" => {
                 // Extract type definition from MacroValue::Object
                 let type_def = value_to_defined_type(args.first(), location)?;
@@ -1031,6 +1046,11 @@ impl MacroContext {
     /// Take all collected diagnostics (draining the internal list)
     pub fn take_diagnostics(&mut self) -> Vec<MacroDiagnostic> {
         std::mem::take(&mut self.diagnostics)
+    }
+
+    /// Take the registered generation hooks (draining the internal list)
+    pub fn take_hooks(&mut self) -> Vec<(String, MacroValue)> {
+        std::mem::take(&mut self.hooks)
     }
 
     /// Take all defined types (draining the internal list)
@@ -1276,10 +1296,17 @@ fn value_to_defined_type(
         _ => Vec::new(),
     };
 
-    let kind_str = obj
-        .get("kind")
-        .and_then(|v| v.as_string())
-        .unwrap_or("class");
+    // `TDClass(..)`/`TDStructure` values, or the older string spelling.
+    let kind_str = match obj.get("kind") {
+        Some(MacroValue::Enum(_, variant, _)) => match &**variant {
+            "TDEnum" => "enum",
+            "TDAlias" => "alias",
+            "TDStructure" => "typedef",
+            _ => "class",
+        },
+        Some(v) => v.as_string().unwrap_or("class"),
+        None => "class",
+    };
 
     let kind = match kind_str {
         "interface" => DefinedTypeKind::Interface,
@@ -1296,18 +1323,21 @@ fn value_to_defined_type(
     };
 
     // Extract fields (simplified — full implementation in Phase 6)
-    let fields = match obj.get("fields") {
-        Some(MacroValue::Array(arr)) => {
-            arr.iter().filter_map(|v| value_to_build_field(v)).collect()
-        }
+    let field_values: Vec<MacroValue> = match obj.get("fields") {
+        Some(MacroValue::Array(arr)) => arr.iter().cloned().collect(),
         _ => Vec::new(),
     };
+    let fields = field_values
+        .iter()
+        .filter_map(value_to_build_field)
+        .collect();
 
     Ok(DefinedType {
         pack,
         name,
         kind,
         fields,
+        field_values,
         pos: location,
     })
 }
@@ -1473,6 +1503,7 @@ mod tests {
             name: "Generated".to_string(),
             kind: DefinedTypeKind::Class,
             fields: Vec::new(),
+            field_values: Vec::new(),
             pos: SourceLocation::unknown(),
         };
         let result = ctx.define_type(td, SourceLocation::unknown());
@@ -1488,6 +1519,7 @@ mod tests {
             name: "Foo".to_string(),
             kind: DefinedTypeKind::Class,
             fields: Vec::new(),
+            field_values: Vec::new(),
             pos: SourceLocation::unknown(),
         };
         ctx.define_type(td.clone(), SourceLocation::unknown())

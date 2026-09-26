@@ -136,6 +136,7 @@ impl CompilationUnit {
                 .map(|f| view(&f))
                 .collect();
             let mut class_registry = crate::macro_system::ClassRegistry::new();
+            class_registry.use_statics(self.macro_statics.clone());
             class_registry.register_files(&build_modules);
             class_registry.register_files(&self.stdlib_files);
             class_registry
@@ -159,12 +160,41 @@ impl CompilationUnit {
             if let Some(v) = current_view {
                 dep_files.push(v);
             }
-            let (expansion, kept_expander) =
+            // One file reached by two spellings (entry and import) is one key.
+            let file_key = std::fs::canonicalize(filename)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| filename.to_string());
+            let replay = self.macro_state_by_file.get(&file_key).cloned();
+            let lock = |s: &crate::macro_system::class_registry::MacroStatics| {
+                s.lock().map(|m| m.clone()).unwrap_or_default()
+            };
+            let before = match &replay {
+                Some((before, _)) => {
+                    if let Ok(mut statics) = self.macro_statics.lock() {
+                        *statics = before.clone();
+                    }
+                    before.clone()
+                }
+                None => lock(&self.macro_statics),
+            };
+            let (mut expansion, kept_expander) =
                 crate::macro_system::expander::expand_macros_with_dependencies_keep(
                     ast_file.clone(),
                     class_registry,
                     &dep_files,
                 );
+            match replay {
+                Some((_, after)) => {
+                    if let Ok(mut statics) = self.macro_statics.lock() {
+                        *statics = after;
+                    }
+                    expansion.hooks.clear();
+                }
+                None => {
+                    let after = lock(&self.macro_statics);
+                    self.macro_state_by_file.insert(file_key, (before, after));
+                }
+            }
             deferred_macro_calls = expansion.deferred.clone();
             if !deferred_macro_calls.is_empty() {
                 deferred_macro_expander = Some(std::cell::RefCell::new(kept_expander));
@@ -195,7 +225,10 @@ impl CompilationUnit {
                         diagnostics::DiagnosticSeverity::Info
                     }
                 };
-                let loc = &diag.location;
+                // Macro positions carry no file; this file expanded them.
+                let mut loc = diag.location;
+                loc.file_id = file_id_u32;
+                let loc = &loc;
                 let pos = diagnostics::SourcePosition::new(
                     loc.line.max(1) as usize,
                     loc.column.max(1) as usize,
@@ -209,7 +242,7 @@ impl CompilationUnit {
                 if !seen_macro_diags.insert((diag.message.clone(), loc.line, loc.column)) {
                     continue;
                 }
-                let span = diagnostics::SourceSpan::new(pos, end_pos, diagnostics::FileId::new(0));
+                let span = diagnostics::SourceSpan::new(pos, end_pos, file_id);
                 macro_diagnostics.push(diagnostics::Diagnostic {
                     severity,
                     code: Some("MACRO".to_string()),
@@ -237,7 +270,10 @@ impl CompilationUnit {
                 .filter(|diag| matches!(diag.severity, crate::macro_system::MacroSeverity::Error))
                 .map(|diag| CompilationError {
                     message: format!("[E0700] {}", diag.message),
-                    location: diag.location,
+                    location: SourceLocation {
+                        file_id: file_id_u32,
+                        ..diag.location
+                    },
                     category: ErrorCategory::MacroExpansionError,
                     suggestion: None,
                     related_errors: Vec::new(),
@@ -256,6 +292,7 @@ impl CompilationUnit {
             }
             // Store expansion origins for LSP macro hints
             self.macro_expansions.extend(expansion.expansion_origins);
+            self.macro_hooks.extend(expansion.hooks);
             ast_file_owned = expansion.file;
             &ast_file_owned
         } else {
@@ -356,7 +393,7 @@ impl CompilationUnit {
                 (loc.column.max(1) + 1) as usize,
                 (loc.byte_offset + 1) as usize,
             );
-            let span = diagnostics::SourceSpan::new(pos, end_pos, diagnostics::FileId::new(0));
+            let span = diagnostics::SourceSpan::new(pos, end_pos, file_id);
             self.collected_diagnostics.push(diagnostics::Diagnostic {
                 severity: diagnostics::DiagnosticSeverity::Warning,
                 code: Some("W0110".to_string()),
@@ -1795,7 +1832,51 @@ impl CompilationUnit {
 
         self.maybe_dump_file_table();
 
+        self.run_macro_hooks()?;
+
         Ok(all_typed_files)
+    }
+
+    /// Runs the macros' `onAfterTyping`/`onGenerate` callbacks once every
+    /// module is typed, reporting what they say as macro diagnostics.
+    fn run_macro_hooks(&mut self) -> Result<(), Vec<CompilationError>> {
+        if self.macro_hooks.is_empty() {
+            return Ok(());
+        }
+        let hooks = std::mem::take(&mut self.macro_hooks);
+        let mut files = self.user_files.clone();
+        files.extend(self.loaded_import_haxe_files.iter().cloned());
+        let to_error = |message: String, location| CompilationError {
+            message: format!("[E0700] {}", message),
+            location,
+            category: ErrorCategory::MacroExpansionError,
+            suggestion: None,
+            related_errors: Vec::new(),
+        };
+        let diagnostics = crate::macro_system::expander::run_generation_hooks(
+            &hooks,
+            &files,
+            self.macro_statics.clone(),
+        )
+        .map_err(|e| vec![to_error(format!("macro hook failed: {}", e), e.location())])?;
+        let mut errors = Vec::new();
+        for diag in diagnostics {
+            match diag.severity {
+                crate::macro_system::MacroSeverity::Error => {
+                    errors.push(to_error(diag.message, diag.location));
+                }
+                crate::macro_system::MacroSeverity::Warning => {
+                    eprintln!("Warning: [MACRO] {}", diag.message);
+                }
+                _ => {}
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            self.print_compilation_errors(&errors);
+            Err(errors)
+        }
     }
 }
 

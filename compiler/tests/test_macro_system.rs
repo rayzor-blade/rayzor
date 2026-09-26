@@ -1100,6 +1100,7 @@ fn test_context_defined_types() {
         pack: vec!["gen".to_string()],
         kind: DefinedTypeKind::Class,
         fields: vec![],
+        field_values: vec![],
         pos: unknown_loc(),
     });
 

@@ -569,7 +569,7 @@ fn function_value(func: &Function, kind: MacroValue) -> MacroValue {
     en("ExprDef", "EFunction", vec![kind, f])
 }
 
-fn arg_value(p: &FunctionParam) -> MacroValue {
+pub(crate) fn arg_value(p: &FunctionParam) -> MacroValue {
     obj(vec![
         ("name", s(&p.name)),
         ("opt", MacroValue::Bool(p.optional)),

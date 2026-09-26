@@ -37,6 +37,10 @@ pub struct ClassInfo {
 /// Registry of all known classes for macro interpretation.
 ///
 /// Built from parsed HaxeFiles (stdlib + imports + user files) before macro expansion.
+/// Macro-time static values, `Class.field` → value, shared by every
+/// registry of one compile.
+pub type MacroStatics = Arc<std::sync::Mutex<BTreeMap<String, super::value::MacroValue>>>;
+
 /// The interpreter falls back to this registry when hardcoded class dispatch doesn't match.
 pub struct ClassRegistry {
     /// qualified_name → ClassInfo
@@ -44,8 +48,8 @@ pub struct ClassRegistry {
     /// short_name → qualified_name (for unambiguous lookups)
     short_name_index: BTreeMap<String, String>,
     /// Static variables' current values, `Class.field` → value. Shared by
-    /// every macro call of one expansion, as macro-time statics are.
-    statics: std::sync::Mutex<BTreeMap<String, super::value::MacroValue>>,
+    /// every macro call of the compile, as macro-time statics are.
+    statics: MacroStatics,
 }
 
 impl ClassRegistry {
@@ -53,8 +57,14 @@ impl ClassRegistry {
         Self {
             classes: BTreeMap::new(),
             short_name_index: BTreeMap::new(),
-            statics: std::sync::Mutex::new(BTreeMap::new()),
+            statics: MacroStatics::default(),
         }
+    }
+
+    /// Read and write macro-time statics in `statics`, the compile's shared
+    /// store, instead of a store of this registry's own.
+    pub fn use_statics(&mut self, statics: MacroStatics) {
+        self.statics = statics;
     }
 
     /// The static variable `name` declared by `class_name`, with the class's
@@ -69,6 +79,18 @@ impl ClassRegistry {
             })
         });
         Some((class.qualified_name.clone(), init))
+    }
+
+    /// Every macro-time static's current value.
+    pub fn statics_snapshot(&self) -> BTreeMap<String, super::value::MacroValue> {
+        self.statics.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// Put every macro-time static back to `snapshot`.
+    pub fn restore_statics(&self, snapshot: BTreeMap<String, super::value::MacroValue>) {
+        if let Ok(mut statics) = self.statics.lock() {
+            *statics = snapshot;
+        }
     }
 
     pub fn static_value(&self, key: &str) -> Option<super::value::MacroValue> {

@@ -265,6 +265,22 @@ pub struct CompilationUnit {
 
     /// Macro expansion origins (for IDE hints showing expanded results)
     pub macro_expansions: Vec<crate::macro_system::expander::ExpansionOrigin>,
+    /// Macro-time statics for the whole compile. Modules expand in compile
+    /// order (dependencies first), so shared values are deterministic.
+    pub(crate) macro_statics: crate::macro_system::class_registry::MacroStatics,
+    /// `onAfterTyping`/`onGenerate` callbacks registered by expanded macros.
+    pub(crate) macro_hooks: Vec<(String, crate::macro_system::MacroValue)>,
+    /// Macro statics before and after each file's first expansion. A file
+    /// expanded again (the entry file also reached as an import) replays
+    /// from the first state and leaves the second, so its macros take effect
+    /// once.
+    pub(crate) macro_state_by_file: std::collections::BTreeMap<
+        String,
+        (
+            std::collections::BTreeMap<String, crate::macro_system::MacroValue>,
+            std::collections::BTreeMap<String, crate::macro_system::MacroValue>,
+        ),
+    >,
 
     /// Shared string interner
     pub string_interner: StringInterner,
@@ -593,6 +609,9 @@ impl CompilationUnit {
             manifest_types_by_short_name: BTreeMap::new(),
             manifest_type_params: BTreeMap::new(),
             macro_expansions: Vec::new(),
+            macro_statics: Default::default(),
+            macro_hooks: Vec::new(),
+            macro_state_by_file: std::collections::BTreeMap::new(),
             string_interner,
             symbol_table: SymbolTable::new(),
             type_table: Rc::new(RefCell::new(TypeTable::new())),

@@ -571,7 +571,7 @@ fn field_name(field: &ClassField) -> &str {
 }
 
 /// Convert a single MacroValue (Object) back to a ClassField
-fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
+pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
     let obj = match value {
         MacroValue::Object(o) => o,
         _ => return None,
@@ -593,7 +593,40 @@ fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
 
     let field_kind = match kind_str.as_str() {
         "FFun" | "function" => {
-            let params = Vec::new(); // Simplified — params from kind_obj
+            // `{args, ret}` of the FFun payload, as `macro class` and
+            // hand-built fields carry them.
+            let kind_field = |name: &str| match kind_obj {
+                Some(MacroValue::Object(ko)) => ko.get(name).cloned(),
+                _ => None,
+            };
+            let span = parser::Span::new(0, 0);
+            let params: Vec<parser::FunctionParam> = match kind_field("args") {
+                Some(MacroValue::Array(args)) => args
+                    .iter()
+                    .filter_map(|a| {
+                        let MacroValue::Object(a) = a else {
+                            return None;
+                        };
+                        Some(parser::FunctionParam {
+                            meta: Vec::new(),
+                            name: a.get("name")?.as_string()?.to_string(),
+                            type_hint: a
+                                .get("type")
+                                .and_then(|t| super::expr_adt::type_of_value(t, span)),
+                            optional: matches!(a.get("opt"), Some(MacroValue::Bool(true))),
+                            rest: false,
+                            default_value: a
+                                .get("value")
+                                .and_then(|v| super::expr_adt::try_expr_of(v, span))
+                                .map(Box::new),
+                            span,
+                        })
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let declared_ret =
+                kind_field("ret").and_then(|t| super::expr_adt::type_of_value(&t, span));
             let body = kind_obj
                 .and_then(|k| {
                     if let MacroValue::Object(ko) = k {
@@ -673,6 +706,7 @@ fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
                 }
                 sniff(b)
             });
+            let return_type = declared_ret.or(return_type);
 
             ClassFieldKind::Function(parser::Function {
                 name: name.clone(),
