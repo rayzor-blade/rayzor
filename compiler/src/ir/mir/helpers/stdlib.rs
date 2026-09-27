@@ -581,6 +581,36 @@ impl<'a> HirToMirContext<'a> {
 
     /// The source abstract's `@:to` conversion to `target_type`, when it
     /// declares one (`var f:Float = u` with `u:UInt` runs `toFloat`).
+    /// Whether `source_type` is an abstract with an `@:to` method returning
+    /// `target_type`'s kind (Int, Float, Bool or String).
+    pub(crate) fn has_abstract_to_function(
+        &self,
+        source_type: TypeId,
+        target_type: TypeId,
+    ) -> bool {
+        let Some(abs_name) = self.resolve_abstract_name(source_type) else {
+            return false;
+        };
+        let Some(target_kind) = self.type_table.get(target_type).map(|t| t.kind.clone()) else {
+            return false;
+        };
+        if !matches!(
+            target_kind,
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String
+        ) {
+            return false;
+        }
+        self.abstract_to_rules.get(&abs_name).is_some_and(|rules| {
+            rules.iter().any(|r| {
+                r.cast_function.is_some()
+                    && self
+                        .type_table
+                        .get(r.to_type)
+                        .is_some_and(|t| t.kind == target_kind)
+            })
+        })
+    }
+
     pub(crate) fn maybe_abstract_to_convert(
         &mut self,
         value: IrId,
@@ -600,9 +630,11 @@ impl<'a> HirToMirContext<'a> {
             .get(&abs_name)?
             .iter()
             .find(|r| {
-                self.type_table
-                    .get(r.to_type)
-                    .is_some_and(|t| t.kind == target_kind)
+                r.cast_function.is_some()
+                    && self
+                        .type_table
+                        .get(r.to_type)
+                        .is_some_and(|t| t.kind == target_kind)
             })
             .cloned()?;
         let func_id =

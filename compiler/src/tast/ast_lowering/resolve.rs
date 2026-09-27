@@ -507,9 +507,17 @@ impl<'a> AstLowering<'a> {
                 // no expected-param-types hint and its untyped params default
                 // to Dynamic → `*void` MIR formals → the caller passes raw
                 // i32 that the body unboxes (deref of a small int → SIGSEGV).
-                let class_sym = *self.context.class_context_stack.last()?;
-                let method_sym = self.resolve_class_method_symbol(class_sym, name_interned)?;
-                self.function_param_types_from_symbol(method_sym)
+                // An inherited method is declared on a parent class.
+                let mut class_sym = *self.context.class_context_stack.last()?;
+                for _ in 0..16 {
+                    if let Some(method_sym) =
+                        self.resolve_class_method_symbol(class_sym, name_interned)
+                    {
+                        return self.function_param_types_from_symbol(method_sym);
+                    }
+                    class_sym = self.parent_class_symbol(class_sym)?;
+                }
+                None
             }
             ExprKind::Field {
                 expr: obj, field, ..

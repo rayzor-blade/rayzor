@@ -293,6 +293,8 @@ impl<'a> AstLowering<'a> {
                     if let Ok(id) = self.lower_type(annotation) {
                         recorded_to.push(id);
                     }
+                } else if func.name == "toString" {
+                    recorded_to.push(self.context.type_table.borrow().string_type());
                 }
             }
         }

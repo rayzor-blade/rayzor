@@ -101,6 +101,16 @@ impl<'a> HirToMirContext<'a> {
             return Some(converted);
         }
 
+        // An implicit cast from an abstract to a type one of its `@:to`
+        // methods returns goes through that method.
+        if *is_safe && self.has_abstract_to_function(expr.ty, *target) {
+            let value = self.lower_expression(expr)?;
+            if let Some(converted) = self.maybe_abstract_to_convert(value, expr.ty, *target) {
+                return Some(converted);
+            }
+            return Some(value);
+        }
+
         let from_type = self.convert_type(expr.ty);
         let to_type = self.convert_type(*target);
 
