@@ -4068,6 +4068,17 @@ pub extern "C" fn haxe_stringmap_clear(map_ptr: *mut HaxeStringMap) {
     }
 }
 
+/// Shallow copy: a new map holding the same keys and value bits
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_stringmap_copy(map_ptr: *mut HaxeStringMap) -> *mut HaxeStringMap {
+    let map = if map_ptr.is_null() {
+        HashMap::new()
+    } else {
+        unsafe { (*map_ptr).map.clone() }
+    };
+    Box::into_raw(Box::new(HaxeStringMap { map }))
+}
+
 /// Get the number of entries in the map
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_count(map_ptr: *mut HaxeStringMap) -> i64 {
@@ -4296,6 +4307,17 @@ pub extern "C" fn haxe_intmap_clear(map_ptr: *mut HaxeIntMap) {
         let map = &mut *map_ptr;
         map.map.clear();
     }
+}
+
+/// Shallow copy: a new map holding the same keys and value bits
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_intmap_copy(map_ptr: *mut HaxeIntMap) -> *mut HaxeIntMap {
+    let map = if map_ptr.is_null() {
+        HashMap::new()
+    } else {
+        unsafe { (*map_ptr).map.clone() }
+    };
+    Box::into_raw(Box::new(HaxeIntMap { map }))
 }
 
 /// Get the number of entries in the map

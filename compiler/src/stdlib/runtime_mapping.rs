@@ -2932,6 +2932,7 @@ impl StdlibMapping {
                 types: &[PtrU8, PtrString] => Bool),
             // StringMap<T>::clear() -> Void
             map_method!(instance "haxe.ds.StringMap", "clear" => "haxe_stringmap_clear", params: 0, returns: void),
+            map_method!(instance "haxe.ds.StringMap", "copy" => "haxe_stringmap_copy", params: 0, returns: primitive),
             // StringMap<T>::toString() -> String
             // Returns pointer directly
             map_method!(instance "haxe.ds.StringMap", "toString" => "haxe_stringmap_to_string", params: 0, returns: primitive),
@@ -2978,6 +2979,7 @@ impl StdlibMapping {
                 types: &[PtrU8, I64] => Bool),
             // IntMap<T>::clear() -> Void
             map_method!(instance "haxe.ds.IntMap", "clear" => "haxe_intmap_clear", params: 0, returns: void),
+            map_method!(instance "haxe.ds.IntMap", "copy" => "haxe_intmap_copy", params: 0, returns: primitive),
             // IntMap<T>::toString() -> String
             // Returns pointer directly
             map_method!(instance "haxe.ds.IntMap", "toString" => "haxe_intmap_to_string", params: 0, returns: primitive),
