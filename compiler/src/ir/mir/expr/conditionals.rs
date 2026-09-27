@@ -422,12 +422,13 @@ impl<'a> HirToMirContext<'a> {
         let else_block = self.builder.create_block()?;
         let merge_block = self.builder.create_block()?;
 
-        // Snapshot symbol_map before branches so each branch can be lowered
-        // against the same starting bindings.
-        let symbol_map_before = self.symbol_map.clone();
-
         let cond_val = self.lower_expression(cond)?;
         let cond_val = self.truth_of(cond_val, cond.ty)?;
+
+        // Snapshot symbol_map before branches so each branch can be lowered
+        // against the same starting bindings -- after the condition, whose
+        // side effects (`a++ > 0`) both branches see.
+        let symbol_map_before = self.symbol_map.clone();
 
         // Branch-phi for effectful Call results.
         //

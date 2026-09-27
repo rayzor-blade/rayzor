@@ -260,6 +260,13 @@ impl<'a> HirToMirContext<'a> {
             .lower_expression(condition)
             .and_then(|r| self.truth_of(r, condition.ty))
         {
+            // Both arms start from the values after the condition, whose side
+            // effects (`a++ > 0`) have already happened.
+            for (symbol_id, (reg, _)) in var_initial_values.iter_mut() {
+                if let Some(&current) = self.symbol_map.get(symbol_id) {
+                    *reg = current;
+                }
+            }
             // Branch-phi for effectful Call results; rationale in
             // lower_conditional_typed.
             let cond_eval_block = match self.builder.current_block() {
