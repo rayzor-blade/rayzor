@@ -1084,6 +1084,70 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// The abstract a type is, through generic instantiation.
+    pub(crate) fn abstract_symbol_of(&self, ty: TypeId) -> Option<SymbolId> {
+        use crate::tast::core::TypeKind;
+        let tt = self.context.type_table.borrow();
+        let mut resolved = ty;
+        for _ in 0..8 {
+            match tt.get(resolved).map(|ti| &ti.kind) {
+                Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
+                Some(TypeKind::Abstract { symbol_id, .. }) => return Some(*symbol_id),
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// Convert an abstract-typed argument when the formal is a concrete type
+    /// the abstract implicitly casts to (a `to` clause or an `@:to` method):
+    /// `f(meters)` with `f(s:String)` passes `meters` through its `@:to`. The
+    /// cast is implicit, and MIR applies the abstract's conversion rule.
+    pub(crate) fn coerce_arg_via_abstract_to(
+        &mut self,
+        arg: TypedExpression,
+        formal: Option<TypeId>,
+    ) -> TypedExpression {
+        use crate::tast::core::TypeKind;
+        let Some(formal_ty) = formal else {
+            return arg;
+        };
+        let Some(abstract_symbol) = self.abstract_symbol_of(arg.expr_type) else {
+            return arg;
+        };
+        let converts = {
+            let tt = self.context.type_table.borrow();
+            let formal_kind = tt.get(formal_ty).map(|ti| &ti.kind);
+            matches!(
+                formal_kind,
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
+            ) && self
+                .abstract_casts
+                .get(&abstract_symbol)
+                .is_some_and(|(_, to_types)| {
+                    to_types
+                        .iter()
+                        .any(|&t| t == formal_ty || tt.get(t).map(|ti| &ti.kind) == formal_kind)
+                })
+        };
+        if !converts {
+            return arg;
+        }
+        let location = arg.source_location;
+        TypedExpression {
+            expr_type: formal_ty,
+            kind: TypedExpressionKind::Cast {
+                expression: Box::new(arg),
+                target_type: formal_ty,
+                cast_kind: CastKind::Implicit,
+            },
+            usage: crate::tast::node::VariableUsage::Copy,
+            lifetime_id: crate::tast::LifetimeId::first(),
+            source_location: location,
+            metadata: crate::tast::node::ExpressionMetadata::default(),
+        }
+    }
+
     fn coerce_arg_to_dynamic_param(
         &mut self,
         arg: TypedExpression,
@@ -1358,12 +1422,31 @@ impl<'a> AstLowering<'a> {
                 // indistinguishable from an object.
                 let reflect_callee = matches!(&expr.kind, ExprKind::Field { expr: obj, .. }
                     if matches!(&obj.kind, ExprKind::Ident(c) if c == "Reflect"));
-                let mut coerced: Vec<TypedExpression> = Vec::with_capacity(arg_exprs.len());
-                for (i, a) in arg_exprs.into_iter().enumerate() {
-                    let formal = boxing_formals
+                // Type parameters bound by the non-abstract arguments: an
+                // abstract argument beside them converts to what they fixed
+                // (`eq("1m", meters)` binds T to String and calls `@:to`).
+
+                let formal_at = |i: usize| {
+                    boxing_formals
                         .as_ref()
                         .and_then(|f| f.get(i).copied())
-                        .or_else(|| expected_arg_types.as_ref().and_then(|f| f.get(i).copied()));
+                        .or_else(|| expected_arg_types.as_ref().and_then(|f| f.get(i).copied()))
+                };
+                let mut bindings = BTreeMap::new();
+                for (i, a) in arg_exprs.iter().enumerate() {
+                    if let Some(formal) = formal_at(i) {
+                        if self.abstract_symbol_of(a.expr_type).is_none() {
+                            self.bind_type_params(formal, a.expr_type, &mut bindings);
+                        }
+                    }
+                }
+                let mut coerced: Vec<TypedExpression> = Vec::with_capacity(arg_exprs.len());
+                for (i, a) in arg_exprs.into_iter().enumerate() {
+                    let formal = formal_at(i);
+                    let a = self.coerce_arg_via_abstract_to(
+                        a,
+                        formal.map(|f| self.substitute_bound_type_params(f, &bindings)),
+                    );
                     let a = self.coerce_arg_via_abstract_from(a, formal);
                     // A top-level Int argument for a Float formal is left to the
                     // call's own coercion; literals inside structures are retyped.

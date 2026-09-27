@@ -180,6 +180,48 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Register a symbol with package information
+    /// Whether the root slot for `name` holds an enum or abstract declared in
+    /// another package while a class of that name is declared in the current,
+    /// named package. The class then gets its own packaged symbol instead of
+    /// lowering onto the other type's.
+    pub(crate) fn root_slot_is_foreign_type(&self, name: InternedString) -> bool {
+        let Some(pkg) = self.context.current_package else {
+            return false;
+        };
+        let named = self
+            .context
+            .namespace_resolver
+            .get_package(pkg)
+            .is_some_and(|p| !p.full_path.is_empty());
+        named
+            && self
+                .context
+                .symbol_table
+                .lookup_symbol(ScopeId::first(), name)
+                .is_some_and(|s| {
+                    matches!(
+                        s.kind,
+                        crate::tast::SymbolKind::Enum | crate::tast::SymbolKind::Abstract
+                    ) && s.package_id != Some(pkg)
+                })
+    }
+
+    /// The class symbol registered for `name` in the current package, if any.
+    pub(crate) fn package_class_symbol(&self, name: InternedString) -> Option<SymbolId> {
+        let pkg = self.context.current_package?;
+        let id = *self
+            .context
+            .namespace_resolver
+            .get_package(pkg)?
+            .symbols
+            .get(&name)?;
+        self.context
+            .symbol_table
+            .get_symbol(id)
+            .filter(|s| s.kind == crate::tast::SymbolKind::Class)
+            .map(|s| s.id)
+    }
+
     pub(crate) fn register_symbol_with_package(&mut self, symbol_id: SymbolId, name: &str) {
         if let Some(package_id) = self.context.current_package {
             let interned_name = self.context.string_interner.intern(name);
@@ -228,6 +270,29 @@ impl<'a> AstLowering<'a> {
         match declaration {
             TypeDeclaration::Class(class_decl) => {
                 let class_name = self.context.intern_string(&class_decl.name);
+
+                if self.root_slot_is_foreign_type(class_name) {
+                    if self.package_class_symbol(class_name).is_none() {
+                        let class_symbol = self
+                            .context
+                            .symbol_table
+                            .create_class_in_scope(class_name, ScopeId::first());
+                        self.register_symbol_with_package(class_symbol, &class_decl.name);
+                        let class_type = self.context.type_table.borrow_mut().create_type(
+                            crate::tast::core::TypeKind::Class {
+                                symbol_id: class_symbol,
+                                type_args: Vec::new(),
+                            },
+                        );
+                        self.context
+                            .symbol_table
+                            .update_symbol_type(class_symbol, class_type);
+                        self.context
+                            .symbol_table
+                            .register_type_symbol_mapping(class_type, class_symbol);
+                    }
+                    return Ok(());
+                }
 
                 // Check if this class already exists in the root scope (from a previous compilation)
                 // If so, skip pre-registration to avoid creating duplicate symbols
@@ -784,6 +849,8 @@ impl<'a> AstLowering<'a> {
                     if let Ok(id) = self.lower_type(annotation) {
                         to_types.push(id);
                     }
+                } else if func.name == "toString" {
+                    to_types.push(self.context.type_table.borrow().string_type());
                 }
             }
         }

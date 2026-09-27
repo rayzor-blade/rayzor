@@ -47,7 +47,19 @@ impl<'a> AstLowering<'a> {
         let class_name = self.context.intern_string(&class_decl.name);
 
         // Look up the existing symbol that was created during pre-registration
-        let class_symbol = if let Some(existing_symbol) = self
+        let class_symbol = if self.root_slot_is_foreign_type(class_name) {
+            match self.package_class_symbol(class_name) {
+                Some(symbol) => symbol,
+                None => {
+                    let symbol = self
+                        .context
+                        .symbol_table
+                        .create_class_in_scope(class_name, ScopeId::first());
+                    self.register_symbol_with_package(symbol, &class_decl.name);
+                    symbol
+                }
+            }
+        } else if let Some(existing_symbol) = self
             .context
             .symbol_table
             .lookup_symbol(ScopeId::first(), class_name)
