@@ -1,0 +1,548 @@
+{
+  "index.html": [
+    [
+      "Tiered JIT, ownership memory, and no GC. The architecture doc explains how.",
+      "New to Rayzor? Start with compilation modes, tiering, and memory management."
+    ],
+    [
+      "Read it →",
+      "Read the docs →"
+    ],
+    [
+      "A Haxe compiler that starts instantly, gets faster as it runs, and has no garbage collector.",
+      "Run Haxe with instant startup and a JIT that optimizes your code as it runs. Memory is managed without a garbage collector."
+    ],
+    [
+      "starts interpreting at once, then compiles each function as it proves hot",
+      "starts in the interpreter and compiles frequently called functions"
+    ],
+    [
+      "memory is freed at points the compiler works out while building your program",
+      "the compiler inserts cleanup based on where values are used"
+    ],
+    [
+      "native binaries and WebAssembly, optimized once and shared by both",
+      "native binaries and WebAssembly from a shared optimization pipeline"
+    ],
+    [
+      "One codebase, one runtime, four places to put it. WebAssembly is a first-class target: it is built by the same compiler and the same optimizations as the native output, and ships as a core module, a WASI P2 component, or a browser bundle.",
+      "Use the same Haxe codebase and runtime on Linux, macOS, Windows, and the web. WebAssembly goes through the same compiler and optimizations as native code, with output as a core module, WASI P2 component, or browser bundle."
+    ],
+    [
+      "Native binaries to ship, and an instant run-from-source loop while you work. Threads, sockets and the full runtime, plus NUMA-aware worker pinning on servers.",
+      "Run from source with instant startup during development, then build a native binary to deploy. Includes the full runtime, threads, sockets, and NUMA-aware worker pinning."
+    ],
+    [
+      "The same native path on Apple silicon and Intel, with a worker pool that adapts to the machine instead of fighting it.",
+      "Native builds on Apple silicon and Intel, with a worker pool that adapts to the available CPU topology."
+    ],
+    [
+      "Native binaries through the MSVC toolchain, with the same tiered JIT and the same runtime you develop against elsewhere.",
+      "Build native binaries with the MSVC toolchain, or use the tiered JIT to run from source."
+    ],
+    [
+      "first-class target",
+      "core modules · WASI P2"
+    ],
+    [
+      "Core modules, WASI P2 components, and a browser harness, from the same program and the same optimizations as the native backends.",
+      "Build a core module or WASI P2 component. Add --browser to generate an HTML harness for running it in a browser."
+    ],
+    [
+      ">Policy<",
+      ">Design choices<"
+    ],
+    [
+      "Haxe is a systems language.<br>We compile it like one.",
+      "Why build another<br>Haxe compiler?"
+    ],
+    [
+      "Haxe already has the type system, the macros and the ergonomics. What it hasn't had is a compiler that goes straight to machine code, frees memory without a collector, and optimizes once for every backend. Rayzor does that, with the Haxe you already write.",
+      "We wanted native code, fast iteration, and control over memory while keeping Haxe's types and macros. Rayzor brings those pieces together in one compiler. These choices guide the implementation."
+    ],
+    [
+      "An optimization ships after it's proven correct. Drop insertion and inline are guarantees, not hints, so they run at every level, including -O0.",
+      "We verify optimizations before shipping them. Drop insertion and required inlining run at every level, including -O0, because program correctness depends on them."
+    ],
+    [
+      "The compiler works out when to free things. No pauses in the middle of a frame, and you can annotate one class at a time.",
+      "The compiler determines when to free memory, so there are no GC pauses during a frame. You can add ownership annotations one class at a time."
+    ],
+    [
+      "Same source, same binary",
+      "Deterministic codegen"
+    ],
+    [
+      "MIR collections are ordered on purpose, so codegen is reproducible build after build.",
+      "MIR collections use a stable iteration order to keep code generation reproducible."
+    ],
+    [
+      "Don't redo work",
+      "Cache unchanged modules"
+    ],
+    [
+      "Parsing, type checking, module caching and bundling all skip what hasn't changed. Caching is on by default.",
+      "Parsing, type checking, and bundling reuse cached work for unchanged modules. The cache is enabled by default."
+    ],
+    [
+      "Optimize once",
+      "Shared optimization passes"
+    ],
+    [
+      "Every target is built from the same optimized program, so an improvement to one speeds up your native binary and your wasm module too.",
+      "Every target uses the same optimized MIR. Improvements to the shared passes carry through to both native binaries and WebAssembly."
+    ],
+    [
+      "Not a goal",
+      "Scope"
+    ],
+    [
+      "Transpilation. The official Haxe compiler is very good at emitting JavaScript, Python and PHP. Rayzor has no such target and won't. Use the official compiler when you ship source, Rayzor when you ship machine code.",
+      "Rayzor focuses on native code and WebAssembly. For JavaScript, Python, or PHP output, use the official Haxe compiler."
+    ],
+    [
+      "No collector. No pauses.",
+      "Memory without GC pauses."
+    ],
+    [
+      "The compiler decides when every value is freed, by working out where it is last used. You reach for annotations only where sharing actually matters.",
+      "The compiler tracks where values are last used and inserts cleanup at those points. Add ownership annotations where you need to control sharing."
+    ],
+    [
+      "Atomic reference counting, for state that genuinely needs more than one owner.",
+      "Atomic reference counting for values shared across threads."
+    ],
+    [
+      ", so ownership is never a rewrite you do first.",
+      ". You can add annotations one class at a time."
+    ],
+    [
+      "One pipeline,<br>optimized once.",
+      "Benchmark results."
+    ],
+    [
+      "Same Haxe source on every target. Rayzor is faster than HashLink outright, faster than the JVM without paying its startup, and faster than hxcpp on floating-point work. Compile time is tens of milliseconds, not hundreds.",
+      "We run the same Haxe source on every target. Rayzor beats HashLink and the JVM, avoids JVM startup overhead, and outperforms hxcpp on floating-point workloads. Compilation takes tens of milliseconds, compared with hundreds on the other targets."
+    ],
+    [
+      "That compile column is the part you feel all day. No C++ toolchain to set up, no JVM to warm, no separate build step before you can run.",
+      "Short compile times make a difference when you run code throughout the day. Rayzor needs no C++ toolchain or JVM warm-up, and you can run source files directly."
+    ],
+    [
+      "starts executing while the optimizer is still working. And it's a cold number: the BLADE cache keeps every unchanged module compiled, so the second build compilation is instant.",
+      "starts executing while the optimizer runs. These are cold-build measurements. With the BLADE cache, unchanged modules are already compiled, so compilation on the second build is instant."
+    ],
+    [
+      "Vectors are a type,<br>not an intrinsic.",
+      "SIMD types with<br>Haxe operators."
+    ],
+    [
+      "family covers 128- and 256-bit, float and integer lanes, with tuple and array literals, real operator overloads, and a full math surface: dot, normalize, magnitude, lerp. It lowers to NEON, SSE2 or WASM SIMD128, with a scalar fallback where none exists.",
+      "types cover 128- and 256-bit vectors with float and integer lanes. You can use tuple and array literals, arithmetic operators, and methods such as dot, normalize, magnitude, and lerp. The compiler emits NEON, SSE2, or WASM SIMD128 instructions, with a scalar fallback where needed."
+    ],
+    [
+      "The interpreter handles vector types, and functions that use SIMD are promoted on first call, so vector work runs compiled from the start and startup stays instant.",
+      "The interpreter supports vector types, and SIMD functions are compiled on their first call. Vector work runs as compiled code from the start, while startup stays instant."
+    ],
+    [
+      "How it lowers ↗",
+      "SIMD types and backend support ↗"
+    ],
+    [
+      "Running in a minute.",
+      "Install and run."
+    ],
+    [
+      "Installs to ~/.rayzor/bin. The download is self-contained. Nothing else needs installing.",
+      "Installs to ~/.rayzor/bin with everything needed to run Rayzor."
+    ],
+    [
+      "Where a native Haxe pays off.",
+      "What you can build."
+    ],
+    [
+      "Long-running processes where a collector pause is a latency spike you can't explain to anyone. Memory is freed by analysis, so tail latency is a property of your code, not the runtime's mood.",
+      "Rayzor determines cleanup at compile time, so long-running services avoid latency spikes from garbage collection. OS threads and channels handle concurrent work, and the server preset optimizes for processes that stay up."
+    ],
+    [
+      "Real OS threads with Channel, Select, Mutex and Arc, not a green-thread emulation",
+      "OS threads with Channel, Select, Mutex and Arc"
+    ],
+    [
+      "Ship one native binary, or one .rzb that skips compilation at startup",
+      "Deploy a native binary, or an .rzb bundle that skips source compilation"
+    ],
+    [
+      "Frame budgets don't survive a stop-the-world pause. Ownership annotations put allocation lifetimes where you can see them, and the JIT means iteration doesn't wait on a full build.",
+      "Keep GC pauses out of the frame budget. Ownership annotations make allocation lifetimes explicit, and the JIT lets you iterate without waiting for a full build."
+    ],
+    [
+      "@:shader classes compile straight to WGSL, so shaders are Haxe too",
+      "@:shader classes compile to WGSL"
+    ],
+    [
+      "@:cstruct gives flat, headerless layouts for C ABI compatibility. Bind only what you must",
+      "@:cstruct provides flat, headerless layouts for C ABI compatibility"
+    ],
+    [
+      "The parts that usually push people out of Haxe and into C: vector types, thread pools that don't re-spawn, and control over which core does what.",
+      "Write compute kernels with vector types, persistent worker threads, and explicit CPU affinity. The Nue inference engine below uses these APIs."
+    ],
+    [
+      "Every kernel is benchmarked against the Rust version it replaces. When Haxe is slower, that's treated as something to fix in the kernel, the thread pool or the compiler, not a reason to drop back to Rust.",
+      "We benchmark every kernel against the Rust version it replaces. When Haxe is slower, we work on the kernel, thread pool, or compiler until it catches up."
+    ],
+    [
+      "Parity is met and beaten on k-quant; INT8 sits within 5% and is closing. FFI is reserved for platform APIs such as AMX, CoreML and VNNI, never for kernels Haxe could write.",
+      "The Haxe k-quant kernel is faster than the Rust version. INT8 is within 5%, and the gap is narrowing. Nue uses FFI for platform APIs such as AMX, CoreML, and VNNI; the compute kernels stay in Haxe."
+    ],
+    [
+      "Bring your own frontend.",
+      "Using the official Haxe frontend."
+    ],
+    [
+      "We're working on consuming the official Haxe compiler's output directly and lowering it into Rayzor MIR. You would keep the frontend you already use, with every macro and library, and get native codegen, ownership and the tiered runtime underneath it.",
+      "We're working on reading typed output from the official Haxe compiler and lowering it to Rayzor MIR. This would let you keep your existing frontend, macros, and libraries, with Rayzor handling native code generation, ownership, and tiered execution."
+    ],
+    [
+      "No rewrite, no second dialect. The same build you run today, ending in machine code.",
+      "The aim is to compile your existing Haxe build to machine code without changing the source."
+    ],
+    [
+      "Standard library coverage and optimization tuning are the active fronts. Both are good first patches.",
+      "Current work includes standard library coverage and compiler optimizations. Both are good places to start contributing."
+    ],
+    [
+      "and you're contributing.",
+      "to run the test suite."
+    ],
+    [
+      "Apache 2.0, Rust 1.70+. ",
+      "Apache 2.0, Rust 1.70+. Run "
+    ]
+  ],
+  "docs.html": [
+    [
+      "Rayzor compiles Haxe 4.x to native code. Each task below has its own command.",
+      "Install Rayzor, create a Haxe project, and run it with the commands below."
+    ],
+    [
+      "The same MIR goes through a different backend depending on the command.",
+      "Use run during development, aot for a native executable, or build for WebAssembly. The table below covers the main commands."
+    ],
+    [
+      "starts in the MIR interpreter so execution begins immediately, then promotes a function to a compiled tier once it has run enough times. A preset is a policy, not a backend.",
+      "starts executing immediately in the MIR interpreter, then compiles functions as their call counts increase. Presets control when functions move to a more optimized tier."
+    ],
+    [
+      "There is no garbage collector. The compiler decides at compile time when a value is freed, from last-use and escape analysis, with a MIR-level pass as the backstop for anything the HIR analysis cannot see. Ownership is opt-in through annotations.",
+      "Rayzor has no garbage collector. It uses last-use and escape analysis to insert cleanup at compile time. Analysis starts in HIR, with a MIR pass handling cases that become visible after lowering. You can add ownership annotations to individual classes."
+    ],
+    [
+      "skips compilation entirely.",
+      "loads the bundle without compiling it again."
+    ],
+    [
+      "The cache is invalidated by source content, compiler version, and a content-derived compiler cache ABI id, not by a redundant relink of identical sources.",
+      "Cache entries depend on source content, the compiler version, and a cache ABI identifier derived from compiler sources. Relinking unchanged compiler sources preserves the cache."
+    ],
+    [
+      "A project is described by a",
+      "Put your project settings in"
+    ],
+    [
+      "at its root.",
+      "at the project root."
+    ],
+    [
+      "An existing HXML build can be delegated to rather than ported. Set",
+      "To use an existing HXML build, set"
+    ],
+    [
+      "A project depending on native plugins must declare both the class paths and the native libraries; only one of the two fails to resolve at run time.",
+      "For native plugins, declare both the class paths and the native libraries. Rayzor needs both to resolve the plugin at runtime."
+    ],
+    [
+      "Macros run at compile time in rayzor's own interpreter. Expansion is deterministic: modules expand in a fixed order, dependencies first and then by module path, each in source order, and",
+      "Macros run at compile time in Rayzor's interpreter. Modules expand in a fixed order: dependencies first, then by module path. Within a module, expansion follows source order, and"
+    ],
+    [
+      "run in declaration order. The same sources always produce the same program.",
+      "run in declaration order. This keeps the generated program consistent across builds of the same sources."
+    ],
+    [
+      "The Haxe compiler types modules lazily, so the order its macros run in can change when unrelated code changes. rayzor's order is fixed, and a few things follow from that:",
+      "The official Haxe compiler types modules lazily, which can change macro execution order when unrelated code changes. When porting macros to Rayzor, keep these differences in mind:"
+    ],
+    [
+      "Macros that ask the typer run once",
+      "Macros that need type information run once"
+    ],
+    [
+      "Full reference lives in the repo",
+      "More detail in the repository"
+    ],
+    [
+      "Every flag, the pass ordering, the runtime ABI and the format specs.",
+      "See the full CLI reference, compiler pass order, runtime ABI, and file format specifications."
+    ],
+    [
+      "Runs immediately, then compiles and optimizes whatever gets hot",
+      "Starts executing immediately, then compiles and optimizes frequently called functions"
+    ],
+    [
+      "CLI tools and one-shot scripts. Starts instantly, never promotes",
+      "CLI tools and short scripts. Instant startup, no tier promotion"
+    ],
+    [
+      "Performance testing. Compiles at once, fully optimized within warm-up",
+      "Performance testing. Compiles immediately and finishes optimizing during warm-up"
+    ]
+  ],
+  "cli.html": [
+    [
+      "has the full flag list. This page is the short path: setup, then the commands you use daily.",
+      "lists the available flags. Start with installation, then use the command reference below."
+    ],
+    [
+      "Lands in",
+      "Installs to"
+    ],
+    [
+      ". The download is self-contained. Nothing else to install.",
+      ". The download includes everything needed to run Rayzor."
+    ],
+    [
+      "Then scaffold a project and run it:",
+      "Create a project and run it:"
+    ],
+    [
+      "The same MIR goes through a different backend depending on the command. Picking a mode means picking a command.",
+      "Choose a command based on what you need: run source code, check types, or produce a build artifact."
+    ],
+    [
+      "A preset is a policy, not a backend:",
+      "Presets control when functions move between execution tiers:"
+    ],
+    [
+      "bails out to compiled code immediately.",
+      "starts compiling immediately."
+    ],
+    [
+      "The whole program compiled ahead of time and linked against the runtime.",
+      "Compiles the whole program ahead of time and links it against the runtime."
+    ],
+    [
+      "Serializes every compiled module into one file so startup skips compilation. Run it with rayzor run app.rzb.",
+      "Saves every compiled module in one file, so startup skips compilation. Run the bundle with rayzor run app.rzb."
+    ],
+    [
+      "Resolution order: an explicit .hxml file, else rayzor.toml in the current directory, else the manifest's hxml delegation.",
+      "Pass an .hxml file directly, or run this command in a directory with rayzor.toml. The manifest can also point to an existing HXML build."
+    ],
+    [
+      "warm pre-compiles the standard library so the first real build does not pay for it.",
+      "warm pre-compiles the standard library for reuse in later builds."
+    ],
+    [
+      ".rpkg packages carry Haxe sources and, optionally, native dylibs. strip reduces a package to a single platform's native library.",
+      ".rpkg packages contain Haxe sources and optional native libraries. Use strip to keep only the native library for a selected platform."
+    ],
+    [
+      "at the project root. A workspace lists members instead, and an existing HXML build can be delegated to rather than ported.",
+      "file at the project root stores build settings. A workspace lists its members there. To reuse an HXML build, set the hxml field as shown below."
+    ],
+    [
+      "A project depending on native plugins must declare both the class paths and the native libraries; a consumer with only one of the two fails to resolve at run time.",
+      "For native plugins, declare both the class paths and the native libraries. Rayzor needs both to resolve the plugin at runtime."
+    ],
+    [
+      "How the compiler works inside",
+      "Compiler internals"
+    ],
+    [
+      "Runs immediately, then compiles and optimizes whatever gets hot",
+      "Starts executing immediately, then compiles and optimizes frequently called functions"
+    ],
+    [
+      "CLI tools and one-shot scripts. Starts instantly, never promotes",
+      "CLI tools and short scripts. Instant startup, no tier promotion"
+    ],
+    [
+      "Performance testing. Compiles at once, fully optimized within warm-up",
+      "Performance testing. Compiles immediately and finishes optimizing during warm-up"
+    ]
+  ],
+  "concurrency.html": [
+    [
+      "Threads, channels and shared state, with the sharing rules checked before you run. Every value that crosses a thread boundary must be",
+      "Rayzor provides OS threads, channels, and shared state. The compiler checks thread-safety rules: values moved across thread boundaries must be"
+    ],
+    [
+      "Both are declared with one annotation and validated by the compiler.",
+      "Declare these markers with the annotation below; the compiler validates them."
+    ],
+    [
+      "Lightweight and goroutine-shaped: spawn a closure, get a handle back, join it for the result. Every variable the closure captures must be Send, and the closure itself is moved into the new thread.",
+      "Spawn a closure on an OS thread, then join the returned handle to get its result. The closure is moved into the new thread, and every captured variable must be Send."
+    ],
+    [
+      "exposes the primitive underneath: register for park/unpark, block, and wake by id. An unpark issued before the park makes the next park return immediately, so there is no lost-wakeup window.",
+      "provides park/unpark operations: register a thread, block it, and wake it by id. If unpark is called before park, the next park returns immediately."
+    ],
+    [
+      "Multi-producer, multi-consumer. Capacity zero is unbounded and never blocks the sender; a positive capacity is bounded and blocks when full.",
+      "Channels support multiple senders and receivers. Capacity zero creates an unbounded channel; a positive capacity creates a bounded channel whose send operation blocks when full."
+    ],
+    [
+      "are the non-blocking pair.",
+      "return without blocking."
+    ],
+    [
+      "Non-deterministic receive across several channels, Go-shaped.",
+      "Use Select to receive from several channels."
+    ],
+    [
+      "blocks until any channel yields;",
+      "blocks until a channel has a value or is closed;"
+    ],
+    [
+      "A closed, empty channel yields its own slot index with a null value, the same \"zero value on a closed receive\" convention, which is how you detect closure inside a select arm. Channels in one call share an element type; use",
+      "A closed, empty channel returns its index and a null value. Check both to detect closure. All channels in one call must share an element type; use"
+    ],
+    [
+      "for heterogeneous selects.",
+      "to select across different value types."
+    ],
+    [
+      "gives shared ownership across threads, where cloning bumps the refcount rather than copying. It pairs with",
+      "provides shared ownership across threads. Cloning increments the reference count. Wrap the value in a"
+    ],
+    [
+      "when the shared value is also mutable.",
+      "when you need to mutate it."
+    ],
+    [
+      "The inner type must be Send + Sync to cross a thread boundary at all. The compiler rejects the spawn otherwise, rather than leaving it to a data race at runtime.",
+      "The inner type must be Send + Sync to cross a thread boundary. Otherwise, the compiler rejects the spawn."
+    ],
+    [
+      "covers the cases where a lock is more than you need.",
+      "provides atomic operations for cases that do not need a mutex."
+    ],
+    [
+      "is the entry point for anything that iterates a large index range: matmul rows, conv tiles, attention heads, elementwise sweeps.",
+      "distributes work over an index range, such as matrix rows, convolution tiles, or attention heads."
+    ],
+    [
+      "SpinPool, for kernels called hundreds of times",
+      "SpinPool: reuse workers across calls"
+    ],
+    [
+      "Spawning and joining OS threads per call dominates when a kernel runs hundreds of times per token. A",
+      "For frequently called kernels, creating and joining threads on every call can cost more than the work itself. A"
+    ],
+    [
+      "Work distribution is chunk-stealing rather than static bands: workers claim row ranges from a shared atomic cursor until the range is exhausted. Static bands lose the join to the slowest core, since an E-core band runs three to four times longer than a P-core band. Stealing self-balances heterogeneous cores without knowing the topology.",
+      "Workers claim chunks of rows from a shared atomic cursor until all rows are processed. With fixed row assignments, an E-core can take three to four times longer than a P-core, holding up the whole call. Chunk stealing lets faster cores take more work without needing to know the CPU topology."
+    ],
+    [
+      "is the low-level primitive WorkerPool is built on, exposed for callers who need fine-grained pinning. One topology per process, queried lazily on first call.",
+      "provides the topology information used by WorkerPool. Use it directly when you need explicit thread affinity. The topology is queried once per process, on first use."
+    ],
+    [
+      "NUMA-pinned where it matters",
+      "with NUMA pinning on multi-node systems"
+    ],
+    [
+      "How the runtime backs this",
+      "Runtime implementation"
+    ]
+  ],
+  "architecture.html": [
+    [
+      "Rayzor is a native code generator, not a source-to-source backend: every backend emits machine code, WASM bytecode, or C used as an assembler. What it adds over the official compiler is a tiered runtime and a single optimization pipeline shared by every backend — code starts executing immediately, and only what proves hot pays compilation cost.",
+      "Rayzor adds a tiered runtime and a shared optimization pipeline to Haxe. Backends emit machine code, WebAssembly, or C for native compilation. In tiered execution, code starts immediately in the interpreter; functions are compiled as they get hot."
+    ],
+    [
+      "Language transpilation is an explicit non-goal. There is no JavaScript target and none planned.",
+      "The supported output targets are native code and WebAssembly. There is no planned JavaScript target."
+    ],
+    [
+      "HIR still knows what the user wrote, so diagnostics and ownership analysis read naturally there. MIR is flat and typed, so one optimization pipeline serves every backend — that is the whole reason for the split. Type checking is not a separate phase; it is folded into AST lowering.",
+      "HIR preserves source-level structure for diagnostics and ownership analysis. MIR represents typed operations in basic blocks, which lets the backends share optimization passes. Type checking happens during AST lowering."
+    ],
+    [
+      "SSA over basic blocks with real phi nodes, type metadata carried down rather than erased. Every collection is a",
+      "MIR uses SSA basic blocks with phi nodes and retains type metadata. Collections use"
+    ],
+    [
+      "— explicitly so iteration order is deterministic and codegen is reproducible.",
+      "to keep iteration order deterministic and code generation reproducible."
+    ],
+    [
+      "fires before the passes; use",
+      "prints MIR before optimization; use"
+    ],
+    [
+      "for what the backend actually sees.",
+      "to inspect changes made by the passes."
+    ],
+    [
+      "is added before the level match at every level — it is a correctness pass, not an optimization.",
+      "runs at every level because it inserts the cleanup required for correct memory management."
+    ],
+    [
+      "O0 is not \"no optimization.\"",
+      "O0 still runs required passes."
+    ],
+    [
+      "Ordering is load-bearing: inlining exposes Alloc+GEP for SRA, GlobalLoadCaching dedups metadata loads for BCE, BCE emits the invariant load LICM hoists, and LICM's clean loop bodies are what LoopUnrolling and LoopVectorization need.",
+      "Pass order matters. Inlining exposes Alloc+GEP for SRA. GlobalLoadCaching deduplicates metadata loads so BCE can remove bounds checks. BCE exposes invariant loads for LICM to hoist, preparing loops for unrolling and vectorization."
+    ],
+    [
+      "The interpreter is tier 0, the next three rungs are Cranelift, and Maximum is LLVM. Promotion compares tier ordinals, so a counter clearing several thresholds at once skips rungs.",
+      "Tier 0 is the interpreter, tiers 1–3 use Cranelift, and tier 4 uses LLVM. A function can skip tiers if its call count passes several thresholds at once."
+    ],
+    [
+      " is the safety-critical part. Function pointers cannot be swapped while JIT code is running, so a safepoint gates the swap: the promoter requests promotion, waits for the in-flight execution counter to drain to zero, swaps under a write lock, and returns to idle. Installs are monotonic — a pointer for a function already at a higher tier is dropped.",
+      " waits for active JIT calls to finish before replacing a function pointer. The promoter requests a safepoint, waits for the execution counter to reach zero, and swaps the pointer under a write lock. A completed compilation is discarded if the function has already reached a higher tier."
+    ],
+    [
+      "Vectors are language-level types, not intrinsics you reach for through externs. The",
+      "SIMD vectors are built into the type system. The"
+    ],
+    [
+      "abstracts whose representation follows from their identity — each lowers straight to a MIR vector type, in 128- and 256-bit widths, across float and integer lanes.",
+      "abstracts that lower directly to MIR vector types. They support float and integer lanes in 128- and 256-bit widths, subject to backend support."
+    ],
+    [
+      "Arithmetic through real operators, lane read/write via array access, and a full float surface — dot, sum, sqrt, abs, min, max, rounding, normalize, magnitude, lerp",
+      "Arithmetic operators, lane access with array syntax, and float methods: dot, sum, sqrt, abs, min, max, rounding, normalize, magnitude, lerp"
+    ],
+    [
+      "Beyond the Haxe standard library, Rayzor ships a systems layer: memory primitives that map to real machine types, a native vector monomorphized per element type, and a concurrency surface the compiler validates through Send and Sync.",
+      "The rayzor package adds memory primitives, native collections specialized by element type, and concurrency APIs checked by the compiler through Send and Sync."
+    ],
+    [
+      "Parallelism adapts to the machine.",
+      "WorkerPool uses the detected NUMA topology."
+    ],
+    [
+      "errors rather than silently degrading.",
+      "reports an error."
+    ],
+    [
+      " It still forces inlining, because Haxe ",
+      " Haxe requires inlining for functions marked "
+    ],
+    [
+      " is a language guarantee rather than a hint — and because inlining small constructors is what exposes the Alloc+GEP shape SRA needs. Without it, per-iteration constructor allocations are never scalarised and loops leak.",
+      ". Inlining small constructors also exposes the Alloc+GEP pattern that SRA needs to remove allocations. Without it, allocations inside loops cannot be scalarised and leak."
+    ],
+    [
+      " family are ",
+      " types are "
+    ]
+  ]
+}

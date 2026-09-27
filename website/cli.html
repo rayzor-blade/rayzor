@@ -182,21 +182,21 @@
     <main style="padding:40px 0 96px;min-width:0" class="dcr9">
       <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Reference</div>
       <h1 id="overview" style="margin:14px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.035em;font-weight:600" class="dcr10">CLI reference</h1>
-      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Every command is <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">rayzor &lt;command&gt;</span>, and <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">--help</span> has the full flag list. This page is the short path: setup, then the commands you use daily.</p>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Every command is <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">rayzor &lt;command&gt;</span>, and <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">--help</span> lists the available flags. Start with installation, then use the command reference below.</p>
 
       <h2 id="setup" style="margin:52px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Install</h2>
       <div style="margin-top:22px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">curl -fsSL https://rayzor.tech/install.sh | sh     # macOS, Linux, WSL
 irm https://rayzor.tech/install.ps1 | iex          # Windows
 
 rayzor info                                        # confirm the install</div>
-      <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Lands in <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">~/.rayzor/bin</span>. The download is self-contained. Nothing else to install.</p>
-      <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Then scaffold a project and run it:</p>
+      <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Installs to <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">~/.rayzor/bin</span>. The download includes everything needed to run Rayzor.</p>
+      <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Create a project and run it:</p>
       <div style="margin-top:12px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor init --name my-app      # src/Main.hx + rayzor.toml
 cd my-app
 rayzor run                     # entry point from the manifest</div>
 
       <h2 id="modes" style="margin:52px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Compilation modes</h2>
-      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">The same MIR goes through a different backend depending on the command. Picking a mode means picking a command.</p>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">Choose a command based on what you need: run source code, check types, or produce a build artifact.</p>
       <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;overflow:hidden">
         <div style="display:grid;grid-template-columns:1fr 1.1fr 1.3fr;background:#101216;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.1em;text-transform:uppercase;color:#6F757E" class="dcr5 dcr11">
           <div style="padding:12px 18px">You want to</div><div style="padding:12px 18px">Command</div><div style="padding:12px 18px">What happens</div>
@@ -205,7 +205,7 @@ rayzor run                     # entry point from the manifest</div>
           <div style="display:grid;grid-template-columns:1fr 1.1fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr5">
             <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">Run code while developing</div>
             <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316;overflow-wrap:break-word">rayzor run main.hx</div>
-            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Runs immediately, then compiles and optimizes whatever gets hot</div>
+            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Starts executing immediately, then compiles and optimizes frequently called functions</div>
           </div>
         
           <div style="display:grid;grid-template-columns:1fr 1.1fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr5">
@@ -241,12 +241,12 @@ rayzor run                     # entry point from the manifest</div>
       </div>
 
       <h2 id="presets" style="margin:52px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Tier presets</h2>
-      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">A preset is a policy, not a backend: <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">script</span> never promotes, <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">embedded</span> stays interpreted, <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">benchmark</span> bails out to compiled code immediately.</p>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Presets control when functions move between execution tiers: <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">script</span> never promotes, <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">embedded</span> stays interpreted, <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">benchmark</span> starts compiling immediately.</p>
       <div style="margin-top:22px;display:grid;gap:2px">
         
           <div style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:20px;padding:13px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
             <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">script</span>
-            <span style="font-size:14px;line-height:1.55;color:#8A9099">CLI tools and one-shot scripts. Starts instantly, never promotes</span>
+            <span style="font-size:14px;line-height:1.55;color:#8A9099">CLI tools and short scripts. Instant startup, no tier promotion</span>
           </div>
         
           <div style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:20px;padding:13px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
@@ -261,7 +261,7 @@ rayzor run                     # entry point from the manifest</div>
         
           <div style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:20px;padding:13px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
             <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">benchmark</span>
-            <span style="font-size:14px;line-height:1.55;color:#8A9099">Performance testing. Compiles at once, fully optimized within warm-up</span>
+            <span style="font-size:14px;line-height:1.55;color:#8A9099">Performance testing. Compiles immediately and finishes optimizing during warm-up</span>
           </div>
         
           <div style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:20px;padding:13px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
@@ -339,7 +339,7 @@ rayzor run                     # entry point from the manifest</div>
             <h3 style="margin:0;font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.01em;color:#F97316">rayzor aot</h3>
             <span style="font-size:15px;color:#9AA0AA">native executable</span>
           </div>
-          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">The whole program compiled ahead of time and linked against the runtime.</p>
+          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">Compiles the whole program ahead of time and links it against the runtime.</p>
           <div style="margin-top:16px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor aot [FILES...] -o app</div>
           
             <div style="margin-top:16px;display:grid;gap:2px">
@@ -384,7 +384,7 @@ rayzor run                     # entry point from the manifest</div>
             <h3 style="margin:0;font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.01em;color:#F97316">rayzor bundle</h3>
             <span style="font-size:15px;color:#9AA0AA">single-file .rzb</span>
           </div>
-          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">Serializes every compiled module into one file so startup skips compilation. Run it with rayzor run app.rzb.</p>
+          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">Saves every compiled module in one file, so startup skips compilation. Run the bundle with rayzor run app.rzb.</p>
           <div style="margin-top:16px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor bundle [FILES...] -o app.rzb</div>
           
             <div style="margin-top:16px;display:grid;gap:2px">
@@ -418,7 +418,7 @@ rayzor run                     # entry point from the manifest</div>
             <h3 style="margin:0;font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.01em;color:#F97316">rayzor build</h3>
             <span style="font-size:15px;color:#9AA0AA">build from a manifest or HXML</span>
           </div>
-          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">Resolution order: an explicit .hxml file, else rayzor.toml in the current directory, else the manifest's hxml delegation.</p>
+          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">Pass an .hxml file directly, or run this command in a directory with rayzor.toml. The manifest can also point to an existing HXML build.</p>
           <div style="margin-top:16px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor build [FILE]</div>
           
             <div style="margin-top:16px;display:grid;gap:2px">
@@ -463,7 +463,7 @@ rayzor run                     # entry point from the manifest</div>
             <h3 style="margin:0;font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.01em;color:#F97316">rayzor cache</h3>
             <span style="font-size:15px;color:#9AA0AA">BLADE module cache</span>
           </div>
-          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">warm pre-compiles the standard library so the first real build does not pay for it.</p>
+          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">warm pre-compiles the standard library for reuse in later builds.</p>
           <div style="margin-top:16px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor cache stats | list | warm | clear</div>
           
         </div>
@@ -485,7 +485,7 @@ rayzor init --from-hxml build.hxml</div>
             <h3 style="margin:0;font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.01em;color:#F97316">rayzor rpkg</h3>
             <span style="font-size:15px;color:#9AA0AA">packages</span>
           </div>
-          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">.rpkg packages carry Haxe sources and, optionally, native dylibs. strip reduces a package to a single platform's native library.</p>
+          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">.rpkg packages contain Haxe sources and optional native libraries. Use strip to keep only the native library for a selected platform.</p>
           <div style="margin-top:16px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor rpkg pack | inspect | install | add | remove | list | strip</div>
           
         </div>
@@ -504,7 +504,7 @@ rayzor info [--features] [--tiers]</div>
       
 
       <h2 id="manifest" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Project manifest</h2>
-      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">A <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">rayzor.toml</span> at the project root. A workspace lists members instead, and an existing HXML build can be delegated to rather than ported.</p>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">A <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">rayzor.toml</span> file at the project root stores build settings. A workspace lists its members there. To reuse an HXML build, set the hxml field as shown below.</p>
       <div style="margin-top:20px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px" class="dcr12">
         <div style="border:1px solid #22242A;border-radius:12px;background:#0E1013;overflow:hidden">
           <div style="padding:9px 18px;border-bottom:1px solid #1A1C21;background:#101216;font-family:'JetBrains Mono',monospace;font-size:11px;color:#6F757E">rayzor.toml</div>
@@ -539,11 +539,11 @@ opt-level = </span><span style="color:#E8B84B">2
           </div>
         </div>
       </div>
-      <p style="margin:18px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:700px">A project depending on native plugins must declare both the class paths and the native libraries; a consumer with only one of the two fails to resolve at run time.</p>
+      <p style="margin:18px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:700px">For native plugins, declare both the class paths and the native libraries. Rayzor needs both to resolve the plugin at runtime.</p>
 
       <div style="margin-top:64px;padding:26px 28px;border:1px solid #22242A;border-radius:12px;background:#0C0D10;display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:wrap" class="dcr13">
         <div>
-          <div style="font-size:16px;font-weight:600">How the compiler works inside</div>
+          <div style="font-size:16px;font-weight:600">Compiler internals</div>
           <p style="margin:6px 0 0;font-size:14px;color:#8A9099">The IR levels, pass ordering, the tier ladder and the runtime ABI.</p>
         </div>
         <a href="/architecture.html" style="padding:11px 20px;border-radius:9px;background:#F97316;color:#0A0B0D;font-size:14px;font-weight:600;white-space:nowrap" class="dch14">Architecture →</a>

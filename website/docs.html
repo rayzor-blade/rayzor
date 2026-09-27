@@ -187,7 +187,7 @@
     <main style="padding:40px 0 96px;min-width:0" class="dcr11">
       <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Getting started</div>
       <h1 id="quickstart" style="margin:14px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.035em;font-weight:600" class="dcr12">Quick start</h1>
-      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Rayzor compiles Haxe 4.x to native code. Each task below has its own command.</p>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Install Rayzor, create a Haxe project, and run it with the commands below.</p>
 
       <div style="margin-top:32px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:2;color:#C9CCD2">
         <div><span style="color:#F97316">$</span> curl -fsSL https://rayzor.tech/install.sh | sh</div>
@@ -196,7 +196,7 @@
       </div>
 
       <h2 id="modes" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Compilation modes</h2>
-      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">The same MIR goes through a different backend depending on the command.</p>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">Use run during development, aot for a native executable, or build for WebAssembly. The table below covers the main commands.</p>
       <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;overflow:hidden">
         <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;gap:0;background:#101216;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.1em;text-transform:uppercase;color:#6F757E" class="dcr7 dcr13">
           <div style="padding:12px 18px">You want to</div><div style="padding:12px 18px">Command</div><div style="padding:12px 18px">What happens</div>
@@ -205,7 +205,7 @@
           <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr7">
             <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">Run code while developing</div>
             <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316">rayzor run main.hx</div>
-            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Runs immediately, then compiles and optimizes whatever gets hot</div>
+            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Starts executing immediately, then compiles and optimizes frequently called functions</div>
           </div>
         
           <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr7">
@@ -235,12 +235,12 @@
       </div>
 
       <h2 id="tiers" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Tiering</h2>
-      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty"><span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">rayzor run</span> starts in the MIR interpreter so execution begins immediately, then promotes a function to a compiled tier once it has run enough times. A preset is a policy, not a backend.</p>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty"><span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">rayzor run</span> starts executing immediately in the MIR interpreter, then compiles functions as their call counts increase. Presets control when functions move to a more optimized tier.</p>
       <div style="margin-top:22px;display:grid;gap:2px">
         
           <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
             <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:120px;flex:none">script</span>
-            <span style="font-size:14px;color:#8A9099;line-height:1.5">CLI tools and one-shot scripts. Starts instantly, never promotes</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">CLI tools and short scripts. Instant startup, no tier promotion</span>
           </div>
         
           <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
@@ -255,7 +255,7 @@
         
           <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
             <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:120px;flex:none">benchmark</span>
-            <span style="font-size:14px;color:#8A9099;line-height:1.5">Performance testing. Compiles at once, fully optimized within warm-up</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">Performance testing. Compiles immediately and finishes optimizing during warm-up</span>
           </div>
         
           <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
@@ -272,7 +272,7 @@
       <p style="margin:26px 0 0;padding:14px 18px;border:1px solid #1A1C21;border-radius:10px;background:#0E1013;font-size:13.5px;line-height:1.6;color:#8A9099"><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">--tier-thresholds &lt;I/W/H[/B]&gt;</span> overrides the preset's thresholds directly.</p>
 
       <h2 id="memory" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Memory model</h2>
-      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">There is no garbage collector. The compiler decides at compile time when a value is freed, from last-use and escape analysis, with a MIR-level pass as the backstop for anything the HIR analysis cannot see. Ownership is opt-in through annotations.</p>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Rayzor has no garbage collector. It uses last-use and escape analysis to insert cleanup at compile time. Analysis starts in HIR, with a MIR pass handling cases that become visible after lowering. You can add ownership annotations to individual classes.</p>
       <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:2;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#E8B84B">@:move</span> <span style="color:#F97316">class</span> <span style="color:#C9CCD2">UniqueResource { ... }      </span><span style="color:#5B616B">// move semantics, no aliasing
 </span><span style="color:#E8B84B">@:arc</span> <span style="color:#F97316">class</span> <span style="color:#C9CCD2">SharedState { ... }          </span><span style="color:#5B616B">// atomic reference counting
 </span><span style="color:#E8B84B">@:derive</span><span style="color:#C9CCD2">([Send, Sync]) </span><span style="color:#F97316">class</span> <span style="color:#C9CCD2">Data { ... } </span><span style="color:#5B616B">// thread-safety markers</span></div>
@@ -286,17 +286,17 @@
         </div>
         <div style="border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013">
           <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">.rzb</div>
-          <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">Every compiled module in one file. <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px">rayzor run app.rzb</span> skips compilation entirely.</p>
+          <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">Every compiled module in one file. <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px">rayzor run app.rzb</span> loads the bundle without compiling it again.</p>
         </div>
         <div style="border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013">
           <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">.rpkg</div>
           <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">Haxe sources plus optional native libraries. <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px">strip</span> reduces it to one platform.</p>
         </div>
       </div>
-      <p style="margin:18px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:680px">The cache is invalidated by source content, compiler version, and a content-derived compiler cache ABI id, not by a redundant relink of identical sources.</p>
+      <p style="margin:18px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:680px">Cache entries depend on source content, the compiler version, and a cache ABI identifier derived from compiler sources. Relinking unchanged compiler sources preserves the cache.</p>
 
       <h2 id="manifest" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Project manifest</h2>
-      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">A project is described by a <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">rayzor.toml</span> at its root.</p>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">Put your project settings in <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">rayzor.toml</span> at the project root.</p>
       <div style="margin-top:20px;border:1px solid #22242A;border-radius:12px;background:#0E1013;overflow:hidden">
         <div style="padding:9px 18px;border-bottom:1px solid #1A1C21;background:#101216;font-family:'JetBrains Mono',monospace;font-size:11px;color:#6F757E">rayzor.toml</div>
         <div style="padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#7FD1C0">[project]
@@ -312,20 +312,20 @@ opt-level = </span><span style="color:#E8B84B">2
 <span style="color:#7FD1C0">[cache]
 </span><span style="color:#C9CCD2">enabled = </span><span style="color:#E8B84B">true</span></div>
       </div>
-      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">An existing HXML build can be delegated to rather than ported. Set <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">hxml = "build.hxml"</span> under <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">[project]</span>. A workspace lists <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">members</span> instead.</p>
-      <p style="margin:14px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:680px">A project depending on native plugins must declare both the class paths and the native libraries; only one of the two fails to resolve at run time.</p>
+      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">To use an existing HXML build, set <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">hxml = "build.hxml"</span> under <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">[project]</span>. A workspace lists <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">members</span> instead.</p>
+      <p style="margin:14px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:680px">For native plugins, declare both the class paths and the native libraries. Rayzor needs both to resolve the plugin at runtime.</p>
 
 
       <h2 id="macros" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Macros</h2>
-      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Macros run at compile time in rayzor's own interpreter. Expansion is deterministic: modules expand in a fixed order, dependencies first and then by module path, each in source order, and <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">@:build</span> and <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">@:autoBuild</span> run in declaration order. The same sources always produce the same program.</p>
-      <p style="margin:14px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">The Haxe compiler types modules lazily, so the order its macros run in can change when unrelated code changes. rayzor's order is fixed, and a few things follow from that:</p>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Macros run at compile time in Rayzor's interpreter. Modules expand in a fixed order: dependencies first, then by module path. Within a module, expansion follows source order, and <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">@:build</span> and <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">@:autoBuild</span> run in declaration order. This keeps the generated program consistent across builds of the same sources.</p>
+      <p style="margin:14px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">The official Haxe compiler types modules lazily, which can change macro execution order when unrelated code changes. When porting macros to Rayzor, keep these differences in mind:</p>
       <div style="margin-top:20px;border:1px solid #22242A;border-radius:12px;background:#0E1013;overflow:hidden">
         <div style="padding:18px 22px;border-top:none">
           <div style="font-size:15px;font-weight:600;color:#E9EAEE">Macro state is shared in compile order</div>
           <p style="margin:8px 0 0;font-size:14.5px;line-height:1.65;color:#8A9099;text-wrap:pretty">Static variables of a macro class keep their values for the whole compile, as in Haxe. They are updated in the fixed module order above, so a registry filled by several modules' build macros is complete once those modules have expanded. Changing which modules import which can change that order.</p>
         </div>
         <div style="padding:18px 22px;border-top:1px solid #1A1C21">
-          <div style="font-size:15px;font-weight:600;color:#E9EAEE">Macros that ask the typer run once</div>
+          <div style="font-size:15px;font-weight:600;color:#E9EAEE">Macros that need type information run once</div>
           <p style="margin:8px 0 0;font-size:14.5px;line-height:1.65;color:#8A9099;text-wrap:pretty">A macro that calls <span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;color:#C9CCD2">Context.typeof</span>, <span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;color:#C9CCD2">typeExpr</span>, <span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;color:#C9CCD2">getType</span> or <span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;color:#C9CCD2">unify</span> waits until typing reaches its call site. Its first attempt is rolled back, so its side effects happen once.</p>
         </div>
         <div style="padding:18px 22px;border-top:1px solid #1A1C21">
@@ -341,8 +341,8 @@ opt-level = </span><span style="color:#E8B84B">2
 
       <div style="margin-top:64px;padding:26px 28px;border:1px solid #22242A;border-radius:12px;background:#0C0D10;display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:wrap" class="dcr17">
         <div>
-          <div style="font-size:16px;font-weight:600">Full reference lives in the repo</div>
-          <p style="margin:6px 0 0;font-size:14px;color:#8A9099">Every flag, the pass ordering, the runtime ABI and the format specs.</p>
+          <div style="font-size:16px;font-weight:600">More detail in the repository</div>
+          <p style="margin:6px 0 0;font-size:14px;color:#8A9099">See the full CLI reference, compiler pass order, runtime ABI, and file format specifications.</p>
         </div>
         <a href="https://github.com/rayzor-blade/rayzor/tree/main/docs" style="padding:11px 20px;border-radius:9px;background:#F97316;color:#0A0B0D;font-size:14px;font-weight:600;white-space:nowrap" class="dch18">Open docs/ ↗</a>
       </div>

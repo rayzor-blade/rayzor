@@ -3,7 +3,8 @@
 // site ships.
 //
 // The imported .dc.html files are vendored verbatim — they are the design's
-// source of truth and are never edited. Every transformation lives here:
+// source of truth and are never edited. Transformations live here, with copy
+// edits in copy.json applied to both templates and component strings:
 // template directives are expanded at build time so each page is real HTML a
 // crawler can read, and the component logic is carried over unchanged to drive
 // the interactive parts in the browser.
@@ -21,6 +22,7 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
 const IMPORT_DIR = path.join(HERE, "_import");
+const COPY = JSON.parse(fs.readFileSync(path.join(HERE, "copy.json"), "utf8"));
 
 const argv = process.argv.slice(2);
 const argOf = (flag, fallback) => {
@@ -1254,7 +1256,7 @@ if (component.componentDidMount) component.componentDidMount();
 
 function buildPage(page, bench) {
   const file = path.join(IMPORT_DIR, page.src);
-  const parsed = applyBenchmarks(page, parseDesignFile(file), bench);
+  const parsed = applyBenchmarks(page, applyCopy(page, parseDesignFile(file)), bench);
 
   const tokens = tokenize(parsed.template);
   injectMobileMenu(tokens);
@@ -1288,6 +1290,20 @@ function buildPage(page, bench) {
 
   fs.writeFileSync(path.join(OUT_DIR, page.out), parts.join("\n"));
   return { bytes: Buffer.byteLength(parts.join("\n")), dynamic: page.interactive === true };
+}
+
+// Apply wording changes before rendering so interactions keep the same copy.
+// Fail on stale entries rather than silently reverting to the imported wording.
+function applyCopy(page, parsed) {
+  let { template, script } = parsed;
+  for (const [before, after] of COPY[page.out] || []) {
+    if (!template.includes(before) && !script.includes(before)) {
+      throw new Error(`Stale copy edit in ${page.out}: ${before}`);
+    }
+    template = template.split(before).join(after);
+    script = script.split(before).join(after);
+  }
+  return { ...parsed, template, script };
 }
 
 /** Sitemap, generated from PAGES so a new page cannot be added without one.
