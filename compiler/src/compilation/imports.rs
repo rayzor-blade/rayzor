@@ -303,6 +303,9 @@ impl CompilationUnit {
                     extract_expr_deps(expr, deps);
                 }
                 ExprKind::Map(pairs) => {
+                    // A map literal builds a `Map`, whose concrete containers
+                    // must be loaded for its methods to resolve.
+                    deps.insert("Map".to_string());
                     for (k, v) in pairs {
                         extract_expr_deps(k, deps);
                         extract_expr_deps(v, deps);

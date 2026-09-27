@@ -199,7 +199,7 @@ impl<'a> HirToMirContext<'a> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let ptr_void = IrType::Ptr(Box::new(IrType::Void));
         let ret_ir = match method {
-            "get" | "keys" | "iterator" => ptr_u8.clone(),
+            "get" | "keys" | "iterator" | "copy" => ptr_u8.clone(),
             "set" | "clear" => IrType::Void,
             "exists" | "remove" => IrType::Bool,
             "toString" => IrType::String,
@@ -393,6 +393,18 @@ impl<'a> HirToMirContext<'a> {
                     );
                     self.builder.build_call_direct(f, vec![this], IrType::Void);
                     Some(None)
+                }
+                "copy" => {
+                    let f = self.get_or_register_extern_function(
+                        runtime_name,
+                        vec![ptr_u8.clone()],
+                        ptr_u8.clone(),
+                    );
+                    Some(Some(self.builder.build_call_direct(
+                        f,
+                        vec![this],
+                        ptr_u8.clone(),
+                    )?))
                 }
                 "toString" => {
                     let f = self.get_or_register_extern_function(
