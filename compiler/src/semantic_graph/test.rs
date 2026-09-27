@@ -133,6 +133,7 @@ mod basic_control_flow_tests {
             condition,
             body,
             source_location: SourceLocation::unknown(),
+            do_while: false,
         };
 
         let function_body = vec![while_stmt];
@@ -202,6 +203,7 @@ mod basic_control_flow_tests {
             condition: create_test_expression(TypeId::from_raw(2)),
             body: Box::new(loop_body),
             source_location: SourceLocation::unknown(),
+            do_while: false,
         };
 
         let function_body = vec![while_stmt];
@@ -444,6 +446,7 @@ mod complex_scenarios_tests {
             condition: create_test_expression(TypeId::from_raw(2)),
             body: Box::new(inner_body),
             source_location: SourceLocation::unknown(),
+            do_while: false,
         };
 
         // Outer loop containing inner loop
@@ -451,6 +454,7 @@ mod complex_scenarios_tests {
             condition: create_test_expression(TypeId::from_raw(2)),
             body: Box::new(inner_loop),
             source_location: SourceLocation::unknown(),
+            do_while: false,
         };
 
         let function_body = vec![outer_loop];
@@ -479,6 +483,7 @@ mod complex_scenarios_tests {
             condition: create_test_expression(TypeId::from_raw(2)),
             body: Box::new(throw_stmt),
             source_location: SourceLocation::unknown(),
+            do_while: false,
         };
 
         // Wrap in try-catch

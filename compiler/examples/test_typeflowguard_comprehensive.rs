@@ -877,6 +877,7 @@ fn create_nested_loop_function(
                                 source_location: SourceLocation::new(0, 4, 1, 1),
                             }),
                             source_location: SourceLocation::new(0, 4, 1, 1),
+                            do_while: false,
                         },
                         // i++
                         TypedStatement::Assignment {
@@ -923,6 +924,7 @@ fn create_nested_loop_function(
                     source_location: SourceLocation::new(0, 3, 1, 1),
                 }),
                 source_location: SourceLocation::new(0, 3, 1, 1),
+                do_while: false,
             },
         ],
         type_parameters: vec![],

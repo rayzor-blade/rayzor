@@ -309,6 +309,7 @@ mod tests {
                 source_location: SourceLocation::unknown(),
             }),
             source_location: SourceLocation::unknown(),
+            do_while: false,
         };
 
         let function = TypedFunction {
@@ -443,6 +444,7 @@ mod tests {
                 source_location: SourceLocation::unknown(),
             }),
             source_location: SourceLocation::unknown(),
+            do_while: false,
         };
 
         let function = TypedFunction {

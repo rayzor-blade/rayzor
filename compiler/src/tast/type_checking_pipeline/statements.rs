@@ -166,9 +166,7 @@ impl<'a> TypeCheckingPhase<'a> {
                 self.validate_throwable_type(exception_type, *source_location)?;
             }
             TypedStatement::While {
-                condition,
-                body,
-                source_location: _,
+                condition, body, ..
             } => {
                 // Check condition is boolean
                 let condition_type = self.check_expression(condition)?;

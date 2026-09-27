@@ -1391,19 +1391,30 @@ impl<'a> TastToHirContext<'a> {
                 }
             }
             TypedStatement::While {
-                condition, body, ..
+                condition,
+                body,
+                do_while,
+                ..
             } => {
                 self.loop_labels.push(None);
-                let hir_stmt = HirStatement::While {
-                    label: None,
-                    condition: self.lower_expression(condition),
-                    body: self.lower_block(std::slice::from_ref(body)),
-                    continue_update: None,
+                let hir_stmt = if *do_while {
+                    let body = self.lower_block(std::slice::from_ref(body));
+                    HirStatement::DoWhile {
+                        label: None,
+                        body,
+                        condition: self.lower_expression(condition),
+                    }
+                } else {
+                    HirStatement::While {
+                        label: None,
+                        condition: self.lower_expression(condition),
+                        body: self.lower_block(std::slice::from_ref(body)),
+                        continue_update: None,
+                    }
                 };
                 self.loop_labels.pop();
                 hir_stmt
             }
-            // Note: DoWhile might not exist in TAST, handle via While
             TypedStatement::For {
                 init,
                 condition,

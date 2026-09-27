@@ -1507,6 +1507,7 @@ impl<'a> AstLowering<'a> {
                 let while_stmt = TypedStatement::While {
                     condition: cond_expr,
                     body: Box::new(body_stmt),
+                    do_while: false,
                     source_location: SourceLocation::unknown(),
                 };
 
@@ -1517,28 +1518,16 @@ impl<'a> AstLowering<'a> {
                 }
             }
             ExprKind::DoWhile { body, cond } => {
-                // Convert do-while expressions to statement form
                 let body_stmt = self.convert_expression_to_statement(body)?;
                 let cond_expr = self.lower_expression(cond)?;
-
-                // Create a do-while statement (add to TAST if missing)
-                // Convert do-while to equivalent control flow:
-                // { body; while(cond) { body } }
-                let body_block = TypedStatement::Block {
-                    statements: vec![body_stmt.clone()],
-                    scope_id: ScopeId::from_raw(self.context.next_scope_id()),
-                    source_location: SourceLocation::unknown(),
-                };
-
                 let while_stmt = TypedStatement::While {
                     condition: cond_expr,
                     body: Box::new(body_stmt),
+                    do_while: true,
                     source_location: SourceLocation::unknown(),
                 };
-
-                // Return block that executes body once, then while loop
                 TypedExpressionKind::Block {
-                    statements: vec![body_block, while_stmt],
+                    statements: vec![while_stmt],
                     scope_id: ScopeId::from_raw(self.context.next_scope_id()),
                 }
             }

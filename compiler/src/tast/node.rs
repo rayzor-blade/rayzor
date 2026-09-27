@@ -753,6 +753,8 @@ pub enum TypedStatement {
     While {
         condition: TypedExpression,
         body: Box<TypedStatement>,
+        /// `do body while (condition)`: the body runs before the first test.
+        do_while: bool,
         source_location: SourceLocation,
     },
 
