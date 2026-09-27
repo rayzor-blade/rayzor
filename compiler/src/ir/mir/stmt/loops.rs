@@ -551,13 +551,49 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Push loop context with empty exit_phi_nodes (will be populated later)
+        // `continue` jumps to the condition and `break` to the exit, both from
+        // inside the body, so the phis those edges feed exist before the body
+        // is lowered. The condition reads the merge of body end and continues.
+        let mut cond_phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
+        let mut exit_phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
+        for (symbol_id, (_, var_type)) in &loop_var_initial_values {
+            let (Some(cond_phi), Some(exit_phi)) = (
+                self.builder.build_phi(cond_block, var_type.clone()),
+                self.builder.build_phi(exit_block, var_type.clone()),
+            ) else {
+                continue;
+            };
+            if let Some(func) = self.builder.current_function_mut() {
+                for (reg, name, mutable) in [
+                    (
+                        cond_phi,
+                        format!("do_cond_phi_{}", symbol_id.as_raw()),
+                        true,
+                    ),
+                    (exit_phi, format!("loop_exit_{}", symbol_id.as_raw()), false),
+                ] {
+                    func.locals.insert(
+                        reg,
+                        crate::ir::IrLocal {
+                            name,
+                            ty: var_type.clone(),
+                            mutable,
+                            source_location: crate::ir::IrSourceLocation::unknown(),
+                            allocation: crate::ir::AllocationHint::Register,
+                        },
+                    );
+                }
+            }
+            cond_phi_nodes.insert(*symbol_id, cond_phi);
+            exit_phi_nodes.insert(*symbol_id, exit_phi);
+        }
+
         self.loop_stack.push(LoopContext {
             continue_block: cond_block,
             break_block: exit_block,
             label: label.cloned(),
-            exit_phi_nodes: BTreeMap::new(),
-            continue_phi_nodes: BTreeMap::new(),
+            exit_phi_nodes: exit_phi_nodes.clone(),
+            continue_phi_nodes: cond_phi_nodes.clone(),
             carried_slots: BTreeMap::new(),
         });
 
@@ -569,90 +605,41 @@ impl<'a> HirToMirContext<'a> {
         self.enter_drop_scope(); // Enter scope for loop body allocations
         self.lower_block(body);
 
-        // Get the block we're in after the body (might be different if there are nested blocks)
-        let body_end_block = if let Some(block_id) = self.builder.current_block() {
-            block_id
-        } else {
-            self.loop_carried_symbols.pop();
-            self.loop_stack.pop();
-            return;
-        };
-
-        // Branch to condition block if not already terminated
         if !self.is_terminated() {
+            if let Some(body_end_block) = self.builder.current_block() {
+                for (symbol_id, cond_phi) in &cond_phi_nodes {
+                    let value = self.symbol_map.get(symbol_id).copied().unwrap_or(*cond_phi);
+                    self.builder
+                        .add_phi_incoming(cond_block, *cond_phi, body_end_block, value);
+                }
+            }
             self.exit_drop_scope(); // Free loop body allocations before condition check
             self.builder.build_branch(cond_block);
         }
         self.loop_carried_symbols.pop();
 
         self.builder.switch_to_block(cond_block);
+        for (symbol_id, cond_phi) in &cond_phi_nodes {
+            self.symbol_map.insert(*symbol_id, *cond_phi);
+        }
         let cond_result = self
             .lower_expression(condition)
             .and_then(|r| self.truth_of(r, condition.ty));
 
         // The block we are in after condition evaluation is the one that branches
-        // to body/exit.
+        // to body/exit (short-circuit operators add blocks).
         let cond_end_block = self.builder.current_block().unwrap_or(cond_block);
 
-        // Now create exit block phi nodes with the correct predecessor block
-        let mut exit_phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
-        for (symbol_id, _phi_reg) in &phi_nodes {
-            if let Some((_, var_type)) = loop_var_initial_values.get(symbol_id) {
-                // Get the current value of the variable after the loop body
-                let current_value = if let Some(&updated_reg) = self.symbol_map.get(symbol_id) {
-                    updated_reg
-                } else {
-                    continue;
-                };
-
-                let exit_param_reg = self.builder.alloc_reg().unwrap();
-
-                // The incoming edge comes from cond_end_block.
-                if let Some(func) = self.builder.current_function_mut() {
-                    if let Some(exit_block_data) = func.cfg.get_block_mut(exit_block) {
-                        let exit_phi = crate::ir::IrPhiNode {
-                            dest: exit_param_reg,
-                            incoming: vec![(cond_end_block, current_value)],
-                            ty: var_type.clone(),
-                        };
-                        exit_block_data.add_phi(exit_phi);
-
-                        // Register as a local
-                        func.locals.insert(
-                            exit_param_reg,
-                            crate::ir::IrLocal {
-                                name: format!("loop_exit_{}", symbol_id.as_raw()),
-                                ty: var_type.clone(),
-                                mutable: false,
-                                source_location: crate::ir::IrSourceLocation::unknown(),
-                                allocation: crate::ir::AllocationHint::Register,
-                            },
-                        );
-                    }
-                }
-
-                exit_phi_nodes.insert(*symbol_id, exit_param_reg);
+        for (symbol_id, phi_reg) in &phi_nodes {
+            let value = self.symbol_map.get(symbol_id).copied().unwrap_or(*phi_reg);
+            self.builder
+                .add_phi_incoming(body_block, *phi_reg, cond_end_block, value);
+            if let Some(exit_phi) = exit_phi_nodes.get(symbol_id) {
+                self.builder
+                    .add_phi_incoming(exit_block, *exit_phi, cond_end_block, value);
             }
         }
 
-        if let Some(loop_ctx) = self.loop_stack.last_mut() {
-            loop_ctx.exit_phi_nodes = exit_phi_nodes.clone();
-        }
-
-        // Back-edge phi incoming values: the updated values for the next iteration,
-        // reaching body_block from cond_end_block.
-        for (symbol_id, phi_reg) in &phi_nodes {
-            let back_edge_value = if let Some(&updated_reg) = self.symbol_map.get(symbol_id) {
-                updated_reg
-            } else {
-                *phi_reg
-            };
-
-            self.builder
-                .add_phi_incoming(body_block, *phi_reg, cond_end_block, back_edge_value);
-        }
-
-        // Build conditional branch from the block we're actually in
         if let Some(cond_reg) = cond_result {
             self.builder
                 .build_cond_branch(cond_reg, body_block, exit_block);

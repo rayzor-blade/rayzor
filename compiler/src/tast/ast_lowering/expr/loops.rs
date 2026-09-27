@@ -1109,6 +1109,7 @@ impl<'a> AstLowering<'a> {
         let while_stmt = TypedStatement::While {
             condition,
             body: Box::new(while_body),
+            do_while: false,
             source_location,
         };
 

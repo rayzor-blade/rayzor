@@ -730,6 +730,7 @@ fn test_loop_phi_analysis(
                     source_location: SourceLocation::new(0, 4, 20, 7),
                 }),
                 source_location: SourceLocation::new(0, 4, 5, 8),
+                do_while: false,
             },
             // return sum;
             TypedStatement::Return {
