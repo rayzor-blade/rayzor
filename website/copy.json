@@ -462,7 +462,7 @@
   "architecture.html": [
     [
       "Rayzor is a native code generator, not a source-to-source backend: every backend emits machine code, WASM bytecode, or C used as an assembler. What it adds over the official compiler is a tiered runtime and a single optimization pipeline shared by every backend — code starts executing immediately, and only what proves hot pays compilation cost.",
-      "Rayzor adds a tiered runtime and a shared optimization pipeline to Haxe. Backends emit machine code, WebAssembly, or C for native compilation. In tiered execution, code starts immediately in the interpreter; functions are compiled as they get hot."
+      "Rayzor adds a tiered runtime and a shared optimization pipeline to Haxe. The native backends generate machine code directly; the WebAssembly backend emits WASM. In tiered execution, code starts immediately in the interpreter; functions are compiled as they get hot."
     ],
     [
       "Language transpilation is an explicit non-goal. There is no JavaScript target and none planned.",
@@ -543,6 +543,18 @@
     [
       " family are ",
       " types are "
+    ],
+    [
+      "  { name: \"c99\", what: \"Experimental — MIR → C99 → gcc -O2. Not an official backend\" }\n",
+      ""
+    ],
+    [
+      "  BE -.->|\"experimental\"| CBE[\"C99 then gcc\"]\n",
+      ""
+    ],
+    [
+      " The TCC linker path on Linux also lacks SIMD in its final tier.",
+      ""
     ]
   ]
 }
