@@ -951,7 +951,29 @@ impl<'a> HirToMirContext<'a> {
                 r
             }
 
-            HirExprKind::Block(block) => self.lower_block_expr(block),
+            HirExprKind::Block(block) => {
+                let value = self.lower_block_expr(block);
+                if !self.is_terminated() {
+                    return value;
+                }
+                // Control left through a return/break/continue/throw inside an
+                // expression. The rest of the enclosing expression is lowered
+                // into a block with no predecessors, which the unreachable-block
+                // pass removes, instead of past this block's terminator. Its
+                // explicit `unreachable` makes it read as terminated, so no edge
+                // leaves it and a branch that ends here is treated as one that
+                // does not fall through.
+                let dead = self.builder.create_block()?;
+                self.builder.switch_to_block(dead);
+                self.builder.build_unreachable();
+                let ty = self.convert_type(expr.ty);
+                match ty {
+                    IrType::Void => None,
+                    _ => self
+                        .zero_of_ir_type(&ty)
+                        .or_else(|| self.builder.build_null()),
+                }
+            }
 
             HirExprKind::Lambda {
                 params,
