@@ -262,6 +262,7 @@ haxe.NativeStackTrace exceptionStack static=true ctor=false params=0 -> rayzor_n
 haxe.NativeStackTrace saveStack static=true ctor=false params=1 -> rayzor_native_stack_trace_save_stack
 haxe.NativeStackTrace toHaxe static=true ctor=false params=2 -> rayzor_native_stack_trace_to_haxe
 haxe.ds.IntMap clear static=false ctor=false params=0 -> haxe_intmap_clear
+haxe.ds.IntMap copy static=false ctor=false params=0 -> haxe_intmap_copy
 haxe.ds.IntMap exists static=false ctor=false params=1 -> haxe_intmap_exists
 haxe.ds.IntMap get static=false ctor=false params=1 -> haxe_intmap_get
 haxe.ds.IntMap iterator static=false ctor=false params=0 -> intmap_values_iterator
@@ -281,6 +282,7 @@ haxe.ds.ObjectMap remove static=false ctor=false params=1 -> haxe_objectmap_remo
 haxe.ds.ObjectMap set static=false ctor=false params=2 -> haxe_objectmap_set
 haxe.ds.ObjectMap toString static=false ctor=false params=0 -> haxe_objectmap_to_string
 haxe.ds.StringMap clear static=false ctor=false params=0 -> haxe_stringmap_clear
+haxe.ds.StringMap copy static=false ctor=false params=0 -> haxe_stringmap_copy
 haxe.ds.StringMap exists static=false ctor=false params=1 -> haxe_stringmap_exists
 haxe.ds.StringMap get static=false ctor=false params=1 -> haxe_stringmap_get
 haxe.ds.StringMap iterator static=false ctor=false params=0 -> stringmap_values_iterator
