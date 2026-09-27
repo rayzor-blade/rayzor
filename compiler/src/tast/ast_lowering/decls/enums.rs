@@ -531,18 +531,25 @@ impl<'a> AstLowering<'a> {
             parameters.push(typed_param);
         }
 
+        // A GADT constructor (`C:E<Int>`) names its own result type; an
+        // unresolvable one falls back to the plain enum type.
+        let result_type = match &variant.return_type {
+            Some(t) => self.lower_type(t).unwrap_or(enum_type_id),
+            None => enum_type_id,
+        };
+
         // For enum constructors, we store the generic constructor type
         // The actual type will be instantiated when the constructor is used
         let constructor_type = if param_types.is_empty() {
             // No parameters: constructor will return the enum type directly
-            enum_type_id
+            result_type
         } else {
             // Has parameters: create a function type that preserves generics
             // This will be a generic function if the enum is generic
             self.context
                 .type_table
                 .borrow_mut()
-                .create_function_type(param_types, enum_type_id)
+                .create_function_type(param_types, result_type)
         };
 
         // Update the symbol with the proper type
