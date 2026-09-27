@@ -403,6 +403,11 @@ impl<'a> HirToMirContext<'a> {
             let mut else_values: BTreeMap<SymbolId, IrId> = BTreeMap::new();
             let else_end_block = if let Some(else_branch) = else_branch {
                 self.builder.switch_to_block(else_block);
+                // The else arm starts from the values before the `if`, not
+                // from what the then arm left in `symbol_map`.
+                for (symbol_id, (initial_reg, _)) in &var_initial_values {
+                    self.symbol_map.insert(*symbol_id, *initial_reg);
+                }
                 // Rebind effectful-call-bound symbols to the else-branch phi
                 // before lowering, so the else view sees the right SSA value.
                 for (sym, _, else_phi_opt) in &branch_phi_rebind {

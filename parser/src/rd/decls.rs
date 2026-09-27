@@ -251,12 +251,19 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 Vec::new()
             };
 
+            let return_type = if self.stream.eat(TokenKind::Colon).is_some() {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+
             self.stream.eat(TokenKind::Semicolon);
 
             constructors.push(EnumConstructor {
                 meta,
                 name: ctor_name,
                 params,
+                return_type,
                 span: self.stream.span_from(ctor_start),
             });
         }

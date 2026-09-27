@@ -185,6 +185,8 @@ fn enum_constructor<'a>(full: &'a str, input: &'a str) -> PResult<'a, EnumConstr
     ))
     .parse(input)?;
 
+    let (input, return_type) = opt(preceded(symbol(":"), |i| type_expr(full, i))).parse(input)?;
+
     let end = position(full, input);
 
     Ok((
@@ -193,6 +195,7 @@ fn enum_constructor<'a>(full: &'a str, input: &'a str) -> PResult<'a, EnumConstr
             meta,
             name,
             params: params.unwrap_or_default(),
+            return_type,
             span: Span::new(start, end),
         },
     ))

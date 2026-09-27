@@ -954,6 +954,15 @@ impl<'a> AstLowering<'a> {
                     let first = &entries[0];
                     (first.key.expr_type, first.value.expr_type)
                 };
+                // Typed like `new Map<K, V>()`: the concrete map for K, so its
+                // methods resolve with V known.
+                if !entries.is_empty() {
+                    if let Some(concrete) =
+                        self.resolve_multitype_map_to_concrete(&[key_type, value_type])
+                    {
+                        return Ok(concrete);
+                    }
+                }
                 Ok(type_resolution::create_map_type(
                     &self.context.type_table,
                     key_type,
