@@ -689,11 +689,57 @@ impl<'a> AstLowering<'a> {
     /// Infer return type from function body by looking at return statements
     /// The type a return inside this expression yields, if any.
     ///
-    /// Only the shapes a brace-less body can take: the return itself, and the
-    /// block or conditional a body may be wrapped in. Anything else has no
-    /// return to find.
+    /// A return can sit anywhere a value is computed (`Std.string(return x)`),
+    /// so every operand is searched; a function literal's returns are its own.
     fn find_return_type_in_expression(&self, expr: &TypedExpression) -> Option<TypeId> {
+        let in_all = |exprs: &[TypedExpression]| {
+            exprs
+                .iter()
+                .find_map(|e| self.find_return_type_in_expression(e))
+        };
         match &expr.kind {
+            TypedExpressionKind::FunctionCall {
+                function,
+                arguments,
+                ..
+            } => self
+                .find_return_type_in_expression(function)
+                .or_else(|| in_all(arguments)),
+            TypedExpressionKind::MethodCall {
+                receiver,
+                arguments,
+                ..
+            } => self
+                .find_return_type_in_expression(receiver)
+                .or_else(|| in_all(arguments)),
+            TypedExpressionKind::StaticMethodCall { arguments, .. }
+            | TypedExpressionKind::New { arguments, .. } => in_all(arguments),
+            TypedExpressionKind::ArrayLiteral { elements } => in_all(elements),
+            TypedExpressionKind::BinaryOp { left, right, .. } => self
+                .find_return_type_in_expression(left)
+                .or_else(|| self.find_return_type_in_expression(right)),
+            TypedExpressionKind::ArrayAccess { array, index } => self
+                .find_return_type_in_expression(array)
+                .or_else(|| self.find_return_type_in_expression(index)),
+            TypedExpressionKind::UnaryOp { operand: inner, .. }
+            | TypedExpressionKind::FieldAccess { object: inner, .. }
+            | TypedExpressionKind::Cast {
+                expression: inner, ..
+            }
+            | TypedExpressionKind::VarDeclarationExpr {
+                initializer: inner, ..
+            }
+            | TypedExpressionKind::FinalDeclarationExpr {
+                initializer: inner, ..
+            } => self.find_return_type_in_expression(inner),
+            TypedExpressionKind::StringInterpolation { parts } => {
+                parts.iter().find_map(|p| match p {
+                    StringInterpolationPart::Expression(e) => {
+                        self.find_return_type_in_expression(e)
+                    }
+                    StringInterpolationPart::String(_) => None,
+                })
+            }
             TypedExpressionKind::Return { value } => Some(
                 value
                     .as_ref()
@@ -758,6 +804,13 @@ impl<'a> AstLowering<'a> {
             TypedStatement::Expression { expression, .. } => {
                 self.find_return_type_in_expression(expression)
             }
+            TypedStatement::VarDeclaration {
+                initializer: Some(init),
+                ..
+            } => self.find_return_type_in_expression(init),
+            TypedStatement::Assignment { target, value, .. } => self
+                .find_return_type_in_expression(value)
+                .or_else(|| self.find_return_type_in_expression(target)),
             TypedStatement::Return { value, .. } => {
                 if let Some(expr) = value {
                     Some(expr.expr_type)

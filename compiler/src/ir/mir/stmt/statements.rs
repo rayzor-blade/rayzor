@@ -617,7 +617,11 @@ impl<'a> HirToMirContext<'a> {
                 // Shadow-stack location updates are emitted only at call expressions and
                 // throw statements, to avoid N extra extern calls per function.
 
-                let result = self.lower_expression(expr);
+                // A block here is a statement list; it keeps its terminator.
+                let result = match &expr.kind {
+                    HirExprKind::Block(block) => self.lower_block_expr(block),
+                    _ => self.lower_expression(expr),
+                };
 
                 // The top-level result is not tracked as a temp: functions like
                 // Array.push() may store their argument, so freeing the result would

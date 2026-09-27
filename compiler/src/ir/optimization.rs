@@ -599,8 +599,10 @@ impl OptimizationPass for UnreachableBlockEliminationPass {
                 result.modified = true;
                 result.blocks_eliminated += eliminated;
 
-                // Clean up phi nodes: remove incoming edges from eliminated blocks
+                // Clean up phi nodes and predecessor lists: remove edges from
+                // eliminated blocks
                 for block in function.cfg.blocks.values_mut() {
+                    block.predecessors.retain(|pred| reachable.contains(pred));
                     for phi in &mut block.phi_nodes {
                         phi.incoming
                             .retain(|(pred_block, _)| reachable.contains(pred_block));
@@ -2035,6 +2037,9 @@ impl PassManager {
     /// it misbehaves at runtime rather than merely running slower.
     pub fn required_only() -> Self {
         let mut manager = Self::new();
+        // Lowering leaves predecessor-less blocks after control leaves an
+        // expression; codegen must not see them.
+        manager.add_pass(UnreachableBlockEliminationPass::new());
         manager.add_pass(super::insert_free::InsertFreePass::new());
         manager
     }
@@ -2042,6 +2047,7 @@ impl PassManager {
     /// Create optimization pipeline for a specific level.
     pub fn for_level(level: OptimizationLevel) -> Self {
         let mut manager = Self::new();
+        manager.add_pass(UnreachableBlockEliminationPass::new());
 
         // InsertFreePass runs at ALL optimization levels — it's a correctness pass
         // that inserts Free instructions for non-escaping heap allocations.
