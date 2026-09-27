@@ -4115,27 +4115,62 @@ impl<'a> TastToHirContext<'a> {
         array_type: TypeId,
         int_type: TypeId,
     ) -> Result<HirBlock, String> {
-        // Check if expression is a filter: Conditional { condition, then_expr, else_expr: None }
-        // If so, wrap the push in an if-statement so filtered-out elements are skipped entirely.
-        if let TypedExpressionKind::Conditional {
-            condition,
-            then_expr,
-            else_expr: None,
-        } = &expression.kind
-        {
-            let push_block = self.build_comprehension_push(
+        // The body is rewritten the way Haxe does it: the push moves into
+        // every branch of an `if` and onto the trailing expression of a block,
+        // so an iteration that reaches no value (an `if` without `else`)
+        // contributes no element.
+        match &expression.kind {
+            TypedExpressionKind::Conditional {
+                condition,
                 then_expr,
-                array_symbol,
-                index_symbol,
-                array_type,
-                int_type,
-            )?;
-            let if_stmt = HirStatement::If {
-                condition: self.lower_expression(condition),
-                then_branch: push_block,
-                else_branch: None,
-            };
-            return Ok(HirBlock::new(vec![if_stmt], self.current_scope));
+                else_expr,
+            } => {
+                let then_branch = self.build_comprehension_body(
+                    then_expr,
+                    array_symbol,
+                    index_symbol,
+                    array_type,
+                    int_type,
+                )?;
+                let else_branch = match else_expr {
+                    Some(else_expr) => Some(self.build_comprehension_body(
+                        else_expr,
+                        array_symbol,
+                        index_symbol,
+                        array_type,
+                        int_type,
+                    )?),
+                    None => None,
+                };
+                let if_stmt = HirStatement::If {
+                    condition: self.lower_expression(condition),
+                    then_branch,
+                    else_branch,
+                };
+                return Ok(HirBlock::new(vec![if_stmt], self.current_scope));
+            }
+            TypedExpressionKind::Block { statements, .. } => {
+                if let Some((
+                    TypedStatement::Expression {
+                        expression: tail, ..
+                    },
+                    leading,
+                )) = statements.split_last()
+                {
+                    let mut stmts: Vec<HirStatement> =
+                        leading.iter().map(|s| self.lower_statement(s)).collect();
+                    let tail_block = self.build_comprehension_body(
+                        tail,
+                        array_symbol,
+                        index_symbol,
+                        array_type,
+                        int_type,
+                    )?;
+                    stmts.extend(tail_block.statements);
+                    return Ok(HirBlock::new(stmts, self.current_scope));
+                }
+            }
+            _ => {}
         }
 
         self.build_comprehension_push(expression, array_symbol, index_symbol, array_type, int_type)
