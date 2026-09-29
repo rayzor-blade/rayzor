@@ -1755,16 +1755,21 @@ pub extern "C" fn haxe_std_is(value_ptr: *mut u8, expected_type_id: i64) -> bool
     if value_ptr.is_null() {
         return false;
     }
-    let actual_type_id = unsafe {
-        let dynamic = *(value_ptr as *const DynamicValue);
-        dynamic.type_id.0 as i64
-    };
+    let dynamic = unsafe { *(value_ptr as *const DynamicValue) };
+    let actual_type_id = dynamic.type_id.0 as i64;
     if type_id_matches_with_hierarchy(actual_type_id, expected_type_id) {
         return true;
     }
     // An Int is a Float.
     if actual_type_id == TYPE_INT.0 as i64 && expected_type_id == TYPE_FLOAT.0 as i64 {
         return true;
+    }
+    if actual_type_id == TYPE_FLOAT.0 as i64 && expected_type_id == TYPE_INT.0 as i64 {
+        let value = unsafe { *(dynamic.value_ptr as *const f64) };
+        return value.is_finite()
+            && value.fract() == 0.0
+            && value >= i32::MIN as f64
+            && value <= i32::MAX as f64;
     }
     if class_implements_interface_id(actual_type_id, expected_type_id) {
         return true;

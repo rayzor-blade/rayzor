@@ -721,9 +721,15 @@ impl<'a> HirToMirContext<'a> {
             | (Some(TypeKind::String), Some(TypeKind::String)) => {
                 self.builder.build_const(IrValue::Bool(true))
             }
+            // A Float may hold an integral Int value at runtime.
+            (Some(TypeKind::Float), Some(TypeKind::Int)) => {
+                let value = self.lower_expression(expr)?;
+                let dynamic = self.type_table.dynamic_type();
+                let boxed = self.maybe_box_value(value, expr.ty, dynamic)?;
+                self.runtime_type_check(boxed, *expected)
+            }
             // Cross-primitive: always false
-            (Some(TypeKind::Float), Some(TypeKind::Int))
-            | (Some(TypeKind::Int), Some(TypeKind::String))
+            (Some(TypeKind::Int), Some(TypeKind::String))
             | (Some(TypeKind::String), Some(TypeKind::Int))
             | (Some(TypeKind::Float), Some(TypeKind::String))
             | (Some(TypeKind::String), Some(TypeKind::Float))
