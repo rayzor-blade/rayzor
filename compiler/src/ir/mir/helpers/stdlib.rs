@@ -596,7 +596,7 @@ impl<'a> HirToMirContext<'a> {
         };
         if !matches!(
             target_kind,
-            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String | TypeKind::Dynamic
         ) {
             return false;
         }
@@ -621,7 +621,7 @@ impl<'a> HirToMirContext<'a> {
         let target_kind = self.type_table.get(target_type).map(|t| t.kind.clone())?;
         if !matches!(
             target_kind,
-            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String | TypeKind::Dynamic
         ) {
             return None;
         }

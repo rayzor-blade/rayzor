@@ -1120,7 +1120,7 @@ impl<'a> AstLowering<'a> {
             let formal_kind = tt.get(formal_ty).map(|ti| &ti.kind);
             matches!(
                 formal_kind,
-                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String | TypeKind::Dynamic)
             ) && self
                 .abstract_casts
                 .get(&abstract_symbol)
