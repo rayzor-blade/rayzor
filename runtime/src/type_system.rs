@@ -136,6 +136,10 @@ impl DynamicValue {
 /// `tag_is_*` predicate.
 pub(crate) fn dynamic_box_at(p: *mut u8) -> Option<DynamicValue> {
     let addr = p as usize;
+    // On 64-bit targets a u32 runtime type ID is a raw token, not a box.
+    if usize::BITS > 32 && addr <= u32::MAX as usize {
+        return None;
+    }
     // Erased slots also carry raw f64 bits; a finite double's exponent sits
     // above the 47-bit user address space, so it is never a box.
     if addr < 0x1000 || (addr & 7) != 0 || (addr >> 47) != 0 {
@@ -3111,7 +3115,18 @@ pub extern "C" fn haxe_dynamic_equals(a: *mut u8, b: *mut u8) -> bool {
         return false;
     }
 
-    let (da, db) = match (dynamic_value_if_boxed(a), dynamic_value_if_boxed(b)) {
+    let a_box = dynamic_value_if_boxed(a);
+    let b_box = dynamic_value_if_boxed(b);
+    if a_box.is_some() != b_box.is_some()
+        && let (Some(a_id), Some(b_id)) = (
+            crate::reflect::type_token_id(a as i64),
+            crate::reflect::type_token_id(b as i64),
+        )
+    {
+        return a_id == b_id;
+    }
+
+    let (da, db) = match (a_box, b_box) {
         (Some(x), Some(y)) => (x, y),
         // At least one side is a raw value: pointer identity is the only
         // meaningful answer, and it was already checked above.

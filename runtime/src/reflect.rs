@@ -734,11 +734,15 @@ pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i
 }
 
 /// Recover a reflective type ID from either its scalar or boxed representation.
-fn type_token_id(value: i64) -> Option<u32> {
+pub(crate) fn type_token_id(value: i64) -> Option<u32> {
     if value >= 0 && value <= u32::MAX as i64 {
         return Some(value as u32);
     }
     let boxed = crate::type_system::dynamic_value_if_boxed(value as *mut u8)?;
+    if boxed.type_id == TYPE_INT && !boxed.value_ptr.is_null() {
+        let raw_id = unsafe { *(boxed.value_ptr as *const i64) };
+        return u32::try_from(raw_id).ok();
+    }
     let payload = boxed.value_ptr as usize;
     if payload > u32::MAX as usize {
         return None;
@@ -761,15 +765,7 @@ fn type_token_id(value: i64) -> Option<u32> {
 /// Check a value against a class or enum token held in a Dynamic slot.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_is_dynamic_type(value: *mut u8, expected_token: i64) -> bool {
-    let expected_id = type_token_id(expected_token).or_else(|| {
-        let boxed = crate::type_system::dynamic_value_if_boxed(expected_token as *mut u8)?;
-        if boxed.type_id != TYPE_INT || boxed.value_ptr.is_null() {
-            return None;
-        }
-        let raw_id = unsafe { *(boxed.value_ptr as *const i64) };
-        u32::try_from(raw_id).ok()
-    });
-    let Some(expected_id) = expected_id else {
+    let Some(expected_id) = type_token_id(expected_token) else {
         return false;
     };
     let expected_name = get_type_info(TypeId(expected_id)).map(|info| info.name);
