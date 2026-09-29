@@ -792,8 +792,13 @@ impl<'a> HirToMirContext<'a> {
         let typedef = IrTypeDef {
             id: typedef_id,
             name: self
-                .string_interner
-                .get(interface.name)
+                .symbol_table
+                .get_symbol(interface.symbol_id)
+                .and_then(|sym| {
+                    sym.qualified_name
+                        .and_then(|name| self.string_interner.get(name))
+                })
+                .or_else(|| self.string_interner.get(interface.name))
                 .unwrap_or("<unknown>")
                 .to_string(),
             type_id,

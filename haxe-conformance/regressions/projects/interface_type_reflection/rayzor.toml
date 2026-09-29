@@ -1,0 +1,6 @@
+[project]
+name = "interface-type-reflection"
+entry = "unit/InterfaceTypeReflection.hx"
+
+[build]
+class-paths = ["."]
