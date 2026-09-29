@@ -6085,6 +6085,53 @@ impl CraneliftBackend {
             let methods: Vec<String> = methods.into_iter().map(str::to_string).collect();
             register_class_with_methods_from_mir(id, class, None, &[], &[], &[], &methods);
         }
+
+        // Math is an extern class whose methods lower to native intrinsics,
+        // so it has no MIR struct to register through the usual RTTI walk.
+        let math_id = crate::ir::mir::HirToMirContext::fnv1a_class_type_id("Math");
+        if get_type_info(rayzor_runtime::type_system::TypeId(math_id)).is_none() {
+            let static_fields: Vec<String> = [
+                "PI",
+                "NEGATIVE_INFINITY",
+                "POSITIVE_INFINITY",
+                "NaN",
+                "abs",
+                "min",
+                "max",
+                "sin",
+                "cos",
+                "tan",
+                "asin",
+                "acos",
+                "atan",
+                "atan2",
+                "exp",
+                "log",
+                "pow",
+                "sqrt",
+                "round",
+                "floor",
+                "ceil",
+                "random",
+                "ffloor",
+                "fceil",
+                "fround",
+                "isFinite",
+                "isNaN",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+            register_class_with_methods_from_mir(
+                math_id,
+                "Math",
+                None,
+                &[],
+                &[],
+                &static_fields,
+                &[],
+            );
+        }
     }
 
     /// Register enum RTTI by walking MIR module type definitions directly.
