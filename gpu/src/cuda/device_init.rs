@@ -124,14 +124,16 @@ impl Drop for CudaContext {
 }
 
 /// Helper: query a device attribute.
-unsafe fn get_device_attribute(device: CUdevice, attrib: c_int) -> Option<c_int> { unsafe {
-    let mut value: c_int = 0;
-    if cuDeviceGetAttribute(&mut value, attrib, device) == CUDA_SUCCESS {
-        Some(value)
-    } else {
-        None
+unsafe fn get_device_attribute(device: CUdevice, attrib: c_int) -> Option<c_int> {
+    unsafe {
+        let mut value: c_int = 0;
+        if cuDeviceGetAttribute(&mut value, attrib, device) == CUDA_SUCCESS {
+            Some(value)
+        } else {
+            None
+        }
     }
-}}
+}
 
 #[cfg(test)]
 mod tests {

@@ -263,9 +263,10 @@ pub fn gfx_surface_get_texture(h: i32) -> i32 {
 pub fn gfx_surface_present(h: i32) {
     let mut ht = HANDLES.lock().unwrap();
     if let Some(GpuObject::Surface(s)) = ht.get_mut(h)
-        && let Some(tex) = s.current_texture.take() {
-            s.queue.present(tex);
-        }
+        && let Some(tex) = s.current_texture.take()
+    {
+        s.queue.present(tex);
+    }
 }
 
 #[wasm_bindgen(js_name = "rayzor_gpu_gfx_surface_resize")]

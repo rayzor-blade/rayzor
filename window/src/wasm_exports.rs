@@ -194,10 +194,11 @@ pub fn window_set_title(_h: i32, title: &str) {
 pub fn window_set_fullscreen(h: i32, fs: i32) {
     let wt = WINDOWS.lock().unwrap();
     if let Some(win) = wt.get(h)
-        && fs != 0 {
-            let _ = win.canvas.request_fullscreen();
-        }
-        // exit fullscreen is on document, not canvas
+        && fs != 0
+    {
+        let _ = win.canvas.request_fullscreen();
+    }
+    // exit fullscreen is on document, not canvas
 }
 
 #[wasm_bindgen(js_name = "rayzor_window_set_visible")]
