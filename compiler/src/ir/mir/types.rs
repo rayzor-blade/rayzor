@@ -966,7 +966,8 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or(false)
             };
             if matches!(from_type, IrType::I64 | IrType::U64) && names_a_string {
-                return self.builder.build_bitcast(value, IrType::String);
+                let string = self.builder.build_bitcast(value, IrType::String)?;
+                return self.normalize_nullable_string(string, &IrType::String);
             }
         }
 
@@ -983,18 +984,32 @@ impl<'a> HirToMirContext<'a> {
         self.convert_to_string(value, from_type)
     }
 
-    /// Convert a value to a string pointer
-    /// Uses the appropriate *_to_string MIR wrapper based on the source type
+    /// Keep nullable String values printable without changing their pointer type.
+    fn normalize_nullable_string(&mut self, value: IrId, string_ty: &IrType) -> Option<IrId> {
+        let bits = self.builder.build_bitcast(value, IrType::I64)?;
+        let zero = self.builder.build_const(IrValue::I64(0))?;
+        let is_null = self.builder.build_cmp(CompareOp::Eq, bits, zero)?;
+        let null_string = self.builder.build_string("null".to_string())?;
+        let null_string = if *string_ty == IrType::String {
+            null_string
+        } else {
+            self.builder.build_bitcast(null_string, string_ty.clone())?
+        };
+        self.builder.build_select(is_null, null_string, value)
+    }
+
+    /// Convert a value to a string pointer.
+    /// A nullable String renders as the literal "null".
     pub(crate) fn convert_to_string(&mut self, value: IrId, from_type: &IrType) -> Option<IrId> {
         let mir_wrapper = match from_type {
             IrType::I32 | IrType::I64 => "int_to_string",
             IrType::F32 | IrType::F64 => "float_to_string",
             IrType::Bool => "bool_to_string",
             IrType::String => {
-                return Some(value);
+                return self.normalize_nullable_string(value, from_type);
             }
             IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String) => {
-                return Some(value);
+                return self.normalize_nullable_string(value, from_type);
             }
             IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void) => {
                 // Ptr(Void) could be Array, Class or DynBox; the class hint is
