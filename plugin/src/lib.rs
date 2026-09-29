@@ -167,6 +167,37 @@ pub mod host_abi {
         /// Returns 1 if the tensor's strides match row-major
         /// contiguous layout for its current shape, 0 otherwise.
         pub fn rayzor_plugin_tensor_is_contiguous(t: TensorHandle) -> u8;
+
+        // -- Native callback futures ------------------------------------
+
+        /// Create a pending Future completed by a plugin callback.
+        pub fn rayzor_plugin_future_pending(raw_result: u8) -> *mut u8;
+
+        /// Resolve a pending plugin Future with an i64 or raw pointer value.
+        pub fn rayzor_plugin_future_resolve(handle: *mut u8, value: i64) -> u8;
+
+        /// Reject a pending plugin Future with a borrowed UTF-8 message.
+        pub fn rayzor_plugin_future_reject(
+            handle: *mut u8,
+            message: *const u8,
+            message_len: usize,
+        ) -> u8;
+
+        // -- Language carriers used by generated native adapters ----------
+
+        pub fn rayzor_plugin_string_data(value: *const u8) -> *const u8;
+        pub fn rayzor_plugin_string_len(value: *const u8) -> usize;
+        pub fn rayzor_plugin_string_new(data: *const u8, len: usize) -> *mut u8;
+
+        pub fn rayzor_plugin_bytes_data(value: *const u8) -> *const u8;
+        pub fn rayzor_plugin_bytes_data_mut(value: *mut u8) -> *mut u8;
+        pub fn rayzor_plugin_bytes_len(value: *const u8) -> usize;
+        pub fn rayzor_plugin_bytes_new(data: *const u8, len: usize) -> *mut u8;
+        pub fn rayzor_plugin_bytes_retain(value: *mut u8) -> *mut u8;
+        pub fn rayzor_plugin_bytes_release(value: *mut u8);
+
+        /// Raise a language exception from the current plugin call.
+        pub fn rayzor_plugin_raise(message: *const u8, message_len: usize) -> !;
     }
 }
 
@@ -261,6 +292,54 @@ impl Tensor {
     #[inline]
     pub fn is_contiguous(&self) -> bool {
         unsafe { host_abi::rayzor_plugin_tensor_is_contiguous(self.handle) != 0 }
+    }
+}
+
+/// A Rayzor Future whose completion is owned by a native plugin callback.
+///
+/// The language owns the returned handle. The plugin may copy this small
+/// wrapper into an asynchronous callback and settle it exactly once.
+#[derive(Clone, Copy)]
+pub struct PendingFuture {
+    handle: *mut u8,
+}
+
+unsafe impl Send for PendingFuture {}
+unsafe impl Sync for PendingFuture {}
+
+impl PendingFuture {
+    /// Create a Future whose resolved value is already a language object.
+    pub fn raw() -> Option<Self> {
+        let handle = unsafe { host_abi::rayzor_plugin_future_pending(1) };
+        (!handle.is_null()).then_some(Self { handle })
+    }
+
+    /// Create a Future whose resolved i64 is boxed by the runtime.
+    pub fn boxed() -> Option<Self> {
+        let handle = unsafe { host_abi::rayzor_plugin_future_pending(0) };
+        (!handle.is_null()).then_some(Self { handle })
+    }
+
+    /// The opaque handle returned to Haxe as `rayzor.concurrent.Future<T>`.
+    pub const fn handle(self) -> *mut u8 {
+        self.handle
+    }
+
+    /// Complete with a raw object pointer. Returns false after settlement.
+    pub fn resolve_ptr(self, value: *mut u8) -> bool {
+        unsafe { host_abi::rayzor_plugin_future_resolve(self.handle, value as i64) != 0 }
+    }
+
+    /// Complete with an integer that Rayzor will box for the language.
+    pub fn resolve_i64(self, value: i64) -> bool {
+        unsafe { host_abi::rayzor_plugin_future_resolve(self.handle, value) != 0 }
+    }
+
+    /// Reject with a copied UTF-8 message. Returns false after settlement.
+    pub fn reject(self, message: &str) -> bool {
+        unsafe {
+            host_abi::rayzor_plugin_future_reject(self.handle, message.as_ptr(), message.len()) != 0
+        }
     }
 }
 
@@ -433,32 +512,8 @@ macro_rules! _count_params {
     () => {
         0u8
     };
-    ($a:ident) => {
-        1u8
-    };
-    ($a:ident, $b:ident) => {
-        2u8
-    };
-    ($a:ident, $b:ident, $c:ident) => {
-        3u8
-    };
-    ($a:ident, $b:ident, $c:ident, $d:ident) => {
-        4u8
-    };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident) => {
-        5u8
-    };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident) => {
-        6u8
-    };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident) => {
-        7u8
-    };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident) => {
-        8u8
-    };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $i:ident) => {
-        9u8
+    ($($param:ident),+ $(,)?) => {
+        0u8 $(+ { let _ = stringify!($param); 1u8 })+
     };
 }
 

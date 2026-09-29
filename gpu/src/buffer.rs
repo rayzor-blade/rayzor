@@ -48,15 +48,63 @@ pub enum GpuBufferKind {
 
 /// Opaque GPU buffer handle.
 pub struct GpuBuffer {
+    /// xgpu's native resource identity. Lazy values acquire it when their
+    /// fused graph materializes; the language object itself never changes.
+    pub(crate) handle: i32,
     pub(crate) kind: GpuBufferKind,
     pub numel: usize,
     pub dtype: u8,
 }
 
 impl GpuBuffer {
+    #[cfg(feature = "webgpu-backend")]
+    fn xgpu_handle(inner: &NativeBuffer) -> i32 {
+        match inner {
+            NativeBuffer::Wgpu(buffer) => {
+                crate::xgpu_backend::extension::insert_buffer(buffer.buffer.clone())
+            }
+            _ => 0,
+        }
+    }
+
+    /// Adopt a buffer created by the portable xgpu API. Its device and queue
+    /// are cloned handles to the same native objects; no GPU data is copied.
+    #[cfg(feature = "webgpu-backend")]
+    pub(crate) fn from_handle(handle: i32) -> Self {
+        use crate::wgpu_backend::buffer_ops::WgpuBuffer;
+
+        let Some((buffer, device, queue)) = crate::xgpu_backend::extension::buffer_context(handle)
+        else {
+            return Self {
+                handle,
+                kind: GpuBufferKind::Materialized(Rc::new(NativeBuffer::Unavailable)),
+                numel: 0,
+                dtype: DTYPE_U8,
+            };
+        };
+        let byte_size = buffer.size() as usize;
+        Self {
+            handle,
+            kind: GpuBufferKind::Materialized(Rc::new(NativeBuffer::Wgpu(WgpuBuffer {
+                buffer,
+                byte_size,
+                device,
+                queue,
+                ctx: std::ptr::null(),
+            }))),
+            numel: byte_size,
+            dtype: DTYPE_U8,
+        }
+    }
+
     /// Create a new materialized buffer.
     pub(crate) fn materialized(inner: NativeBuffer, numel: usize, dtype: u8) -> Self {
+        #[cfg(feature = "webgpu-backend")]
+        let handle = Self::xgpu_handle(&inner);
+        #[cfg(not(feature = "webgpu-backend"))]
+        let handle = 0;
         GpuBuffer {
+            handle,
             kind: GpuBufferKind::Materialized(Rc::new(inner)),
             numel,
             dtype,
@@ -66,6 +114,7 @@ impl GpuBuffer {
     /// Create a new lazy buffer (pending computation).
     pub(crate) fn lazy(node: LazyNode, numel: usize, dtype: u8) -> Self {
         GpuBuffer {
+            handle: 0,
             kind: GpuBufferKind::Lazy(node),
             numel,
             dtype,
@@ -90,9 +139,24 @@ impl GpuBuffer {
     pub(crate) fn ensure_materialized(&mut self, gpu_ctx: &mut GpuContext) -> Result<(), String> {
         if let GpuBufferKind::Lazy(ref lazy_node) = self.kind {
             let native_buf = materialize_lazy(gpu_ctx, lazy_node)?;
+            #[cfg(feature = "webgpu-backend")]
+            {
+                self.handle = Self::xgpu_handle(&native_buf);
+            }
             self.kind = GpuBufferKind::Materialized(Rc::new(native_buf));
         }
         Ok(())
+    }
+}
+
+impl Drop for GpuBuffer {
+    fn drop(&mut self) {
+        #[cfg(feature = "webgpu-backend")]
+        if self.handle != 0 {
+            // Repeated destruction is harmless in xgpu's generational slab.
+            unsafe { crate::xgpu_backend::buffer_destroy(self.handle) };
+            self.handle = 0;
+        }
     }
 }
 

@@ -14,9 +14,16 @@ set -e
 cd "$(dirname "$0")"
 
 RAYZOR="../target/release/rayzor"
-HAXE_DIR="../compiler/haxe-std/rayzor/gpu"
+HAXE_DIR="../target/rayzor-gpu-haxe"
 FEATURES="webgpu-backend"
 WASM_HOST_JS=""
+
+# The package carries xgpu's generated portable API and Rayzor's shader/
+# compute extensions as one rayzor.gpu class path. A changing stamp makes
+# Cargo rerun the generator even when a previous package build was cached.
+mkdir -p "$HAXE_DIR"
+export XGPU_HAXE_OUT="$HAXE_DIR"
+export XGPU_HAXE_STAMP="$RANDOM"
 
 # Build WASM host module (if wasm-pack is available)
 build_wasm_host() {

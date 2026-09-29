@@ -9,6 +9,7 @@ use super::GraphicsContext;
 
 pub struct GraphicsSurface {
     pub surface: wgpu::Surface<'static>,
+    pub queue: std::sync::Arc<wgpu::Queue>,
     pub config: wgpu::SurfaceConfiguration,
     pub format: wgpu::TextureFormat,
     pub current_texture: Option<wgpu::SurfaceTexture>,
@@ -169,6 +170,7 @@ mod native_surface {
                 height: height.max(1),
                 present_mode: wgpu::PresentMode::Fifo, // vsync
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                color_space: wgpu::SurfaceColorSpace::Auto,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             };
@@ -176,6 +178,7 @@ mod native_surface {
 
             Box::into_raw(Box::new(GraphicsSurface {
                 surface,
+                queue: ctx.queue.clone(),
                 config,
                 format,
                 current_texture: None,
@@ -215,9 +218,10 @@ mod native_surface {
             let surface = &mut *surface;
 
             let frame = match surface.surface.get_current_texture() {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("[GPU] surface.get_current_texture() failed: {}", e);
+                wgpu::CurrentSurfaceTexture::Success(frame)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+                error => {
+                    eprintln!("[GPU] surface.get_current_texture() failed: {:?}", error);
                     return std::ptr::null_mut();
                 }
             };
@@ -253,7 +257,7 @@ mod native_surface {
             }
             let surface = &mut *surface;
             if let Some(texture) = surface.current_texture.take() {
-                texture.present();
+                surface.queue.present(texture);
             }
         }
     }

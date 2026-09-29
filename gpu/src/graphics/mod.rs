@@ -32,26 +32,24 @@ impl GraphicsContext {
     /// Native only — on WASM, use the async version in wasm_exports.rs.
     #[cfg(feature = "native")]
     pub fn new() -> Option<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::all();
+        let instance = wgpu::Instance::new(descriptor);
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
-        }))?;
+            ..Default::default()
+        }))
+        .ok()?;
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("rayzor_graphics"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                ..Default::default()
-            },
-            None,
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("rayzor_graphics"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        }))
         .ok()?;
 
         Some(GraphicsContext {
@@ -64,16 +62,16 @@ impl GraphicsContext {
 
     #[cfg(feature = "native")]
     pub fn is_available() -> bool {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::all();
+        let instance = wgpu::Instance::new(descriptor);
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            ..Default::default()
         }))
-        .is_some()
+        .is_ok()
     }
 }
 
@@ -194,6 +192,7 @@ mod native_buffer_ffi {
             buffer
                 .slice(..)
                 .get_mapped_range_mut()
+                .expect("newly mapped GPU buffer")
                 .copy_from_slice(data);
             buffer.unmap();
 

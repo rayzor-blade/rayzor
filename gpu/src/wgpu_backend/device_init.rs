@@ -30,6 +30,17 @@ pub struct WgpuContext {
 }
 
 impl WgpuContext {
+    /// Adopt xgpu's device pair. Cloning wgpu handles preserves native object
+    /// identity, so Rayzor kernels and portable WebGPU commands share ordering,
+    /// buffers and validation state.
+    pub fn from_device_queue(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        Self {
+            device,
+            queue,
+            pending: std::cell::RefCell::new(None),
+        }
+    }
+
     /// Encode into the pending command buffer, creating it if needed.
     /// `f` receives the encoder; `bind_group` is retained until submit.
     pub(crate) fn encode(
@@ -68,7 +79,7 @@ impl WgpuContext {
         let taken = self.pending.borrow_mut().take();
         if let Some(p) = taken {
             self.queue.submit(std::iter::once(p.encoder.finish()));
-            self.device.poll(wgpu::Maintain::Wait);
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         }
     }
 }
@@ -78,16 +89,17 @@ impl WgpuContext {
     /// Native only — on WASM, use `new_async()`.
     #[cfg(feature = "native")]
     pub fn new() -> Option<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::all();
+        let instance = wgpu::Instance::new(descriptor);
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
-        }))?;
+            ..Default::default()
+        }))
+        .ok()?;
 
         // Take what the adapter actually supports rather than wgpu's portable
         // defaults. The default caps a storage binding at 128 MiB, which is
@@ -108,15 +120,12 @@ impl WgpuContext {
                 limits.max_compute_workgroup_storage_size
             );
         }
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("rayzor_gpu"),
-                required_features: wgpu::Features::empty(),
-                required_limits: limits,
-                ..Default::default()
-            },
-            None,
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("rayzor_gpu"),
+            required_features: wgpu::Features::empty(),
+            required_limits: limits,
+            ..Default::default()
+        }))
         .ok()?;
 
         // wgpu's default uncaptured-error handler PANICS. Inside an
@@ -124,15 +133,11 @@ impl WgpuContext {
         // surfacing as SIGILL (or a corrupted-looking SIGSEGV) with the actual
         // error text never printed. Log it instead so a validation failure,
         // device-lost or OOM is diagnosable rather than fatal-and-silent.
-        device.on_uncaptured_error(Box::new(|e| {
+        device.on_uncaptured_error(std::sync::Arc::new(|e| {
             eprintln!("[rzg] WGPU UNCAPTURED ERROR: {e}");
         }));
 
-        Some(WgpuContext {
-            device,
-            queue,
-            pending: std::cell::RefCell::new(None),
-        })
+        Some(WgpuContext::from_device_queue(device, queue))
     }
 
     /// Async version for WASM.
@@ -142,52 +147,46 @@ impl WgpuContext {
         } else {
             wgpu::Backends::all()
         };
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends,
-            ..Default::default()
-        });
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = backends;
+        let instance = wgpu::Instance::new(descriptor);
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                ..Default::default()
             })
-            .await?;
-
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("rayzor_gpu"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
-                    ..Default::default()
-                },
-                None,
-            )
             .await
             .ok()?;
 
-        Some(WgpuContext {
-            device,
-            queue,
-            pending: std::cell::RefCell::new(None),
-        })
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("rayzor_gpu"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                ..Default::default()
+            })
+            .await
+            .ok()?;
+
+        Some(WgpuContext::from_device_queue(device, queue))
     }
 
     /// Check if wgpu is available on this system.
     #[cfg(feature = "native")]
     pub fn is_available() -> bool {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::all();
+        let instance = wgpu::Instance::new(descriptor);
 
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            ..Default::default()
         }))
-        .is_some()
+        .is_ok()
     }
 }

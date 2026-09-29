@@ -37,6 +37,13 @@ pub enum NativeContext {
 
 #[allow(unused_variables)]
 impl NativeContext {
+    /// Use the device and queue owned by xgpu's portable object model.
+    #[cfg(feature = "webgpu-backend")]
+    pub fn from_xgpu_device(handle: i32) -> Option<Self> {
+        let (device, queue) = crate::xgpu_backend::extension::device_queue(handle)?;
+        Some(Self::Wgpu(WgpuContext::from_device_queue(device, queue)))
+    }
+
     /// Create a new GPU context using the best available backend.
     pub fn new() -> Option<Self> {
         #[cfg(feature = "metal-backend")]

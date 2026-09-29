@@ -1097,6 +1097,58 @@ register_symbol!(
 
 // Future functions
 register_symbol!("rayzor_future_create", crate::future::rayzor_future_create);
+register_symbol!(
+    "rayzor_plugin_future_pending",
+    crate::future::rayzor_plugin_future_pending
+);
+register_symbol!(
+    "rayzor_plugin_future_resolve",
+    crate::future::rayzor_plugin_future_resolve
+);
+register_symbol!(
+    "rayzor_plugin_future_reject",
+    crate::future::rayzor_plugin_future_reject
+);
+register_symbol!(
+    "rayzor_plugin_string_data",
+    crate::plugin_carriers::rayzor_plugin_string_data
+);
+register_symbol!(
+    "rayzor_plugin_string_len",
+    crate::plugin_carriers::rayzor_plugin_string_len
+);
+register_symbol!(
+    "rayzor_plugin_string_new",
+    crate::plugin_carriers::rayzor_plugin_string_new
+);
+register_symbol!(
+    "rayzor_plugin_bytes_data",
+    crate::plugin_carriers::rayzor_plugin_bytes_data
+);
+register_symbol!(
+    "rayzor_plugin_bytes_data_mut",
+    crate::plugin_carriers::rayzor_plugin_bytes_data_mut
+);
+register_symbol!(
+    "rayzor_plugin_bytes_len",
+    crate::plugin_carriers::rayzor_plugin_bytes_len
+);
+register_symbol!(
+    "rayzor_plugin_bytes_new",
+    crate::plugin_carriers::rayzor_plugin_bytes_new
+);
+register_symbol!(
+    "rayzor_plugin_bytes_retain",
+    crate::plugin_carriers::rayzor_plugin_bytes_retain
+);
+register_symbol!(
+    "rayzor_plugin_bytes_release",
+    crate::plugin_carriers::rayzor_plugin_bytes_release
+);
+register_symbol!(
+    "rayzor_plugin_raise",
+    crate::plugin_carriers::rayzor_plugin_raise
+);
 register_symbol!("rayzor_future_await", crate::future::rayzor_future_await);
 register_symbol!("rayzor_future_then", crate::future::rayzor_future_then);
 register_symbol!("rayzor_future_poll", crate::future::rayzor_future_poll);

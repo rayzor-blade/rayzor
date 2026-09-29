@@ -242,14 +242,14 @@ mod native_ffi {
             };
 
             // Build bind group layouts
-            let bg_layouts: Vec<&wgpu::BindGroupLayout> = b
+            let bg_layouts: Vec<Option<&wgpu::BindGroupLayout>> = b
                 .bind_group_layouts
                 .iter()
                 .filter_map(|&l| {
                     if l.is_null() {
                         None
                     } else {
-                        Some(&(*l).layout)
+                        Some(Some(&(*l).layout))
                     }
                 })
                 .collect();
@@ -262,7 +262,7 @@ mod native_ffi {
                         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                             label: Some("rayzor_pipeline_layout"),
                             bind_group_layouts: &bg_layouts,
-                            push_constant_ranges: &[],
+                            immediate_size: 0,
                         }),
                 )
             };
@@ -270,17 +270,17 @@ mod native_ffi {
             let vertex_buffers = if b.vertex_attributes.is_empty() {
                 vec![]
             } else {
-                vec![wgpu::VertexBufferLayout {
+                vec![Some(wgpu::VertexBufferLayout {
                     array_stride: b.vertex_stride,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &b.vertex_attributes,
-                }]
+                })]
             };
 
             let depth_stencil = b.depth_format.map(|format| wgpu::DepthStencilState {
                 format,
-                depth_write_enabled: true,
-                depth_compare: b.depth_compare,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(b.depth_compare),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             });
@@ -325,7 +325,7 @@ mod native_ffi {
                     },
                     depth_stencil,
                     multisample: wgpu::MultisampleState::default(),
-                    multiview: None,
+                    multiview_mask: None,
                     cache: None,
                 });
 

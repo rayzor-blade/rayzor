@@ -96,10 +96,9 @@ impl HandleTable {
 
 #[wasm_bindgen(js_name = "rayzor_gpu_gfx_device_create")]
 pub async fn gfx_device_create() -> i32 {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
-        ..Default::default()
-    });
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL;
+    let instance = wgpu::Instance::new(descriptor);
     let adapter = match instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -107,18 +106,15 @@ pub async fn gfx_device_create() -> i32 {
         })
         .await
     {
-        Some(a) => a,
-        None => return 0,
+        Ok(a) => a,
+        Err(_) => return 0,
     };
     let (device, queue) = match adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("rayzor_gpu_wasm"),
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
-                ..Default::default()
-            },
-            None,
-        )
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("rayzor_gpu_wasm"),
+            required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+            ..Default::default()
+        })
         .await
     {
         Ok(dq) => dq,
@@ -222,12 +218,15 @@ pub fn gfx_surface_create_canvas(dev_h: i32, canvas_id: &str, width: i32, height
         height: height.max(1) as u32,
         present_mode: wgpu::PresentMode::Fifo,
         alpha_mode: wgpu::CompositeAlphaMode::Auto,
+        color_space: wgpu::SurfaceColorSpace::Auto,
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };
     surface.configure(&ctx.device, &config);
+    let queue = ctx.queue.clone();
     ht.alloc(GpuObject::Surface(Box::new(GraphicsSurface {
         surface,
+        queue,
         config,
         format,
         current_texture: None,
@@ -245,12 +244,13 @@ pub fn gfx_surface_get_texture(h: i32) -> i32 {
             _ => return 0,
         };
         match surf.surface.get_current_texture() {
-            Ok(frame) => {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
                 let v = frame.texture.create_view(&Default::default());
                 surf.current_texture = Some(frame);
                 Some(v)
             }
-            Err(_) => None,
+            _ => None,
         }
     }; // surf borrow ends here
     match view {
@@ -264,7 +264,7 @@ pub fn gfx_surface_present(h: i32) {
     let mut ht = HANDLES.lock().unwrap();
     if let Some(GpuObject::Surface(s)) = ht.get_mut(h) {
         if let Some(tex) = s.current_texture.take() {
-            tex.present();
+            s.queue.present(tex);
         }
     }
 }
@@ -656,7 +656,7 @@ pub fn gfx_pipeline_build(pipe_h: i32, dev_h: i32) -> i32 {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -1004,10 +1004,10 @@ pub fn compute_alloc_buffer(dev_h: i32, numel: i32, dtype: i32) -> i32 {
         _ => 4,
     }; // F64=8, else 4
     let byte_size = (numel as usize) * elem_size;
-    let wgpu_ctx = crate::wgpu_backend::device_init::WgpuContext {
-        device: (*ctx.device).clone(),
-        queue: (*ctx.queue).clone(),
-    };
+    let wgpu_ctx = crate::wgpu_backend::device_init::WgpuContext::from_device_queue(
+        (*ctx.device).clone(),
+        (*ctx.queue).clone(),
+    );
     match WgpuBuffer::allocate(&wgpu_ctx, byte_size) {
         Some(buf) => ht.alloc(GpuObject::ComputeBuffer(Box::new(ComputeBufferInfo {
             buffer: buf,
@@ -1085,8 +1085,10 @@ pub fn compute_buffer_read_f32(dev_h: i32, buf_h: i32, idx: i32) -> f64 {
     ctx.queue.submit(std::iter::once(encoder.finish()));
     let slice = read_buf.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
-    ctx.device.poll(wgpu::Maintain::Wait);
-    let data = slice.get_mapped_range();
+    let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+    let Ok(data) = slice.get_mapped_range() else {
+        return 0.0;
+    };
     let result = f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64;
     drop(data);
     read_buf.unmap();
@@ -1192,8 +1194,9 @@ fn compute_binary_op(dev_h: i32, a_h: i32, b_h: i32, op: &str) -> i32 {
     let wgpu_buf = WgpuBuffer {
         buffer: out_buf,
         byte_size: out_size,
-        device: &*ctx.device as *const _,
-        queue: &*ctx.queue as *const _,
+        device: (*ctx.device).clone(),
+        queue: (*ctx.queue).clone(),
+        ctx: std::ptr::null(),
     };
     ht.alloc(GpuObject::ComputeBuffer(Box::new(ComputeBufferInfo {
         buffer: wgpu_buf,
@@ -1276,8 +1279,9 @@ fn compute_unary_op(dev_h: i32, a_h: i32, expr: &str) -> i32 {
     let wgpu_buf = WgpuBuffer {
         buffer: out_buf,
         byte_size: out_size,
-        device: &*ctx.device as *const _,
-        queue: &*ctx.queue as *const _,
+        device: (*ctx.device).clone(),
+        queue: (*ctx.queue).clone(),
+        ctx: std::ptr::null(),
     };
     ht.alloc(GpuObject::ComputeBuffer(Box::new(ComputeBufferInfo {
         buffer: wgpu_buf,
@@ -1457,8 +1461,10 @@ fn compute_reduce(dev_h: i32, buf_h: i32, op: &str, init: &str) -> f64 {
     // Synchronous readback (works in WASM because wgpu handles it)
     let slice = read_buf.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
-    ctx.device.poll(wgpu::Maintain::Wait);
-    let data = slice.get_mapped_range();
+    let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+    let Ok(data) = slice.get_mapped_range() else {
+        return 0.0;
+    };
     let result = f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64;
     drop(data);
     read_buf.unmap();
@@ -1554,8 +1560,10 @@ pub fn compute_dot(dev_h: i32, a_h: i32, b_h: i32) -> f64 {
 
     let slice = read_buf.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
-    ctx.device.poll(wgpu::Maintain::Wait);
-    let data = slice.get_mapped_range();
+    let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+    let Ok(data) = slice.get_mapped_range() else {
+        return 0.0;
+    };
     let result = f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64;
     drop(data);
     read_buf.unmap();
@@ -1665,8 +1673,9 @@ pub fn compute_matmul(dev_h: i32, a_h: i32, b_h: i32, m: i32, k: i32, n: i32) ->
     let wgpu_buf = WgpuBuffer {
         buffer: out_buf,
         byte_size: out_size,
-        device: &*ctx.device as *const _,
-        queue: &*ctx.queue as *const _,
+        device: (*ctx.device).clone(),
+        queue: (*ctx.queue).clone(),
+        ctx: std::ptr::null(),
     };
     ht.alloc(GpuObject::ComputeBuffer(Box::new(ComputeBufferInfo {
         buffer: wgpu_buf,

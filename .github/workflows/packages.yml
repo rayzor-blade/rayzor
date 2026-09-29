@@ -90,12 +90,21 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Build rayzor-gpu
+        env:
+          XGPU_HAXE_OUT: ${{ github.workspace }}/target/rayzor-gpu-haxe
+          XGPU_HAXE_STAMP: ${{ github.run_id }}-${{ matrix.target }}
         run: cargo build -p rayzor-gpu --features webgpu-backend --release --target ${{ matrix.target }}
       - name: Upload dylib
         uses: actions/upload-artifact@v6
         with:
           name: gpu-${{ matrix.rpkg_os }}-${{ matrix.rpkg_arch }}
           path: target/${{ matrix.target }}/release/${{ matrix.lib }}
+      - name: Upload generated GPU externs
+        if: matrix.target == 'aarch64-apple-darwin'
+        uses: actions/upload-artifact@v6
+        with:
+          name: gpu-haxe
+          path: target/rayzor-gpu-haxe
 
   # =========================================================================
   # Build rayzor CLI (needed for rpkg pack)
@@ -205,7 +214,7 @@ jobs:
           $CLI rpkg pack \
             --name rayzor-gpu \
             $ARGS \
-            --haxe-dir compiler/haxe-std/rayzor/gpu \
+            --haxe-dir artifacts/gpu-haxe/rayzor/gpu \
             -o rayzor-gpu.rpkg
           ls -la rayzor-gpu.rpkg
 

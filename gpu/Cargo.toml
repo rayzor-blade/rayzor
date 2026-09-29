@@ -2,6 +2,7 @@
 name = "rayzor-gpu"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -10,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 default = ["native"]
 native = ["dep:rayzor-plugin", "dep:rayzor-runtime", "dep:libc"]
 metal-backend = ["dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
-webgpu-backend = ["dep:wgpu", "dep:pollster", "dep:raw-window-handle"]
+webgpu-backend = ["dep:wgpu", "dep:pollster", "dep:raw-window-handle", "dep:xgpu-core"]
 wasm-host = ["dep:wgpu", "dep:wasm-bindgen", "dep:web-sys", "dep:wasm-bindgen-futures", "dep:js-sys"]
 cuda-backend = []
 
@@ -29,7 +30,7 @@ objc2-metal = { version = "0.3", optional = true, features = [
 objc2-foundation = { version = "0.3", optional = true }
 
 # WebGPU backend (cross-platform)
-wgpu = { version = "24", optional = true }
+wgpu = { version = "30", optional = true }
 pollster = { version = "0.4", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 
@@ -41,4 +42,8 @@ web-sys = { version = "0.3", optional = true, features = [
 ] }
 js-sys = { version = "0.3", optional = true }
 once_cell = "1"
+xgpu-core = { git = "https://github.com/rayzor-blade/xgpu.git", rev = "0750cecd4ad1be233375a80687cb76495de2291b", optional = true }
 
+[build-dependencies]
+xgpu-backend = { git = "https://github.com/rayzor-blade/xgpu.git", rev = "0750cecd4ad1be233375a80687cb76495de2291b" }
+xgpu-bindgen = { git = "https://github.com/rayzor-blade/xgpu.git", rev = "0750cecd4ad1be233375a80687cb76495de2291b" }

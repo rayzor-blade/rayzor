@@ -31,12 +31,52 @@ pub mod kernel_ir;
 // gate them on native, provide wasm alternatives via wasm_exports.rs
 #[cfg(feature = "native")]
 pub mod buffer;
+#[cfg(all(feature = "native", feature = "webgpu-backend"))]
+pub use buffer::GpuBuffer;
 #[cfg(feature = "native")]
 pub mod device;
 #[cfg(feature = "native")]
 pub mod lazy;
 #[cfg(feature = "native")]
 pub mod ops;
+#[cfg(feature = "native")]
+pub mod xgpu_runtime;
+
+// xgpu supplies the portable WebGPU object model and backend. Rayzor owns the
+// ABI carriers above and layers its shader compiler, lazy compute graph and
+// native kernels over the same handles through `xgpu_backend::extension`.
+#[cfg(feature = "webgpu-backend")]
+mod handles {
+    pub use xgpu_core::{Slab, kind_of};
+}
+#[cfg(feature = "webgpu-backend")]
+mod types {
+    pub use xgpu_core::Kind;
+}
+#[cfg(feature = "webgpu-backend")]
+mod runtime {
+    pub use crate::xgpu_runtime::{
+        Buffer, BufferMut, ErrorKind, Future, Rooted, Text, Value, host,
+    };
+}
+#[cfg(feature = "webgpu-backend")]
+#[allow(clippy::all)]
+mod xgpu_backend {
+    include!(concat!(env!("OUT_DIR"), "/xgpu_backend/backend.rs"));
+}
+#[cfg(feature = "webgpu-backend")]
+#[allow(clippy::all)]
+mod xgpu_api {
+    #![allow(non_snake_case)]
+    use crate::GpuBuffer;
+    use crate::xgpu_backend as backend;
+    use crate::xgpu_runtime::{
+        Buffer, BufferMut, Enum, ErrorKind, Future, NativeEnum, Rooted, Text, host,
+    };
+    include!(concat!(env!("OUT_DIR"), "/xgpu_rayzor.rs"));
+}
+#[cfg(feature = "webgpu-backend")]
+pub use xgpu_api::*;
 
 #[cfg(feature = "native")]
 pub mod backend;
@@ -74,139 +114,140 @@ rayzor_plugin::export_abi_version!();
 declare_native_methods! {
     GPU_METHODS;
     // GPUCompute lifecycle (static)
-    "rayzor_gpu_GPUCompute", "create",       static,   "rayzor_gpu_compute_create",        []              => Ptr;
-    "rayzor_gpu_GPUCompute", "isAvailable",  static,   "rayzor_gpu_compute_is_available",  []              => Bool;
+    "rayzor::gpu::GPUCompute", "create",       static,   "rayzor_gpu_compute_create",        []              => Ptr;
+    "rayzor::gpu::GPUCompute", "fromDevice",   static,   "rayzor_gpu_compute_from_device",   [Ptr]           => Ptr;
+    "rayzor::gpu::GPUCompute", "isAvailable",  static,   "rayzor_gpu_compute_is_available",  []              => Bool;
     // GPUCompute instance methods (self = Ptr is first param)
-    "rayzor_gpu_GPUCompute", "destroy",      instance, "rayzor_gpu_compute_destroy",       [Ptr]           => Void;
-    "rayzor_gpu_GPUCompute", "createBuffer", instance, "rayzor_gpu_compute_create_buffer", [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GPUCompute", "allocBuffer",  instance, "rayzor_gpu_compute_alloc_buffer",  [Ptr, I64, I64] => Ptr;
-    "rayzor_gpu_GPUCompute", "toTensor",     instance, "rayzor_gpu_compute_to_tensor",     [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GPUCompute", "freeBuffer",   instance, "rayzor_gpu_compute_free_buffer",   [Ptr, Ptr]      => Void;
+    "rayzor::gpu::GPUCompute", "destroy",      instance, "rayzor_gpu_compute_destroy",       [Ptr]           => Void;
+    "rayzor::gpu::GPUCompute", "createBuffer", instance, "rayzor_gpu_compute_create_buffer", [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GPUCompute", "allocBuffer",  instance, "rayzor_gpu_compute_alloc_buffer",  [Ptr, I64, I64] => Ptr;
+    "rayzor::gpu::GPUCompute", "toTensor",     instance, "rayzor_gpu_compute_to_tensor",     [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GPUCompute", "freeBuffer",   instance, "rayzor_gpu_compute_free_buffer",   [Ptr, Ptr]      => Void;
     // Binary elementwise ops: (self, a, b) -> result
-    "rayzor_gpu_GPUCompute", "add",          instance, "rayzor_gpu_compute_add",           [Ptr, Ptr, Ptr] => Ptr;
-    "rayzor_gpu_GPUCompute", "sub",          instance, "rayzor_gpu_compute_sub",           [Ptr, Ptr, Ptr] => Ptr;
-    "rayzor_gpu_GPUCompute", "mul",          instance, "rayzor_gpu_compute_mul",           [Ptr, Ptr, Ptr] => Ptr;
-    "rayzor_gpu_GPUCompute", "div",          instance, "rayzor_gpu_compute_div",           [Ptr, Ptr, Ptr] => Ptr;
+    "rayzor::gpu::GPUCompute", "add",          instance, "rayzor_gpu_compute_add",           [Ptr, Ptr, Ptr] => Ptr;
+    "rayzor::gpu::GPUCompute", "sub",          instance, "rayzor_gpu_compute_sub",           [Ptr, Ptr, Ptr] => Ptr;
+    "rayzor::gpu::GPUCompute", "mul",          instance, "rayzor_gpu_compute_mul",           [Ptr, Ptr, Ptr] => Ptr;
+    "rayzor::gpu::GPUCompute", "div",          instance, "rayzor_gpu_compute_div",           [Ptr, Ptr, Ptr] => Ptr;
     // Unary elementwise ops: (self, a) -> result
-    "rayzor_gpu_GPUCompute", "neg",          instance, "rayzor_gpu_compute_neg",           [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GPUCompute", "abs",          instance, "rayzor_gpu_compute_abs",           [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GPUCompute", "sqrt",         instance, "rayzor_gpu_compute_sqrt",          [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GPUCompute", "exp",          instance, "rayzor_gpu_compute_exp",           [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GPUCompute", "log",          instance, "rayzor_gpu_compute_log",           [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GPUCompute", "relu",         instance, "rayzor_gpu_compute_relu",          [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GPUCompute", "sigmoid",      instance, "rayzor_gpu_compute_sigmoid",       [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GPUCompute", "tanh",         instance, "rayzor_gpu_compute_tanh",          [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GPUCompute", "gelu",         instance, "rayzor_gpu_compute_gelu",          [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GPUCompute", "silu",         instance, "rayzor_gpu_compute_silu",          [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GPUCompute", "neg",          instance, "rayzor_gpu_compute_neg",           [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GPUCompute", "abs",          instance, "rayzor_gpu_compute_abs",           [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GPUCompute", "sqrt",         instance, "rayzor_gpu_compute_sqrt",          [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GPUCompute", "exp",          instance, "rayzor_gpu_compute_exp",           [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GPUCompute", "log",          instance, "rayzor_gpu_compute_log",           [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GPUCompute", "relu",         instance, "rayzor_gpu_compute_relu",          [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GPUCompute", "sigmoid",      instance, "rayzor_gpu_compute_sigmoid",       [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GPUCompute", "tanh",         instance, "rayzor_gpu_compute_tanh",          [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GPUCompute", "gelu",         instance, "rayzor_gpu_compute_gelu",          [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GPUCompute", "silu",         instance, "rayzor_gpu_compute_silu",          [Ptr, Ptr]      => Ptr;
     // Reductions: (self, buf) -> f64
-    "rayzor_gpu_GPUCompute", "sum",          instance, "rayzor_gpu_compute_sum",           [Ptr, Ptr]      => F64;
-    "rayzor_gpu_GPUCompute", "mean",         instance, "rayzor_gpu_compute_mean",          [Ptr, Ptr]      => F64;
-    "rayzor_gpu_GPUCompute", "max",          instance, "rayzor_gpu_compute_max",           [Ptr, Ptr]      => F64;
-    "rayzor_gpu_GPUCompute", "min",          instance, "rayzor_gpu_compute_min",           [Ptr, Ptr]      => F64;
+    "rayzor::gpu::GPUCompute", "sum",          instance, "rayzor_gpu_compute_sum",           [Ptr, Ptr]      => F64;
+    "rayzor::gpu::GPUCompute", "mean",         instance, "rayzor_gpu_compute_mean",          [Ptr, Ptr]      => F64;
+    "rayzor::gpu::GPUCompute", "max",          instance, "rayzor_gpu_compute_max",           [Ptr, Ptr]      => F64;
+    "rayzor::gpu::GPUCompute", "min",          instance, "rayzor_gpu_compute_min",           [Ptr, Ptr]      => F64;
     // Dot product: (self, a, b) -> f64
-    "rayzor_gpu_GPUCompute", "dot",          instance, "rayzor_gpu_compute_dot",           [Ptr, Ptr, Ptr] => F64;
+    "rayzor::gpu::GPUCompute", "dot",          instance, "rayzor_gpu_compute_dot",           [Ptr, Ptr, Ptr] => F64;
     // Matmul: (self, a, b, m, k, n) -> GpuBuffer
-    "rayzor_gpu_GPUCompute", "matmul",       instance, "rayzor_gpu_compute_matmul",        [Ptr, Ptr, Ptr, I64, I64, I64] => Ptr;
+    "rayzor::gpu::GPUCompute", "matmul",       instance, "rayzor_gpu_compute_matmul",        [Ptr, Ptr, Ptr, I64, I64, I64] => Ptr;
     // Q4_K weights straight to the shader: no CPU dequant, ~7x less upload.
-    "rayzor_gpu_GPUCompute", "matmulQ4K",    instance, "rayzor_gpu_compute_matmul_q4k",    [Ptr, Ptr, Ptr, I64, I64, I64] => Ptr;
-    "rayzor_gpu_GPUCompute", "bufferFromBytes", instance, "rayzor_gpu_compute_buffer_from_bytes", [Ptr, I64, I64] => Ptr;
-    "rayzor_gpu_GPUCompute", "writeBytes",    instance, "rayzor_gpu_compute_write_bytes",   [Ptr, Ptr, I64, I64] => Bool;
+    "rayzor::gpu::GPUCompute", "matmulQ4K",    instance, "rayzor_gpu_compute_matmul_q4k",    [Ptr, Ptr, Ptr, I64, I64, I64] => Ptr;
+    "rayzor::gpu::GPUCompute", "bufferFromBytes", instance, "rayzor_gpu_compute_buffer_from_bytes", [Ptr, I64, I64] => Ptr;
+    "rayzor::gpu::GPUCompute", "writeBytes",    instance, "rayzor_gpu_compute_write_bytes",   [Ptr, Ptr, I64, I64] => Bool;
     // Batch matmul: (self, a, b, batch, m, k, n) -> GpuBuffer
-    "rayzor_gpu_GPUCompute", "batchMatmul",  instance, "rayzor_gpu_compute_batch_matmul",  [Ptr, Ptr, Ptr, I64, I64, I64, I64] => Ptr;
+    "rayzor::gpu::GPUCompute", "batchMatmul",  instance, "rayzor_gpu_compute_batch_matmul",  [Ptr, Ptr, Ptr, I64, I64, I64, I64] => Ptr;
     // Transformer primitives: (self, ...) -> GpuBuffer
-    "rayzor_gpu_GPUCompute", "rmsNorm", instance, "rayzor_gpu_compute_rms_norm", [Ptr, Ptr, Ptr, I64, F64] => Ptr;
-    "rayzor_gpu_GPUCompute", "rope",    instance, "rayzor_gpu_compute_rope",     [Ptr, Ptr, Ptr, Ptr, I64, I64, I64, I64, I64] => Ptr;
+    "rayzor::gpu::GPUCompute", "rmsNorm", instance, "rayzor_gpu_compute_rms_norm", [Ptr, Ptr, Ptr, I64, F64] => Ptr;
+    "rayzor::gpu::GPUCompute", "rope",    instance, "rayzor_gpu_compute_rope",     [Ptr, Ptr, Ptr, Ptr, I64, I64, I64, I64, I64] => Ptr;
     // Structured buffer ops: (self, ...) -> result
-    "rayzor_gpu_GPUCompute", "createStructBuffer", instance, "rayzor_gpu_compute_create_struct_buffer", [Ptr, Ptr, I64, I64] => Ptr;
-    "rayzor_gpu_GPUCompute", "allocStructBuffer",  instance, "rayzor_gpu_compute_alloc_struct_buffer",  [Ptr, I64, I64]      => Ptr;
-    "rayzor_gpu_GPUCompute", "readStructFloat",    instance, "rayzor_gpu_compute_read_struct_float",    [Ptr, Ptr, I64, I64, I64] => F64;
-    "rayzor_gpu_GPUCompute", "readStructInt",      instance, "rayzor_gpu_compute_read_struct_int",      [Ptr, Ptr, I64, I64, I64] => I64;
+    "rayzor::gpu::GPUCompute", "createStructBuffer", instance, "rayzor_gpu_compute_create_struct_buffer", [Ptr, Ptr, I64, I64] => Ptr;
+    "rayzor::gpu::GPUCompute", "allocStructBuffer",  instance, "rayzor_gpu_compute_alloc_struct_buffer",  [Ptr, I64, I64]      => Ptr;
+    "rayzor::gpu::GPUCompute", "readStructFloat",    instance, "rayzor_gpu_compute_read_struct_float",    [Ptr, Ptr, I64, I64, I64] => F64;
+    "rayzor::gpu::GPUCompute", "readStructInt",      instance, "rayzor_gpu_compute_read_struct_int",      [Ptr, Ptr, I64, I64, I64] => I64;
     // GpuBuffer instance methods
-    "rayzor_gpu_GpuBuffer",  "numel",        instance, "rayzor_gpu_compute_buffer_numel",  [Ptr]           => I64;
-    "rayzor_gpu_GpuBuffer",  "dtype",        instance, "rayzor_gpu_compute_buffer_dtype",  [Ptr]           => I64;
+    "rayzor::gpu::GpuBuffer",  "numel",        instance, "rayzor_gpu_compute_buffer_numel",  [Ptr]           => I64;
+    "rayzor::gpu::GpuBuffer",  "dtype",        instance, "rayzor_gpu_compute_buffer_dtype",  [Ptr]           => I64;
     // GpuBuffer @:op overloads — `a + b` desugars to `a.add(b)` etc.
     // Reuses binary_lazy under the hood (no ctx needed; lazy DAG only).
-    "rayzor_gpu_GpuBuffer",  "add",          instance, "rayzor_gpu_buffer_add",            [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GpuBuffer",  "sub",          instance, "rayzor_gpu_buffer_sub",            [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GpuBuffer",  "mul",          instance, "rayzor_gpu_buffer_mul",            [Ptr, Ptr]      => Ptr;
-    "rayzor_gpu_GpuBuffer",  "div",          instance, "rayzor_gpu_buffer_div",            [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GpuBuffer",  "add",          instance, "rayzor_gpu_buffer_add",            [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GpuBuffer",  "sub",          instance, "rayzor_gpu_buffer_sub",            [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GpuBuffer",  "mul",          instance, "rayzor_gpu_buffer_mul",            [Ptr, Ptr]      => Ptr;
+    "rayzor::gpu::GpuBuffer",  "div",          instance, "rayzor_gpu_buffer_div",            [Ptr, Ptr]      => Ptr;
 
     // ======================================================================
     // GPU Graphics (render pipeline)
     // ======================================================================
 
     // GPUDevice lifecycle
-    "rayzor_gpu_GPUDevice", "create",       static,   "rayzor_gpu_gfx_device_create",      []              => Ptr;
-    "rayzor_gpu_GPUDevice", "destroy",      instance, "rayzor_gpu_gfx_device_destroy",     [Ptr]           => Void;
-    "rayzor_gpu_GPUDevice", "isAvailable",  static,   "rayzor_gpu_gfx_is_available",       []              => I64;
+    "rayzor::gpu::GPUDevice", "create",       static,   "rayzor_gpu_gfx_device_create",      []              => Ptr;
+    "rayzor::gpu::GPUDevice", "destroy",      instance, "rayzor_gpu_gfx_device_destroy",     [Ptr]           => Void;
+    "rayzor::gpu::GPUDevice", "isAvailable",  static,   "rayzor_gpu_gfx_is_available",       []              => I64;
 
     // ShaderModule (Haxe-friendly: accepts HaxeString* directly)
-    "rayzor_gpu_ShaderModule", "create",    static,   "rayzor_gpu_gfx_shader_create_hx",   [Ptr, Ptr, Ptr, Ptr] => Ptr;
-    "rayzor_gpu_ShaderModule", "destroy",   instance, "rayzor_gpu_gfx_shader_destroy",     [Ptr]           => Void;
+    "rayzor::gpu::ShaderModule", "create",    static,   "rayzor_gpu_gfx_shader_create_hx",   [Ptr, Ptr, Ptr, Ptr] => Ptr;
+    "rayzor::gpu::ShaderModule", "destroy",   instance, "rayzor_gpu_gfx_shader_destroy",     [Ptr]           => Void;
 
     // Buffer (graphics)
-    "rayzor_gpu_GfxBuffer", "create",           static,   "rayzor_gpu_gfx_buffer_create",           [Ptr, I64, I64] => Ptr;
-    "rayzor_gpu_GfxBuffer", "createWithData",   static,   "rayzor_gpu_gfx_buffer_create_with_data", [Ptr, Ptr, I64, I64] => Ptr;
-    "rayzor_gpu_GfxBuffer", "write",            instance, "rayzor_gpu_gfx_buffer_write",            [Ptr, Ptr, I64, Ptr, I64] => Void;
-    "rayzor_gpu_GfxBuffer", "destroy",          instance, "rayzor_gpu_gfx_buffer_destroy",          [Ptr]           => Void;
+    "rayzor::gpu::GfxBuffer", "create",           static,   "rayzor_gpu_gfx_buffer_create",           [Ptr, I64, I64] => Ptr;
+    "rayzor::gpu::GfxBuffer", "createWithData",   static,   "rayzor_gpu_gfx_buffer_create_with_data", [Ptr, Ptr, I64, I64] => Ptr;
+    "rayzor::gpu::GfxBuffer", "write",            instance, "rayzor_gpu_gfx_buffer_write",            [Ptr, Ptr, I64, Ptr, I64] => Void;
+    "rayzor::gpu::GfxBuffer", "destroy",          instance, "rayzor_gpu_gfx_buffer_destroy",          [Ptr]           => Void;
 
     // Texture
-    "rayzor_gpu_Texture", "create",         static,   "rayzor_gpu_gfx_texture_create",     [Ptr, I64, I64, I64, I64] => Ptr;
-    "rayzor_gpu_Texture", "write",          instance, "rayzor_gpu_gfx_texture_write",      [Ptr, Ptr, Ptr, I64, I64] => Void;
-    "rayzor_gpu_Texture", "getView",        instance, "rayzor_gpu_gfx_texture_get_view",   [Ptr]           => Ptr;
-    "rayzor_gpu_Texture", "destroy",        instance, "rayzor_gpu_gfx_texture_destroy",    [Ptr]           => Void;
-    "rayzor_gpu_Texture", "readPixels",     instance, "rayzor_gpu_gfx_texture_read_pixels", [Ptr, Ptr, Ptr, I64] => I64;
+    "rayzor::gpu::Texture", "create",         static,   "rayzor_gpu_gfx_texture_create",     [Ptr, I64, I64, I64, I64] => Ptr;
+    "rayzor::gpu::Texture", "write",          instance, "rayzor_gpu_gfx_texture_write",      [Ptr, Ptr, Ptr, I64, I64] => Void;
+    "rayzor::gpu::Texture", "getView",        instance, "rayzor_gpu_gfx_texture_get_view",   [Ptr]           => Ptr;
+    "rayzor::gpu::Texture", "destroy",        instance, "rayzor_gpu_gfx_texture_destroy",    [Ptr]           => Void;
+    "rayzor::gpu::Texture", "readPixels",     instance, "rayzor_gpu_gfx_texture_read_pixels", [Ptr, Ptr, Ptr, I64] => I64;
 
     // Sampler
-    "rayzor_gpu_Sampler", "create",         static,   "rayzor_gpu_gfx_sampler_create",     [Ptr, I64, I64, I64] => Ptr;
-    "rayzor_gpu_Sampler", "destroy",        instance, "rayzor_gpu_gfx_sampler_destroy",    [Ptr]           => Void;
+    "rayzor::gpu::Sampler", "create",         static,   "rayzor_gpu_gfx_sampler_create",     [Ptr, I64, I64, I64] => Ptr;
+    "rayzor::gpu::Sampler", "destroy",        instance, "rayzor_gpu_gfx_sampler_destroy",    [Ptr]           => Void;
 
     // RenderPipeline builder
-    "rayzor_gpu_RenderPipeline", "begin",   static,   "rayzor_gpu_gfx_pipeline_begin",     []              => Ptr;
-    "rayzor_gpu_RenderPipeline", "setShader", instance, "rayzor_gpu_gfx_pipeline_set_shader", [Ptr, Ptr]   => Void;
-    "rayzor_gpu_RenderPipeline", "setFormat", instance, "rayzor_gpu_gfx_pipeline_set_format", [Ptr, I64]   => Void;
-    "rayzor_gpu_RenderPipeline", "setTopology", instance, "rayzor_gpu_gfx_pipeline_set_topology", [Ptr, I64] => Void;
-    "rayzor_gpu_RenderPipeline", "setCull",   instance, "rayzor_gpu_gfx_pipeline_set_cull",   [Ptr, I64]   => Void;
-    "rayzor_gpu_RenderPipeline", "build",     instance, "rayzor_gpu_gfx_pipeline_build",     [Ptr, Ptr]    => Ptr;
-    "rayzor_gpu_RenderPipeline", "destroy",   instance, "rayzor_gpu_gfx_pipeline_destroy",   [Ptr]         => Void;
+    "rayzor::gpu::RenderPipeline", "begin",   static,   "rayzor_gpu_gfx_pipeline_begin",     []              => Ptr;
+    "rayzor::gpu::RenderPipeline", "setShader", instance, "rayzor_gpu_gfx_pipeline_set_shader", [Ptr, Ptr]   => Void;
+    "rayzor::gpu::RenderPipeline", "setFormat", instance, "rayzor_gpu_gfx_pipeline_set_format", [Ptr, I64]   => Void;
+    "rayzor::gpu::RenderPipeline", "setTopology", instance, "rayzor_gpu_gfx_pipeline_set_topology", [Ptr, I64] => Void;
+    "rayzor::gpu::RenderPipeline", "setCull",   instance, "rayzor_gpu_gfx_pipeline_set_cull",   [Ptr, I64]   => Void;
+    "rayzor::gpu::RenderPipeline", "build",     instance, "rayzor_gpu_gfx_pipeline_build",     [Ptr, Ptr]    => Ptr;
+    "rayzor::gpu::RenderPipeline", "destroy",   instance, "rayzor_gpu_gfx_pipeline_destroy",   [Ptr]         => Void;
 
     // BindGroup
-    "rayzor_gpu_BindGroupLayout", "create", static,   "rayzor_gpu_gfx_bind_group_layout_create", [Ptr, I64, Ptr, Ptr] => Ptr;
-    "rayzor_gpu_BindGroupLayout", "destroy", instance, "rayzor_gpu_gfx_bind_group_layout_destroy", [Ptr]   => Void;
-    "rayzor_gpu_BindGroup", "destroy",      instance, "rayzor_gpu_gfx_bind_group_destroy",  [Ptr]           => Void;
+    "rayzor::gpu::BindGroupLayout", "create", static,   "rayzor_gpu_gfx_bind_group_layout_create", [Ptr, I64, Ptr, Ptr] => Ptr;
+    "rayzor::gpu::BindGroupLayout", "destroy", instance, "rayzor_gpu_gfx_bind_group_layout_destroy", [Ptr]   => Void;
+    "rayzor::gpu::BindGroup", "destroy",      instance, "rayzor_gpu_gfx_bind_group_destroy",  [Ptr]           => Void;
 
     // Render (Haxe-friendly simplified APIs)
-    "rayzor_gpu_Renderer", "renderTriangles", static, "rayzor_gpu_gfx_render_triangles", [Ptr, Ptr, Ptr, I64, F64, F64, F64, F64] => Void;
-    "rayzor_gpu_Texture", "toBytes",          instance, "rayzor_gpu_gfx_texture_to_bytes", [Ptr, Ptr] => Ptr;
+    "rayzor::gpu::Renderer", "renderTriangles", static, "rayzor_gpu_gfx_render_triangles", [Ptr, Ptr, Ptr, I64, F64, F64, F64, F64] => Void;
+    "rayzor::gpu::Texture", "toBytes",          instance, "rayzor_gpu_gfx_texture_to_bytes", [Ptr, Ptr] => Ptr;
 
     // Surface
-    "rayzor_gpu_Surface", "create",         static,   "rayzor_gpu_gfx_surface_create",     [Ptr, Ptr, Ptr, I64, I64] => Ptr;
+    "rayzor::gpu::Surface", "create",         static,   "rayzor_gpu_gfx_surface_create",     [Ptr, Ptr, Ptr, I64, I64] => Ptr;
     // Surface.createCanvas is available on all platforms — on WASM the host provides it,
     // on native it's a no-op (use Surface.create with raw window handles instead).
-    "rayzor_gpu_Surface", "createCanvas",   static,   "rayzor_gpu_gfx_surface_create_canvas", [Ptr, Ptr, I64, I64] => Ptr;
-    "rayzor_gpu_Surface", "getTexture",     instance, "rayzor_gpu_gfx_surface_get_texture",[Ptr]           => Ptr;
-    "rayzor_gpu_Surface", "present",        instance, "rayzor_gpu_gfx_surface_present",    [Ptr]           => Void;
-    "rayzor_gpu_Surface", "resize",         instance, "rayzor_gpu_gfx_surface_resize",     [Ptr, Ptr, I64, I64] => Void;
-    "rayzor_gpu_Surface", "getFormat",      instance, "rayzor_gpu_gfx_surface_get_format", [Ptr]           => I64;
-    "rayzor_gpu_Surface", "destroy",        instance, "rayzor_gpu_gfx_surface_destroy",    [Ptr]           => Void;
+    "rayzor::gpu::Surface", "createCanvas",   static,   "rayzor_gpu_gfx_surface_create_canvas", [Ptr, Ptr, I64, I64] => Ptr;
+    "rayzor::gpu::Surface", "getTexture",     instance, "rayzor_gpu_gfx_surface_get_texture",[Ptr]           => Ptr;
+    "rayzor::gpu::Surface", "present",        instance, "rayzor_gpu_gfx_surface_present",    [Ptr]           => Void;
+    "rayzor::gpu::Surface", "resize",         instance, "rayzor_gpu_gfx_surface_resize",     [Ptr, Ptr, I64, I64] => Void;
+    "rayzor::gpu::Surface", "getFormat",      instance, "rayzor_gpu_gfx_surface_get_format", [Ptr]           => I64;
+    "rayzor::gpu::Surface", "destroy",        instance, "rayzor_gpu_gfx_surface_destroy",    [Ptr]           => Void;
 
     // CommandEncoder (multi-pass)
-    "rayzor_gpu_CommandEncoder", "create",          static,   "rayzor_gpu_gfx_cmd_create",           []                  => Ptr;
-    "rayzor_gpu_CommandEncoder", "beginPass",       instance, "rayzor_gpu_gfx_cmd_begin_pass",       [Ptr, Ptr, I64, F64, F64, F64, F64, Ptr] => Void;
-    "rayzor_gpu_CommandEncoder", "endPass",         instance, "rayzor_gpu_gfx_cmd_end_pass",         [Ptr]               => Void;
-    "rayzor_gpu_CommandEncoder", "submit",          instance, "rayzor_gpu_gfx_cmd_submit",           [Ptr, Ptr]          => Void;
-    "rayzor_gpu_CommandEncoder", "setPipeline",     instance, "rayzor_gpu_gfx_cmd_set_pipeline",     [Ptr, Ptr]          => Void;
-    "rayzor_gpu_CommandEncoder", "draw",            instance, "rayzor_gpu_gfx_cmd_draw",             [Ptr, I64, I64, I64, I64] => Void;
-    "rayzor_gpu_CommandEncoder", "drawIndexed",     instance, "rayzor_gpu_gfx_cmd_draw_indexed",     [Ptr, I64, I64, I64, I64, I64] => Void;
-    "rayzor_gpu_CommandEncoder", "setVertexBuffer", instance, "rayzor_gpu_gfx_cmd_set_vertex_buffer",[Ptr, I64, Ptr]     => Void;
-    "rayzor_gpu_CommandEncoder", "setIndexBuffer",  instance, "rayzor_gpu_gfx_cmd_set_index_buffer", [Ptr, Ptr, I64]     => Void;
-    "rayzor_gpu_CommandEncoder", "setBindGroup",    instance, "rayzor_gpu_gfx_cmd_set_bind_group",   [Ptr, I64, Ptr]     => Void;
-    "rayzor_gpu_CommandEncoder", "setViewport",     instance, "rayzor_gpu_gfx_cmd_set_viewport",     [Ptr, F64, F64, F64, F64, F64, F64] => Void;
-    "rayzor_gpu_CommandEncoder", "setScissor",      instance, "rayzor_gpu_gfx_cmd_set_scissor",      [Ptr, I64, I64, I64, I64]           => Void;
-    "rayzor_gpu_CommandEncoder", "beginPassMRT",   instance, "rayzor_gpu_gfx_cmd_begin_pass_mrt",  [Ptr, I64, Ptr, Ptr, Ptr, Ptr]      => Void;
+    "rayzor::gpu::CommandEncoder", "create",          static,   "rayzor_gpu_gfx_cmd_create",           []                  => Ptr;
+    "rayzor::gpu::CommandEncoder", "beginPass",       instance, "rayzor_gpu_gfx_cmd_begin_pass",       [Ptr, Ptr, I64, F64, F64, F64, F64, Ptr] => Void;
+    "rayzor::gpu::CommandEncoder", "endPass",         instance, "rayzor_gpu_gfx_cmd_end_pass",         [Ptr]               => Void;
+    "rayzor::gpu::CommandEncoder", "submit",          instance, "rayzor_gpu_gfx_cmd_submit",           [Ptr, Ptr]          => Void;
+    "rayzor::gpu::CommandEncoder", "setPipeline",     instance, "rayzor_gpu_gfx_cmd_set_pipeline",     [Ptr, Ptr]          => Void;
+    "rayzor::gpu::CommandEncoder", "draw",            instance, "rayzor_gpu_gfx_cmd_draw",             [Ptr, I64, I64, I64, I64] => Void;
+    "rayzor::gpu::CommandEncoder", "drawIndexed",     instance, "rayzor_gpu_gfx_cmd_draw_indexed",     [Ptr, I64, I64, I64, I64, I64] => Void;
+    "rayzor::gpu::CommandEncoder", "setVertexBuffer", instance, "rayzor_gpu_gfx_cmd_set_vertex_buffer",[Ptr, I64, Ptr]     => Void;
+    "rayzor::gpu::CommandEncoder", "setIndexBuffer",  instance, "rayzor_gpu_gfx_cmd_set_index_buffer", [Ptr, Ptr, I64]     => Void;
+    "rayzor::gpu::CommandEncoder", "setBindGroup",    instance, "rayzor_gpu_gfx_cmd_set_bind_group",   [Ptr, I64, Ptr]     => Void;
+    "rayzor::gpu::CommandEncoder", "setViewport",     instance, "rayzor_gpu_gfx_cmd_set_viewport",     [Ptr, F64, F64, F64, F64, F64, F64] => Void;
+    "rayzor::gpu::CommandEncoder", "setScissor",      instance, "rayzor_gpu_gfx_cmd_set_scissor",      [Ptr, I64, I64, I64, I64]           => Void;
+    "rayzor::gpu::CommandEncoder", "beginPassMRT",   instance, "rayzor_gpu_gfx_cmd_begin_pass_mrt",  [Ptr, I64, Ptr, Ptr, Ptr, Ptr]      => Void;
 
     // Pipeline MRT
-    "rayzor_gpu_RenderPipeline", "addColorTarget", instance, "rayzor_gpu_gfx_pipeline_add_color_target", [Ptr, I64] => Void;
+    "rayzor::gpu::RenderPipeline", "addColorTarget", instance, "rayzor_gpu_gfx_pipeline_add_color_target", [Ptr, I64] => Void;
 }
 
 // ============================================================================
@@ -216,6 +257,29 @@ declare_native_methods! {
 mod native_plugin {
     use super::*;
     use std::ffi::c_void;
+    use std::sync::LazyLock;
+
+    fn copy_method(method: &NativeMethodDesc) -> NativeMethodDesc {
+        NativeMethodDesc {
+            symbol_name: method.symbol_name,
+            symbol_name_len: method.symbol_name_len,
+            class_name: method.class_name,
+            class_name_len: method.class_name_len,
+            method_name: method.method_name,
+            method_name_len: method.method_name_len,
+            is_static: method.is_static,
+            param_count: method.param_count,
+            return_type: method.return_type,
+            param_types: method.param_types,
+        }
+    }
+
+    static ALL_METHODS: LazyLock<Vec<NativeMethodDesc>> = LazyLock::new(|| {
+        let mut methods: Vec<_> = GPU_METHODS.iter().map(copy_method).collect();
+        #[cfg(feature = "webgpu-backend")]
+        methods.extend(XGPU_METHODS.iter().map(copy_method));
+        methods
+    });
 
     /// Symbol table entry for plugin registration
     #[repr(C)]
@@ -250,10 +314,10 @@ mod native_plugin {
     ) -> *const NativeMethodDesc {
         if !out_count.is_null() {
             unsafe {
-                *out_count = GPU_METHODS.len();
+                *out_count = ALL_METHODS.len();
             }
         }
-        GPU_METHODS.as_ptr()
+        ALL_METHODS.as_ptr()
     }
 
     /// Rust-callable API returning runtime symbols.
@@ -276,6 +340,11 @@ mod native_plugin {
             (
                 "rayzor_gpu_compute_create",
                 device::rayzor_gpu_compute_create as *const u8,
+            ),
+            #[cfg(feature = "webgpu-backend")]
+            (
+                "rayzor_gpu_compute_from_device",
+                device::rayzor_gpu_compute_from_device as *const u8,
             ),
             (
                 "rayzor_gpu_compute_destroy",
@@ -716,6 +785,9 @@ mod native_plugin {
             symbols.extend(gfx_symbols);
         }
 
+        #[cfg(feature = "webgpu-backend")]
+        symbols.extend(xgpu_runtime_symbols());
+
         symbols
     }
 
@@ -731,7 +803,7 @@ mod native_plugin {
     }
 
     // Universal rpkg entry point — single export for both symbols and method descriptors
-    rayzor_plugin::rpkg_entry!(GPU_METHODS, get_runtime_symbols);
+    rayzor_plugin::rpkg_entry!(ALL_METHODS, get_runtime_symbols);
 
     /// GPU compute plugin implementing RuntimePlugin trait
     pub struct GpuComputePlugin;
@@ -748,3 +820,43 @@ mod native_plugin {
 } // mod native_plugin
 #[cfg(feature = "native")]
 pub use native_plugin::*;
+
+#[cfg(all(test, feature = "native", feature = "webgpu-backend"))]
+mod xgpu_adapter_tests {
+    use std::collections::HashSet;
+
+    #[test]
+    fn portable_and_rayzor_extensions_share_one_method_catalog() {
+        let mut count = 0;
+        let pointer = unsafe { super::rayzor_gpu_plugin_describe(&mut count) };
+        let methods = unsafe { std::slice::from_raw_parts(pointer, count) };
+        let mut keys = HashSet::new();
+        let mut expected = HashSet::from([
+            "rayzor.gpu.GpuBuffer.destroy".to_owned(),
+            "rayzor.gpu.GpuBuffer.numel".to_owned(),
+            "rayzor.gpu.GPUCompute.fromDevice".to_owned(),
+        ]);
+        for method in methods {
+            let class = unsafe {
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                    method.class_name,
+                    method.class_name_len,
+                ))
+            }
+            .replace("::", ".");
+            let name = unsafe {
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                    method.method_name,
+                    method.method_name_len,
+                ))
+            };
+            let key = format!("{class}.{name}");
+            assert!(keys.insert(key.clone()), "duplicate GPU method {key}");
+            expected.remove(&key);
+        }
+        assert!(
+            expected.is_empty(),
+            "missing shared GPU methods: {expected:?}"
+        );
+    }
+}

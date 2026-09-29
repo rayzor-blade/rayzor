@@ -38,6 +38,26 @@ pub extern "C" fn rayzor_gpu_compute_create() -> i64 {
     }
 }
 
+/// Attach Rayzor's shader compiler and lazy compute graph to an xgpu device.
+/// The wgpu handles are clones of the same native objects, so this allocates no
+/// second device and does not copy GPU resources.
+#[cfg(feature = "webgpu-backend")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rayzor_gpu_compute_from_device(device: *const crate::GpuDevice) -> i64 {
+    if device.is_null() {
+        return 0;
+    }
+    let handle = unsafe { (*device).handle };
+    let Some(inner) = NativeContext::from_xgpu_device(handle) else {
+        return 0;
+    };
+    Box::into_raw(Box::new(GpuContext {
+        inner,
+        kernel_cache: KernelCache::new(),
+        fused_cache: HashMap::new(),
+    })) as i64
+}
+
 /// Destroy a GPU compute context and free its resources.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_destroy(ctx: i64) {

@@ -31,6 +31,13 @@ extern class GPUCompute {
     @:native("rayzor_gpu_compute_create")
     public static function create():GPUCompute;
 
+    /**
+     * Add Rayzor's shader and lazy-compute extensions to a portable xgpu
+     * device. Both APIs use the same native device, queue and buffers.
+     */
+    @:native("rayzor_gpu_compute_from_device")
+    public static function fromDevice(device:GpuDevice):GPUCompute;
+
     /** Destroy this GPU compute context and release device resources. */
     @:native("rayzor_gpu_compute_destroy")
     public function destroy():Void;

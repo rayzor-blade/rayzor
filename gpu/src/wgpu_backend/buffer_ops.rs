@@ -11,8 +11,8 @@ pub struct WgpuBuffer {
     pub(crate) byte_size: usize,
     /// Reference to the device for readback operations.
     /// We need this because wgpu readback requires creating a staging buffer.
-    pub(crate) device: *const wgpu::Device,
-    pub(crate) queue: *const wgpu::Queue,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
     /// Needed so a readback can flush pending encoded work first — results do
     /// not exist until the command buffer that writes them has been submitted.
     pub(crate) ctx: *const super::device_init::WgpuContext,
@@ -46,8 +46,8 @@ impl WgpuBuffer {
         Some(WgpuBuffer {
             buffer,
             byte_size,
-            device: &ctx.device as *const _,
-            queue: &ctx.queue as *const _,
+            device: ctx.device.clone(),
+            queue: ctx.queue.clone(),
             ctx: ctx as *const _,
         })
     }
@@ -71,8 +71,8 @@ impl WgpuBuffer {
         Some(WgpuBuffer {
             buffer,
             byte_size,
-            device: &ctx.device as *const _,
-            queue: &ctx.queue as *const _,
+            device: ctx.device.clone(),
+            queue: ctx.queue.clone(),
             ctx: ctx as *const _,
         })
     }
@@ -84,8 +84,8 @@ impl WgpuBuffer {
         if !self.ctx.is_null() {
             unsafe { &*self.ctx }.flush();
         }
-        let device = unsafe { &*self.device };
-        let queue = unsafe { &*self.queue };
+        let device = &self.device;
+        let queue = &self.queue;
         let read_size = byte_size.min(self.byte_size);
 
         // Create staging buffer for readback
@@ -109,11 +109,11 @@ impl WgpuBuffer {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
         match rx.recv() {
             Ok(Ok(())) => {
-                let data = slice.get_mapped_range().to_vec();
+                let data = slice.get_mapped_range().ok()?.to_vec();
                 staging.unmap();
                 Some(data)
             }

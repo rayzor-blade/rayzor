@@ -118,6 +118,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_render_submit(
                 label: Some("rayzor_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: color_view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load,
@@ -127,6 +128,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_render_submit(
                 depth_stencil_attachment: depth_attachment,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             pass.set_pipeline(&pipeline.pipeline);

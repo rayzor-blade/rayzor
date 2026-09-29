@@ -11,6 +11,9 @@
 //! - `rayzor_future_then(handle, cb_fn, cb_env)` — non-blocking: register callback + spawn
 //! - `rayzor_future_poll(handle) -> i64` — non-blocking check
 //! - `rayzor_future_is_ready(handle) -> bool` — check if resolved
+//! - `rayzor_plugin_future_pending(raw) -> handle` — native callback future
+//! - `rayzor_plugin_future_resolve(handle, value)` — complete from a plugin
+//! - `rayzor_plugin_future_reject(handle, utf8, len)` — reject from a plugin
 
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
@@ -27,6 +30,7 @@ unsafe extern "C" {
 const STATE_PENDING: u8 = 0;
 const STATE_RUNNING: u8 = 1;
 const STATE_RESOLVED: u8 = 2;
+const STATE_SETTLING: u8 = 3;
 
 /// A lazy future handle.
 ///
@@ -56,6 +60,9 @@ struct FutureHandle {
     error_value: Mutex<i64>,
     /// Exception type_id for typed re-throw
     error_type_id: AtomicU32,
+    /// Error text supplied by a native callback. It is turned into a Haxe
+    /// exception on the awaiting language thread.
+    error_message: Mutex<Option<String>>,
     /// Cooperative cancellation flag — checked by worker thread
     cancelled: AtomicBool,
 }
@@ -65,6 +72,25 @@ struct FutureHandle {
 // by the worker thread — no concurrent mutation.
 unsafe impl Send for FutureHandle {}
 unsafe impl Sync for FutureHandle {}
+
+fn callback_value(future: &FutureHandle, value: i64) -> *mut u8 {
+    if future.raw_result {
+        value as *mut u8
+    } else {
+        crate::type_system::haxe_box_int_ptr(value)
+    }
+}
+
+fn notify_then(future: &FutureHandle, value: i64) {
+    let then_fn = future.then_fn.load(Ordering::Acquire);
+    if then_fn.is_null() {
+        return;
+    }
+    let then_env = future.then_env.load(Ordering::Acquire);
+    type CallbackFn = extern "C" fn(*const u8, *mut u8);
+    let callback: CallbackFn = unsafe { std::mem::transmute(then_fn as usize) };
+    callback(then_env, callback_value(future, value));
+}
 
 /// Spawn the future's closure on a worker thread.
 ///
@@ -118,19 +144,7 @@ fn spawn_future(handle: &FutureHandle, handle_ptr: *mut FutureHandle) {
                 handle.state.store(STATE_RESOLVED, Ordering::Release);
                 handle.cvar.notify_all();
 
-                // Call .then() callback if registered
-                let then_fn = handle.then_fn.load(Ordering::Acquire);
-                if !then_fn.is_null() {
-                    let then_env = handle.then_env.load(Ordering::Acquire);
-                    let cb_result = if handle.raw_result {
-                        value as *mut u8
-                    } else {
-                        crate::type_system::haxe_box_int_ptr(value)
-                    };
-                    type CallbackFn = extern "C" fn(*const u8, *mut u8);
-                    let callback: CallbackFn = unsafe { std::mem::transmute(then_fn as usize) };
-                    callback(then_env, cb_result);
-                }
+                notify_then(handle, value);
             }
             Ok(Err((exc_value, exc_type_id))) => {
                 // Haxe exception was thrown — store for re-throw on .await()
@@ -182,10 +196,102 @@ pub extern "C" fn rayzor_future_create(fn_ptr: *const u8, env_ptr: *const u8) ->
         has_error: AtomicBool::new(false),
         error_value: Mutex::new(0),
         error_type_id: AtomicU32::new(0),
+        error_message: Mutex::new(None),
         cancelled: AtomicBool::new(false),
     });
 
     Box::into_raw(handle) as *mut u8
+}
+
+/// Create a future whose result will be supplied by a native plugin callback.
+///
+/// A plugin future starts in `Running`, so awaiting or attaching `then()` never
+/// tries to spawn a Haxe closure. `raw_result` selects whether the resolved i64
+/// is already a language object pointer or should be boxed as an integer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rayzor_plugin_future_pending(raw_result: u8) -> *mut u8 {
+    let handle = Box::new(FutureHandle {
+        state: AtomicU8::new(STATE_RUNNING),
+        fn_ptr: ptr::null(),
+        env_ptr: ptr::null(),
+        value: Mutex::new(0),
+        cvar: Condvar::new(),
+        then_fn: AtomicPtr::new(ptr::null_mut()),
+        then_env: AtomicPtr::new(ptr::null_mut()),
+        raw_result: raw_result != 0,
+        has_error: AtomicBool::new(false),
+        error_value: Mutex::new(0),
+        error_type_id: AtomicU32::new(0),
+        error_message: Mutex::new(None),
+        cancelled: AtomicBool::new(false),
+    });
+    Box::into_raw(handle) as *mut u8
+}
+
+/// Resolve a plugin-created future. Returns 1 for the first completion.
+#[unsafe(no_mangle)]
+pub extern "C" fn rayzor_plugin_future_resolve(handle: *mut u8, value: i64) -> u8 {
+    if handle.is_null() {
+        return 0;
+    }
+    let future = unsafe { &*(handle as *const FutureHandle) };
+    if future
+        .state
+        .compare_exchange(
+            STATE_RUNNING,
+            STATE_SETTLING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return 0;
+    }
+    *future.value.lock().unwrap() = value;
+    future.state.store(STATE_RESOLVED, Ordering::Release);
+    future.cvar.notify_all();
+    notify_then(future, value);
+    1
+}
+
+/// Reject a plugin-created future with a borrowed UTF-8 message.
+///
+/// The bytes are copied into the Future because the callback's source storage
+/// does not need to outlive this call. The Haxe exception is allocated only
+/// when the language thread awaits the result.
+#[unsafe(no_mangle)]
+pub extern "C" fn rayzor_plugin_future_reject(
+    handle: *mut u8,
+    message: *const u8,
+    message_len: usize,
+) -> u8 {
+    if handle.is_null() || (message.is_null() && message_len != 0) {
+        return 0;
+    }
+    let future = unsafe { &*(handle as *const FutureHandle) };
+    if future
+        .state
+        .compare_exchange(
+            STATE_RUNNING,
+            STATE_SETTLING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return 0;
+    }
+    let text = if message_len == 0 {
+        String::new()
+    } else {
+        let bytes = unsafe { std::slice::from_raw_parts(message, message_len) };
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    *future.error_message.lock().unwrap() = Some(text);
+    future.has_error.store(true, Ordering::Release);
+    future.state.store(STATE_RESOLVED, Ordering::Release);
+    future.cvar.notify_all();
+    1
 }
 
 /// Await a future: spawn if pending, block until resolved, return value.
@@ -228,6 +334,9 @@ pub extern "C" fn rayzor_future_await(handle: *mut u8) -> *mut u8 {
 
     // Check if the closure threw an exception — re-throw in caller's context
     if future.has_error.load(Ordering::Acquire) {
+        if let Some(message) = future.error_message.lock().unwrap().clone() {
+            crate::exception::throw_with_message(message);
+        }
         let exc_value = *future.error_value.lock().unwrap();
         let exc_type_id = future.error_type_id.load(Ordering::Acquire);
         if exc_value != 0 {
@@ -296,6 +405,9 @@ pub extern "C" fn rayzor_future_await_timeout(handle: *mut u8, millis: i64) -> *
 
     // Check for error
     if future.has_error.load(Ordering::Acquire) {
+        if let Some(message) = future.error_message.lock().unwrap().clone() {
+            crate::exception::throw_with_message(message);
+        }
         let exc_value = *future.error_value.lock().unwrap();
         let exc_type_id = future.error_type_id.load(Ordering::Acquire);
         if exc_value != 0 {
@@ -338,14 +450,9 @@ pub extern "C" fn rayzor_future_then(handle: *mut u8, cb_fn: *const u8, cb_env: 
     if current_state == STATE_RESOLVED {
         // Already resolved — call callback immediately
         let result = *future.value.lock().unwrap();
-        let cb_result = if future.raw_result {
-            result as *mut u8
-        } else {
-            crate::type_system::haxe_box_int_ptr(result)
-        };
         type CallbackFn = extern "C" fn(*const u8, *mut u8);
         let callback: CallbackFn = unsafe { std::mem::transmute(cb_fn as usize) };
-        callback(cb_env, cb_result);
+        callback(cb_env, callback_value(future, result));
     } else if current_state == STATE_PENDING {
         // Spawn the future
         if future
@@ -377,11 +484,13 @@ pub extern "C" fn rayzor_future_poll(handle: *mut u8) -> *mut u8 {
 
     let future = unsafe { &*(handle as *const FutureHandle) };
 
-    if future.state.load(Ordering::Acquire) == STATE_RESOLVED {
-        crate::type_system::haxe_box_int_ptr(*future.value.lock().unwrap())
-    } else {
-        ptr::null_mut()
+    if future.state.load(Ordering::Acquire) != STATE_RESOLVED
+        || future.has_error.load(Ordering::Acquire)
+    {
+        return ptr::null_mut();
     }
+
+    callback_value(future, *future.value.lock().unwrap())
 }
 
 /// Create a lazy Future that resolves to an Array of results from multiple futures.
@@ -427,6 +536,7 @@ pub extern "C" fn rayzor_future_all(arr_ptr: *const u8) -> *mut u8 {
         has_error: AtomicBool::new(false),
         error_value: Mutex::new(0),
         error_type_id: AtomicU32::new(0),
+        error_message: Mutex::new(None),
         cancelled: AtomicBool::new(false),
     });
     let handle_ptr = Box::into_raw(handle);
@@ -571,6 +681,7 @@ pub extern "C" fn rayzor_future_race(arr_ptr: *const u8) -> *mut u8 {
         has_error: AtomicBool::new(false),
         error_value: Mutex::new(0),
         error_type_id: AtomicU32::new(0),
+        error_message: Mutex::new(None),
         cancelled: AtomicBool::new(false),
     });
     let handle_ptr = Box::into_raw(handle);
@@ -797,5 +908,38 @@ mod tests {
         assert!(rayzor_future_await(ptr::null_mut()).is_null());
         assert!(rayzor_future_poll(ptr::null_mut()).is_null());
         assert!(!rayzor_future_is_ready(ptr::null()));
+    }
+
+    #[test]
+    fn plugin_future_resolves_a_raw_object_once() {
+        let handle = rayzor_plugin_future_pending(1);
+        let object = Box::into_raw(Box::new(42_u64)) as *mut u8;
+        assert_eq!(rayzor_plugin_future_resolve(handle, object as i64), 1);
+        assert_eq!(rayzor_plugin_future_resolve(handle, 0), 0);
+        assert_eq!(rayzor_future_poll(handle), object);
+        assert_eq!(rayzor_future_await(handle), object);
+        unsafe {
+            drop(Box::from_raw(object as *mut u64));
+            drop(Box::from_raw(handle as *mut FutureHandle));
+        }
+    }
+
+    #[test]
+    fn plugin_future_rejection_copies_its_message() {
+        let handle = rayzor_plugin_future_pending(1);
+        let mut message = b"device lost".to_vec();
+        assert_eq!(
+            rayzor_plugin_future_reject(handle, message.as_ptr(), message.len()),
+            1
+        );
+        message.fill(b'x');
+        let future = unsafe { &*(handle as *const FutureHandle) };
+        assert_eq!(
+            future.error_message.lock().unwrap().as_deref(),
+            Some("device lost")
+        );
+        unsafe {
+            drop(Box::from_raw(handle as *mut FutureHandle));
+        }
     }
 }

@@ -79,6 +79,7 @@ impl CommandRecorder {
                     .map(|ca| {
                         Some(wgpu::RenderPassColorAttachment {
                             view: &*ca.view,
+                            depth_slice: None,
                             resolve_target: None,
                             ops: wgpu::Operations {
                                 load: ca.load_op,
@@ -95,6 +96,7 @@ impl CommandRecorder {
                         depth_stencil_attachment: depth_attachment,
                         timestamp_writes: None,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
 
                     for command in &recorded_pass.commands {
@@ -575,6 +577,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_submit(
                     .map(|ca| {
                         Some(wgpu::RenderPassColorAttachment {
                             view: &*ca.view,
+                            depth_slice: None,
                             resolve_target: None,
                             ops: wgpu::Operations {
                                 load: ca.load_op,
@@ -590,6 +593,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_submit(
                     depth_stencil_attachment: depth_attachment,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
 
                 // Replay recorded commands

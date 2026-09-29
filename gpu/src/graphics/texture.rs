@@ -191,13 +191,16 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_read_pixels(
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
-        ctx.device.poll(wgpu::Maintain::Wait);
+        let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
 
         if receiver.recv().ok().and_then(|r| r.ok()).is_none() {
             return 0;
         }
 
-        let mapped = buffer_slice.get_mapped_range();
+        let mapped = match buffer_slice.get_mapped_range() {
+            Ok(mapped) => mapped,
+            Err(_) => return 0,
+        };
         let unpadded_row_bytes = (tex.width * bytes_per_pixel) as usize;
         let needed = unpadded_row_bytes * tex.height as usize;
         if out_capacity < needed {
