@@ -105,6 +105,9 @@ jobs:
         with:
           name: gpu-haxe
           path: target/rayzor-gpu-haxe
+      - name: Check committed GPU externs
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: diff -ru gpu/haxe/rayzor/gpu target/rayzor-gpu-haxe/rayzor/gpu
 
   # =========================================================================
   # Build rayzor CLI (needed for rpkg pack)

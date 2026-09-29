@@ -19,14 +19,17 @@ fn gpu_buffer_extensions(generated: String, source: &Path) -> Result<String, Str
 
 fn write_haxe(root: &Path) -> Result<(), String> {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let adapter = manifest.join("haxe/rayzor/gpu");
+    let committed = manifest.join("haxe/rayzor/gpu");
+    let adapter = manifest.join("haxe-overrides/rayzor/gpu");
     let package = root.join("rayzor/gpu");
     std::fs::create_dir_all(&package).map_err(|error| error.to_string())?;
-    for entry in std::fs::read_dir(&adapter).map_err(|error| error.to_string())? {
+    for entry in std::fs::read_dir(&committed).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         if entry.path().extension().and_then(|value| value.to_str()) == Some("hx") {
-            std::fs::copy(entry.path(), package.join(entry.file_name()))
-                .map_err(|error| error.to_string())?;
+            let destination = package.join(entry.file_name());
+            if entry.path() != destination {
+                std::fs::copy(entry.path(), destination).map_err(|error| error.to_string())?;
+            }
         }
     }
 
