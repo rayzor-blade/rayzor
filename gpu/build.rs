@@ -48,6 +48,13 @@ fn write_haxe(root: &Path) -> Result<(), String> {
 }
 
 fn main() {
+    // The runtime supplies the `rayzor_plugin_*` carrier symbols when it loads
+    // this cdylib. Darwin requires the library to opt into resolving them at
+    // load time; ELF linkers defer them by default.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-undefined,dynamic_lookup");
+    }
+
     println!("cargo:rerun-if-env-changed=XGPU_HAXE_OUT");
     println!("cargo:rerun-if-env-changed=XGPU_HAXE_STAMP");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
