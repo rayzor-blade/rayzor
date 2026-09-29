@@ -29,6 +29,9 @@ impl<'a> HirToMirContext<'a> {
         symbol: SymbolId,
         read: bool,
     ) -> Option<IrFunctionId> {
+        if self.bypass_accessors {
+            return None;
+        }
         let info = self.property_access_map.get(&symbol)?;
         let accessor = if read { &info.getter } else { &info.setter };
         let crate::tast::PropertyAccessor::Method(name) = accessor else {

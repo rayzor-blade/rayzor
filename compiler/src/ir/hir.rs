@@ -282,6 +282,8 @@ pub enum HirStatement {
 /// HIR Expression
 #[derive(Debug, Clone)]
 pub struct HirExpr {
+    /// Access backing fields throughout an `@:bypassAccessor` expression.
+    pub bypass_accessors: bool,
     pub kind: HirExprKind,
     pub ty: TypeId,
     pub lifetime: LifetimeId,
@@ -801,6 +803,7 @@ impl HirExpr {
     /// Create a new HIR expression
     pub fn new(kind: HirExprKind, ty: TypeId, lifetime: LifetimeId, loc: SourceLocation) -> Self {
         Self {
+            bypass_accessors: false,
             kind,
             ty,
             lifetime,

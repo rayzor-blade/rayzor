@@ -3014,6 +3014,12 @@ impl DfgBuilder {
                         | BinaryOperator::SubAssign
                         | BinaryOperator::MulAssign
                         | BinaryOperator::DivAssign
+                        | BinaryOperator::AndAssign
+                        | BinaryOperator::OrAssign
+                        | BinaryOperator::XorAssign
+                        | BinaryOperator::ShlAssign
+                        | BinaryOperator::ShrAssign
+                        | BinaryOperator::UshrAssign
                         | BinaryOperator::ModAssign
                 ) {
                     // Left side is being modified

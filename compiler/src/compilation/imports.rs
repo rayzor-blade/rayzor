@@ -447,9 +447,14 @@ impl CompilationUnit {
                         extract_expr_deps(e, deps);
                     }
                 }
-                ClassFieldKind::Property { type_hint, .. } => {
+                ClassFieldKind::Property {
+                    type_hint, expr, ..
+                } => {
                     if let Some(ty) = type_hint {
                         extract_type_deps(ty, deps);
+                    }
+                    if let Some(e) = expr {
+                        extract_expr_deps(e, deps);
                     }
                 }
                 ClassFieldKind::Function(func) => {

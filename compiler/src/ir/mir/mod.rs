@@ -370,6 +370,7 @@ pub struct HirToMirContext<'a> {
     /// Accessor info for the properties of abstracts, keyed by the property
     /// symbol: a write consults it before the slot path, a read after
     /// (see decl/module.rs).
+    bypass_accessors: bool,
     abstract_property_accessors: BTreeMap<SymbolId, crate::tast::node::PropertyAccessInfo>,
 
     /// The HIR type of the value an assignment is storing, for the reflective
@@ -1424,6 +1425,7 @@ impl<'a> HirToMirContext<'a> {
             current_function_symbol: None,
             try_depth: 0,
             pending_store_value_ty: None,
+            bypass_accessors: false,
             abstract_property_accessors: BTreeMap::new(),
             interface_method_names: BTreeMap::new(),
             interface_method_return_types: BTreeMap::new(),

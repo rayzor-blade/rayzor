@@ -493,6 +493,7 @@ pub enum ClassFieldKind {
         type_hint: Option<Type>,
         getter: PropertyAccess,
         setter: PropertyAccess,
+        expr: Option<Expr>,
     },
     /// Function: `function foo():Void {}`
     Function(Function),

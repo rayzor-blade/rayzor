@@ -439,7 +439,8 @@ impl MacroExpander {
                     }
                 }
             }
-            ClassFieldKind::Var { expr: init, .. } => {
+            ClassFieldKind::Var { expr: init, .. }
+            | ClassFieldKind::Property { expr: init, .. } => {
                 if let Some(init_expr) = init.take() {
                     let backup = init_expr.clone();
                     match self.walk_expr(init_expr) {
@@ -478,9 +479,6 @@ impl MacroExpander {
                         }
                     }
                 }
-            }
-            ClassFieldKind::Property { .. } => {
-                // Properties don't have expression bodies to expand
             }
         }
 

@@ -579,6 +579,7 @@ impl Reifier {
                 type_hint,
                 getter,
                 setter,
+                expr,
             } => {
                 let spell = |a: &parser::PropertyAccess| match a {
                     parser::PropertyAccess::Default => "default".to_string(),
@@ -596,7 +597,7 @@ impl Reifier {
                             self.string(&spell(getter)),
                             self.string(&spell(setter)),
                             self.opt(type_hint.as_ref(), |t| self.complex_type(t))?,
-                            self.null(),
+                            self.opt(expr.as_ref(), |e| self.expr(e))?,
                         ],
                     ),
                 )

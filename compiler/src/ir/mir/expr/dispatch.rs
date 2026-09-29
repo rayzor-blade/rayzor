@@ -33,7 +33,10 @@ impl<'a> HirToMirContext<'a> {
         // register), so a `?` here would drop every event for `f(a);` in
         // statement position — which is how a consuming call is usually
         // written — while `var x = f(a);` was checked.
+        let previous_bypass = self.bypass_accessors;
+        self.bypass_accessors |= expr.bypass_accessors;
         let lowered = self.lower_expression_inner(expr);
+        self.bypass_accessors = previous_bypass;
         self.record_argument_moves(expr);
         self.record_capture_reads(expr);
         let result = lowered?;

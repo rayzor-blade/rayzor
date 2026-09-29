@@ -188,13 +188,23 @@ impl<'a> AstLowering<'a> {
                     type_hint,
                     getter,
                     setter,
+                    expr,
                 } => {
-                    // Handle property with getter/setter
-                    let field_type = if let Some(type_hint) = type_hint {
-                        self.lower_type(type_hint)?
-                    } else {
-                        self.context.type_table.borrow().dynamic_type()
-                    };
+                    let hint = type_hint
+                        .as_ref()
+                        .map(|ty| self.lower_type(ty))
+                        .transpose()?;
+                    let previous_hint = self.context.expected_new_type_hint;
+                    self.context.expected_new_type_hint = hint;
+                    let initializer = expr
+                        .as_ref()
+                        .map(|expr| self.lower_expression(expr))
+                        .transpose();
+                    self.context.expected_new_type_hint = previous_hint;
+                    let initializer = initializer?;
+                    let field_type = hint
+                        .or_else(|| initializer.as_ref().map(|expr| expr.expr_type))
+                        .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
                     let is_static = field
                         .modifiers
                         .iter()
@@ -228,7 +238,7 @@ impl<'a> AstLowering<'a> {
                     (
                         name.clone(),
                         field_type,
-                        None,
+                        initializer,
                         mutability,
                         is_static,
                         property_info,

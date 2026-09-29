@@ -507,6 +507,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                             type_hint,
                             getter,
                             setter,
+                            expr,
                             ..
                         } => {
                             let field_info = BladeFieldInfo {
@@ -515,7 +516,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                                 is_public,
                                 is_static,
                                 is_final: false,
-                                has_default: false,
+                                has_default: expr.is_some(),
                                 property: Some(BladeProperty {
                                     getter: access_to_blade(getter, name, true),
                                     setter: access_to_blade(setter, name, false),

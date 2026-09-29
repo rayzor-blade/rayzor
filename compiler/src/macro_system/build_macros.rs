@@ -442,6 +442,7 @@ fn class_field_to_build_field(field: &ClassField) -> BuildField {
             type_hint,
             getter,
             setter,
+            ..
         } => {
             let kind = BuildFieldKind::Property {
                 get: format!("{:?}", getter),

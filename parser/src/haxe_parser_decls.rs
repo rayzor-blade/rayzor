@@ -610,8 +610,7 @@ fn field_property<'a>(full: &'a str, input: &'a str) -> PResult<'a, ClassFieldKi
     let (input, _) = symbol(")").parse(input)?;
 
     let (input, type_hint) = opt(preceded(symbol(":"), |i| type_expr(full, i))).parse(input)?;
-    let (input, _default_value) =
-        opt(preceded(symbol("="), |i| expression(full, i))).parse(input)?;
+    let (input, expr) = opt(preceded(symbol("="), |i| expression(full, i))).parse(input)?;
     let (input, _) = symbol(";").parse(input)?;
 
     Ok((
@@ -621,6 +620,7 @@ fn field_property<'a>(full: &'a str, input: &'a str) -> PResult<'a, ClassFieldKi
             type_hint,
             getter,
             setter,
+            expr,
         },
     ))
 }

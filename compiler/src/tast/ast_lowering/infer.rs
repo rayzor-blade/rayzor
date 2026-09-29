@@ -436,6 +436,12 @@ impl<'a> AstLowering<'a> {
                     | BinaryOperator::SubAssign
                     | BinaryOperator::MulAssign
                     | BinaryOperator::DivAssign
+                    | BinaryOperator::AndAssign
+                    | BinaryOperator::OrAssign
+                    | BinaryOperator::XorAssign
+                    | BinaryOperator::ShlAssign
+                    | BinaryOperator::ShrAssign
+                    | BinaryOperator::UshrAssign
                     | BinaryOperator::ModAssign => {
                         // Assignment returns the type of the left operand
                         Ok(left.expr_type)

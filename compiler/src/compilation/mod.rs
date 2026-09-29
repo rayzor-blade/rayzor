@@ -987,9 +987,14 @@ fn collect_qualified_type_refs_from_ast(ast: &parser::HaxeFile, out: &mut Vec<St
                     collect_from_expr(e, seen, out);
                 }
             }
-            ClassFieldKind::Property { type_hint, .. } => {
+            ClassFieldKind::Property {
+                type_hint, expr, ..
+            } => {
                 if let Some(ty) = type_hint {
                     collect_from_type(ty, seen, out);
+                }
+                if let Some(e) = expr {
+                    collect_from_expr(e, seen, out);
                 }
             }
             ClassFieldKind::Function(func) => {

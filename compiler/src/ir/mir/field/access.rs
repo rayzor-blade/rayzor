@@ -369,11 +369,20 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Abstract properties belong to the abstract, even when it wraps a structure.
+        let abstract_property = match self.type_table.get(receiver_ty).map(|t| &t.kind) {
+            Some(TypeKind::Abstract { .. }) => {
+                self.abstract_property_accessors.get(&field).cloned()
+            }
+            _ => None,
+        };
         // Property with a custom getter: SymbolId lookup first, then by name.
         let mut property_info_owned = if receiver_is_interface {
             self.interface_property_access(receiver_ty, field)
         } else {
-            self.property_access_map.get(&field).cloned()
+            abstract_property
+                .clone()
+                .or_else(|| self.property_access_map.get(&field).cloned())
         };
         // An anonymous object's field is its own, and a built-in (Array,
         // String, Map) has no user properties: a same-named property getter on
@@ -403,7 +412,7 @@ impl<'a> HirToMirContext<'a> {
             )
         };
         // Structural fields do not inherit accessors from same-named class fields.
-        if receiver_is_anon {
+        if receiver_is_anon && abstract_property.is_none() {
             property_info_owned = None;
         }
         if property_info_owned.is_none() && !receiver_is_anon && !receiver_is_interface {
@@ -511,7 +520,10 @@ impl<'a> HirToMirContext<'a> {
                     .or(default_match);
             }
         }
-        if let Some(property_info) = property_info_owned.as_ref() {
+        if let Some(property_info) = property_info_owned
+            .as_ref()
+            .filter(|_| !self.bypass_accessors)
+        {
             match &property_info.getter {
                 // The guard keeps `this.p` inside `p`'s own getter on the
                 // backing slot, where calling the getter would re-enter the

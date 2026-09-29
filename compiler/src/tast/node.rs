@@ -1510,6 +1510,12 @@ pub enum BinaryOperator {
     ModAssign,
     MulAssign,
     DivAssign,
+    AndAssign,
+    OrAssign,
+    XorAssign,
+    ShlAssign,
+    ShrAssign,
+    UshrAssign,
 
     // Range
     /// Range operator: 0...10 (creates IntIterator)

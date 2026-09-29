@@ -192,10 +192,10 @@ impl<'a> HirToMirContext<'a> {
                             },
                         );
                     }
-                    self.store_field_with_regs(obj_reg, object, field, stored);
+                    let result = self.store_field_with_regs(obj_reg, object, field, stored)?;
                     return Some(match op {
                         HirUnaryOp::PostIncr | HirUnaryOp::PostDecr => old_value,
-                        _ => new_value,
+                        _ => result,
                     });
                 }
 
@@ -224,16 +224,17 @@ impl<'a> HirToMirContext<'a> {
                     );
                 }
 
+                let mut assigned_value = new_value;
                 match &operand.kind {
                     HirExprKind::Variable { symbol, .. } => {
                         // A bare static field lives in GLOBAL storage, not an
                         // SSA local, so the write must go through the global.
                         if let Some(setter) = self.static_property_accessor(*symbol, false) {
-                            self.builder.build_call_direct(
+                            assigned_value = self.builder.build_call_direct(
                                 setter,
                                 vec![new_value],
                                 result_type.clone(),
-                            );
+                            )?;
                         } else if let Some(global_id) = self.static_global_for(*symbol) {
                             self.builder.build_store_global(global_id, new_value);
                         } else if let Some(&cell) = self.capture_cells.get(symbol) {
@@ -261,7 +262,7 @@ impl<'a> HirToMirContext<'a> {
 
                 let result_reg = match op {
                     HirUnaryOp::PostIncr | HirUnaryOp::PostDecr => old_value,
-                    HirUnaryOp::PreIncr | HirUnaryOp::PreDecr => new_value,
+                    HirUnaryOp::PreIncr | HirUnaryOp::PreDecr => assigned_value,
                     _ => unreachable!(),
                 };
 

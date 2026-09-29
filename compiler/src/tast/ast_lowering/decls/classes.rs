@@ -974,7 +974,42 @@ impl<'a> AstLowering<'a> {
         for _round in 0..4 {
             let mut changed = false;
             for &(func, symbol) in &methods {
-                let inferred = self.param_types_from_uses(func, class_symbol);
+                let mut inferred = self.param_types_from_uses(func, class_symbol);
+                if let [param] = func.params.as_slice() {
+                    if param.type_hint.is_none() {
+                        for field in &class_decl.fields {
+                            let ClassFieldKind::Property {
+                                name,
+                                setter: parser::PropertyAccess::Custom(setter),
+                                ..
+                            } = &field.kind
+                            else {
+                                continue;
+                            };
+                            let setter_name = if setter == "set" {
+                                format!("set_{name}")
+                            } else {
+                                setter.clone()
+                            };
+                            if func.name == setter_name {
+                                let key = self.context.intern_string(name);
+                                let ty = self
+                                    .class_fields
+                                    .get(&class_symbol)
+                                    .and_then(|fields| {
+                                        fields.iter().find(|(name, _, _)| *name == key)
+                                    })
+                                    .and_then(|(_, symbol, _)| {
+                                        self.context.symbol_table.get_symbol(*symbol)
+                                    })
+                                    .map(|symbol| symbol.type_id);
+                                if let Some(ty) = ty {
+                                    inferred.insert(self.context.intern_string(&param.name), ty);
+                                }
+                            }
+                        }
+                    }
+                }
                 if self.inferred_param_types.get(&symbol) == Some(&inferred) {
                     continue;
                 }

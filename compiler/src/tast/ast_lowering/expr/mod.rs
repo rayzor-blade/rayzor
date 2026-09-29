@@ -879,93 +879,25 @@ impl<'a> AstLowering<'a> {
                     }
                 }
 
-                match op {
-                    parser::AssignOp::Assign => {
-                        // Simple assignment: target = value
-                        TypedExpressionKind::BinaryOp {
-                            left: Box::new(target_expr),
-                            operator: BinaryOperator::Assign,
-                            right: Box::new(value_expr),
-                        }
-                    }
-                    parser::AssignOp::AddAssign
-                    | parser::AssignOp::SubAssign
-                    | parser::AssignOp::MulAssign
-                    | parser::AssignOp::DivAssign
-                    | parser::AssignOp::ModAssign
-                        if {
-                            let tt = self.context.type_table.borrow();
-                            let is_abstract = |ty: TypeId| {
-                                matches!(
-                                    tt.get(ty).map(|t| &t.kind),
-                                    Some(TypeKind::Abstract { .. })
-                                )
-                            };
-                            is_abstract(target_expr.expr_type)
-                                || matches!(&target_expr.kind,
-                                    TypedExpressionKind::FieldAccess { object, .. }
-                                        if is_abstract(object.expr_type))
-                        } =>
-                    {
-                        // Preserve the operator until HIR overload resolution. An
-                        // op= overload may mutate its receiver and return Void; a
-                        // field of an abstract may resolve through `@:op(a.b)`.
-                        let operator = match op {
-                            parser::AssignOp::AddAssign => BinaryOperator::AddAssign,
-                            parser::AssignOp::SubAssign => BinaryOperator::SubAssign,
-                            parser::AssignOp::MulAssign => BinaryOperator::MulAssign,
-                            parser::AssignOp::DivAssign => BinaryOperator::DivAssign,
-                            parser::AssignOp::ModAssign => BinaryOperator::ModAssign,
-                            _ => unreachable!(),
-                        };
-                        TypedExpressionKind::BinaryOp {
-                            left: Box::new(target_expr),
-                            operator,
-                            right: Box::new(value_expr),
-                        }
-                    }
-                    _ => {
-                        // Compound assignment: target op= value
-                        // This needs to be: target = target op value
-                        let target_clone = target_expr.clone();
-
-                        // Map compound assignment operators to their corresponding binary operators
-                        let binary_op = match op {
-                            parser::AssignOp::AddAssign => BinaryOperator::Add,
-                            parser::AssignOp::SubAssign => BinaryOperator::Sub,
-                            parser::AssignOp::MulAssign => BinaryOperator::Mul,
-                            parser::AssignOp::DivAssign => BinaryOperator::Div,
-                            parser::AssignOp::ModAssign => BinaryOperator::Mod,
-                            parser::AssignOp::AndAssign => BinaryOperator::BitAnd,
-                            parser::AssignOp::OrAssign => BinaryOperator::BitOr,
-                            parser::AssignOp::XorAssign => BinaryOperator::BitXor,
-                            parser::AssignOp::ShlAssign => BinaryOperator::Shl,
-                            parser::AssignOp::ShrAssign => BinaryOperator::Shr,
-                            parser::AssignOp::UshrAssign => BinaryOperator::Ushr,
-                            parser::AssignOp::Assign => unreachable!(), // Handled above
-                        };
-
-                        // Create the binary operation: target op value
-                        let binary_expr = TypedExpression {
-                            expr_type: target_expr.expr_type,
-                            kind: TypedExpressionKind::BinaryOp {
-                                left: Box::new(target_clone),
-                                operator: binary_op,
-                                right: Box::new(value_expr),
-                            },
-                            usage: VariableUsage::Copy,
-                            lifetime_id: crate::tast::LifetimeId::first(),
-                            source_location: self.context.create_location(),
-                            metadata: ExpressionMetadata::default(),
-                        };
-
-                        // Now assign the result back to target: target = (target op value)
-                        TypedExpressionKind::BinaryOp {
-                            left: Box::new(target_expr),
-                            operator: BinaryOperator::Assign,
-                            right: Box::new(binary_expr),
-                        }
-                    }
+                // Keep read-modify-write intact until HIR can bind the target once.
+                let operator = match op {
+                    parser::AssignOp::Assign => BinaryOperator::Assign,
+                    parser::AssignOp::AddAssign => BinaryOperator::AddAssign,
+                    parser::AssignOp::SubAssign => BinaryOperator::SubAssign,
+                    parser::AssignOp::MulAssign => BinaryOperator::MulAssign,
+                    parser::AssignOp::DivAssign => BinaryOperator::DivAssign,
+                    parser::AssignOp::ModAssign => BinaryOperator::ModAssign,
+                    parser::AssignOp::AndAssign => BinaryOperator::AndAssign,
+                    parser::AssignOp::OrAssign => BinaryOperator::OrAssign,
+                    parser::AssignOp::XorAssign => BinaryOperator::XorAssign,
+                    parser::AssignOp::ShlAssign => BinaryOperator::ShlAssign,
+                    parser::AssignOp::ShrAssign => BinaryOperator::ShrAssign,
+                    parser::AssignOp::UshrAssign => BinaryOperator::UshrAssign,
+                };
+                TypedExpressionKind::BinaryOp {
+                    left: Box::new(target_expr),
+                    operator,
+                    right: Box::new(value_expr),
                 }
             }
             ExprKind::New {
@@ -2759,6 +2691,12 @@ impl<'a> AstLowering<'a> {
                     | BinaryOperator::SubAssign
                     | BinaryOperator::MulAssign
                     | BinaryOperator::DivAssign
+                    | BinaryOperator::AndAssign
+                    | BinaryOperator::OrAssign
+                    | BinaryOperator::XorAssign
+                    | BinaryOperator::ShlAssign
+                    | BinaryOperator::ShrAssign
+                    | BinaryOperator::UshrAssign
                     | BinaryOperator::ModAssign => {
                         metadata.has_side_effects = true;
                         metadata.can_throw = false;

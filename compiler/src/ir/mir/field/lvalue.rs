@@ -79,7 +79,7 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    pub(crate) fn lower_lvalue_write(&mut self, lvalue: &HirLValue, value: IrId) {
+    pub(crate) fn lower_lvalue_write(&mut self, lvalue: &HirLValue, value: IrId) -> Option<IrId> {
         match lvalue {
             HirLValue::Variable(symbol) => {
                 if let Some(setter) = self.static_property_accessor(*symbol, false) {
@@ -88,9 +88,9 @@ impl<'a> HirToMirContext<'a> {
                         .get_symbol(*symbol)
                         .map(|s| self.convert_type(s.type_id))
                         .unwrap_or(IrType::I32);
-                    self.builder
+                    return self
+                        .builder
                         .build_call_direct(setter, vec![value], return_ty);
-                    return;
                 }
                 let global_id = self.static_global_for(*symbol).or_else(|| {
                     // Name-based fallback: SymbolIds may differ between contexts
@@ -121,13 +121,13 @@ impl<'a> HirToMirContext<'a> {
                     self.builder.build_store_global(global_id, value);
                     // Untrack from drop system — value escapes to global storage
                     self.owned_heap_values.remove(symbol);
-                    return;
+                    return Some(value);
                 }
 
                 if let Some(&cell) = self.capture_cells.get(symbol) {
                     let _ = self.builder.build_store(cell, value);
                     self.symbol_map.insert(*symbol, value);
-                    return;
+                    return Some(value);
                 }
 
                 // Kept for the type of the previous binding.
@@ -165,7 +165,7 @@ impl<'a> HirToMirContext<'a> {
             }
             HirLValue::Field { object, field } => {
                 if let Some(obj_reg) = self.lower_expression(object) {
-                    self.store_field_with_regs(obj_reg, object, field, value);
+                    return self.store_field_with_regs(obj_reg, object, field, value);
                 }
             }
             HirLValue::Index { object, index } => {
@@ -176,6 +176,7 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
         }
+        Some(value)
     }
 
     /// Store `value` into `obj_reg`'s `field`, given the receiver ALREADY
@@ -190,11 +191,11 @@ impl<'a> HirToMirContext<'a> {
         object: &HirExpr,
         field: &SymbolId,
         value: IrId,
-    ) {
+    ) -> Option<IrId> {
         // `___Int64`'s constructor writes its words; the value is a native
         // i64 built by `Int64_make`, so there is no slot to write.
         if self.is_int64_type(object.ty) {
-            return;
+            return Some(value);
         }
         if self.get_interface_symbol(object.ty).is_some() {
             if let Some(crate::tast::PropertyAccessor::Method(setter)) = self
@@ -202,12 +203,17 @@ impl<'a> HirToMirContext<'a> {
                 .map(|info| info.setter)
             {
                 let result_ty = self.builder.get_register_type(value).unwrap_or(IrType::I32);
-                self.call_interface_accessor(obj_reg, object.ty, setter, Some(value), result_ty);
-                return;
+                return self.call_interface_accessor(
+                    obj_reg,
+                    object.ty,
+                    setter,
+                    Some(value),
+                    result_ty,
+                );
             }
             let ptr_ty = IrType::Ptr(Box::new(IrType::U8));
             let Some(object_ptr) = self.builder.build_load(obj_reg, ptr_ty.clone()) else {
-                return;
+                return Some(value);
             };
             let Some(name) = self
                 .symbol_table
@@ -215,14 +221,15 @@ impl<'a> HirToMirContext<'a> {
                 .and_then(|s| self.string_interner.get(s.name))
                 .map(str::to_owned)
             else {
-                return;
+                return Some(value);
             };
             self.dynamic_member_names.insert(name.clone());
             let Some(name_reg) = self.builder.build_const(IrValue::String(name)) else {
-                return;
+                return Some(value);
             };
             // Box scalars so the runtime can convert to the implementing
             // field's declared storage (e.g. an Int interface writes Float).
+            let stored_value = value;
             let value = self
                 .builder
                 .get_register_type(value)
@@ -235,7 +242,7 @@ impl<'a> HirToMirContext<'a> {
             );
             self.builder
                 .build_call_direct(setter, vec![object_ptr, name_reg, value], IrType::Void);
-            return;
+            return Some(stored_value);
         }
         // Check if this is a property with a custom setter.
         // Clone the info so the immutable borrow of `self` is released
@@ -249,7 +256,10 @@ impl<'a> HirToMirContext<'a> {
                     .filter(|info| matches!(info.setter, crate::tast::PropertyAccessor::Method(_)))
             })
             .cloned();
-        if let Some(property_info) = property_info_owned.as_ref() {
+        if let Some(property_info) = property_info_owned
+            .as_ref()
+            .filter(|_| !self.bypass_accessors)
+        {
             match &property_info.setter {
                 // The guard keeps `this.p = v` inside `p`'s own setter on the
                 // backing slot, where calling the setter would re-enter the
@@ -285,18 +295,20 @@ impl<'a> HirToMirContext<'a> {
 
                     if let Some(func_id) = setter_func_id {
                         // Setters take (this, value) and return the value set.
-                        let return_type = if let Some(func) = self.builder.current_function() {
-                            func.locals
-                                .get(&value)
-                                .map(|local| local.ty.clone())
-                                .unwrap_or(IrType::I32)
-                        } else {
-                            IrType::I32
-                        };
+                        let return_type = self
+                            .builder
+                            .module
+                            .functions
+                            .get(&func_id)
+                            .map(|func| func.signature.return_type.clone())
+                            .or_else(|| self.builder.get_register_type(value))
+                            .unwrap_or(IrType::I32);
 
-                        self.builder
-                            .build_call_direct(func_id, vec![obj_reg, value], return_type);
-                        return;
+                        return self.builder.build_call_direct(
+                            func_id,
+                            vec![obj_reg, value],
+                            return_type,
+                        );
                     }
 
                     // Fallback: extern-class accessor — try the stdlib mapping
@@ -312,7 +324,7 @@ impl<'a> HirToMirContext<'a> {
                         )
                         .is_some()
                     {
-                        return;
+                        return Some(value);
                     }
 
                     let method_name_str = self
@@ -350,16 +362,18 @@ impl<'a> HirToMirContext<'a> {
                             vec![IrType::Ptr(Box::new(IrType::Void)), value_ty.clone()],
                             value_ty.clone(),
                         );
-                        self.builder
-                            .build_call_direct(forward, vec![obj_reg, value], value_ty);
-                        return;
+                        return self.builder.build_call_direct(
+                            forward,
+                            vec![obj_reg, value],
+                            value_ty,
+                        );
                     }
 
                     self.add_error(
                         &format!("Property setter method '{}' not found", method_name_str),
                         SourceLocation::unknown(),
                     );
-                    return;
+                    return Some(value);
                 }
                 crate::tast::PropertyAccessor::Null => {
                     // `null` setter = writable from inside the class only;
@@ -371,7 +385,7 @@ impl<'a> HirToMirContext<'a> {
                         "Cannot write to read-only property (never setter)",
                         SourceLocation::unknown(),
                     );
-                    return;
+                    return Some(value);
                 }
                 crate::tast::PropertyAccessor::Default | crate::tast::PropertyAccessor::Dynamic => {
                     // Fall through to direct field access
@@ -413,7 +427,7 @@ impl<'a> HirToMirContext<'a> {
                                     );
                                     if let Some(fp) = field_ptr {
                                         self.builder.build_store(fp, value);
-                                        return;
+                                        return Some(value);
                                     }
                                 }
                             }
@@ -440,7 +454,7 @@ impl<'a> HirToMirContext<'a> {
                                         vec![obj_reg, iv, cv],
                                         IrType::Void,
                                     );
-                                    return;
+                                    return Some(value);
                                 }
                             }
                         }
@@ -539,7 +553,7 @@ impl<'a> HirToMirContext<'a> {
                                 IrType::Void,
                             );
                         }
-                        return;
+                        return Some(value);
                     }
                 }
             }
@@ -604,7 +618,7 @@ impl<'a> HirToMirContext<'a> {
                                 self.builder.build_store(field_ptr, value);
                             }
                         }
-                        return;
+                        return Some(value);
                     }
                 }
             }
@@ -650,7 +664,7 @@ impl<'a> HirToMirContext<'a> {
                                 self.builder.build_store(field_ptr, store_val);
                             }
                         }
-                        return;
+                        return Some(value);
                     }
                 }
             }
@@ -831,7 +845,7 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     }
-                    return;
+                    return Some(value);
                 }
             }
             // Check if this is a static field that should be written as a global
@@ -850,7 +864,7 @@ impl<'a> HirToMirContext<'a> {
             });
             if let Some(global_id) = global_lookup {
                 self.builder.build_store_global(global_id, value);
-                return;
+                return Some(value);
             }
             let field_name = self
                 .symbol_table
@@ -865,6 +879,7 @@ impl<'a> HirToMirContext<'a> {
                 SourceLocation::unknown(),
             );
         }
+        Some(value)
     }
 
     /// Read `obj_reg[idx_reg]`, given the receiver and index ALREADY lowered.

@@ -48,7 +48,10 @@ impl<'a> HirToMirContext<'a> {
         modified: &mut std::collections::BTreeSet<SymbolId>,
     ) {
         match stmt {
-            HirStatement::Let { pattern, .. } => {
+            HirStatement::Let { pattern, init, .. } => {
+                if let Some(init) = init {
+                    self.find_modified_variables_in_expression(init, modified);
+                }
                 // Variable declarations count as modifications.
                 self.collect_pattern_variables(pattern, modified);
             }
@@ -170,9 +173,7 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             HirExprKind::Block(block) => {
-                for stmt in &block.statements {
-                    self.find_modified_variables_in_statement(stmt, modified);
-                }
+                modified.extend(self.find_modified_variables_in_block(block));
             }
             _ => {}
         }

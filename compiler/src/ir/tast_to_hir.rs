@@ -238,6 +238,12 @@ impl<'a> TastToHirContext<'a> {
             BinaryOperator::BitXor => "BitXor",
             BinaryOperator::BitOr => "BitOr",
             BinaryOperator::BitAnd => "BitAnd",
+            BinaryOperator::AndAssign => "AndAssign",
+            BinaryOperator::OrAssign => "OrAssign",
+            BinaryOperator::XorAssign => "XorAssign",
+            BinaryOperator::ShlAssign => "ShlAssign",
+            BinaryOperator::ShrAssign => "ShrAssign",
+            BinaryOperator::UshrAssign => "UshrAssign",
             BinaryOperator::ModAssign => "ModAssign",
             BinaryOperator::DivAssign => "DivAssign",
             BinaryOperator::MulAssign => "MulAssign",
@@ -1760,6 +1766,7 @@ impl<'a> TastToHirContext<'a> {
                 });
                 if let Some(literal) = inline_lookup {
                     return HirExpr {
+                        bypass_accessors: false,
                         kind: HirExprKind::Literal(literal),
                         ty: expr.expr_type,
                         lifetime: LifetimeId::from_raw(1), // Static lifetime for constants
@@ -1964,6 +1971,7 @@ impl<'a> TastToHirContext<'a> {
                         );
                     }
                     return HirExpr {
+                        bypass_accessors: false,
                         kind: HirExprKind::Literal(literal),
                         ty: expr.expr_type,
                         lifetime: LifetimeId::from_raw(1),
@@ -2401,6 +2409,39 @@ impl<'a> TastToHirContext<'a> {
                         field_symbol,
                         is_optional: false,
                     } = &left.kind
+                    && let Some(setter) =
+                        self.inline_abstract_setter(object.expr_type, *field_symbol)
+                {
+                    let mut statements = Vec::new();
+                    let target = self.bind_assignment_target(left, &mut statements);
+                    let TypedExpressionKind::FieldAccess { object, .. } = &target.kind else {
+                        unreachable!()
+                    };
+                    if let Some(result) = self.try_inline_abstract_method(
+                        object,
+                        setter,
+                        &[(**right).clone()],
+                        expr.expr_type,
+                        expr.source_location,
+                    ) {
+                        return HirExpr::new(
+                            HirExprKind::Block(HirBlock::with_expr(
+                                statements,
+                                result,
+                                self.current_scope,
+                            )),
+                            expr.expr_type,
+                            self.current_lifetime,
+                            expr.source_location,
+                        );
+                    }
+                }
+                if *operator == BinaryOperator::Assign
+                    && let TypedExpressionKind::FieldAccess {
+                        object,
+                        field_symbol,
+                        is_optional: false,
+                    } = &left.kind
                     && let Some(call) =
                         self.resolve_operator_call(object, *field_symbol, Some(right), expr)
                 {
@@ -2545,65 +2586,45 @@ impl<'a> TastToHirContext<'a> {
                     return self.lower_expression(&synthesized);
                 }
 
-                let base_op = match operator {
-                    BinaryOperator::AddAssign => Some(BinaryOperator::Add),
-                    BinaryOperator::SubAssign => Some(BinaryOperator::Sub),
-                    BinaryOperator::MulAssign => Some(BinaryOperator::Mul),
-                    BinaryOperator::DivAssign => Some(BinaryOperator::Div),
-                    BinaryOperator::ModAssign => Some(BinaryOperator::Mod),
-                    _ => None,
-                };
+                let base_op = Self::compound_assignment_operator(operator);
                 if let Some(base_op) = base_op {
+                    let mut statements = Vec::new();
+                    let target = self.bind_assignment_target(left, &mut statements);
                     let mut binary = expr.clone();
                     binary.kind = TypedExpressionKind::BinaryOp {
-                        left: left.clone(),
+                        left: Box::new(target.clone()),
                         operator: base_op,
                         right: right.clone(),
                     };
                     let mut assignment = expr.clone();
                     assignment.kind = TypedExpressionKind::BinaryOp {
-                        left: left.clone(),
+                        left: Box::new(target),
                         operator: BinaryOperator::Assign,
                         right: Box::new(binary),
                     };
-                    return self.lower_expression(&assignment);
+                    let result = self.lower_expression(&assignment);
+                    return HirExpr::new(
+                        HirExprKind::Block(HirBlock::with_expr(
+                            statements,
+                            result,
+                            self.current_scope,
+                        )),
+                        expr.expr_type,
+                        self.current_lifetime,
+                        expr.source_location,
+                    );
                 }
 
-                // Check if this is an assignment operator
                 match operator {
-                    BinaryOperator::Assign
-                    | BinaryOperator::AddAssign
-                    | BinaryOperator::SubAssign
-                    | BinaryOperator::MulAssign
-                    | BinaryOperator::DivAssign
-                    | BinaryOperator::ModAssign => {
-                        // Assignments in expression position need special handling
-                        // In HIR, assignments are statements, not expressions
-                        // We need to create a block that performs the assignment and returns the value
-
-                        // Create an assignment statement
-                        let assign_stmt = HirStatement::Assign {
-                            lhs: self.lower_lvalue(left),
+                    BinaryOperator::Assign => {
+                        let mut statements = Vec::new();
+                        let target = self.bind_assignment_target(left, &mut statements);
+                        statements.push(HirStatement::Assign {
+                            lhs: self.lower_lvalue(&target),
                             rhs: self.lower_expression(right),
-                            op: match operator {
-                                BinaryOperator::AddAssign => Some(HirBinaryOp::Add),
-                                BinaryOperator::SubAssign => Some(HirBinaryOp::Sub),
-                                BinaryOperator::MulAssign => Some(HirBinaryOp::Mul),
-                                BinaryOperator::DivAssign => Some(HirBinaryOp::Div),
-                                BinaryOperator::ModAssign => Some(HirBinaryOp::Mod),
-                                _ => None, // Simple assignment
-                            },
-                        };
-
-                        // Create a variable reference to the assigned value
-                        let result_expr = self.lower_expression(left);
-
-                        // Wrap in a block that performs assignment and returns the value
-                        HirExprKind::Block(HirBlock {
-                            statements: vec![assign_stmt],
-                            expr: Some(Box::new(result_expr)),
-                            scope: self.current_scope,
-                        })
+                            op: None,
+                        });
+                        HirExprKind::Block(HirBlock::new(statements, self.current_scope))
                     }
                     BinaryOperator::NullCoal => {
                         // Desugar `lhs ?? rhs` into `if (lhs != null) lhs else rhs`
@@ -3016,6 +3037,7 @@ impl<'a> TastToHirContext<'a> {
                     });
 
                     let result_read = HirExpr {
+                        bypass_accessors: false,
                         kind: HirExprKind::Variable {
                             symbol: result_symbol,
                             capture_mode: None,
@@ -3463,8 +3485,15 @@ impl<'a> TastToHirContext<'a> {
                 metadata,
                 expression,
             } => {
-                // Metadata-annotated expression — just lower the inner expression
-                return self.lower_expression(expression);
+                let mut lowered = self.lower_expression(expression);
+                if metadata.iter().any(|meta| {
+                    self.string_interner
+                        .get(meta.name)
+                        .is_some_and(|name| name.trim_start_matches(':') == "bypassAccessor")
+                }) {
+                    lowered.bypass_accessors = true;
+                }
+                return lowered;
             }
             TypedExpressionKind::MacroExpression {
                 macro_symbol,
@@ -3606,6 +3635,146 @@ impl<'a> TastToHirContext<'a> {
                 HirPattern::Wildcard
             }
         }
+    }
+
+    fn compound_assignment_operator(operator: &BinaryOperator) -> Option<BinaryOperator> {
+        match operator {
+            BinaryOperator::AddAssign => Some(BinaryOperator::Add),
+            BinaryOperator::SubAssign => Some(BinaryOperator::Sub),
+            BinaryOperator::MulAssign => Some(BinaryOperator::Mul),
+            BinaryOperator::DivAssign => Some(BinaryOperator::Div),
+            BinaryOperator::AndAssign => Some(BinaryOperator::BitAnd),
+            BinaryOperator::OrAssign => Some(BinaryOperator::BitOr),
+            BinaryOperator::XorAssign => Some(BinaryOperator::BitXor),
+            BinaryOperator::ShlAssign => Some(BinaryOperator::Shl),
+            BinaryOperator::ShrAssign => Some(BinaryOperator::Shr),
+            BinaryOperator::UshrAssign => Some(BinaryOperator::Ushr),
+            BinaryOperator::ModAssign => Some(BinaryOperator::Mod),
+            _ => None,
+        }
+    }
+
+    fn bind_hir_operand(&mut self, init: HirExpr, statements: &mut Vec<HirStatement>) -> HirExpr {
+        let (name, symbol) = self.gen_temp_var();
+        let reference = HirExpr::new(
+            HirExprKind::Variable {
+                symbol,
+                capture_mode: None,
+            },
+            init.ty,
+            init.lifetime,
+            init.source_location,
+        );
+        statements.push(HirStatement::Let {
+            pattern: HirPattern::Variable { name, symbol },
+            type_hint: Some(init.ty),
+            init: Some(init),
+            is_mutable: false,
+        });
+        reference
+    }
+
+    fn bind_hir_assignment_target(
+        &mut self,
+        mut target: HirExpr,
+        statements: &mut Vec<HirStatement>,
+    ) -> HirExpr {
+        match &mut target.kind {
+            HirExprKind::Field { object, .. } => {
+                **object = self.bind_hir_operand((**object).clone(), statements);
+            }
+            HirExprKind::Index { object, index } => {
+                **object = self.bind_hir_operand((**object).clone(), statements);
+                **index = self.bind_hir_operand((**index).clone(), statements);
+            }
+            _ => {}
+        }
+        target
+    }
+
+    fn inline_abstract_setter(&self, receiver_ty: TypeId, field: SymbolId) -> Option<SymbolId> {
+        let table = self.type_table.borrow();
+        let TypeKind::Abstract { symbol_id, .. } = &table.get(receiver_ty)?.kind else {
+            return None;
+        };
+        let declaration = self
+            .current_file?
+            .abstracts
+            .iter()
+            .find(|a| a.symbol_id == *symbol_id)?;
+        let property = declaration.fields.iter().find(|f| f.symbol_id == field)?;
+        let crate::tast::PropertyAccessor::Method(name) = property.property_access.as_ref()?.setter
+        else {
+            return None;
+        };
+        declaration
+            .methods
+            .iter()
+            .find(|m| {
+                m.name == name
+                    && self
+                        .symbol_table
+                        .get_symbol(m.symbol_id)
+                        .is_some_and(|s| s.is_inline())
+            })
+            .map(|m| m.symbol_id)
+    }
+
+    fn is_scalar_abstract(&self, ty: TypeId) -> bool {
+        let table = self.type_table.borrow();
+        let Some(TypeKind::Abstract {
+            underlying: Some(underlying),
+            ..
+        }) = table.get(ty).map(|t| &t.kind)
+        else {
+            return false;
+        };
+        matches!(
+            table.get(*underlying).map(|t| &t.kind),
+            Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+        )
+    }
+
+    /// Bind the address operands before evaluating the RHS or reading the target.
+    fn bind_assignment_target(
+        &mut self,
+        target: &TypedExpression,
+        statements: &mut Vec<HirStatement>,
+    ) -> TypedExpression {
+        let mut target = target.clone();
+        match &mut target.kind {
+            TypedExpressionKind::FieldAccess { object, .. } => {
+                **object = if self.is_scalar_abstract(object.expr_type) {
+                    self.bind_assignment_target(object, statements)
+                } else {
+                    self.bind_assignment_operand(object, statements)
+                };
+            }
+            TypedExpressionKind::ArrayAccess { array, index } => {
+                **array = self.bind_assignment_operand(array, statements);
+                **index = self.bind_assignment_operand(index, statements);
+            }
+            _ => {}
+        }
+        target
+    }
+
+    fn bind_assignment_operand(
+        &mut self,
+        operand: &TypedExpression,
+        statements: &mut Vec<HirStatement>,
+    ) -> TypedExpression {
+        let init = self.lower_expression(operand);
+        let (name, symbol) = self.gen_temp_var();
+        statements.push(HirStatement::Let {
+            pattern: HirPattern::Variable { name, symbol },
+            type_hint: Some(operand.expr_type),
+            init: Some(init),
+            is_mutable: false,
+        });
+        let mut reference = operand.clone();
+        reference.kind = TypedExpressionKind::Variable { symbol_id: symbol };
+        reference
     }
 
     fn lower_lvalue(&mut self, expr: &TypedExpression) -> HirLValue {
@@ -5348,6 +5517,12 @@ impl<'a> TastToHirContext<'a> {
                 "BitXor" => Some(BinaryOperator::BitXor),
                 "BitOr" => Some(BinaryOperator::BitOr),
                 "BitAnd" => Some(BinaryOperator::BitAnd),
+                "AndAssign" => Some(BinaryOperator::AndAssign),
+                "OrAssign" => Some(BinaryOperator::OrAssign),
+                "XorAssign" => Some(BinaryOperator::XorAssign),
+                "ShlAssign" => Some(BinaryOperator::ShlAssign),
+                "ShrAssign" => Some(BinaryOperator::ShrAssign),
+                "UshrAssign" => Some(BinaryOperator::UshrAssign),
                 "ModAssign" => Some(BinaryOperator::ModAssign),
                 "DivAssign" => Some(BinaryOperator::DivAssign),
                 "MulAssign" => Some(BinaryOperator::MulAssign),
@@ -6136,6 +6311,7 @@ impl<'a> TastToHirContext<'a> {
         // `this` has no value yet inside a constructor -- it is what the body is
         // computing -- so a body that READS it is not something to expand.
         let placeholder = HirExpr {
+            bypass_accessors: false,
             kind: HirExprKind::Literal(HirLiteral::Int(0)),
             ty: underlying,
             lifetime: crate::tast::LifetimeId::invalid(),
@@ -6276,10 +6452,12 @@ impl<'a> TastToHirContext<'a> {
                 self.inline_expression_deep(value, &recv_hir, &param_map, recv_hir.ty)
             }
             Write::Step(op) => HirExpr {
+                bypass_accessors: false,
                 kind: HirExprKind::Binary {
                     op,
                     lhs: Box::new(recv_hir.clone()),
                     rhs: Box::new(HirExpr {
+                        bypass_accessors: false,
                         // Typed to match the receiver: an Int 1 added to an f64
                         // is read back as a bit pattern, not as one.
                         kind: HirExprKind::Literal(if recv_is_float {
@@ -6686,8 +6864,12 @@ impl<'a> TastToHirContext<'a> {
                     right.expr_type,
                 );
 
-                if *operator == BinaryOperator::Assign {
-                    let lhs = match &lowered_left.kind {
+                let base_op = Self::compound_assignment_operator(operator);
+                if *operator == BinaryOperator::Assign || base_op.is_some() {
+                    let mut statements = Vec::new();
+                    let target =
+                        self.bind_hir_assignment_target(lowered_left.clone(), &mut statements);
+                    let lhs = match &target.kind {
                         HirExprKind::Variable { symbol, .. } => Some(HirLValue::Variable(*symbol)),
                         HirExprKind::Field { object, field } => Some(HirLValue::Field {
                             object: object.clone(),
@@ -6700,16 +6882,23 @@ impl<'a> TastToHirContext<'a> {
                         _ => None,
                     };
                     if let Some(lhs) = lhs {
+                        let rhs = if let Some(base_op) = base_op {
+                            HirExpr::new(
+                                HirExprKind::Binary {
+                                    op: self.convert_binary_op(&base_op),
+                                    lhs: Box::new(target),
+                                    rhs: Box::new(lowered_right),
+                                },
+                                expr.expr_type,
+                                self.current_lifetime,
+                                expr.source_location,
+                            )
+                        } else {
+                            lowered_right
+                        };
+                        statements.push(HirStatement::Assign { lhs, rhs, op: None });
                         return HirExpr::new(
-                            HirExprKind::Block(HirBlock {
-                                statements: vec![HirStatement::Assign {
-                                    lhs,
-                                    rhs: lowered_right,
-                                    op: None,
-                                }],
-                                expr: Some(Box::new(lowered_left)),
-                                scope: self.current_scope,
-                            }),
+                            HirExprKind::Block(HirBlock::new(statements, self.current_scope)),
                             expr.expr_type,
                             self.current_lifetime,
                             expr.source_location,

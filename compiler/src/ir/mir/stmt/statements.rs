@@ -24,7 +24,8 @@ use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
     /// Lower a HIR statement to MIR instructions
-    pub(crate) fn lower_statement(&mut self, stmt: &HirStatement) {
+    pub(crate) fn lower_statement(&mut self, stmt: &HirStatement) -> Option<IrId> {
+        let mut statement_value = None;
         match stmt {
             HirStatement::Let {
                 pattern,
@@ -432,7 +433,11 @@ impl<'a> HirToMirContext<'a> {
                         };
                         // A value boxed for a Dynamic binding is a box now, not
                         // a handle: cloning it read the box as the object.
-                        let final_value = if !is_anon_view
+                        // Compiler temporaries preserve the receiver's identity.
+                        let is_source_binding = matches!(pattern, HirPattern::Variable { symbol, .. }
+                            if self.symbol_table.get_symbol(*symbol).is_some());
+                        let final_value = if is_source_binding
+                            && !is_anon_view
                             && !src_has_view
                             && !matches!(&init_expr.kind, HirExprKind::ObjectLiteral { .. })
                             && !self.boxed_value_regs.contains(&final_value)
@@ -619,7 +624,9 @@ impl<'a> HirToMirContext<'a> {
 
                 // A block here is a statement list; it keeps its terminator.
                 let result = match &expr.kind {
-                    HirExprKind::Block(block) => self.lower_block_expr(block),
+                    HirExprKind::Block(block) if !expr.bypass_accessors => {
+                        self.lower_block_expr(block)
+                    }
                     _ => self.lower_expression(expr),
                 };
 
@@ -1005,7 +1012,7 @@ impl<'a> HirToMirContext<'a> {
                         // The reflective write into a Dynamic boxes the value by
                         // this type; a register alone cannot tell a handle from a box.
                         self.pending_store_value_ty = Some(rhs.ty);
-                        self.lower_lvalue_write(lhs, value);
+                        statement_value = self.lower_lvalue_write(lhs, value);
                         self.pending_store_value_ty = None;
 
                         // If the LHS is a global variable, the value escapes to global storage
@@ -1537,6 +1544,7 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
         }
+        statement_value
     }
 
     /// Lower a HIR block to MIR
@@ -1557,39 +1565,6 @@ impl<'a> HirToMirContext<'a> {
 
     /// Lower a HIR block expression to MIR, returning the trailing expression's value
     pub(crate) fn lower_block_expr(&mut self, block: &HirBlock) -> Option<IrId> {
-        // Assignment to a write-only interface slot yields the stored value;
-        // its synthetic read-back cannot go through a getter.
-        if let [
-            HirStatement::Assign {
-                lhs: HirLValue::Field { object, field },
-                rhs,
-                op: None,
-            },
-        ] = block.statements.as_slice()
-        {
-            let write_only_slot = self
-                .interface_property_access(object.ty, *field)
-                .is_some_and(|info| {
-                    matches!(
-                        info.getter,
-                        crate::tast::PropertyAccessor::Never | crate::tast::PropertyAccessor::Null
-                    ) && matches!(
-                        info.setter,
-                        crate::tast::PropertyAccessor::Default
-                            | crate::tast::PropertyAccessor::Dynamic
-                    )
-                });
-            if write_only_slot
-                && matches!(block.expr.as_deref().map(|e| &e.kind),
-                Some(HirExprKind::Field { field: result_field, .. }) if result_field == field)
-            {
-                let value = self.lower_expression(rhs)?;
-                let receiver = self.lower_expression(object)?;
-                self.store_field_with_regs(receiver, object, field, value);
-                return Some(value);
-            }
-        }
-
         // A block's value is its last expression, and a trailing semicolon does
         // not change that in Haxe -- `{ f(x); }` evaluates to `f(x)`. Only a
         // block with no trailing semicolon reaches `block.expr`, so returning
@@ -1599,8 +1574,11 @@ impl<'a> HirToMirContext<'a> {
         // it produced a function that computed both branches and then returned
         // nothing. LLVM rejects the result; Cranelift does not verify and
         // returns whatever was in the register.
-        let trailing =
-            block.expr.is_none() && matches!(block.statements.last(), Some(HirStatement::Expr(_)));
+        let trailing = block.expr.is_none()
+            && matches!(
+                block.statements.last(),
+                Some(HirStatement::Expr(_) | HirStatement::Assign { .. })
+            );
         let last = if trailing {
             block.statements.len() - 1
         } else {
@@ -1614,10 +1592,11 @@ impl<'a> HirToMirContext<'a> {
         }
 
         if trailing {
-            let Some(HirStatement::Expr(expr)) = block.statements.last() else {
-                unreachable!("checked above")
+            let value = match block.statements.last()? {
+                HirStatement::Expr(expr) => self.lower_expression(expr),
+                stmt @ HirStatement::Assign { .. } => self.lower_statement(stmt),
+                _ => unreachable!("checked above"),
             };
-            let value = self.lower_expression(expr);
             self.check_drop_points_after_statement();
             self.current_stmt_index += 1;
             return value;
