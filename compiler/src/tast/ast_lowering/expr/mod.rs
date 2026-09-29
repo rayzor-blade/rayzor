@@ -1809,8 +1809,11 @@ impl<'a> AstLowering<'a> {
                 // (expr : Type) is a type check hint — returns the value (not a boolean).
                 // It asserts at compile time that expr is compatible with Type.
                 // At runtime, it acts as an implicit cast (identity for same type, coercion otherwise).
-                let typed_expr = self.lower_expression(expr)?;
                 let target_type = self.lower_type(type_hint)?;
+                self.expected_arg_type_stack.push(Some(target_type));
+                let lowered = self.lower_value_expression(expr);
+                self.expected_arg_type_stack.pop();
+                let typed_expr = lowered?;
 
                 TypedExpressionKind::Cast {
                     expression: Box::new(typed_expr),
