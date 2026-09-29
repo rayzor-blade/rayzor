@@ -977,7 +977,36 @@ impl<'a> HirToMirContext<'a> {
             }
         };
 
-        let value_ir_type = self.builder.get_register_type(value);
+        let dynamic_elements = matches!(
+            self.type_table.get(object_ty).map(|t| &t.kind),
+            Some(TypeKind::Array { element_type })
+                if matches!(
+                    self.type_table.get(*element_type).map(|t| &t.kind),
+                    Some(TypeKind::Dynamic)
+                )
+        );
+        let mut value = value;
+        let mut value_ir_type = self.builder.get_register_type(value);
+        let raw_string = match &value_ir_type {
+            Some(IrType::String) => true,
+            Some(IrType::Ptr(inner)) => **inner == IrType::String,
+            _ => false,
+        };
+        // Dynamic array slots retain the String tag for value comparison.
+        if dynamic_elements && raw_string {
+            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+            if let Some(raw) = self.builder.build_bitcast(value, ptr_u8.clone()) {
+                let box_fn = self.get_or_register_extern_function(
+                    "haxe_box_haxestring_ptr",
+                    vec![ptr_u8.clone()],
+                    ptr_u8.clone(),
+                );
+                if let Some(boxed) = self.builder.build_call_direct(box_fn, vec![raw], ptr_u8) {
+                    value = boxed;
+                    value_ir_type = self.builder.get_register_type(boxed);
+                }
+            }
+        }
         match &value_ir_type {
             Some(IrType::F32) | Some(IrType::F64) => {
                 let func_id = self.get_or_register_extern_function(
