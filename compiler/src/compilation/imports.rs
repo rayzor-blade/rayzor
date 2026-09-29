@@ -103,6 +103,15 @@ impl CompilationUnit {
         // Helper to extract dependencies from an expression
         fn extract_expr_deps(expr: &parser::Expr, deps: &mut std::collections::BTreeSet<String>) {
             match &expr.kind {
+                ExprKind::Ident(name)
+                    if name
+                        .chars()
+                        .next()
+                        .is_some_and(|first| first.is_uppercase())
+                        && !is_stdtypes_ambient_name(name) =>
+                {
+                    deps.insert(name.clone());
+                }
                 ExprKind::New {
                     type_path,
                     params,
