@@ -41,6 +41,16 @@ impl<'a> HirToMirContext<'a> {
             *fell_through = true;
             return None;
         };
+        // Static calls can retain a synthetic type receiver in HIR. Leave
+        // those for the static mapping, which strips that receiver.
+        if *is_method
+            && args
+                .first()
+                .is_some_and(|arg| self.is_class_symbol_expr(arg))
+        {
+            *fell_through = true;
+            return None;
+        }
         if *is_method && !args.is_empty() {
             // args[0] is the receiver; resolve it through TypeAlias. Prefer the
             // MIR-time override for a receiver bound by an iface call whose return

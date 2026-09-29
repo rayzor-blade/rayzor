@@ -802,7 +802,8 @@ impl<'a> HirToMirContext<'a> {
                                         &arg.kind,
                                         HirExprKind::New { .. } | HirExprKind::Call { .. }
                                     ) && self.get_drop_behavior(arg.ty)
-                                        == DropBehavior::AutoDrop;
+                                        == DropBehavior::AutoDrop
+                                        && !self.is_type_token_call(arg);
                                     if is_heap_intermediate {
                                         self.temp_heap_values.push(reg);
                                     }
@@ -1047,6 +1048,7 @@ impl<'a> HirToMirContext<'a> {
                                     HirExprKind::New { .. } | HirExprKind::Call { .. }
                                 ) && self.get_drop_behavior(arg.ty)
                                     == DropBehavior::AutoDrop
+                                    && !self.is_type_token_call(arg)
                                     && !self.interface_wrapped_args.contains(&reg);
                                 if is_heap_intermediate {
                                     self.temp_heap_values.push(reg);

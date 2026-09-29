@@ -587,6 +587,7 @@ impl<'a> HirToMirContext<'a> {
                     matches!(
                         sym.kind,
                         crate::tast::symbols::SymbolKind::Class
+                            | crate::tast::symbols::SymbolKind::Enum
                             | crate::tast::symbols::SymbolKind::Abstract
                             | crate::tast::symbols::SymbolKind::TypeAlias
                     )
@@ -595,6 +596,32 @@ impl<'a> HirToMirContext<'a> {
             HirExprKind::Cast { expr: inner, .. } => self.is_class_symbol_expr(inner),
             _ => false,
         }
+    }
+
+    /// Type reflection returns scalar type IDs even when HIR gives them a class type.
+    pub(crate) fn is_type_token_call(&self, expr: &HirExpr) -> bool {
+        let HirExprKind::Call { callee, .. } = &expr.kind else {
+            return false;
+        };
+        let symbol = match &callee.kind {
+            HirExprKind::Variable { symbol, .. } => *symbol,
+            HirExprKind::Field { field, .. } => *field,
+            _ => return false,
+        };
+        let Some(sym) = self.symbol_table.get_symbol(symbol) else {
+            return false;
+        };
+        let Some(name) = sym.qualified_name.and_then(|q| self.string_interner.get(q)) else {
+            return false;
+        };
+        matches!(
+            name,
+            "Type.getClass"
+                | "Type.getEnum"
+                | "Type.getSuperClass"
+                | "Type.resolveClass"
+                | "Type.resolveEnum"
+        )
     }
 
     pub(crate) fn extract_underlying_class_symbol(&self, expr: &HirExpr) -> Option<SymbolId> {

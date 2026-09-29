@@ -671,6 +671,14 @@ pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i
     match type_tag {
         1 | 3 => {
             // Int comparison (type_tag 1=TYPE_INT, 3=legacy)
+            // Class values are represented by integer type IDs, while a
+            // Dynamic array stores the same class value in a box.
+            if ((a >= 0 && a <= u32::MAX as i64 && b > u32::MAX as i64)
+                || (b >= 0 && b <= u32::MAX as i64 && a > u32::MAX as i64))
+                && let (Some(a_id), Some(b_id)) = (type_token_id(a), type_token_id(b))
+            {
+                return (a_id as i64 - b_id as i64).signum();
+            }
             (a - b).signum()
         }
         2 => {
@@ -725,6 +733,31 @@ pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i
     }
 }
 
+/// Recover a reflective type ID from either its scalar or boxed representation.
+fn type_token_id(value: i64) -> Option<u32> {
+    if value >= 0 && value <= u32::MAX as i64 {
+        return Some(value as u32);
+    }
+    let boxed = crate::type_system::dynamic_value_if_boxed(value as *mut u8)?;
+    let payload = boxed.value_ptr as usize;
+    if payload > u32::MAX as usize {
+        return None;
+    }
+    let id = payload as u32;
+    if id <= 100 {
+        return None;
+    }
+    if boxed.type_id.0 == id {
+        return Some(id);
+    }
+    let registry = crate::type_system::TYPE_REGISTRY.read().unwrap();
+    registry
+        .as_ref()?
+        .get(&TypeId(id))
+        .filter(|info| info.class_info.is_some() || info.enum_info.is_some())
+        .map(|_| id)
+}
+
 /// Order two pointer-shaped slots of unknown provenance.
 ///
 /// Subtracting the two addresses is the right answer for objects, which Haxe
@@ -749,7 +782,15 @@ fn compare_reference_slot(a: i64, b: i64) -> i64 {
     if b == 0 {
         return 1;
     }
+    let a_token = type_token_id(a);
+    let b_token = type_token_id(b);
+    if let (Some(a_id), Some(b_id)) = (a_token, b_token) {
+        return (a_id as i64 - b_id as i64).signum();
+    }
     let scalar_box = |v: i64| -> Option<DynamicValue> {
+        if v >= 0 && v <= u32::MAX as i64 {
+            return None;
+        }
         let d = crate::type_system::dynamic_value_if_boxed(v as *mut u8)?;
         let scalar = d.type_id == TYPE_BOOL
             || d.type_id == TYPE_INT
