@@ -231,15 +231,36 @@ impl<'a> HirToMirContext<'a> {
         }
 
         let class_runtime_id = self.deterministic_class_type_id(class.symbol_id);
+        let declared_name = self.string_interner.get(class.name).unwrap_or("<unknown>");
+        let qualified_name = self
+            .symbol_table
+            .get_symbol(class.symbol_id)
+            .and_then(|sym| sym.qualified_name.and_then(|n| self.string_interner.get(n)))
+            .unwrap_or(declared_name);
+        // Haxe exposes private secondary types through their containing module:
+        // package._Module.Type. The symbol's qualified name remains unchanged
+        // for source-level lookup and the existing deterministic runtime ID.
+        let reflection_name = if class.visibility == crate::tast::Visibility::Private {
+            let module_name = std::path::Path::new(&self.builder.module.source_file)
+                .file_stem()
+                .and_then(|stem| stem.to_str());
+            match module_name.filter(|module| *module != declared_name) {
+                Some(module) => {
+                    let package = qualified_name.rsplit_once('.').map_or("", |(pkg, _)| pkg);
+                    if package.is_empty() {
+                        format!("_{module}.{declared_name}")
+                    } else {
+                        format!("{package}._{module}.{declared_name}")
+                    }
+                }
+                None => qualified_name.to_owned(),
+            }
+        } else {
+            qualified_name.to_owned()
+        };
         let typedef = IrTypeDef {
             id: typedef_id,
-            name: self
-                .symbol_table
-                .get_symbol(class.symbol_id)
-                .and_then(|sym| sym.qualified_name.and_then(|n| self.string_interner.get(n)))
-                .or_else(|| self.string_interner.get(class.name))
-                .unwrap_or("<unknown>")
-                .to_string(),
+            name: reflection_name,
             type_id,
             runtime_type_id: class_runtime_id,
             instance_methods: class

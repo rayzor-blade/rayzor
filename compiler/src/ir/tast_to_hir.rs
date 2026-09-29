@@ -776,6 +776,7 @@ impl<'a> TastToHirContext<'a> {
         let hir_class = HirClass {
             symbol_id: class.symbol_id,
             name: class.name.clone(),
+            visibility: class.visibility,
             type_params: self.lower_type_params(&class.type_parameters),
             extends: extends_canonical.or(class.super_class),
             extends_symbol,

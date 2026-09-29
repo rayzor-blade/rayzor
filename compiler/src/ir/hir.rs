@@ -9,7 +9,9 @@
 //! This matches the architecture plan where HIR preserves high-level
 //! language features before lowering to MIR (SSA form).
 
-use crate::tast::{InternedString, LifetimeId, ScopeId, SourceLocation, SymbolId, TypeId};
+use crate::tast::{
+    InternedString, LifetimeId, ScopeId, SourceLocation, SymbolId, TypeId, Visibility,
+};
 use indexmap::IndexMap;
 use std::collections::BTreeMap;
 
@@ -48,6 +50,7 @@ pub enum HirTypeDecl {
 pub struct HirClass {
     pub symbol_id: SymbolId,
     pub name: InternedString,
+    pub visibility: Visibility,
     pub type_params: Vec<HirTypeParam>,
     pub extends: Option<TypeId>,
     /// The parent class's `SymbolId`, resolved once at TAST->HIR time.

@@ -71,6 +71,9 @@ pub(super) fn attach(module: &mut IrModule, file: &HaxeFile) -> Result<(), Strin
         .as_ref()
         .map(|p| p.path.join("."))
         .unwrap_or_default();
+    let module_name = std::path::Path::new(&module.source_file)
+        .file_stem()
+        .and_then(|stem| stem.to_str());
     for decl in &file.declarations {
         let (name, meta, fields, constructors) = match decl {
             TypeDeclaration::Class(c) => (&c.name, &c.meta, c.fields.as_slice(), &[][..]),
@@ -83,10 +86,21 @@ pub(super) fn attach(module: &mut IrModule, file: &HaxeFile) -> Result<(), Strin
         } else {
             format!("{package}.{name}")
         };
+        let private_qualified = module_name.map(|module_name| {
+            if package.is_empty() {
+                format!("_{module_name}.{name}")
+            } else {
+                format!("{package}._{module_name}.{name}")
+            }
+        });
         let Some(id) = module
             .types
             .values()
-            .find(|ty| ty.name == qualified || ty.name == *name)
+            .find(|ty| {
+                ty.name == qualified
+                    || ty.name == *name
+                    || private_qualified.as_deref() == Some(ty.name.as_str())
+            })
             .and_then(|ty| ty.runtime_type_id)
         else {
             continue;

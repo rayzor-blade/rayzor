@@ -1,0 +1,6 @@
+[project]
+name = "private-class-reflection"
+entry = "unit/PrivateClassReflection.hx"
+
+[build]
+class-paths = ["."]
