@@ -769,8 +769,11 @@ pub extern "C" fn haxe_std_is_dynamic_type(value: *mut u8, expected_token: i64) 
         return false;
     };
     let expected_name = get_type_info(TypeId(expected_id)).map(|info| info.name);
-    if expected_id == 0 || expected_name == Some("Dynamic") {
+    if expected_id == crate::type_system::TYPE_DYNAMIC_TOKEN.0 || expected_name == Some("Dynamic") {
         return !value.is_null();
+    }
+    if expected_id == 0 {
+        return false;
     }
     if expected_name == Some("Class") || expected_name == Some("Enum") {
         let Some(actual_id) = type_token_id(value as i64) else {

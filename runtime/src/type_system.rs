@@ -50,6 +50,7 @@ pub const TYPE_INT: TypeId = TypeId(3);
 pub const TYPE_FLOAT: TypeId = TypeId(4);
 pub const TYPE_STRING: TypeId = TypeId(5);
 pub const TYPE_FUNCTION: TypeId = TypeId(u32::MAX - 1);
+pub const TYPE_DYNAMIC_TOKEN: TypeId = TypeId(u32::MAX - 2);
 
 // Compound type IDs (6 = anon object defined in anon_object.rs, 7 = array)
 pub const TYPE_ARRAY: TypeId = TypeId(7);

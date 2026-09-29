@@ -634,18 +634,14 @@ impl<'a> HirToMirContext<'a> {
             .build_call_direct(is_func_id, vec![boxed, type_id_const], IrType::Bool)
     }
 
-    pub(crate) fn lower_runtime_type_check(&mut self, expr: &HirExpr) -> Option<IrId> {
-        let HirExprKind::RuntimeTypeCheck {
-            expr,
-            expected_expr,
-        } = &expr.kind
-        else {
-            unreachable!("lower_runtime_type_check on a different expression")
-        };
-        let value = self.lower_expression(expr)?;
+    fn runtime_type_check_token(
+        &mut self,
+        value: IrId,
+        value_ty: TypeId,
+        target: IrId,
+    ) -> Option<IrId> {
         let dynamic = self.type_table.dynamic_type();
-        let boxed = self.maybe_box_value(value, expr.ty, dynamic)?;
-        let target = self.lower_expression(expected_expr)?;
+        let boxed = self.maybe_box_value(value, value_ty, dynamic)?;
         let target_id = self.erase_reflect_compare_arg(target);
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let boxed_type = self.builder.get_register_type(boxed)?;
@@ -661,6 +657,19 @@ impl<'a> HirToMirContext<'a> {
         );
         self.builder
             .build_call_direct(is_func, vec![boxed, target_id], IrType::Bool)
+    }
+
+    pub(crate) fn lower_runtime_type_check(&mut self, expr: &HirExpr) -> Option<IrId> {
+        let HirExprKind::RuntimeTypeCheck {
+            expr,
+            expected_expr,
+        } = &expr.kind
+        else {
+            unreachable!("lower_runtime_type_check on a different expression")
+        };
+        let value = self.lower_expression(expr)?;
+        let target = self.lower_expression(expected_expr)?;
+        self.runtime_type_check_token(value, expr.ty, target)
     }
 
     pub(crate) fn lower_type_check(&mut self, expr: &HirExpr) -> Option<IrId> {
@@ -679,6 +688,13 @@ impl<'a> HirToMirContext<'a> {
         };
 
         let result = match (&source_kind, &target_kind) {
+            (_, Some(TypeKind::Dynamic)) => {
+                let value = self.lower_expression(expr)?;
+                let token = self.builder.build_const(IrValue::I64(
+                    rayzor_runtime::type_system::TYPE_DYNAMIC_TOKEN.0 as i64,
+                ))?;
+                self.runtime_type_check_token(value, expr.ty, token)
+            }
             // Dynamic source: runtime type check via haxe_std_is
             (Some(TypeKind::Dynamic), _) => {
                 let value_reg = self.lower_expression(expr)?;

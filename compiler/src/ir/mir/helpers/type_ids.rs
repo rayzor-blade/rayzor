@@ -41,6 +41,7 @@ impl<'a> HirToMirContext<'a> {
             Some("Float") => type_table.float_type(),
             Some("Bool") => type_table.bool_type(),
             Some("String") => type_table.string_type(),
+            Some("Dynamic") => type_table.dynamic_type(),
             _ => type_id,
         }
     }
