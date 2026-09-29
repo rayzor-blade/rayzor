@@ -279,6 +279,12 @@ pub extern "C" fn haxe_dynamic_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
     if obj.is_null() || (obj as usize) >> 32 == 0 {
         return std::ptr::null_mut();
     }
+    // A raw anonymous-object handle starts with an Arc pointer. Its low word
+    // can look like a user type ID, but only registered IDs name Dynamic boxes.
+    let tag = unsafe { std::ptr::read_unaligned(obj as *const u32) };
+    if tag > TYPE_ARRAY.0 && get_type_info(TypeId(tag)).is_none() {
+        return haxe_reflect_field(obj, field);
+    }
     let Some(d) = dynamic_box_at(obj).filter(|d| d.tag_is_known()) else {
         return haxe_reflect_field(obj, field);
     };
