@@ -62,6 +62,12 @@ impl<'a> HirToMirContext<'a> {
         let HirExprKind::Variable { symbol, .. } = &expr.kind else {
             unreachable!("lower_variable_expr on a non-Variable expression")
         };
+        if let Some(getter) = self.static_property_accessor(*symbol, true) {
+            let return_ty = self.convert_type(expr.ty);
+            return self
+                .builder
+                .build_call_direct(getter, Vec::new(), return_ty);
+        }
         if crate::debug_flags::globals_debug() {
             if let Some(n) = self
                 .symbol_table

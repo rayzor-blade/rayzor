@@ -210,6 +210,11 @@ impl<'a> TastToHirContext<'a> {
                         continue;
                     }
                     for (op_str, _params) in &method.metadata.operator_metadata {
+                        if let Some(op) = Self::parse_unary_operator_from_metadata(op_str) {
+                            self.class_operator_methods
+                                .entry((abstract_def.symbol_id, format!("{op:?}")))
+                                .or_insert(method.symbol_id);
+                        }
                         if let Some(op) = Self::parse_operator_from_metadata(op_str) {
                             let key = Self::op_key_for_binary(&op);
                             self.class_operator_methods
@@ -2333,31 +2338,45 @@ impl<'a> TastToHirContext<'a> {
                 }
             }
             TypedExpressionKind::UnaryOp { operator, operand } => {
-                // OPERATOR OVERLOADING: Check if operand has abstract type with @:op metadata
-                if let Some((method_symbol, _abstract_symbol)) =
+                if let Some((method_symbol, abstract_symbol)) =
                     self.find_unary_operator_method(operand.expr_type, operator)
                 {
-                    // debug!(": Found unary operator method for {:?} on type {:?}: method symbol {:?}",
-                    //           operator, operand.expr_type, method_symbol);
-
-                    // Rewrite unary operation to method call:  `-a` → `a.negate()`
-                    // Then try to inline it using existing infrastructure
-                    if let Some(inlined) = self.try_inline_abstract_method(
-                        operand,
-                        method_symbol,
-                        &[], // No arguments for unary operators
-                        expr.expr_type,
-                        expr.source_location,
-                    ) {
-                        // debug!(": Successfully inlined unary operator method!");
-                        return inlined;
+                    let method = self.symbol_table.get_symbol(method_symbol);
+                    let result_type = method
+                        .and_then(|m| {
+                            let table = self.type_table.borrow();
+                            match &table.get(m.type_id)?.kind {
+                                TypeKind::Function { return_type, .. } => Some(*return_type),
+                                _ => None,
+                            }
+                        })
+                        .unwrap_or(expr.expr_type);
+                    let is_static = method.is_some_and(|m| {
+                        m.flags.contains(crate::tast::symbols::SymbolFlags::STATIC)
+                    });
+                    // Use the ordinary call path for both inline and non-inline
+                    // bodies. A failed inline must not discard the overload's
+                    // side effects and execute the built-in operator instead.
+                    let mut call = expr.clone();
+                    call.expr_type = result_type;
+                    call.kind = if is_static {
+                        TypedExpressionKind::StaticMethodCall {
+                            class_symbol: abstract_symbol,
+                            method_symbol,
+                            arguments: vec![(**operand).clone()],
+                            type_arguments: Vec::new(),
+                        }
                     } else {
-                        // debug!(": Failed to inline unary operator method, falling back to method call");
-                        // TODO: Fall back to method call if inlining fails
-                    }
+                        TypedExpressionKind::MethodCall {
+                            receiver: operand.clone(),
+                            method_symbol,
+                            arguments: Vec::new(),
+                            type_arguments: Vec::new(),
+                            is_optional: false,
+                        }
+                    };
+                    return self.lower_expression(&call);
                 }
-
-                // Default: convert to normal unary operation
                 HirExprKind::Unary {
                     op: self.convert_unary_op(operator),
                     operand: Box::new(self.lower_expression(operand)),
@@ -5356,7 +5375,23 @@ impl<'a> TastToHirContext<'a> {
         };
         drop(type_table);
 
-        // Get the abstract definition from the current file
+        // Int32 and Int64 use native integer storage in MIR. Their portable
+        // Haxe bodies must not replace native unary lowering (in particular,
+        // a by-value call cannot implement their writes to `this`).
+        if self
+            .symbol_table
+            .get_symbol(abstract_symbol)
+            .and_then(|s| self.string_interner.get(s.name))
+            .is_some_and(|name| matches!(name, "Int32" | "Int64"))
+        {
+            return None;
+        }
+        if let Some(&method) = self
+            .class_operator_methods
+            .get(&(abstract_symbol, format!("{operator:?}")))
+        {
+            return Some((method, abstract_symbol));
+        }
         let current_file = self.current_file?;
 
         // Search all abstracts for the one matching our symbol
@@ -5367,6 +5402,10 @@ impl<'a> TastToHirContext<'a> {
 
             // Found the abstract, now search for a method with matching @:op metadata
             for method in &abstract_def.methods {
+                // A declaration without a body requests the underlying operation.
+                if method.body.is_empty() {
+                    continue;
+                }
                 for (op_str, _params) in &method.metadata.operator_metadata {
                     if let Some(parsed_op) = Self::parse_unary_operator_from_metadata(op_str) {
                         // Compare using discriminant to match operator variants

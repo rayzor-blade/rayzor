@@ -468,9 +468,18 @@ impl<'a> AstLowering<'a> {
                     }
                 }
                 _ => {
-                    // Interfaces can have property signatures too
-                    // Interfaces can have property signatures and constants
-                    // These are handled separately in the interface specification
+                    // Field signatures need typed symbols in the interface
+                    // scope too. Otherwise `view.field` becomes Dynamic and
+                    // a reflected scalar is passed to callers as a box pointer.
+                    match self.lower_field(field) {
+                        Ok(typed) => {
+                            self.class_fields
+                                .entry(interface_symbol)
+                                .or_default()
+                                .push((typed.name, typed.symbol_id, typed.is_static));
+                        }
+                        Err(e) => self.context.add_error(e),
+                    }
                 }
             }
         }

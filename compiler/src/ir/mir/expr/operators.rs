@@ -228,7 +228,13 @@ impl<'a> HirToMirContext<'a> {
                     HirExprKind::Variable { symbol, .. } => {
                         // A bare static field lives in GLOBAL storage, not an
                         // SSA local, so the write must go through the global.
-                        if let Some(global_id) = self.static_global_for(*symbol) {
+                        if let Some(setter) = self.static_property_accessor(*symbol, false) {
+                            self.builder.build_call_direct(
+                                setter,
+                                vec![new_value],
+                                result_type.clone(),
+                            );
+                        } else if let Some(global_id) = self.static_global_for(*symbol) {
                             self.builder.build_store_global(global_id, new_value);
                         } else if let Some(&cell) = self.capture_cells.get(symbol) {
                             self.builder.build_store(cell, new_value);

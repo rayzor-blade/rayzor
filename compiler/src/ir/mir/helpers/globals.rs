@@ -22,6 +22,57 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// Resolve a static property's accessor within its declaring class. Inside
+    /// that accessor, the property name refers to its backing global instead.
+    pub(crate) fn static_property_accessor(
+        &self,
+        symbol: SymbolId,
+        read: bool,
+    ) -> Option<IrFunctionId> {
+        let info = self.property_access_map.get(&symbol)?;
+        let accessor = if read { &info.getter } else { &info.setter };
+        let crate::tast::PropertyAccessor::Method(name) = accessor else {
+            return None;
+        };
+        // The declaration index exists before method bodies acquire MIR
+        // qualified names. Resolve by owner and symbol while lowering locally.
+        let local = self
+            .static_field_owners
+            .get(&symbol)
+            .and_then(|owner| self.class_method_by_name.get(&(*owner, *name)))
+            .and_then(|method| self.get_function_id(method));
+        let function = local.or_else(|| {
+            self.static_global_for(symbol)?;
+            let owner = self
+                .field_class_names
+                .get(&symbol)
+                .map(String::as_str)
+                .or_else(|| {
+                    let field = self.symbol_table.get_symbol(symbol)?;
+                    self.string_interner
+                        .get(field.qualified_name?)?
+                        .rsplit_once('.')
+                        .map(|(owner, _)| owner)
+                })?;
+            let accessor = format!("{owner}.{}", self.string_interner.get(*name)?);
+            self.external_function_name_map.get(&accessor).copied()
+        })?;
+        let same_owner = self
+            .current_class_symbol
+            .and_then(|class| self.symbol_table.get_symbol(class))
+            .and_then(|class| class.qualified_name)
+            .and_then(|qn| self.string_interner.get(qn))
+            .zip(self.field_class_names.get(&symbol))
+            .is_some_and(|(current, owner)| current == owner);
+        if self.builder.current_function().is_some_and(|f| {
+            f.id == function
+                || (same_owner && self.string_interner.get(*name) == Some(f.name.as_str()))
+        }) {
+            return None;
+        }
+        Some(function)
+    }
+
     /// The global a static field symbol names: by symbol, else by the
     /// symbol's qualified name among this module's globals and then the
     /// imported ones. The same class typed twice (an entry file that is also

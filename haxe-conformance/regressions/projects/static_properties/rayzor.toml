@@ -1,0 +1,6 @@
+[project]
+name = "static-property-regression"
+entry = "StaticProperties.hx"
+
+[build]
+class-paths = ["."]

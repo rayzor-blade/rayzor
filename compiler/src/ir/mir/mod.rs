@@ -222,6 +222,7 @@ pub struct HirToMirContext<'a> {
     /// Mapping from field SymbolId to PropertyAccessInfo (for properties with custom getters/setters)
     /// This allows us to route property access through the appropriate getter/setter methods
     property_access_map: BTreeMap<SymbolId, crate::tast::PropertyAccessInfo>,
+    static_field_owners: BTreeMap<SymbolId, SymbolId>,
 
     /// Mapping from class TypeId to constructor IrFunctionId
     /// This allows new expressions to find the constructor by class type
@@ -1385,6 +1386,7 @@ impl<'a> HirToMirContext<'a> {
             fields_by_type_cache: None,
             typedef_field_map: BTreeMap::new(),
             property_access_map: BTreeMap::new(),
+            static_field_owners: BTreeMap::new(),
             constructor_map: BTreeMap::new(),
             constructor_reflect_wrappers: BTreeMap::new(),
             method_ref_thunks: BTreeMap::new(),

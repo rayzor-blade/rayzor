@@ -64,6 +64,21 @@ impl<'a> HirToMirContext<'a> {
         for field in &class.fields {
             // Static fields should be stored as globals, not instance fields
             if field.is_static {
+                self.static_field_owners
+                    .insert(field.symbol_id, class.symbol_id);
+                let owner_name = self
+                    .symbol_table
+                    .get_symbol(class.symbol_id)
+                    .and_then(|s| s.qualified_name)
+                    .and_then(|q| self.string_interner.get(q))
+                    .or_else(|| self.string_interner.get(class.name))
+                    .unwrap_or("<unknown>");
+                self.field_class_names
+                    .insert(field.symbol_id, owner_name.to_owned());
+                if let Some(info) = &field.property_access {
+                    self.property_access_map
+                        .insert(field.symbol_id, info.clone());
+                }
                 let field_name = self.string_interner.get(field.name).unwrap_or("<unknown>");
                 let class_name = self.string_interner.get(class.name).unwrap_or("<unknown>");
 

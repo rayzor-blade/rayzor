@@ -146,6 +146,14 @@ impl<'a> HirToMirContext<'a> {
         let resolved_field_ty = self.resolve_type_param_from_receiver(field_ty, receiver_ty);
         let field_ty = resolved_field_ty.unwrap_or(field_ty);
 
+        let receiver_is_interface = self.get_interface_symbol(receiver_ty).is_some();
+        let obj = if receiver_is_interface {
+            self.builder
+                .build_load(obj, IrType::Ptr(Box::new(IrType::U8)))?
+        } else {
+            obj
+        };
+
         // A Dynamic receiver is unboxed to the actual object pointer.
         let (obj, receiver_ty) = {
             let type_table = self.type_table;
@@ -614,6 +622,67 @@ impl<'a> HirToMirContext<'a> {
                     // fall through to a direct read of the backing slot.
                 }
             }
+        }
+
+        // Interfaces carry an object pointer followed by method slots, not
+        // the implementing class's field layout. Resolve the physical field
+        // against that object's RTTI, which also handles inherited fields and
+        // differing numeric storage types across implementations.
+        if receiver_is_interface {
+            let field_ty = self.resolve_through_aliases(field_ty);
+            let field_ty = if matches!(
+                self.type_table.get(field_ty).map(|t| &t.kind),
+                None | Some(TypeKind::Dynamic | TypeKind::Placeholder { .. })
+            ) {
+                self.symbol_table
+                    .get_symbol(field)
+                    .map(|s| s.type_id)
+                    .unwrap_or(field_ty)
+            } else {
+                field_ty
+            };
+            let value = self.raw_anon_reflect_field_read(obj, field, field_ty)?;
+            if matches!(
+                self.type_table.get(field_ty).map(|t| &t.kind),
+                Some(TypeKind::Enum { .. })
+            ) {
+                // Both enum discriminants and boxed-enum addresses occupy i64
+                // class slots. RTTI boxes that slot as Int in either case.
+                let unbox = self.get_or_register_extern_function(
+                    "haxe_unbox_int_ptr",
+                    vec![IrType::Ptr(Box::new(IrType::U8))],
+                    IrType::I64,
+                );
+                return self
+                    .builder
+                    .build_call_direct(unbox, vec![value], IrType::I64);
+            }
+            if matches!(
+                self.type_table.get(field_ty).map(|t| &t.kind),
+                Some(
+                    TypeKind::Class { .. }
+                        | TypeKind::Array { .. }
+                        | TypeKind::Anonymous { .. }
+                        | TypeKind::Interface { .. }
+                        | TypeKind::Map { .. }
+                        | TypeKind::Function { .. }
+                )
+            ) {
+                let ptr_ty = IrType::Ptr(Box::new(IrType::U8));
+                let unbox = self.get_or_register_extern_function(
+                    "haxe_unbox_reference_ptr",
+                    vec![ptr_ty.clone()],
+                    ptr_ty.clone(),
+                );
+                return self.builder.build_call_direct(unbox, vec![value], ptr_ty);
+            }
+            let actual = self.builder.get_register_type(value)?;
+            let expected = self.convert_type(field_ty);
+            return if actual == IrType::I64 && expected == IrType::I32 {
+                self.builder.build_cast(value, actual, expected)
+            } else {
+                Some(value)
+            };
         }
 
         // An anonymous receiver (or a typedef alias to one) reads through

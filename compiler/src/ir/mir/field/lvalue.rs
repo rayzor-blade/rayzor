@@ -25,6 +25,19 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn lower_lvalue_read(&mut self, lvalue: &HirLValue) -> Option<IrId> {
         match lvalue {
             HirLValue::Variable(symbol) => {
+                if let Some(getter) = self.static_property_accessor(*symbol, true) {
+                    let ty = self
+                        .symbol_table
+                        .get_symbol(*symbol)
+                        .map(|s| self.convert_type(s.type_id))
+                        .unwrap_or(IrType::I32);
+                    return self.builder.build_call_direct(getter, Vec::new(), ty);
+                }
+                if let Some(global) = self.static_global_for(*symbol) {
+                    return self
+                        .builder
+                        .build_load_global(global, self.global_type_of(global));
+                }
                 if let Some(&cell) = self.capture_cells.get(symbol) {
                     let ty = self
                         .symbol_table
@@ -69,6 +82,16 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn lower_lvalue_write(&mut self, lvalue: &HirLValue, value: IrId) {
         match lvalue {
             HirLValue::Variable(symbol) => {
+                if let Some(setter) = self.static_property_accessor(*symbol, false) {
+                    let return_ty = self
+                        .symbol_table
+                        .get_symbol(*symbol)
+                        .map(|s| self.convert_type(s.type_id))
+                        .unwrap_or(IrType::I32);
+                    self.builder
+                        .build_call_direct(setter, vec![value], return_ty);
+                    return;
+                }
                 let global_id = self.static_global_for(*symbol).or_else(|| {
                     // Name-based fallback: SymbolIds may differ between contexts
                     let sym_name = self
@@ -171,6 +194,39 @@ impl<'a> HirToMirContext<'a> {
         // `___Int64`'s constructor writes its words; the value is a native
         // i64 built by `Int64_make`, so there is no slot to write.
         if self.is_int64_type(object.ty) {
+            return;
+        }
+        if self.get_interface_symbol(object.ty).is_some() {
+            let ptr_ty = IrType::Ptr(Box::new(IrType::U8));
+            let Some(object_ptr) = self.builder.build_load(obj_reg, ptr_ty.clone()) else {
+                return;
+            };
+            let Some(name) = self
+                .symbol_table
+                .get_symbol(*field)
+                .and_then(|s| self.string_interner.get(s.name))
+                .map(str::to_owned)
+            else {
+                return;
+            };
+            self.dynamic_member_names.insert(name.clone());
+            let Some(name_reg) = self.builder.build_const(IrValue::String(name)) else {
+                return;
+            };
+            // Box scalars so the runtime can convert to the implementing
+            // field's declared storage (e.g. an Int interface writes Float).
+            let value = self
+                .builder
+                .get_register_type(value)
+                .and_then(|ty| self.box_primitive_to_dynamic(value, ty))
+                .unwrap_or(value);
+            let setter = self.get_or_register_extern_function(
+                "haxe_reflect_set_field",
+                vec![ptr_ty.clone(), ptr_ty.clone(), ptr_ty],
+                IrType::Void,
+            );
+            self.builder
+                .build_call_direct(setter, vec![object_ptr, name_reg, value], IrType::Void);
             return;
         }
         // Check if this is a property with a custom setter.
