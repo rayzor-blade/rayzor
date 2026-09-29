@@ -581,8 +581,13 @@ impl<'a> HirToMirContext<'a> {
             .unwrap_or(_type_id);
 
         let enum_name = self
-            .string_interner
-            .get(enum_decl.name)
+            .symbol_table
+            .get_symbol(enum_decl.symbol_id)
+            .and_then(|sym| {
+                sym.qualified_name
+                    .and_then(|name| self.string_interner.get(name))
+            })
+            .or_else(|| self.string_interner.get(enum_decl.name))
             .unwrap_or("<unknown>")
             .to_string();
 

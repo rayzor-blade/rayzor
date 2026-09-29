@@ -1,0 +1,6 @@
+[project]
+name = "enum-type-reflection"
+entry = "unit/EnumTypeReflection.hx"
+
+[build]
+class-paths = ["."]

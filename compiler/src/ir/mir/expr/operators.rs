@@ -579,6 +579,49 @@ impl<'a> HirToMirContext<'a> {
                 return self.builder.build_cmp(CompareOp::Eq, eq, ffalse);
             }
 
+            // Type values are runtime IDs, while Dynamic holds boxed type
+            // tokens. Compare their reflective IDs before treating the raw
+            // integer as an ordinary Int.
+            let type_token = |me: &Self, e: &HirExpr| -> bool {
+                let HirExprKind::Variable { symbol, .. } = &e.kind else {
+                    return false;
+                };
+                matches!(
+                    me.symbol_table.get_symbol(*symbol).map(|sym| sym.kind),
+                    Some(
+                        crate::tast::SymbolKind::Class
+                            | crate::tast::SymbolKind::Enum
+                            | crate::tast::SymbolKind::Interface
+                    )
+                )
+            };
+            let token_vs_dyn = (is_dyn(self, rhs.ty) && type_token(self, lhs))
+                || (is_dyn(self, lhs.ty) && type_token(self, rhs));
+            if token_vs_dyn {
+                let lhs_reg = self.lower_expression(lhs)?;
+                let rhs_reg = self.lower_expression(rhs)?;
+                let lhs_i64 = self.erase_reflect_compare_arg(lhs_reg);
+                let rhs_i64 = self.erase_reflect_compare_arg(rhs_reg);
+                let tag = self.builder.build_const(IrValue::I32(6))?;
+                let compare = self.get_or_register_extern_function(
+                    "haxe_reflect_compare_typed",
+                    vec![IrType::I64, IrType::I64, IrType::I32],
+                    IrType::I64,
+                );
+                let order = self.builder.build_call_direct(
+                    compare,
+                    vec![lhs_i64, rhs_i64, tag],
+                    IrType::I64,
+                )?;
+                let zero = self.builder.build_const(IrValue::I64(0))?;
+                let compare_op = if matches!(op, HirBinaryOp::Eq) {
+                    CompareOp::Eq
+                } else {
+                    CompareOp::Ne
+                };
+                return self.builder.build_cmp(compare_op, order, zero);
+            }
+
             // The same split, with the tag known statically: a concretely
             // typed operand against a Dynamic box. Comparing the registers
             // instead would compare a value against a box ADDRESS, so a boxed
