@@ -721,14 +721,13 @@ unsafe fn build_i64_array(values: &[i64]) -> *mut u8 {
 
 /// Type values stored in Dynamic slots carry their ID inside a box.
 fn reflected_type_id(value: i64) -> u32 {
-    if value > u32::MAX as i64 {
-        if let Some(boxed) = dynamic_value_if_boxed(value as *mut u8) {
+    if value > u32::MAX as i64
+        && let Some(boxed) = dynamic_value_if_boxed(value as *mut u8) {
             let payload = boxed.value_ptr as usize;
             if payload <= u32::MAX as usize {
                 return payload as u32;
             }
         }
-    }
     value as u32
 }
 

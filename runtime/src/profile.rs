@@ -87,15 +87,14 @@ fn record_sample() {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     top.hash(&mut h);
-    if let Ok(mut g) = GRAPH_SITES.lock() {
-        if let Some(map) = g.as_mut() {
+    if let Ok(mut g) = GRAPH_SITES.lock()
+        && let Some(map) = g.as_mut() {
             let e = map.entry(h.finish()).or_insert(SiteStat {
                 sampled_count: 0,
                 pcs: top,
             });
             e.sampled_count += 1;
         }
-    }
     IN_GRAPH.with(|g| g.set(false));
 }
 
@@ -191,7 +190,7 @@ pub extern "C" fn rayzor_dump_alloc_graph() {
 /// 8-slot variant for crash-handler use. Same algorithm.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn walk_fp_chain_8(initial_pc: u64, start_fp: u64, out: &mut [u64; 8]) -> usize {
+unsafe fn walk_fp_chain_8(initial_pc: u64, start_fp: u64, out: &mut [u64; 8]) -> usize { unsafe {
     out[0] = initial_pc;
     let mut fp = start_fp;
     let stack_top_guess = fp.saturating_add(16 * 1024 * 1024);
@@ -213,11 +212,11 @@ unsafe fn walk_fp_chain_8(initial_pc: u64, start_fp: u64, out: &mut [u64; 8]) ->
         fp = saved_fp;
     }
     i
-}
+}}
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn walk_fp_chain(initial_pc: u64, start_fp: u64, out: &mut [u64; 6]) -> usize {
+unsafe fn walk_fp_chain(initial_pc: u64, start_fp: u64, out: &mut [u64; 6]) -> usize { unsafe {
     out[0] = initial_pc;
     let mut fp = start_fp;
     let stack_top_guess = fp.saturating_add(16 * 1024 * 1024); // 16 MB upper
@@ -244,7 +243,7 @@ unsafe fn walk_fp_chain(initial_pc: u64, start_fp: u64, out: &mut [u64; 6]) -> u
         fp = saved_fp;
     }
     i
-}
+}}
 
 #[cfg(target_arch = "aarch64")]
 extern "C" fn sigprof_handler(
@@ -282,15 +281,14 @@ extern "C" fn sigprof_handler(
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     top.hash(&mut h);
-    if let Ok(mut g) = GRAPH_SITES.try_lock() {
-        if let Some(map) = g.as_mut() {
+    if let Ok(mut g) = GRAPH_SITES.try_lock()
+        && let Some(map) = g.as_mut() {
             let e = map.entry(h.finish()).or_insert(SiteStat {
                 sampled_count: 0,
                 pcs: top,
             });
             e.sampled_count += 1;
         }
-    }
     IN_GRAPH.with(|g| g.set(false));
 }
 
@@ -337,7 +335,7 @@ extern "C" fn sigprof_handler(
     IN_GRAPH.with(|g| g.set(false));
 }
 
-unsafe fn install_cpu_profiler(period_us: u64) {
+unsafe fn install_cpu_profiler(period_us: u64) { unsafe {
     // SA_SIGINFO gives our handler the 3-arg signature
     // `(int, siginfo_t*, ucontext_t*)` instead of the legacy 1-arg one.
     // We need the ucontext to read the interrupted thread's PC + FP
@@ -355,12 +353,12 @@ unsafe fn install_cpu_profiler(period_us: u64) {
     tv.it_value = tv.it_interval;
     libc::setitimer(libc::ITIMER_PROF, &tv, std::ptr::null_mut());
     CPU_PROFILE_ACTIVE.store(1, MemOrdering::Relaxed);
-}
+}}
 
 pub struct TrackingAllocator;
 
 unsafe impl std::alloc::GlobalAlloc for TrackingAllocator {
-    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 { unsafe {
         let p = std::alloc::System.alloc(layout);
         if !p.is_null() {
             let sz = layout.size() as u64;
@@ -371,13 +369,13 @@ unsafe impl std::alloc::GlobalAlloc for TrackingAllocator {
             record_sample();
         }
         p
-    }
+    }}
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) { unsafe {
         std::alloc::System.dealloc(ptr, layout);
         FREE_BYTES_TOTAL.fetch_add(layout.size() as u64, MemOrdering::Relaxed);
         FREE_COUNT.fetch_add(1, MemOrdering::Relaxed);
-    }
+    }}
 }
 
 /// Arm the SIGPROF profiler explicitly. Callable from Haxe via the
@@ -428,7 +426,7 @@ pub extern "C" fn rayzor_profile_stop() {
 /// Install atexit + signal-driven dumpers and (when requested) arm the
 /// SIGPROF profiler. Idempotent — safe to call multiple times. Should
 /// be called from `fn main` early.
-pub unsafe fn ensure_alloc_dump_hooks() {
+pub unsafe fn ensure_alloc_dump_hooks() { unsafe {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -618,4 +616,4 @@ pub unsafe fn ensure_alloc_dump_hooks() {
             }
         }
     });
-}
+}}

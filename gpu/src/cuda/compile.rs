@@ -174,7 +174,7 @@ fn load_ptx(ctx: &CudaContext, ptx: &[u8], fn_name: &str) -> Result<CudaCompiled
 }
 
 /// Get NVRTC compilation log for error messages.
-unsafe fn get_nvrtc_log(prog: NvrtcProgram) -> String {
+unsafe fn get_nvrtc_log(prog: NvrtcProgram) -> String { unsafe {
     let mut log_size: usize = 0;
     if nvrtcGetProgramLogSize(prog, &mut log_size) != NVRTC_SUCCESS || log_size == 0 {
         return "<no log>".to_string();
@@ -189,7 +189,7 @@ unsafe fn get_nvrtc_log(prog: NvrtcProgram) -> String {
     CStr::from_ptr(log.as_ptr() as *const _)
         .to_string_lossy()
         .to_string()
-}
+}}
 
 #[cfg(test)]
 mod tests {
