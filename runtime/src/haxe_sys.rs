@@ -606,7 +606,23 @@ pub extern "C" fn haxe_value_to_string_by_tag(value: i64, type_tag: i32) -> *mut
         // reinterpret i64 bits as f64
         Some(ValueTag::Float) => haxe_string_from_float(f64::from_bits(value as u64)),
         Some(ValueTag::Reference) => crate::type_system::haxe_std_string_ptr(value as *mut u8),
-        // Unresolved, or a tag from outside the space.
+        // An unresolved generic may carry a boxed Dynamic, an erased scalar,
+        // or a raw static HaxeString. The latter has a small byte length in
+        // the box's value-pointer slot and zero capacity in the next slot.
+        Some(ValueTag::Unresolved) => {
+            let ptr = value as *mut u8;
+            if let Some(boxed) = crate::type_system::dynamic_box_at(ptr) {
+                let len = boxed.value_ptr as usize;
+                if !boxed.tag_is_builtin() && len > 0 && len < 1_000_000 {
+                    let raw = unsafe { &*(ptr as *const HaxeString) };
+                    if raw.cap == 0 && !raw.ptr.is_null() {
+                        return ptr as *mut HaxeString;
+                    }
+                }
+            }
+            crate::type_system::haxe_std_string_ptr(ptr)
+        }
+        // A tag from outside the space.
         _ => haxe_string_from_int(value),
     }
 }
