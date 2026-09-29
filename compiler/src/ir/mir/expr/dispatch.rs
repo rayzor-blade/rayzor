@@ -946,6 +946,7 @@ impl<'a> HirToMirContext<'a> {
             HirExprKind::Binary { .. } => self.lower_binary(expr),
             HirExprKind::Cast { .. } => self.lower_cast(expr),
             HirExprKind::TypeCheck { .. } => self.lower_type_check(expr),
+            HirExprKind::RuntimeTypeCheck { .. } => self.lower_runtime_type_check(expr),
             HirExprKind::If {
                 condition,
                 then_expr,

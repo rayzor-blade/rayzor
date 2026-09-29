@@ -375,6 +375,11 @@ pub enum HirExprKind {
         expected: TypeId,
     },
 
+    RuntimeTypeCheck {
+        expr: Box<HirExpr>,
+        expected_expr: Box<HirExpr>,
+    },
+
     // === Control flow ===
     If {
         condition: Box<HirExpr>,

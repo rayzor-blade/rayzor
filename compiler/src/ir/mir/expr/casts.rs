@@ -634,6 +634,35 @@ impl<'a> HirToMirContext<'a> {
             .build_call_direct(is_func_id, vec![boxed, type_id_const], IrType::Bool)
     }
 
+    pub(crate) fn lower_runtime_type_check(&mut self, expr: &HirExpr) -> Option<IrId> {
+        let HirExprKind::RuntimeTypeCheck {
+            expr,
+            expected_expr,
+        } = &expr.kind
+        else {
+            unreachable!("lower_runtime_type_check on a different expression")
+        };
+        let value = self.lower_expression(expr)?;
+        let dynamic = self.type_table.dynamic_type();
+        let boxed = self.maybe_box_value(value, expr.ty, dynamic)?;
+        let target = self.lower_expression(expected_expr)?;
+        let target_id = self.erase_reflect_compare_arg(target);
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let boxed_type = self.builder.get_register_type(boxed)?;
+        let boxed = if boxed_type == ptr_u8 {
+            boxed
+        } else {
+            self.builder.build_cast(boxed, boxed_type, ptr_u8.clone())?
+        };
+        let is_func = self.get_or_register_extern_function(
+            "haxe_std_is_dynamic_type",
+            vec![ptr_u8, IrType::I64],
+            IrType::Bool,
+        );
+        self.builder
+            .build_call_direct(is_func, vec![boxed, target_id], IrType::Bool)
+    }
+
     pub(crate) fn lower_type_check(&mut self, expr: &HirExpr) -> Option<IrId> {
         let HirExprKind::TypeCheck { expr, expected } = &expr.kind else {
             unreachable!("lower_type_check on a non-TypeCheck expression")

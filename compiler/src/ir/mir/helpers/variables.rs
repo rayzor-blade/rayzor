@@ -90,6 +90,13 @@ impl<'a> HirToMirContext<'a> {
             | HirExprKind::Reification { expr } => {
                 self.collect_referenced_variables_in_expr(expr, vars);
             }
+            HirExprKind::RuntimeTypeCheck {
+                expr,
+                expected_expr,
+            } => {
+                self.collect_referenced_variables_in_expr(expr, vars);
+                self.collect_referenced_variables_in_expr(expected_expr, vars);
+            }
             HirExprKind::Untyped(inner) => {
                 self.collect_referenced_variables_in_expr(inner, vars);
             }

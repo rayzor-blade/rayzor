@@ -125,6 +125,21 @@ impl Clone for LoweringError {
 }
 
 impl<'a> TastToHirContext<'a> {
+    fn is_named_type_value(&self, expr: &HirExpr) -> bool {
+        let HirExprKind::Variable { symbol, .. } = &expr.kind else {
+            return false;
+        };
+        matches!(
+            self.symbol_table.get_symbol(*symbol).map(|sym| sym.kind),
+            Some(
+                crate::tast::SymbolKind::Class
+                    | crate::tast::SymbolKind::Enum
+                    | crate::tast::SymbolKind::Interface
+                    | crate::tast::SymbolKind::Abstract
+            )
+        )
+    }
+
     /// Create a new lowering context
     pub fn new(
         symbol_table: &'a SymbolTable,
@@ -3301,7 +3316,8 @@ impl<'a> TastToHirContext<'a> {
                 type_arguments,
                 arguments,
             } => {
-                // Check for Std.is() / Std.isOfType() — desugar to TypeCheck
+                // Preserve runtime type values; only a named type has a
+                // compile-time target for TypeCheck.
                 let class_name = self
                     .symbol_table
                     .get_symbol(*class_symbol)
@@ -3316,13 +3332,18 @@ impl<'a> TastToHirContext<'a> {
                     && matches!(method_name.as_deref(), Some("is") | Some("isOfType"))
                     && arguments.len() == 2
                 {
-                    // Desugar Std.is(value, Type) → (value is Type)
                     let value_hir = self.lower_expression(&arguments[0]);
-                    let type_arg = &arguments[1];
-                    // The second argument's expr_type is the TypeId of the checked type
-                    HirExprKind::TypeCheck {
-                        expr: Box::new(value_hir),
-                        expected: type_arg.expr_type,
+                    let target_hir = self.lower_expression(&arguments[1]);
+                    if self.is_named_type_value(&target_hir) {
+                        HirExprKind::TypeCheck {
+                            expr: Box::new(value_hir),
+                            expected: arguments[1].expr_type,
+                        }
+                    } else {
+                        HirExprKind::RuntimeTypeCheck {
+                            expr: Box::new(value_hir),
+                            expected_expr: Box::new(target_hir),
+                        }
                     }
                 } else {
                     // Try to inline static abstract methods (e.g., Color.fromInt(1))
@@ -7201,11 +7222,19 @@ impl<'a> TastToHirContext<'a> {
                     && matches!(method_name, Some("is") | Some("isOfType"))
                     && arguments.len() == 2
                 {
-                    return HirExpr::new(
+                    let kind = if self.is_named_type_value(&lowered_args[1]) {
                         HirExprKind::TypeCheck {
                             expr: Box::new(lowered_args[0].clone()),
                             expected: arguments[1].expr_type,
-                        },
+                        }
+                    } else {
+                        HirExprKind::RuntimeTypeCheck {
+                            expr: Box::new(lowered_args[0].clone()),
+                            expected_expr: Box::new(lowered_args[1].clone()),
+                        }
+                    };
+                    return HirExpr::new(
+                        kind,
                         expr.expr_type,
                         self.current_lifetime,
                         expr.source_location,

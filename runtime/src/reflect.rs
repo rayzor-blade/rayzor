@@ -758,6 +758,48 @@ fn type_token_id(value: i64) -> Option<u32> {
         .map(|_| id)
 }
 
+/// Check a value against a class or enum token held in a Dynamic slot.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_std_is_dynamic_type(value: *mut u8, expected_token: i64) -> bool {
+    let expected_id = type_token_id(expected_token).or_else(|| {
+        let boxed = crate::type_system::dynamic_value_if_boxed(expected_token as *mut u8)?;
+        if boxed.type_id != TYPE_INT || boxed.value_ptr.is_null() {
+            return None;
+        }
+        let raw_id = unsafe { *(boxed.value_ptr as *const i64) };
+        u32::try_from(raw_id).ok()
+    });
+    let Some(expected_id) = expected_id else {
+        return false;
+    };
+    let expected_name = get_type_info(TypeId(expected_id)).map(|info| info.name);
+    if expected_id == 0 || expected_name == Some("Dynamic") {
+        return !value.is_null();
+    }
+    if expected_name == Some("Class") || expected_name == Some("Enum") {
+        let Some(actual_id) = type_token_id(value as i64) else {
+            return false;
+        };
+        let Some(info) = get_type_info(TypeId(actual_id)) else {
+            return false;
+        };
+        return if expected_name == Some("Class") {
+            info.class_info.is_some()
+        } else {
+            info.enum_info.is_some()
+        };
+    }
+    let expected_id = match expected_name {
+        Some("Bool") => TYPE_BOOL.0,
+        Some("Int") => TYPE_INT.0,
+        Some("Float") => TYPE_FLOAT.0,
+        Some("String") => TYPE_STRING.0,
+        Some("Array") => TYPE_ARRAY.0,
+        _ => expected_id,
+    };
+    crate::type_system::haxe_std_is(value, expected_id as i64)
+}
+
 /// Order two pointer-shaped slots of unknown provenance.
 ///
 /// Subtracting the two addresses is the right answer for objects, which Haxe

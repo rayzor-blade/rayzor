@@ -356,6 +356,10 @@ register_symbol!(
     crate::type_system::haxe_enum_get_parameters
 );
 register_symbol!("haxe_std_is", crate::type_system::haxe_std_is);
+register_symbol!(
+    "haxe_std_is_dynamic_type",
+    crate::reflect::haxe_std_is_dynamic_type
+);
 register_symbol!("haxe_std_downcast", crate::type_system::haxe_std_downcast);
 // Type API enum wrappers (accept boxed DynamicValue*)
 register_symbol!(
