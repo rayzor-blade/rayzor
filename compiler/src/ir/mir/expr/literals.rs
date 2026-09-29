@@ -254,7 +254,39 @@ impl<'a> HirToMirContext<'a> {
                         } else {
                             v
                         };
-                        let v = if dynamic_elements
+                        let class_token_id = if dynamic_elements
+                            && matches!(
+                                self.type_table.get(elem.ty).map(|t| &t.kind),
+                                Some(TypeKind::TypeAlias { .. }) | None
+                            ) {
+                            match &elem.kind {
+                                HirExprKind::Variable { symbol, .. }
+                                    if self.symbol_table.get_symbol(*symbol).is_some_and(|s| {
+                                        s.kind == crate::tast::symbols::SymbolKind::Class
+                                    }) =>
+                                {
+                                    self.deterministic_class_type_id(*symbol)
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        let v = if let Some(type_id) = class_token_id {
+                            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                            let value_ptr = self.builder.build_bitcast(v, ptr_u8.clone())?;
+                            let type_id = self.builder.build_const(IrValue::U32(type_id))?;
+                            let boxer = self.get_or_register_extern_function(
+                                "haxe_box_reference_ptr",
+                                vec![ptr_u8.clone(), IrType::U32],
+                                ptr_u8.clone(),
+                            );
+                            self.builder.build_call_direct(
+                                boxer,
+                                vec![value_ptr, type_id],
+                                ptr_u8,
+                            )?
+                        } else if dynamic_elements
                             && !matches!(
                                 self.type_table.get(elem.ty).map(|t| &t.kind),
                                 Some(TypeKind::Dynamic)
@@ -263,7 +295,8 @@ impl<'a> HirToMirContext<'a> {
                                     | Some(TypeKind::Float)
                                     | Some(TypeKind::Bool)
                                     | None
-                            ) {
+                            )
+                        {
                             let dynamic = self.type_table.dynamic_type();
                             self.maybe_box_value(v, elem.ty, dynamic).unwrap_or(v)
                         } else {
