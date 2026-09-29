@@ -157,7 +157,9 @@ impl<'a> HirToMirContext<'a> {
                     vec![IrType::Ptr(Box::new(IrType::I64)), IrType::I64],
                     IrType::Void,
                 );
-                return self.builder.build_call_direct(push, vec![arr, slot], IrType::Void);
+                return self
+                    .builder
+                    .build_call_direct(push, vec![arr, slot], IrType::Void);
             }
             if elem_is_f64 {
                 if let (Some(arr_reg), Some(val_reg)) = (

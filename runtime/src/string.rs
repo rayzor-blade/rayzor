@@ -146,17 +146,9 @@ fn haxe_string_concat_impl(a: *const HaxeString, b: *const HaxeString) -> HaxeSt
             len: 4,
             cap: 0,
         };
-        let a_ref = if a.is_null() {
-            &null_string
-        } else {
-            &*a
-        };
+        let a_ref = if a.is_null() { &null_string } else { &*a };
 
-        let b_ref = if b.is_null() {
-            &null_string
-        } else {
-            &*b
-        };
+        let b_ref = if b.is_null() { &null_string } else { &*b };
 
         // Guard against corrupted HaxeString structs
         let a_len = if a_ref.ptr.is_null() { 0 } else { a_ref.len };
