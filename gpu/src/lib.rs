@@ -39,7 +39,7 @@ pub mod device;
 pub mod lazy;
 #[cfg(feature = "native")]
 pub mod ops;
-#[cfg(feature = "native")]
+#[cfg(any(feature = "native", feature = "webgpu-backend"))]
 pub mod xgpu_runtime;
 
 // xgpu supplies the portable WebGPU object model and backend. Rayzor owns the
@@ -68,6 +68,7 @@ mod xgpu_backend {
 #[allow(clippy::all)]
 mod xgpu_api {
     #![allow(non_snake_case)]
+    #[cfg(feature = "native")]
     use crate::GpuBuffer;
     use crate::xgpu_backend as backend;
     use crate::xgpu_runtime::{

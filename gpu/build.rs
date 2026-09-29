@@ -52,10 +52,18 @@ fn main() {
     println!("cargo:rerun-if-env-changed=XGPU_HAXE_STAMP");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
     xgpu_backend::install(&out).expect("xgpu backend installs");
+    // The native package extends GpuBuffer with Rayzor's lazy-compute state.
+    // The compiler's WebGPU-only feature shape does not compile that native
+    // compute stack, so let xgpu emit its ordinary handle wrapper there.
+    let adapter_resources: &[&str] = if std::env::var_os("CARGO_FEATURE_NATIVE").is_some() {
+        &["GpuBuffer"]
+    } else {
+        &[]
+    };
     let model = xgpu_bindgen::generate_rayzor_with_resources(
         &xgpu_bindgen::gpu_api(),
         xgpu_bindgen::WEBGPU_IDL,
-        &["GpuBuffer"],
+        adapter_resources,
     )
     .expect("xgpu Rayzor model generates");
     std::fs::write(out.join("xgpu_rayzor.rs"), model).expect("xgpu model writes");

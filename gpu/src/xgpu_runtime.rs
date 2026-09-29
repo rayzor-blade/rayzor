@@ -159,6 +159,12 @@ impl<T> Clone for Future<T> {
 unsafe impl<T> Send for Future<T> {}
 unsafe impl<T> Sync for Future<T> {}
 
+impl<T> Default for Future<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> Future<T> {
     pub const NULL: Self = Self(std::ptr::null_mut(), PhantomData);
 

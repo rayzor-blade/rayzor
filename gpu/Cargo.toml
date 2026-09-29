@@ -11,7 +11,13 @@ crate-type = ["cdylib", "rlib"]
 default = ["native"]
 native = ["dep:rayzor-plugin", "dep:rayzor-runtime", "dep:libc"]
 metal-backend = ["dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
-webgpu-backend = ["dep:wgpu", "dep:pollster", "dep:raw-window-handle", "dep:xgpu-core"]
+webgpu-backend = [
+    "dep:rayzor-plugin",
+    "dep:wgpu",
+    "dep:pollster",
+    "dep:raw-window-handle",
+    "dep:xgpu-core",
+]
 wasm-host = ["dep:wgpu", "dep:wasm-bindgen", "dep:web-sys", "dep:wasm-bindgen-futures", "dep:js-sys"]
 cuda-backend = []
 
