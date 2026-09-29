@@ -994,9 +994,6 @@ pub extern "C" fn haxe_array_join_typed(
     sep: *const HaxeString,
     elem_tag: i32,
 ) -> *mut HaxeString {
-    if elem_tag == 5 {
-        return haxe_array_join(arr, sep);
-    }
     unsafe {
         let result_layout = Layout::new::<HaxeString>();
         let result_ptr = alloc(result_layout) as *mut HaxeString;
@@ -1018,9 +1015,16 @@ pub extern "C" fn haxe_array_join_typed(
         let mut strs: Vec<*mut HaxeString> = Vec::with_capacity(arr_ref.len);
         for i in 0..arr_ref.len {
             let value = *(arr_ref.ptr.add(i * arr_ref.elem_size) as *const i64);
-            strs.push(crate::haxe_sys::haxe_value_to_string_by_tag(
-                value, elem_tag,
-            ));
+            let string = if elem_tag == 5 {
+                // A String inferred through an initially Dynamic array may be boxed.
+                crate::type_system::dynamic_value_if_boxed(value as *mut u8)
+                    .filter(|d| d.type_id == crate::type_system::TYPE_STRING)
+                    .map(|d| d.value_ptr as *mut HaxeString)
+                    .unwrap_or(value as *mut HaxeString)
+            } else {
+                crate::haxe_sys::haxe_value_to_string_by_tag(value, elem_tag)
+            };
+            strs.push(string);
         }
 
         let mut total_len: usize = 0;

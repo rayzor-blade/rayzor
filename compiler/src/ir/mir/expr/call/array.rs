@@ -116,7 +116,7 @@ impl<'a> HirToMirContext<'a> {
         // runtime entry — value stays F64 (→ WASM f64, full 8 bytes). This
         // matches the array-literal lowering and is bit-identical on native.
         if vname == "push" && *is_method && args.len() == 2 {
-            let elem_is_f64 = {
+            let (elem_is_f64, elem_is_dynamic) = {
                 let type_table = self.type_table;
                 type_table
                     .get(args[0].ty)
@@ -127,9 +127,38 @@ impl<'a> HirToMirContext<'a> {
                             None
                         }
                     })
-                    .map(|et| self.convert_type(et) == IrType::F64)
-                    .unwrap_or(false)
+                    .map(|et| {
+                        (
+                            self.convert_type(et) == IrType::F64,
+                            matches!(type_table.get(et).map(|t| &t.kind), Some(TypeKind::Dynamic)),
+                        )
+                    })
+                    .unwrap_or((false, false))
             };
+            // Dynamic string slots need a tag for value-based equality.
+            if elem_is_dynamic && self.convert_type(args[1].ty) == IrType::String {
+                let arr = self.lower_expression(&args[0])?;
+                let value = self.lower_expression(&args[1])?;
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let raw = self.builder.build_bitcast(value, ptr_u8.clone())?;
+                let box_fn = self.get_or_register_extern_function(
+                    "haxe_box_haxestring_ptr",
+                    vec![ptr_u8.clone()],
+                    ptr_u8,
+                );
+                let boxed = self.builder.build_call_direct(
+                    box_fn,
+                    vec![raw],
+                    IrType::Ptr(Box::new(IrType::U8)),
+                )?;
+                let slot = self.builder.build_bitcast(boxed, IrType::I64)?;
+                let push = self.get_or_register_extern_function(
+                    "haxe_array_push_i64",
+                    vec![IrType::Ptr(Box::new(IrType::I64)), IrType::I64],
+                    IrType::Void,
+                );
+                return self.builder.build_call_direct(push, vec![arr, slot], IrType::Void);
+            }
             if elem_is_f64 {
                 if let (Some(arr_reg), Some(val_reg)) = (
                     self.lower_expression(&args[0]),
