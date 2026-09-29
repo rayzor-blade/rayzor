@@ -150,7 +150,7 @@ impl<'a> HirToMirContext<'a> {
                 (Some(TypeKind::Class { .. }), Some(TypeKind::Class { .. }))
                     | (
                         Some(TypeKind::Class { .. }),
-                        Some(TypeKind::Interface { .. })
+                        Some(TypeKind::Interface { .. } | TypeKind::Anonymous { .. })
                     )
                     | (
                         Some(TypeKind::Interface { .. }),
@@ -406,6 +406,11 @@ impl<'a> HirToMirContext<'a> {
                 } else {
                     Some(value_reg)
                 }
+            }
+
+            (Some(TypeKind::Class { .. }), Some(TypeKind::Anonymous { .. })) => {
+                let value = self.lower_expression(expr)?;
+                self.materialize_class_to_anon(value, expr.ty, *target)
             }
 
             // Class → Class safe cast: runtime downcast via object header

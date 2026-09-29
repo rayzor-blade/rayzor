@@ -134,6 +134,17 @@ impl<'a> HirToMirContext<'a> {
                     // first, since a slot found by name would be the wrong one;
                     // a read consults it last.
                     for field in &abstract_decl.fields {
+                        if let Some(owner) = self
+                            .symbol_table
+                            .get_symbol(abstract_decl.symbol_id)
+                            .and_then(|s| {
+                                self.string_interner.get(s.qualified_name.unwrap_or(s.name))
+                            })
+                        {
+                            self.field_class_names
+                                .entry(field.symbol_id)
+                                .or_insert_with(|| owner.to_owned());
+                        }
                         if let Some(info) = &field.property_access {
                             let is_method = |a: &crate::tast::PropertyAccessor| {
                                 matches!(a, crate::tast::PropertyAccessor::Method(_))

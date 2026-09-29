@@ -1557,6 +1557,39 @@ impl<'a> HirToMirContext<'a> {
 
     /// Lower a HIR block expression to MIR, returning the trailing expression's value
     pub(crate) fn lower_block_expr(&mut self, block: &HirBlock) -> Option<IrId> {
+        // Assignment to a write-only interface slot yields the stored value;
+        // its synthetic read-back cannot go through a getter.
+        if let [
+            HirStatement::Assign {
+                lhs: HirLValue::Field { object, field },
+                rhs,
+                op: None,
+            },
+        ] = block.statements.as_slice()
+        {
+            let write_only_slot = self
+                .interface_property_access(object.ty, *field)
+                .is_some_and(|info| {
+                    matches!(
+                        info.getter,
+                        crate::tast::PropertyAccessor::Never | crate::tast::PropertyAccessor::Null
+                    ) && matches!(
+                        info.setter,
+                        crate::tast::PropertyAccessor::Default
+                            | crate::tast::PropertyAccessor::Dynamic
+                    )
+                });
+            if write_only_slot
+                && matches!(block.expr.as_deref().map(|e| &e.kind),
+                Some(HirExprKind::Field { field: result_field, .. }) if result_field == field)
+            {
+                let value = self.lower_expression(rhs)?;
+                let receiver = self.lower_expression(object)?;
+                self.store_field_with_regs(receiver, object, field, value);
+                return Some(value);
+            }
+        }
+
         // A block's value is its last expression, and a trailing semicolon does
         // not change that in Haxe -- `{ f(x); }` evaluates to `f(x)`. Only a
         // block with no trailing semicolon reaches `block.expr`, so returning

@@ -197,6 +197,14 @@ impl<'a> HirToMirContext<'a> {
             return;
         }
         if self.get_interface_symbol(object.ty).is_some() {
+            if let Some(crate::tast::PropertyAccessor::Method(setter)) = self
+                .interface_property_access(object.ty, *field)
+                .map(|info| info.setter)
+            {
+                let result_ty = self.builder.get_register_type(value).unwrap_or(IrType::I32);
+                self.call_interface_accessor(obj_reg, object.ty, setter, Some(value), result_ty);
+                return;
+            }
             let ptr_ty = IrType::Ptr(Box::new(IrType::U8));
             let Some(object_ptr) = self.builder.build_load(obj_reg, ptr_ty.clone()) else {
                 return;
@@ -251,6 +259,17 @@ impl<'a> HirToMirContext<'a> {
                 {
                     let setter_func_id = self
                         .resolve_method_function_id(object.ty, *setter_method_name)
+                        .or_else(|| {
+                            let ty = self.resolve_through_aliases(object.ty);
+                            let TypeKind::Abstract { symbol_id, .. } =
+                                &self.type_table.get(ty)?.kind
+                            else {
+                                return None;
+                            };
+                            let method =
+                                self.resolve_class_method_symbol(*symbol_id, *setter_method_name)?;
+                            self.resolve_function_id_with_qualified_fallback(method)
+                        })
                         .or_else(|| {
                             self.function_map
                                 .iter()

@@ -147,6 +147,7 @@ impl<'a> HirToMirContext<'a> {
         let field_ty = resolved_field_ty.unwrap_or(field_ty);
 
         let receiver_is_interface = self.get_interface_symbol(receiver_ty).is_some();
+        let interface_receiver = obj;
         let obj = if receiver_is_interface {
             self.builder
                 .build_load(obj, IrType::Ptr(Box::new(IrType::U8)))?
@@ -369,7 +370,11 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Property with a custom getter: SymbolId lookup first, then by name.
-        let mut property_info_owned = self.property_access_map.get(&field).cloned();
+        let mut property_info_owned = if receiver_is_interface {
+            self.interface_property_access(receiver_ty, field)
+        } else {
+            self.property_access_map.get(&field).cloned()
+        };
         // An anonymous object's field is its own, and a built-in (Array,
         // String, Map) has no user properties: a same-named property getter on
         // some class (`StringBuf.length`, `Vector.length`) must not answer
@@ -397,7 +402,11 @@ impl<'a> HirToMirContext<'a> {
                 )
             )
         };
-        if property_info_owned.is_none() && !receiver_is_anon {
+        // Structural fields do not inherit accessors from same-named class fields.
+        if receiver_is_anon {
+            property_info_owned = None;
+        }
+        if property_info_owned.is_none() && !receiver_is_anon && !receiver_is_interface {
             // Name-based fallback: SymbolIds may differ between import and user modules.
             // Prefer entries with `Method(...)` getters over `Default` — orphan entries
             // from prior BLADE cache loads (with empty class_name and Default getter)
@@ -510,6 +519,15 @@ impl<'a> HirToMirContext<'a> {
                 crate::tast::PropertyAccessor::Method(getter_method_name)
                     if !self.is_inside_own_accessor(obj, *getter_method_name) =>
                 {
+                    if receiver_is_interface {
+                        return self.call_interface_accessor(
+                            interface_receiver,
+                            receiver_ty,
+                            *getter_method_name,
+                            None,
+                            self.convert_type(field_ty),
+                        );
+                    }
                     // The receiver's own class first. The scans below match on the
                     // BARE method name across every module in the session, and
                     // `get_length` is declared by several stdlib classes — the

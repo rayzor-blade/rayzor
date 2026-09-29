@@ -788,8 +788,16 @@ impl<'a> TastToHirContext<'a> {
             })
             .collect();
 
-        // Interfaces don't have fields in Haxe, only properties (which are methods)
-        let hir_fields: Vec<HirInterfaceField> = Vec::new();
+        let hir_fields = interface
+            .fields
+            .iter()
+            .map(|field| HirInterfaceField {
+                symbol_id: field.symbol_id,
+                name: field.name,
+                ty: field.field_type,
+                property_access: field.property_access.clone(),
+            })
+            .collect();
 
         // Create type ID from symbol ID (simplified)
         let type_id = TypeId::from_raw(interface.symbol_id.as_raw());
@@ -3863,26 +3871,48 @@ impl<'a> TastToHirContext<'a> {
             return arg;
         };
 
-        // Check: target is Interface, arg.ty is Class implementing it.
-        let (tgt_is_iface, arg_is_class) = {
+        self.coerce_parameter_argument(arg, target_iface_type, source_location, false)
+    }
+
+    /// Preserve representation changes when a formal parameter is substituted.
+    fn coerce_parameter_argument(
+        &mut self,
+        mut arg: HirExpr,
+        target_type: TypeId,
+        source_location: SourceLocation,
+        include_structural: bool,
+    ) -> HirExpr {
+        let (target_iface_type, source_type) = {
+            let table = self.type_table.borrow();
+            let resolve = |mut ty| {
+                for _ in 0..table.len() {
+                    match table.get(ty).map(|t| &t.kind) {
+                        Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                        _ => break,
+                    }
+                }
+                ty
+            };
+            (resolve(target_type), resolve(arg.ty))
+        };
+        let (target_needs_wrapper, arg_is_class) = {
             let type_table = self.type_table.borrow();
-            let tgt_iface = matches!(
-                type_table.get(target_iface_type).map(|t| &t.kind),
-                Some(crate::tast::TypeKind::Interface { .. })
-            );
+            let target_kind = type_table.get(target_iface_type).map(|t| &t.kind);
+            let target_needs_wrapper = matches!(target_kind, Some(TypeKind::Interface { .. }))
+                || (include_structural && matches!(target_kind, Some(TypeKind::Anonymous { .. })));
             let arg_class = matches!(
-                type_table.get(arg.ty).map(|t| &t.kind),
+                type_table.get(source_type).map(|t| &t.kind),
                 Some(crate::tast::TypeKind::Class { .. })
             );
-            (tgt_iface, arg_class)
+            (target_needs_wrapper, arg_class)
         };
-        if !tgt_is_iface || !arg_is_class {
+        if !target_needs_wrapper || !arg_is_class {
             return arg;
         }
 
-        // Wrap in Cast(arg → interface). MIR's Class→Interface Cast arm emits
-        // the fat-pointer wrap, and keeps the arg's HIR type the CLASS inside
-        // the cast so the wrap's class identity survives.
+        arg.ty = source_type;
+        // Keep the concrete source type inside the cast so MIR can build
+        // the interface or structural representation required by the parameter.
         HirExpr::new(
             HirExprKind::Cast {
                 expr: Box::new(arg),
@@ -6078,7 +6108,13 @@ impl<'a> TastToHirContext<'a> {
         }
         let mut param_map: BTreeMap<SymbolId, HirExpr> = BTreeMap::new();
         for (param, arg) in ctor.parameters.iter().zip(arguments.iter()) {
-            param_map.insert(param.symbol_id, arg.clone());
+            let coerced = self.coerce_parameter_argument(
+                arg.clone(),
+                param.param_type,
+                arg.source_location,
+                true,
+            );
+            param_map.insert(param.symbol_id, coerced);
         }
 
         // The body computes the UNDERLYING value, not the abstract: `this = f * 2`
@@ -7040,12 +7076,18 @@ impl<'a> TastToHirContext<'a> {
             } if matches!(&object.kind, TypedExpressionKind::Variable { symbol_id } if param_map.contains_key(symbol_id))
                 || matches!(&object.kind, TypedExpressionKind::This { .. }) =>
             {
-                let lowered_object = self.inline_expression_deep(
+                let mut lowered_object = self.inline_expression_deep(
                     object,
                     this_replacement,
                     param_map,
                     object.expr_type,
                 );
+                // An abstract's `this` accesses fields on its underlying type.
+                if matches!(object.kind, TypedExpressionKind::This { .. })
+                    && object.expr_type.is_valid()
+                {
+                    lowered_object.ty = object.expr_type;
+                }
                 HirExpr::new(
                     HirExprKind::Field {
                         object: Box::new(lowered_object),

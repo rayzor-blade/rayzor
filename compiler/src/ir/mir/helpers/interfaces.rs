@@ -22,6 +22,80 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    pub(crate) fn interface_property_access(
+        &self,
+        receiver_ty: TypeId,
+        field: SymbolId,
+    ) -> Option<crate::tast::PropertyAccessInfo> {
+        let interface = self.get_interface_symbol(receiver_ty)?;
+        let name = self.symbol_table.get_symbol(field)?.name;
+        let mut pending = vec![interface];
+        let mut visited = BTreeSet::new();
+        while let Some(interface) = pending.pop() {
+            if !visited.insert(interface) {
+                continue;
+            }
+            let symbol = self.symbol_table.get_symbol(interface)?;
+            let owner = self
+                .string_interner
+                .get(symbol.qualified_name.unwrap_or(symbol.name))?;
+            for (field, info) in &self.property_access_map {
+                if self
+                    .symbol_table
+                    .get_symbol(*field)
+                    .is_some_and(|s| s.name == name)
+                    && self
+                        .field_class_names
+                        .get(field)
+                        .is_some_and(|n| n == owner)
+                {
+                    return Some(info.clone());
+                }
+            }
+            if let Some(parents) = self.interface_extends.get(&interface) {
+                pending.extend(parents);
+            }
+        }
+        None
+    }
+
+    /// Call a property accessor through the receiver's interface table.
+    pub(crate) fn call_interface_accessor(
+        &mut self,
+        receiver: IrId,
+        receiver_ty: TypeId,
+        accessor: InternedString,
+        value: Option<IrId>,
+        result_ty: IrType,
+    ) -> Option<IrId> {
+        let interface = self.get_interface_symbol(receiver_ty)?;
+        let names = self.resolve_interface_method_names(interface)?;
+        let index = names.iter().position(|name| *name == accessor)?;
+        let object = self.builder.build_load(receiver, IrType::I64)?;
+        let offset = self
+            .builder
+            .build_const(IrValue::I64(((index + 1) * 8) as i64))?;
+        let slot =
+            self.builder
+                .build_ptr_add(receiver, offset, IrType::Ptr(Box::new(IrType::U8)))?;
+        let function = self.builder.build_load(slot, IrType::I64)?;
+        let mut args = vec![object];
+        let mut params = vec![IrType::Ptr(Box::new(IrType::Void))];
+        if let Some(value) = value {
+            params.push(self.builder.get_register_type(value)?);
+            args.push(value);
+        }
+        self.builder.build_call_indirect(
+            function,
+            args,
+            IrType::Function {
+                params,
+                return_type: Box::new(result_ty),
+                varargs: false,
+            },
+        )
+    }
+
     /// Wrap a class instance in an interface fat pointer.
     /// Fat pointer layout: { object_ptr: i64, fn_ptr_0: i64, fn_ptr_1: i64, ... }
     /// One slot per interface method, in the interface's method order.

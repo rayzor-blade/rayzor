@@ -1695,6 +1695,9 @@ pub struct TypedInterface {
     /// Method signatures
     pub methods: Vec<TypedMethodSignature>,
 
+    /// Field and property declarations.
+    pub fields: Vec<TypedField>,
+
     /// Generic type parameters
     pub type_parameters: Vec<TypedTypeParameter>,
 

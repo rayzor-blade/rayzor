@@ -740,6 +740,31 @@ impl<'a> HirToMirContext<'a> {
                 .insert((interface.symbol_id, method.name), method.return_type);
         }
 
+        // Computed interface properties dispatch through the same table as methods.
+        for field in &interface.fields {
+            if let Some(owner) = self
+                .symbol_table
+                .get_symbol(interface.symbol_id)
+                .and_then(|s| self.string_interner.get(s.qualified_name.unwrap_or(s.name)))
+            {
+                self.field_class_names
+                    .insert(field.symbol_id, owner.to_owned());
+            }
+            if let Some(info) = &field.property_access {
+                self.property_access_map
+                    .insert(field.symbol_id, info.clone());
+                for accessor in [&info.getter, &info.setter] {
+                    if let crate::tast::PropertyAccessor::Method(name) = accessor {
+                        if !all_method_names.contains(name) {
+                            all_method_names.push(*name);
+                        }
+                        self.interface_method_return_types
+                            .insert((interface.symbol_id, *name), field.ty);
+                    }
+                }
+            }
+        }
+
         // Store extends relationships for transitive vtable building
         self.interface_extends
             .insert(interface.symbol_id, parent_symbols);

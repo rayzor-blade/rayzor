@@ -687,10 +687,10 @@ pub struct HirMethod {
 
 #[derive(Debug, Clone)]
 pub struct HirInterfaceField {
+    pub symbol_id: SymbolId,
     pub name: InternedString,
     pub ty: TypeId,
-    pub getter: bool,
-    pub setter: bool,
+    pub property_access: Option<crate::tast::node::PropertyAccessInfo>,
 }
 
 #[derive(Debug, Clone)]

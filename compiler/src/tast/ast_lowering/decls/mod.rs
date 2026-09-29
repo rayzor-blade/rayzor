@@ -458,6 +458,7 @@ impl<'a> AstLowering<'a> {
 
         // Process fields - separate method signatures from other fields
         let mut method_signatures = Vec::with_capacity(interface_decl.fields.len());
+        let mut fields = Vec::new();
         for field in &interface_decl.fields {
             match &field.kind {
                 ClassFieldKind::Function(func) => {
@@ -477,6 +478,7 @@ impl<'a> AstLowering<'a> {
                                 .entry(interface_symbol)
                                 .or_default()
                                 .push((typed.name, typed.symbol_id, typed.is_static));
+                            fields.push(typed);
                         }
                         Err(e) => self.context.add_error(e),
                     }
@@ -519,6 +521,7 @@ impl<'a> AstLowering<'a> {
             name: interface_name,
             extends,
             methods: method_signatures,
+            fields,
             type_parameters: type_params,
             visibility: self.lower_access(&interface_decl.access),
             source_location: self.context.create_location_from_span(interface_decl.span),

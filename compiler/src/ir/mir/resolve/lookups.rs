@@ -300,6 +300,7 @@ impl<'a> HirToMirContext<'a> {
     /// Check if a type is an interface type and return its SymbolId.
     /// Also handles TypeParameters with interface constraints (T:Printable).
     pub(crate) fn get_interface_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
+        let type_id = self.resolve_through_aliases(type_id);
         let type_table = self.type_table;
         let type_ref = type_table.get(type_id)?;
         match &type_ref.kind {
