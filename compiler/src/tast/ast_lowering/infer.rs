@@ -618,7 +618,7 @@ impl<'a> AstLowering<'a> {
                 if let Some(symbol) = self.context.symbol_table.get_symbol(*field_symbol) {
                     // Check if this is a valid typed symbol
                     if symbol.type_id.is_valid() {
-                        Ok(symbol.type_id)
+                        Ok(self.substitute_receiver_type(symbol.type_id, object.expr_type))
                     } else {
                         // Handle built-in method access for Array, String, etc.
                         self.infer_builtin_method_type(object.expr_type, *field_symbol)

@@ -910,6 +910,57 @@ impl<'a> HirToMirContext<'a> {
         // cleared heap-tracking state and doesn't double-count escapes.
         self.enter_drop_scope();
 
+        // Imported calls can supply null without carrying the HIR default.
+        // Reference defaults also apply when the caller explicitly passes null.
+        for param in &constructor.params {
+            let Some(default) = &param.default else {
+                continue;
+            };
+            if !matches!(self.convert_type(param.ty), IrType::String | IrType::Ptr(_))
+                || matches!(default.kind, HirExprKind::Null)
+            {
+                continue;
+            }
+            let value = HirExpr::new(
+                HirExprKind::Variable {
+                    symbol: param.symbol_id,
+                    capture_mode: None,
+                },
+                param.ty,
+                default.lifetime,
+                default.source_location,
+            );
+            let null = HirExpr::new(
+                HirExprKind::Null,
+                param.ty,
+                default.lifetime,
+                default.source_location,
+            );
+            let condition = HirExpr::new(
+                HirExprKind::Binary {
+                    op: HirBinaryOp::Eq,
+                    lhs: Box::new(value.clone()),
+                    rhs: Box::new(null),
+                },
+                self.type_table.bool_type(),
+                default.lifetime,
+                default.source_location,
+            );
+            let normalized = HirExpr::new(
+                HirExprKind::If {
+                    condition: Box::new(condition),
+                    then_expr: Box::new(default.clone()),
+                    else_expr: Box::new(value),
+                },
+                param.ty,
+                default.lifetime,
+                default.source_location,
+            );
+            if let Some(reg) = self.lower_expression(&normalized) {
+                self.symbol_map.insert(param.symbol_id, reg);
+            }
+        }
+
         // Execute pre-super statements (e.g., field assignments that come before
         // super() in the source code and are needed by virtual methods called from super)
         for stmt in &constructor.pre_super_stmts {

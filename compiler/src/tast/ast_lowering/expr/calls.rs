@@ -3065,6 +3065,17 @@ impl<'a> AstLowering<'a> {
         ty: TypeId,
         bindings: &[(SymbolId, TypeId)],
     ) -> TypeId {
+        self.substitute_type_bindings(ty, bindings, true)
+    }
+
+    /// Class arguments substitute simultaneously: `C<Array<T>>` must retain the
+    /// caller's T inside Array instead of expanding it through the same binding.
+    pub(crate) fn substitute_type_bindings(
+        &self,
+        ty: TypeId,
+        bindings: &[(SymbolId, TypeId)],
+        expand_bindings: bool,
+    ) -> TypeId {
         use crate::tast::core::{AnonymousField, TypeKind};
         if bindings.is_empty() {
             return ty;
@@ -3077,13 +3088,16 @@ impl<'a> AstLowering<'a> {
             .map(|i| i.kind.clone());
         let sub = |ids: &[TypeId]| -> Vec<TypeId> {
             ids.iter()
-                .map(|t| self.substitute_alias_args(*t, bindings))
+                .map(|t| self.substitute_type_bindings(*t, bindings, expand_bindings))
                 .collect()
         };
         let rebuilt = match kind {
             Some(TypeKind::TypeParameter { symbol_id, .. }) => {
                 return match bindings.iter().find(|(p, _)| *p == symbol_id) {
-                    Some((_, a)) => self.substitute_alias_args(*a, bindings),
+                    Some((_, a)) if expand_bindings => {
+                        self.substitute_type_bindings(*a, bindings, expand_bindings)
+                    }
+                    Some((_, a)) => *a,
                     None => ty,
                 };
             }
@@ -3133,7 +3147,7 @@ impl<'a> AstLowering<'a> {
                 }
             }
             Some(TypeKind::Array { element_type }) => {
-                let elem = self.substitute_alias_args(element_type, bindings);
+                let elem = self.substitute_type_bindings(element_type, bindings, expand_bindings);
                 if elem == element_type {
                     return ty;
                 }
@@ -3145,7 +3159,7 @@ impl<'a> AstLowering<'a> {
                 effects,
             }) => {
                 let p = sub(&params);
-                let r = self.substitute_alias_args(return_type, bindings);
+                let r = self.substitute_type_bindings(return_type, bindings, expand_bindings);
                 if p == params && r == return_type {
                     return ty;
                 }
@@ -3160,7 +3174,11 @@ impl<'a> AstLowering<'a> {
                     .iter()
                     .map(|f| AnonymousField {
                         name: f.name,
-                        type_id: self.substitute_alias_args(f.type_id, bindings),
+                        type_id: self.substitute_type_bindings(
+                            f.type_id,
+                            bindings,
+                            expand_bindings,
+                        ),
                         is_public: f.is_public,
                         optional: f.optional,
                     })
@@ -3191,7 +3209,7 @@ impl<'a> AstLowering<'a> {
                     .create_class_type(symbol_id, args);
             }
             Some(TypeKind::Optional { inner_type }) => {
-                let inner = self.substitute_alias_args(inner_type, bindings);
+                let inner = self.substitute_type_bindings(inner_type, bindings, expand_bindings);
                 if inner == inner_type {
                     return ty;
                 }
@@ -3824,7 +3842,7 @@ impl<'a> AstLowering<'a> {
     }
 
     /// The type parameters a type mentions anywhere inside it.
-    fn collect_type_param_symbols(
+    pub(crate) fn collect_type_param_symbols(
         &self,
         ty: TypeId,
         depth: u32,
@@ -3867,14 +3885,25 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    /// What `iterator()` returning `iter` yields, bound against `element`:
-    /// an `Iterator<X>` or a structure with `next():X` binds X.
+    /// Infer concrete argument bindings without binding another generic parameter.
+    pub(crate) fn unify_type_args(
+        &self,
+        declared: TypeId,
+        actual: TypeId,
+        depth: u32,
+        out: &mut Vec<(SymbolId, TypeId)>,
+    ) {
+        self.unify_type_args_inner(declared, actual, depth, out, false);
+    }
+
+    /// What `iterator()` returning `iter` yields, bound against `element`.
     fn unify_iterator_element(
         &self,
         iter: TypeId,
         element: TypeId,
         depth: u32,
         out: &mut Vec<(SymbolId, TypeId)>,
+        bind_parameters: bool,
     ) {
         use crate::tast::core::TypeKind;
         if depth > 8 {
@@ -3903,7 +3932,7 @@ impl<'a> AstLowering<'a> {
                         _ => None,
                     };
                     if let Some(ret) = ret {
-                        self.unify_type_args(ret, element, depth + 1, out);
+                        self.unify_type_args_inner(ret, element, depth + 1, out, bind_parameters);
                     }
                 }
             }
@@ -3915,7 +3944,7 @@ impl<'a> AstLowering<'a> {
                 let bindings = self.alias_bindings(symbol_id, &type_args);
                 let expanded = self.substitute_alias_args(target_type, &bindings);
                 if expanded != iter {
-                    self.unify_iterator_element(expanded, element, depth + 1, out);
+                    self.unify_iterator_element(expanded, element, depth + 1, out, bind_parameters);
                 }
             }
             Some(TypeKind::Class {
@@ -3930,7 +3959,7 @@ impl<'a> AstLowering<'a> {
                 if resolved != iter {
                     let bindings = self.alias_bindings(symbol_id, &type_args);
                     let expanded = self.substitute_alias_args(resolved, &bindings);
-                    self.unify_iterator_element(expanded, element, depth + 1, out);
+                    self.unify_iterator_element(expanded, element, depth + 1, out, bind_parameters);
                 }
             }
             _ => {}
@@ -3942,12 +3971,14 @@ impl<'a> AstLowering<'a> {
     /// reaches T, and `Iterable<T>` against `{ iterator: f }` reaches T
     /// through the alias's structure. Depth-bounded because a type can be
     /// cyclic.
-    pub(crate) fn unify_type_args(
+    /// Constructors also preserve bindings to their caller's type parameters.
+    pub(crate) fn unify_type_args_inner(
         &self,
         declared: TypeId,
         actual: TypeId,
         depth: u32,
         out: &mut Vec<(SymbolId, TypeId)>,
+        bind_parameters: bool,
     ) {
         use crate::tast::core::TypeKind;
         if depth > 8 {
@@ -3966,24 +3997,20 @@ impl<'a> AstLowering<'a> {
             // disagreement. `aeq([1,2,3], xs)` where `xs` inferred as
             // Array<Dynamic> still pins T from the first argument.
             (TypeKind::TypeParameter { symbol_id, .. }, _) => {
-                let uninformative = matches!(
-                    a,
-                    TypeKind::TypeParameter { .. }
-                        | TypeKind::Dynamic
-                        | TypeKind::Unknown
-                        | TypeKind::Error
-                );
-                if !uninformative {
+                let uninformative =
+                    matches!(a, TypeKind::Dynamic | TypeKind::Unknown | TypeKind::Error)
+                        || (!bind_parameters && matches!(a, TypeKind::TypeParameter { .. }));
+                if !uninformative && (bind_parameters || declared != actual) {
                     out.push((*symbol_id, actual));
                 }
             }
             (TypeKind::Array { element_type: de }, TypeKind::Array { element_type: ae }) => {
-                self.unify_type_args(*de, *ae, depth + 1, out)
+                self.unify_type_args_inner(*de, *ae, depth + 1, out, bind_parameters)
             }
             (
                 TypeKind::Optional { inner_type: di, .. },
                 TypeKind::Optional { inner_type: ai, .. },
-            ) => self.unify_type_args(*di, *ai, depth + 1, out),
+            ) => self.unify_type_args_inner(*di, *ai, depth + 1, out, bind_parameters),
             (
                 TypeKind::Function {
                     params: dp,
@@ -3997,14 +4024,20 @@ impl<'a> AstLowering<'a> {
                 },
             ) => {
                 for (x, y) in dp.iter().zip(ap.iter()) {
-                    self.unify_type_args(*x, *y, depth + 1, out);
+                    self.unify_type_args_inner(*x, *y, depth + 1, out, bind_parameters);
                 }
-                self.unify_type_args(*dr, *ar, depth + 1, out);
+                self.unify_type_args_inner(*dr, *ar, depth + 1, out, bind_parameters);
             }
             (TypeKind::Anonymous { fields: df }, TypeKind::Anonymous { fields: af }) => {
                 for f in df {
                     if let Some(g) = af.iter().find(|g| g.name == f.name) {
-                        self.unify_type_args(f.type_id, g.type_id, depth + 1, out);
+                        self.unify_type_args_inner(
+                            f.type_id,
+                            g.type_id,
+                            depth + 1,
+                            out,
+                            bind_parameters,
+                        );
                     }
                 }
             }
@@ -4025,7 +4058,13 @@ impl<'a> AstLowering<'a> {
                         _ => None,
                     };
                     if let Some(ret) = ret {
-                        self.unify_iterator_element(ret, *element_type, depth + 1, out);
+                        self.unify_iterator_element(
+                            ret,
+                            *element_type,
+                            depth + 1,
+                            out,
+                            bind_parameters,
+                        );
                     }
                 }
             }
@@ -4039,7 +4078,7 @@ impl<'a> AstLowering<'a> {
                     else {
                         continue;
                     };
-                    self.unify_type_args(f.type_id, mt, depth + 1, out);
+                    self.unify_type_args_inner(f.type_id, mt, depth + 1, out, bind_parameters);
                 }
             }
             // The same generic type on both sides: its arguments pair up.
@@ -4056,7 +4095,7 @@ impl<'a> AstLowering<'a> {
                 },
             ) if ds == as_ => {
                 for (x, y) in da.iter().zip(aa.iter()) {
-                    self.unify_type_args(*x, *y, depth + 1, out);
+                    self.unify_type_args_inner(*x, *y, depth + 1, out, bind_parameters);
                 }
             }
             (
@@ -4070,7 +4109,7 @@ impl<'a> AstLowering<'a> {
                 },
             ) if ds == as_ => {
                 for (x, y) in da.iter().zip(aa.iter()) {
-                    self.unify_type_args(*x, *y, depth + 1, out);
+                    self.unify_type_args_inner(*x, *y, depth + 1, out, bind_parameters);
                 }
             }
             // An alias against anything else: its structure, with the alias's
@@ -4086,7 +4125,7 @@ impl<'a> AstLowering<'a> {
                 let bindings = self.alias_bindings(*symbol_id, type_args);
                 let expanded = self.substitute_alias_args(*target_type, &bindings);
                 if expanded != declared {
-                    self.unify_type_args(expanded, actual, depth + 1, out);
+                    self.unify_type_args_inner(expanded, actual, depth + 1, out, bind_parameters);
                 }
             }
             // `Iterable<T>` / `Iterator<T>` against an array: T is its element.
@@ -4104,7 +4143,13 @@ impl<'a> AstLowering<'a> {
                     .and_then(|s| self.context.string_interner.get(s.name))
                     .is_some_and(|n| n == "Iterable" || n == "Iterator") =>
             {
-                self.unify_type_args(type_args[0], *element_type, depth + 1, out)
+                self.unify_type_args_inner(
+                    type_args[0],
+                    *element_type,
+                    depth + 1,
+                    out,
+                    bind_parameters,
+                )
             }
             // A typedef pre-registered as a class keeps that symbol kind; its
             // declaration is the alias to expand.
@@ -4122,7 +4167,7 @@ impl<'a> AstLowering<'a> {
                 if resolved != declared && resolved != dynamic {
                     let bindings = self.alias_bindings(*symbol_id, type_args);
                     let expanded = self.substitute_alias_args(resolved, &bindings);
-                    self.unify_type_args(expanded, actual, depth + 1, out);
+                    self.unify_type_args_inner(expanded, actual, depth + 1, out, bind_parameters);
                 }
             }
             _ => {}
@@ -4459,6 +4504,23 @@ impl<'a> AstLowering<'a> {
         method_symbol: SymbolId,
         receiver_type: TypeId,
     ) -> LoweringResult<TypeId> {
+        let declared_return = {
+            let tt = self.context.type_table.borrow();
+            self.context
+                .symbol_table
+                .get_symbol(method_symbol)
+                .and_then(|s| tt.get(s.type_id))
+                .and_then(|t| match t.kind {
+                    TypeKind::Function { return_type, .. } => Some(return_type),
+                    _ => None,
+                })
+        };
+        if let Some(declared) = declared_return {
+            let resolved = self.substitute_receiver_type(declared, receiver_type);
+            if resolved != declared {
+                return Ok(resolved);
+            }
+        }
         // Phase 1: Collect all necessary information with immutable borrow
         let substitution_result = {
             let type_table = self.context.type_table.borrow();

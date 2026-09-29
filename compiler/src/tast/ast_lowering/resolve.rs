@@ -262,7 +262,7 @@ impl<'a> AstLowering<'a> {
         if sym.kind == crate::tast::symbols::SymbolKind::Function {
             return None;
         }
-        let fn_type = sym.type_id;
+        let fn_type = self.substitute_receiver_type(sym.type_id, receiver_type);
         let is_fn = self
             .context
             .type_table

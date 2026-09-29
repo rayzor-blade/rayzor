@@ -141,26 +141,19 @@ pub extern "C" fn haxe_string_concat_ptr(
 /// Concatenate two strings (returns value - may have ABI issues with large structs)
 fn haxe_string_concat_impl(a: *const HaxeString, b: *const HaxeString) -> HaxeString {
     unsafe {
-        if a.is_null() && b.is_null() {
-            return haxe_string_new();
-        }
-
+        let null_string = HaxeString {
+            ptr: b"null".as_ptr() as *mut u8,
+            len: 4,
+            cap: 0,
+        };
         let a_ref = if a.is_null() {
-            &HaxeString {
-                ptr: ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            }
+            &null_string
         } else {
             &*a
         };
 
         let b_ref = if b.is_null() {
-            &HaxeString {
-                ptr: ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            }
+            &null_string
         } else {
             &*b
         };

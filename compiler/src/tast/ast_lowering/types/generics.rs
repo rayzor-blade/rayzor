@@ -15,6 +15,83 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// Bind a member's declared type to the receiver's class arguments.
+    pub(crate) fn substitute_receiver_type(&self, member_type: TypeId, receiver: TypeId) -> TypeId {
+        let mut bindings = {
+            let tt = self.context.type_table.borrow();
+            let (params, args) = match tt.get(receiver).map(|t| &t.kind) {
+                Some(TypeKind::Class {
+                    symbol_id,
+                    type_args,
+                })
+                | Some(TypeKind::Interface {
+                    symbol_id,
+                    type_args,
+                })
+                | Some(TypeKind::Abstract {
+                    symbol_id,
+                    type_args,
+                    ..
+                }) => {
+                    let params = self
+                        .context
+                        .symbol_table
+                        .get_class_type_params(*symbol_id)
+                        .or_else(|| self.class_type_params.get(symbol_id));
+                    let Some(params) = params else {
+                        return member_type;
+                    };
+                    (params.as_slice(), type_args.as_slice())
+                }
+                Some(TypeKind::GenericInstance {
+                    base_type,
+                    type_args,
+                    ..
+                }) => match tt.get(*base_type).map(|t| &t.kind) {
+                    Some(TypeKind::Class {
+                        type_args: params, ..
+                    })
+                    | Some(TypeKind::Interface {
+                        type_args: params, ..
+                    }) => (params.as_slice(), type_args.as_slice()),
+                    _ => return member_type,
+                },
+                _ => return member_type,
+            };
+            params
+                .iter()
+                .zip(args)
+                .filter_map(|(param, arg)| match tt.get(*param).map(|t| &t.kind) {
+                    Some(TypeKind::TypeParameter { symbol_id, .. }) if param != arg => {
+                        Some((*symbol_id, *arg))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        // Imported declarations can retain a different symbol for the same
+        // class parameter. Match its declared name within this receiver.
+        let mut mentioned = std::collections::BTreeSet::new();
+        self.collect_type_param_symbols(member_type, 0, &mut mentioned);
+        for symbol in mentioned {
+            if bindings.iter().any(|(param, _)| *param == symbol) {
+                continue;
+            }
+            let Some(name) = self.context.symbol_table.get_symbol(symbol).map(|s| s.name) else {
+                continue;
+            };
+            if let Some((_, arg)) = bindings.iter().find(|(param, _)| {
+                self.context
+                    .symbol_table
+                    .get_symbol(*param)
+                    .is_some_and(|s| s.name == name)
+            }) {
+                bindings.push((symbol, *arg));
+            }
+        }
+        self.substitute_type_bindings(member_type, &bindings, false)
+    }
+
     /// A function literal's own type parameters as fresh type variables,
     /// keyed by name for `push_type_parameters`.
     pub(crate) fn function_type_parameter_map(
@@ -425,26 +502,12 @@ impl<'a> AstLowering<'a> {
             }
         };
 
-        // Match TypeParameter params against argument types
-        let mut tp_to_concrete: BTreeMap<TypeId, TypeId> = BTreeMap::new();
-        {
-            let tt = self.context.type_table.borrow();
-            for (i, param_ty) in param_type_ids.iter().enumerate() {
-                if i >= args.len() {
-                    break;
-                }
-                if let Some(param_info) = tt.get(*param_ty) {
-                    if matches!(
-                        param_info.kind,
-                        crate::tast::core::TypeKind::TypeParameter { .. }
-                    ) {
-                        tp_to_concrete.insert(*param_ty, args[i].expr_type);
-                    }
-                }
-            }
+        let mut bindings = Vec::new();
+        for (param, arg) in param_type_ids.iter().zip(args) {
+            self.unify_type_args_inner(*param, arg.expr_type, 0, &mut bindings, true);
         }
 
-        if tp_to_concrete.is_empty() {
+        if bindings.is_empty() {
             return None;
         }
 
@@ -452,10 +515,30 @@ impl<'a> AstLowering<'a> {
         let type_args: Vec<TypeId> = type_param_ids
             .iter()
             .map(|tp_id| {
-                tp_to_concrete
-                    .get(tp_id)
-                    .copied()
-                    .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type())
+                let tt = self.context.type_table.borrow();
+                let Some(TypeKind::TypeParameter { symbol_id, .. }) =
+                    tt.get(*tp_id).map(|t| &t.kind)
+                else {
+                    return tt.dynamic_type();
+                };
+                if let Some((_, arg)) = bindings.iter().rev().find(|(param, _)| param == symbol_id)
+                {
+                    return *arg;
+                }
+                let name = self
+                    .context
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .map(|s| s.name);
+                bindings
+                    .iter()
+                    .rev()
+                    .find_map(|(param, arg)| {
+                        let param_name =
+                            self.context.symbol_table.get_symbol(*param).map(|s| s.name);
+                        (name.is_some() && name == param_name).then_some(*arg)
+                    })
+                    .unwrap_or_else(|| tt.dynamic_type())
             })
             .collect();
 

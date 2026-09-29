@@ -1249,16 +1249,17 @@ impl<'a> AstLowering<'a> {
         };
         let method_symbol = self.resolve_class_method_symbol(class_symbol, method)?;
         let method_type = self.context.symbol_table.get_symbol(method_symbol)?.type_id;
-        match self
+        let return_type = match self
             .context
             .type_table
             .borrow()
             .get(method_type)
             .map(|t| &t.kind)
         {
-            Some(TypeKind::Function { return_type, .. }) => Some(*return_type),
-            _ => None,
-        }
+            Some(TypeKind::Function { return_type, .. }) => *return_type,
+            _ => return None,
+        };
+        Some(self.substitute_receiver_type(return_type, ty))
     }
 
     /// Determine variable usage based on expression kind (simplified for TAST)
