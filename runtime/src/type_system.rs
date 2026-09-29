@@ -264,6 +264,24 @@ static ENUM_NAME_REGISTRY: RwLock<Option<HashMap<String, u32>>> = RwLock::new(No
 /// class type_id -> set of interface type_ids implemented by that class.
 static INTERFACE_IMPL_REGISTRY: RwLock<Option<HashMap<u32, HashSet<u32>>>> = RwLock::new(None);
 
+fn stable_class_type_id(name: &str) -> u32 {
+    let mut hash = 0x811c9dc5u32;
+    for byte in name.bytes() {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    0x1000_0000 | (hash & 0x0fff_ffff)
+}
+
+static STRING_CLASS_INFO: ClassInfo = ClassInfo {
+    name: "String",
+    super_type_id: None,
+    instance_fields: &[],
+    instance_field_types: &[],
+    instance_methods: &[],
+    static_fields: &[],
+};
+
 /// Initialize the type registry with primitive types
 pub fn init_type_system() {
     let mut registry = HashMap::new();
@@ -340,6 +358,24 @@ pub fn init_type_system() {
             class_info: None,
         },
     );
+
+    let string_class_id = stable_class_type_id("String");
+    registry.insert(
+        TypeId(string_class_id),
+        TypeInfo {
+            name: "String",
+            size: std::mem::size_of::<StringPtr>(),
+            align: std::mem::align_of::<StringPtr>(),
+            to_string: string_to_string,
+            enum_info: None,
+            class_info: Some(&STRING_CLASS_INFO),
+        },
+    );
+    CLASS_NAME_REGISTRY
+        .write()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert("String".to_string(), string_class_id);
 
     registry.insert(
         TYPE_FUNCTION,
@@ -683,13 +719,26 @@ unsafe fn build_i64_array(values: &[i64]) -> *mut u8 {
     }
 }
 
+/// Type values stored in Dynamic slots carry their ID inside a box.
+fn reflected_type_id(value: i64) -> u32 {
+    if value > u32::MAX as i64 {
+        if let Some(boxed) = dynamic_value_if_boxed(value as *mut u8) {
+            let payload = boxed.value_ptr as usize;
+            if payload <= u32::MAX as usize {
+                return payload as u32;
+            }
+        }
+    }
+    value as u32
+}
+
 /// Type.getClassName(c) -> String
 /// Takes a type_id (i64), returns the class name as a HaxeString pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_class_name(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref()
-        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(type_info) = registry.get(&TypeId(reflected_type_id(type_id)))
         && let Some(class_info) = &type_info.class_info
     {
         return unsafe { alloc_haxe_string(class_info.name) };
@@ -702,7 +751,7 @@ pub extern "C" fn haxe_type_get_class_name(type_id: i64) -> *mut u8 {
 pub extern "C" fn haxe_type_get_super_class(type_id: i64) -> i64 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref()
-        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(type_info) = registry.get(&TypeId(reflected_type_id(type_id)))
         && let Some(class_info) = &type_info.class_info
         && let Some(super_id) = class_info.super_type_id
     {
@@ -717,7 +766,7 @@ pub extern "C" fn haxe_type_get_super_class(type_id: i64) -> i64 {
 pub extern "C" fn haxe_type_get_instance_fields(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref()
-        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(type_info) = registry.get(&TypeId(reflected_type_id(type_id)))
         && let Some(class_info) = &type_info.class_info
     {
         let mut names = class_info.instance_fields.to_vec();
@@ -746,7 +795,7 @@ pub extern "C" fn haxe_type_get_instance_fields(type_id: i64) -> *mut u8 {
 pub extern "C" fn haxe_type_get_class_fields(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref()
-        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(type_info) = registry.get(&TypeId(reflected_type_id(type_id)))
         && let Some(class_info) = &type_info.class_info
     {
         return unsafe { build_string_array(class_info.static_fields) };
@@ -826,6 +875,7 @@ pub extern "C" fn haxe_type_get_enum(value: i64, type_id: i32) -> i64 {
 /// Allocates a zero-initialized class instance without invoking the constructor.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_create_empty_instance(type_id: i64) -> *mut u8 {
+    let type_id = reflected_type_id(type_id) as i64;
     if type_id <= 0 {
         return std::ptr::null_mut();
     }
@@ -935,6 +985,7 @@ pub(crate) fn class_instance_to_string(
 /// Allocates an object, then invokes its registered constructor wrapper.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_create_instance(type_id: i64, args_ptr: *mut u8) -> *mut u8 {
+    let type_id = reflected_type_id(type_id) as i64;
     let obj = haxe_type_create_empty_instance(type_id);
     if obj.is_null() {
         return std::ptr::null_mut();
@@ -979,7 +1030,7 @@ pub extern "C" fn haxe_type_create_instance(type_id: i64, args_ptr: *mut u8) -> 
 pub extern "C" fn haxe_type_get_enum_constructs(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref()
-        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(type_info) = registry.get(&TypeId(reflected_type_id(type_id)))
         && let Some(enum_info) = &type_info.enum_info
     {
         let names: Vec<&str> = enum_info.variants.iter().map(|v| v.name).collect();
@@ -993,7 +1044,7 @@ pub extern "C" fn haxe_type_get_enum_constructs(type_id: i64) -> *mut u8 {
 pub extern "C" fn haxe_type_get_enum_name(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref()
-        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(type_info) = registry.get(&TypeId(reflected_type_id(type_id)))
         && let Some(enum_info) = &type_info.enum_info
     {
         return unsafe { alloc_haxe_string(enum_info.name) };
@@ -1059,7 +1110,7 @@ unsafe fn haxe_string_ptr_eq(a: i64, b: i64) -> bool {
 pub extern "C" fn haxe_type_all_enums(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref()
-        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(type_info) = registry.get(&TypeId(reflected_type_id(type_id)))
         && let Some(enum_info) = &type_info.enum_info
     {
         let mut values = Vec::new();
@@ -1158,7 +1209,7 @@ pub extern "C" fn haxe_type_create_enum(
 
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref()
-        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(type_info) = registry.get(&TypeId(reflected_type_id(type_id)))
         && let Some(enum_info) = &type_info.enum_info
     {
         for (idx, variant) in enum_info.variants.iter().enumerate() {
@@ -1180,7 +1231,7 @@ pub extern "C" fn haxe_type_create_enum_index(
 ) -> i64 {
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref()
-        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(type_info) = registry.get(&TypeId(reflected_type_id(type_id)))
         && let Some(enum_info) = &type_info.enum_info
         && let Some(variant) = enum_info.variants.get(index as usize)
     {

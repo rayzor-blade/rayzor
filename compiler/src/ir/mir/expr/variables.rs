@@ -95,6 +95,18 @@ impl<'a> HirToMirContext<'a> {
         // Must be before function reference check since class symbols may also map to constructors
         if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
             use crate::tast::SymbolKind;
+            if sym.kind == SymbolKind::Abstract {
+                let builtin = self.string_interner.get(sym.name);
+                let type_id = match builtin {
+                    Some("Bool") => Some(2i64),
+                    Some("Int") => Some(3i64),
+                    Some("Float") => Some(4i64),
+                    _ => None,
+                };
+                if let Some(type_id) = type_id {
+                    return self.builder.build_const(IrValue::I64(type_id));
+                }
+            }
             if sym.kind == SymbolKind::Class {
                 // A class used as a value must carry the same id its object
                 // headers carry, because that is the key the RTTI and

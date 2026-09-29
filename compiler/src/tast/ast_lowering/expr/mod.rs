@@ -2541,6 +2541,11 @@ impl<'a> AstLowering<'a> {
                     self.lower_map_comprehension(for_parts, key, value, &expr_location)?;
                 comprehension.kind
             }
+            ExprKind::CompilerSpecific { target, code, args }
+                if target == "__unprotect__" && args.is_empty() =>
+            {
+                return self.lower_expression(code);
+            }
             ExprKind::CompilerSpecific { target, code, args } => {
                 // Compiler-specific code: __c__("code {0}", arg0)
                 let code_expr = self.lower_expression(code)?;
