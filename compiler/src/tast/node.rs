@@ -666,6 +666,9 @@ pub struct FunctionMetadata {
     /// Stored as (operator_string, params) e.g. ("A + B", [])
     pub operator_metadata: Vec<(String, Vec<String>)>,
 
+    /// Whether an @:op method also accepts the operands in reverse order.
+    pub is_commutative: bool,
+
     /// Whether this function is marked with @:arrayAccess
     pub is_array_access: bool,
 

@@ -764,6 +764,7 @@ impl<'a> AstLowering<'a> {
                 is_override: modifier_info.is_override,
                 overload_signatures,
                 operator_metadata,
+                is_commutative: field.meta.iter().any(|m| m.name == "commutative"),
                 is_array_access,
                 is_from_conversion,
                 is_to_conversion,

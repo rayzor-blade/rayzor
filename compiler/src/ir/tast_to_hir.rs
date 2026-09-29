@@ -72,6 +72,7 @@ pub struct TastToHirContext<'a> {
     /// Seeded from imported/loaded files so `a + b` on a stdlib type like
     /// `Tensor` works from user code.
     class_operator_methods: BTreeMap<(SymbolId, String), SymbolId>,
+    commutative_operator_methods: std::collections::BTreeSet<SymbolId>,
 }
 
 #[derive(Debug)]
@@ -190,6 +191,7 @@ impl<'a> TastToHirContext<'a> {
             stdlib_mapping: StdlibMapping::builtin(),
             inline_var_values: BTreeMap::new(),
             class_operator_methods: BTreeMap::new(),
+            commutative_operator_methods: std::collections::BTreeSet::new(),
         }
     }
 
@@ -222,6 +224,9 @@ impl<'a> TastToHirContext<'a> {
         for file in all {
             for class_def in &file.classes {
                 for method in &class_def.methods {
+                    if method.metadata.is_commutative {
+                        self.commutative_operator_methods.insert(method.symbol_id);
+                    }
                     for (op_str, _params) in &method.metadata.operator_metadata {
                         if let Some(op) = Self::parse_operator_from_metadata(op_str) {
                             let key = Self::op_key_for_binary(&op);
@@ -236,6 +241,9 @@ impl<'a> TastToHirContext<'a> {
             // so that abstract @:op resolves regardless of which file declared it.
             for abstract_def in &file.abstracts {
                 for method in &abstract_def.methods {
+                    if method.metadata.is_commutative {
+                        self.commutative_operator_methods.insert(method.symbol_id);
+                    }
                     if method.body.is_empty() {
                         continue;
                     }
@@ -2512,7 +2520,8 @@ impl<'a> TastToHirContext<'a> {
                 }
 
                 // OPERATOR OVERLOADING: rewrite `a OP b` to a method call when the
-                // LHS type (abstract or class) declares an @:op-tagged method matching OP.
+                // LHS type declares an @:op method, or the RHS declares one
+                // marked @:commutative.
                 //
                 // EXCEPTION — SIMD vector arithmetic (SIMD4f + - * /): those @:op
                 // methods are `@:native` markers with no runtime body; they are
@@ -2529,10 +2538,24 @@ impl<'a> TastToHirContext<'a> {
                     .find_binary_operator_method(left_type, operator)
                     .filter(|(method, _, _)| {
                         self.operator_method_accepts(*method, left_type, right.expr_type)
+                    })
+                    .map(|(method, owner, is_class)| (method, owner, is_class, false))
+                    .or_else(|| {
+                        let right_type = self.resolved_type(right);
+                        self.find_binary_operator_method(right_type, operator)
+                            .filter(|(method, _, _)| {
+                                self.commutative_operator_methods.contains(method)
+                                    && self.operator_method_accepts(
+                                        *method,
+                                        right_type,
+                                        left.expr_type,
+                                    )
+                            })
+                            .map(|(method, owner, is_class)| (method, owner, is_class, true))
                     });
-                let owner_name_id = op_method
-                    .as_ref()
-                    .and_then(|(_, owner, _)| self.symbol_table.get_symbol(*owner).map(|s| s.name));
+                let owner_name_id = op_method.as_ref().and_then(|(_, owner, _, _)| {
+                    self.symbol_table.get_symbol(*owner).map(|s| s.name)
+                });
                 let skip_simd_vector_arith = matches!(
                     operator,
                     BinaryOperator::Add
@@ -2545,9 +2568,17 @@ impl<'a> TastToHirContext<'a> {
                     // (SIMD8i32/SIMD32i8) need the same fall-through, and a
                     // list would have to be edited again for the next width.
                     .is_some_and(|n| n.starts_with("SIMD"));
-                if let Some((method_symbol, _owner_symbol, is_class)) =
+                if let Some((method_symbol, _owner_symbol, is_class, swapped)) =
                     op_method.filter(|_| !skip_simd_vector_arith)
                 {
+                    let mut evaluation = Vec::new();
+                    let (receiver, argument) = if swapped {
+                        let left = self.bind_assignment_operand(left, &mut evaluation);
+                        let right = self.bind_assignment_operand(right, &mut evaluation);
+                        (right, left)
+                    } else {
+                        ((**left).clone(), (**right).clone())
+                    };
                     let method_info = self.symbol_table.get_symbol(method_symbol);
                     let is_static = method_info.is_some_and(|m| {
                         m.flags.contains(crate::tast::symbols::SymbolFlags::STATIC)
@@ -2561,13 +2592,31 @@ impl<'a> TastToHirContext<'a> {
                             })
                         })
                         .unwrap_or(expr.expr_type);
+                    let scope = self.current_scope;
+                    let lifetime = self.current_lifetime;
+                    let wrap_result = |result| {
+                        if swapped {
+                            HirExpr::new(
+                                HirExprKind::Block(HirBlock::with_expr(
+                                    evaluation.clone(),
+                                    result,
+                                    scope,
+                                )),
+                                result_type,
+                                lifetime,
+                                expr.source_location,
+                            )
+                        } else {
+                            result
+                        }
+                    };
                     if is_static {
                         let synthesized = TypedExpression {
                             expr_type: result_type,
                             kind: TypedExpressionKind::StaticMethodCall {
                                 class_symbol: _owner_symbol,
                                 method_symbol,
-                                arguments: vec![(**left).clone(), (**right).clone()],
+                                arguments: vec![receiver.clone(), argument.clone()],
                                 type_arguments: vec![],
                             },
                             usage: expr.usage,
@@ -2575,18 +2624,18 @@ impl<'a> TastToHirContext<'a> {
                             source_location: expr.source_location,
                             metadata: expr.metadata.clone(),
                         };
-                        return self.lower_expression(&synthesized);
+                        return wrap_result(self.lower_expression(&synthesized));
                     }
                     if !is_class {
                         // Abstract: try inline first (existing path); fall through if not inlinable.
                         if let Some(inlined) = self.try_inline_abstract_method(
-                            left,
+                            &receiver,
                             method_symbol,
-                            &[(**right).clone()],
+                            &[argument.clone()],
                             result_type,
                             expr.source_location,
                         ) {
-                            return inlined;
+                            return wrap_result(inlined);
                         }
                     }
 
@@ -2595,17 +2644,14 @@ impl<'a> TastToHirContext<'a> {
                     // lowering path as a real `a.method(b)` call (stdlib mapping, drop
                     // tracking, monomorphization all work without divergence).
                     //
-                    // For result type we use `left.expr_type` — for the symmetric ops we
-                    // care about (Add/Sub/Mul/Div on Tensor / SIMD4f / etc.) the return
-                    // type matches the LHS. The TAST type-checker may have left
-                    // `expr.expr_type` as a primitive default since it doesn't know
-                    // class @:op return types yet.
+                    // The method return type takes precedence over the TAST
+                    // expression type, which may still be a primitive default.
                     let synthesized = TypedExpression {
                         expr_type: result_type,
                         kind: TypedExpressionKind::MethodCall {
-                            receiver: left.clone(),
+                            receiver: Box::new(receiver),
                             method_symbol,
-                            arguments: vec![(**right).clone()],
+                            arguments: vec![argument],
                             type_arguments: vec![],
                             is_optional: false,
                         },
@@ -2614,7 +2660,7 @@ impl<'a> TastToHirContext<'a> {
                         source_location: expr.source_location,
                         metadata: expr.metadata.clone(),
                     };
-                    return self.lower_expression(&synthesized);
+                    return wrap_result(self.lower_expression(&synthesized));
                 }
 
                 let base_op = Self::compound_assignment_operator(operator);
