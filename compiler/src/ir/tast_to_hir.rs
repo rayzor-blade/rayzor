@@ -125,19 +125,34 @@ impl Clone for LoweringError {
 }
 
 impl<'a> TastToHirContext<'a> {
+    fn is_type_value_expr(&self, expr: &HirExpr) -> bool {
+        let HirExprKind::Variable { symbol, .. } = &expr.kind else {
+            return false;
+        };
+        let Some(sym) = self.symbol_table.get_symbol(*symbol) else {
+            return false;
+        };
+        matches!(
+            sym.kind,
+            crate::tast::SymbolKind::Class
+                | crate::tast::SymbolKind::Enum
+                | crate::tast::SymbolKind::Interface
+                | crate::tast::SymbolKind::Abstract
+        ) || matches!(
+            self.string_interner.get(sym.name),
+            Some("Class" | "Enum" | "Dynamic")
+        )
+    }
+
     fn is_named_type_value(&self, expr: &HirExpr) -> bool {
         let HirExprKind::Variable { symbol, .. } = &expr.kind else {
             return false;
         };
-        matches!(
-            self.symbol_table.get_symbol(*symbol).map(|sym| sym.kind),
-            Some(
-                crate::tast::SymbolKind::Class
-                    | crate::tast::SymbolKind::Enum
-                    | crate::tast::SymbolKind::Interface
-                    | crate::tast::SymbolKind::Abstract
-            )
-        )
+        let Some(sym) = self.symbol_table.get_symbol(*symbol) else {
+            return false;
+        };
+        !matches!(self.string_interner.get(sym.name), Some("Class" | "Enum"))
+            && self.is_type_value_expr(expr)
     }
 
     /// Create a new lowering context
@@ -3334,7 +3349,8 @@ impl<'a> TastToHirContext<'a> {
                 {
                     let value_hir = self.lower_expression(&arguments[0]);
                     let target_hir = self.lower_expression(&arguments[1]);
-                    if self.is_named_type_value(&target_hir) {
+                    if self.is_named_type_value(&target_hir) && !self.is_type_value_expr(&value_hir)
+                    {
                         HirExprKind::TypeCheck {
                             expr: Box::new(value_hir),
                             expected: arguments[1].expr_type,
@@ -7222,7 +7238,9 @@ impl<'a> TastToHirContext<'a> {
                     && matches!(method_name, Some("is") | Some("isOfType"))
                     && arguments.len() == 2
                 {
-                    let kind = if self.is_named_type_value(&lowered_args[1]) {
+                    let kind = if self.is_named_type_value(&lowered_args[1])
+                        && !self.is_type_value_expr(&lowered_args[0])
+                    {
                         HirExprKind::TypeCheck {
                             expr: Box::new(lowered_args[0].clone()),
                             expected: arguments[1].expr_type,

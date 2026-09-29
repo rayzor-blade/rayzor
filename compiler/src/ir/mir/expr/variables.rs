@@ -95,10 +95,14 @@ impl<'a> HirToMirContext<'a> {
         // Must be before function reference check since class symbols may also map to constructors
         if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
             use crate::tast::SymbolKind;
-            if self.string_interner.get(sym.name) == Some("Dynamic") {
-                return self.builder.build_const(IrValue::I64(
-                    rayzor_runtime::type_system::TYPE_DYNAMIC_TOKEN.0 as i64,
-                ));
+            let meta_type_id = match self.string_interner.get(sym.name) {
+                Some("Dynamic") => Some(rayzor_runtime::type_system::TYPE_DYNAMIC_TOKEN.0),
+                Some("Class") => Some(rayzor_runtime::type_system::TYPE_CLASS_TOKEN.0),
+                Some("Enum") => Some(rayzor_runtime::type_system::TYPE_ENUM_TOKEN.0),
+                _ => None,
+            };
+            if let Some(type_id) = meta_type_id {
+                return self.builder.build_const(IrValue::I64(type_id as i64));
             }
             if sym.kind == SymbolKind::Abstract {
                 let builtin = self.string_interner.get(sym.name);

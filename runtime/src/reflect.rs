@@ -775,18 +775,28 @@ pub extern "C" fn haxe_std_is_dynamic_type(value: *mut u8, expected_token: i64) 
     if expected_id == 0 {
         return false;
     }
-    if expected_name == Some("Class") || expected_name == Some("Enum") {
+    let wants_class =
+        expected_id == crate::type_system::TYPE_CLASS_TOKEN.0 || expected_name == Some("Class");
+    let wants_enum =
+        expected_id == crate::type_system::TYPE_ENUM_TOKEN.0 || expected_name == Some("Enum");
+    if wants_class || wants_enum {
         let Some(actual_id) = type_token_id(value as i64) else {
             return false;
         };
         let Some(info) = get_type_info(TypeId(actual_id)) else {
             return false;
         };
-        return if expected_name == Some("Class") {
+        return if wants_class {
             info.class_info.is_some()
         } else {
             info.enum_info.is_some()
         };
+    }
+    if let Some(actual_id) = type_token_id(value as i64)
+        && let Some(info) = get_type_info(TypeId(actual_id))
+        && (info.class_info.is_some() || info.enum_info.is_some())
+    {
+        return false;
     }
     let expected_id = match expected_name {
         Some("Bool") => TYPE_BOOL.0,
