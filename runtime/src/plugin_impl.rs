@@ -182,6 +182,10 @@ register_symbol!(
     "haxe_array_join_typed",
     crate::haxe_array::haxe_array_join_typed
 );
+register_symbol!(
+    "haxe_array_join_enum",
+    crate::haxe_array::haxe_array_join_enum
+);
 register_symbol!("haxe_array_concat", crate::haxe_array::haxe_array_concat);
 register_symbol!("haxe_array_splice", crate::haxe_array::haxe_array_splice);
 

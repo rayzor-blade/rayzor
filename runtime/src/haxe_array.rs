@@ -826,6 +826,7 @@ pub extern "C" fn haxe_array_free(arr: *mut HaxeArray) {
         return;
     }
     crate::haxe_sys::bytes_data_forget(arr);
+    crate::type_system::forget_reflected_enum_array(arr);
     arrfree_dbg_count();
 
     unsafe {
@@ -1008,6 +1009,9 @@ pub extern "C" fn haxe_array_join_typed(
     sep: *const HaxeString,
     elem_tag: i32,
 ) -> *mut HaxeString {
+    if let Some((type_id, boxed)) = crate::type_system::reflected_enum_array_type(arr) {
+        return haxe_array_join_enum(arr, sep, type_id, i32::from(boxed));
+    }
     unsafe {
         let result_layout = Layout::new::<HaxeString>();
         let result_ptr = alloc(result_layout) as *mut HaxeString;
@@ -1078,6 +1082,40 @@ pub extern "C" fn haxe_array_join_typed(
         (*result_ptr).len = total_len;
         (*result_ptr).cap = buf_cap;
         result_ptr
+    }
+}
+
+/// Join enum values using the enum's registered constructor names.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_join_enum(
+    arr: *const HaxeArray,
+    sep: *const HaxeString,
+    type_id: u32,
+    is_boxed: i32,
+) -> *mut HaxeString {
+    if arr.is_null() {
+        return haxe_array_join(arr, sep);
+    }
+    unsafe {
+        let source = &*arr;
+        let mut names = Vec::with_capacity(source.len);
+        for index in 0..source.len {
+            let value =
+                std::ptr::read_unaligned(source.ptr.add(index * source.elem_size) as *const i64);
+            let name = if is_boxed != 0 {
+                crate::type_system::haxe_enum_to_string_boxed(type_id, value as *const u8)
+            } else {
+                crate::type_system::haxe_enum_to_string(type_id as i64, value)
+            };
+            names.push(name as i64);
+        }
+        let names_array = HaxeArray {
+            ptr: names.as_mut_ptr().cast::<u8>(),
+            len: names.len(),
+            cap: names.capacity(),
+            elem_size: 8,
+        };
+        haxe_array_join(&names_array, sep)
     }
 }
 

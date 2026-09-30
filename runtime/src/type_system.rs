@@ -58,6 +58,34 @@ pub const TYPE_ENUM_TOKEN: TypeId = TypeId(u32::MAX - 4);
 pub const TYPE_ARRAY: TypeId = TypeId(7);
 
 static ARRAY_BOXES: RwLock<Option<HashMap<usize, usize>>> = RwLock::new(None);
+static ENUM_ARRAY_TYPES: RwLock<Option<HashMap<usize, (u32, bool)>>> = RwLock::new(None);
+static ENUM_VALUE_TYPES: RwLock<Option<HashMap<usize, u32>>> = RwLock::new(None);
+
+fn register_reflected_enum_value(value: i64, type_id: u32) {
+    if value != 0 {
+        ENUM_VALUE_TYPES
+            .write()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(value as usize, type_id);
+    }
+}
+
+pub(crate) fn reflected_enum_array_type(
+    array: *const crate::haxe_array::HaxeArray,
+) -> Option<(u32, bool)> {
+    ENUM_ARRAY_TYPES
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|arrays| arrays.get(&(array as usize)).copied())
+}
+
+pub(crate) fn forget_reflected_enum_array(array: *const crate::haxe_array::HaxeArray) {
+    if let Some(arrays) = ENUM_ARRAY_TYPES.write().unwrap().as_mut() {
+        arrays.remove(&(array as usize));
+    }
+}
 
 pub(crate) fn boxed_array_points_to(boxed: usize, raw: usize) -> bool {
     ARRAY_BOXES
@@ -1132,12 +1160,28 @@ pub extern "C" fn haxe_type_all_enums(type_id: i64) -> *mut u8 {
         && let Some(enum_info) = &type_info.enum_info
     {
         let mut values = Vec::new();
+        let boxed = enum_info
+            .variants
+            .iter()
+            .any(|variant| variant.param_count > 0);
         for (idx, variant) in enum_info.variants.iter().enumerate() {
             if variant.param_count == 0 {
-                values.push(idx as i64);
+                let value = create_enum_value(idx as i32, 0, std::ptr::null_mut(), boxed);
+                if boxed {
+                    register_reflected_enum_value(value, reflected_type_id(type_id));
+                }
+                values.push(value);
             }
         }
-        return unsafe { build_i64_array(&values) };
+        let array = unsafe { build_i64_array(&values) };
+        if !array.is_null() {
+            ENUM_ARRAY_TYPES
+                .write()
+                .unwrap()
+                .get_or_insert_with(HashMap::new)
+                .insert(array as usize, (reflected_type_id(type_id), boxed));
+        }
+        return array;
     }
     unsafe { build_i64_array(&[]) }
 }
@@ -1208,8 +1252,7 @@ pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32) -> bool {
 
 /// Type.createEnum(e, constr, ?params) -> T
 /// Creates an enum value dynamically by constructor name.
-/// For parameterless constructors, returns the tag as i64 (unboxed).
-/// For constructors with parameters, allocates boxed enum [tag:i32][pad:i32][fields...].
+/// All constructors use the enum's registered boxed or unboxed representation.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_create_enum(
     type_id: i64,
@@ -1230,9 +1273,17 @@ pub extern "C" fn haxe_type_create_enum(
         && let Some(type_info) = registry.get(&TypeId(reflected_type_id(type_id)))
         && let Some(enum_info) = &type_info.enum_info
     {
+        let boxed = enum_info
+            .variants
+            .iter()
+            .any(|variant| variant.param_count > 0);
         for (idx, variant) in enum_info.variants.iter().enumerate() {
             if variant.name == constr_name {
-                return create_enum_value(idx as i32, variant.param_count, params_ptr);
+                let value = create_enum_value(idx as i32, variant.param_count, params_ptr, boxed);
+                if boxed {
+                    register_reflected_enum_value(value, reflected_type_id(type_id));
+                }
+                return value;
             }
         }
     }
@@ -1253,14 +1304,22 @@ pub extern "C" fn haxe_type_create_enum_index(
         && let Some(enum_info) = &type_info.enum_info
         && let Some(variant) = enum_info.variants.get(index as usize)
     {
-        return create_enum_value(index as i32, variant.param_count, params_ptr);
+        let boxed = enum_info
+            .variants
+            .iter()
+            .any(|variant| variant.param_count > 0);
+        let value = create_enum_value(index as i32, variant.param_count, params_ptr, boxed);
+        if boxed {
+            register_reflected_enum_value(value, reflected_type_id(type_id));
+        }
+        return value;
     }
     0
 }
 
 /// Helper: create an enum value (unboxed tag or boxed struct)
-fn create_enum_value(tag: i32, param_count: usize, params_ptr: *mut u8) -> i64 {
-    if param_count == 0 {
+fn create_enum_value(tag: i32, param_count: usize, params_ptr: *mut u8, boxed: bool) -> i64 {
+    if !boxed {
         // Unboxed: just the tag
         return tag as i64;
     }
@@ -1849,6 +1908,14 @@ fn enum_is_boxed(type_id: u32) -> bool {
 fn resolve_dynamic_enum(value: i64, type_id: i32) -> (i64, u32) {
     if type_id != 0 {
         return (value, type_id as u32);
+    }
+    if let Some(reflected_type) = ENUM_VALUE_TYPES
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|values| values.get(&(value as usize)).copied())
+    {
+        return (value, reflected_type);
     }
     let addr = value as usize;
     if addr < 0x1000 || (addr & 7) != 0 {
@@ -2458,6 +2525,15 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
             len: s.len(),
             cap: 0,
         }));
+    }
+
+    if let Some(type_id) = ENUM_VALUE_TYPES
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|values| values.get(&(dynamic_ptr as usize)).copied())
+    {
+        return haxe_enum_to_string_boxed(type_id, dynamic_ptr) as *mut HaxeString;
     }
 
     // A Dynamic slot holding an erased primitive carries the VALUE, not a box:

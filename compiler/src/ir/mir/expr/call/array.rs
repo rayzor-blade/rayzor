@@ -212,6 +212,60 @@ impl<'a> HirToMirContext<'a> {
                 )
             });
         if vname == "join" && *is_method && args.len() == 2 && receiver_is_arrayish {
+            let enum_element = self
+                .type_table
+                .get(args[0].ty)
+                .and_then(|t| match &t.kind {
+                    TypeKind::Array { element_type } => Some(*element_type),
+                    _ => None,
+                })
+                .and_then(|element| self.type_table.get(self.resolve_through_aliases(element)))
+                .and_then(|t| match &t.kind {
+                    TypeKind::Enum { symbol_id, .. } => Some(*symbol_id),
+                    _ => None,
+                })
+                .or_else(|| {
+                    let HirExprKind::Call {
+                        target: CallTarget::Static { class, method },
+                        type_args,
+                        args: enum_args,
+                        ..
+                    } = &args[0].kind
+                    else {
+                        return None;
+                    };
+                    let names = [*class, *method].map(|symbol| {
+                        self.symbol_table
+                            .get_symbol(symbol)
+                            .and_then(|s| self.string_interner.get(s.name))
+                    });
+                    if names != [Some("Type"), Some("allEnums")] {
+                        return None;
+                    }
+                    type_args
+                        .iter()
+                        .chain(enum_args.first().map(|arg| &arg.ty))
+                        .find_map(|ty| {
+                            self.type_table
+                                .get(self.resolve_through_aliases(*ty))
+                                .and_then(|t| match &t.kind {
+                                    TypeKind::Enum { symbol_id, .. } => Some(*symbol_id),
+                                    _ => None,
+                                })
+                        })
+                        .or_else(|| {
+                            enum_args.first().and_then(|arg| match &arg.kind {
+                                HirExprKind::Variable { symbol, .. }
+                                    if self.symbol_table.get_symbol(*symbol).is_some_and(|s| {
+                                        s.kind == crate::tast::symbols::SymbolKind::Enum
+                                    }) =>
+                                {
+                                    Some(*symbol)
+                                }
+                                _ => None,
+                            })
+                        })
+                });
             let elem_tag: i32 = {
                 let type_table = self.type_table;
                 type_table
@@ -247,17 +301,36 @@ impl<'a> HirToMirContext<'a> {
                 // A Dynamic receiver arrives boxed; the runtime wants the array.
                 let arr_reg = self.unbox_dynamic_receiver(arr_reg, &args[0], "Array");
                 let ptr_void = IrType::Ptr(Box::new(IrType::Void));
-                let tag_reg = self.builder.build_const(IrValue::I32(elem_tag))?;
-                let join_fn = self.get_or_register_extern_function(
-                    "haxe_array_join_typed",
-                    vec![ptr_void.clone(), ptr_void.clone(), IrType::I32],
-                    ptr_void.clone(),
-                );
-                let joined = self.builder.build_call_direct(
-                    join_fn,
-                    vec![arr_reg, sep_reg, tag_reg],
-                    ptr_void,
-                )?;
+                let joined = if let Some(enum_symbol) = enum_element {
+                    let type_id = self
+                        .builder
+                        .build_const(IrValue::U32(self.enum_runtime_id(enum_symbol)))?;
+                    let is_boxed = self
+                        .builder
+                        .build_const(IrValue::I32(i32::from(self.enum_is_boxed(enum_symbol))))?;
+                    let join_fn = self.get_or_register_extern_function(
+                        "haxe_array_join_enum",
+                        vec![ptr_void.clone(), ptr_void.clone(), IrType::U32, IrType::I32],
+                        ptr_void.clone(),
+                    );
+                    self.builder.build_call_direct(
+                        join_fn,
+                        vec![arr_reg, sep_reg, type_id, is_boxed],
+                        ptr_void.clone(),
+                    )?
+                } else {
+                    let tag_reg = self.builder.build_const(IrValue::I32(elem_tag))?;
+                    let join_fn = self.get_or_register_extern_function(
+                        "haxe_array_join_typed",
+                        vec![ptr_void.clone(), ptr_void.clone(), IrType::I32],
+                        ptr_void.clone(),
+                    );
+                    self.builder.build_call_direct(
+                        join_fn,
+                        vec![arr_reg, sep_reg, tag_reg],
+                        ptr_void.clone(),
+                    )?
+                };
                 // Through a Dynamic receiver the result is Dynamic too, and a
                 // Dynamic is a box.
                 let receiver_is_dynamic = matches!(
