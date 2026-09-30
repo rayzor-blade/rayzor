@@ -52,6 +52,49 @@ impl<'a> HirToMirContext<'a> {
             })
         };
 
+        // A function value has no function id for bind_skipped_optional_args.
+        // Match a supplied argument to a later formal only when its shape
+        // cannot fit the current optional slot.
+        let arg_formals: Vec<usize> = {
+            let type_table = self.type_table;
+            let shape = |mut ty: TypeId| {
+                for _ in 0..4 {
+                    match type_table.get(ty).map(|t| &t.kind) {
+                        Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                        Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                        _ => break,
+                    }
+                }
+                match type_table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool) => 1,
+                    Some(TypeKind::String) => 2,
+                    _ => 0,
+                }
+            };
+            let mut next_formal = 0;
+            args.iter()
+                .map(|arg| {
+                    if let Some(formals) = &formal_tys {
+                        while next_formal + 1 < formals.len()
+                            && matches!(
+                                type_table.get(formals[next_formal]).map(|t| &t.kind),
+                                Some(TypeKind::Optional { .. })
+                            )
+                            && shape(arg.ty) != 0
+                            && shape(formals[next_formal]) != 0
+                            && shape(arg.ty) != shape(formals[next_formal])
+                            && shape(arg.ty) == shape(formals[next_formal + 1])
+                        {
+                            next_formal += 1;
+                        }
+                    }
+                    let assigned = next_formal;
+                    next_formal += 1;
+                    assigned
+                })
+                .collect()
+        };
+
         // Arguments are lowered before the callee, so lambdas passed as
         // arguments are still generated when callee lowering fails.
         debug!("About to lower {} indirect call arguments", args.len());
@@ -81,7 +124,10 @@ impl<'a> HirToMirContext<'a> {
                     Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
                 )
             };
-            let reg = match formal_tys.as_ref().and_then(|f| f.get(i).copied()) {
+            let reg = match formal_tys
+                .as_ref()
+                .and_then(|f| f.get(arg_formals[i]).copied())
+            {
                 Some(formal) if boxable => self.maybe_box_value(reg, a.ty, formal).unwrap_or(reg),
                 Some(formal) => self
                     .unbox_optional_for_erased_formal(reg, a.ty, formal)
@@ -135,6 +181,27 @@ impl<'a> HirToMirContext<'a> {
             }
         };
         let return_type = Box::new(self.convert_type(expr.ty));
+
+        if arg_formals
+            .iter()
+            .enumerate()
+            .any(|(arg, formal)| arg != *formal)
+        {
+            let supplied = std::mem::take(&mut arg_regs);
+            for (formal, ty) in param_types.iter().enumerate() {
+                if let Some((arg, _)) = arg_formals
+                    .iter()
+                    .enumerate()
+                    .find(|(_, assigned)| **assigned == formal)
+                {
+                    arg_regs.push(supplied[arg]);
+                } else if formal < arg_formals.last().copied().unwrap_or(0) {
+                    arg_regs.push(self.zero_of(ty)?);
+                } else {
+                    break;
+                }
+            }
+        }
 
         // Haxe accepts a short call only when the missing parameters are
         // optional; they travel as null (a zero of their slot type), and a

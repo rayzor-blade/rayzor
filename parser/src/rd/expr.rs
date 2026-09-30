@@ -1186,7 +1186,17 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.expect(TokenKind::KwCast)?;
         if self.stream.at(TokenKind::LParen) {
             self.stream.advance();
-            let expr = self.parse_expression()?;
+            let mut expr = self.parse_expression()?;
+            if self.stream.eat(TokenKind::Colon).is_some() {
+                let type_hint = self.parse_type()?;
+                expr = Expr {
+                    span: self.stream.span_from(expr.span.start),
+                    kind: ExprKind::TypeCheck {
+                        expr: Box::new(expr),
+                        type_hint,
+                    },
+                };
+            }
             let type_hint = if self.stream.eat(TokenKind::Comma).is_some() {
                 Some(self.parse_type()?)
             } else {
