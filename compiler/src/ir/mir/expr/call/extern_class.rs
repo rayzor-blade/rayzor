@@ -295,14 +295,39 @@ impl<'a> HirToMirContext<'a> {
                             if i == 0 && !is_instance_method {
                                 continue; // Skip class receiver for static methods
                             }
-                            if let Some(reg) = self.lower_expression(arg) {
-                                let actual_ty =
+                            if let Some(mut reg) = self.lower_expression(arg) {
+                                let mut actual_ty =
                                     self.builder.get_register_type(reg).unwrap_or(IrType::I64);
                                 let param_idx = if is_instance_method { i } else { i - 1 };
                                 let expected_ty = mir_wrapper_sig
                                     .as_ref()
                                     .and_then(|(params, _)| params.get(param_idx).cloned())
                                     .unwrap_or_else(|| actual_ty.clone());
+
+                                // A nullable start index reaches a String wrapper as a
+                                // boxed pointer, while the wrapper takes a plain Int.
+                                if matches!(
+                                    runtime_func,
+                                    "String_indexOf_2" | "String_lastIndexOf_2"
+                                ) && param_idx == 2
+                                    && matches!(actual_ty, IrType::Ptr(_))
+                                {
+                                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                                    let ptr = self.builder.build_bitcast(reg, ptr_u8.clone())?;
+                                    let coerce = self.get_or_register_extern_function(
+                                        "haxe_coerce_dynamic_to_int",
+                                        vec![ptr_u8],
+                                        IrType::I64,
+                                    );
+                                    let value = self.builder.build_call_direct(
+                                        coerce,
+                                        vec![ptr],
+                                        IrType::I64,
+                                    )?;
+                                    reg =
+                                        self.builder.build_cast(value, IrType::I64, IrType::I32)?;
+                                    actual_ty = IrType::I32;
+                                }
 
                                 // Check if this arg is a type-erased pointer (I64 from
                                 // TypeParameter/class/GenericInstance/Array) vs a concrete
