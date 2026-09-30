@@ -652,6 +652,27 @@ impl<'a> HirToMirContext<'a> {
         location: SourceLocation,
     ) -> Option<Option<IrId>> {
         match runtime_func {
+            "haxe_std_downcast" if args.len() == 2 => {
+                // A typed Array is already the raw value the cast should return.
+                let source_is_array = matches!(
+                    self.type_table
+                        .get(self.resolve_through_aliases(args[0].ty))
+                        .map(|ty| &ty.kind),
+                    Some(TypeKind::Array { .. })
+                );
+                let target_is_array = matches!(
+                    &args[1].kind,
+                    HirExprKind::Variable { symbol, .. }
+                        if self.symbol_table.get_symbol(*symbol).is_some_and(|sym| {
+                            sym.kind == crate::tast::symbols::SymbolKind::Class
+                                && self.class_is_named(sym.id, "Array")
+                        })
+                );
+                if source_is_array && target_is_array {
+                    return Some(self.lower_expression(&args[0]));
+                }
+                None
+            }
             "haxe_reflect_call_method" | "Reflect.callMethod" => {
                 Some(self.lower_reflect_call_method(args, result_type, location))
             }

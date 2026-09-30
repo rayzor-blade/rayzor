@@ -57,6 +57,17 @@ pub const TYPE_ENUM_TOKEN: TypeId = TypeId(u32::MAX - 4);
 // Compound type IDs (6 = anon object defined in anon_object.rs, 7 = array)
 pub const TYPE_ARRAY: TypeId = TypeId(7);
 
+static ARRAY_BOXES: RwLock<Option<HashMap<usize, usize>>> = RwLock::new(None);
+
+pub(crate) fn boxed_array_points_to(boxed: usize, raw: usize) -> bool {
+    ARRAY_BOXES
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|boxes| boxes.get(&boxed))
+        .is_some_and(|value| *value == raw)
+}
+
 // Starting ID for user-defined types (classes, enums, etc.)
 pub const TYPE_USER_START: u32 = 1000;
 
@@ -1787,6 +1798,12 @@ pub extern "C" fn haxe_std_downcast(value_ptr: *mut u8, expected_type_id: i64) -
     if value_ptr.is_null() {
         return std::ptr::null_mut();
     }
+    // Class tokens use stable IDs; boxed Array and String values use builtin tags.
+    let expected_type_id = match expected_type_id as u32 {
+        id if id == stable_class_type_id("Array") => TYPE_ARRAY.0 as i64,
+        id if id == stable_class_type_id("String") => TYPE_STRING.0 as i64,
+        _ => expected_type_id,
+    };
     unsafe {
         let dynamic = *(value_ptr as *const DynamicValue);
         if type_id_matches_with_hierarchy(dynamic.type_id.0 as i64, expected_type_id) {
@@ -3125,6 +3142,12 @@ pub extern "C" fn haxe_dynamic_equals(a: *mut u8, b: *mut u8) -> bool {
 
     let a_box = dynamic_value_if_boxed(a);
     let b_box = dynamic_value_if_boxed(b);
+    // A reference can arrive raw on one side and boxed through Dynamic on the other.
+    if boxed_array_points_to(a as usize, b as usize)
+        || boxed_array_points_to(b as usize, a as usize)
+    {
+        return true;
+    }
     if a_box.is_some() != b_box.is_some()
         && let (Some(a_id), Some(b_id)) = (
             crate::reflect::type_token_id(a as i64),
@@ -3390,7 +3413,15 @@ pub extern "C" fn haxe_box_reference_ptr(value_ptr: *mut u8, type_id: u32) -> *m
         value_ptr,
     };
     let boxed = Box::new(dynamic);
-    Box::into_raw(boxed) as *mut u8
+    let boxed_ptr = Box::into_raw(boxed) as *mut u8;
+    if type_id == TYPE_ARRAY.0 {
+        ARRAY_BOXES
+            .write()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(boxed_ptr as usize, value_ptr as usize);
+    }
+    boxed_ptr
 }
 
 /// Unbox a reference type - just extract the pointer

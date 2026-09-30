@@ -110,7 +110,7 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    fn class_is_named(&self, symbol_id: SymbolId, name: &str) -> bool {
+    pub(crate) fn class_is_named(&self, symbol_id: SymbolId, name: &str) -> bool {
         self.symbol_table
             .get_symbol(symbol_id)
             .and_then(|sym| {

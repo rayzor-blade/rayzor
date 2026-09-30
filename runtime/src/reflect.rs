@@ -733,10 +733,19 @@ pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i
         // class instance -- both are Ptr in MIR.
         6 => compare_reference_slot(a, b),
         _ => {
-            // Unknown type: compare as raw i64
-            (a - b).signum()
+            // A generic slot can hold the same array as a raw pointer or a box.
+            if same_array_reference(a, b) {
+                0
+            } else {
+                (a - b).signum()
+            }
         }
     }
+}
+
+fn same_array_reference(a: i64, b: i64) -> bool {
+    crate::type_system::boxed_array_points_to(a as usize, b as usize)
+        || crate::type_system::boxed_array_points_to(b as usize, a as usize)
 }
 
 /// Recover a reflective type ID from either its scalar or boxed representation.
@@ -831,6 +840,9 @@ pub extern "C" fn haxe_std_is_dynamic_type(value: *mut u8, expected_token: i64) 
 /// identity it had before.
 fn compare_reference_slot(a: i64, b: i64) -> i64 {
     if a == b {
+        return 0;
+    }
+    if same_array_reference(a, b) {
         return 0;
     }
     if a == 0 {
