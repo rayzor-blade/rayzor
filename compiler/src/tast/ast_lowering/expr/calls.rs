@@ -1228,6 +1228,69 @@ impl<'a> AstLowering<'a> {
         expr: &Expr,
         args: &[Expr],
     ) -> LoweringResult<TypedExpression> {
+        if let ExprKind::Ident(alias) = &expr.kind {
+            let alias_name = self.context.intern_string(alias);
+            let symbol_is_import = self
+                .resolve_symbol_in_scope_hierarchy(alias_name)
+                .and_then(|id| self.context.symbol_table.get_symbol(id))
+                .is_some_and(|symbol| symbol.kind == crate::tast::symbols::SymbolKind::Class);
+            if symbol_is_import {
+                let mut scope = self.context.current_scope;
+                loop {
+                    let import_path = self
+                        .context
+                        .import_resolver
+                        .get_imports(scope)
+                        .iter()
+                        .find(|import| import.alias == Some(alias_name))
+                        .map(|import| {
+                            import
+                                .package_path
+                                .package
+                                .iter()
+                                .chain(std::iter::once(&import.package_path.name))
+                                .filter_map(|part| self.context.string_interner.get(*part))
+                                .map(str::to_owned)
+                                .collect::<Vec<_>>()
+                        });
+                    if let Some(parts) = import_path {
+                        // The imported native function uses the normal static-call ABI.
+                        let mapped_static = matches!(
+                            parts.join(".").as_str(),
+                            "haxe.io.Bytes.fastGet" | "rayzor.Bytes.fastGet"
+                        );
+                        if mapped_static {
+                            let mut qualified = Expr {
+                                kind: ExprKind::Ident(parts[0].clone()),
+                                span: expr.span,
+                            };
+                            for part in &parts[1..] {
+                                qualified = Expr {
+                                    kind: ExprKind::Field {
+                                        expr: Box::new(qualified),
+                                        field: part.clone(),
+                                        is_optional: false,
+                                    },
+                                    span: expr.span,
+                                };
+                            }
+                            return self.lower_call_expression(expression, &qualified, args);
+                        }
+                        break;
+                    }
+                    let Some(parent) = self
+                        .context
+                        .scope_tree
+                        .get_scope(scope)
+                        .and_then(|s| s.parent_id)
+                    else {
+                        break;
+                    };
+                    scope = parent;
+                }
+            }
+        }
+
         // A call the expander deferred (its macro body asks the typer a
         // question) is re-expanded HERE, where locals upstream of this site
         // are typed and this lowering can answer as the MacroTyper. The

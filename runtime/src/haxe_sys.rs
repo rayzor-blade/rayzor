@@ -5,8 +5,8 @@
 use log::debug;
 use std::cell::RefCell;
 use std::io::Write;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 // Use the canonical HaxeString definition from haxe_string module
 use crate::haxe_string::HaxeString;
@@ -18,6 +18,8 @@ const TRACE_STATE_DISABLED: u8 = 2;
 static TRACE_STATE: AtomicU8 = AtomicU8::new(TRACE_STATE_UNINITIALIZED);
 type TraceCallback = Box<dyn Fn(&str) + Send>;
 static TRACE_CALLBACK: Mutex<Option<TraceCallback>> = Mutex::new(None);
+static BYTES_DATA_VIEWS: LazyLock<Mutex<HashMap<usize, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // Thread-local trace prefix for identifying which backend owns the output
 thread_local! {
@@ -3339,9 +3341,97 @@ pub extern "C" fn haxe_bytes_of_int_array(
     bytes
 }
 
-/// `bytes.getData()`: the bytes as the `Array<Int>` that is `BytesData`
-/// here. A copy, as `getData` is on the targets whose BytesData is not the
-/// buffer itself.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_bytes_of_data(data: *const crate::haxe_array::HaxeArray) -> *mut HaxeBytes {
+    if let Some(bytes) = bytes_data_source(data) {
+        return haxe_bytes_sub_i64(bytes, 0, unsafe { (*bytes).len as i64 });
+    }
+    let len = crate::haxe_array::haxe_array_length(data).min(i32::MAX as usize) as i32;
+    let bytes = haxe_bytes_of_int_array(len, data);
+    if !data.is_null() && !bytes.is_null() {
+        BYTES_DATA_VIEWS
+            .lock()
+            .unwrap()
+            .insert(data as usize, bytes as usize);
+    }
+    bytes
+}
+
+fn bytes_data_source(data: *const crate::haxe_array::HaxeArray) -> Option<*mut HaxeBytes> {
+    BYTES_DATA_VIEWS
+        .lock()
+        .unwrap()
+        .get(&(data as usize))
+        .copied()
+        .map(|ptr| ptr as *mut HaxeBytes)
+}
+
+pub(crate) fn bytes_data_get(
+    data: *const crate::haxe_array::HaxeArray,
+    index: usize,
+) -> Option<i64> {
+    let bytes = bytes_data_source(data)?;
+    unsafe {
+        let b = &*bytes;
+        (index < b.len).then(|| *b.ptr.add(index) as i64)
+    }
+}
+
+pub(crate) fn bytes_data_set(data: *const crate::haxe_array::HaxeArray, index: usize, value: i64) {
+    if let Some(bytes) = bytes_data_source(data) {
+        unsafe {
+            let b = &mut *bytes;
+            if index < b.len {
+                *b.ptr.add(index) = value as u8;
+                sync_bytes_data_views(bytes, index, 1);
+            }
+        }
+    }
+}
+
+// Array<Int> indexes its 8-byte slots directly, so byte writes refresh each view's slots.
+fn sync_bytes_data_views(bytes: *const HaxeBytes, start: usize, count: usize) {
+    if bytes.is_null() || count == 0 {
+        return;
+    }
+    unsafe {
+        let changed_start = (*bytes).ptr as usize + start;
+        let changed_end = changed_start + count;
+        for (&array_ptr, &source_ptr) in BYTES_DATA_VIEWS.lock().unwrap().iter() {
+            let source = &*(source_ptr as *const HaxeBytes);
+            let source_start = source.ptr as usize;
+            let begin = changed_start.max(source_start);
+            let end = changed_end.min(source_start + source.len);
+            if begin >= end {
+                continue;
+            }
+            let array = &mut *(array_ptr as *mut crate::haxe_array::HaxeArray);
+            if array.elem_size != 8 || array.ptr.is_null() {
+                continue;
+            }
+            let first = begin - source_start;
+            let last = (end - source_start).min(array.len);
+            for index in first..last {
+                let value = *source.ptr.add(index) as i64;
+                std::ptr::write_unaligned(array.ptr.add(index * 8) as *mut i64, value);
+            }
+        }
+    }
+}
+
+pub(crate) fn bytes_data_forget(data: *const crate::haxe_array::HaxeArray) {
+    BYTES_DATA_VIEWS.lock().unwrap().remove(&(data as usize));
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_bytes_fast_get(data: *const crate::haxe_array::HaxeArray, pos: i32) -> i32 {
+    if pos < 0 {
+        return 0;
+    }
+    crate::haxe_array::haxe_array_get_i64(data, pos as usize) as i32
+}
+
+/// `bytes.getData()`: an `Array<Int>` view of the byte buffer.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_get_data(
     bytes: *const HaxeBytes,
@@ -3358,6 +3448,10 @@ pub extern "C" fn haxe_bytes_get_data(
             haxe_array_push_i64(arr, *b.ptr.add(i) as i64);
         }
     }
+    BYTES_DATA_VIEWS
+        .lock()
+        .unwrap()
+        .insert(arr as usize, bytes as usize);
     arr
 }
 
@@ -3393,7 +3487,7 @@ pub extern "C" fn haxe_bytes_of_hex(s: *const HaxeString) -> *mut HaxeBytes {
         return bytes;
     }
     unsafe {
-        for (i, pair) in digits.chunks_exact(2).enumerate() {
+        for (i, pair) in digits.as_chunks::<2>().0.iter().enumerate() {
             let high = (pair[0] & 0x0f) + ((pair[0] & 0x40) >> 6) * 9;
             let low = (pair[1] & 0x0f) + ((pair[1] & 0x40) >> 6) * 9;
             *(*bytes).ptr.add(i) = (high << 4) | low;
@@ -3553,6 +3647,7 @@ pub extern "C" fn haxe_bytes_set(bytes: *mut HaxeBytes, pos: i32, value: i32) {
             return;
         }
         *b.ptr.add(pos as usize) = value as u8;
+        sync_bytes_data_views(bytes, pos as usize, 1);
     }
 }
 
@@ -3571,6 +3666,17 @@ pub extern "C" fn haxe_bytes_set(bytes: *mut HaxeBytes, pos: i32, value: i32) {
 /// the slice cost is one 64-byte `HaxeBytes` struct.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_sub(bytes: *mut HaxeBytes, pos: i32, len: i32) -> *mut HaxeBytes {
+    if bytes.is_null() || pos < 0 || len < 0 {
+        crate::exception::throw_with_message("Outside bounds".into());
+    }
+    unsafe {
+        let total = (*bytes).len;
+        let start = pos as usize;
+        let count = len as usize;
+        if start > total || count > total - start {
+            crate::exception::throw_with_message("Outside bounds".into());
+        }
+    }
     haxe_bytes_sub_i64(bytes, pos as i64, len as i64)
 }
 
@@ -3655,7 +3761,7 @@ pub extern "C" fn haxe_bytes_sub_i64(bytes: *mut HaxeBytes, pos: i64, len: i64) 
 }
 
 /// Copy bytes from source to destination
-/// bytes.blit(srcPos: Int, dest: Bytes, destPos: Int, len: Int): Void
+/// bytes.blitTo(srcPos: Int, dest: Bytes, destPos: Int, len: Int): Void
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_blit(
     src: *const HaxeBytes,
@@ -3680,6 +3786,40 @@ pub extern "C" fn haxe_bytes_blit(
 
         // Use memmove for potentially overlapping regions
         std::ptr::copy(s.ptr.add(src_pos), d.ptr.add(dest_pos), len);
+        sync_bytes_data_views(dest, dest_pos, len);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_bytes_blit_into(
+    dest: *mut HaxeBytes,
+    dest_pos: i32,
+    src: *const HaxeBytes,
+    src_pos: i32,
+    len: i32,
+) {
+    if dest.is_null() || src.is_null() || dest_pos < 0 || src_pos < 0 || len < 0 {
+        crate::exception::throw_with_message("Outside bounds".into());
+    }
+    unsafe {
+        let dest_len = (*dest).len;
+        let src_len = (*src).len;
+        let dest_start = dest_pos as usize;
+        let src_start = src_pos as usize;
+        let count = len as usize;
+        if dest_start > dest_len
+            || count > dest_len - dest_start
+            || src_start > src_len
+            || count > src_len - src_start
+        {
+            crate::exception::throw_with_message("Outside bounds".into());
+        }
+        std::ptr::copy(
+            (*src).ptr.add(src_start),
+            (*dest).ptr.add(dest_start),
+            count,
+        );
+        sync_bytes_data_views(dest, dest_start, count);
     }
 }
 
@@ -3698,6 +3838,7 @@ pub extern "C" fn haxe_bytes_fill(bytes: *mut HaxeBytes, pos: i32, len: i32, val
             return;
         }
         std::ptr::write_bytes(b.ptr.add(pos), value as u8, len);
+        sync_bytes_data_views(bytes, pos, len);
     }
 }
 
@@ -3755,6 +3896,27 @@ pub extern "C" fn haxe_bytes_to_hex(bytes: *const HaxeBytes) -> *mut HaxeString 
             text.push(HEX[(value & 0x0f) as usize]);
         }
         rust_string_to_haxe(String::from_utf8_unchecked(text))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_bytes_get_string(
+    bytes: *const HaxeBytes,
+    pos: i32,
+    len: i32,
+) -> *mut HaxeString {
+    if bytes.is_null() || pos < 0 || len < 0 {
+        crate::exception::throw_with_message("Outside bounds".into());
+    }
+    unsafe {
+        let bytes = &*bytes;
+        let start = pos as usize;
+        let count = len as usize;
+        if start > bytes.len || count > bytes.len - start {
+            crate::exception::throw_with_message("Outside bounds".into());
+        }
+        let data = std::slice::from_raw_parts(bytes.ptr.add(start), count);
+        rust_string_to_haxe(String::from_utf8_lossy(data).into_owned())
     }
 }
 
@@ -3869,6 +4031,7 @@ pub extern "C" fn haxe_bytes_set_int16(bytes: *mut HaxeBytes, pos: i32, value: i
         }
         let ptr = b.ptr.add(pos) as *mut i16;
         std::ptr::write_unaligned(ptr, (value as i16).to_le());
+        sync_bytes_data_views(bytes, pos, 2);
     }
 }
 
@@ -3887,6 +4050,7 @@ pub extern "C" fn haxe_bytes_set_int32(bytes: *mut HaxeBytes, pos: i32, value: i
         }
         let ptr = b.ptr.add(pos) as *mut i32;
         std::ptr::write_unaligned(ptr, value.to_le());
+        sync_bytes_data_views(bytes, pos, 4);
     }
 }
 
@@ -3905,6 +4069,7 @@ pub extern "C" fn haxe_bytes_set_int64(bytes: *mut HaxeBytes, pos: i32, value: i
         }
         let ptr = b.ptr.add(pos) as *mut i64;
         std::ptr::write_unaligned(ptr, value.to_le());
+        sync_bytes_data_views(bytes, pos, 8);
     }
 }
 
@@ -3923,6 +4088,7 @@ pub extern "C" fn haxe_bytes_set_float(bytes: *mut HaxeBytes, pos: i32, value: f
         }
         let ptr = b.ptr.add(pos) as *mut u32;
         std::ptr::write_unaligned(ptr, value.to_bits().to_le());
+        sync_bytes_data_views(bytes, pos, 4);
     }
 }
 
@@ -3941,6 +4107,7 @@ pub extern "C" fn haxe_bytes_set_double(bytes: *mut HaxeBytes, pos: i32, value: 
         }
         let ptr = b.ptr.add(pos) as *mut u64;
         std::ptr::write_unaligned(ptr, value.to_bits().to_le());
+        sync_bytes_data_views(bytes, pos, 8);
     }
 }
 
@@ -3961,6 +4128,10 @@ pub extern "C" fn haxe_bytes_free(bytes: *mut HaxeBytes) {
         let b = &mut *bytes;
         match b.kind {
             HAXE_BYTES_KIND_VIEW => {
+                BYTES_DATA_VIEWS
+                    .lock()
+                    .unwrap()
+                    .retain(|_, ptr| *ptr != bytes as usize);
                 let owner = b.owner;
                 let _ = Box::from_raw(bytes); // drop view struct
                 if !owner.is_null() {
@@ -3973,6 +4144,10 @@ pub extern "C" fn haxe_bytes_free(bytes: *mut HaxeBytes) {
             HAXE_BYTES_KIND_MMAP => {
                 b.refcount -= 1;
                 if b.refcount <= 0 {
+                    BYTES_DATA_VIEWS
+                        .lock()
+                        .unwrap()
+                        .retain(|_, ptr| *ptr != bytes as usize);
                     let boxed = Box::from_raw(bytes);
                     #[cfg(unix)]
                     {
@@ -3991,6 +4166,10 @@ pub extern "C" fn haxe_bytes_free(bytes: *mut HaxeBytes) {
                 // Malloc backend (legacy default).
                 b.refcount -= 1;
                 if b.refcount <= 0 {
+                    BYTES_DATA_VIEWS
+                        .lock()
+                        .unwrap()
+                        .retain(|_, ptr| *ptr != bytes as usize);
                     let boxed = Box::from_raw(bytes);
                     if !boxed.ptr.is_null() && boxed.cap > 0 {
                         let layout = std::alloc::Layout::from_size_align(boxed.cap, 1).unwrap();

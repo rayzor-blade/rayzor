@@ -126,6 +126,13 @@ pub extern "C" fn haxe_array_get(arr: *const HaxeArray, index: usize, out: *mut 
             return false;
         }
 
+        if arr_ref.elem_size == 8
+            && let Some(value) = crate::haxe_sys::bytes_data_get(arr, index)
+        {
+            ptr::copy_nonoverlapping((&value as *const i64).cast::<u8>(), out, 8);
+            return true;
+        }
+
         let elem_ptr = arr_ref.ptr.add(index * arr_ref.elem_size);
         ptr::copy_nonoverlapping(elem_ptr, out, arr_ref.elem_size);
         true
@@ -218,6 +225,9 @@ pub extern "C" fn haxe_array_set(arr: *mut HaxeArray, index: usize, data: *const
             );
             ptr::copy_nonoverlapping(data, elem_ptr, arr_ref.elem_size);
         }
+        if arr_ref.elem_size == 8 {
+            crate::haxe_sys::bytes_data_set(arr, index, *(elem_ptr as *const i64));
+        }
         debug!("[haxe_array_set] Successfully set element, returning true");
         true
     }
@@ -271,6 +281,9 @@ pub extern "C" fn haxe_array_set_i64(arr: *mut HaxeArray, index: usize, value: i
 
         let elem_ptr = arr_ref.ptr.add(index * arr_ref.elem_size) as *mut i64;
         *elem_ptr = value;
+        if arr_ref.elem_size == 8 {
+            crate::haxe_sys::bytes_data_set(arr, index, value);
+        }
         true
     }
 }
@@ -812,6 +825,7 @@ pub extern "C" fn haxe_array_free(arr: *mut HaxeArray) {
     if arr.is_null() {
         return;
     }
+    crate::haxe_sys::bytes_data_forget(arr);
     arrfree_dbg_count();
 
     unsafe {
@@ -1791,6 +1805,13 @@ pub extern "C" fn haxe_array_get_erased(array: *mut u8, index: i64, target: i32)
         let array = &*(array as *const HaxeArray);
         if index as usize >= array.len {
             return 0;
+        }
+        if let Some(value) = crate::haxe_sys::bytes_data_get(array, index as usize) {
+            return if target == 0 {
+                haxe_box_int_ptr(value) as u64
+            } else {
+                value as u64
+            };
         }
         let value = std::ptr::read_unaligned(array.ptr.add(index as usize * 8) as *const u64);
         if !boxed || value == 0 {

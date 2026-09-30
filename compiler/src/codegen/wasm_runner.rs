@@ -2008,6 +2008,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             "haxe_bytes_set_double" => Some("haxe_bytes_set_double"),
             "haxe_bytes_fill" => Some("haxe_bytes_fill"),
             "haxe_bytes_blit" => Some("haxe_bytes_blit"),
+            "haxe_bytes_blit_into" => Some("haxe_bytes_blit_into"),
             "haxe_bytes_compare" => Some("haxe_bytes_compare"),
             "haxe_bytes_sub" => Some("haxe_bytes_sub"),
             "haxe_bytes_sub_base_u64lh" => Some("haxe_bytes_sub_base_u64lh"),
@@ -2031,7 +2032,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             "getDouble" => Some("haxe_bytes_get_double"),
             "setDouble" => Some("haxe_bytes_set_double"),
             "fill" => Some("haxe_bytes_fill"),
-            "blit" => Some("haxe_bytes_blit"),
+            "blit" => Some("haxe_bytes_blit_into"),
+            "blitTo" => Some("haxe_bytes_blit"),
             "compare" => Some("haxe_bytes_compare"),
             "sub" => Some("haxe_bytes_sub"),
             _ => None,
@@ -2663,8 +2665,9 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
             }
 
-            // -- blit(dest, destPos, src, srcPos, len) --
-            "haxe_bytes_blit" => {
+            // -- blit(dest, destPos, src, srcPos, len) / blitTo(src, srcPos, dest, destPos, len) --
+            "haxe_bytes_blit" | "haxe_bytes_blit_into" => {
+                let dest_first = name == "haxe_bytes_blit_into";
                 linker
                     .func_new(
                         "rayzor",
@@ -2673,10 +2676,13 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         move |mut caller, params, results| {
                             // positions/len are raw primitives — do NOT unbox
                             // (see haxe_bytes_sub note).
-                            let dest_h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
-                            let dest_pos = val_i32(&params[1]) as usize;
-                            let src_h = unbox_int_from_memory(&mut caller, val_i32(&params[2]));
-                            let src_pos = val_i32(&params[3]) as usize;
+                            let (dest_index, src_index) = if dest_first { (0, 2) } else { (2, 0) };
+                            let dest_h =
+                                unbox_int_from_memory(&mut caller, val_i32(&params[dest_index]));
+                            let dest_pos = val_i32(&params[dest_index + 1]) as usize;
+                            let src_h =
+                                unbox_int_from_memory(&mut caller, val_i32(&params[src_index]));
+                            let src_pos = val_i32(&params[src_index + 1]) as usize;
                             let len = val_i32(&params[4]) as usize;
                             let src_bytes = read_bytes_slice(&mut caller, src_h, src_pos, len);
                             write_bytes_slice(&mut caller, dest_h, dest_pos, &src_bytes);

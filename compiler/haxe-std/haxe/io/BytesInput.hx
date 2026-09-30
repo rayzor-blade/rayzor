@@ -64,6 +64,16 @@ class BytesInput extends Input {
 		#end
 	}
 
+	#if rayzor
+	public override function readAll(?bufsize:Int):Bytes {
+		var remaining = len;
+		var result = Bytes.alloc(remaining);
+		if (remaining > 0)
+			readBytes(result, 0, remaining);
+		return result;
+	}
+	#end
+
 	inline function get_position():Int {
 		#if flash
 		return b.position;

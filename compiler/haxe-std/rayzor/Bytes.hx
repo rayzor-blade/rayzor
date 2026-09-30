@@ -67,6 +67,10 @@ extern class Bytes {
 
     public static function ofHex(s: String): Bytes;
 
+    public static function ofData(data: haxe.io.BytesData): Bytes;
+
+    public static function fastGet(data: haxe.io.BytesData, pos: Int): Int;
+
     /**
         Gets a single byte at the given position.
 
@@ -129,15 +133,11 @@ extern class Bytes {
     **/
     public function subWithBase(base: Int, offLo: Int, offHi: Int, len: Int): Bytes;
 
-    /**
-        Copies bytes from source to this buffer.
+    /** Copies bytes from `src` into this buffer. **/
+    public function blit(pos: Int, src: Bytes, srcPos: Int, len: Int): Void;
 
-        @param srcPos Position in source to start copying from
-        @param dest Destination Bytes buffer
-        @param destPos Position in destination to start copying to
-        @param len Number of bytes to copy
-    **/
-    public function blit(srcPos: Int, dest: Bytes, destPos: Int, len: Int): Void;
+    /** Copies bytes from this buffer into `dest`. **/
+    public function blitTo(srcPos: Int, dest: Bytes, destPos: Int, len: Int): Void;
 
     /**
         Fills a range with a byte value.
@@ -164,6 +164,8 @@ extern class Bytes {
     public function toString(): String;
 
     public function toHex(): String;
+
+    public function getString(pos: Int, len: Int): String;
 
     /**
         Gets a 16-bit signed integer at the given position.

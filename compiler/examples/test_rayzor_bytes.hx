@@ -38,7 +38,7 @@ class Main {
         var src:Bytes = Bytes.ofString("COPY");
         var dst:Bytes = Bytes.alloc(10);
         dst.fill(0, 10, 45);  // Fill with '-'
-        src.blit(0, dst, 3, 4);  // Copy "COPY" to position 3
+        src.blitTo(0, dst, 3, 4);  // Copy "COPY" to position 3
         trace("blit result: " + dst.toString());
 
         // Test 5: setInt32/getInt32

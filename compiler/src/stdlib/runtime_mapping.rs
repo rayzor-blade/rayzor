@@ -3102,6 +3102,10 @@ impl StdlibMapping {
                 types: &[IrTypeDescriptor::PtrString] => IrTypeDescriptor::PtrVoid),
             map_method!(static "rayzor.Bytes", "ofHex" => "haxe_bytes_of_hex", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrString] => IrTypeDescriptor::PtrVoid),
+            map_method!(static "rayzor.Bytes", "ofData" => "haxe_bytes_of_data", params: 1, returns: primitive,
+                types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::PtrVoid),
+            map_method!(static "rayzor.Bytes", "fastGet" => "haxe_bytes_fast_get", params: 2, returns: primitive,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
             // new Bytes(length, data:BytesData): the stdlib's BytesBuffer.getBytes,
             // whose BytesData is Array<Int> here.
             map_method!(constructor "rayzor.Bytes", "new" => "haxe_bytes_of_int_array", params: 2, returns: primitive,
@@ -3132,8 +3136,11 @@ impl StdlibMapping {
             // bytes.subWithBase(base, offLo, offHi, len): Bytes — base + u64-offset view
             map_method!(instance "rayzor.Bytes", "subWithBase" => "haxe_bytes_sub_base_u64lh", params: 4, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            // bytes.blit(srcPos: Int, dest: Bytes, destPos: Int, len: Int): Void
-            map_method!(instance "rayzor.Bytes", "blit" => "haxe_bytes_blit", params: 4, returns: void,
+            // bytes.blit(pos: Int, src: Bytes, srcPos: Int, len: Int): Void
+            map_method!(instance "rayzor.Bytes", "blit" => "haxe_bytes_blit_into", params: 4, returns: void,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
+            // bytes.blitTo(srcPos: Int, dest: Bytes, destPos: Int, len: Int): Void
+            map_method!(instance "rayzor.Bytes", "blitTo" => "haxe_bytes_blit", params: 4, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             // bytes.fill(pos: Int, len: Int, value: Int): Void
             map_method!(instance "rayzor.Bytes", "fill" => "haxe_bytes_fill", params: 3, returns: void,
@@ -3146,6 +3153,8 @@ impl StdlibMapping {
                 types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::PtrString),
             map_method!(instance "rayzor.Bytes", "toHex" => "haxe_bytes_to_hex", params: 0, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::PtrString),
+            map_method!(instance "rayzor.Bytes", "getString" => "haxe_bytes_get_string", params: 2, returns: primitive,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrString),
             // Integer getters (little-endian)
             // bytes.getInt16(pos: Int): Int
             map_method!(instance "rayzor.Bytes", "getInt16" => "haxe_bytes_get_int16", params: 1, returns: primitive,

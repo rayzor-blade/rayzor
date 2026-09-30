@@ -62,7 +62,7 @@ class StringBuf {
 		var ncap = cap << 1;
 		while (ncap < len + need) ncap <<= 1;
 		var nb = rayzor.Bytes.alloc(ncap);
-		b.blit(0, nb, 0, len);
+		b.blitTo(0, nb, 0, len);
 		b.free();
 		b = nb;
 	}
@@ -84,7 +84,7 @@ class StringBuf {
 		// Bulk byte copy through a transient Bytes copy — avoids per-char
 		// charCodeAt (Null<Int> round-trips) and String concatenation.
 		var sb = rayzor.Bytes.ofString(s);
-		sb.blit(0, b, len, n);
+		sb.blitTo(0, b, len, n);
 		sb.free();
 		len += n;
 	}
@@ -142,7 +142,7 @@ class StringBuf {
 			return;
 		}
 		grow(n);
-		sb.blit(pos, b, this.len, n);
+		sb.blitTo(pos, b, this.len, n);
 		sb.free();
 		this.len += n;
 	}
