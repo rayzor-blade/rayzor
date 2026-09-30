@@ -33,6 +33,7 @@ impl<'a> HirToMirContext<'a> {
             callee,
             args,
             is_method,
+            target,
             ..
         } = &expr.kind
         else {
@@ -126,6 +127,18 @@ impl<'a> HirToMirContext<'a> {
                     }
                     None
                 });
+            let native_bytes_method = self
+                .symbol_table
+                .get_symbol(*field)
+                .and_then(|symbol| symbol.qualified_name)
+                .and_then(|name| self.string_interner.get(name))
+                .is_some_and(|name| name.starts_with("rayzor.Bytes."));
+            if maybe_func_id.is_none()
+                && matches!(target, CallTarget::Static { .. })
+                && native_bytes_method
+            {
+                probe!(self.try_static_receiver_call(expr, None, true, result_type.clone(), None));
+            }
             probe!(self.try_resolved_method_call(
                 expr,
                 maybe_func_id,

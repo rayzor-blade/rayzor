@@ -33,7 +33,7 @@ impl<'a> HirToMirContext<'a> {
         )>,
         is_static_class_call: bool,
         result_type: IrType,
-        func_id: IrFunctionId,
+        func_id: Option<IrFunctionId>,
         fell_through: &mut bool,
     ) -> Option<IrId> {
         let HirExprKind::Call { callee, args, .. } = &expr.kind else {
@@ -241,6 +241,11 @@ impl<'a> HirToMirContext<'a> {
                     return call_result;
                 }
             }
+
+            let Some(func_id) = func_id else {
+                *fell_through = true;
+                return None;
+            };
 
             // Static call: do NOT include the class reference as 'this'
             let callee_is_user_defined = self

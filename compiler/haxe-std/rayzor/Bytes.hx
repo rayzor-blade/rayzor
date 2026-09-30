@@ -65,6 +65,8 @@ extern class Bytes {
     **/
     public static function ofString(s: String): Bytes;
 
+    public static function ofHex(s: String): Bytes;
+
     /**
         Gets a single byte at the given position.
 
@@ -160,6 +162,8 @@ extern class Bytes {
         @return The decoded string
     **/
     public function toString(): String;
+
+    public function toHex(): String;
 
     /**
         Gets a 16-bit signed integer at the given position.

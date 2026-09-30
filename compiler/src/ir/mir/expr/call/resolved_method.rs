@@ -468,7 +468,7 @@ impl<'a> HirToMirContext<'a> {
                 stdlib_info.clone(),
                 is_static_class_call,
                 result_type.clone(),
-                func_id
+                Some(func_id)
             ));
 
             let obj_reg = self.lower_expression(object)?;

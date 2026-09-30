@@ -3379,6 +3379,29 @@ pub extern "C" fn haxe_bytes_of_string(s: *const HaxeString) -> *mut HaxeBytes {
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_bytes_of_hex(s: *const HaxeString) -> *mut HaxeBytes {
+    let Some(s) = (unsafe { haxe_string_to_rust(s) }) else {
+        return haxe_bytes_alloc(0);
+    };
+    let digits = s.as_bytes();
+    if digits.len() % 2 != 0 {
+        crate::exception::throw_with_message("Not a hex string (odd number of digits)".into());
+    }
+    let bytes = haxe_bytes_alloc((digits.len() / 2) as i32);
+    if bytes.is_null() {
+        return bytes;
+    }
+    unsafe {
+        for (i, pair) in digits.chunks_exact(2).enumerate() {
+            let high = (pair[0] & 0x0f) + ((pair[0] & 0x40) >> 6) * 9;
+            let low = (pair[1] & 0x0f) + ((pair[1] & 0x40) >> 6) * 9;
+            *(*bytes).ptr.add(i) = (high << 4) | low;
+        }
+    }
+    bytes
+}
+
 /// Get the length of Bytes
 /// bytes.length: Int
 #[unsafe(no_mangle)]
@@ -3715,6 +3738,23 @@ pub extern "C" fn haxe_bytes_to_string(bytes: *const HaxeBytes) -> *mut HaxeStri
         let slice = std::slice::from_raw_parts(b.ptr, b.len);
         let s = String::from_utf8_lossy(slice).into_owned();
         rust_string_to_haxe(s)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_bytes_to_hex(bytes: *const HaxeBytes) -> *mut HaxeString {
+    if bytes.is_null() {
+        return rust_string_to_haxe(String::new());
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    unsafe {
+        let b = &*bytes;
+        let mut text = Vec::with_capacity(b.len * 2);
+        for &value in std::slice::from_raw_parts(b.ptr, b.len) {
+            text.push(HEX[(value >> 4) as usize]);
+            text.push(HEX[(value & 0x0f) as usize]);
+        }
+        rust_string_to_haxe(String::from_utf8_unchecked(text))
     }
 }
 

@@ -779,6 +779,7 @@ register_symbol!(
     "haxe_bytes_of_string",
     crate::haxe_sys::haxe_bytes_of_string
 );
+register_symbol!("haxe_bytes_of_hex", crate::haxe_sys::haxe_bytes_of_hex);
 register_symbol!("haxe_bytes_length", crate::haxe_sys::haxe_bytes_length);
 register_symbol!(
     "haxe_bytes_data_address",
@@ -802,6 +803,7 @@ register_symbol!(
     "haxe_bytes_to_string",
     crate::haxe_sys::haxe_bytes_to_string
 );
+register_symbol!("haxe_bytes_to_hex", crate::haxe_sys::haxe_bytes_to_hex);
 register_symbol!(
     "haxe_bytes_get_int16",
     crate::haxe_sys::haxe_bytes_get_int16
