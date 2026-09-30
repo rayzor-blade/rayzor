@@ -104,6 +104,7 @@ pub struct HirEnum {
 #[derive(Debug, Clone)]
 pub struct HirEnumVariant {
     pub name: InternedString,
+    pub native_name: Option<InternedString>,
     pub fields: Vec<HirEnumField>,
     pub discriminant: Option<i32>,
 }

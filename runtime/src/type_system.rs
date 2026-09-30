@@ -1843,10 +1843,7 @@ pub extern "C" fn haxe_std_is(value_ptr: *mut u8, expected_type_id: i64) -> bool
             && value >= i32::MIN as f64
             && value <= i32::MAX as f64;
     }
-    if class_implements_interface_id(actual_type_id, expected_type_id) {
-        return true;
-    }
-    false
+    class_implements_interface_id(actual_type_id, expected_type_id)
 }
 
 /// Runtime downcast for Dynamic/boxed values.

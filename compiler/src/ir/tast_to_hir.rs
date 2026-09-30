@@ -880,6 +880,7 @@ impl<'a> TastToHirContext<'a> {
 
             hir_variants.push(HirEnumVariant {
                 name: variant.name.clone(),
+                native_name: variant.native_name,
                 fields: hir_fields,
                 discriminant: Some(i as i32),
             });
@@ -2631,7 +2632,7 @@ impl<'a> TastToHirContext<'a> {
                         if let Some(inlined) = self.try_inline_abstract_method(
                             &receiver,
                             method_symbol,
-                            &[argument.clone()],
+                            std::slice::from_ref(&argument),
                             result_type,
                             expr.source_location,
                         ) {

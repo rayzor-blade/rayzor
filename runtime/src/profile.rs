@@ -503,14 +503,12 @@ pub unsafe fn ensure_alloc_dump_hooks() {
                             );
                             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                         }
-                        unsafe { install_cpu_profiler(period) };
+                        install_cpu_profiler(period);
                         eprintln!("[cpu-profile] SIGPROF profiler armed (period={}us)", period);
                         if duration_ms > 0 {
                             std::thread::sleep(std::time::Duration::from_millis(duration_ms));
-                            let zero: libc::itimerval = unsafe { std::mem::zeroed() };
-                            unsafe {
-                                libc::setitimer(libc::ITIMER_PROF, &zero, std::ptr::null_mut())
-                            };
+                            let zero: libc::itimerval = std::mem::zeroed();
+                            libc::setitimer(libc::ITIMER_PROF, &zero, std::ptr::null_mut());
                             CPU_PROFILE_ACTIVE.store(0, MemOrdering::Relaxed);
                             eprintln!(
                                 "[cpu-profile] SIGPROF disarmed after {}ms duration",

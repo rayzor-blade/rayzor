@@ -407,6 +407,11 @@ impl<'a> AstLowering<'a> {
             new_symbol
         };
 
+        let flags = self.extract_metadata_flags(&enum_decl.meta, enum_symbol);
+        self.context
+            .symbol_table
+            .add_symbol_flags(enum_symbol, flags);
+
         // Enter enum scope with name
         let enum_scope = self.context.enter_named_scope(ScopeKind::Enum, enum_name);
 
@@ -522,6 +527,16 @@ impl<'a> AstLowering<'a> {
             )
         };
 
+        let flags = self.extract_metadata_flags(&variant.meta, variant_symbol);
+        self.context
+            .symbol_table
+            .add_symbol_flags(variant_symbol, flags);
+        let native_name = self
+            .context
+            .symbol_table
+            .get_symbol(variant_symbol)
+            .and_then(|symbol| symbol.native_name);
+
         // Process parameters first to get their types
         let mut parameters = Vec::new();
         let mut param_types = Vec::new();
@@ -559,6 +574,7 @@ impl<'a> AstLowering<'a> {
 
         Ok(TypedEnumVariant {
             name: variant_name,
+            native_name,
             parameters,
             source_location: self.context.create_location(),
         })

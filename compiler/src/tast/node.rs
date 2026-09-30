@@ -1764,6 +1764,9 @@ pub struct TypedEnumVariant {
     /// Variant name
     pub name: InternedString,
 
+    /// Reflection name supplied by `@:native`.
+    pub native_name: Option<InternedString>,
+
     /// Variant parameters (for complex enums)
     pub parameters: Vec<TypedParameter>,
 

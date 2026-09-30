@@ -584,7 +584,8 @@ impl<'a> HirToMirContext<'a> {
             .symbol_table
             .get_symbol(enum_decl.symbol_id)
             .and_then(|sym| {
-                sym.qualified_name
+                sym.native_name
+                    .or(sym.qualified_name)
                     .and_then(|name| self.string_interner.get(name))
             })
             .or_else(|| self.string_interner.get(enum_decl.name))
@@ -597,7 +598,7 @@ impl<'a> HirToMirContext<'a> {
 
             let variant_name = self
                 .string_interner
-                .get(variant.name)
+                .get(variant.native_name.unwrap_or(variant.name))
                 .unwrap_or("<unknown>")
                 .to_string();
 
