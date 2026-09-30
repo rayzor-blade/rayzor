@@ -250,6 +250,29 @@ impl<'a> AstLowering<'a> {
             return;
         }
 
+        // These extern methods construct arrays of raw String values. If their
+        // declaration has only been pre-registered as a placeholder, the call
+        // result becomes Dynamic and later Array operations lose the element
+        // type (notably join and contains).
+        if class_name == Some("Type")
+            && matches!(
+                method_name_str,
+                Some("getInstanceFields" | "getClassFields" | "getEnumConstructs")
+            )
+        {
+            let fn_type = {
+                let mut types = self.context.type_table.borrow_mut();
+                let arg_type = types.dynamic_type();
+                let string_type = types.string_type();
+                let result_type = types.create_array_type(string_type);
+                types.create_function_type(vec![arg_type], result_type)
+            };
+            self.context
+                .symbol_table
+                .update_symbol_type(method_symbol, fn_type);
+            return;
+        }
+
         let has_type = self
             .context
             .symbol_table

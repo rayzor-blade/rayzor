@@ -1,0 +1,6 @@
+[project]
+name = "type-field-names"
+entry = "unit/TypeFieldNames.hx"
+
+[build]
+class-paths = ["."]

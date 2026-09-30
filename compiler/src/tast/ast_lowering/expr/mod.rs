@@ -800,7 +800,55 @@ impl<'a> AstLowering<'a> {
                         }
                     }
                 }
-                return self.lower_call_expression(expression, expr, args);
+                let mut call = self.lower_call_expression(expression, expr, args)?;
+                // Type's field-name APIs return raw Array<String> values. The
+                // Type token can resolve through the method-call path, where
+                // its placeholder signature loses the array element type.
+                let method_symbol = match &call.kind {
+                    TypedExpressionKind::MethodCall { method_symbol, .. }
+                    | TypedExpressionKind::StaticMethodCall { method_symbol, .. } => {
+                        Some(*method_symbol)
+                    }
+                    _ => None,
+                };
+                let method_name = method_symbol
+                    .and_then(|symbol| self.context.symbol_table.get_symbol(symbol))
+                    .and_then(|symbol| symbol.qualified_name)
+                    .and_then(|name| self.context.string_interner.get(name));
+                let source_type_method = matches!(&expr.kind, ExprKind::Field { expr: receiver, field, .. }
+                    if matches!(&receiver.kind, ExprKind::Ident(name) if name == "Type")
+                        && matches!(field.as_str(), "getInstanceFields" | "getClassFields" | "getEnumConstructs"));
+                let type_token_method = if source_type_method {
+                    if let TypedExpressionKind::MethodCall { receiver, .. } = &call.kind {
+                        matches!(
+                            self.context
+                                .type_table
+                                .borrow()
+                                .get(receiver.expr_type)
+                                .map(|ty| &ty.kind),
+                            Some(TypeKind::Enum { .. })
+                        )
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if type_token_method
+                    || matches!(
+                        method_name,
+                        Some(
+                            "Type.getInstanceFields"
+                                | "Type.getClassFields"
+                                | "Type.getEnumConstructs"
+                        )
+                    )
+                {
+                    let mut types = self.context.type_table.borrow_mut();
+                    let string_type = types.string_type();
+                    call.expr_type = types.create_array_type(string_type);
+                }
+                return Ok(call);
             }
             ExprKind::Field {
                 expr,

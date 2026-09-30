@@ -119,7 +119,7 @@ impl<'a> HirToMirContext<'a> {
             let (elem_is_f64, elem_is_dynamic) = {
                 let type_table = self.type_table;
                 type_table
-                    .get(args[0].ty)
+                    .get(self.resolve_through_aliases(args[0].ty))
                     .and_then(|t| {
                         if let TypeKind::Array { element_type } = &t.kind {
                             Some(*element_type)
@@ -223,7 +223,11 @@ impl<'a> HirToMirContext<'a> {
                             None
                         }
                     })
-                    .and_then(|et| type_table.get(et).map(|t| t.kind.clone()))
+                    .and_then(|et| {
+                        type_table
+                            .get(self.resolve_through_aliases(et))
+                            .map(|t| t.kind.clone())
+                    })
                     .map(|k| match k {
                         TypeKind::Int => 1,
                         TypeKind::Bool => 2,
