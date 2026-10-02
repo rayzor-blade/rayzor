@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1790958576,"nonce":"OMFpysXmaQ3dvE7qZt6tN6vQLcc=","message":"Fixed in b882776bab22a189bb55c9aa121897c70f7062cf on branch plugin-constructors: a static method named `new` in a plugin's method table is its class's constructor.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1790958576,"nonce":"HBIiB9lzbGtnEdI6eIHQnVh7lEg=","status":2}]}
