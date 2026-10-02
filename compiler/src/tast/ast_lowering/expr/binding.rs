@@ -145,6 +145,7 @@ impl<'a> AstLowering<'a> {
         expression: &Expr,
         receiver: TypedExpression,
         bind_args: &[Expr],
+        null_safe: bool,
     ) -> LoweringResult<TypedExpression> {
         use crate::tast::core::TypeKind;
 
@@ -176,6 +177,54 @@ impl<'a> AstLowering<'a> {
         let location = self
             .context
             .create_location_from_span(expression.span.clone());
+
+        // The receiver and the bound arguments are evaluated at bind time: a
+        // local receiver and each non-literal argument are copied into fresh
+        // locals the lambda captures. A class method stays bound to `this`.
+        let mut prelude: Vec<TypedStatement> = Vec::new();
+        let receiver_is_local = match &receiver.kind {
+            TypedExpressionKind::Variable { symbol_id } => {
+                let is_method = self
+                    .context
+                    .class_context_stack
+                    .last()
+                    .and_then(|class| self.class_methods.get(class))
+                    .is_some_and(|methods| methods.iter().any(|(_, sym, _)| sym == symbol_id));
+                !is_method
+                    && self
+                        .context
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .is_some_and(|s| {
+                            matches!(
+                                s.kind,
+                                crate::tast::SymbolKind::Variable
+                                    | crate::tast::SymbolKind::Parameter
+                            )
+                        })
+            }
+            _ => false,
+        };
+        let receiver = if receiver_is_local {
+            self.bind_time_local(receiver, "_bound_receiver", location, &mut prelude)
+        } else {
+            receiver
+        };
+        let mut bound_values: Vec<Option<TypedExpression>> = Vec::with_capacity(bind_args.len());
+        for (i, bind_arg) in bind_args.iter().enumerate() {
+            if matches!(&bind_arg.kind, ExprKind::Ident(name) if name == "_") {
+                bound_values.push(None);
+                continue;
+            }
+            let value = self.lower_expression(bind_arg)?;
+            let value = match value.kind {
+                TypedExpressionKind::Literal { .. } | TypedExpressionKind::Null => value,
+                _ => self.bind_time_local(value, &format!("_bound_{i}"), location, &mut prelude),
+            };
+            bound_values.push(Some(value));
+        }
+        // `f?.bind()` calls through `?.`: a null `f` gives null when called.
+        let null_check_receiver = null_safe.then(|| receiver.clone());
 
         // Enter new function scope for the generated lambda
         let _function_scope = self.context.enter_scope(ScopeKind::Function);
@@ -224,10 +273,8 @@ impl<'a> AstLowering<'a> {
                     source_location: location,
                     metadata: ExpressionMetadata::default(),
                 });
-            } else {
-                // Bound value — lower normally
-                let lowered = self.lower_expression(bind_arg)?;
-                call_args.push(lowered);
+            } else if let Some(value) = bound_values[i].take() {
+                call_args.push(value);
             }
         }
 
@@ -343,6 +390,37 @@ impl<'a> AstLowering<'a> {
             source_location: location,
             metadata: ExpressionMetadata::default(),
         };
+        let call_expr = match null_check_receiver {
+            Some(target) => {
+                let bool_type = self.context.type_table.borrow().bool_type();
+                let wrap = |kind, expr_type| TypedExpression {
+                    kind,
+                    expr_type,
+                    usage: VariableUsage::Copy,
+                    lifetime_id: crate::tast::LifetimeId::default(),
+                    source_location: location,
+                    metadata: ExpressionMetadata::default(),
+                };
+                let null = wrap(TypedExpressionKind::Null, target.expr_type);
+                let is_null = wrap(
+                    TypedExpressionKind::BinaryOp {
+                        left: Box::new(target),
+                        operator: crate::tast::node::BinaryOperator::Eq,
+                        right: Box::new(null),
+                    },
+                    bool_type,
+                );
+                wrap(
+                    TypedExpressionKind::Conditional {
+                        condition: Box::new(is_null),
+                        then_expr: Box::new(wrap(TypedExpressionKind::Null, func_return_type)),
+                        else_expr: Some(Box::new(call_expr)),
+                    },
+                    func_return_type,
+                )
+            }
+            None => call_expr,
+        };
 
         // A Void function has no value to return: the call is the statement.
         let returns_void = self
@@ -423,7 +501,7 @@ impl<'a> AstLowering<'a> {
                 .create_function_type_with_effects(lambda_param_types, func_return_type, effects)
         };
 
-        Ok(TypedExpression {
+        let lambda = TypedExpression {
             kind: TypedExpressionKind::FunctionLiteral {
                 parameters: lambda_params,
                 body,
@@ -434,7 +512,57 @@ impl<'a> AstLowering<'a> {
             lifetime_id: crate::tast::LifetimeId::default(),
             source_location: location,
             metadata: ExpressionMetadata::default(),
+        };
+        if prelude.is_empty() {
+            return Ok(lambda);
+        }
+        prelude.push(TypedStatement::Expression {
+            expression: lambda,
+            source_location: location,
+        });
+        Ok(TypedExpression {
+            kind: TypedExpressionKind::Block {
+                statements: prelude,
+                scope_id: ScopeId::from_raw(self.context.next_scope_id()),
+            },
+            expr_type: result_type,
+            usage: VariableUsage::Copy,
+            lifetime_id: crate::tast::LifetimeId::default(),
+            source_location: location,
+            metadata: ExpressionMetadata::default(),
         })
+    }
+
+    /// `value` stored in a fresh local declared by `prelude`; a read of it.
+    fn bind_time_local(
+        &mut self,
+        value: TypedExpression,
+        name: &str,
+        location: SourceLocation,
+        prelude: &mut Vec<TypedStatement>,
+    ) -> TypedExpression {
+        let ty = value.expr_type;
+        let interned = self.context.string_interner.intern(name);
+        let symbol = self.context.symbol_table.create_variable_with_type(
+            interned,
+            self.context.current_scope,
+            ty,
+        );
+        prelude.push(TypedStatement::VarDeclaration {
+            symbol_id: symbol,
+            var_type: ty,
+            initializer: Some(value),
+            mutability: crate::tast::Mutability::Immutable,
+            source_location: location,
+        });
+        TypedExpression {
+            kind: TypedExpressionKind::Variable { symbol_id: symbol },
+            expr_type: ty,
+            usage: VariableUsage::Copy,
+            lifetime_id: crate::tast::LifetimeId::default(),
+            source_location: location,
+            metadata: ExpressionMetadata::default(),
+        }
     }
 }
 

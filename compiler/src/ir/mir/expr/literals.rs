@@ -775,8 +775,23 @@ impl<'a> HirToMirContext<'a> {
                     })?;
             let value = self.lower_expression(expression)?;
             let (value, _) = self.maybe_wrap_for_interface(value, expression.ty, field_type);
-            let index = self.builder.build_const(IrValue::I64(index as i64))?;
             let field_ir_type = self.convert_type(field_type);
+            // An Int for a Float field is that Float.
+            let is_int = matches!(
+                self.type_table.get(expression.ty).map(|t| &t.kind),
+                Some(TypeKind::Int)
+            );
+            let value = match self.builder.get_register_type(value) {
+                Some(have @ (IrType::I32 | IrType::I64))
+                    if is_int && field_ir_type == IrType::F64 =>
+                {
+                    self.builder
+                        .build_cast(value, have, IrType::F64)
+                        .unwrap_or(value)
+                }
+                _ => value,
+            };
+            let index = self.builder.build_const(IrValue::I64(index as i64))?;
             let field_ptr = self.builder.build_gep(object, vec![index], field_ir_type)?;
             self.builder.build_store(field_ptr, value);
         }

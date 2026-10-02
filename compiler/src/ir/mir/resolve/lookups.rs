@@ -299,6 +299,21 @@ impl<'a> HirToMirContext<'a> {
 
     /// Check if a type is an interface type and return its SymbolId.
     /// Also handles TypeParameters with interface constraints (T:Printable).
+    /// A value of interface type, `Null<I>` included: held as a fat pointer.
+    pub(crate) fn is_interface_value_type(&self, type_id: TypeId) -> bool {
+        let type_id = self.resolve_through_aliases(type_id);
+        match self.type_table.get(type_id).map(|t| &t.kind) {
+            Some(TypeKind::Interface { .. }) => true,
+            Some(TypeKind::Optional { inner_type }) => matches!(
+                self.type_table
+                    .get(self.resolve_through_aliases(*inner_type))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Interface { .. })
+            ),
+            _ => false,
+        }
+    }
+
     pub(crate) fn get_interface_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
         let type_id = self.resolve_through_aliases(type_id);
         let type_table = self.type_table;

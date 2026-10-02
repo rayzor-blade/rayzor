@@ -1375,19 +1375,34 @@ impl<'a> AstLowering<'a> {
         if let ExprKind::Field {
             expr: receiver_expr,
             field,
-            ..
+            is_optional,
         } = &expr.kind
         {
             if field == "bind" {
-                let receiver = self.lower_expression(receiver_expr)?;
-                let is_func_type = {
+                let mut receiver = self.lower_expression(receiver_expr)?;
+                // `Null<F>` binds as the function `F` it holds.
+                let func_type = {
+                    use crate::tast::core::TypeKind;
                     let tt = self.context.type_table.borrow();
-                    tt.get(receiver.expr_type)
-                        .map(|t| matches!(t.kind, crate::tast::core::TypeKind::Function { .. }))
-                        .unwrap_or(false)
+                    match tt.get(receiver.expr_type).map(|t| &t.kind) {
+                        Some(TypeKind::Optional { inner_type })
+                            if matches!(
+                                tt.get(*inner_type).map(|t| &t.kind),
+                                Some(TypeKind::Function { .. })
+                            ) =>
+                        {
+                            Some(*inner_type)
+                        }
+                        Some(TypeKind::Function { .. }) => Some(receiver.expr_type),
+                        _ => None,
+                    }
                 };
+                let is_func_type = func_type.is_some();
+                if let Some(func_type) = func_type {
+                    receiver.expr_type = func_type;
+                }
                 if is_func_type {
-                    return self.lower_bind_expression(expression, receiver, args);
+                    return self.lower_bind_expression(expression, receiver, args, *is_optional);
                 }
                 // Not function-typed — fall through to normal method call handling
             }

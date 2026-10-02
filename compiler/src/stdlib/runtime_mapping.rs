@@ -4317,7 +4317,7 @@ impl StdlibMapping {
             map_method!(static "Type", "typeof" => "haxe_type_typeof", params: 1, returns: primitive,
                 types: &[PtrU8] => I32),
             // Type.getClass(o:T):Class<T> — reads object header type_id
-            map_method!(static "Type", "getClass" => "haxe_object_get_type_id", params: 1, returns: primitive,
+            map_method!(static "Type", "getClass" => "haxe_type_get_class", params: 1, returns: primitive,
                 types: &[PtrVoid] => I64),
             // Type.getEnum(e:EnumValue):Enum<Dynamic> — compiler injects enum type_id
             map_method!(static "Type", "getEnum" => "haxe_type_get_enum", params: 1, returns: primitive,

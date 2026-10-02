@@ -3119,6 +3119,7 @@ pub extern "C" fn haxe_dynamic_tag(ptr: *mut u8) -> u32 {
 pub extern "C" fn haxe_unbox_if_tag(ptr: *mut u8, tag: u32) -> *mut u8 {
     match dynamic_box_at(ptr) {
         Some(d) if d.type_id.0 == tag => d.value_ptr,
+        Some(d) if d.type_id == TYPE_NULL => std::ptr::null_mut(),
         // A scalar read as a String is its string, as `Std.string` spells it.
         Some(d)
             if tag == TYPE_STRING.0 && matches!(d.type_id, TYPE_INT | TYPE_FLOAT | TYPE_BOOL) =>
@@ -3749,6 +3750,50 @@ pub extern "C" fn haxe_object_get_type_id(obj_ptr: *const u8) -> i64 {
     unsafe { *(obj_ptr as *const i64) }
 }
 
+/// `Type.getClass(v)`: the class id from the header of a class instance,
+/// null (0) for null and for any other value.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_type_get_class(obj_ptr: *const u8) -> i64 {
+    // A class value is a 32-bit id, not an object.
+    if obj_ptr.is_null() || (obj_ptr as usize) >> 32 == 0 {
+        return 0;
+    }
+    let header = unsafe { *(obj_ptr as *const i64) };
+    match u32::try_from(header) {
+        Ok(id) if is_class_type(id) => header,
+        _ => 0,
+    }
+}
+
+#[repr(C, align(8))]
+pub struct EnumNullaryCell([i32; 2]);
+
+const ENUM_NULLARY_CELL_COUNT: usize = 1024;
+
+static ENUM_NULLARY_CELLS: [EnumNullaryCell; ENUM_NULLARY_CELL_COUNT] = {
+    let mut cells = [const { EnumNullaryCell([0, 0]) }; ENUM_NULLARY_CELL_COUNT];
+    let mut i = 0;
+    while i < ENUM_NULLARY_CELL_COUNT {
+        cells[i] = EnumNullaryCell([i as i32, 0]);
+        i += 1;
+    }
+    cells
+};
+
+/// The `[tag:i32][pad:i32]` cell of a parameterless variant of an enum whose
+/// other variants carry payloads. One shared, read-only cell per tag, so the
+/// variant is a singleton as in Haxe and `==` holds between two of them.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_enum_nullary_cell(tag: i32) -> *mut u8 {
+    match usize::try_from(tag)
+        .ok()
+        .and_then(|t| ENUM_NULLARY_CELLS.get(t))
+    {
+        Some(cell) => cell as *const EnumNullaryCell as *mut u8,
+        None => Box::into_raw(Box::new(EnumNullaryCell([tag, 0]))) as *mut u8,
+    }
+}
+
 /// Safe downcast for class instances using object headers.
 /// Reads the type_id from offset 0, walks the class hierarchy, and returns
 /// the object pointer on match or null on failure.
@@ -4024,6 +4069,22 @@ pub extern "C" fn haxe_iface_fat_ptr_build(obj_ptr: *mut u8, iface_type_id: i32)
         }
     }
     new_ptr
+}
+
+/// The object an interface value stands for: word 0 of a fat pointer
+/// `[obj][slots..]`. A class instance (word 0 is its 32-bit type id) and
+/// null are their own identity.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_iface_identity(ptr: *mut u8) -> *mut u8 {
+    if ptr.is_null() || (ptr as usize) >> 32 == 0 {
+        return ptr;
+    }
+    let word = unsafe { *(ptr as *const usize) };
+    if word >> 32 == 0 {
+        ptr
+    } else {
+        word as *mut u8
+    }
 }
 
 /// Freeze the vtable registry into a flat array for O(1) lookup.

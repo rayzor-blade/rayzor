@@ -8354,6 +8354,51 @@ impl<'a> TastToHirContext<'a> {
                     self.collect_local_defs_expr(finally, defs);
                 }
             }
+            // Operands and arguments can hold block expressions with their own
+            // declarations.
+            TypedExpressionKind::FunctionCall {
+                function,
+                arguments,
+                ..
+            } => {
+                self.collect_local_defs_expr(function, defs);
+                for arg in arguments {
+                    self.collect_local_defs_expr(arg, defs);
+                }
+            }
+            TypedExpressionKind::MethodCall {
+                receiver,
+                arguments,
+                ..
+            } => {
+                self.collect_local_defs_expr(receiver, defs);
+                for arg in arguments {
+                    self.collect_local_defs_expr(arg, defs);
+                }
+            }
+            TypedExpressionKind::StaticMethodCall { arguments, .. }
+            | TypedExpressionKind::New { arguments, .. } => {
+                for arg in arguments {
+                    self.collect_local_defs_expr(arg, defs);
+                }
+            }
+            TypedExpressionKind::BinaryOp { left, right, .. } => {
+                self.collect_local_defs_expr(left, defs);
+                self.collect_local_defs_expr(right, defs);
+            }
+            TypedExpressionKind::UnaryOp { operand, .. } => {
+                self.collect_local_defs_expr(operand, defs);
+            }
+            TypedExpressionKind::FieldAccess { object, .. } => {
+                self.collect_local_defs_expr(object, defs);
+            }
+            TypedExpressionKind::ArrayAccess { array, index, .. } => {
+                self.collect_local_defs_expr(array, defs);
+                self.collect_local_defs_expr(index, defs);
+            }
+            TypedExpressionKind::Cast { expression, .. } => {
+                self.collect_local_defs_expr(expression, defs);
+            }
             _ => {} // Other expression types don't define local variables
         }
     }

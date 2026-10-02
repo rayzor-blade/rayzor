@@ -76,30 +76,22 @@ impl<'a> HirToMirContext<'a> {
             })
     }
 
-    /// Allocate a boxed enum struct with only a tag (no fields).
-    /// Used for parameterless variants of enums that have other parameterized variants.
-    /// Layout: [tag:i32][pad:i32] = 8 bytes, returned as ptr bitcast to i64.
+    /// The boxed form of a parameterless variant of an enum that has other
+    /// parameterized variants: the runtime's shared `[tag:i32][pad:i32]` cell
+    /// for that tag, so two evaluations of `None` are the same value.
+    /// Returned as ptr bitcast to i64.
     pub(crate) fn build_boxed_enum_tag_only(&mut self, tag_idx: i32) -> Option<IrId> {
-        let size_const = self.builder.build_const(IrValue::I64(8))?;
-        let alloc_func = self.get_or_register_extern_function(
-            "malloc",
-            vec![IrType::I64],
+        let cell_func = self.get_or_register_extern_function(
+            "haxe_enum_nullary_cell",
+            vec![IrType::I32],
             IrType::Ptr(Box::new(IrType::I8)),
         );
+        let tag_val = self.builder.build_const(IrValue::I32(tag_idx))?;
         let ptr = self.builder.build_call_direct(
-            alloc_func,
-            vec![size_const],
+            cell_func,
+            vec![tag_val],
             IrType::Ptr(Box::new(IrType::I8)),
         )?;
-        let zero_offset = self.builder.build_const(IrValue::I64(0))?;
-        let tag_gep =
-            self.builder
-                .build_gep(ptr, vec![zero_offset], IrType::Ptr(Box::new(IrType::I8)))?;
-        let tag_ptr = self
-            .builder
-            .build_bitcast(tag_gep, IrType::Ptr(Box::new(IrType::I32)))?;
-        let tag_val = self.builder.build_const(IrValue::I32(tag_idx))?;
-        self.builder.build_store(tag_ptr, tag_val)?;
         self.builder.build_bitcast(ptr, IrType::I64)
     }
 

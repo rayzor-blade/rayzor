@@ -156,7 +156,7 @@ Type enumConstructor static=true ctor=false params=1 -> haxe_type_enum_construct
 Type enumEq static=true ctor=false params=2 -> haxe_type_enum_eq
 Type enumIndex static=true ctor=false params=1 -> haxe_type_enum_index
 Type enumParameters static=true ctor=false params=1 -> haxe_type_enum_parameters
-Type getClass static=true ctor=false params=1 -> haxe_object_get_type_id
+Type getClass static=true ctor=false params=1 -> haxe_type_get_class
 Type getClassFields static=true ctor=false params=1 -> haxe_type_get_class_fields
 Type getClassName static=true ctor=false params=1 -> haxe_type_get_class_name
 Type getEnum static=true ctor=false params=1 -> haxe_type_get_enum

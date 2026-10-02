@@ -136,6 +136,16 @@ pub extern "C" fn haxe_reflect_has_field(obj: *mut u8, field: *mut u8) -> bool {
             Some(p) => p,
             None => return false,
         };
+        // A class used as a value is its 32-bit type id: its statics.
+        if (obj as usize) >> 32 == 0 {
+            let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                name_ptr,
+                name_len as usize,
+            ));
+            return get_type_info(TypeId(obj as u32))
+                .and_then(|info| info.class_info)
+                .is_some_and(|class| class.static_fields.contains(&name));
+        }
         if let Some(b) = builtin_box(obj) {
             let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
                 name_ptr,

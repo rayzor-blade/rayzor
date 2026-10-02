@@ -461,6 +461,39 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Interface values are fat pointers `[obj][slots..]`, a fresh one per
+        // conversion: they compare by the object they wrap.
+        let is_null_literal = |e: &HirExpr| matches!(&e.kind, HirExprKind::Null);
+        if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne)
+            && !is_null_literal(lhs)
+            && !is_null_literal(rhs)
+            && (self.is_interface_value_type(lhs.ty) || self.is_interface_value_type(rhs.ty))
+        {
+            let lhs_reg = self.lower_expression(lhs)?;
+            let rhs_reg = self.lower_expression(rhs)?;
+            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+            let identity = self.get_or_register_extern_function(
+                "haxe_iface_identity",
+                vec![ptr_u8.clone()],
+                ptr_u8.clone(),
+            );
+            let mut sides = [lhs_reg, rhs_reg];
+            for (side, ty) in sides.iter_mut().zip([lhs.ty, rhs.ty]) {
+                *side = self.coerce_reg_to(*side, &ptr_u8)?;
+                if self.is_interface_value_type(ty) {
+                    *side =
+                        self.builder
+                            .build_call_direct(identity, vec![*side], ptr_u8.clone())?;
+                }
+            }
+            let cmp_op = if matches!(op, HirBinaryOp::Eq) {
+                CompareOp::Eq
+            } else {
+                CompareOp::Ne
+            };
+            return self.builder.build_cmp(cmp_op, sides[0], sides[1]);
+        }
+
         // Comparison against a type parameter. A generic body is lowered ONCE
         // with its parameters erased to i64, so `a == b` on `T` compiles to a
         // raw integer compare: correct for Int, wrong for every value whose

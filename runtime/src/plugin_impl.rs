@@ -453,6 +453,18 @@ register_symbol!(
     crate::type_system::haxe_object_get_type_id
 );
 register_symbol!(
+    "haxe_type_get_class",
+    crate::type_system::haxe_type_get_class
+);
+register_symbol!(
+    "haxe_iface_identity",
+    crate::type_system::haxe_iface_identity
+);
+register_symbol!(
+    "haxe_enum_nullary_cell",
+    crate::type_system::haxe_enum_nullary_cell
+);
+register_symbol!(
     "haxe_object_is_instance",
     crate::type_system::haxe_object_is_instance
 );

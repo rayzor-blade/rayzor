@@ -27,7 +27,9 @@
 //!
 //! The analyzer tracks that z is used in the loop and determines drop points.
 
-use super::hir::{HirBlock, HirExpr, HirExprKind, HirLValue, HirPattern, HirStatement};
+use super::hir::{
+    HirBlock, HirExpr, HirExprKind, HirLValue, HirPattern, HirStatement, HirStringPart,
+};
 use crate::tast::SymbolId;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -121,6 +123,219 @@ pub struct DropPointAnalyzer {
     lambda_captures: BTreeSet<SymbolId>,
 }
 
+/// The captures of every lambda in `block`, nested ones included.
+fn collect_lambda_captures_block(block: &HirBlock, out: &mut BTreeSet<SymbolId>) {
+    for stmt in &block.statements {
+        collect_lambda_captures_stmt(stmt, out);
+    }
+    if let Some(expr) = &block.expr {
+        collect_lambda_captures_expr(expr, out);
+    }
+}
+
+fn collect_lambda_captures_stmt(stmt: &HirStatement, out: &mut BTreeSet<SymbolId>) {
+    match stmt {
+        HirStatement::Let { init, .. } => {
+            if let Some(init) = init {
+                collect_lambda_captures_expr(init, out);
+            }
+        }
+        HirStatement::Expr(expr) | HirStatement::Throw(expr) => {
+            collect_lambda_captures_expr(expr, out)
+        }
+        HirStatement::Return(expr) => {
+            if let Some(expr) = expr {
+                collect_lambda_captures_expr(expr, out);
+            }
+        }
+        HirStatement::Assign { lhs, rhs, .. } => {
+            match lhs {
+                HirLValue::Variable(_) => {}
+                HirLValue::Field { object, .. } => collect_lambda_captures_expr(object, out),
+                HirLValue::Index { object, index } => {
+                    collect_lambda_captures_expr(object, out);
+                    collect_lambda_captures_expr(index, out);
+                }
+            }
+            collect_lambda_captures_expr(rhs, out);
+        }
+        HirStatement::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_lambda_captures_expr(condition, out);
+            collect_lambda_captures_block(then_branch, out);
+            if let Some(else_branch) = else_branch {
+                collect_lambda_captures_block(else_branch, out);
+            }
+        }
+        HirStatement::Switch { scrutinee, cases } => {
+            collect_lambda_captures_expr(scrutinee, out);
+            for case in cases {
+                if let Some(guard) = &case.guard {
+                    collect_lambda_captures_expr(guard, out);
+                }
+                collect_lambda_captures_block(&case.body, out);
+            }
+        }
+        HirStatement::While {
+            condition,
+            body,
+            continue_update,
+            ..
+        } => {
+            collect_lambda_captures_expr(condition, out);
+            collect_lambda_captures_block(body, out);
+            if let Some(update) = continue_update {
+                collect_lambda_captures_block(update, out);
+            }
+        }
+        HirStatement::DoWhile {
+            body, condition, ..
+        } => {
+            collect_lambda_captures_block(body, out);
+            collect_lambda_captures_expr(condition, out);
+        }
+        HirStatement::ForIn { iterator, body, .. } => {
+            collect_lambda_captures_expr(iterator, out);
+            collect_lambda_captures_block(body, out);
+        }
+        HirStatement::TryCatch {
+            try_block,
+            catches,
+            finally_block,
+        } => {
+            collect_lambda_captures_block(try_block, out);
+            for clause in catches {
+                collect_lambda_captures_block(&clause.body, out);
+            }
+            if let Some(finally) = finally_block {
+                collect_lambda_captures_block(finally, out);
+            }
+        }
+        HirStatement::Label { block, .. } => collect_lambda_captures_block(block, out),
+        HirStatement::Break(_) | HirStatement::Continue(_) => {}
+    }
+}
+
+fn collect_lambda_captures_expr(expr: &HirExpr, out: &mut BTreeSet<SymbolId>) {
+    let mut each = |exprs: &[&HirExpr], out: &mut BTreeSet<SymbolId>| {
+        for e in exprs {
+            collect_lambda_captures_expr(e, out);
+        }
+    };
+    match &expr.kind {
+        HirExprKind::Lambda { captures, body, .. } => {
+            out.extend(captures.iter().map(|c| c.symbol));
+            collect_lambda_captures_expr(body, out);
+        }
+        HirExprKind::Field { object, .. } => each(&[object], out),
+        HirExprKind::Index { object, index } => each(&[object, index], out),
+        HirExprKind::Call { callee, args, .. } => {
+            each(&[callee], out);
+            for arg in args {
+                collect_lambda_captures_expr(arg, out);
+            }
+        }
+        HirExprKind::New { args, .. }
+        | HirExprKind::Array { elements: args }
+        | HirExprKind::MacroExpansion { args, .. } => {
+            for arg in args {
+                collect_lambda_captures_expr(arg, out);
+            }
+        }
+        HirExprKind::Unary { operand, .. } => each(&[operand], out),
+        HirExprKind::Binary { lhs, rhs, .. } => each(&[lhs, rhs], out),
+        HirExprKind::Cast { expr, .. }
+        | HirExprKind::TypeCheck { expr, .. }
+        | HirExprKind::Reification { expr }
+        | HirExprKind::Untyped(expr) => each(&[expr], out),
+        HirExprKind::RuntimeTypeCheck {
+            expr,
+            expected_expr,
+        } => each(&[expr, expected_expr], out),
+        HirExprKind::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => each(&[condition, then_expr, else_expr], out),
+        HirExprKind::Block(block) => collect_lambda_captures_block(block, out),
+        HirExprKind::MethodReference { receiver, .. } => each(&[receiver], out),
+        HirExprKind::Map { entries } => {
+            for (k, v) in entries {
+                each(&[k, v], out);
+            }
+        }
+        HirExprKind::ObjectLiteral { fields } => {
+            for (_, v) in fields {
+                collect_lambda_captures_expr(v, out);
+            }
+        }
+        HirExprKind::ArrayComprehension {
+            element,
+            iterators,
+            filter,
+        } => {
+            each(&[element], out);
+            for it in iterators {
+                collect_lambda_captures_expr(&it.iterator, out);
+            }
+            if let Some(filter) = filter {
+                collect_lambda_captures_expr(filter, out);
+            }
+        }
+        HirExprKind::MapComprehension {
+            key,
+            value,
+            iterators,
+            filter,
+        } => {
+            each(&[key, value], out);
+            for it in iterators {
+                collect_lambda_captures_expr(&it.iterator, out);
+            }
+            if let Some(filter) = filter {
+                collect_lambda_captures_expr(filter, out);
+            }
+        }
+        HirExprKind::StringInterpolation { parts } => {
+            for part in parts {
+                if let HirStringPart::Interpolation(e) = part {
+                    collect_lambda_captures_expr(e, out);
+                }
+            }
+        }
+        HirExprKind::InlineCode { code, args, .. } => {
+            each(&[code], out);
+            for arg in args {
+                collect_lambda_captures_expr(arg, out);
+            }
+        }
+        HirExprKind::TryCatch {
+            try_expr,
+            catch_handlers,
+            finally_expr,
+        } => {
+            each(&[try_expr], out);
+            for handler in catch_handlers {
+                if let Some(guard) = &handler.guard {
+                    collect_lambda_captures_expr(guard, out);
+                }
+                collect_lambda_captures_expr(&handler.body, out);
+            }
+            if let Some(finally) = finally_expr {
+                collect_lambda_captures_expr(finally, out);
+            }
+        }
+        HirExprKind::Literal(_)
+        | HirExprKind::Variable { .. }
+        | HirExprKind::This
+        | HirExprKind::Super
+        | HirExprKind::Null => {}
+    }
+}
+
 impl DropPointAnalyzer {
     pub fn new() -> Self {
         Self {
@@ -149,6 +364,12 @@ impl DropPointAnalyzer {
 
         // Traverse the function body
         self.analyze_block(body);
+        // `analyze_block` skips some statement and expression kinds; a lambda
+        // inside one still captures, and its captures must not be freed.
+        let mut captures = BTreeSet::new();
+        collect_lambda_captures_block(body, &mut captures);
+        self.escaping.extend(captures.iter().copied());
+        self.lambda_captures.extend(captures);
 
         // Compute last use for each variable
         let mut last_use = BTreeMap::new();
