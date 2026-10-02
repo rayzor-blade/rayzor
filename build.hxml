@@ -1,0 +1,3 @@
+--class-path compiler/haxe-std
+--class-path rayzor-tensors/haxe
+--class-path gpu/haxe

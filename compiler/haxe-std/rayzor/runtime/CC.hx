@@ -66,7 +66,9 @@ package rayzor.runtime;
  * cc2.relocate();
  * var pollFn = cc2.getSymbol("poll");
  *
- * while (CC.call1(pollFn, env) != null) { /* render */ }
+ * while (CC.call1(pollFn, env) != null) { 
+ * //render
+ * }
  * ```
  *
  * ## Platform Frameworks
