@@ -136,6 +136,45 @@ impl<'a> AstLowering<'a> {
 
             let start_expr = self.lower_expression(left)?;
             let end_expr = self.lower_expression(right)?;
+            // Haxe evaluates both bounds once, start first: a non-literal end
+            // is read into a local before the loop, and so is the start then.
+            let mut bound_decls = Vec::new();
+            let mut hoist_bound = |this: &mut Self, value: TypedExpression, suffix: &str| {
+                let ty = value.expr_type;
+                let name = this.context.intern_string(&format!("{var}__{suffix}"));
+                let symbol = this.context.symbol_table.create_variable_with_type(
+                    name,
+                    this.context.current_scope,
+                    ty,
+                );
+                bound_decls.push(TypedStatement::VarDeclaration {
+                    symbol_id: symbol,
+                    var_type: ty,
+                    initializer: Some(value),
+                    source_location: SourceLocation::unknown(),
+                    mutability: crate::tast::Mutability::Immutable,
+                });
+                TypedExpression {
+                    expr_type: ty,
+                    kind: TypedExpressionKind::Variable { symbol_id: symbol },
+                    usage: VariableUsage::Copy,
+                    lifetime_id: LifetimeId::static_lifetime(),
+                    source_location: SourceLocation::unknown(),
+                    metadata: ExpressionMetadata::default(),
+                }
+            };
+            let is_literal =
+                |e: &TypedExpression| matches!(e.kind, TypedExpressionKind::Literal { .. });
+            let (start_expr, end_expr) = if is_literal(&end_expr) {
+                (start_expr, end_expr)
+            } else {
+                let start_expr = if is_literal(&start_expr) {
+                    start_expr
+                } else {
+                    hoist_bound(self, start_expr, "start")
+                };
+                (start_expr, hoist_bound(self, end_expr, "end"))
+            };
 
             // Create the loop body scope
             let loop_body_scope_id = ScopeId::from_raw(self.context.next_scope_id());
@@ -264,11 +303,12 @@ impl<'a> AstLowering<'a> {
                 source_location: SourceLocation::unknown(),
             };
 
-            // Return block: { for (...) { body } }
+            // Return block: { bounds; for (...) { body } }
+            bound_decls.push(for_stmt);
             return Ok(TypedExpression {
                 expr_type: self.context.type_table.borrow().void_type(),
                 kind: TypedExpressionKind::Block {
-                    statements: vec![for_stmt],
+                    statements: bound_decls,
                     scope_id: ScopeId::from_raw(self.context.next_scope_id()),
                 },
                 usage: VariableUsage::Move,

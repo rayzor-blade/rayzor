@@ -1387,18 +1387,46 @@ impl<'a> HirToMirContext<'a> {
                     // This must happen AFTER rayzor_update_call_frame_location (so the
                     // throw location is in the trace) but BEFORE rayzor_throw_typed.
                     // Only for class types (Exception subclasses), not primitive throws.
-                    if self.get_class_symbol(thrown_type).is_some() {
+                    if let Some(thrown_class) = self.get_class_symbol(thrown_type) {
                         let stack_name = self.string_interner.intern("stack");
-                        // Only a class that declares `stack` gets one; a
-                        // thrown class without it (`haxe.io.Eof`) must not
-                        // fail the compile on the by-name fallback.
-                        let stack_field = match self
-                            .resolve_field_index_candidates(stack_name, thrown_type)
-                        {
-                            FieldIndexResolution::Unique(class_ty, idx) => Some((class_ty, idx)),
-                            _ => None,
-                        };
-                        if let Some((_class_ty, field_idx)) = stack_field {
+                        // Only a class that declares or inherits `stack` gets
+                        // one. The lookup is by name across every class, so
+                        // the owner is checked against the thrown class's
+                        // chain: another class's slot index would write past
+                        // the end of this object.
+                        let stack_field =
+                            match self.resolve_field_index_candidates(stack_name, thrown_type) {
+                                FieldIndexResolution::Unique(class_ty, idx) => {
+                                    let owner = self.get_class_symbol(class_ty);
+                                    let in_chain = owner.is_some_and(|owner| {
+                                        owner == thrown_class
+                                            || self.parent_chain(thrown_class).contains(&owner)
+                                    });
+                                    in_chain.then_some(idx)
+                                }
+                                _ => None,
+                            };
+                        if let Some(field_idx) = stack_field {
+                            // A null exception has no slot to write.
+                            let null = self
+                                .builder
+                                .build_const(IrValue::Null)
+                                .expect("failed to create null const");
+                            let not_null = self
+                                .builder
+                                .build_cmp(CompareOp::Ne, exception_reg, null)
+                                .expect("failed to compare the exception with null");
+                            let store_block = self
+                                .builder
+                                .create_block()
+                                .expect("failed to create stack store block");
+                            let after_block = self
+                                .builder
+                                .create_block()
+                                .expect("failed to create block after the stack store");
+                            self.builder
+                                .build_cond_branch(not_null, store_block, after_block);
+                            self.builder.switch_to_block(store_block);
                             let call_stack_fn = self.get_or_register_extern_function(
                                 "rayzor_native_stack_trace_call_stack",
                                 vec![],
@@ -1426,6 +1454,8 @@ impl<'a> HirToMirContext<'a> {
                                 )
                                 .expect("failed to build stack field GEP");
                             self.builder.build_store(field_ptr, stack_str);
+                            self.builder.build_branch(after_block);
+                            self.builder.switch_to_block(after_block);
                         }
                     }
 
@@ -1467,7 +1497,8 @@ impl<'a> HirToMirContext<'a> {
                             .build_cast(header_raw, IrType::I64, IrType::I32)
                             .expect("failed to cast throw class type id")
                     } else {
-                        let thrown_type_id = self.runtime_type_id(expr.ty);
+                        let thrown_type_id =
+                            self.runtime_type_id(self.exception_carrier_type(expr.ty));
                         self.builder
                             .build_const(IrValue::I32(thrown_type_id as i32))
                             .expect("failed to create throw type_id const")

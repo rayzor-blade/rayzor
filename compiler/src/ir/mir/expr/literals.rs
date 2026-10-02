@@ -982,6 +982,16 @@ impl<'a> HirToMirContext<'a> {
             }
         };
 
+        // Field values are evaluated in source order; the stores below go by
+        // sorted index.
+        let mut source_order: Vec<usize> = named_fields.iter().filter_map(|(_, s)| *s).collect();
+        source_order.sort_unstable();
+        let mut lowered_values: BTreeMap<usize, IrId> = BTreeMap::new();
+        for orig_idx in source_order {
+            let value = self.lower_expression(&fields[orig_idx].1)?;
+            lowered_values.insert(orig_idx, value);
+        }
+
         // Emit: handle = rayzor_anon_new(shape_id, total_field_count)
         let shape_id_val = self.builder.build_const(IrValue::I32(shape_id as i32))?;
         let field_count_val = self
@@ -999,9 +1009,8 @@ impl<'a> HirToMirContext<'a> {
 
             match source {
                 Some(orig_idx) => {
-                    // Literal field — lower the expression
                     let field_expr = &fields[*orig_idx].1;
-                    let field_val = self.lower_expression(field_expr)?;
+                    let field_val = *lowered_values.get(orig_idx)?;
                     // Wrap a class value into an interface fat pointer when the
                     // field's declared type is that interface.
                     let (field_val, field_val_ty) =

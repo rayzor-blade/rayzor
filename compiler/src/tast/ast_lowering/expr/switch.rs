@@ -267,6 +267,27 @@ impl<'a> AstLowering<'a> {
 
     /// Whether a pattern needs the guard desugaring: it binds with `name =`
     /// or runs an extractor somewhere inside.
+    /// A pattern matched structurally against parts of the subject.
+    fn pattern_destructures(pattern: &parser::Pattern) -> bool {
+        match pattern {
+            parser::Pattern::Array(_) | parser::Pattern::Object { .. } => true,
+            parser::Pattern::Const(value) => {
+                matches!(&value.kind, parser::ExprKind::Object(fields) if !fields.is_empty())
+            }
+            // `case [1, 1] | [1, 0]:` matches structurally per alternative.
+            parser::Pattern::Or(items) => items.iter().any(Self::pattern_destructures),
+            _ => false,
+        }
+    }
+
+    /// A case lowered as a guard and bindings over parts of the subject
+    /// expression, which therefore re-reads the subject.
+    pub(crate) fn case_reads_subject_parts(case: &parser::Case) -> bool {
+        case.patterns
+            .first()
+            .is_some_and(|p| Self::pattern_destructures(p) || Self::pattern_needs_guard(p))
+    }
+
     fn pattern_needs_guard(pattern: &parser::Pattern) -> bool {
         use parser::Pattern as P;
         match pattern {
@@ -546,14 +567,7 @@ impl<'a> AstLowering<'a> {
         pattern: &parser::Pattern,
         subject: &parser::Expr,
     ) -> Option<Result<(TypedExpression, Vec<(String, parser::Expr)>), LoweringError>> {
-        let destructures = match pattern {
-            parser::Pattern::Array(_) | parser::Pattern::Object { .. } => true,
-            parser::Pattern::Const(value) => {
-                matches!(&value.kind, parser::ExprKind::Object(fields) if !fields.is_empty())
-            }
-            _ => false,
-        };
-        if !destructures && !Self::pattern_needs_guard(pattern) {
+        if !Self::pattern_destructures(pattern) && !Self::pattern_needs_guard(pattern) {
             return None;
         }
         let (test, bindings) = self.pattern_guard_parts(pattern, subject)?;

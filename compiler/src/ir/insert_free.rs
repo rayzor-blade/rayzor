@@ -61,6 +61,8 @@ struct AllocFuncIds {
     /// `haxe_object_free_deep` — releases an object and, through the owned-field
     /// mask its class registered, whatever it owns beneath it.
     free_deep_ids: BTreeSet<IrFunctionId>,
+    /// `_setjmp`, which returns again when an exception longjmps back to it.
+    setjmp_ids: BTreeSet<IrFunctionId>,
     /// Array ops that take the header as arg0 and DO NOT retain it past the
     /// call (scalar get/set/push/pop/length/…). Deliberately EXCLUDES the
     /// retaining/aliasing ops — iterator (holds the array) and the `_ptr`
@@ -105,6 +107,7 @@ impl OptimizationPass for InsertFreePass {
             ext_fresh_string_ids: BTreeSet::new(),
             string_free_ids: BTreeSet::new(),
             free_deep_ids: BTreeSet::new(),
+            setjmp_ids: BTreeSet::new(),
             array_safe_ids: BTreeSet::new(),
             nonaliasing_result_ids: BTreeSet::new(),
         };
@@ -342,6 +345,9 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         }
         "haxe_array_free" | "array_free" => {
             ids.array_free_ids.insert(fid);
+        }
+        "_setjmp" => {
+            ids.setjmp_ids.insert(fid);
         }
         "haxe_string_free" => {
             ids.string_free_ids.insert(fid);
@@ -1259,7 +1265,67 @@ fn insert_free_for_function(
         );
     }
 
+    keep_releases_before_setjmp(function, ids);
+
     inserted
+}
+
+/// A `_setjmp` returns again when an exception longjmps back to it, re-running
+/// the rest of its block. A release there of a value defined before the
+/// setjmp would run twice, so it moves ahead of the setjmp, or is dropped when
+/// the value is still read after it.
+fn keep_releases_before_setjmp(function: &mut IrFunction, ids: &AllocFuncIds) {
+    let released = |inst: &IrInstruction| -> Option<IrId> {
+        match inst {
+            IrInstruction::Free { ptr } => Some(*ptr),
+            IrInstruction::CallDirect { func_id, args, .. }
+                if ids.free_ids.contains(func_id)
+                    || ids.string_free_ids.contains(func_id)
+                    || ids.array_free_ids.contains(func_id)
+                    || ids.anon_drop_ids.contains(func_id)
+                    || ids.free_deep_ids.contains(func_id) =>
+            {
+                args.first().copied()
+            }
+            _ => None,
+        }
+    };
+    for block in function.cfg.blocks.values_mut() {
+        let Some(setjmp_at) = block.instructions.iter().position(|inst| {
+            matches!(inst, IrInstruction::CallDirect { func_id, .. } if ids.setjmp_ids.contains(func_id))
+        }) else {
+            continue;
+        };
+        let defined_after: BTreeSet<IrId> = block.instructions[setjmp_at + 1..]
+            .iter()
+            .filter_map(|inst| inst.dest())
+            .collect();
+        let mut hoisted = Vec::new();
+        let mut i = setjmp_at + 1;
+        while i < block.instructions.len() {
+            match released(&block.instructions[i]) {
+                Some(value) if !defined_after.contains(&value) => {
+                    let release = block.instructions.remove(i);
+                    let read_after = block.instructions[setjmp_at + 1..]
+                        .iter()
+                        .any(|inst| inst.uses().contains(&value))
+                        || match &block.terminator {
+                            IrTerminator::CondBranch { condition, .. } => *condition == value,
+                            IrTerminator::Switch { value: v, .. } => *v == value,
+                            IrTerminator::Return { value: Some(v) } => *v == value,
+                            _ => false,
+                        };
+                    if !read_after {
+                        hoisted.push(release);
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        for (k, release) in hoisted.into_iter().enumerate() {
+            block.instructions.insert(setjmp_at + k, release);
+        }
+    }
 }
 
 /// Describe what this function's allocations are and how each was released.

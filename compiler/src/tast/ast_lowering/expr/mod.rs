@@ -1589,6 +1589,69 @@ impl<'a> AstLowering<'a> {
                 cases,
                 default,
             } => {
+                // Patterns lowered as guards read parts of the subject
+                // expression, so its parts are bound to locals first and
+                // evaluated once, in order. An array literal keeps its shape
+                // (each element its own local, keeping its type); any other
+                // subject that is not a plain name is bound whole.
+                let plain = |e: &Expr| {
+                    matches!(
+                        e.kind,
+                        ExprKind::Ident(_)
+                            | ExprKind::This
+                            | ExprKind::Int(_)
+                            | ExprKind::Float(_)
+                            | ExprKind::String(_)
+                            | ExprKind::Bool(_)
+                            | ExprKind::Null
+                    )
+                };
+                let needs_binding = match &expr.kind {
+                    ExprKind::Array(elements) => !elements.iter().all(|e| plain(e)),
+                    _ => !plain(expr),
+                };
+                if needs_binding && cases.iter().any(Self::case_reads_subject_parts) {
+                    let span = expr.span;
+                    let mut elements = Vec::new();
+                    let mut bind = |value: &Expr, this: &mut Self| -> Expr {
+                        if plain(value) {
+                            return value.clone();
+                        }
+                        let name = format!("__switch_subject{}", this.context.next_scope_id());
+                        elements.push(parser::BlockElement::Expr(Expr {
+                            kind: ExprKind::Var {
+                                name: name.clone(),
+                                type_hint: None,
+                                expr: Some(Box::new(value.clone())),
+                            },
+                            span: value.span,
+                        }));
+                        Expr {
+                            kind: ExprKind::Ident(name),
+                            span: value.span,
+                        }
+                    };
+                    let subject = match &expr.kind {
+                        ExprKind::Array(items) => Expr {
+                            kind: ExprKind::Array(items.iter().map(|e| bind(e, self)).collect()),
+                            span,
+                        },
+                        _ => bind(expr, self),
+                    };
+                    elements.push(parser::BlockElement::Expr(Expr {
+                        kind: ExprKind::Switch {
+                            expr: Box::new(subject),
+                            cases: cases.clone(),
+                            default: default.clone(),
+                        },
+                        span: expression.span,
+                    }));
+                    let block = Expr {
+                        kind: ExprKind::Block(elements),
+                        span: expression.span,
+                    };
+                    return self.lower_expression(&block);
+                }
                 // Lower the discriminant expression
                 let discriminant = Box::new(self.lower_expression(expr)?);
 

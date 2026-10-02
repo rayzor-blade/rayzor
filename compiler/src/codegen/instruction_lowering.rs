@@ -268,11 +268,11 @@ impl CraneliftBackend {
                 let actual_rhs_ty = builder.func.dfg.value_type(rhs);
 
                 if actual_lhs_ty.is_float() || actual_rhs_ty.is_float() {
-                    // Float modulo: a % b = a - floor(a/b) * b
+                    // Float modulo truncates toward zero, as C fmod: a - trunc(a/b) * b
                     // lhs and rhs are already converted to float by the general coercion above
                     let div = builder.ins().fdiv(lhs, rhs);
-                    let floored = builder.ins().floor(div);
-                    let mul = builder.ins().fmul(floored, rhs);
+                    let truncated = builder.ins().trunc(div);
+                    let mul = builder.ins().fmul(truncated, rhs);
                     builder.ins().fsub(lhs, mul)
                 } else if ty.is_signed() {
                     builder.ins().srem(lhs, rhs)
@@ -310,7 +310,7 @@ impl CraneliftBackend {
             BinaryOp::FMul => builder.ins().fmul(lhs, rhs),
             BinaryOp::FDiv => builder.ins().fdiv(lhs, rhs),
             BinaryOp::FRem => {
-                // Float modulo: a % b = a - floor(a/b) * b
+                // Float modulo truncates toward zero, as C fmod: a - trunc(a/b) * b
                 // Get actual types AFTER coercion (lhs/rhs may have been converted above)
                 let actual_lhs_ty = builder.func.dfg.value_type(lhs);
                 let actual_rhs_ty = builder.func.dfg.value_type(rhs);
@@ -337,8 +337,8 @@ impl CraneliftBackend {
                 };
 
                 let div = builder.ins().fdiv(lhs_f, rhs_f);
-                let floored = builder.ins().floor(div);
-                let mul = builder.ins().fmul(floored, rhs_f);
+                let truncated = builder.ins().trunc(div);
+                let mul = builder.ins().fmul(truncated, rhs_f);
                 builder.ins().fsub(lhs_f, mul)
             }
         };
@@ -743,11 +743,11 @@ impl CraneliftBackend {
                 let actual_rhs_ty = builder.func.dfg.value_type(rhs);
 
                 if actual_lhs_ty.is_float() || actual_rhs_ty.is_float() {
-                    // Float modulo: a % b = a - floor(a/b) * b
+                    // Float modulo truncates toward zero, as C fmod: a - trunc(a/b) * b
                     // lhs and rhs are already converted to float by the general coercion above
                     let div = builder.ins().fdiv(lhs, rhs);
-                    let floored = builder.ins().floor(div);
-                    let mul = builder.ins().fmul(floored, rhs);
+                    let truncated = builder.ins().trunc(div);
+                    let mul = builder.ins().fmul(truncated, rhs);
                     builder.ins().fsub(lhs, mul)
                 } else if ty.is_signed() {
                     builder.ins().srem(lhs, rhs)
@@ -784,7 +784,7 @@ impl CraneliftBackend {
             BinaryOp::FMul => builder.ins().fmul(lhs, rhs),
             BinaryOp::FDiv => builder.ins().fdiv(lhs, rhs),
             BinaryOp::FRem => {
-                // Float modulo: a % b = a - floor(a/b) * b
+                // Float modulo truncates toward zero, as C fmod: a - trunc(a/b) * b
                 // Get actual types AFTER coercion (lhs/rhs may have been converted above)
                 let actual_lhs_ty = builder.func.dfg.value_type(lhs);
                 let actual_rhs_ty = builder.func.dfg.value_type(rhs);
@@ -811,8 +811,8 @@ impl CraneliftBackend {
                 };
 
                 let div = builder.ins().fdiv(lhs_f, rhs_f);
-                let floored = builder.ins().floor(div);
-                let mul = builder.ins().fmul(floored, rhs_f);
+                let truncated = builder.ins().trunc(div);
+                let mul = builder.ins().fmul(truncated, rhs_f);
                 builder.ins().fsub(lhs_f, mul)
             }
         };

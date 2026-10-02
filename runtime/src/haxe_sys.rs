@@ -831,9 +831,9 @@ pub extern "C" fn haxe_string_index_of_ptr(
             return -1;
         }
 
-        // Empty needle - return start_index (or 0 if start_index < 0)
+        // An empty needle is found at the start, clamped to the string.
         if needle_ref.len == 0 {
-            return if start_index < 0 { 0 } else { start_index };
+            return start_index.clamp(0, s_ref.len as i32);
         }
 
         let start = if start_index < 0 {
@@ -877,14 +877,11 @@ pub extern "C" fn haxe_string_last_index_of_ptr(
             return -1;
         }
 
-        // Empty needle - return end of string (or start_index if provided and smaller)
+        // A negative start searches position 0 only, as ECMAScript clamps it.
+        let start_index = start_index.max(0);
+        // An empty needle is found at the start, clamped to the string.
         if needle_ref.len == 0 {
-            let len = s_ref.len as i32;
-            return if start_index < 0 || start_index >= len {
-                len
-            } else {
-                start_index
-            };
+            return start_index.min(s_ref.len as i32);
         }
 
         if needle_ref.len > s_ref.len {
@@ -896,11 +893,7 @@ pub extern "C" fn haxe_string_last_index_of_ptr(
 
         // Calculate the maximum starting position
         let max_start = s_ref.len - needle_ref.len;
-        let search_start = if start_index < 0 {
-            max_start
-        } else {
-            (start_index as usize).min(max_start)
-        };
+        let search_start = (start_index as usize).min(max_start);
 
         // Search backwards
         for i in (0..=search_start).rev() {

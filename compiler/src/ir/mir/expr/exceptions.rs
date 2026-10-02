@@ -290,7 +290,7 @@ impl<'a> HirToMirContext<'a> {
                 let catch_type_kind = {
                     let type_table = self.type_table;
                     type_table
-                        .get(catch_clause.exception_type)
+                        .get(self.exception_carrier_type(catch_clause.exception_type))
                         .map(|t| t.kind.clone())
                 };
                 let is_dynamic = matches!(catch_type_kind, Some(crate::tast::TypeKind::Dynamic));
@@ -306,12 +306,17 @@ impl<'a> HirToMirContext<'a> {
                 }
                 // else: we're still in the landing_pad block from above
 
-                if is_dynamic || i == catches.len() - 1 {
-                    // Dynamic catches everything; last catch is also unconditional fallback
+                let carrier = self.exception_carrier_type(catch_clause.exception_type);
+                // The last clause also takes what its type cannot be tested for.
+                if is_dynamic
+                    || (i == catches.len() - 1
+                        && (self.is_catch_all_type(catch_clause.exception_type)
+                            || !self.catch_type_is_testable(carrier)))
+                {
                     self.builder.build_branch(catch_body_block);
                     next_test_block = None;
                 } else {
-                    let expected_type_id = self.runtime_type_id(catch_clause.exception_type);
+                    let expected_type_id = self.runtime_type_id(carrier);
                     let expected_const = self
                         .builder
                         .build_const(IrValue::I32(expected_type_id as i32))
@@ -387,11 +392,15 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // If all typed catches failed and no Dynamic/final catch consumed it,
-            // branch to finally/continuation (exception goes unhandled at this level)
+            // No clause matched: the exception propagates to the enclosing
+            // handler (this try's handler is already popped). With a finally
+            // the path still falls through to it.
             if let Some(fallthrough_block) = next_test_block {
                 self.builder.switch_to_block(fallthrough_block);
                 tc_fallthrough = Some(fallthrough_block);
+                if finally_block.is_none() {
+                    self.rethrow_current(exception_id, exc_type_id);
+                }
                 self.builder.build_branch(after_catch_target);
             }
         } else {
@@ -488,6 +497,74 @@ impl<'a> HirToMirContext<'a> {
         self.builder
             .build_call_direct(as_dyn, vec![], ptr_u8)
             .unwrap_or(raw)
+    }
+
+    /// The type a value is thrown and caught as: through typedefs, and an
+    /// abstract as the type it wraps.
+    pub(crate) fn exception_carrier_type(&self, ty: TypeId) -> TypeId {
+        let mut ty = self.resolve_through_aliases(ty);
+        for _ in 0..8 {
+            let Some(TypeKind::Abstract {
+                symbol_id,
+                underlying,
+                ..
+            }) = self.type_table.get(ty).map(|t| &t.kind)
+            else {
+                break;
+            };
+            let Some(next) =
+                underlying.or_else(|| self.type_table.resolve_abstract_underlying(*symbol_id))
+            else {
+                break;
+            };
+            ty = self.resolve_through_aliases(next);
+        }
+        ty
+    }
+
+    /// A catch type whose runtime test is reliable: a class (matched through
+    /// its hierarchy) or a basic type (matched by id).
+    fn catch_type_is_testable(&self, ty: TypeId) -> bool {
+        matches!(
+            self.type_table.get(ty).map(|t| &t.kind),
+            Some(
+                TypeKind::Class { .. }
+                    | TypeKind::Int
+                    | TypeKind::Float
+                    | TypeKind::Bool
+                    | TypeKind::String
+            )
+        )
+    }
+
+    /// A catch type that takes every thrown value: Dynamic, `Any`, and
+    /// `haxe.Exception`, which wraps a non-exception value in Haxe 4.
+    fn is_catch_all_type(&self, ty: TypeId) -> bool {
+        let ty = self.resolve_through_aliases(ty);
+        match self.type_table.get(ty).map(|t| &t.kind) {
+            Some(crate::tast::TypeKind::Dynamic) => true,
+            Some(
+                crate::tast::TypeKind::Class { symbol_id, .. }
+                | crate::tast::TypeKind::Abstract { symbol_id, .. },
+            ) => self
+                .symbol_table
+                .get_symbol(*symbol_id)
+                .and_then(|s| s.qualified_name.or(Some(s.name)))
+                .and_then(|n| self.string_interner.get(n))
+                .is_some_and(|n| n == "haxe.Exception" || n == "Any"),
+            _ => false,
+        }
+    }
+
+    /// Raise the exception being handled again, to the enclosing handler.
+    fn rethrow_current(&mut self, exception: IrId, type_id: IrId) {
+        let throw_fn = self.get_or_register_extern_function(
+            "rayzor_throw_typed",
+            vec![IrType::I64, IrType::I32],
+            IrType::Void,
+        );
+        self.builder
+            .build_call_direct(throw_fn, vec![exception, type_id], IrType::Void);
     }
 
     pub(crate) fn lower_try_catch_expr(&mut self, expr: &HirExpr) -> Option<IrId> {
@@ -641,7 +718,7 @@ impl<'a> HirToMirContext<'a> {
                 let catch_type_kind = {
                     let type_table = self.type_table;
                     type_table
-                        .get(handler.exception_type)
+                        .get(self.exception_carrier_type(handler.exception_type))
                         .map(|t| t.kind.clone())
                 };
                 let is_dynamic = matches!(catch_type_kind, Some(crate::tast::TypeKind::Dynamic));
@@ -655,11 +732,17 @@ impl<'a> HirToMirContext<'a> {
                     self.builder.switch_to_block(test_block);
                 }
 
-                if is_dynamic || i == catch_handlers.len() - 1 {
+                let carrier = self.exception_carrier_type(handler.exception_type);
+                // The last clause also takes what its type cannot be tested for.
+                if is_dynamic
+                    || (i == catch_handlers.len() - 1
+                        && (self.is_catch_all_type(handler.exception_type)
+                            || !self.catch_type_is_testable(carrier)))
+                {
                     self.builder.build_branch(catch_body_block);
                     next_test_block = None;
                 } else {
-                    let expected_type_id = self.runtime_type_id(handler.exception_type);
+                    let expected_type_id = self.runtime_type_id(carrier);
                     let expected_const = self
                         .builder
                         .build_const(IrValue::I32(expected_type_id as i32))
@@ -740,6 +823,9 @@ impl<'a> HirToMirContext<'a> {
                 }
                 if let Some(finally_body) = &finally_expr {
                     self.lower_expression(finally_body);
+                }
+                if !self.is_terminated() {
+                    self.rethrow_current(exception_id, exc_type_id);
                 }
                 if !self.is_terminated() {
                     if let Some(blk) = self.builder.current_block() {

@@ -278,10 +278,8 @@ fn build_string_lastindexof_wrapper(builder: &mut MirBuilder) {
     let s = builder.get_param(0);
     let needle = builder.get_param(1);
 
-    // Default startIndex = -1 (means search from end in runtime)
-    // Actually for lastIndexOf, the default should be null which means string.length
-    // In Haxe, passing -1 or a large number would search from end
-    let start_index = builder.const_i32(-1);
+    // An omitted startIndex searches from the end of the string.
+    let start_index = builder.const_i32(i32::MAX);
 
     // Call the runtime function with default startIndex
     let extern_id = builder

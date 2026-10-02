@@ -1990,9 +1990,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let mut fields = Vec::new();
             while !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof() {
                 let field_name = self.stream.current_text().to_string();
-                // Strip quotes for string keys
+                // A string key is its unescaped contents.
                 let field_name = if field_name.starts_with('"') || field_name.starts_with('\'') {
-                    field_name[1..field_name.len() - 1].to_string()
+                    unescape_string(&field_name[1..field_name.len() - 1])
                 } else {
                     field_name
                 };

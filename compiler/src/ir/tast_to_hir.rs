@@ -3134,7 +3134,40 @@ impl<'a> TastToHirContext<'a> {
                     HirExprKind::Block(block)
                 } else {
                     // Value matching with optional guards: convert to if-then-else chain
-                    let discriminant_expr = self.lower_expression(discriminant);
+                    let mut discriminant_expr = self.lower_expression(discriminant);
+                    // Every case tests the scrutinee's one value: anything but a
+                    // plain read is evaluated once into a temporary.
+                    let discriminant_let = if matches!(
+                        discriminant_expr.kind,
+                        HirExprKind::Variable { .. }
+                            | HirExprKind::Literal(_)
+                            | HirExprKind::This
+                            | HirExprKind::Null
+                    ) {
+                        None
+                    } else {
+                        let (name, symbol) = self.gen_temp_var();
+                        let ty = discriminant_expr.ty;
+                        let location = discriminant_expr.source_location;
+                        let init = std::mem::replace(
+                            &mut discriminant_expr,
+                            HirExpr::new(
+                                HirExprKind::Variable {
+                                    symbol,
+                                    capture_mode: None,
+                                },
+                                ty,
+                                self.current_lifetime,
+                                location,
+                            ),
+                        );
+                        Some(HirStatement::Let {
+                            pattern: HirPattern::Variable { name, symbol },
+                            type_hint: Some(ty),
+                            init: Some(init),
+                            is_mutable: false,
+                        })
+                    };
                     let mut current_expr = default_case
                         .as_ref()
                         .map(|expr| self.lower_expression(expr))
@@ -3306,7 +3339,14 @@ impl<'a> TastToHirContext<'a> {
                         }
                     }
 
-                    current_expr.kind
+                    match discriminant_let {
+                        Some(let_stmt) => HirExprKind::Block(HirBlock {
+                            statements: vec![let_stmt],
+                            expr: Some(Box::new(current_expr)),
+                            scope: self.current_scope,
+                        }),
+                        None => current_expr.kind,
+                    }
                 }
             }
             TypedExpressionKind::Throw { expression } => {
@@ -6789,14 +6829,30 @@ impl<'a> TastToHirContext<'a> {
                     refs.keys()
                         .any(|s| *s == SymbolId::from_raw(0) || params.contains_key(s))
                 };
-                self.inline_safe(discriminant, params)
+                // The inlined form tests `discriminant == value` per case: it
+                // re-reads the discriminant and has no pattern binding, so
+                // only single value cases over a plain read qualify.
+                let plain_read = matches!(
+                    discriminant.kind,
+                    TypedExpressionKind::This { .. }
+                        | TypedExpressionKind::Variable { .. }
+                        | TypedExpressionKind::FieldAccess { .. }
+                );
+                plain_read
+                    && self.inline_safe(discriminant, params)
                     && default_case
                         .as_ref()
                         .is_none_or(|d| self.inline_safe(d, params))
                     && cases.iter().all(|case| {
-                        case.guard
-                            .as_ref()
-                            .is_none_or(|g| self.inline_safe(g, params))
+                        case.extra_case_values.is_empty()
+                            && !matches!(
+                                case.case_value.kind,
+                                TypedExpressionKind::PatternPlaceholder { .. }
+                            )
+                            && case
+                                .guard
+                                .as_ref()
+                                .is_none_or(|g| self.inline_safe(g, params))
                             && match &case.body {
                                 TypedStatement::Expression { expression, .. } => {
                                     self.inline_safe(expression, params)
