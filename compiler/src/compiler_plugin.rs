@@ -461,11 +461,13 @@ impl CompilerPlugin for NativePlugin {
                 None
             };
 
+            // A static native `new` is the class's constructor: Haxe's `new`
+            // can name nothing else.
             let sig = MethodSignature {
                 class,
                 method,
                 is_static: m.is_static,
-                is_constructor: false,
+                is_constructor: m.is_static && method == "new",
                 param_count: user_param_count,
             };
 
