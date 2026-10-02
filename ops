@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1790324276,"nonce":"mzfAgRKFQb9R7fSJ+g6Bt8EH13w=","added":["bug","area:mir"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1790970241,"nonce":"8VLGFDIXAXTARD1u0oo6lrqo9Dc=","message":"Issue3338 hits this: a payload-free enum is a raw i64 discriminant, so null == the first constructor (`e == null` is true for Val1). Its `case null` half is 213b61c.","files":null}]}
