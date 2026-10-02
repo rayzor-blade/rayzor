@@ -278,7 +278,7 @@ mod native_plugin {
     static ALL_METHODS: LazyLock<Vec<NativeMethodDesc>> = LazyLock::new(|| {
         let mut methods: Vec<_> = GPU_METHODS.iter().map(copy_method).collect();
         #[cfg(feature = "webgpu-backend")]
-        methods.extend(XGPU_METHODS.iter().map(copy_method));
+        methods.extend(XIDL_METHODS.iter().map(copy_method));
         methods
     });
 
@@ -787,7 +787,7 @@ mod native_plugin {
         }
 
         #[cfg(feature = "webgpu-backend")]
-        symbols.extend(xgpu_runtime_symbols());
+        symbols.extend(xidl_runtime_symbols());
 
         symbols
     }
@@ -833,7 +833,7 @@ mod xgpu_adapter_tests {
         let methods = unsafe { std::slice::from_raw_parts(pointer, count) };
         let mut keys = HashSet::new();
         let mut expected = HashSet::from([
-            "rayzor.gpu.GpuBuffer.destroy".to_owned(),
+            "gpu.GpuBuffer.destroy".to_owned(),
             "rayzor.gpu.GpuBuffer.numel".to_owned(),
             "rayzor.gpu.GPUCompute.fromDevice".to_owned(),
         ]);
@@ -852,6 +852,7 @@ mod xgpu_adapter_tests {
                 ))
             };
             let key = format!("{class}.{name}");
+            println!("found GPU method: {key}");
             assert!(keys.insert(key.clone()), "duplicate GPU method {key}");
             expected.remove(&key);
         }

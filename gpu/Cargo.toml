@@ -48,8 +48,8 @@ web-sys = { version = "0.3", optional = true, features = [
 ] }
 js-sys = { version = "0.3", optional = true }
 once_cell = "1"
-xgpu-core = { git = "https://github.com/rayzor-blade/xgpu.git", rev = "4837ce45a99c7d2bb3cf2c4c324aef8fd1a5638a", optional = true }
+xgpu-core = { git = "https://github.com/rayzor-blade/xgpu.git", rev = "901dca1f42ee31310b1d98e8496c4a053fd4d395", optional = true }
 
 [build-dependencies]
-xgpu-backend = { git = "https://github.com/rayzor-blade/xgpu.git", rev = "4837ce45a99c7d2bb3cf2c4c324aef8fd1a5638a" }
-xgpu-bindgen = { git = "https://github.com/rayzor-blade/xgpu.git", rev = "4837ce45a99c7d2bb3cf2c4c324aef8fd1a5638a" }
+xgpu-backend = { git = "https://github.com/rayzor-blade/xgpu.git", rev = "901dca1f42ee31310b1d98e8496c4a053fd4d395" }
+xgpu-bindgen = { git = "https://github.com/rayzor-blade/xgpu.git", rev = "901dca1f42ee31310b1d98e8496c4a053fd4d395" }

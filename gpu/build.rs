@@ -1,4 +1,18 @@
-use std::path::{Path, PathBuf};
+use std::{env::temp_dir, path::{Path, PathBuf}};
+
+fn gpu_decl(content: &str) -> Option<PathBuf> {
+    // make file unique to avoid collisions with other tests
+    let file_name = format!(
+        "gpu.api.{}.rs",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros()
+    );
+    let path = temp_dir().join(file_name);
+    std::fs::write(&path, content).ok()?;
+    Some(path)
+}
 
 fn gpu_buffer_extensions(generated: String, source: &Path) -> Result<String, String> {
     let overlay = std::fs::read_to_string(source).map_err(|error| error.to_string())?;
@@ -33,7 +47,7 @@ fn write_haxe(root: &Path) -> Result<(), String> {
         }
     }
 
-    for file in xgpu_bindgen::haxe(xgpu_bindgen::haxe::Runtime::Rayzor)? {
+    for file in xgpu_bindgen::_haxe(xgpu_bindgen::haxe::Runtime::Rayzor)? {
         let path = root.join(file.path);
         std::fs::create_dir_all(path.parent().expect("generated extern has a parent"))
             .map_err(|error| error.to_string())?;
@@ -68,14 +82,15 @@ fn main() {
         &[]
     };
     let model = xgpu_bindgen::generate_rayzor_with_resources(
-        &xgpu_bindgen::gpu_api(),
+        "gpu",
+        gpu_decl(&xgpu_bindgen::gpu_api()),
         xgpu_bindgen::WEBGPU_IDL,
         adapter_resources,
     )
     .expect("xgpu Rayzor model generates");
     std::fs::write(out.join("xgpu_rayzor.rs"), model).expect("xgpu model writes");
 
-    if let Some(root) = std::env::var_os("XGPU_HAXE_OUT") {
-        write_haxe(&PathBuf::from(root)).expect("xgpu Rayzor externs generate");
-    }
+    //if let Some(root) = std::env::var_os("XGPU_HAXE_OUT") {
+        write_haxe(&PathBuf::from("haxe")).expect("xgpu Rayzor externs generate");
+   // }
 }
