@@ -1,21 +1,4 @@
-use std::{
-    env::temp_dir,
-    path::{Path, PathBuf},
-};
-
-fn gpu_decl(content: &str) -> Option<PathBuf> {
-    // make file unique to avoid collisions with other tests
-    let file_name = format!(
-        "gpu.api.{}.rs",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros()
-    );
-    let path = temp_dir().join(file_name);
-    std::fs::write(&path, content).ok()?;
-    Some(path)
-}
+use std::path::{Path, PathBuf};
 
 fn gpu_buffer_extensions(generated: String, source: &Path) -> Result<String, String> {
     let overlay = std::fs::read_to_string(source).map_err(|error| error.to_string())?;
@@ -77,9 +60,11 @@ fn main() {
     } else {
         &[]
     };
-    let model = xgpu_bindgen::generate_rayzor_with_resources(
+    // Method classes are named by the externs' package, as they declare them.
+    let model = xgpu_bindgen::generate_rayzor_in(
         "gpu",
-        gpu_decl(&xgpu_bindgen::gpu_api()),
+        xgpu_bindgen::RAYZOR_PACKAGE,
+        xgpu_bindgen::gpu_api(),
         xgpu_bindgen::WEBGPU_IDL,
         adapter_resources,
     )

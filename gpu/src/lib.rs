@@ -834,7 +834,7 @@ mod xgpu_adapter_tests {
         let methods = unsafe { std::slice::from_raw_parts(pointer, count) };
         let mut keys = HashSet::new();
         let mut expected = HashSet::from([
-            "gpu.GpuBuffer.destroy".to_owned(),
+            "rayzor.gpu.GpuBuffer.destroy".to_owned(),
             "rayzor.gpu.GpuBuffer.numel".to_owned(),
             "rayzor.gpu.GPUCompute.fromDevice".to_owned(),
         ]);
