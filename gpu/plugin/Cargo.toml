@@ -1,0 +1,22 @@
+[package]
+name = "rayzor-gpu-plugin"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+# The rayzor-gpu plugin as a loadable library. A separate crate so the
+# compiler, which embeds rayzor-gpu, never links a standalone library.
+[lib]
+name = "rayzor_gpu_plugin"
+crate-type = ["cdylib"]
+
+[features]
+default = ["native"]
+native = ["rayzor-gpu/native"]
+metal-backend = ["rayzor-gpu/metal-backend"]
+webgpu-backend = ["rayzor-gpu/webgpu-backend"]
+wasm-host = ["rayzor-gpu/wasm-host"]
+cuda-backend = ["rayzor-gpu/cuda-backend"]
+
+[dependencies]
+rayzor-gpu = { path = "..", default-features = false }

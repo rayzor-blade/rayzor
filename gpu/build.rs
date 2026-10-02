@@ -1,4 +1,7 @@
-use std::{env::temp_dir, path::{Path, PathBuf}};
+use std::{
+    env::temp_dir,
+    path::{Path, PathBuf},
+};
 
 fn gpu_decl(content: &str) -> Option<PathBuf> {
     // make file unique to avoid collisions with other tests
@@ -62,13 +65,6 @@ fn write_haxe(root: &Path) -> Result<(), String> {
 }
 
 fn main() {
-    // The runtime supplies the `rayzor_plugin_*` carrier symbols when it loads
-    // this cdylib. Darwin requires the library to opt into resolving them at
-    // load time; ELF linkers defer them by default.
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        println!("cargo:rustc-cdylib-link-arg=-Wl,-undefined,dynamic_lookup");
-    }
-
     println!("cargo:rerun-if-env-changed=XGPU_HAXE_OUT");
     println!("cargo:rerun-if-env-changed=XGPU_HAXE_STAMP");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
@@ -91,6 +87,6 @@ fn main() {
     std::fs::write(out.join("xgpu_rayzor.rs"), model).expect("xgpu model writes");
 
     //if let Some(root) = std::env::var_os("XGPU_HAXE_OUT") {
-        write_haxe(&PathBuf::from("haxe")).expect("xgpu Rayzor externs generate");
-   // }
+    write_haxe(&PathBuf::from("haxe")).expect("xgpu Rayzor externs generate");
+    // }
 }

@@ -298,19 +298,19 @@ Build for each platform, then pack into one rpkg:
 
 ```bash
 # macOS targets (native, since cross doesn't support macOS as a target)
-cargo build -p rayzor-gpu --features webgpu-backend --release --target aarch64-apple-darwin
-cargo build -p rayzor-gpu --features webgpu-backend --release --target x86_64-apple-darwin
+cargo build -p rayzor-gpu-plugin --features webgpu-backend --release --target aarch64-apple-darwin
+cargo build -p rayzor-gpu-plugin --features webgpu-backend --release --target x86_64-apple-darwin
 
 # Linux and Windows targets via cross
-cross build -p rayzor-gpu --features webgpu-backend --release --target x86_64-unknown-linux-gnu
-cross build -p rayzor-gpu --features webgpu-backend --release --target x86_64-pc-windows-gnu
+cross build -p rayzor-gpu-plugin --features webgpu-backend --release --target x86_64-unknown-linux-gnu
+cross build -p rayzor-gpu-plugin --features webgpu-backend --release --target x86_64-pc-windows-gnu
 
 # Pack all platforms into one rpkg
 rayzor rpkg pack \
-  --dylib target/aarch64-apple-darwin/release/librayzor_gpu.dylib --os macos --arch aarch64 \
-  --dylib target/x86_64-apple-darwin/release/librayzor_gpu.dylib --os macos --arch x86_64 \
-  --dylib target/x86_64-unknown-linux-gnu/release/librayzor_gpu.so --os linux --arch x86_64 \
-  --dylib target/x86_64-pc-windows-gnu/release/rayzor_gpu.dll --os windows --arch x86_64 \
+  --dylib target/aarch64-apple-darwin/release/librayzor_gpu_plugin.dylib --os macos --arch aarch64 \
+  --dylib target/x86_64-apple-darwin/release/librayzor_gpu_plugin.dylib --os macos --arch x86_64 \
+  --dylib target/x86_64-unknown-linux-gnu/release/librayzor_gpu_plugin.so --os linux --arch x86_64 \
+  --dylib target/x86_64-pc-windows-gnu/release/rayzor_gpu_plugin.dll --os windows --arch x86_64 \
   --haxe-dir haxe/ \
   -o rayzor-gpu.rpkg
 ```

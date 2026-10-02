@@ -8,6 +8,7 @@ members = [
     "runtime",
     "runtime-core",
     "gpu",
+    "gpu/plugin",
     "window",
     "lsp",
     "plugin",

@@ -3178,6 +3178,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rayzor-gpu-plugin"
+version = "0.1.0"
+dependencies = [
+ "rayzor-gpu",
+]
+
+[[package]]
 name = "rayzor-lsp"
 version = "0.1.0"
 dependencies = [

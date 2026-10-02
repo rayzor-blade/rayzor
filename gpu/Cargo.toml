@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
+# The compiler links this as a library; the loadable plugin is `plugin/`.
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [features]
 default = ["native"]

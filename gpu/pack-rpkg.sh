@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build rayzor-gpu for all supported platforms and package as a single rpkg.
+# Build the rayzor-gpu plugin for all supported platforms and package it as a
+# single rpkg.
 # Includes native dylibs + WASM host module (via wasm-pack).
 #
 # Usage:
@@ -29,12 +30,14 @@ export XGPU_HAXE_STAMP="$RANDOM"
 build_wasm_host() {
     if command -v wasm-pack &>/dev/null; then
         echo "=== Building WASM host module (wasm-pack) ==="
-        wasm-pack build \
+        # wasm-pack's own options come first: everything after the first
+        # cargo flag is passed through to cargo.
+        (cd plugin && wasm-pack build \
             --target web \
+            --out-dir ../pkg \
+            --out-name rayzor_gpu \
             --no-default-features \
-            --features wasm-host \
-            --out-dir pkg \
-            --out-name rayzor_gpu
+            --features wasm-host)
         WASM_HOST_JS="--js-host rayzor-gpu=pkg/rayzor_gpu.js"
         echo "  WASM host: pkg/rayzor_gpu.js + pkg/rayzor_gpu_bg.wasm"
     else
@@ -59,23 +62,23 @@ elif [ "$1" = "--cross" ]; then
 
     # macOS aarch64 (native — cross can't do macOS)
     echo "[1/4] macOS aarch64..."
-    cargo build -p rayzor-gpu --features "$FEATURES" --release --target aarch64-apple-darwin
-    MACOS_ARM="../target/aarch64-apple-darwin/release/librayzor_gpu.dylib"
+    cargo build -p rayzor-gpu-plugin --features "$FEATURES" --release --target aarch64-apple-darwin
+    MACOS_ARM="../target/aarch64-apple-darwin/release/librayzor_gpu_plugin.dylib"
 
     # macOS x86_64
     echo "[2/4] macOS x86_64..."
-    cargo build -p rayzor-gpu --features "$FEATURES" --release --target x86_64-apple-darwin
-    MACOS_X64="../target/x86_64-apple-darwin/release/librayzor_gpu.dylib"
+    cargo build -p rayzor-gpu-plugin --features "$FEATURES" --release --target x86_64-apple-darwin
+    MACOS_X64="../target/x86_64-apple-darwin/release/librayzor_gpu_plugin.dylib"
 
     # Linux x86_64
     echo "[3/4] Linux x86_64..."
-    cross build -p rayzor-gpu --features "$FEATURES" --release --target x86_64-unknown-linux-gnu
-    LINUX_X64="../target/x86_64-unknown-linux-gnu/release/librayzor_gpu.so"
+    cross build -p rayzor-gpu-plugin --features "$FEATURES" --release --target x86_64-unknown-linux-gnu
+    LINUX_X64="../target/x86_64-unknown-linux-gnu/release/librayzor_gpu_plugin.so"
 
     # Windows x86_64
     echo "[4/4] Windows x86_64..."
-    cross build -p rayzor-gpu --features "$FEATURES" --release --target x86_64-pc-windows-gnu
-    WIN_X64="../target/x86_64-pc-windows-gnu/release/rayzor_gpu.dll"
+    cross build -p rayzor-gpu-plugin --features "$FEATURES" --release --target x86_64-pc-windows-gnu
+    WIN_X64="../target/x86_64-pc-windows-gnu/release/rayzor_gpu_plugin.dll"
 
     build_wasm_host
 
@@ -95,7 +98,7 @@ elif [ "$1" = "--cross" ]; then
         --output rayzor-gpu.rpkg
 else
     echo "=== Building rayzor-gpu (current platform) ==="
-    cargo build -p rayzor-gpu --features "$FEATURES" --release
+    cargo build -p rayzor-gpu-plugin --features "$FEATURES" --release
 
     case "$(uname -s)" in
         Darwin*) LIB_EXT="dylib" ;;
@@ -103,7 +106,7 @@ else
         *)       echo "Unsupported platform"; exit 1 ;;
     esac
 
-    DYLIB_PATH="../target/release/librayzor_gpu.${LIB_EXT}"
+    DYLIB_PATH="../target/release/librayzor_gpu_plugin.${LIB_EXT}"
     [ ! -f "$DYLIB_PATH" ] && echo "Error: $DYLIB_PATH not found" && exit 1
 
     build_wasm_host

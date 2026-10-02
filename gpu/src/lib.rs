@@ -1,7 +1,8 @@
 //! Rayzor GPU Compute — opt-in native package
 //!
 //! Provides GPU-accelerated compute via Metal (macOS), with CUDA and WebGPU
-//! planned for future phases. Ships as a cdylib loaded at runtime via dlopen.
+//! planned for future phases. The compiler links this crate; the `plugin/`
+//! crate builds it as the library a host loads at run time.
 //!
 //! # Plugin Registration
 //!
