@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1790454957,"nonce":"TypPI7yB4HIboI4e0SI+xdxj9jY=","added":["debt","area:runtime"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1791047818,"nonce":"AWo5iWBd3Vhdy/eCnbEEsVJOl3M=","message":"Decision (user, 2026-10-03): Haxe 5 support is in scope; vendor the Haxe 5 API from the corpus pin's std/ rather than marking these rows SKIP. See 3f6e9e7.","files":null}]}
