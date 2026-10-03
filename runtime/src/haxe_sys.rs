@@ -1808,7 +1808,7 @@ pub extern "C" fn haxe_filesystem_delete_file(path: *const HaxeString) {
         if let Some(path_str) = haxe_string_to_rust(path)
             && let Err(e) = std::fs::remove_file(&path_str)
         {
-            debug!("FileSystem.deleteFile error: {} - {}", path_str, e);
+            crate::exception::throw_with_message(format!("{}: {}", path_str, e));
         }
     }
 }
@@ -1821,7 +1821,7 @@ pub extern "C" fn haxe_filesystem_delete_directory(path: *const HaxeString) {
         if let Some(path_str) = haxe_string_to_rust(path)
             && let Err(e) = std::fs::remove_dir(&path_str)
         {
-            debug!("FileSystem.deleteDirectory error: {} - {}", path_str, e);
+            crate::exception::throw_with_message(format!("{}: {}", path_str, e));
         }
     }
 }

@@ -260,11 +260,26 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let ctor_name = self.stream.current_text().to_string();
             self.stream.advance();
 
-            let params = if self.stream.at(TokenKind::LParen) {
+            // `Cons<X, L>(x:X, l:L)`: a constructor's own type parameters
+            // are erased to Dynamic in its argument types.
+            let ctor_type_params: Vec<String> = self
+                .parse_type_params()?
+                .into_iter()
+                .map(|p| p.name)
+                .collect();
+
+            let mut params = if self.stream.at(TokenKind::LParen) {
                 self.parse_function_params()?
             } else {
                 Vec::new()
             };
+            if !ctor_type_params.is_empty() {
+                for param in &mut params {
+                    if let Some(hint) = param.type_hint.as_mut() {
+                        erase_type_params(hint, &ctor_type_params);
+                    }
+                }
+            }
 
             let return_type = if self.stream.eat(TokenKind::Colon).is_some() {
                 Some(self.parse_type()?)
@@ -969,5 +984,51 @@ fn take_static_locals(
             }
         }
         _ => {}
+    }
+}
+
+/// Replace the named type parameters in `ty` with `Dynamic`.
+fn erase_type_params(ty: &mut Type, names: &[String]) {
+    match ty {
+        Type::Path { path, params, span } => {
+            if path.package.is_empty()
+                && path.sub.is_none()
+                && params.is_empty()
+                && names.contains(&path.name)
+            {
+                *ty = Type::Path {
+                    path: TypePath {
+                        package: Vec::new(),
+                        name: "Dynamic".to_string(),
+                        sub: None,
+                    },
+                    params: Vec::new(),
+                    span: *span,
+                };
+                return;
+            }
+            for p in params {
+                erase_type_params(p, names);
+            }
+        }
+        Type::Function { params, ret, .. } => {
+            for p in params {
+                erase_type_params(p, names);
+            }
+            erase_type_params(ret, names);
+        }
+        Type::Anonymous { fields, .. } => {
+            for f in fields {
+                erase_type_params(&mut f.type_hint, names);
+            }
+        }
+        Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => {
+            erase_type_params(inner, names)
+        }
+        Type::Intersection { left, right, .. } => {
+            erase_type_params(left, names);
+            erase_type_params(right, names);
+        }
+        Type::Wildcard { .. } | Type::Const { .. } => {}
     }
 }

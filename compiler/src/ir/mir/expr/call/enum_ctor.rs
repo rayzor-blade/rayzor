@@ -63,7 +63,10 @@ impl<'a> HirToMirContext<'a> {
                                         self.get_enum_variant_field_count(*enum_symbol, idx);
                                     if field_count == 0 {
                                         if self.enum_is_boxed(*enum_symbol) {
-                                            return self.build_boxed_enum_tag_only(idx as i32);
+                                            return self.build_boxed_enum_tag_only(
+                                                *enum_symbol,
+                                                idx as i32,
+                                            );
                                         }
                                         return self.builder.build_const(IrValue::I64(idx as i64));
                                     }
@@ -129,7 +132,10 @@ impl<'a> HirToMirContext<'a> {
                                     if field_count == 0 {
                                         // If enum has parameterized variants, all variants must be boxed
                                         if self.enum_is_boxed(parent_enum_id) {
-                                            return self.build_boxed_enum_tag_only(idx as i32);
+                                            return self.build_boxed_enum_tag_only(
+                                                parent_enum_id,
+                                                idx as i32,
+                                            );
                                         }
                                         // Pure discriminant enum - return index directly
                                         return self.builder.build_const(IrValue::I64(idx as i64));

@@ -604,10 +604,18 @@ impl<'a> HirToMirContext<'a> {
                         // `Null<scalar>` is also a boxed DynamicValue* (see convert_type),
                         // so gating on Dynamic alone would let a raw scalar travel into a
                         // Ptr(U8) slot the callee then unboxes.
+                        // `Null<T>` takes a box too when the argument is a
+                        // concrete scalar: raw 0 would read as null.
+                        let arg_is_scalar = matches!(
+                            type_table.get(resolved_arg).map(|t| &t.kind),
+                            Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+                        );
                         let param_is_optional_scalar =
                             match type_table.get(resolved_param).map(|t| &t.kind) {
                                 Some(TypeKind::Optional { inner_type }) => {
                                     self.optional_inner_is_boxable_primitive(*inner_type)
+                                        || (arg_is_scalar
+                                            && self.optional_inner_is_type_param(*inner_type))
                                 }
                                 _ => false,
                             };

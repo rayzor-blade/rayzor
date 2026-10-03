@@ -398,7 +398,8 @@ impl<'a> HirToMirContext<'a> {
                                 if id_match || name_match {
                                     // If enum has parameterized variants, all variants must be boxed
                                     if self.enum_is_boxed(parent_enum_id) {
-                                        return self.build_boxed_enum_tag_only(idx as i32);
+                                        return self
+                                            .build_boxed_enum_tag_only(parent_enum_id, idx as i32);
                                     }
                                     return self.builder.build_const(IrValue::I64(idx as i64));
                                 }

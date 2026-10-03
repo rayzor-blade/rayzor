@@ -77,19 +77,25 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// The boxed form of a parameterless variant of an enum that has other
-    /// parameterized variants: the runtime's shared `[tag:i32][pad:i32]` cell
-    /// for that tag, so two evaluations of `None` are the same value.
+    /// parameterized variants: the runtime's one `[tag:i32][pad:i32]` cell for
+    /// that enum and tag, so two evaluations of `None` are the same value.
     /// Returned as ptr bitcast to i64.
-    pub(crate) fn build_boxed_enum_tag_only(&mut self, tag_idx: i32) -> Option<IrId> {
+    pub(crate) fn build_boxed_enum_tag_only(
+        &mut self,
+        enum_symbol: SymbolId,
+        tag_idx: i32,
+    ) -> Option<IrId> {
         let cell_func = self.get_or_register_extern_function(
             "haxe_enum_nullary_cell",
-            vec![IrType::I32],
+            vec![IrType::I32, IrType::I32],
             IrType::Ptr(Box::new(IrType::I8)),
         );
+        let type_id = self.enum_runtime_id(enum_symbol);
+        let type_val = self.builder.build_const(IrValue::I32(type_id as i32))?;
         let tag_val = self.builder.build_const(IrValue::I32(tag_idx))?;
         let ptr = self.builder.build_call_direct(
             cell_func,
-            vec![tag_val],
+            vec![type_val, tag_val],
             IrType::Ptr(Box::new(IrType::I8)),
         )?;
         self.builder.build_bitcast(ptr, IrType::I64)

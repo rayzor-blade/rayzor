@@ -1166,10 +1166,11 @@ pub extern "C" fn haxe_type_all_enums(type_id: i64) -> *mut u8 {
             .any(|variant| variant.param_count > 0);
         for (idx, variant) in enum_info.variants.iter().enumerate() {
             if variant.param_count == 0 {
-                let value = create_enum_value(idx as i32, 0, std::ptr::null_mut(), boxed);
-                if boxed {
-                    register_reflected_enum_value(value, reflected_type_id(type_id));
-                }
+                let value = if boxed {
+                    haxe_enum_nullary_cell(reflected_type_id(type_id), idx as i32) as i64
+                } else {
+                    idx as i64
+                };
                 values.push(value);
             }
         }
@@ -1279,6 +1280,9 @@ pub extern "C" fn haxe_type_create_enum(
             .any(|variant| variant.param_count > 0);
         for (idx, variant) in enum_info.variants.iter().enumerate() {
             if variant.name == constr_name {
+                if boxed && variant.param_count == 0 {
+                    return haxe_enum_nullary_cell(reflected_type_id(type_id), idx as i32) as i64;
+                }
                 let value = create_enum_value(idx as i32, variant.param_count, params_ptr, boxed);
                 if boxed {
                     register_reflected_enum_value(value, reflected_type_id(type_id));
@@ -1308,6 +1312,9 @@ pub extern "C" fn haxe_type_create_enum_index(
             .variants
             .iter()
             .any(|variant| variant.param_count > 0);
+        if boxed && variant.param_count == 0 {
+            return haxe_enum_nullary_cell(reflected_type_id(type_id), index as i32) as i64;
+        }
         let value = create_enum_value(index as i32, variant.param_count, params_ptr, boxed);
         if boxed {
             register_reflected_enum_value(value, reflected_type_id(type_id));
@@ -3210,12 +3217,20 @@ pub extern "C" fn haxe_dynamic_equals(a: *mut u8, b: *mut u8) -> bool {
     if a == b {
         return true;
     }
-    if a.is_null() || b.is_null() {
-        return false;
-    }
-
     let a_box = dynamic_value_if_boxed(a);
     let b_box = dynamic_value_if_boxed(b);
+    if a.is_null() || b.is_null() {
+        // A box of a null String or Array is null. Class tags are left out:
+        // a raw object's header can read as one.
+        let null_box = |d: Option<DynamicValue>| {
+            d.is_some_and(|d| {
+                d.type_id == TYPE_NULL
+                    || (d.value_ptr.is_null()
+                        && (d.type_id == TYPE_STRING || d.type_id == TYPE_ARRAY))
+            })
+        };
+        return null_box(a_box) || null_box(b_box);
+    }
     // A reference can arrive raw on one side and boxed through Dynamic on the other.
     if boxed_array_points_to(a as usize, b as usize)
         || boxed_array_points_to(b as usize, a as usize)
@@ -3238,7 +3253,11 @@ pub extern "C" fn haxe_dynamic_equals(a: *mut u8, b: *mut u8) -> bool {
         _ => return false,
     };
 
-    let is_null = |d: &DynamicValue| d.type_id == TYPE_NULL || d.value_ptr.is_null();
+    // An unboxed enum's first constructor is discriminant 0: a null payload
+    // under an enum tag is that value, not null.
+    let is_enum = |t: TypeId| get_type_info(t).is_some_and(|ti| ti.enum_info.is_some());
+    let is_null =
+        |d: &DynamicValue| d.type_id == TYPE_NULL || (d.value_ptr.is_null() && !is_enum(d.type_id));
     if is_null(&da) || is_null(&db) {
         return is_null(&da) && is_null(&db);
     }
@@ -3765,33 +3784,29 @@ pub extern "C" fn haxe_type_get_class(obj_ptr: *const u8) -> i64 {
     }
 }
 
-#[repr(C, align(8))]
-pub struct EnumNullaryCell([i32; 2]);
-
-const ENUM_NULLARY_CELL_COUNT: usize = 1024;
-
-static ENUM_NULLARY_CELLS: [EnumNullaryCell; ENUM_NULLARY_CELL_COUNT] = {
-    let mut cells = [const { EnumNullaryCell([0, 0]) }; ENUM_NULLARY_CELL_COUNT];
-    let mut i = 0;
-    while i < ENUM_NULLARY_CELL_COUNT {
-        cells[i] = EnumNullaryCell([i as i32, 0]);
-        i += 1;
-    }
-    cells
-};
+static ENUM_NULLARY_CELLS: RwLock<Option<HashMap<(u32, i32), usize>>> = RwLock::new(None);
 
 /// The `[tag:i32][pad:i32]` cell of a parameterless variant of an enum whose
-/// other variants carry payloads. One shared, read-only cell per tag, so the
-/// variant is a singleton as in Haxe and `==` holds between two of them.
+/// other variants carry payloads: one per (enum, tag), so the variant is a
+/// singleton as in Haxe and `==` holds between two of them.
 #[unsafe(no_mangle)]
-pub extern "C" fn haxe_enum_nullary_cell(tag: i32) -> *mut u8 {
-    match usize::try_from(tag)
-        .ok()
-        .and_then(|t| ENUM_NULLARY_CELLS.get(t))
+pub extern "C" fn haxe_enum_nullary_cell(type_id: u32, tag: i32) -> *mut u8 {
+    if let Some(&cell) = ENUM_NULLARY_CELLS
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|cells| cells.get(&(type_id, tag)))
     {
-        Some(cell) => cell as *const EnumNullaryCell as *mut u8,
-        None => Box::into_raw(Box::new(EnumNullaryCell([tag, 0]))) as *mut u8,
+        return cell as *mut u8;
     }
+    let mut cells = ENUM_NULLARY_CELLS.write().unwrap();
+    let cells = cells.get_or_insert_with(HashMap::new);
+    let cell = *cells.entry((type_id, tag)).or_insert_with(|| {
+        let value = create_enum_value(tag, 0, std::ptr::null_mut(), true);
+        register_reflected_enum_value(value, type_id);
+        value as usize
+    });
+    cell as *mut u8
 }
 
 /// Safe downcast for class instances using object headers.

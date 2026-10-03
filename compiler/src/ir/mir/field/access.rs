@@ -1418,7 +1418,7 @@ impl<'a> HirToMirContext<'a> {
                             if *variant_id == *field || variant_name == field_name {
                                 // A parameterized variant forces every variant boxed.
                                 if self.enum_is_boxed(*symbol) {
-                                    return self.build_boxed_enum_tag_only(idx as i32);
+                                    return self.build_boxed_enum_tag_only(*symbol, idx as i32);
                                 }
                                 return self.builder.build_const(IrValue::I64(idx as i64));
                             }

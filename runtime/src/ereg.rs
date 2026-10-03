@@ -126,8 +126,8 @@ pub extern "C" fn haxe_ereg_match(ereg: *mut u8, s: *const HaxeString) -> i32 {
     }
 }
 
-/// Get the nth matched group (0 = full match).
-/// Returns HaxeString pointer, or null if no match or group out of range.
+/// Get the nth matched group (0 = full match): null for a group that did not
+/// participate; a group number outside the pattern throws "Invalid group".
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_ereg_matched(ereg: *mut u8, n: i32) -> *mut u8 {
     if ereg.is_null() {
@@ -136,11 +136,11 @@ pub extern "C" fn haxe_ereg_matched(ereg: *mut u8, n: i32) -> *mut u8 {
     unsafe {
         let ereg = &*(ereg as *mut HaxeEReg);
         if let (Some(captures), Some(input)) = (&ereg.last_captures, &ereg.last_input) {
-            let idx = n as usize;
-            if idx < captures.len()
-                && let Some((start, end)) = captures[idx]
-            {
-                return rust_str_to_hs(&input[start..end]);
+            let Some(group) = usize::try_from(n).ok().and_then(|i| captures.get(i)) else {
+                crate::exception::throw_with_message("Invalid group".to_string());
+            };
+            if let Some((start, end)) = group {
+                return rust_str_to_hs(&input[*start..*end]);
             }
         }
         ptr::null_mut()
