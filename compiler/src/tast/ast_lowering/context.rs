@@ -53,6 +53,7 @@ impl<'a> AstLowering<'a> {
             empty_array_used_uncertain: std::collections::BTreeSet::new(),
             using_modules: Vec::new(),
             unresolved_usings: Vec::new(),
+            type_usings: BTreeMap::new(),
             pending_usings: Vec::new(),
             // (class_fields will be seeded below if global_class_fields provided)
             in_static_method: false,

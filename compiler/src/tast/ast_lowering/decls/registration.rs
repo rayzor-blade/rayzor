@@ -263,6 +263,31 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Pre-register type declarations in the symbol table (first pass)
+    /// The classes named by `@:using(..)` on a type: their static methods
+    /// extend values of the type, as a module-level `using` would.
+    fn record_type_usings(&mut self, type_name: InternedString, meta: &[parser::Metadata]) {
+        fn last_segment(expr: &parser::Expr) -> Option<&str> {
+            match &expr.kind {
+                parser::ExprKind::Ident(name) => Some(name),
+                parser::ExprKind::Field { field, .. } => Some(field),
+                _ => None,
+            }
+        }
+        let names: Vec<InternedString> = meta
+            .iter()
+            .filter(|m| m.name.trim_start_matches(':') == "using")
+            .flat_map(|m| m.params.iter())
+            .filter_map(last_segment)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|name| self.context.intern_string(&name))
+            .collect();
+        if !names.is_empty() {
+            self.type_usings.entry(type_name).or_default().extend(names);
+        }
+    }
+
     pub fn pre_register_declaration(
         &mut self,
         declaration: &TypeDeclaration,
@@ -270,6 +295,7 @@ impl<'a> AstLowering<'a> {
         match declaration {
             TypeDeclaration::Class(class_decl) => {
                 let class_name = self.context.intern_string(&class_decl.name);
+                self.record_type_usings(class_name, &class_decl.meta);
 
                 if self.root_slot_is_foreign_type(class_name) {
                     if self.package_class_symbol(class_name).is_none() {
@@ -340,6 +366,8 @@ impl<'a> AstLowering<'a> {
                     .add_symbol(class_symbol, class_name);
             }
             TypeDeclaration::Interface(interface_decl) => {
+                let type_name = self.context.intern_string(&interface_decl.name);
+                self.record_type_usings(type_name, &interface_decl.meta);
                 let interface_name = self.context.intern_string(&interface_decl.name);
 
                 // A same-named root symbol is this interface only when it is one
@@ -403,6 +431,8 @@ impl<'a> AstLowering<'a> {
                 }
             }
             TypeDeclaration::Enum(enum_decl) => {
+                let type_name = self.context.intern_string(&enum_decl.name);
+                self.record_type_usings(type_name, &enum_decl.meta);
                 let enum_name = self.context.intern_string(&enum_decl.name);
 
                 // Check if this enum already exists in the root scope
@@ -595,6 +625,8 @@ impl<'a> AstLowering<'a> {
                     .add_symbol(typedef_symbol, typedef_name);
             }
             TypeDeclaration::Abstract(abstract_decl) => {
+                let type_name = self.context.intern_string(&abstract_decl.name);
+                self.record_type_usings(type_name, &abstract_decl.meta);
                 let abstract_name = self.context.intern_string(&abstract_decl.name);
 
                 // The underlying type, recorded now rather than when the

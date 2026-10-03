@@ -486,6 +486,24 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        // Data fields of the interfaces this one extends, after its own.
+        for parent in &extends {
+            let Some(parent_symbol) = self.resolve_type_to_class_symbol(*parent) else {
+                continue;
+            };
+            let inherited = self
+                .class_fields
+                .get(&parent_symbol)
+                .cloned()
+                .unwrap_or_default();
+            let own = self.class_fields.entry(interface_symbol).or_default();
+            for entry in inherited {
+                if !own.iter().any(|(name, _, _)| *name == entry.0) {
+                    own.push(entry);
+                }
+            }
+        }
+
         // Process modifiers
         let modifiers = self.lower_modifiers(&interface_decl.modifiers)?;
 

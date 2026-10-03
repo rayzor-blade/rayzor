@@ -843,9 +843,22 @@ impl<'a> AstLowering<'a> {
             }
         };
         // Check each using module for a static method with this name
+        // `@:using` on the receiver's class or one of its ancestors.
+        let mut type_using_names: Vec<InternedString> = Vec::new();
+        let mut class = self.resolve_type_to_class_symbol(receiver_type);
+        for _ in 0..16 {
+            let Some(c) = class else { break };
+            if let Some(name) = self.context.symbol_table.get_symbol(c).map(|s| s.name) {
+                if let Some(names) = self.type_usings.get(&name) {
+                    type_using_names.extend(names.iter().copied());
+                }
+            }
+            class = self.parent_class_symbol(c);
+        }
         let late: Vec<(InternedString, SymbolId)> = self
             .unresolved_usings
             .iter()
+            .chain(type_using_names.iter())
             .filter_map(|name| Some((*name, self.resolve_class_like_symbol_by_name(*name)?)))
             .collect();
         for (_class_name, class_symbol) in self.using_modules.iter().chain(late.iter()) {
@@ -3987,6 +4000,7 @@ impl<'a> AstLowering<'a> {
                 .collect(),
             Some(TypeKind::Anonymous { fields }) => fields.iter().map(|f| f.type_id).collect(),
             Some(TypeKind::Class { type_args, .. })
+            | Some(TypeKind::Enum { type_args, .. })
             | Some(TypeKind::Abstract { type_args, .. })
             | Some(TypeKind::TypeAlias { type_args, .. })
             | Some(TypeKind::GenericInstance { type_args, .. }) => type_args,
@@ -4218,6 +4232,28 @@ impl<'a> AstLowering<'a> {
                 TypeKind::Class {
                     symbol_id: as_,
                     type_args: aa,
+                },
+            )
+            | (
+                TypeKind::Enum {
+                    symbol_id: ds,
+                    type_args: da,
+                },
+                TypeKind::Enum {
+                    symbol_id: as_,
+                    type_args: aa,
+                },
+            )
+            | (
+                TypeKind::Abstract {
+                    symbol_id: ds,
+                    type_args: da,
+                    ..
+                },
+                TypeKind::Abstract {
+                    symbol_id: as_,
+                    type_args: aa,
+                    ..
                 },
             ) if ds == as_ => {
                 for (x, y) in da.iter().zip(aa.iter()) {

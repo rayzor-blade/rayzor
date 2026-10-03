@@ -1563,6 +1563,8 @@ pub struct AstLowering<'a> {
     /// lowered (a class of the same file); resolved when an extension is
     /// looked up.
     unresolved_usings: Vec<InternedString>,
+    /// A class's `@:using(X, ..)` extension classes, by class name.
+    type_usings: BTreeMap<InternedString, Vec<InternedString>>,
     /// Pending 'using' modules that need to be loaded (not yet compiled)
     /// These are module paths like "StringTools" that were used but only pre-registered
     pub pending_usings: Vec<String>,
