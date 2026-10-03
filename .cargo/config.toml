@@ -65,3 +65,8 @@ rustflags = [
 # toolchain: inkwell 0.7.1 / llvm-sys 211). `force = false` lets contributors
 # override with their own LLVM 21 path.
 LLVM_SYS_211_PREFIX = { value = "/opt/homebrew/opt/llvm", force = false }
+
+# No incremental compilation: its caches grew target/debug by gigabytes a
+# day. Builds are slower to repeat; CARGO_INCREMENTAL=1 turns it back on.
+[build]
+incremental = false
