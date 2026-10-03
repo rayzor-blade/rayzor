@@ -19,13 +19,14 @@ use crate::type_system::{
 /// Haxe ValueType constructor ordinals (matches Type.hx ValueType order)
 pub const TVALUETYPE_TNULL: i32 = 0;
 pub const TVALUETYPE_TINT: i32 = 1;
-pub const TVALUETYPE_TFLOAT: i32 = 2;
-pub const TVALUETYPE_TBOOL: i32 = 3;
-pub const TVALUETYPE_TOBJECT: i32 = 4;
-pub const TVALUETYPE_TFUNCTION: i32 = 5;
-pub const TVALUETYPE_TCLASS: i32 = 6;
-pub const TVALUETYPE_TENUM: i32 = 7;
-pub const TVALUETYPE_TUNKNOWN: i32 = 8;
+pub const TVALUETYPE_TINT64: i32 = 2;
+pub const TVALUETYPE_TFLOAT: i32 = 3;
+pub const TVALUETYPE_TBOOL: i32 = 4;
+pub const TVALUETYPE_TOBJECT: i32 = 5;
+pub const TVALUETYPE_TFUNCTION: i32 = 6;
+pub const TVALUETYPE_TCLASS: i32 = 7;
+pub const TVALUETYPE_TENUM: i32 = 8;
+pub const TVALUETYPE_TUNKNOWN: i32 = 9;
 
 // ============================================================================
 // Helper: extract field name bytes from HaxeString pointer
@@ -1016,6 +1017,13 @@ pub extern "C" fn haxe_type_typeof(v: *mut u8) -> i32 {
     }
 }
 
+/// `TInt64`, for a value the compiler knows is an Int64: there is no Int64
+/// box tag for `haxe_type_typeof` to find.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_type_typeof_int64() -> i64 {
+    valuetype_tag_only(TVALUETYPE_TINT64)
+}
+
 /// Build a boxed `ValueType` runtime enum value from the ordinal returned by
 /// `haxe_type_typeof`.
 ///
@@ -1072,6 +1080,7 @@ fn format_value_type(value: i64) -> String {
     match tag {
         TVALUETYPE_TNULL => "TNull".to_string(),
         TVALUETYPE_TINT => "TInt".to_string(),
+        TVALUETYPE_TINT64 => "TInt64".to_string(),
         TVALUETYPE_TFLOAT => "TFloat".to_string(),
         TVALUETYPE_TBOOL => "TBool".to_string(),
         TVALUETYPE_TOBJECT => "TObject".to_string(),

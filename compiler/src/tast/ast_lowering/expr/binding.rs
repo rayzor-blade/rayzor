@@ -548,6 +548,10 @@ impl<'a> AstLowering<'a> {
             self.context.current_scope,
             ty,
         );
+        // Never reassigned: the lambda captures its value, not a cell.
+        if let Some(sym) = self.context.symbol_table.get_symbol_mut(symbol) {
+            sym.mutability = crate::tast::Mutability::Immutable;
+        }
         prelude.push(TypedStatement::VarDeclaration {
             symbol_id: symbol,
             var_type: ty,

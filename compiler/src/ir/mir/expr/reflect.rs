@@ -457,6 +457,17 @@ impl<'a> HirToMirContext<'a> {
             return None;
         }
         let value_reg = self.lower_expression(&args[0])?;
+        // An Int64 has no box tag of its own; its static type says TInt64.
+        if self.is_int64_type(args[0].ty) {
+            let int64_fn =
+                self.get_or_register_extern_function("haxe_type_typeof_int64", vec![], IrType::I64);
+            let result = self
+                .builder
+                .build_call_direct(int64_fn, Vec::new(), IrType::I64)?;
+            return self
+                .builder
+                .build_cast(result, IrType::I64, IrType::Ptr(Box::new(IrType::U8)));
+        }
         let actual_ty = self
             .builder
             .get_register_type(value_reg)

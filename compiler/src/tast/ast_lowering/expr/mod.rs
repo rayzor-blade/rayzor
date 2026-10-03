@@ -1883,6 +1883,18 @@ impl<'a> AstLowering<'a> {
                 });
             }
             ExprKind::Cast { expr, type_hint } => {
+                // A cast's operand is a value: `cast {}` is an empty object.
+                let empty_object;
+                let expr = match &expr.kind {
+                    ExprKind::Block(elements) if elements.is_empty() => {
+                        empty_object = Expr {
+                            kind: ExprKind::Object(Vec::new()),
+                            span: expr.span,
+                        };
+                        &empty_object
+                    }
+                    _ => expr.as_ref(),
+                };
                 let typed_expr = self.lower_expression(expr)?;
                 let (target_type, cast_kind) = if let Some(hint) = type_hint {
                     // cast(expr, Type) — safe/explicit cast
