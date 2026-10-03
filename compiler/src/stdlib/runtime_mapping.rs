@@ -1921,7 +1921,7 @@ impl StdlibMapping {
             // and the `build_call_direct` coercion bitcasts F64→I64 at the call
             // site. Without this, Array<Float>.push silently truncated every value.
             map_method!(instance "Array", "push" => "array_push", params: 1, mir_wrapper,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I64]),
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I64] => I32),
             map_method!(instance "Array", "pop" => "array_pop", params: 0, mir_wrapper,
                 types: &[PtrU8] => I64),
             map_method!(instance "Array", "reverse" => "haxe_array_reverse", params: 0, returns: void),
@@ -5229,7 +5229,7 @@ mod tests {
         };
         let call = mapping.get(&sig).expect("push should be mapped");
         assert_eq!(call.runtime_name, "array_push");
-        assert!(!call.has_return); // Void return
+        assert!(call.has_return); // the new length
     }
 
     #[test]

@@ -585,6 +585,8 @@ impl<'a> AstLowering<'a> {
             }
 
             self.using_modules.push((class_name_interned, symbol_id));
+        } else {
+            self.unresolved_usings.push(class_name_interned);
         }
         // Note: If class not found, static extensions will still work through the
         // "LAST RESORT" mechanism in hir_to_mir.rs which searches all stdlib classes

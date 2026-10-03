@@ -1074,15 +1074,15 @@ impl<'a> AstLowering<'a> {
                 crate::tast::core::TypeKind::Array { element_type } => {
                     match field_name.as_str() {
                         "push" => {
-                            // push(item: T): Void
-                            let void_type = type_table.void_type();
+                            // push(item: T): Int, the new length
+                            let int_type = type_table.int_type();
                             let element_type_copy = *element_type;
                             drop(type_table);
                             Ok(self
                                 .context
                                 .type_table
                                 .borrow_mut()
-                                .create_function_type(vec![element_type_copy], void_type))
+                                .create_function_type(vec![element_type_copy], int_type))
                         }
                         "pop" | "shift" => {
                             // pop(): T, shift(): T

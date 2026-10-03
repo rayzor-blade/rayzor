@@ -712,6 +712,20 @@ impl<'a> AstLowering<'a> {
         // `obj.method(args)` through its own field-callee branch
         // before reaching here, so converting unconditionally here
         // can't accidentally break the invocation path.
+        let is_placeholder = self
+            .context
+            .symbol_table
+            .get_symbol(field_symbol)
+            .is_some_and(|s| {
+                s.kind == crate::tast::symbols::SymbolKind::Field && !s.type_id.is_valid()
+            });
+        if is_placeholder && !is_optional && field != "new" {
+            if let Some(value) =
+                self.lower_unresolved_method_value(expression, expr, field, &obj_expr)?
+            {
+                return Ok(value);
+            }
+        }
         let is_method = self
             .context
             .symbol_table
@@ -723,6 +737,41 @@ impl<'a> AstLowering<'a> {
                 self.lower_interface_method_value(expression, expr, field, field_symbol, &obj_expr)?
             {
                 return Ok(value);
+            }
+            // A static method read through a variable holding the class is
+            // that class's static, not a method bound to the class value.
+            let receiver_is_local = match &obj_expr.kind {
+                TypedExpressionKind::Variable { symbol_id } => self
+                    .context
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .is_some_and(|s| {
+                        matches!(
+                            s.kind,
+                            crate::tast::symbols::SymbolKind::Variable
+                                | crate::tast::symbols::SymbolKind::Parameter
+                        )
+                    }),
+                _ => false,
+            };
+            let static_owner = self
+                .context
+                .symbol_table
+                .get_symbol(field_symbol)
+                .filter(|s| s.is_static())
+                .and_then(|_| self.resolve_type_to_class_symbol(obj_expr.expr_type));
+            if let Some(owner) = static_owner.filter(|_| receiver_is_local) {
+                if let Some(owner_expr) = self.class_path_expr(owner, expression.span) {
+                    let direct = Expr {
+                        kind: ExprKind::Field {
+                            expr: Box::new(owner_expr),
+                            field: field.to_string(),
+                            is_optional: false,
+                        },
+                        span: expression.span,
+                    };
+                    return self.lower_expression(&direct);
+                }
             }
             // The expression's type is the method's function type,
             // which the symbol already carries (or Dynamic as a
@@ -875,6 +924,331 @@ impl<'a> AstLowering<'a> {
         lowered.map(Some)
     }
 
+    /// `recv.m` as a value where only the call form `recv.m(..)` resolves: a
+    /// method of a builtin Array or String, a static extension, or a method
+    /// an abstract forwards to its underlying class.
+    fn lower_unresolved_method_value(
+        &mut self,
+        expression: &Expr,
+        receiver: &Expr,
+        method: &str,
+        lowered_receiver: &TypedExpression,
+    ) -> LoweringResult<Option<TypedExpression>> {
+        let method_name = self.context.intern_string(method);
+        let dynamic = self.context.type_table.borrow().dynamic_type();
+        let receiver_ty = {
+            let tt = self.context.type_table.borrow();
+            let mut ty = lowered_receiver.expr_type;
+            for _ in 0..4 {
+                match tt.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            ty
+        };
+        let builtin = {
+            let tt = self.context.type_table.borrow();
+            match tt.get(receiver_ty).map(|t| &t.kind) {
+                Some(TypeKind::Array { element_type }) => Some(("Array", Some(*element_type))),
+                Some(TypeKind::String) => Some(("String", None)),
+                _ => None,
+            }
+        };
+        let builtin_sig = builtin.and_then(|(class, element)| {
+            let index = self.static_sig_index.as_ref()?;
+            let resolver: &super::namespace::NamespaceResolver = self.context.namespace_resolver;
+            let resolve_file = |q: &str| resolver.resolve_qualified_path_to_file_force(q);
+            let sig = index
+                .borrow_mut()
+                .resolve(class, method, false, &resolve_file)?;
+            Some((sig, element))
+        });
+        if let Some((sig, element)) = builtin_sig {
+            // The class's `T` is the element type; the method's own type
+            // parameters are left Dynamic.
+            let mut bindings = BTreeMap::new();
+            bindings.insert(self.context.intern_string("T"), element.unwrap_or(dynamic));
+            for param in &sig.type_params {
+                bindings.insert(self.context.intern_string(&param.name), dynamic);
+            }
+            let params = sig
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (dynamic, sig.optional.get(i).copied().unwrap_or(false)))
+                .collect();
+            let returns_void = matches!(
+                &sig.return_type,
+                Some(parser::Type::Path { path, .. }) if path.name == "Void"
+            );
+            let declared = DeclaredSig {
+                params: sig.params.clone(),
+                return_type: sig.return_type.clone(),
+                bindings,
+            };
+            return self
+                .method_value_closure(
+                    expression,
+                    Some(receiver),
+                    method,
+                    params,
+                    returns_void,
+                    Some(declared),
+                )
+                .map(Some);
+        }
+
+        // A static extension in scope: the call form passes the receiver first.
+        if let Some((class, ext)) =
+            self.find_static_extension_method(method_name, lowered_receiver.expr_type)
+        {
+            let Some(types) = self.function_param_types_from_symbol(ext) else {
+                return Ok(None);
+            };
+            let optional = self
+                .resolve_declared_method_sig(class, method_name, true)
+                .map(|sig| sig.optional)
+                .unwrap_or_default();
+            let params = types
+                .iter()
+                .enumerate()
+                .skip(1)
+                .map(|(i, t)| (*t, optional.get(i).copied().unwrap_or(false)))
+                .collect();
+            let returns_void = self.method_returns_void(ext);
+            return self
+                .method_value_closure(
+                    expression,
+                    Some(receiver),
+                    method,
+                    params,
+                    returns_void,
+                    None,
+                )
+                .map(Some);
+        }
+
+        // An enum's constructor read through a value of the enum type: an
+        // enum value has no fields, so the receiver is the enum itself.
+        let enum_symbol = match self
+            .context
+            .type_table
+            .borrow()
+            .get(receiver_ty)
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Enum { symbol_id, .. }) => Some(*symbol_id),
+            _ => None,
+        };
+        if let Some(enum_symbol) = enum_symbol {
+            let is_variant = self
+                .context
+                .symbol_table
+                .get_symbol(enum_symbol)
+                .and_then(|e| {
+                    self.context
+                        .symbol_table
+                        .lookup_symbol(e.scope_id, method_name)
+                })
+                .is_some_and(|v| v.kind == crate::tast::symbols::SymbolKind::EnumVariant);
+            if is_variant {
+                if let Some(enum_expr) = self.class_path_expr(enum_symbol, expression.span) {
+                    let direct = Expr {
+                        kind: ExprKind::Field {
+                            expr: Box::new(enum_expr),
+                            field: method.to_string(),
+                            is_optional: false,
+                        },
+                        span: expression.span,
+                    };
+                    return self.lower_expression(&direct).map(Some);
+                }
+            }
+        }
+
+        // A method of the class an abstract wraps (`@:forward`).
+        let underlying = {
+            let tt = self.context.type_table.borrow();
+            match tt.get(receiver_ty).map(|t| &t.kind) {
+                Some(TypeKind::Abstract {
+                    symbol_id,
+                    underlying,
+                    ..
+                }) => underlying.or_else(|| tt.resolve_abstract_underlying(*symbol_id)),
+                _ => None,
+            }
+        };
+        let forwarded = underlying
+            .and_then(|u| self.resolve_type_to_class_symbol(u))
+            .and_then(|class| self.resolve_class_method_symbol(class, method_name));
+        if let Some(target) = forwarded {
+            let Some(types) = self.function_param_types_from_symbol(target) else {
+                return Ok(None);
+            };
+            let params = types.into_iter().map(|t| (t, false)).collect();
+            let returns_void = self.method_returns_void(target);
+            return self
+                .method_value_closure(
+                    expression,
+                    Some(receiver),
+                    method,
+                    params,
+                    returns_void,
+                    None,
+                )
+                .map(Some);
+        }
+        Ok(None)
+    }
+
+    /// The expression naming a class by its qualified path (`a.b.C`).
+    fn class_path_expr(&self, class: SymbolId, span: parser::Span) -> Option<Expr> {
+        let sym = self.context.symbol_table.get_symbol(class)?;
+        let path = sym
+            .qualified_name
+            .or(Some(sym.name))
+            .and_then(|n| self.context.string_interner.get(n))?
+            .to_string();
+        let mut parts = path.split('.');
+        let first = parts.next()?;
+        let mut expr = Expr {
+            kind: ExprKind::Ident(first.to_string()),
+            span,
+        };
+        for part in parts {
+            expr = Expr {
+                kind: ExprKind::Field {
+                    expr: Box::new(expr),
+                    field: part.to_string(),
+                    is_optional: false,
+                },
+                span,
+            };
+        }
+        Some(expr)
+    }
+
+    fn method_returns_void(&self, method: SymbolId) -> bool {
+        let tt = self.context.type_table.borrow();
+        let fn_ty = self
+            .context
+            .symbol_table
+            .get_symbol(method)
+            .map(|s| s.type_id);
+        match fn_ty.and_then(|t| tt.get(t)).map(|t| &t.kind) {
+            Some(TypeKind::Function { return_type, .. }) => {
+                matches!(tt.get(*return_type).map(|t| &t.kind), Some(TypeKind::Void))
+            }
+            _ => false,
+        }
+    }
+
+    /// `{ var r = recv; function(a, ..) return r.m(a, ..); }`, or with no
+    /// receiver `function(a, ..) return m(a, ..)`. An optional parameter left
+    /// null drops it and those after it from the call, so the method applies
+    /// its own defaults.
+    pub(crate) fn method_value_closure(
+        &mut self,
+        expression: &Expr,
+        receiver: Option<&Expr>,
+        method: &str,
+        params: Vec<(TypeId, bool)>,
+        returns_void: bool,
+        declared: Option<DeclaredSig>,
+    ) -> LoweringResult<TypedExpression> {
+        let span = expression.span;
+        let at = |kind: ExprKind| Expr { kind, span };
+        let recv = format!("__method_recv{}", self.context.next_scope_id());
+        let names: Vec<String> = (0..params.len())
+            .map(|i| format!("__method_arg{i}"))
+            .collect();
+        let callee = match receiver {
+            Some(_) => at(ExprKind::Field {
+                expr: Box::new(at(ExprKind::Ident(recv.clone()))),
+                field: method.to_string(),
+                is_optional: false,
+            }),
+            None => at(ExprKind::Ident(method.to_string())),
+        };
+        let call = |n: usize| {
+            at(ExprKind::Call {
+                expr: Box::new(callee.clone()),
+                args: names[..n]
+                    .iter()
+                    .map(|a| at(ExprKind::Ident(a.clone())))
+                    .collect(),
+            })
+        };
+        let mut body = call(names.len());
+        for (i, (_, optional)) in params.iter().enumerate().rev() {
+            if !*optional {
+                continue;
+            }
+            body = at(ExprKind::If {
+                cond: Box::new(at(ExprKind::Binary {
+                    left: Box::new(at(ExprKind::Ident(names[i].clone()))),
+                    op: parser::BinaryOp::Eq,
+                    right: Box::new(at(ExprKind::Null)),
+                })),
+                then_branch: Box::new(call(i)),
+                else_branch: Some(Box::new(body)),
+            });
+        }
+        if !returns_void {
+            body = at(ExprKind::Return(Some(Box::new(body))));
+        }
+        let literal = at(ExprKind::Function(Function {
+            name: String::new(),
+            type_params: Vec::new(),
+            params: names
+                .iter()
+                .zip(&params)
+                .enumerate()
+                .map(|(i, (n, (_, optional)))| FunctionParam {
+                    meta: Vec::new(),
+                    name: n.clone(),
+                    type_hint: declared
+                        .as_ref()
+                        .and_then(|d| d.params.get(i).cloned().flatten()),
+                    optional: *optional,
+                    rest: false,
+                    default_value: None,
+                    span,
+                })
+                .collect(),
+            return_type: declared.as_ref().and_then(|d| d.return_type.clone()),
+            body: Some(Box::new(body)),
+            span,
+        }));
+        let block = match receiver {
+            Some(receiver) => at(ExprKind::Block(vec![
+                BlockElement::Expr(at(ExprKind::Var {
+                    name: recv,
+                    type_hint: None,
+                    expr: Some(Box::new(receiver.clone())),
+                })),
+                BlockElement::Expr(literal),
+            ])),
+            None => literal,
+        };
+        let bound = declared.map(|d| d.bindings);
+        let has_bindings = bound.is_some();
+        if let Some(bindings) = bound {
+            self.context.push_type_parameters(bindings);
+            self.expected_lambda_params_stack.push(None);
+        } else {
+            self.expected_lambda_params_stack
+                .push(Some(params.iter().map(|(t, _)| *t).collect()));
+        }
+        let lowered = self.lower_expression(&block);
+        self.expected_lambda_params_stack.pop();
+        if has_bindings {
+            self.context.pop_type_parameters();
+        }
+        lowered
+    }
+
     /// `C.new` as a value: `function(a, ..) return new C(a, ..)`, its
     /// parameters typed from the constructor's.
     fn lower_constructor_value(
@@ -968,4 +1342,12 @@ impl<'a> AstLowering<'a> {
                     ))
         })
     }
+}
+
+/// A method's declared parameter and return annotations, with the type
+/// parameters they mention bound.
+pub(crate) struct DeclaredSig {
+    params: Vec<Option<parser::Type>>,
+    return_type: Option<parser::Type>,
+    bindings: BTreeMap<InternedString, TypeId>,
 }

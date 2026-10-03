@@ -800,7 +800,7 @@ impl<'a> AstLowering<'a> {
 
     /// Try to find a static extension method in using modules
     /// Returns (class_symbol, method_symbol) if found
-    fn find_static_extension_method(
+    pub(crate) fn find_static_extension_method(
         &self,
         method_name: InternedString,
         receiver_type: TypeId,
@@ -843,7 +843,12 @@ impl<'a> AstLowering<'a> {
             }
         };
         // Check each using module for a static method with this name
-        for (_class_name, class_symbol) in &self.using_modules {
+        let late: Vec<(InternedString, SymbolId)> = self
+            .unresolved_usings
+            .iter()
+            .filter_map(|name| Some((*name, self.resolve_class_like_symbol_by_name(*name)?)))
+            .collect();
+        for (_class_name, class_symbol) in self.using_modules.iter().chain(late.iter()) {
             // First, check local class_methods (for classes lowered in this instance)
             if let Some(methods) = self.class_methods.get(class_symbol) {
                 for (meth_name, meth_symbol, is_static) in methods {

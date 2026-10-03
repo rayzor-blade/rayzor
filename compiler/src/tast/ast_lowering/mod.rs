@@ -1559,6 +1559,10 @@ pub struct AstLowering<'a> {
     /// Active 'using' modules for static extension resolution
     /// Maps module name (e.g., "StringTools") to class symbol ID
     using_modules: Vec<(InternedString, SymbolId)>,
+    /// `using` names whose class was not declared yet when the `using` was
+    /// lowered (a class of the same file); resolved when an extension is
+    /// looked up.
+    unresolved_usings: Vec<InternedString>,
     /// Pending 'using' modules that need to be loaded (not yet compiled)
     /// These are module paths like "StringTools" that were used but only pre-registered
     pub pending_usings: Vec<String>,

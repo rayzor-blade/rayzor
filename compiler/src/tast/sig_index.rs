@@ -29,6 +29,8 @@ pub struct StaticMethodSig {
     pub param_kinds: Vec<Option<String>>,
     /// The method's own type parameters, in scope for `params`/`return_type`.
     pub type_params: Vec<parser::TypeParam>,
+    /// Each parameter is optional (`?x`) or has a default.
+    pub optional: Vec<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -493,6 +495,11 @@ impl StaticSigIndex {
                     has_body: func.body.is_some(),
                     param_kinds: func.params.iter().map(Self::param_kind).collect(),
                     type_params: func.type_params.clone(),
+                    optional: func
+                        .params
+                        .iter()
+                        .map(|p| p.optional || p.default_value.is_some())
+                        .collect(),
                 });
         }
         self.bare_to_qualified

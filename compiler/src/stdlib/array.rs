@@ -379,9 +379,10 @@ fn declare_array_externs(builder: &mut MirBuilder) {
     builder.mark_as_extern(func_id);
 }
 
-/// Build: fn array_push(arr: Ptr<Void>, value: I64) -> void
+/// Build: fn array_push(arr: Ptr<Void>, value: I64) -> I32
 ///
-/// Appends an 8-byte element to the array. The value param is declared as
+/// Appends an 8-byte element to the array and returns the new length, read
+/// from the header's `len` word. The value param is declared as
 /// `I64` rather than `Any` so the call-site coercion in `build_call_direct`
 /// (which has explicit F64↔I64 bitcast logic) fires for `Array<Float>.push`:
 /// the f64 bits get reinterpreted as i64, passed in the integer register,
@@ -397,7 +398,7 @@ fn build_array_push(builder: &mut MirBuilder) {
         .begin_function("array_push")
         .param("arr", ptr_void.clone())
         .param("value", i64_ty.clone())
-        .returns(IrType::Void)
+        .returns(IrType::I32)
         .calling_convention(CallingConvention::C)
         .inline(InlineHint::Always)
         .build();
@@ -417,7 +418,12 @@ fn build_array_push(builder: &mut MirBuilder) {
 
     builder.call(extern_func, vec![arr_ptr, value]);
 
-    builder.ret(None);
+    // HaxeArray is { ptr, len, cap, elem_size }: `len` is at byte 8.
+    let len_offset = builder.const_i64(8);
+    let len_ptr = builder.add(arr_ptr, len_offset, ptr_void);
+    let len = builder.load(len_ptr, i64_ty.clone());
+    let len = builder.cast(len, i64_ty, IrType::I32);
+    builder.ret(Some(len));
 }
 
 /// Build: fn array_pop(arr: Any) -> Any

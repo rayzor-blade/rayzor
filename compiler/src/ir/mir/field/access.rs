@@ -1097,6 +1097,17 @@ impl<'a> HirToMirContext<'a> {
                                 return Some(result);
                             }
 
+                            // A type parameter's value is read by name, as
+                            // a structural field of whatever it was bound to.
+                            if matches!(
+                                self.type_table
+                                    .get(self.resolve_through_aliases(receiver_ty))
+                                    .map(|t| &t.kind),
+                                Some(TypeKind::TypeParameter { .. })
+                            ) {
+                                return self.dynamic_reflect_field_read(obj, field, field_ty);
+                            }
+
                             if std::env::var_os("RAYZOR_E0100_DEBUG").is_some() {
                                 let recv_kind = self
                                     .type_table
