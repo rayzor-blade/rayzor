@@ -1337,6 +1337,19 @@ impl<'a> AstLowering<'a> {
                 for elem in block_elements {
                     match elem {
                         parser::BlockElement::Expr(expr) => {
+                            // `@:meta var x = ..` declares `x` like a plain `var`.
+                            let expr = match &expr.kind {
+                                parser::ExprKind::Meta { expr: inner, .. }
+                                    if matches!(
+                                        inner.kind,
+                                        parser::ExprKind::Var { .. }
+                                            | parser::ExprKind::Final { .. }
+                                    ) =>
+                                {
+                                    inner.as_ref()
+                                }
+                                _ => expr,
+                            };
                             // Check if this is a variable declaration expression
                             match &expr.kind {
                                 parser::ExprKind::Var { .. } | parser::ExprKind::Final { .. } => {

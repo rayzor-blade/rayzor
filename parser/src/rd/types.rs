@@ -265,8 +265,18 @@ impl<'a, 'b> RdParser<'a, 'b> {
     fn parse_anonymous_type(&mut self, start: usize) -> Result<Type, ParseError> {
         self.stream.expect(TokenKind::LBrace)?;
         let mut fields = Vec::new();
+        // `{> A, > B, x:Int}` extends A and B: the structure is `A & B & {x:Int}`.
+        let mut extends = Vec::new();
 
         while !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof() {
+            if self.stream.at_closing_gt() {
+                self.stream.expect_closing_gt()?;
+                extends.push(self.parse_type()?);
+                if self.stream.eat(TokenKind::Comma).is_none() {
+                    self.stream.eat(TokenKind::Semicolon);
+                }
+                continue;
+            }
             let field_start = self.stream.current_offset();
             // Field-level metadata: `@:optional var x:T`. The `@:optional`
             // metadata is the canonical Haxe spelling of an optional field
@@ -371,11 +381,17 @@ impl<'a, 'b> RdParser<'a, 'b> {
         }
 
         let end_span = self.stream.expect(TokenKind::RBrace)?;
+        let span = Span::new(start, end_span.end);
 
-        Ok(Type::Anonymous {
-            fields,
-            span: Span::new(start, end_span.end),
-        })
+        let mut ty = Type::Anonymous { fields, span };
+        for extended in extends.into_iter().rev() {
+            ty = Type::Intersection {
+                left: Box::new(extended),
+                right: Box::new(ty),
+                span,
+            };
+        }
+        Ok(ty)
     }
 
     /// A literal in type-argument position, or None when a real type follows.

@@ -137,6 +137,21 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     decl.modifiers = modifiers;
                     return Ok(TypeDeclaration::Class(decl));
                 }
+                // `abstract private class Foo`: the access may follow `abstract`.
+                let late_access = match self.stream.peek_at(1).kind {
+                    TokenKind::KwPrivate => Some(Access::Private),
+                    TokenKind::KwPublic => Some(Access::Public),
+                    _ => None,
+                };
+                if late_access.is_some() && self.stream.peek_at(2).kind == TokenKind::KwClass {
+                    self.stream.advance(); // 'abstract'
+                    self.stream.advance(); // the access
+                    let mut decl = self.parse_class()?;
+                    decl.meta = meta;
+                    decl.access = access.or(late_access);
+                    decl.modifiers = modifiers;
+                    return Ok(TypeDeclaration::Class(decl));
+                }
                 let mut decl = self.parse_abstract()?;
                 decl.meta = meta;
                 decl.access = access;

@@ -197,6 +197,36 @@ impl<'a> HirToMirContext<'a> {
         if self.is_int64_type(object.ty) {
             return Some(value);
         }
+        // A type parameter's value is written by name, as it is read.
+        if matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(object.ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::TypeParameter { .. })
+        ) {
+            let ptr_ty = IrType::Ptr(Box::new(IrType::U8));
+            let name = self
+                .symbol_table
+                .get_symbol(*field)
+                .and_then(|s| self.string_interner.get(s.name))
+                .map(str::to_owned)?;
+            self.dynamic_member_names.insert(name.clone());
+            let name_reg = self.builder.build_const(IrValue::String(name))?;
+            let boxed = self
+                .builder
+                .get_register_type(value)
+                .and_then(|ty| self.box_primitive_to_dynamic(value, ty))
+                .unwrap_or(value);
+            let object_ptr = self.coerce_reg_to(obj_reg, &ptr_ty)?;
+            let setter = self.get_or_register_extern_function(
+                "haxe_reflect_set_field",
+                vec![ptr_ty.clone(), ptr_ty.clone(), ptr_ty],
+                IrType::Void,
+            );
+            self.builder
+                .build_call_direct(setter, vec![object_ptr, name_reg, boxed], IrType::Void);
+            return Some(value);
+        }
         if self.get_interface_symbol(object.ty).is_some() {
             if let Some(crate::tast::PropertyAccessor::Method(setter)) = self
                 .interface_property_access(object.ty, *field)

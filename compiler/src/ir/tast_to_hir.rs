@@ -8398,10 +8398,11 @@ impl<'a> TastToHirContext<'a> {
                 }
             }
             TypedExpressionKind::Try {
+                try_expr,
                 catch_clauses,
                 finally_block,
-                ..
             } => {
+                self.collect_local_defs_expr(try_expr, defs);
                 for clause in catch_clauses {
                     defs.insert(clause.exception_variable);
                     self.collect_local_defs_stmt(&clause.body, defs);

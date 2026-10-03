@@ -254,6 +254,14 @@ impl MacroInterpreter {
                 if let Some(v) = self.env.get(name).cloned() {
                     return Ok(v);
                 }
+                // A bare instance field inside a method or constructor.
+                if let Some(MacroValue::Object(this)) = self.env.get("this") {
+                    if name != "__type__" {
+                        if let Some(v) = this.get(name.as_str()) {
+                            return Ok(v.clone());
+                        }
+                    }
+                }
                 if let Some(v) = self.read_class_static(None, name)? {
                     return Ok(v);
                 }
@@ -981,6 +989,15 @@ impl MacroInterpreter {
         // Assign to the target
         match &left.kind {
             ExprKind::Ident(name) => {
+                let is_this_field = !self.env.contains(name)
+                    && name != "__type__"
+                    && matches!(
+                        self.env.get("this"),
+                        Some(MacroValue::Object(this)) if this.contains_key(name.as_str())
+                    );
+                if is_this_field && self.env.mutate_object_field("this", name, new_val.clone()) {
+                    return Ok(new_val);
+                }
                 if !self.env.set(name, new_val.clone())
                     && !self.write_class_static(name, new_val.clone())
                 {
