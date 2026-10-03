@@ -23,12 +23,18 @@ fn write_haxe(root: &Path) -> Result<(), String> {
     let adapter = manifest.join("haxe-overrides/rayzor/gpu");
     let package = root.join("rayzor/gpu");
     std::fs::create_dir_all(&package).map_err(|error| error.to_string())?;
-    for entry in std::fs::read_dir(&committed).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        if entry.path().extension().and_then(|value| value.to_str()) == Some("hx") {
-            let destination = package.join(entry.file_name());
-            if entry.path() != destination {
-                std::fs::copy(entry.path(), destination).map_err(|error| error.to_string())?;
+    // Copying a file onto itself truncates it, so the committed files are
+    // copied only into a different directory.
+    let same_dir = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if !same_dir(&committed, &package) {
+        for entry in std::fs::read_dir(&committed).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if entry.path().extension().and_then(|value| value.to_str()) == Some("hx") {
+                std::fs::copy(entry.path(), package.join(entry.file_name()))
+                    .map_err(|error| error.to_string())?;
             }
         }
     }
