@@ -346,6 +346,13 @@ impl<'a> HirToMirContext<'a> {
                     }
                     // Legacy path, superseded by raw_value_params: boxes args as Dynamic.
                     else if ptr_conversion_mask != 0 {
+                        // A container of Dynamic keeps references boxed too.
+                        let dynamic = self.type_table.dynamic_type();
+                        let element_is_dynamic = matches!(
+                            self.type_table.get(receiver_type).map(|t| &t.kind),
+                            Some(crate::tast::TypeKind::Class { type_args, .. })
+                                if type_args.first() == Some(&dynamic)
+                        );
                         for i in 0..arg_regs.len() {
                             if (ptr_conversion_mask & (1 << i)) != 0 {
                                 let arg_reg = arg_regs[i];
@@ -416,10 +423,15 @@ impl<'a> HirToMirContext<'a> {
                                             IrType::Ptr(Box::new(IrType::U8)),
                                         )
                                     }
-                                    IrType::Ptr(_) | IrType::Struct { .. } => {
-                                        // The runtime expects a pointer TO the value, so a
-                                        // pointer argument is itself passed by reference:
-                                        // haxe_array_push(arr, &value).
+                                    // A reference (or null) already is the value the
+                                    // container keeps.
+                                    IrType::Ptr(_) | IrType::String => match args.get(i) {
+                                        Some(arg) if element_is_dynamic => {
+                                            self.maybe_box_value(arg_reg, arg.ty, dynamic)
+                                        }
+                                        _ => Some(arg_reg),
+                                    },
+                                    IrType::Struct { .. } => {
                                         if let Some(stack_slot) =
                                             self.builder.build_alloc(arg_type.clone(), None)
                                         {

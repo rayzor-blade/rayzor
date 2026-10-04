@@ -860,7 +860,16 @@ impl<'a> HirToMirContext<'a> {
                 Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool)
             ) || self.is_int64_type(target_ty);
 
+            // `Null<Dynamic>` is Dynamic.
+            let value_is_null_dynamic = match value_kind {
+                Some(TypeKind::Optional { inner_type }) => matches!(
+                    type_table.get(*inner_type).map(|t| &t.kind),
+                    Some(TypeKind::Dynamic)
+                ),
+                _ => false,
+            };
             let value_is_dyn = matches!(value_kind, Some(TypeKind::Dynamic))
+                || value_is_null_dynamic
                 || (value_is_optional_scalar && target_is_scalar);
             (value_is_dyn, target_kind, value_is_optional_scalar)
         };

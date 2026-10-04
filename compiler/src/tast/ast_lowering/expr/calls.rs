@@ -4565,7 +4565,7 @@ impl<'a> AstLowering<'a> {
     /// Which formal each argument binds, when Haxe skips optional formals the
     /// argument cannot be (`create(?name:String, job:()->Void)` called with a
     /// function): None when every argument binds in order. Only an argument
-    /// whose literal shape cannot be an optional formal skips it, and only
+    /// whose shape cannot be an optional formal skips it, and only
     /// while formals outnumber the arguments left.
     fn skipped_optional_formals(
         &mut self,
@@ -4646,11 +4646,44 @@ impl<'a> AstLowering<'a> {
         )
     }
 
+    /// A function literal, a `.bind(..)`, or a local declared with a function type.
+    fn is_function_value(&self, arg: &Expr) -> bool {
+        match &arg.kind {
+            ExprKind::Function(_) | ExprKind::Arrow { .. } => true,
+            ExprKind::Call { expr, .. } => {
+                matches!(&expr.kind, ExprKind::Field { field, .. } if field == "bind")
+            }
+            ExprKind::Ident(name) => {
+                let id = self.context.string_interner.intern(name);
+                let Some(symbol) = self
+                    .resolve_symbol_in_scope_hierarchy(id)
+                    .and_then(|s| self.context.symbol_table.get_symbol(s))
+                else {
+                    return false;
+                };
+                matches!(
+                    symbol.kind,
+                    crate::tast::symbols::SymbolKind::Variable
+                        | crate::tast::symbols::SymbolKind::Parameter
+                ) && matches!(
+                    self.context
+                        .type_table
+                        .borrow()
+                        .get(symbol.type_id)
+                        .map(|t| &t.kind),
+                    Some(TypeKind::Function { .. })
+                )
+            }
+            _ => false,
+        }
+    }
+
     fn literal_cannot_be(&self, arg: &Expr, formal: TypeId) -> bool {
         let mut arg = arg;
         while let ExprKind::Paren(inner) = &arg.kind {
             arg = inner;
         }
+        let function_value = self.is_function_value(arg);
         let tt = self.context.type_table.borrow();
         let mut ty = formal;
         for _ in 0..4 {
@@ -4667,10 +4700,10 @@ impl<'a> AstLowering<'a> {
             kind,
             TypeKind::String | TypeKind::Int | TypeKind::Float | TypeKind::Bool
         );
+        if function_value {
+            return scalar || matches!(kind, TypeKind::Anonymous { .. } | TypeKind::Array { .. });
+        }
         match &arg.kind {
-            ExprKind::Function(_) | ExprKind::Arrow { .. } => {
-                scalar || matches!(kind, TypeKind::Anonymous { .. } | TypeKind::Array { .. })
-            }
             ExprKind::Object(_) => scalar || matches!(kind, TypeKind::Function { .. }),
             ExprKind::String(_) => matches!(
                 kind,

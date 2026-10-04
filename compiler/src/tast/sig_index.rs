@@ -214,19 +214,19 @@ impl StaticSigIndex {
             .collect()
     }
 
-    /// A bare `extends Base` names a type in the subclass's own package first;
-    /// fall back to the name as written so an imported parent still resolves
-    /// through the unambiguous bare form.
+    /// A bare `extends Base` names a type in the subclass's own package, then
+    /// in each enclosing one; fall back to the name as written so an imported
+    /// parent still resolves through the unambiguous bare form.
     fn qualify_parent(&self, parent: String, pkg: &str) -> String {
         if parent.contains('.') || pkg.is_empty() {
             return parent;
         }
-        let qualified = format!("{}.{}", pkg, parent);
-        if self.classes.contains_key(&qualified) {
-            qualified
-        } else {
-            parent
-        }
+        let segments: Vec<&str> = pkg.split('.').collect();
+        (1..=segments.len())
+            .rev()
+            .map(|depth| format!("{}.{}", segments[..depth].join("."), parent))
+            .find(|qualified| self.classes.contains_key(qualified))
+            .unwrap_or(parent)
     }
 
     /// The ancestor whose constructor `class_name` runs, with its arity.
@@ -631,20 +631,7 @@ impl StaticSigIndex {
             }
             let (own, parent, pkg) = self.resolve_class_entry(&name, resolve_file)?;
             total += own;
-            // A bare `extends Base` names a type in the subclass's own
-            // package first; fall back to the name as written so an imported
-            // parent still resolves through the unambiguous bare form.
-            next = parent.map(|p| {
-                if p.contains('.') || pkg.is_empty() {
-                    return p;
-                }
-                let qualified = format!("{}.{}", pkg, p);
-                if self.classes.contains_key(&qualified) {
-                    qualified
-                } else {
-                    p
-                }
-            });
+            next = parent.map(|p| self.qualify_parent(p, &pkg));
         }
         Some(total)
     }
@@ -760,13 +747,15 @@ pub(crate) fn returned_field_hint<'f>(
         return None;
     }
     fields.iter().find_map(|f| match &f.kind {
-        parser::ClassFieldKind::Var { name: n, type_hint, .. }
-        | parser::ClassFieldKind::Final { name: n, type_hint, .. }
-        | parser::ClassFieldKind::Property { name: n, type_hint, .. }
-            if n == name =>
-        {
-            type_hint.as_ref()
+        parser::ClassFieldKind::Var {
+            name: n, type_hint, ..
         }
+        | parser::ClassFieldKind::Final {
+            name: n, type_hint, ..
+        }
+        | parser::ClassFieldKind::Property {
+            name: n, type_hint, ..
+        } if n == name => type_hint.as_ref(),
         _ => None,
     })
 }

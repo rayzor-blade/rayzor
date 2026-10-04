@@ -542,6 +542,40 @@ impl<'a> HirToMirContext<'a> {
 
     /// Also handles direct class→anon or wider-anon→anon conversion at call boundaries
     /// when the callee expects an anonymous-typed parameter.
+    /// The declared parameter types of imported functions, so a call into
+    /// another module converts its arguments as a local call does. A generic
+    /// callee is left out: its erased formals are bound where it is lowered.
+    pub(crate) fn seed_external_param_types(&mut self) {
+        for (symbol, func_id) in &self.external_function_map {
+            if self.function_param_hir_types.contains_key(func_id) {
+                continue;
+            }
+            let Some(ty) = self.symbol_table.get_symbol(*symbol).map(|s| s.type_id) else {
+                continue;
+            };
+            let Some(TypeKind::Function { params, .. }) = self.type_table.get(ty).map(|t| &t.kind)
+            else {
+                continue;
+            };
+            let erased = params.iter().any(|p| {
+                let mut p = *p;
+                if let Some(TypeKind::Optional { inner_type }) =
+                    self.type_table.get(p).map(|t| &t.kind)
+                {
+                    p = *inner_type;
+                }
+                matches!(
+                    self.type_table.get(p).map(|t| &t.kind),
+                    Some(TypeKind::TypeParameter { .. })
+                )
+            });
+            if !erased {
+                self.function_param_hir_types
+                    .insert(*func_id, params.clone());
+            }
+        }
+    }
+
     pub(crate) fn maybe_materialize_for_call(
         &mut self,
         arg_expr: &HirExpr,

@@ -1062,6 +1062,7 @@ pub fn lower_hir_to_mir_with_externals(
     );
 
     context.external_function_map = external_functions;
+    context.seed_external_param_types();
 
     context.lower_module(hir_module)
 }
@@ -1171,6 +1172,7 @@ pub fn lower_hir_to_mir_with_function_map(
     context.static_sig_index = static_sig_index;
 
     context.external_function_map = external_functions;
+    context.seed_external_param_types();
     context.external_function_name_map = external_functions_by_name;
     context.external_global_types = external_globals
         .values()
