@@ -646,11 +646,24 @@ impl<'a> AstLowering<'a> {
         }
         // Then the import resolver — user imports take priority
         // over top-level stdlib builtins (Array, Map, etc.)
-        let candidates = self.context.import_resolver.resolve_type(
-            name_interned,
-            self.context.current_scope,
-            self.context.namespace_resolver,
-        );
+        // Imports are recorded on the file's scope; read outwards to it.
+        let mut candidates = Vec::new();
+        let mut scope = Some(self.context.current_scope);
+        while let Some(current) = scope {
+            candidates = self.context.import_resolver.resolve_type(
+                name_interned,
+                current,
+                self.context.namespace_resolver,
+            );
+            if !candidates.is_empty() {
+                break;
+            }
+            scope = self
+                .context
+                .scope_tree
+                .get_scope(current)
+                .and_then(|s| s.parent_id);
+        }
 
         if !candidates.is_empty() {
             // Use the first candidate (in a full implementation, we'd handle ambiguity)
