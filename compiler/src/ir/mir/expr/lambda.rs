@@ -259,10 +259,10 @@ impl<'a> HirToMirContext<'a> {
         } = context;
 
         let saved_state = self.save_state();
-        // A lambda typed to return Dynamic boxes its `return`s against that,
-        // not against the enclosing function's result. Other return types
-        // keep the enclosing context: a `Null<Int>` result would box a value
-        // its callers still read raw.
+        // A lambda typed to return Dynamic, or a plain value, returns against
+        // that, not against the enclosing function's result. Other return
+        // types keep the enclosing context: a `Null<Int>` result would box a
+        // value its callers still read raw.
         let declared_return = match self.type_table.get(lambda_type).map(|t| &t.kind) {
             Some(TypeKind::Function { return_type, .. }) => Some(*return_type),
             _ => None,
@@ -270,7 +270,14 @@ impl<'a> HirToMirContext<'a> {
         .filter(|ret| {
             matches!(
                 self.type_table.get(*ret).map(|t| &t.kind),
-                Some(TypeKind::Dynamic)
+                Some(
+                    TypeKind::Dynamic
+                        | TypeKind::Int
+                        | TypeKind::Float
+                        | TypeKind::Bool
+                        | TypeKind::String
+                        | TypeKind::Void
+                )
             )
         });
         if declared_return.is_some() {

@@ -905,6 +905,8 @@ impl<'a> AstLowering<'a> {
                 let slot = self.dynamic_method_slot(left);
                 let left: &Expr = slot.as_ref().unwrap_or(left);
                 let target_expr = self.lower_expression(left)?;
+                let widened = self.widen_function_literal(right, target_expr.expr_type);
+                let right: &Expr = widened.as_ref().unwrap_or(right);
                 // Same `@:multiType` propagation as Var declarations: when
                 // the RHS is a bare `new C()`, the LHS's static type seeds
                 // the type args so e.g. `values = new Map()` against a
@@ -2233,6 +2235,13 @@ impl<'a> AstLowering<'a> {
                 } else {
                     None
                 };
+                let widened: Option<Box<Expr>> = match (expr, declared_type) {
+                    (Some(init), Some(target)) => {
+                        self.widen_function_literal(init, target).map(Box::new)
+                    }
+                    _ => None,
+                };
+                let expr: &Option<Box<Expr>> = if widened.is_some() { &widened } else { expr };
 
                 // Check for tuple → SIMD4f.make() desugaring
                 if let (Some(init_expr), Some(target_ty)) = (expr.as_ref(), declared_type) {
@@ -2484,6 +2493,13 @@ impl<'a> AstLowering<'a> {
                 } else {
                     None
                 };
+                let widened: Option<Box<Expr>> = match (expr, declared_type) {
+                    (Some(init), Some(target)) => {
+                        self.widen_function_literal(init, target).map(Box::new)
+                    }
+                    _ => None,
+                };
+                let expr: &Option<Box<Expr>> = if widened.is_some() { &widened } else { expr };
 
                 // Check for tuple → SIMD4f.make() desugaring
                 if let (Some(init_expr), Some(target_ty)) = (expr.as_ref(), declared_type) {

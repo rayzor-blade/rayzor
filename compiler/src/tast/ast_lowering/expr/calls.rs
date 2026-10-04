@@ -1310,7 +1310,22 @@ impl<'a> AstLowering<'a> {
                     if self.is_own_dynamic_method(symbol, name) {
                         if let Some(owner) = self.implicit_owner(symbol, expr.span) {
                             let read = self.dynamic_method_read(owner.as_ref(), name, expr.span);
-                            return self.lower_call_expression(expression, &read, args);
+                            let at = |kind| Expr {
+                                kind,
+                                span: expression.span,
+                            };
+                            let bound = at(ExprKind::Block(vec![
+                                parser::BlockElement::Expr(at(ExprKind::Var {
+                                    name: "__dyn_callee".to_string(),
+                                    type_hint: None,
+                                    expr: Some(Box::new(read)),
+                                })),
+                                parser::BlockElement::Expr(at(ExprKind::Call {
+                                    expr: Box::new(at(ExprKind::Ident("__dyn_callee".to_string()))),
+                                    args: args.to_vec(),
+                                })),
+                            ]));
+                            return self.lower_expression(&bound);
                         }
                     }
                 }

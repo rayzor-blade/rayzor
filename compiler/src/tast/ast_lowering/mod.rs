@@ -1677,6 +1677,7 @@ mod context;
 mod decls;
 mod dynamic_methods;
 mod expr;
+mod fn_variance;
 mod imports;
 mod infer;
 mod macro_defer;
