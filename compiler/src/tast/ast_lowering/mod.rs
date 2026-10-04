@@ -1552,6 +1552,12 @@ pub struct AstLowering<'a> {
     empty_array_inferred: std::collections::BTreeMap<SymbolId, SourceLocation>,
     /// Untyped `var x = null` locals whose first assignment has not typed them yet.
     null_inferred: std::collections::BTreeSet<SymbolId>,
+    /// Those a closure read before the first assignment: they stay Dynamic.
+    null_read_in_closure: std::collections::BTreeSet<SymbolId>,
+    /// The closure depth each of them is declared at.
+    null_decl_depth: std::collections::BTreeMap<SymbolId, usize>,
+    /// How many function literals enclose the expression being lowered.
+    closure_depth: usize,
     /// `haxe.Rest`'s abstract symbol once looked up (`None` inside = not found).
     rest_symbol_cache: Option<Option<SymbolId>>,
     /// Subset of `empty_array_inferred` that was USED (pushed/index-assigned)

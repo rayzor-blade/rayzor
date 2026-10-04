@@ -243,6 +243,17 @@ impl<'a> AstLowering<'a> {
         &mut self,
         expression: &Expr,
     ) -> LoweringResult<TypedExpression> {
+        let closure = matches!(
+            expression.kind,
+            ExprKind::Function(_) | ExprKind::Arrow { .. }
+        );
+        self.closure_depth += usize::from(closure);
+        let result = self.lower_expression_unnested(expression);
+        self.closure_depth -= usize::from(closure);
+        result
+    }
+
+    fn lower_expression_unnested(&mut self, expression: &Expr) -> LoweringResult<TypedExpression> {
         let kind = match &expression.kind {
             ExprKind::Int(value) => TypedExpressionKind::Literal {
                 value: LiteralValue::Int(*value),
@@ -299,7 +310,16 @@ impl<'a> AstLowering<'a> {
                     // Last, so a local, a parameter or a field still shadows it.
                     .or_else(|| self.resolve_wildcard_static_import(id_name))
                 {
-                    Some(s) => s,
+                    Some(s) => {
+                        if self
+                            .null_decl_depth
+                            .get(&s)
+                            .is_some_and(|d| *d < self.closure_depth)
+                        {
+                            self.null_read_in_closure.insert(s);
+                        }
+                        s
+                    }
                     None => {
                         if let Some(sym) = self.same_package_type_placeholder(name) {
                             return Ok(TypedExpression {
@@ -932,7 +952,13 @@ impl<'a> AstLowering<'a> {
                 // waiting).
                 if matches!(op, parser::AssignOp::Assign) {
                     if let TypedExpressionKind::Variable { symbol_id } = &target_expr.kind {
-                        if self.null_inferred.contains(symbol_id) {
+                        if self.null_inferred.contains(symbol_id)
+                            && self.null_read_in_closure.contains(symbol_id)
+                        {
+                            // A closure already reads it as Dynamic; storing
+                            // the assigned type raw would break that read.
+                            self.null_inferred.remove(symbol_id);
+                        } else if self.null_inferred.contains(symbol_id) {
                             if let Some(t) = self.null_local_binding(value_expr.expr_type) {
                                 self.context.symbol_table.update_symbol_type(*symbol_id, t);
                                 self.null_inferred.remove(symbol_id);
@@ -2471,6 +2497,7 @@ impl<'a> AstLowering<'a> {
                         .is_none_or(|e| matches!(&e.kind, ExprKind::Null))
                 {
                     self.null_inferred.insert(var_symbol);
+                    self.null_decl_depth.insert(var_symbol, self.closure_depth);
                 }
 
                 TypedExpressionKind::VarDeclarationExpr {

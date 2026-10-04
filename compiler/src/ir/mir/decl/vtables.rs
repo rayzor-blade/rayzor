@@ -1378,6 +1378,40 @@ impl<'a> HirToMirContext<'a> {
                     out.push((type_id, name, thunk));
                 }
             }
+            // Imported classes' methods called here by name: their own
+            // module registers only the names it uses itself.
+            let imported: Vec<(SymbolId, SymbolId, String, IrFunctionId)> = self
+                .class_method_symbols
+                .iter()
+                .filter_map(|((class_sym, name), method_sym)| {
+                    if self.function_map.contains_key(method_sym) {
+                        return None;
+                    }
+                    let name = self.string_interner.get(*name)?.to_string();
+                    let method = self.symbol_table.get_symbol(*method_sym)?;
+                    let is_static = method
+                        .flags
+                        .contains(crate::tast::symbols::SymbolFlags::STATIC);
+                    if is_static || !self.dynamic_member_names.contains(&name) {
+                        return None;
+                    }
+                    let func_id = *self.external_function_map.get(method_sym)?;
+                    Some((*class_sym, *method_sym, name, func_id))
+                })
+                .collect();
+            for (class_sym, method_sym, name, func_id) in imported {
+                let Some(type_id) = self.deterministic_class_type_id(class_sym) else {
+                    continue;
+                };
+                let Some(sig) = self.external_method_signature(func_id, method_sym) else {
+                    continue;
+                };
+                if let Some(thunk) = self.ensure_method_ref_thunk_with_sig(func_id, sig) {
+                    let method_ty = self.symbol_table.get_symbol(method_sym).map(|s| s.type_id);
+                    self.closure_targets.entry(thunk).or_insert(method_ty);
+                    out.push((type_id, name, thunk));
+                }
+            }
             out
         };
 

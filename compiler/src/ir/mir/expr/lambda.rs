@@ -502,7 +502,7 @@ impl<'a> HirToMirContext<'a> {
             .build_make_closure(thunk_id, vec![receiver_reg])
     }
 
-    fn external_method_signature(
+    pub(crate) fn external_method_signature(
         &mut self,
         func_id: IrFunctionId,
         method_symbol: SymbolId,

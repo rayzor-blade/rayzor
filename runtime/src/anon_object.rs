@@ -121,6 +121,34 @@ pub extern "C" fn rayzor_register_shape(
     shape_id
 }
 
+/// `(shape, slot, type) -> shape id` of each retyped variant.
+type RetypedShapes = HashMap<(u32, usize, u32), u32>;
+
+/// `shape` with slot `idx` typed `type_id`, registered once per variant.
+fn retyped_shape(shape_id: u32, shape: &ShapeDescriptor, idx: usize, type_id: u32) -> u32 {
+    static RETYPED: RwLock<Option<RetypedShapes>> = RwLock::new(None);
+    let key = (shape_id, idx, type_id);
+    if let Some(&id) = RETYPED.read().unwrap().as_ref().and_then(|m| m.get(&key)) {
+        return id;
+    }
+    let mut retyped = shape.clone();
+    retyped.field_types[idx] = type_id;
+    ensure_shape_table();
+    let id = NEXT_DYNAMIC_SHAPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    SHAPE_TABLE
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .insert(id, retyped);
+    RETYPED
+        .write()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(key, id);
+    id
+}
+
 /// Ensure a shape is registered at the given shape_id.
 ///
 /// descriptor_hs: HaxeString pointer containing "name1:type1,name2:type2,..."
@@ -411,6 +439,11 @@ pub extern "C" fn rayzor_anon_set_field(
                     && let Some(idx) = shape.field_names.iter().position(|n| n == &name)
                 {
                     fields[idx] = raw_value;
+                    // A slot that held `null` (or another type) now reads as
+                    // what was stored; the layout and indices stay the same.
+                    if shape.field_types[idx] != type_id && type_id != TYPE_NULL.0 {
+                        obj.shape_id = retyped_shape(obj.shape_id, &shape, idx, type_id);
+                    }
                     return;
                 }
                 // Field not in shape → promote to Map

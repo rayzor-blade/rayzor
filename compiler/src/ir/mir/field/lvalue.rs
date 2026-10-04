@@ -523,6 +523,42 @@ impl<'a> HirToMirContext<'a> {
                     .map(|s| s.to_string());
 
                 if let Some(field_name) = field_name {
+                    // With an optional field the object may lack slots the type
+                    // names, so its indices are not the type's: write by name.
+                    let optional_field_type =
+                        match self.type_table.get(resolved_obj_ty).map(|t| &t.kind) {
+                            Some(TypeKind::Anonymous { fields })
+                                if fields.iter().any(|f| f.optional) =>
+                            {
+                                fields
+                                    .iter()
+                                    .find(|f| {
+                                        self.string_interner.get(f.name)
+                                            == Some(field_name.as_str())
+                                    })
+                                    .map(|f| f.type_id)
+                            }
+                            _ => None,
+                        };
+                    if let Some(field_ty) = optional_field_type {
+                        let ptr_ty = IrType::Ptr(Box::new(IrType::U8));
+                        self.dynamic_member_names.insert(field_name.clone());
+                        let name_reg = self.builder.build_const(IrValue::String(field_name))?;
+                        let dynamic = self.type_table.dynamic_type();
+                        let boxed = self.maybe_box_value(value, field_ty, dynamic)?;
+                        let object_ptr = self.coerce_reg_to(obj_reg, &ptr_ty)?;
+                        let setter = self.get_or_register_extern_function(
+                            "haxe_reflect_set_field",
+                            vec![ptr_ty.clone(), ptr_ty.clone(), ptr_ty],
+                            IrType::Void,
+                        );
+                        self.builder.build_call_direct(
+                            setter,
+                            vec![object_ptr, name_reg, boxed],
+                            IrType::Void,
+                        );
+                        return Some(value);
+                    }
                     let sorted_index = {
                         let type_table = self.type_table;
                         if let Some(ty_info) = type_table.get(resolved_obj_ty) {
