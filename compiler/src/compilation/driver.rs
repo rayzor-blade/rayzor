@@ -688,6 +688,8 @@ impl CompilationUnit {
             self.import_field_class_names.clone(),
             self.import_abstract_cast_rules.clone(),
             Some(Rc::clone(&self.static_sig_index)),
+            // Only the import loop passes skip_stdlib_merge, and it retries.
+            skip_stdlib_merge,
         ) {
             Ok(result) => result,
             Err(errors) => {

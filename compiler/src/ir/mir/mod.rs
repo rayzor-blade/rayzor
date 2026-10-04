@@ -371,6 +371,8 @@ pub struct HirToMirContext<'a> {
     /// symbol: a write consults it before the slot path, a read after
     /// (see decl/module.rs).
     bypass_accessors: bool,
+    /// This module is compiled by the import loop, which retries a failed module.
+    retryable_module: bool,
     abstract_property_accessors: BTreeMap<SymbolId, crate::tast::node::PropertyAccessInfo>,
 
     /// The HIR type of the value an assignment is storing, for the reflective
@@ -1158,6 +1160,7 @@ pub fn lower_hir_to_mir_with_function_map(
     static_sig_index: Option<
         std::rc::Rc<std::cell::RefCell<crate::tast::sig_index::StaticSigIndex>>,
     >,
+    retryable_module: bool,
 ) -> Result<MirLoweringResult, Vec<LoweringError>> {
     let type_table_ref = type_table.borrow();
     let mut context = HirToMirContext::new(
@@ -1170,6 +1173,7 @@ pub fn lower_hir_to_mir_with_function_map(
         stdlib_mapping,
     );
     context.static_sig_index = static_sig_index;
+    context.retryable_module = retryable_module;
 
     context.external_function_map = external_functions;
     context.seed_external_param_types();
@@ -1428,6 +1432,7 @@ impl<'a> HirToMirContext<'a> {
             try_depth: 0,
             pending_store_value_ty: None,
             bypass_accessors: false,
+            retryable_module: false,
             abstract_property_accessors: BTreeMap::new(),
             interface_method_names: BTreeMap::new(),
             interface_method_return_types: BTreeMap::new(),

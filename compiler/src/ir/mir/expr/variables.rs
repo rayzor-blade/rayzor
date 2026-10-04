@@ -561,8 +561,10 @@ impl<'a> HirToMirContext<'a> {
                         && s.flags.contains(crate::tast::symbols::SymbolFlags::STATIC)
                         && s.qualified_name.is_some())
             });
-            // Import cycles are retried for the standard library's modules.
-            if is_static_field && self.builder.module.source_file.contains("haxe-std") {
+            // Only a module the import loop retries can wait for the owner.
+            if is_static_field
+                && (self.retryable_module || self.builder.module.source_file.contains("haxe-std"))
+            {
                 self.errors.push(LoweringError {
                     message: format!(
                         "static `{}` is not available to this module",
