@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1791083554,"nonce":"+4GBu7wwEgWsfaeZxZeCSCYC7r0=","message":"Fixed in dd5cce12: function literals widened to Dynamic signatures get an adapter; nested plain-value lambdas return against their own type. Issue5556 and Issue5894 pass.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1791083554,"nonce":"YhvfLiUZNpf+h+Ai8mQJoVLFoUc=","status":2}]}
