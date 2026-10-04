@@ -3037,12 +3037,10 @@ impl TieredBackend {
         drop(modules_lock);
 
         // Find the entry (main) function for tree-shaking
-        let entry = modules.iter().enumerate().find_map(|(idx, m)| {
-            m.functions
-                .values()
-                .find(|f| f.name.ends_with("_main") || f.name == "main")
-                .map(|f| (m.name.clone(), f.name.clone()))
-        });
+        let entry = modules
+            .iter()
+            .enumerate()
+            .find_map(|(idx, m)| m.entry_function().map(|f| (m.name.clone(), f.name.clone())));
 
         if let Some((entry_module, entry_function)) = entry {
             let stats = crate::ir::tree_shake::tree_shake_bundle(

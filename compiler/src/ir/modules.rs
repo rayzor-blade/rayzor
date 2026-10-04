@@ -333,6 +333,26 @@ impl Default for ModuleMetadata {
 }
 
 impl IrModule {
+    /// The program's entry: a function named exactly `main` (the entry
+    /// file's own, numbered below the imports, first), else the legacy
+    /// `*_main` / `*.main` spellings. A `get_main` accessor is not one.
+    pub fn entry_function(&self) -> Option<&IrFunction> {
+        let named = |f: &&IrFunction| f.name == "main";
+        self.functions
+            .values()
+            .filter(named)
+            .find(|f| f.id.0 < 100_000)
+            .or_else(|| self.functions.values().find(named))
+            .or_else(|| {
+                self.functions.values().find(|f| {
+                    f.name == "Main_main"
+                        || f.name == "Main.main"
+                        || (f.name.ends_with("_main") && !f.name.ends_with("get_main"))
+                        || f.name.ends_with(".main")
+                })
+            })
+    }
+
     /// Link forward-declared MIR-wrapper stubs to their real body, within this
     /// module.
     ///

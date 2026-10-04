@@ -16,6 +16,12 @@ use tracing::warn;
 
 impl<'a> AstLowering<'a> {
     pub fn lower_file(&mut self, file: &HaxeFile) -> LoweringResult<TypedFile> {
+        let desugared = super::dynamic_methods::desugar(file);
+        self.unknown_return_slots = desugared
+            .as_ref()
+            .map(|(_, unknown)| unknown.iter().cloned().collect())
+            .unwrap_or_default();
+        let file = desugared.as_ref().map_or(file, |(file, _)| file);
         // Optimizer barrier
 
         // Create TypedFile with the shared interner from the pipeline

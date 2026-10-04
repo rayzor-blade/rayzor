@@ -2089,6 +2089,8 @@ impl StdlibMapping {
                 types: &[] => F64),
             map_method!(static "Sys", "cpuTime" => "haxe_sys_cpu_time", params: 0, returns: primitive,
                 types: &[] => F64),
+            map_method!(static "Sys", "timestamp_ms" => "haxe_sys_timestamp_ms", params: 0, returns: primitive,
+                types: &[] => I64),
             // Environment
             map_method!(static "Sys", "getEnv" => "haxe_sys_get_env", params: 1, returns: complex,
                 types: &[PtrVoid] => PtrString),

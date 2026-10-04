@@ -726,6 +726,16 @@ impl<'a> AstLowering<'a> {
             }
         };
 
+        // A dynamic method read as a value takes its current binding.
+        if self.is_method_symbol(field_symbol)
+            && self
+                .resolve_type_to_class_symbol(obj_expr.expr_type)
+                .is_some_and(|class| self.has_original_body(class, field))
+        {
+            let read = self.dynamic_method_read(Some(expr), field, expression.span);
+            return self.lower_expression(&read);
+        }
+
         // Method-as-value (bound method reference): if the resolved
         // symbol is a function (instance method on the receiver's
         // class), emit `MethodReference` rather than a `FieldAccess`.

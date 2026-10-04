@@ -6236,30 +6236,20 @@ impl CraneliftBackend {
 
         // Find the main function in the MIR module
         // Try various naming conventions: main, Main_main, Main.main, etc.
-        let main_func = module
-            .functions
-            .values()
-            .find(|f| {
-                f.name == "main"
-                    || f.name == "Main_main"
-                    || f.name == "Main.main"
-                    || f.name.ends_with("_main")
-                    || f.name.ends_with(".main")
-            })
-            .ok_or_else(|| {
-                // List available functions for debugging
-                let func_names: Vec<_> = module
-                    .functions
-                    .values()
-                    .filter(|f| !f.cfg.blocks.is_empty()) // Skip externs
-                    .map(|f| &f.name)
-                    .take(10)
-                    .collect();
-                format!(
-                    "No main function found in module. Available functions (first 10): {:?}",
-                    func_names
-                )
-            })?;
+        let main_func = module.entry_function().ok_or_else(|| {
+            // List available functions for debugging
+            let func_names: Vec<_> = module
+                .functions
+                .values()
+                .filter(|f| !f.cfg.blocks.is_empty()) // Skip externs
+                .map(|f| &f.name)
+                .take(10)
+                .collect();
+            format!(
+                "No main function found in module. Available functions (first 10): {:?}",
+                func_names
+            )
+        })?;
 
         // Get the function pointer
         let func_ptr = self.get_function_ptr(main_func.id)?;

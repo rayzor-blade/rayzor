@@ -92,31 +92,40 @@ impl<'a> HirToMirContext<'a> {
                         .builder
                         .build_call_direct(setter, vec![value], return_ty);
                 }
-                let global_id = self.static_global_for(*symbol).or_else(|| {
-                    // Name-based fallback: SymbolIds may differ between contexts
-                    let sym_name = self
-                        .symbol_table
-                        .get_symbol(*symbol)
-                        .and_then(|s| self.string_interner.get(s.name))?;
-                    for (&gsym, &gid) in &self.global_symbol_map {
-                        if let Some(gsym_info) = self.symbol_table.get_symbol(gsym) {
-                            if let Some(gname) = self.string_interner.get(gsym_info.name) {
-                                if gname == sym_name {
-                                    return Some(gid);
+                // A binding of this function is never a global, whatever its name.
+                let is_local =
+                    self.symbol_map.contains_key(symbol) || self.capture_cells.contains_key(symbol);
+                let global_id = (!is_local)
+                    .then(|| self.static_global_for(*symbol))
+                    .flatten()
+                    .or_else(|| {
+                        if is_local {
+                            return None;
+                        }
+                        // Name-based fallback: SymbolIds may differ between contexts
+                        let sym_name = self
+                            .symbol_table
+                            .get_symbol(*symbol)
+                            .and_then(|s| self.string_interner.get(s.name))?;
+                        for (&gsym, &gid) in &self.global_symbol_map {
+                            if let Some(gsym_info) = self.symbol_table.get_symbol(gsym) {
+                                if let Some(gname) = self.string_interner.get(gsym_info.name) {
+                                    if gname == sym_name {
+                                        return Some(gid);
+                                    }
                                 }
                             }
                         }
-                    }
-                    // Also search module globals by name suffix
-                    for global in self.builder.module.globals.values() {
-                        if global.name.ends_with(&format!(".{}", sym_name))
-                            || global.name == sym_name
-                        {
-                            return Some(global.id);
+                        // Also search module globals by name suffix
+                        for global in self.builder.module.globals.values() {
+                            if global.name.ends_with(&format!(".{}", sym_name))
+                                || global.name == sym_name
+                            {
+                                return Some(global.id);
+                            }
                         }
-                    }
-                    None
-                });
+                        None
+                    });
                 if let Some(global_id) = global_id {
                     self.builder.build_store_global(global_id, value);
                     // Untrack from drop system — value escapes to global storage

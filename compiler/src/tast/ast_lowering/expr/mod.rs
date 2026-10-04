@@ -373,6 +373,16 @@ impl<'a> AstLowering<'a> {
                         });
                     }
                 };
+                // A dynamic method read as a value takes its current binding;
+                // called, it is the method, which forwards.
+                if (!self.lowering_callee || self.slot_return_known(name))
+                    && self.is_own_dynamic_method(symbol_id, name)
+                {
+                    if let Some(owner) = self.implicit_owner(symbol_id, expression.span) {
+                        let read = self.dynamic_method_read(owner.as_ref(), name, expression.span);
+                        return self.lower_expression(&read);
+                    }
+                }
 
                 if std::env::var_os("RAYZOR_RESOLVE_TRACE").is_some() {
                     let sym = self.context.symbol_table.get_symbol(symbol_id);
@@ -892,6 +902,8 @@ impl<'a> AstLowering<'a> {
                 if let ExprKind::Index { expr: recv, .. } = &left.kind {
                     self.try_bind_inferred_array(recv, right);
                 }
+                let slot = self.dynamic_method_slot(left);
+                let left: &Expr = slot.as_ref().unwrap_or(left);
                 let target_expr = self.lower_expression(left)?;
                 // Same `@:multiType` propagation as Var declarations: when
                 // the RHS is a bare `new C()`, the LHS's static type seeds

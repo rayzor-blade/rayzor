@@ -175,6 +175,10 @@ extern class Sys {
 	@:native("haxe_sys_cpu_time")
 	static function cpuTime():Float;
 
+	/** Milliseconds since an arbitrary start; the `eval` branch of `haxe.Timer.milliseconds` reads it. */
+	@:native("haxe_sys_timestamp_ms")
+	extern static function timestamp_ms():haxe.Int64;
+
 	/**
 		Returns the path to the current executable that we are running.
 	**/

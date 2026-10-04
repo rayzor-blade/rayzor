@@ -2551,12 +2551,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         }
 
         // Find main function by name since IDs may not match between modules
-        let main_func = module
-            .functions
-            .iter()
-            .find(|(_, f)| f.name.ends_with("_main") || f.name == "main")
-            .map(|(_, f)| f)
-            .ok_or("No main function found")?;
+        let main_func = module.entry_function().ok_or("No main function found")?;
 
         // Get function pointer by name (MCJIT compilation already happened in finalize)
         let func_name = Self::mangle_function_name(&main_func.name);

@@ -1099,9 +1099,8 @@ pub unsafe extern "C" fn sys_thread_impl_create(closure_obj: *const u8) -> *mut 
         arm64_jit_barrier();
         type ClosureFn = extern "C" fn(*const u8) -> i64;
         let func: ClosureFn = unsafe { std::mem::transmute(func_addr) };
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            func(env_addr as *const u8)
-        }));
+        let _ =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func(env_addr as *const u8)));
         ACTIVE_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
     });
     info as *mut u8
@@ -1167,28 +1166,22 @@ pub unsafe extern "C" fn sys_thread_impl_set_name(
 // sys.thread.Mutex wrapper functions (simple lock without inner value)
 // ============================================================================
 
-// NOTE: Previous implementation stored a `current_guard` in a shared handle,
-// which caused race conditions when multiple threads used the same mutex.
-// This new implementation uses parking_lot's RawMutex directly without guards,
-// making lock/unlock operations thread-safe.
-
 /// Create a simple mutex (no inner value)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_mutex_new() -> *mut u8 {
     unsafe { sys_mutex_alloc() }
 }
 
+/// `sys.thread.Mutex`: re-entrant, as Haxe specifies — the holder may
+/// acquire it again and must release it as many times.
+type SysMutex =
+    parking_lot::lock_api::RawReentrantMutex<parking_lot::RawMutex, parking_lot::RawThreadId>;
+
 /// Acquire a mutex (blocking)
-/// Uses RawMutex::lock() directly - no guard storage needed
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_mutex_acquire(mutex: *mut u8) {
-    unsafe {
-        if !mutex.is_null() {
-            // Cast directly to MutexHandle (same struct as used by rayzor_mutex_*)
-            let mutex_handle = &*(mutex as *const MutexHandle);
-            // Lock the raw mutex (blocking)
-            mutex_handle.raw_mutex.lock();
-        }
+    if !mutex.is_null() {
+        unsafe { (*(mutex as *const SysMutex)).lock() };
     }
 }
 
@@ -1196,42 +1189,23 @@ pub unsafe extern "C" fn sys_mutex_acquire(mutex: *mut u8) {
 /// Returns boxed Bool (Dynamic value): true if acquired, false if already locked
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_mutex_try_acquire(mutex: *mut u8) -> *mut u8 {
-    unsafe {
-        if mutex.is_null() {
-            return crate::type_system::haxe_box_bool_ptr(false);
-        }
-
-        let mutex_handle = &*(mutex as *const MutexHandle);
-        let result = mutex_handle.raw_mutex.try_lock();
-
-        crate::type_system::haxe_box_bool_ptr(result)
-    }
+    let acquired = !mutex.is_null() && unsafe { (*(mutex as *const SysMutex)).try_lock() };
+    crate::type_system::haxe_box_bool_ptr(acquired)
 }
 
 /// Release a mutex
-/// Uses RawMutex::unlock() directly - thread-safe, no guard needed
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_mutex_release(mutex: *mut u8) {
-    unsafe {
-        if !mutex.is_null() {
-            let mutex_handle = &*(mutex as *const MutexHandle);
-            // Unlock the raw mutex
-            // SAFETY: Caller is responsible for only calling unlock when they hold the lock
-            mutex_handle.raw_mutex.unlock();
-        }
+    if !mutex.is_null() {
+        // SAFETY: the caller holds the lock.
+        unsafe { (*(mutex as *const SysMutex)).unlock() };
     }
 }
 
-/// Allocate a simple mutex
-/// Creates a MutexHandle with RawMutex for thread-safe acquire/release
+/// Allocate a `sys.thread.Mutex`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_mutex_alloc() -> *mut u8 {
-    // Use MutexHandle directly (same as rayzor_mutex_init)
-    let mutex = Box::new(MutexHandle {
-        raw_mutex: parking_lot::RawMutex::INIT,
-        value: ptr::null_mut(),
-    });
-    Box::into_raw(mutex) as *mut u8
+    Box::into_raw(Box::new(SysMutex::INIT)) as *mut u8
 }
 
 // ============================================================================

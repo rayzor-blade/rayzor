@@ -1961,12 +1961,11 @@ fn run_file(
             use compiler::ir::tree_shake;
             let before = mir_module.functions.len() + mir_module.extern_functions.len();
             let mut modules = vec![mir_module];
-            if let Some((mod_name, func_name)) = modules.iter().rev().find_map(|m| {
-                m.functions
-                    .values()
-                    .find(|f| f.name == "main" || f.name.ends_with("_main"))
-                    .map(|f| (m.name.clone(), f.name.clone()))
-            }) {
+            if let Some((mod_name, func_name)) = modules
+                .iter()
+                .rev()
+                .find_map(|m| m.entry_function().map(|f| (m.name.clone(), f.name.clone())))
+            {
                 tree_shake::tree_shake_bundle(&mut modules, &mod_name, &func_name);
             }
             mir_module = modules.into_iter().next().unwrap();
@@ -2095,10 +2094,8 @@ fn run_file(
 
     // Find main function before consuming mir_module
     let main_func_id = mir_module
-        .functions
-        .iter()
-        .find(|(_, f)| f.name == "main")
-        .map(|(id, _)| *id)
+        .entry_function()
+        .map(|f| f.id)
         .ok_or("No main function found")?;
 
     // Get runtime symbols

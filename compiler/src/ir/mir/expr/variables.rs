@@ -550,6 +550,27 @@ impl<'a> HirToMirContext<'a> {
                     symbol, sym_name, qual
                 );
             }
+            // A static of another class that is not visible yet (its module
+            // has not compiled, as in an import cycle) fails this module so
+            // the import retry lowers it after the owner, instead of reading
+            // an empty value.
+            let is_static_field = self.symbol_table.get_symbol(*symbol).is_some_and(|s| {
+                // A field symbol no `this` could reach, or a qualified static.
+                s.kind == crate::tast::SymbolKind::Field
+                    || (s.kind == crate::tast::SymbolKind::Variable
+                        && s.flags.contains(crate::tast::symbols::SymbolFlags::STATIC)
+                        && s.qualified_name.is_some())
+            });
+            // Import cycles are retried for the standard library's modules.
+            if is_static_field && self.builder.module.source_file.contains("haxe-std") {
+                self.errors.push(LoweringError {
+                    message: format!(
+                        "static `{}` is not available to this module",
+                        qual.unwrap_or("?")
+                    ),
+                    location: expr.source_location,
+                });
+            }
             None
         }
     }

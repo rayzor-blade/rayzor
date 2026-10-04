@@ -1523,6 +1523,8 @@ pub struct AstLowering<'a> {
     /// Bare names of the types the file being lowered declares: they take
     /// precedence over imports, default imports included.
     pub(crate) current_module_types: std::collections::BTreeSet<String>,
+    /// Slots of this file's dynamic methods whose return type is unknown.
+    pub(crate) unknown_return_slots: std::collections::BTreeSet<String>,
     /// Child class symbol -> parent class symbol, for resolving inherited
     /// members. `class_methods`/`class_fields` only ever hold what THIS
     /// compilation context lowered, so a parent from another module contributes
@@ -1673,6 +1675,7 @@ pub(crate) enum TypeSubstitutionResult {
 
 mod context;
 mod decls;
+mod dynamic_methods;
 mod expr;
 mod imports;
 mod infer;

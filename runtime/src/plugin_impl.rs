@@ -554,6 +554,10 @@ register_symbol!(
 // Program control
 register_symbol!("haxe_sys_exit", crate::haxe_sys::haxe_sys_exit);
 register_symbol!("haxe_sys_time", crate::haxe_sys::haxe_sys_time);
+register_symbol!(
+    "haxe_sys_timestamp_ms",
+    crate::haxe_sys::haxe_sys_timestamp_ms
+);
 register_symbol!("haxe_sys_args_count", crate::haxe_sys::haxe_sys_args_count);
 register_symbol!("haxe_sys_args", crate::haxe_sys::haxe_sys_args);
 register_symbol!(

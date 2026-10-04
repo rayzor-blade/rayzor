@@ -278,7 +278,11 @@ impl<'a> AstLowering<'a> {
             return Some((field_sym, fn_type));
         }
         let is_type_param = matches!(
-            self.context.type_table.borrow().get(fn_type).map(|t| &t.kind),
+            self.context
+                .type_table
+                .borrow()
+                .get(fn_type)
+                .map(|t| &t.kind),
             Some(crate::tast::core::TypeKind::TypeParameter { .. })
         );
         if !is_type_param {
@@ -286,7 +290,10 @@ impl<'a> AstLowering<'a> {
         }
         let mut type_table = self.context.type_table.borrow_mut();
         let dynamic = type_table.dynamic_type();
-        Some((field_sym, type_table.create_function_type(arg_types.to_vec(), dynamic)))
+        Some((
+            field_sym,
+            type_table.create_function_type(arg_types.to_vec(), dynamic),
+        ))
     }
 
     /// Resolve a class-like symbol by simple name.

@@ -156,6 +156,7 @@ cp "$HERE/shims/unit/Test.hx" "$SHARED/unit/Test.hx"
 cp "$HERE/shims/unit/ConfCheck.hx" "$SHARED/unit/ConfCheck.hx"
 cp "$HERE/shims/utest/Assert.hx" "$SHARED/utest/Assert.hx"
 cp "$HERE/shims/utest/Test.hx" "$SHARED/utest/Test.hx"
+cp "$HERE/shims/utest/Async.hx" "$SHARED/utest/Async.hx"
 
 # How many files are candidates, so progress has a denominator.
 # Both spellings. A file in `package unit.issues` may name the base class
@@ -424,20 +425,31 @@ for i in range(start, last):
     if not live[i] or depth_before != 1:
         continue
     m = re.search(r'\bfunction\s+(test[A-Za-z0-9_]*)\s*\(', code[i])
-    if not m or any(name == m.group(1) for name, _ in methods):
+    if not m or any(name == m.group(1) for name, _, _ in methods):
         continue
     # A macro function runs at compile time; the runner never calls one.
     if re.search(r'\bmacro\b', code[i][:m.start()]):
         continue
     is_static = re.search(r'\bstatic\b', code[i][:m.start()]) is not None
-    methods.append((m.group(1), is_static))
+    # utest passes an Async to a method that takes one and waits on it.
+    takes_async = re.match(r'\s*\w+\s*:\s*(utest\.)?Async\b', code[i][m.end():]) is not None
+    methods.append((m.group(1), is_static, takes_async))
 if not methods:
     sys.exit(3)
 
+# utest runs setup and teardown around each instance test; unit.Test does not.
+utest_case = re.search(r'extends\s+(utest\.Test|ThreadTestBase|TestCommandBase)\b', code[start]) is not None
 main = ['    public static function main():Void {',
         '        var inst = new %s();' % cls]
-main += ['        %s.%s();' % (cls, name) if st else '        inst.%s();' % name
-         for name, st in methods]
+for name, st, takes_async in methods:
+    if st:
+        main.append('        %s.%s();' % (cls, name))
+        continue
+    call = ('{ var a = new utest.Async(); inst.%s(a); a.wait(); }' % name) if takes_async \
+        else 'inst.%s();' % name
+    if utest_case:
+        call = 'inst.setup(); %s inst.teardown();' % call
+    main.append('        ' + call)
 main += ['        unit.ConfCheck.summary();', '    }']
 open(dst, 'w', encoding='utf-8').write('\n'.join(lines[:last] + main + lines[last:]))
 PYGEN

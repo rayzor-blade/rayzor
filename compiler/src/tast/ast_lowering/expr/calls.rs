@@ -315,13 +315,21 @@ impl<'a> AstLowering<'a> {
             .context
             .symbol_table
             .get_symbol(method_symbol)
-            .and_then(|s| match self.context.type_table.borrow().get(s.type_id).map(|t| &t.kind) {
-                Some(TypeKind::Function {
-                    params,
-                    return_type,
-                    effects,
-                }) if *return_type == dynamic_type => Some((params.clone(), effects.clone())),
-                _ => None,
+            .and_then(|s| {
+                match self
+                    .context
+                    .type_table
+                    .borrow()
+                    .get(s.type_id)
+                    .map(|t| &t.kind)
+                {
+                    Some(TypeKind::Function {
+                        params,
+                        return_type,
+                        effects,
+                    }) if *return_type == dynamic_type => Some((params.clone(), effects.clone())),
+                    _ => None,
+                }
             })
         else {
             return;
@@ -1293,6 +1301,21 @@ impl<'a> AstLowering<'a> {
         expr: &Expr,
         args: &[Expr],
     ) -> LoweringResult<TypedExpression> {
+        // Haxe reads a callee before its arguments: a dynamic method whose
+        // arguments may rebind it is called through the binding read first.
+        if let ExprKind::Ident(name) = &expr.kind {
+            if !args.is_empty() && self.slot_return_known(name) {
+                let id = self.context.intern_string(name);
+                if let Some(symbol) = self.resolve_symbol_in_scope_hierarchy(id) {
+                    if self.is_own_dynamic_method(symbol, name) {
+                        if let Some(owner) = self.implicit_owner(symbol, expr.span) {
+                            let read = self.dynamic_method_read(owner.as_ref(), name, expr.span);
+                            return self.lower_call_expression(expression, &read, args);
+                        }
+                    }
+                }
+            }
+        }
         if let ExprKind::Ident(alias) = &expr.kind {
             let alias_name = self.context.intern_string(alias);
             let symbol_is_import = self
@@ -2444,20 +2467,20 @@ impl<'a> AstLowering<'a> {
                                 .any(|p| p.starts_with(|c: char| c.is_ascii_uppercase()));
                             if !names_a_type_midway
                                 && matches!(
-                                first_part.as_str(),
-                                "haxe"
-                                    | "rayzor"
-                                    | "sys"
-                                    | "cpp"
-                                    | "cs"
-                                    | "java"
-                                    | "python"
-                                    | "lua"
-                                    | "eval"
-                                    | "neko"
-                                    | "hl"
-                                    | "flash"
-                            )
+                                    first_part.as_str(),
+                                    "haxe"
+                                        | "rayzor"
+                                        | "sys"
+                                        | "cpp"
+                                        | "cs"
+                                        | "java"
+                                        | "python"
+                                        | "lua"
+                                        | "eval"
+                                        | "neko"
+                                        | "hl"
+                                        | "flash"
+                                )
                             {
                                 return Err(LoweringError::UnresolvedType {
                                     type_name: qualified_class_name,
@@ -4536,7 +4559,9 @@ impl<'a> AstLowering<'a> {
         formals: &[TypeId],
     ) -> Option<Vec<usize>> {
         if args.len() >= formals.len()
-            || formals.last().is_some_and(|l| self.rest_elem_of(*l).is_some())
+            || formals
+                .last()
+                .is_some_and(|l| self.rest_elem_of(*l).is_some())
         {
             return None;
         }
@@ -4589,12 +4614,19 @@ impl<'a> AstLowering<'a> {
             _ => return None,
         };
         let method = self.context.intern_string(method);
-        Some(self.resolve_declared_method_sig(class, method, is_static)?.optional)
+        Some(
+            self.resolve_declared_method_sig(class, method, is_static)?
+                .optional,
+        )
     }
 
     fn is_optional_formal(&self, formal: TypeId) -> bool {
         matches!(
-            self.context.type_table.borrow().get(formal).map(|t| &t.kind),
+            self.context
+                .type_table
+                .borrow()
+                .get(formal)
+                .map(|t| &t.kind),
             Some(TypeKind::Optional { .. })
         )
     }

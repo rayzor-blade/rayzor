@@ -1835,8 +1835,51 @@ impl CompilationUnit {
         self.maybe_dump_file_table();
 
         self.run_macro_hooks()?;
+        self.append_entry_point_run();
 
         Ok(all_typed_files)
+    }
+
+    /// Haxe ends the program's `main` with `haxe.EntryPoint.run()` when
+    /// EntryPoint is part of the program: the main event loop runs out before
+    /// the process ends. The call goes before every return of the entry `main`.
+    fn append_entry_point_run(&mut self) {
+        use crate::ir::{FunctionKind, IrInstruction, IrTerminator};
+        let Some(module) = self.mir_modules.last_mut() else {
+            return;
+        };
+        let find = |m: &crate::ir::IrModule, test: &dyn Fn(&crate::ir::IrFunction) -> bool| {
+            m.functions
+                .values()
+                .find(|f| !f.cfg.blocks.is_empty() && test(f))
+                .map(|f| f.id)
+        };
+        let Some(run) = find(module, &|f| {
+            f.qualified_name.as_deref() == Some("haxe.EntryPoint.run")
+        }) else {
+            return;
+        };
+        let Some(main) = find(module, &|f| {
+            f.name == "main" && f.id.0 < 100_000 && f.kind == FunctionKind::UserDefined
+        }) else {
+            return;
+        };
+        let module = std::sync::Arc::make_mut(module);
+        let Some(main) = module.functions.get_mut(&main) else {
+            return;
+        };
+        for block in main.cfg.blocks.values_mut() {
+            if matches!(block.terminator, IrTerminator::Return { .. }) {
+                block.instructions.push(IrInstruction::CallDirect {
+                    dest: None,
+                    func_id: run,
+                    args: Vec::new(),
+                    arg_ownership: Vec::new(),
+                    type_args: Vec::new(),
+                    is_tail_call: false,
+                });
+            }
+        }
     }
 
     /// Runs the macros' `onAfterTyping`/`onGenerate` callbacks once every

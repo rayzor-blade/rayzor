@@ -147,6 +147,7 @@ Sys stdin static=true ctor=false params=0 -> haxe_sys_stdin
 Sys stdout static=true ctor=false params=0 -> haxe_sys_stdout
 Sys systemName static=true ctor=false params=0 -> haxe_sys_system_name
 Sys time static=true ctor=false params=0 -> haxe_sys_time
+Sys timestamp_ms static=true ctor=false params=0 -> haxe_sys_timestamp_ms
 Type allEnums static=true ctor=false params=1 -> haxe_type_all_enums
 Type createEmptyInstance static=true ctor=false params=1 -> haxe_type_create_empty_instance
 Type createEnum static=true ctor=false params=3 -> haxe_type_create_enum

@@ -155,9 +155,7 @@ pub fn create_bundle(mut config: BundleConfig) -> Result<usize, String> {
     let module_count = 1usize;
 
     let entry_function = merged
-        .functions
-        .values()
-        .find(|f| f.name == "main" || f.name == "Main_main" || f.name.ends_with("_main"))
+        .entry_function()
         .map(|f| f.name.clone())
         .ok_or("No entry point found (no main function)")?;
     let entry_module = merged.name.clone();

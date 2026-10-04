@@ -1233,6 +1233,16 @@ pub extern "C" fn haxe_sys_exit(code: i32) -> ! {
 /// Get current time in milliseconds
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_time() -> f64 {
+    haxe_sys_time_secs()
+}
+
+/// Milliseconds since the Unix epoch.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_sys_timestamp_ms() -> i64 {
+    (haxe_sys_time_secs() * 1000.0) as i64
+}
+
+fn haxe_sys_time_secs() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     SystemTime::now()
