@@ -662,7 +662,8 @@ mod tests {
     /// shape of every `sys/thread/*` class.
     #[test]
     fn dotted_define_names() {
-        let c = cfg(&["eval", "rayzor"]);
+        let mut c = cfg(&["eval", "rayzor"]);
+        c.defines.remove("target.threaded");
         assert!(evaluate_condition("(!target.threaded)", &c));
         assert!(evaluate_condition("!(target.atomics)", &c));
         assert!(!evaluate_condition("target.threaded", &c));
