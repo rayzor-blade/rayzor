@@ -321,6 +321,7 @@ impl CompilationUnit {
 
         // Skip pre-registration if requested (types already registered by CompilationUnit)
         lowering.set_skip_pre_registration(skip_pre_registration);
+        lowering.retrying_failed_attempt = self.failed_attempts.contains(filename);
 
         // CompilationUnit manages stdlib loading itself via load_stdlib() and the
         // later stdlib MIR merge. Re-loading the stdlib inside AstLowering causes
@@ -364,17 +365,18 @@ impl CompilationUnit {
         );
 
         let t_ast_lower = profile_timer(self.config.profile_typecheck);
-        let typed_file = lowering
-            .lower_file(ast_file)
-            .map_err(|e| vec![e.to_compilation_error()])?;
+        let lowered = lowering.lower_file(ast_file);
         file_ast_ms = finish_profile_ms(&mut self.typecheck_timings.ast_lower_ms, t_ast_lower);
 
-        // Export class_fields for subsequent compilations
+        // Export class_fields for subsequent compilations. A failed attempt
+        // exports too: its members are declared, and a file compiled before
+        // its retry must read `Class.staticField` as the static it is.
         for (class_sym, fields) in lowering.export_class_fields() {
             self.global_class_fields
                 .entry(*class_sym)
                 .or_insert_with(|| fields.clone());
         }
+        let typed_file = lowered.map_err(|e| vec![e.to_compilation_error()])?;
 
         // Normal (non-safety) warnings: untyped empty array literals whose
         // element type stayed uncertain (never bound by a push/assign), so they

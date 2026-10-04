@@ -1517,6 +1517,12 @@ pub struct AstLowering<'a> {
     /// Temporary storage for classes being built (symbol_id -> class methods)
     class_methods: BTreeMap<SymbolId, Vec<(InternedString, SymbolId, bool)>>, // (name, symbol, is_static)
     class_fields: BTreeMap<SymbolId, Vec<(InternedString, SymbolId, bool)>>, // (name, symbol, is_static)
+    /// A retry of a file whose last attempt failed: its fields keep the
+    /// symbols that attempt declared, which other files already resolved.
+    pub(crate) retrying_failed_attempt: bool,
+    /// Bare names of the types the file being lowered declares: they take
+    /// precedence over imports, default imports included.
+    pub(crate) current_module_types: std::collections::BTreeSet<String>,
     /// Child class symbol -> parent class symbol, for resolving inherited
     /// members. `class_methods`/`class_fields` only ever hold what THIS
     /// compilation context lowered, so a parent from another module contributes

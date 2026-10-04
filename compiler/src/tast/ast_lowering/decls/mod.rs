@@ -28,6 +28,7 @@ impl<'a> AstLowering<'a> {
         // FileMetadata::default() empty-string value and every E0382
         // dump prints `typed_file=` blank.
         typed_file.metadata.file_path = file.filename.clone();
+        self.current_module_types = module_type_names(&file.declarations);
         let file_name = file
             .filename
             .rsplit('/')
@@ -705,3 +706,37 @@ mod classes;
 mod enums;
 mod fields;
 mod registration;
+
+/// The bare names of the types a module declares, through `#if` blocks.
+fn module_type_names(decls: &[parser::TypeDeclaration]) -> std::collections::BTreeSet<String> {
+    use parser::TypeDeclaration as D;
+    let mut names = std::collections::BTreeSet::new();
+    for decl in decls {
+        match decl {
+            D::Class(c) => {
+                names.insert(c.name.clone());
+            }
+            D::Interface(i) => {
+                names.insert(i.name.clone());
+            }
+            D::Enum(e) => {
+                names.insert(e.name.clone());
+            }
+            D::Typedef(t) => {
+                names.insert(t.name.clone());
+            }
+            D::Abstract(a) => {
+                names.insert(a.name.clone());
+            }
+            D::Conditional(c) => {
+                for branch in std::iter::once(&c.if_branch.content)
+                    .chain(c.elseif_branches.iter().map(|b| &b.content))
+                    .chain(c.else_branch.iter())
+                {
+                    names.extend(module_type_names(branch));
+                }
+            }
+        }
+    }
+    names
+}

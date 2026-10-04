@@ -491,7 +491,20 @@ impl StaticSigIndex {
                 .entry(func.name.clone())
                 .or_insert_with(|| StaticMethodSig {
                     params: func.params.iter().map(|p| p.type_hint.clone()).collect(),
-                    return_type: func.return_type.clone(),
+                    return_type: func.return_type.clone().or_else(|| {
+                        // Read from other files, so the class's own name is qualified.
+                        let mut hint = returned_field_hint(func, fields)?.clone();
+                        if let parser::Type::Path { path, .. } = &mut hint {
+                            if path.package.is_empty() && path.name == class_name {
+                                path.package = package
+                                    .split('.')
+                                    .filter(|p| !p.is_empty())
+                                    .map(str::to_string)
+                                    .collect();
+                            }
+                        }
+                        Some(hint)
+                    }),
                     has_body: func.body.is_some(),
                     param_kinds: func.params.iter().map(Self::param_kind).collect(),
                     type_params: func.type_params.clone(),
@@ -711,4 +724,49 @@ impl StaticSigIndex {
             self.parse_misses.insert(name.to_string());
         }
     }
+}
+
+/// The declared type of the class field a method returns (`return x;`,
+/// `return this.x;`), unless a parameter shadows it.
+pub(crate) fn returned_field_hint<'f>(
+    func: &parser::haxe_ast::Function,
+    fields: &'f [parser::ClassField],
+) -> Option<&'f parser::Type> {
+    use parser::haxe_ast::{BlockElement, ExprKind};
+    let mut returned = func.body.as_deref()?;
+    let mut saw_return = false;
+    loop {
+        returned = match &returned.kind {
+            ExprKind::Return(Some(e)) if !saw_return => {
+                saw_return = true;
+                e
+            }
+            ExprKind::Block(elements) if elements.len() == 1 && !saw_return => match &elements[0] {
+                BlockElement::Expr(e) => e,
+                _ => return None,
+            },
+            _ => break,
+        };
+    }
+    if !saw_return {
+        return None;
+    }
+    let name = match &returned.kind {
+        ExprKind::Ident(n) => n,
+        ExprKind::Field { expr, field, .. } if matches!(expr.kind, ExprKind::This) => field,
+        _ => return None,
+    };
+    if func.params.iter().any(|p| &p.name == name) {
+        return None;
+    }
+    fields.iter().find_map(|f| match &f.kind {
+        parser::ClassFieldKind::Var { name: n, type_hint, .. }
+        | parser::ClassFieldKind::Final { name: n, type_hint, .. }
+        | parser::ClassFieldKind::Property { name: n, type_hint, .. }
+            if n == name =>
+        {
+            type_hint.as_ref()
+        }
+        _ => None,
+    })
 }

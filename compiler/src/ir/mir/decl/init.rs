@@ -102,6 +102,19 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Haxe runs class `__init__`s before static initializers.
+        let static_inits: Vec<IrFunctionId> = self
+            .builder
+            .module
+            .functions
+            .values()
+            .filter(|f| f.name == super::signatures::STATIC_INIT_NAME && !f.cfg.blocks.is_empty())
+            .map(|f| f.id)
+            .collect();
+        for init in static_inits {
+            self.builder.build_call_direct(init, vec![], IrType::Void);
+        }
+
         // Initialize dynamic globals (non-constant initializers).
         for (symbol, init_expr) in &self.dynamic_globals.clone() {
             // Try constant folding first for simple expressions

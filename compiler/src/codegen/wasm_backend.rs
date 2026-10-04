@@ -1269,6 +1269,25 @@ impl CompileCtx {
                 }
             }
         }
+        let init_rank: std::collections::BTreeMap<(usize, crate::ir::IrFunctionId), usize> =
+            modules
+                .iter()
+                .enumerate()
+                .flat_map(|(m, module)| {
+                    crate::ir::init_order::ordered_inits(module, "__init__")
+                        .into_iter()
+                        .map(move |id| (m, id))
+                })
+                .enumerate()
+                .map(|(rank, key)| (key, rank))
+                .collect();
+        module_init_idxs.sort_by_key(|idx| {
+            self.internals
+                .iter()
+                .find(|i| i.func_idx == *idx)
+                .and_then(|i| init_rank.get(&(i.module_idx, i.ir_id)).copied())
+                .unwrap_or(usize::MAX)
+        });
         let startup_init_idxs: Vec<u32> = vtable_init_idxs
             .into_iter()
             .chain(module_init_idxs)

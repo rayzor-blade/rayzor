@@ -1156,6 +1156,7 @@ impl CompilationUnit {
         );
         match compile_outcome {
             Ok(typed_file) => {
+                self.failed_attempts.remove(&filename);
                 if self.config.profile_typecheck {
                     self.typecheck_timings.import_fresh_compiles += 1;
                     if source_has_typedef {
@@ -1242,6 +1243,7 @@ impl CompilationUnit {
                 true
             }
             Err(errors) => {
+                self.failed_attempts.insert(filename.to_string());
                 // LOUD-FAIL: an imported module that fails to compile yields an
                 // empty MIR, so every call into it lowers to a forward-ref stub
                 // that traps (udf #0xc11f / wasm `unreachable`) at call time with

@@ -377,6 +377,8 @@ pub struct CompilationUnit {
         crate::tast::SymbolId,
         Vec<(crate::tast::InternedString, crate::tast::SymbolId, bool)>,
     >,
+    /// Files whose last compile attempt failed; their retry reuses its symbols.
+    failed_attempts: BTreeSet<String>,
 
     /// Mapping from HIR function symbols to MIR function IDs for stdlib functions
     /// This allows user code to call pure Haxe stdlib functions (like StringTools)
@@ -635,6 +637,7 @@ impl CompilationUnit {
             file_source_by_filename: BTreeMap::new(),
             collected_diagnostics: Vec::new(),
             global_class_fields: BTreeMap::new(),
+            failed_attempts: BTreeSet::new(),
             stdlib_function_map: BTreeMap::new(),
             stdlib_function_name_map: BTreeMap::new(),
             import_field_index_map: BTreeMap::new(),

@@ -821,6 +821,10 @@ impl<'a> HirToMirContext<'a> {
             } else {
                 self.convert_type(then_expr.ty)
             };
+            // An `if` statement whose arms are void calls yields nothing to merge.
+            if result_type == IrType::Void {
+                return None;
+            }
             let result = match self.builder.build_phi(merge_block, result_type.clone()) {
                 Some(r) => r,
                 None => {

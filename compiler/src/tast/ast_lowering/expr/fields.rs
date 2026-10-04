@@ -516,6 +516,19 @@ impl<'a> AstLowering<'a> {
                             metadata,
                         });
                     }
+                    // A class declared but not yet compiled (an import cycle):
+                    // nothing says what `field` is, so fail and let the import
+                    // retry compile this file after the class.
+                    if !self.class_fields.contains_key(&class_symbol)
+                        && self
+                            .resolve_class_method_symbol(class_symbol, field_name)
+                            .is_none()
+                    {
+                        return Err(LoweringError::UnresolvedType {
+                            type_name: class_name.clone(),
+                            location: self.context.create_location_from_span(expression.span),
+                        });
+                    }
                 }
 
                 // Check if this is an enum and the field is a variant
@@ -670,14 +683,20 @@ impl<'a> AstLowering<'a> {
         // Create type parameter with deferred constraint resolution
         // But we can try to resolve it if the object is 'this'
         let field_symbol = match &obj_expr.kind {
-            TypedExpressionKind::This { this_type: _ } => {
-                // If accessing field on 'this', try to find it in current class
-                if let Some(class_symbol) = self.context.class_context_stack.last() {
-                    resolve_in_class(self, class_symbol, field_name)
-                        .unwrap_or_else(|| self.context.symbol_table.create_field(field_name))
-                } else {
-                    self.context.symbol_table.create_field(field_name)
-                }
+            TypedExpressionKind::This { this_type } => {
+                // The current class, else the class `this` is (an abstract's
+                // `this` is its underlying value).
+                let this_type = *this_type;
+                self.context
+                    .class_context_stack
+                    .last()
+                    .copied()
+                    .and_then(|class_symbol| resolve_in_class(self, &class_symbol, field_name))
+                    .or_else(|| {
+                        let class_symbol = self.resolve_type_to_class_symbol(this_type)?;
+                        resolve_in_class(self, &class_symbol, field_name)
+                    })
+                    .unwrap_or_else(|| self.context.symbol_table.create_field(field_name))
             }
             TypedExpressionKind::Variable { symbol_id } => {
                 // If accessing field on a variable/parameter, try to resolve from its type

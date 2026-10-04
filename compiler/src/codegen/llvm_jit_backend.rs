@@ -2510,10 +2510,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // class registered by a LATER file got a null/garbage pointer back —
         // SIGSEGV on the next dispatch through it.
         for init_name in ["__vtable_init__", "__init__"] {
-            let init_funcs: Vec<_> = module
-                .functions
-                .iter()
-                .filter(|(_, f)| f.name == init_name)
+            let init_funcs: Vec<_> = crate::ir::init_order::ordered_inits(module, init_name)
+                .into_iter()
+                .filter_map(|id| module.functions.get_key_value(&id))
                 .collect();
             for (init_func_id, init_func) in init_funcs {
                 // Must match the per-func_id-unique name `declare_function`

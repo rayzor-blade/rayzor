@@ -57,13 +57,7 @@
 //! // executed is still false!
 //! ```
 //!
-//! **DO THIS INSTEAD** - Use return values:
-//! ```haxe
-//! var t = Thread.create(() -> { return 42; });
-//! var result = t.join();  // Get return value (future work)
-//! ```
-//!
-//! **OR** - Use Deque for thread-safe communication:
+//! **DO THIS INSTEAD** - Use Deque for thread-safe communication:
 //! ```haxe
 //! var results = new Deque<Int>();
 //! Thread.create(() -> { results.add(42); });
@@ -159,7 +153,11 @@ impl E2ETestCase {
         println!("{}", self.description);
         println!("{}", "=".repeat(70));
 
-        let mut unit = CompilationUnit::new(CompilationConfig::fast());
+        // Uncached: each case is a separate program compiled in this one process.
+        let mut unit = CompilationUnit::new(CompilationConfig {
+            enable_cache: false,
+            ..CompilationConfig::default()
+        });
 
         if let Err(e) = unit.load_stdlib() {
             return TestResult::Failed {
@@ -313,6 +311,11 @@ impl E2ETestCase {
 
         let mut backend = CraneliftBackend::with_symbols(&symbols_ref)?;
 
+        // Class and enum RTTI, as the production path registers it: the
+        // stdlib's thread machinery reads fields by name.
+        CraneliftBackend::register_class_rtti_from_modules(modules);
+        CraneliftBackend::register_enum_rtti_from_modules(modules);
+
         for module in modules {
             backend.compile_module(module)?;
         }
@@ -437,11 +440,11 @@ fn main() -> Result<(), String> {
     // THREAD TESTS
     // ============================================================================
 
-    // TEST 1: Thread.yield
+    // TEST 1: yielding
     suite.add_test(
         E2ETestCase::new(
             "thread_yield",
-            "Thread.yield() to allow other threads to run",
+            "Sys.sleep(0) yields to other threads",
             r#"
 package test;
 
@@ -449,20 +452,20 @@ import sys.thread.Thread;
 
 class Main {
     static function main() {
-        Thread.yield();
+        Sys.sleep(0);
         trace("yield completed");
     }
 }
 "#,
         )
-        .expect_mir_calls(vec!["sys_thread_yield"]),
+        .expect_mir_calls(vec!["haxe_sys_sleep"]),
     );
 
-    // TEST 2: Thread.sleep
+    // TEST 2: sleeping
     suite.add_test(
         E2ETestCase::new(
             "thread_sleep",
-            "Thread.sleep() for a short duration",
+            "Sys.sleep() for a short duration",
             r#"
 package test;
 
@@ -470,13 +473,13 @@ import sys.thread.Thread;
 
 class Main {
     static function main() {
-        Thread.sleep(0.01);
+        Sys.sleep(0.01);
         trace("sleep completed");
     }
 }
 "#,
         )
-        .expect_mir_calls(vec!["sys_thread_sleep"]),
+        .expect_mir_calls(vec!["haxe_sys_sleep"]),
     );
 
     // TEST 3: Basic Thread Creation
@@ -493,17 +496,24 @@ import sys.thread.Thread;
 import sys.thread.Deque;
 
 class Main {
+    // Runs `f` on a new thread; waiting on the returned lock joins it.
+    static function spawn(f:Void->Void):sys.thread.Lock {
+        var done = new sys.thread.Lock();
+        Thread.create(() -> { f(); done.release(); });
+        return done;
+    }
+
     static function main() {
         // Use Deque for thread-safe result communication
         // (primitives like Bool are captured by VALUE, not reference)
         var results = new Deque<Int>();
 
-        var t = Thread.create(() -> {
+        var t = spawn(() -> {
             // Signal execution by adding to Deque
             results.add(1);
         });
 
-        t.join();
+        t.wait();
 
         // Check that thread executed by popping result
         var executed = results.pop(false);
@@ -512,32 +522,37 @@ class Main {
 }
 "#,
         )
-        .expect_mir_calls(vec!["Thread_spawn", "sys_thread_join"]),
+        .expect_mir_calls(vec!["sys_thread_impl_create", "Lock_wait"]),
     );
 
-    // TEST 4: Thread.isFinished
+    // TEST 4: a joined thread has run
     suite.add_test(
         E2ETestCase::new(
-            "thread_is_finished",
-            "Check if a thread has finished execution",
+            "thread_job_completes",
+            "A joined thread has run its job",
             r#"
 package test;
 
 import sys.thread.Thread;
 
 class Main {
+    // Runs `f` on a new thread; waiting on the returned lock joins it.
+    static function spawn(f:Void->Void):sys.thread.Lock {
+        var done = new sys.thread.Lock();
+        Thread.create(() -> { f(); done.release(); });
+        return done;
+    }
+
     static function main() {
-        var t = Thread.create(() -> {
-            // Quick task
-        });
-        t.join();
-        var finished = t.isFinished();
-        trace(finished);
+        var ran = new sys.thread.Deque<Int>();
+        var t = spawn(() -> ran.add(1));
+        t.wait();
+        trace(ran.pop(false) != null);
     }
 }
 "#,
         )
-        .expect_mir_calls(vec!["Thread_spawn", "sys_thread_is_finished"]),
+        .expect_mir_calls(vec!["sys_thread_impl_create", "Lock_wait"]),
     );
 
     // ============================================================================
@@ -606,11 +621,18 @@ import sys.thread.Thread;
 import sys.thread.Mutex;
 
 class Main {
+    // Runs `f` on a new thread; waiting on the returned lock joins it.
+    static function spawn(f:Void->Void):sys.thread.Lock {
+        var done = new sys.thread.Lock();
+        Thread.create(() -> { f(); done.release(); });
+        return done;
+    }
+
     static function main() {
         var mutex = new Mutex();
 
         // Thread acquires mutex and releases
-        var t = Thread.create(() -> {
+        var t = spawn(() -> {
             trace("thread: acquiring mutex");
             mutex.acquire();
             trace("thread: acquired, releasing");
@@ -619,7 +641,7 @@ class Main {
         });
 
         // Small delay to let thread start
-        Thread.sleep(0.01);
+        Sys.sleep(0.01);
 
         // Main thread acquires mutex
         trace("main: acquiring mutex");
@@ -628,13 +650,13 @@ class Main {
         mutex.release();
         trace("main: released");
 
-        t.join();
+        t.wait();
         trace("done");
     }
 }
 "#,
         )
-        .expect_mir_calls(vec!["sys_mutex_acquire", "Thread_spawn"]),
+        .expect_mir_calls(vec!["sys_mutex_acquire", "sys_thread_impl_create"]),
     );
 
     // ============================================================================
@@ -654,16 +676,23 @@ import sys.thread.Thread;
 import sys.thread.Lock;
 
 class Main {
+    // Runs `f` on a new thread; waiting on the returned lock joins it.
+    static function spawn(f:Void->Void):sys.thread.Lock {
+        var done = new sys.thread.Lock();
+        Thread.create(() -> { f(); done.release(); });
+        return done;
+    }
+
     static function main() {
         var lock = new Lock();
 
-        var t = Thread.create(() -> {
-            Thread.sleep(0.02);  // Longer sleep to ensure main is waiting
+        var t = spawn(() -> {
+            Sys.sleep(0.02);  // Longer sleep to ensure main is waiting
             lock.release();
         });
 
         var result = lock.wait();  // Blocking wait
-        t.join();
+        t.wait();
         trace("done");
     }
 }
@@ -769,16 +798,23 @@ import sys.thread.Semaphore;
 import sys.thread.Deque;
 
 class Main {
+    // Runs `f` on a new thread; waiting on the returned lock joins it.
+    static function spawn(f:Void->Void):sys.thread.Lock {
+        var done = new sys.thread.Lock();
+        Thread.create(() -> { f(); done.release(); });
+        return done;
+    }
+
     static function main() {
         var sem = new Semaphore(0);
         var results = new Deque<Int>();
 
-        var t1 = Thread.create(() -> {
+        var t1 = spawn(() -> {
             results.add(10);  // Thread 1 adds value
             sem.release();
         });
 
-        var t2 = Thread.create(() -> {
+        var t2 = spawn(() -> {
             results.add(20);  // Thread 2 adds value
             sem.release();
         });
@@ -787,8 +823,8 @@ class Main {
         sem.acquire();
         sem.acquire();
 
-        t1.join();
-        t2.join();
+        t1.wait();
+        t2.wait();
 
         // Both values should be present (order may vary)
         var v1 = results.pop(false);
@@ -878,14 +914,21 @@ import sys.thread.Thread;
 import sys.thread.Deque;
 
 class Main {
+    // Runs `f` on a new thread; waiting on the returned lock joins it.
+    static function spawn(f:Void->Void):sys.thread.Lock {
+        var done = new sys.thread.Lock();
+        Thread.create(() -> { f(); done.release(); });
+        return done;
+    }
+
     static function main() {
         var deque = new Deque<Int>();
 
-        var producer = Thread.create(() -> {
+        var producer = spawn(() -> {
             deque.add(42);
         });
 
-        producer.join();
+        producer.wait();
 
         var value = deque.pop(false);
         trace(value);
@@ -966,24 +1009,31 @@ import sys.thread.Thread;
 import sys.thread.Condition;
 
 class Main {
+    // Runs `f` on a new thread; waiting on the returned lock joins it.
+    static function spawn(f:Void->Void):sys.thread.Lock {
+        var done = new sys.thread.Lock();
+        Thread.create(() -> { f(); done.release(); });
+        return done;
+    }
+
     static function main() {
         var cond = new Condition();
 
         // Simpler test: signal before wait (lock should release immediately)
-        var waiter = Thread.create(() -> {
-            Thread.sleep(0.02);  // Wait for signal to be sent first
+        var waiter = spawn(() -> {
+            Sys.sleep(0.02);  // Wait for signal to be sent first
             cond.acquire();
             // Signal already sent, wait should return immediately or after signal
             cond.release();
             trace("waiter done");
         });
 
-        Thread.sleep(0.01);
+        Sys.sleep(0.01);
         cond.acquire();
         cond.signal();  // Signal (even if no one waiting yet)
         cond.release();
 
-        waiter.join();
+        waiter.wait();
         trace("main done");
     }
 }
@@ -1005,31 +1055,38 @@ import sys.thread.Thread;
 import sys.thread.Condition;
 
 class Main {
+    // Runs `f` on a new thread; waiting on the returned lock joins it.
+    static function spawn(f:Void->Void):sys.thread.Lock {
+        var done = new sys.thread.Lock();
+        Thread.create(() -> { f(); done.release(); });
+        return done;
+    }
+
     static function main() {
         var cond = new Condition();
 
         // Simpler test: broadcast works (threads wait then signal)
-        var t1 = Thread.create(() -> {
-            Thread.sleep(0.02);
+        var t1 = spawn(() -> {
+            Sys.sleep(0.02);
             cond.acquire();
             cond.release();
             trace("t1 done");
         });
 
-        var t2 = Thread.create(() -> {
-            Thread.sleep(0.02);
+        var t2 = spawn(() -> {
+            Sys.sleep(0.02);
             cond.acquire();
             cond.release();
             trace("t2 done");
         });
 
-        Thread.sleep(0.01);
+        Sys.sleep(0.01);
         cond.acquire();
         cond.broadcast();  // Broadcast (even if no one waiting yet)
         cond.release();
 
-        t1.join();
-        t2.join();
+        t1.wait();
+        t2.wait();
 
         trace("all done");
     }
@@ -1056,19 +1113,26 @@ import sys.thread.Thread;
 import sys.thread.Deque;
 
 class Main {
+    // Runs `f` on a new thread; waiting on the returned lock joins it.
+    static function spawn(f:Void->Void):sys.thread.Lock {
+        var done = new sys.thread.Lock();
+        Thread.create(() -> { f(); done.release(); });
+        return done;
+    }
+
     static function main() {
         var results = new Deque<Int>();
 
-        var t1 = Thread.create(() -> {
+        var t1 = spawn(() -> {
             results.add(1);
         });
 
-        var t2 = Thread.create(() -> {
+        var t2 = spawn(() -> {
             results.add(2);
         });
 
-        t1.join();
-        t2.join();
+        t1.wait();
+        t2.wait();
 
         // Should have 2 items
         var v1 = results.pop(false);
@@ -1079,7 +1143,7 @@ class Main {
 }
 "#,
         )
-        .expect_mir_calls(vec!["Thread_spawn"]),
+        .expect_mir_calls(vec!["sys_thread_impl_create"]),
     );
 
     // TEST 21: Producer-consumer with semaphore
@@ -1094,11 +1158,18 @@ import sys.thread.Thread;
 import sys.thread.Semaphore;
 
 class Main {
+    // Runs `f` on a new thread; waiting on the returned lock joins it.
+    static function spawn(f:Void->Void):sys.thread.Lock {
+        var done = new sys.thread.Lock();
+        Thread.create(() -> { f(); done.release(); });
+        return done;
+    }
+
     static function main() {
         var items = new Array<Int>();
         var sem = new Semaphore(0);
 
-        var producer = Thread.create(() -> {
+        var producer = spawn(() -> {
             items.push(1);
             sem.release();
             items.push(2);
@@ -1111,7 +1182,7 @@ class Main {
         sem.acquire();
         sem.acquire();
 
-        producer.join();
+        producer.wait();
 
         trace(items.length);
     }

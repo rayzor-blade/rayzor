@@ -3234,45 +3234,21 @@ impl StdlibMapping {
     }
 
     // ============================================================================
-    // sys.thread.Thread Methods (standard Haxe threading API)
+    // sys.thread.ThreadImpl: the native handle under the upstream Thread class
     // ============================================================================
-    //
-    // Maps sys.thread.Thread to rayzor's thread runtime.
-    // This provides compatibility with standard Haxe threading code.
 
     fn register_sys_thread_methods(&mut self) {
         use IrTypeDescriptor::*;
 
         let mappings = vec![
-            // sys.thread.Thread.create(job: Void->Void) -> Thread
-            // Uses Thread_spawn wrapper which extracts fn_ptr and env_ptr from closure object
-            map_method!(static "sys.thread.Thread", "create" => "Thread_spawn", params: 1, mir_wrapper,
+            map_method!(static "sys.thread.ThreadImpl", "create" => "sys_thread_impl_create", params: 1, returns: primitive,
                 types: &[PtrU8] => PtrU8),
-            // sys.thread.Thread.current() -> Thread
-            map_method!(static "sys.thread.Thread", "current" => "sys_thread_current", params: 0, returns: complex,
+            map_method!(static "sys.thread.ThreadImpl", "current" => "sys_thread_impl_current", params: 0, returns: primitive,
                 types: &[] => PtrU8),
-            // sys.thread.Thread.readMessage(block: Bool) -> Dynamic
-            // Note: Message passing uses channels internally
-            map_method!(static "sys.thread.Thread", "readMessage" => "sys_thread_read_message", params: 1, returns: complex,
-                types: &[Bool] => PtrU8),
-            // thread.sendMessage(msg: Dynamic) -> Void
-            map_method!(instance "sys.thread.Thread", "sendMessage" => "sys_thread_send_message", params: 1, returns: void,
-                types: &[PtrU8, PtrU8]),
-            // thread.isFinished() -> Bool
-            map_method!(instance "sys.thread.Thread", "isFinished" => "sys_thread_is_finished", params: 0, returns: primitive,
-                types: &[PtrU8] => Bool),
-            // thread.join() -> Void
-            map_method!(instance "sys.thread.Thread", "join" => "sys_thread_join", params: 0, returns: void,
-                types: &[PtrU8]),
-            // Thread.yield() -> Void
-            map_method!(static "sys.thread.Thread", "yield" => "sys_thread_yield", params: 0, returns: void,
-                types: &[]),
-            // Thread.sleep(seconds: Float) -> Void
-            map_method!(static "sys.thread.Thread", "sleep" => "sys_thread_sleep", params: 1, returns: void,
-                types: &[F64]),
-            // Thread.currentId() -> Int
-            map_method!(static "sys.thread.Thread", "currentId" => "rayzor_thread_current_id", params: 0, returns: primitive,
-                types: &[] => I64),
+            map_method!(static "sys.thread.ThreadImpl", "getName" => "sys_thread_impl_get_name", params: 1, returns: complex,
+                types: &[PtrU8] => PtrString),
+            map_method!(static "sys.thread.ThreadImpl", "setName" => "sys_thread_impl_set_name", params: 2, returns: void,
+                types: &[PtrU8, PtrVoid]),
         ];
 
         self.register_from_tuples(mappings);

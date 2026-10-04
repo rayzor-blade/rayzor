@@ -1464,16 +1464,23 @@ register_symbol!(
     crate::concurrency::sys_semaphore_try_acquire_nowait
 );
 
-// sys.thread.Thread wrapper functions
-register_symbol!("sys_thread_create", crate::concurrency::sys_thread_create);
-register_symbol!("sys_thread_join", crate::concurrency::sys_thread_join);
+// sys.thread.ThreadImpl
 register_symbol!(
-    "sys_thread_is_finished",
-    crate::concurrency::sys_thread_is_finished
+    "sys_thread_impl_create",
+    crate::concurrency::sys_thread_impl_create
 );
-register_symbol!("sys_thread_yield", crate::concurrency::sys_thread_yield);
-register_symbol!("sys_thread_sleep", crate::concurrency::sys_thread_sleep);
-register_symbol!("sys_thread_current", crate::concurrency::sys_thread_current);
+register_symbol!(
+    "sys_thread_impl_current",
+    crate::concurrency::sys_thread_impl_current
+);
+register_symbol!(
+    "sys_thread_impl_get_name",
+    crate::concurrency::sys_thread_impl_get_name
+);
+register_symbol!(
+    "sys_thread_impl_set_name",
+    crate::concurrency::sys_thread_impl_set_name
+);
 
 // rayzor.concurrent.Select — Multi-channel non-deterministic receive
 register_symbol!("rayzor_select_recv", crate::concurrency::rayzor_select_recv);

@@ -949,7 +949,7 @@ fn find_entry_llvm_name(
 #[cfg(feature = "llvm-backend")]
 fn find_startup_llvm_names(
     backend: &crate::codegen::llvm_jit_backend::LLVMJitBackend,
-    _modules: &[crate::ir::IrModule],
+    modules: &[crate::ir::IrModule],
 ) -> Vec<String> {
     use std::collections::BTreeSet;
 
@@ -983,6 +983,17 @@ fn find_startup_llvm_names(
         f = func.get_next_function();
     }
 
+    let rank: Vec<u32> = modules
+        .iter()
+        .flat_map(|m| crate::ir::init_order::ordered_inits(m, "__init__"))
+        .map(|id| id.0)
+        .collect();
+    user_inits.sort_by_key(|name| {
+        name.strip_prefix("__init___")
+            .and_then(|id| id.parse::<u32>().ok())
+            .and_then(|id| rank.iter().position(|r| *r == id))
+            .unwrap_or(usize::MAX)
+    });
     vtable_inits.extend(user_inits);
     vtable_inits
 }

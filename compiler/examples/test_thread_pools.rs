@@ -113,7 +113,7 @@ class Main {
 
         // Create producer thread
         Thread.create(function() {
-            Thread.sleep(0.1);
+            Sys.sleep(0.1);
             trace("Producer: adding item");
             deque.add("Hello from producer");
         });
@@ -150,7 +150,7 @@ class Main {
 
         // Create worker thread
         Thread.create(function() {
-            Thread.sleep(0.1);
+            Sys.sleep(0.1);
 
             condition.acquire();
             ready = true;
@@ -197,7 +197,7 @@ class Main {
         // Submit 4 tasks
         for (i in 0...4) {
             pool.run(function() {
-                Thread.sleep(0.05);
+                Sys.sleep(0.05);
                 mutex.acquire();
                 counter++;
                 trace("Task completed");
@@ -206,7 +206,7 @@ class Main {
         }
 
         // Wait for all tasks to complete
-        Thread.sleep(0.5);
+        Sys.sleep(0.5);
 
         if (counter == 4) {
             trace("Final counter: 4 (correct)");

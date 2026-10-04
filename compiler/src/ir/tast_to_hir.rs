@@ -6302,12 +6302,37 @@ impl<'a> TastToHirContext<'a> {
                     .string_interner
                     .intern(&format!("new_{}", arguments.len()));
                 let plain = self.string_interner.intern("new");
-                let ctor = self
+                // The abstract's own `new`: the scope also holds the other
+                // types of its module, and their constructors.
+                let abstract_qn = self
                     .symbol_table
-                    .lookup_symbol(scope, by_arity)
-                    .or_else(|| self.symbol_table.lookup_symbol(scope, plain))
-                    .filter(|s| s.kind == crate::tast::SymbolKind::Function)?
-                    .id;
+                    .get_symbol(symbol_id)
+                    .and_then(|s| s.qualified_name)
+                    .and_then(|q| self.string_interner.get(q))
+                    .map(str::to_string);
+                let owned = |name: InternedString| {
+                    // The abstract's name may lack its package; its members' do not.
+                    let want = format!(".{}.{}", abstract_qn.as_ref()?, self.string_interner.get(name)?);
+                    self.symbol_table
+                        .symbols_in_scope(scope)
+                        .into_iter()
+                        .find(|s| {
+                            s.kind == crate::tast::SymbolKind::Function
+                                && s.qualified_name
+                                    .and_then(|q| self.string_interner.get(q))
+                                    .is_some_and(|q| format!(".{q}").ends_with(&want))
+                        })
+                        .map(|s| s.id)
+                };
+                let function = |name| {
+                    self.symbol_table
+                        .lookup_symbol(scope, name)
+                        .filter(|s| s.kind == crate::tast::SymbolKind::Function)
+                        .map(|s| s.id)
+                };
+                let ctor = function(by_arity)
+                    .or_else(|| owned(plain))
+                    .or_else(|| function(plain))?;
                 let underlying = underlying.or_else(|| {
                     self.type_table
                         .borrow()

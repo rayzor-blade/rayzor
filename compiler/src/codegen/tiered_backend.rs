@@ -1767,12 +1767,7 @@ impl TieredBackend {
             // interpreter is forgiving of missing externs (returns
             // default), so we don't need a trap-stub-skip here.
             for init_name in ["__vtable_init__", "__init__"] {
-                let init_ids: Vec<_> = module
-                    .functions
-                    .values()
-                    .filter(|f| f.name == init_name)
-                    .map(|f| f.id)
-                    .collect();
+                let init_ids = crate::ir::init_order::ordered_inits(module, init_name);
                 for init_id in init_ids {
                     interp
                         .execute(module, init_id, vec![])
@@ -1814,12 +1809,7 @@ impl TieredBackend {
             // missing entries from a single skipped init are
             // recoverable, but a SIGILL is not.
             for &init_name in init_names {
-                let init_ids: Vec<_> = module
-                    .functions
-                    .values()
-                    .filter(|f| f.name == init_name)
-                    .map(|f| f.id)
-                    .collect();
+                let init_ids = crate::ir::init_order::ordered_inits(module, init_name);
                 for init_id in init_ids {
                     let Some(&func_ptr) = function_pointers.get(&init_id) else {
                         continue;

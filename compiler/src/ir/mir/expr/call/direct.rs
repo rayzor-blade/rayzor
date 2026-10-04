@@ -355,7 +355,10 @@ impl<'a> HirToMirContext<'a> {
                     })
                     .unwrap_or(false)
             };
-            if let Some(mn) = method_name_i {
+            // A constructor is not dispatched: an abstract's `new` is called
+            // with a placeholder of the underlying type, whose class has its own.
+            let is_ctor = method_name_i.and_then(|n| self.string_interner.get(n)) == Some("new");
+            if let Some(mn) = method_name_i.filter(|_| !is_ctor) {
                 let resolved = if receiver_has_runtime_mapping {
                     None // Let runtime mapping handle it
                 } else {

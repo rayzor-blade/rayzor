@@ -180,9 +180,9 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Register a symbol with package information
-    /// Whether the root slot for `name` holds an enum or abstract declared in
-    /// another package while a class of that name is declared in the current,
-    /// named package. The class then gets its own packaged symbol instead of
+    /// Whether the root slot for `name` holds an enum, abstract or class
+    /// declared in another package while a class of that name is declared in
+    /// the current, named package. The class then gets its own packaged symbol instead of
     /// lowering onto the other type's.
     pub(crate) fn root_slot_is_foreign_type(&self, name: InternedString) -> bool {
         let Some(pkg) = self.context.current_package else {
@@ -198,11 +198,16 @@ impl<'a> AstLowering<'a> {
                 .context
                 .symbol_table
                 .lookup_symbol(ScopeId::first(), name)
-                .is_some_and(|s| {
-                    matches!(
-                        s.kind,
-                        crate::tast::SymbolKind::Enum | crate::tast::SymbolKind::Abstract
-                    ) && s.package_id != Some(pkg)
+                .is_some_and(|s| match s.kind {
+                    crate::tast::SymbolKind::Enum | crate::tast::SymbolKind::Abstract => {
+                        s.package_id != Some(pkg)
+                    }
+                    // A class of another named package: `sys.thread.Thread`
+                    // beside the default-imported `rayzor.concurrent.Thread`.
+                    crate::tast::SymbolKind::Class => {
+                        s.package_id.is_some() && s.package_id != Some(pkg)
+                    }
+                    _ => false,
                 })
     }
 

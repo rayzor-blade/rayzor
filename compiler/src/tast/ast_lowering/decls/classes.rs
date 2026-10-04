@@ -360,6 +360,10 @@ impl<'a> AstLowering<'a> {
                     self.anonymous_return_type_from_ast(func)
                         .or_else(|| self.constructed_return_type_from_ast(func))
                         .or_else(|| {
+                            let hint = crate::tast::sig_index::returned_field_hint(func, &class_decl.fields)?;
+                            self.lower_type(hint).ok()
+                        })
+                        .or_else(|| {
                             let body = func.body.as_deref()?;
                             is_string_expr(returned_expr(body)?)
                                 .then(|| self.context.type_table.borrow().string_type())

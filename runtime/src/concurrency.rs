@@ -1056,51 +1056,111 @@ pub unsafe extern "C" fn rayzor_semaphore_count(semaphore: *const u8) -> i32 {
 }
 
 // ============================================================================
-// sys.thread.Thread wrapper functions
+// sys.thread.ThreadImpl: the native handle under the upstream Thread class
 // ============================================================================
 
-/// Create a thread using sys.thread.Thread API (wrapper around rayzor_thread_spawn)
-/// This version doesn't return a value, just runs a void->void closure
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn sys_thread_create(closure: *const u8, closure_env: *const u8) -> *mut u8 {
-    unsafe { rayzor_thread_spawn(closure, closure_env) }
+/// One per OS thread, leaked: handles stay valid for any Haxe Thread holding one.
+struct ThreadImplInfo {
+    name: Mutex<Option<String>>,
 }
 
-/// Join a thread (wrapper for sys.thread.Thread compatibility)
+thread_local! {
+    static CURRENT_THREAD_IMPL: std::cell::Cell<*mut ThreadImplInfo> =
+        const { std::cell::Cell::new(ptr::null_mut()) };
+}
+
+fn new_thread_impl() -> *mut ThreadImplInfo {
+    Box::into_raw(Box::new(ThreadImplInfo {
+        name: Mutex::new(None),
+    }))
+}
+
+/// `ThreadImpl.create(job)`: run the closure `{fn, env}` on a new thread.
+/// Counted until the job returns, so `rayzor_wait_all_threads` keeps JIT code
+/// alive for it.
+///
+/// # Safety
+/// `closure_obj` must point to a closure object `{ fn_ptr, env_ptr }`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sys_thread_join(handle: *mut u8) {
-    unsafe {
-        let _ = rayzor_thread_join(handle);
+pub unsafe extern "C" fn sys_thread_impl_create(closure_obj: *const u8) -> *mut u8 {
+    if closure_obj.is_null() {
+        return ptr::null_mut();
+    }
+    let (func_addr, env_addr) = unsafe {
+        let words = closure_obj as *const usize;
+        (*words, *words.add(1))
+    };
+    let info = new_thread_impl();
+    let info_addr = info as usize;
+    ACTIVE_THREAD_COUNT.fetch_add(1, Ordering::SeqCst);
+    arm64_jit_barrier();
+    thread::spawn(move || {
+        CURRENT_THREAD_IMPL.with(|c| c.set(info_addr as *mut ThreadImplInfo));
+        arm64_jit_barrier();
+        type ClosureFn = extern "C" fn(*const u8) -> i64;
+        let func: ClosureFn = unsafe { std::mem::transmute(func_addr) };
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            func(env_addr as *const u8)
+        }));
+        ACTIVE_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
+    });
+    info as *mut u8
+}
+
+/// `ThreadImpl.current()`: the calling thread's handle, created on first use.
+#[unsafe(no_mangle)]
+pub extern "C" fn sys_thread_impl_current() -> *mut u8 {
+    CURRENT_THREAD_IMPL.with(|c| {
+        if c.get().is_null() {
+            c.set(new_thread_impl());
+        }
+        c.get() as *mut u8
+    })
+}
+
+/// `ThreadImpl.getName(t)`: the name set on `t`, or null.
+///
+/// # Safety
+/// `handle` must come from `sys_thread_impl_create` or `sys_thread_impl_current`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sys_thread_impl_get_name(
+    handle: *const u8,
+) -> *mut crate::haxe_string::HaxeString {
+    if handle.is_null() {
+        return ptr::null_mut();
+    }
+    let info = unsafe { &*(handle as *const ThreadImplInfo) };
+    match info.name.lock().unwrap().clone() {
+        Some(name) => crate::native_stack_trace::make_haxe_string(name),
+        None => ptr::null_mut(),
     }
 }
 
-/// Check if thread is finished
+/// `ThreadImpl.setName(t, name)`.
+///
+/// # Safety
+/// `handle` as for `sys_thread_impl_get_name`; `name` is a HaxeString or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sys_thread_is_finished(handle: *const u8) -> bool {
-    unsafe { rayzor_thread_is_finished(handle) }
-}
-
-/// Yield current thread
-#[unsafe(no_mangle)]
-pub extern "C" fn sys_thread_yield() {
-    rayzor_thread_yield_now();
-}
-
-/// Sleep for specified seconds (converts to milliseconds)
-#[unsafe(no_mangle)]
-pub extern "C" fn sys_thread_sleep(seconds: f64) {
-    if seconds > 0.0 {
-        let millis = (seconds * 1000.0) as i32;
-        rayzor_thread_sleep(millis);
+pub unsafe extern "C" fn sys_thread_impl_set_name(
+    handle: *const u8,
+    name: *const crate::haxe_string::HaxeString,
+) {
+    if handle.is_null() {
+        return;
     }
-}
-
-/// Get current thread (returns a thread handle representing current thread)
-#[unsafe(no_mangle)]
-pub extern "C" fn sys_thread_current() -> *mut u8 {
-    // Return the current thread ID as the handle
-    // Note: This is a simplified implementation
-    rayzor_thread_current_id() as usize as *mut u8
+    let info = unsafe { &*(handle as *const ThreadImplInfo) };
+    let value = if name.is_null() {
+        None
+    } else {
+        let s = unsafe { &*name };
+        let bytes = if s.ptr.is_null() {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(s.ptr, s.len) }
+        };
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    };
+    *info.name.lock().unwrap() = value;
 }
 
 // ============================================================================

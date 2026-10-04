@@ -250,10 +250,14 @@ impl<'a> AstLowering<'a> {
     /// `obj.fieldFn(args)` be lowered as an indirect call through the field value
     /// (like `var f = obj.fieldFn; f(args)`) instead of a method dispatch — there
     /// is no method body to dispatch to, so the method path traps at runtime.
+    ///
+    /// A field typed by an unbound type parameter (`callback:F`) called with
+    /// `arg_types` is a function too; its return is unknown, so Dynamic.
     pub(crate) fn resolve_function_typed_field(
         &self,
         receiver_type: TypeId,
         field_name: InternedString,
+        arg_types: &[TypeId],
     ) -> Option<(SymbolId, TypeId)> {
         let class_sym = self.resolve_type_to_class_symbol(receiver_type)?;
         let field_sym = self.lookup_data_field(class_sym, field_name)?;
@@ -271,10 +275,18 @@ impl<'a> AstLowering<'a> {
             .map(|t| matches!(t.kind, crate::tast::core::TypeKind::Function { .. }))
             .unwrap_or(false);
         if is_fn {
-            Some((field_sym, fn_type))
-        } else {
-            None
+            return Some((field_sym, fn_type));
         }
+        let is_type_param = matches!(
+            self.context.type_table.borrow().get(fn_type).map(|t| &t.kind),
+            Some(crate::tast::core::TypeKind::TypeParameter { .. })
+        );
+        if !is_type_param {
+            return None;
+        }
+        let mut type_table = self.context.type_table.borrow_mut();
+        let dynamic = type_table.dynamic_type();
+        Some((field_sym, type_table.create_function_type(arg_types.to_vec(), dynamic)))
     }
 
     /// Resolve a class-like symbol by simple name.

@@ -1017,8 +1017,12 @@ impl<'a> HirToMirContext<'a> {
 
                         // If the LHS is a global variable, the value escapes to global storage
                         // and must NOT be tracked for drop/free. Skip all drop tracking.
+                        // `this` (an abstract constructor's result) escapes the same way.
                         let lhs_is_global = match lhs {
-                            HirLValue::Variable(sym) => self.global_symbol_map.contains_key(sym),
+                            HirLValue::Variable(sym) => {
+                                self.global_symbol_map.contains_key(sym)
+                                    || *sym == SymbolId::from_raw(0)
+                            }
                             _ => false,
                         };
 

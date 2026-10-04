@@ -281,7 +281,11 @@ impl<'a> AstLowering<'a> {
                 .find(|(name, _, _)| *name == interned_field_name)?;
             let symbol = *symbol;
             let sym = self.context.symbol_table.get_symbol_mut(symbol)?;
-            if sym.kind != crate::tast::SymbolKind::Field {
+            // `Variable`: an earlier, failed attempt at this file lowered it.
+            let reusable = sym.kind == crate::tast::SymbolKind::Field
+                || (self.retrying_failed_attempt
+                    && sym.kind == crate::tast::SymbolKind::Variable);
+            if !reusable {
                 return None;
             }
             sym.kind = crate::tast::SymbolKind::Variable;

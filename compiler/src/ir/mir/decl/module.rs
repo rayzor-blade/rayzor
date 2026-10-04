@@ -441,7 +441,16 @@ impl<'a> HirToMirContext<'a> {
 
         // Generate __init__ whenever the module has globals so repeated executions
         // can restore static state even if every initializer is constant/defaulted.
-        if !self.dynamic_globals.is_empty() || !self.builder.module.globals.is_empty() {
+        let has_static_init = self
+            .builder
+            .module
+            .functions
+            .values()
+            .any(|f| f.name == super::signatures::STATIC_INIT_NAME);
+        if !self.dynamic_globals.is_empty()
+            || !self.builder.module.globals.is_empty()
+            || has_static_init
+        {
             self.generate_module_init_function();
         }
 

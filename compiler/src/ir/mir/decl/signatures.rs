@@ -58,6 +58,7 @@ impl<'a> HirToMirContext<'a> {
             .get(hir_func.name)
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("func_{}", symbol_id.as_raw()));
+        let func_name = static_init_ir_name(func_name, this_type.is_none());
 
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
         self.function_map.insert(symbol_id, func_id);
@@ -228,6 +229,7 @@ impl<'a> HirToMirContext<'a> {
             .get(hir_func.name)
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("func_{}", symbol_id.as_raw()));
+        let func_name = static_init_ir_name(func_name, this_type.is_none());
 
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
         self.function_map.insert(symbol_id, func_id);
@@ -560,5 +562,18 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder.module.functions.insert(func_id, function);
         func_id
+    }
+}
+
+/// A class's `static function __init__` is called from the module `__init__`
+/// (after the statics reset, before their initializers), so it must not carry
+/// the name every backend runs at load.
+pub(crate) const STATIC_INIT_NAME: &str = "__static_init__";
+
+fn static_init_ir_name(name: String, is_static: bool) -> String {
+    if is_static && name == "__init__" {
+        STATIC_INIT_NAME.to_string()
+    } else {
+        name
     }
 }

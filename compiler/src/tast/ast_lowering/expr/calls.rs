@@ -280,6 +280,7 @@ impl<'a> AstLowering<'a> {
             .map(|s| s.type_id.is_valid())
             .unwrap_or(false);
         if has_type {
+            self.refine_dynamic_static_return(class_symbol, method_name, method_symbol);
             return;
         }
 
@@ -299,6 +300,52 @@ impl<'a> AstLowering<'a> {
                 .add_symbol_flags(method_symbol, crate::tast::symbols::SymbolFlags::STATIC);
             return;
         }
+    }
+
+    /// A static typed before its declared return type could resolve (an import
+    /// cycle) keeps a Dynamic return; take the declared one once it resolves.
+    fn refine_dynamic_static_return(
+        &mut self,
+        class_symbol: SymbolId,
+        method_name: InternedString,
+        method_symbol: SymbolId,
+    ) {
+        let dynamic_type = self.context.type_table.borrow().dynamic_type();
+        let Some((params, effects)) = self
+            .context
+            .symbol_table
+            .get_symbol(method_symbol)
+            .and_then(|s| match self.context.type_table.borrow().get(s.type_id).map(|t| &t.kind) {
+                Some(TypeKind::Function {
+                    params,
+                    return_type,
+                    effects,
+                }) if *return_type == dynamic_type => Some((params.clone(), effects.clone())),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let Some(sig) = self.resolve_declared_method_sig(class_symbol, method_name, true) else {
+            return;
+        };
+        let (Some(declared), true) = (&sig.return_type, sig.type_params.is_empty()) else {
+            return;
+        };
+        let Ok(ret) = self.lower_type(declared) else {
+            return;
+        };
+        if ret == dynamic_type {
+            return;
+        }
+        let fn_ty = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_function_type_with_effects(params, ret, effects);
+        self.context
+            .symbol_table
+            .update_symbol_type(method_symbol, fn_ty);
     }
 
     /// Lower a declared signature's AST type hints into a function type
@@ -1464,10 +1511,14 @@ impl<'a> AstLowering<'a> {
                 ps.iter().any(|p| slf.type_mentions_type_param(&tt, *p))
             })
         };
+        let formal_of = expected_arg_types
+            .as_deref()
+            .and_then(|formals| self.skipped_optional_formals(expr, args, formals));
+        let formal_index = |i: usize| formal_of.as_ref().map_or(i, |m| m[i]);
         let mut generic_literal_positions: Vec<usize> = Vec::new();
         if let Some(ps) = &expected_param_types {
             for (i, arg) in args.iter().enumerate() {
-                let hint = ps.get(i).cloned().flatten();
+                let hint = ps.get(formal_index(i)).cloned().flatten();
                 if is_literal(arg) && hint_has_type_params(self, &hint) {
                     generic_literal_positions.push(i);
                 }
@@ -1478,7 +1529,7 @@ impl<'a> AstLowering<'a> {
             |slf: &mut Self, i: usize, hint: Option<Vec<TypeId>>| -> Result<TypedExpression, _> {
                 let arg_type_hint = expected_arg_types
                     .as_ref()
-                    .and_then(|ts| ts.get(i).copied());
+                    .and_then(|ts| ts.get(formal_index(i)).copied());
                 slf.expected_lambda_params_stack.push(hint);
                 slf.expected_arg_type_stack.push(arg_type_hint);
                 let result = slf
@@ -1494,7 +1545,7 @@ impl<'a> AstLowering<'a> {
             }
             let hint = expected_param_types
                 .as_ref()
-                .and_then(|ps| ps.get(i).cloned())
+                .and_then(|ps| ps.get(formal_index(i)).cloned())
                 .flatten();
             lowered[i] = Some(lower_arg(self, i, hint)?);
         }
@@ -1502,7 +1553,7 @@ impl<'a> AstLowering<'a> {
             let mut bindings: BTreeMap<SymbolId, TypeId> = BTreeMap::new();
             if let Some(formals) = &expected_arg_types {
                 for (i, typed) in lowered.iter().enumerate() {
-                    if let (Some(formal), Some(typed)) = (formals.get(i), typed) {
+                    if let (Some(formal), Some(typed)) = (formals.get(formal_index(i)), typed) {
                         self.bind_type_params(*formal, typed.expr_type, &mut bindings);
                     }
                 }
@@ -1510,7 +1561,7 @@ impl<'a> AstLowering<'a> {
             for &i in &generic_literal_positions {
                 let hint = expected_param_types
                     .as_ref()
-                    .and_then(|ps| ps.get(i).cloned())
+                    .and_then(|ps| ps.get(formal_index(i)).cloned())
                     .flatten()
                     .map(|ps| {
                         ps.into_iter()
@@ -1520,7 +1571,26 @@ impl<'a> AstLowering<'a> {
                 lowered[i] = Some(lower_arg(self, i, hint)?);
             }
         }
-        let arg_exprs: Vec<TypedExpression> = lowered.into_iter().flatten().collect();
+        let mut arg_exprs: Vec<TypedExpression> = lowered.into_iter().flatten().collect();
+        // Skipped optional formals travel as null.
+        if let Some(map) = &formal_of {
+            let location = self.context.create_location_from_span(expr.span);
+            let mut placed = Vec::with_capacity(map.last().map_or(0, |l| l + 1));
+            for (arg, &f) in arg_exprs.into_iter().zip(map) {
+                while placed.len() < f {
+                    placed.push(TypedExpression {
+                        kind: TypedExpressionKind::Null,
+                        expr_type: self.context.type_table.borrow().dynamic_type(),
+                        usage: VariableUsage::Copy,
+                        lifetime_id: crate::tast::LifetimeId::first(),
+                        source_location: location.clone(),
+                        metadata: ExpressionMetadata::default(),
+                    });
+                }
+                placed.push(arg);
+            }
+            arg_exprs = placed;
+        }
 
         // Trailing arguments bound for a `...rest` parameter travel as one
         // `haxe.Rest<T>` array; a spread argument already is one.
@@ -2365,8 +2435,15 @@ impl<'a> AstLowering<'a> {
                             // Class not found — only return UnresolvedType if the first
                             // segment is a known package prefix. Otherwise fall through
                             // to field access (e.g., a.b.c.process() is field chain, not package)
+                            // A type name before the last segment makes it a field chain
+                            // (`haxe.EventLoop.main.loop()`), not a package path.
                             let first_part = &qualified_parts[0];
-                            if matches!(
+                            let names_a_type_midway = qualified_parts
+                                [..qualified_parts.len().saturating_sub(1)]
+                                .iter()
+                                .any(|p| p.starts_with(|c: char| c.is_ascii_uppercase()));
+                            if !names_a_type_midway
+                                && matches!(
                                 first_part.as_str(),
                                 "haxe"
                                     | "rayzor"
@@ -2380,7 +2457,8 @@ impl<'a> AstLowering<'a> {
                                     | "neko"
                                     | "hl"
                                     | "flash"
-                            ) {
+                            )
+                            {
                                 return Err(LoweringError::UnresolvedType {
                                     type_name: qualified_class_name,
                                     location: self
@@ -2443,9 +2521,12 @@ impl<'a> AstLowering<'a> {
                 // as an indirect call through the field value — the same shape as
                 // `var f = obj.fieldFn; f(args)`. Dispatching it as a method traps
                 // at runtime because there is no method body of that name.
-                if let Some((field_sym, fn_type)) =
-                    self.resolve_function_typed_field(receiver_expr.expr_type, method_name)
-                {
+                let arg_types: Vec<TypeId> = arg_exprs.iter().map(|a| a.expr_type).collect();
+                if let Some((field_sym, fn_type)) = self.resolve_function_typed_field(
+                    receiver_expr.expr_type,
+                    method_name,
+                    &arg_types,
+                ) {
                     // A stdlib method on a local arrives here as a
                     // function-typed field; it can still bind the local's T.
                     self.refine_generic_receiver_from_call(&receiver_expr, field_sym, &arg_exprs);
@@ -4443,6 +4524,115 @@ impl<'a> AstLowering<'a> {
     /// call with too few arguments are left alone.
     /// Both types are primitives (Bool/Int/Float/String) and no Haxe
     /// conversion joins them.
+    /// Which formal each argument binds, when Haxe skips optional formals the
+    /// argument cannot be (`create(?name:String, job:()->Void)` called with a
+    /// function): None when every argument binds in order. Only an argument
+    /// whose literal shape cannot be an optional formal skips it, and only
+    /// while formals outnumber the arguments left.
+    fn skipped_optional_formals(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        formals: &[TypeId],
+    ) -> Option<Vec<usize>> {
+        if args.len() >= formals.len()
+            || formals.last().is_some_and(|l| self.rest_elem_of(*l).is_some())
+        {
+            return None;
+        }
+        let declared = self.callee_optional_params(callee).unwrap_or_default();
+        let mut map = Vec::with_capacity(args.len());
+        let mut f = 0;
+        for (i, arg) in args.iter().enumerate() {
+            while f + 1 < formals.len()
+                && formals.len() - f > args.len() - i
+                && (declared.get(f) == Some(&true) || self.is_optional_formal(formals[f]))
+                && self.literal_cannot_be(arg, formals[f])
+                && !self.literal_cannot_be(arg, formals[f + 1])
+            {
+                f += 1;
+            }
+            if f >= formals.len() {
+                return None;
+            }
+            map.push(f);
+            f += 1;
+        }
+        map.iter().enumerate().any(|(i, f)| i != *f).then_some(map)
+    }
+
+    /// Which parameters a static or same-class callee declares optional.
+    fn callee_optional_params(&mut self, callee: &Expr) -> Option<Vec<bool>> {
+        let (class, method, is_static) = match &callee.kind {
+            ExprKind::Field { expr, field, .. } => {
+                let class_name = match &expr.kind {
+                    ExprKind::Ident(n) => n,
+                    ExprKind::Field { field, .. } => field,
+                    _ => return None,
+                };
+                let id = self.context.intern_string(class_name);
+                let class = self.resolve_class_like_symbol_by_name(id)?;
+                (class, field, true)
+            }
+            ExprKind::Ident(name) => {
+                let class = *self.context.class_context_stack.last()?;
+                let id = self.context.intern_string(name);
+                let method = self.resolve_class_method_symbol(class, id)?;
+                let is_static = self
+                    .context
+                    .symbol_table
+                    .get_symbol(method)?
+                    .flags
+                    .contains(crate::tast::symbols::SymbolFlags::STATIC);
+                (class, name, is_static)
+            }
+            _ => return None,
+        };
+        let method = self.context.intern_string(method);
+        Some(self.resolve_declared_method_sig(class, method, is_static)?.optional)
+    }
+
+    fn is_optional_formal(&self, formal: TypeId) -> bool {
+        matches!(
+            self.context.type_table.borrow().get(formal).map(|t| &t.kind),
+            Some(TypeKind::Optional { .. })
+        )
+    }
+
+    fn literal_cannot_be(&self, arg: &Expr, formal: TypeId) -> bool {
+        let mut arg = arg;
+        while let ExprKind::Paren(inner) = &arg.kind {
+            arg = inner;
+        }
+        let tt = self.context.type_table.borrow();
+        let mut ty = formal;
+        for _ in 0..4 {
+            match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                _ => break,
+            }
+        }
+        let Some(kind) = tt.get(ty).map(|t| &t.kind) else {
+            return false;
+        };
+        let scalar = matches!(
+            kind,
+            TypeKind::String | TypeKind::Int | TypeKind::Float | TypeKind::Bool
+        );
+        match &arg.kind {
+            ExprKind::Function(_) | ExprKind::Arrow { .. } => {
+                scalar || matches!(kind, TypeKind::Anonymous { .. } | TypeKind::Array { .. })
+            }
+            ExprKind::Object(_) => scalar || matches!(kind, TypeKind::Function { .. }),
+            ExprKind::String(_) => matches!(
+                kind,
+                TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Function { .. }
+            ),
+            _ => false,
+        }
+    }
+
     fn primitive_mismatch(&self, arg: TypeId, formal: TypeId) -> bool {
         let shape = |mut ty: TypeId| -> Option<u8> {
             let tt = self.context.type_table.borrow();

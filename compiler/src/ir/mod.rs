@@ -26,6 +26,7 @@ pub mod environment_layout; // Closure environment layout abstraction
 pub mod escape_analysis; // Intra-loop escape analysis for Alloc hoisting
 pub mod free_graph; // What the free-insertion pass decided, for inspection
 pub mod functions;
+pub mod init_order; // Order of per-file `__init__`s in a merged module
 pub mod inlining; // Function inlining and call graph analysis
 pub mod insert_free; // Insert Free instructions for non-escaping allocations
 pub mod instructions;

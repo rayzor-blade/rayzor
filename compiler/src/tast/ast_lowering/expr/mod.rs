@@ -960,6 +960,32 @@ impl<'a> AstLowering<'a> {
                 // `var m:Map<String,V>` annotation, base `Map` from
                 // `new Map()` call site).
                 let mut base_class_type_id = self.resolve_type_path(type_path)?;
+                // `new Alias(...)` over a plain class alias constructs that class.
+                let mut aliased_class_name: Option<String> = None;
+                {
+                    let type_table = self.context.type_table.borrow();
+                    if let Some(crate::tast::core::TypeKind::TypeAlias { type_args, .. }) =
+                        type_table.get(base_class_type_id).map(|t| &t.kind)
+                    {
+                        let target = Self::resolve_alias_chain(&type_table, base_class_type_id);
+                        if let Some(crate::tast::core::TypeKind::Class {
+                            symbol_id,
+                            type_args: class_args,
+                        }) = type_table.get(target).map(|t| &t.kind)
+                            && type_args.is_empty()
+                            && class_args.is_empty()
+                        {
+                            aliased_class_name = self
+                                .context
+                                .symbol_table
+                                .get_symbol(*symbol_id)
+                                .and_then(|s| s.qualified_name.or(Some(s.name)))
+                                .and_then(|n| self.context.string_interner.get(n))
+                                .map(str::to_string);
+                            base_class_type_id = target;
+                        }
+                    }
+                }
 
                 // Lower constructor arguments
                 let arg_exprs = args
@@ -1266,7 +1292,7 @@ impl<'a> AstLowering<'a> {
                 let (final_class_type, final_type_args, final_class_name) =
                     self.maybe_resolve_multitype_map(actual_class_type, type_args, type_path);
 
-                let class_name_str = match final_class_name {
+                let class_name_str = match final_class_name.or(aliased_class_name) {
                     Some(name) => name,
                     None if type_path.package.is_empty() => type_path.name.clone(),
                     None => format!("{}.{}", type_path.package.join("."), type_path.name),

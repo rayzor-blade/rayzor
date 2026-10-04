@@ -3898,8 +3898,12 @@ impl CraneliftBackend {
                         // just ignore the dest. This can happen with lambdas where the MIR was
                         // generated before the function signature was fully resolved.
                         if called_func.signature.return_type == crate::ir::IrType::Void {
-                            // Void function - ignore dest register if present
-                            // (MIR may have allocated one before signature was known)
+                            // A result named for a void callee (MIR allocated one
+                            // before the signature was known) reads as zero.
+                            if let Some(dest_reg) = dest {
+                                let zero = Self::zero_for_register(builder, function, *dest_reg);
+                                value_map.insert(*dest_reg, zero);
+                            }
                         } else if let Some(dest_reg) = dest {
                             if uses_sret {
                                 // For sret, the "return value" is the pointer to the sret slot
@@ -4143,10 +4147,14 @@ impl CraneliftBackend {
                     .call_indirect(sig_ref, func_code_ptr, &call_args);
                 let results = builder.inst_results(call_inst);
 
-                // Map return value
+                // Map return value. A result read from a callee that returns
+                // nothing (a void closure behind a Dynamic-typed call) is zero.
                 if let Some(dest_id) = dest {
                     if !results.is_empty() {
                         value_map.insert(*dest_id, results[0]);
+                    } else {
+                        let zero = Self::zero_for_register(builder, function, *dest_id);
+                        value_map.insert(*dest_id, zero);
                     }
                 }
             }
@@ -5980,6 +5988,30 @@ impl CraneliftBackend {
         Ok(())
     }
 
+    /// Zero of a MIR register's type: what a result named for a callee that
+    /// returns nothing reads as.
+    fn zero_for_register(
+        builder: &mut FunctionBuilder,
+        function: &crate::ir::IrFunction,
+        reg: crate::ir::IrId,
+    ) -> Value {
+        let ty = function
+            .register_types
+            .get(&reg)
+            .filter(|t| !matches!(t, IrType::Void))
+            .and_then(|t| Self::mir_type_to_cranelift_static(t).ok())
+            .unwrap_or(types::I64);
+        if ty == types::F64 {
+            builder.ins().f64const(0.0)
+        } else if ty == types::F32 {
+            builder.ins().f32const(0.0)
+        } else if ty.is_int() {
+            builder.ins().iconst(ty, 0)
+        } else {
+            builder.ins().iconst(types::I64, 0)
+        }
+    }
+
     pub(super) fn register_runtime_metadata_from_module(module: &IrModule) {
         for (key, json) in &module.metadata.attributes {
             if let Some((id, kind)) = key
@@ -6191,8 +6223,8 @@ impl CraneliftBackend {
 
     pub fn call_main(&mut self, module: &crate::ir::IrModule) -> Result<(), String> {
         for init_name in ["__vtable_init__", "__init__"] {
-            for init_func in module.functions.values().filter(|f| f.name == init_name) {
-                if let Ok(init_ptr) = self.get_function_ptr(init_func.id) {
+            for init_id in crate::ir::init_order::ordered_inits(module, init_name) {
+                if let Ok(init_ptr) = self.get_function_ptr(init_id) {
                     debug!("  🔧 Calling {}() for module initialization...", init_name);
                     unsafe {
                         let init_fn: extern "C" fn(i64) = std::mem::transmute(init_ptr);

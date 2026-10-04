@@ -621,9 +621,31 @@ impl<'a> AstLowering<'a> {
         &mut self,
         type_path: &parser::TypePath,
     ) -> LoweringResult<TypeId> {
-        // Try to resolve using the import resolver first — user imports take priority
-        // over top-level stdlib builtins (Array, Map, etc.)
         let name_interned = self.context.string_interner.intern(&type_path.name);
+        // A type the current module declares comes before any import.
+        if type_path.package.is_empty()
+            && type_path.sub.is_none()
+            && self.current_module_types.contains(&type_path.name)
+        {
+            let own = match self.context.current_package {
+                Some(package) => self
+                    .context
+                    .namespace_resolver
+                    .find_symbols_by_name(name_interned, package)
+                    .first()
+                    .map(|(_, symbol)| *symbol),
+                None => self
+                    .context
+                    .namespace_resolver
+                    .lookup_symbol(&super::namespace::QualifiedPath::simple(name_interned)),
+            };
+            if let Some(symbol) = own.and_then(|s| self.context.symbol_table.get_symbol(s)) {
+                let (sym_id, type_id) = (symbol.id, symbol.type_id);
+                return Ok(self.ensure_symbol_has_class_type(sym_id, type_id));
+            }
+        }
+        // Then the import resolver — user imports take priority
+        // over top-level stdlib builtins (Array, Map, etc.)
         let candidates = self.context.import_resolver.resolve_type(
             name_interned,
             self.context.current_scope,
