@@ -6312,7 +6312,11 @@ impl<'a> TastToHirContext<'a> {
                     .map(str::to_string);
                 let owned = |name: InternedString| {
                     // The abstract's name may lack its package; its members' do not.
-                    let want = format!(".{}.{}", abstract_qn.as_ref()?, self.string_interner.get(name)?);
+                    let want = format!(
+                        ".{}.{}",
+                        abstract_qn.as_ref()?,
+                        self.string_interner.get(name)?
+                    );
                     self.symbol_table
                         .symbols_in_scope(scope)
                         .into_iter()

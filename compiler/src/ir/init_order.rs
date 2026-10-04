@@ -80,10 +80,9 @@ pub fn ordered_inits(module: &IrModule, name: &str) -> Vec<IrFunctionId> {
         let pick = remaining
             .iter()
             .position(|id| {
-                deps[id].iter().all(|f| {
-                    done.contains(f)
-                        || !remaining.iter().any(|r| file_of(r.0) == *f)
-                })
+                deps[id]
+                    .iter()
+                    .all(|f| done.contains(f) || !remaining.iter().any(|r| file_of(r.0) == *f))
             })
             .unwrap_or(0);
         let id = remaining.remove(pick);
