@@ -1303,6 +1303,52 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
+            // Dynamic against a reference compares identity, whichever side
+            // is boxed: never as integers.
+            if !comparing_to_null
+                && matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne)
+                && (lhs_is_dyn != rhs_is_dyn)
+            {
+                let concrete = if lhs_is_dyn { rhs } else { lhs };
+                let concrete_ty = self.resolve_through_aliases(concrete.ty);
+                let is_reference = matches!(
+                    self.type_table.get(concrete_ty).map(|t| &t.kind),
+                    Some(
+                        TypeKind::Class { .. }
+                            | TypeKind::Interface { .. }
+                            | TypeKind::Anonymous { .. }
+                            | TypeKind::Array { .. }
+                    )
+                );
+                if is_reference {
+                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                    let lhs_reg = self.lower_expression(lhs)?;
+                    let rhs_reg = self.lower_expression(rhs)?;
+                    let lhs_ptr = self.coerce_reg_to(lhs_reg, &ptr_u8)?;
+                    let rhs_ptr = self.coerce_reg_to(rhs_reg, &ptr_u8)?;
+                    let (dynamic_ptr, raw_ptr) = if lhs_is_dyn {
+                        (lhs_ptr, rhs_ptr)
+                    } else {
+                        (rhs_ptr, lhs_ptr)
+                    };
+                    let equals = self.get_or_register_extern_function(
+                        "haxe_dynamic_ref_equals",
+                        vec![ptr_u8.clone(), ptr_u8],
+                        IrType::Bool,
+                    );
+                    let eq = self.builder.build_call_direct(
+                        equals,
+                        vec![dynamic_ptr, raw_ptr],
+                        IrType::Bool,
+                    )?;
+                    if matches!(op, HirBinaryOp::Eq) {
+                        return Some(eq);
+                    }
+                    let no = self.builder.build_const(IrValue::Bool(false))?;
+                    return self.builder.build_cmp(CompareOp::Eq, eq, no);
+                }
+            }
+
             if !comparing_to_null && (lhs_is_dyn || rhs_is_dyn) && !(lhs_is_dyn && rhs_is_dyn) {
                 let is_arith = matches!(
                     op,

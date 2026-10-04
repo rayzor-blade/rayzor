@@ -1077,6 +1077,46 @@ impl<'a> AstLowering<'a> {
     /// (`this()` on an abstract over a function type jumps through the
     /// integer 2). The clause form (`from Y`) is representation-compatible
     /// and correctly stays uncoerced.
+    /// A String handed to an `Any` parameter travels as Dynamic, boxed.
+    pub(crate) fn string_as_any(
+        &self,
+        arg: TypedExpression,
+        formal: Option<TypeId>,
+    ) -> TypedExpression {
+        use crate::tast::core::TypeKind;
+        let tt = self.context.type_table.borrow();
+        let formal_is_any = formal
+            .and_then(|f| match tt.get(f).map(|t| &t.kind) {
+                Some(TypeKind::Abstract { symbol_id, .. }) => Some(*symbol_id),
+                _ => None,
+            })
+            .and_then(|s| self.context.symbol_table.get_symbol(s))
+            .and_then(|s| self.context.string_interner.get(s.name))
+            == Some("Any");
+        if !formal_is_any
+            || !matches!(
+                tt.get(arg.expr_type).map(|t| &t.kind),
+                Some(TypeKind::String)
+            )
+        {
+            return arg;
+        }
+        let dynamic = tt.dynamic_type();
+        drop(tt);
+        TypedExpression {
+            expr_type: dynamic,
+            source_location: arg.source_location,
+            usage: arg.usage.clone(),
+            lifetime_id: arg.lifetime_id,
+            metadata: arg.metadata.clone(),
+            kind: TypedExpressionKind::Cast {
+                expression: Box::new(arg),
+                target_type: dynamic,
+                cast_kind: CastKind::Implicit,
+            },
+        }
+    }
+
     pub(crate) fn coerce_arg_via_abstract_from(
         &mut self,
         arg: TypedExpression,

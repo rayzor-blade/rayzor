@@ -3198,6 +3198,15 @@ pub extern "C" fn haxe_unbox_float_ptr(ptr: *mut u8) -> f64 {
 /// arrive as a pointer-shaped register. Validate before dereferencing: a real
 /// box is aligned, above the first page, and carries a known type tag. Anything
 /// else is `None`, and the caller must treat the slot as the raw value it is.
+/// Whether Dynamic `dynamic` is the reference `raw`, held raw or in a box.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_dynamic_ref_equals(dynamic: *mut u8, raw: *mut u8) -> bool {
+    dynamic == raw
+        || (!dynamic.is_null()
+            && !raw.is_null()
+            && dynamic_value_if_boxed(dynamic).is_some_and(|d| d.value_ptr == raw))
+}
+
 pub(crate) fn dynamic_value_if_boxed(p: *mut u8) -> Option<DynamicValue> {
     dynamic_box_at(p).filter(|d| d.tag_is_known())
 }

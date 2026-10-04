@@ -272,6 +272,15 @@ impl CompilationUnit {
                         if let Some(ty) = &catch.type_hint {
                             extract_type_deps(ty, deps);
                         }
+                        // A catch-all wraps a non-exception value in one.
+                        let catch_all = match &catch.type_hint {
+                            None => true,
+                            Some(parser::Type::Path { path, .. }) => path.name == "Exception",
+                            Some(_) => false,
+                        };
+                        if catch_all {
+                            deps.insert("haxe.ValueException".to_string());
+                        }
                         extract_expr_deps(&catch.body, deps);
                     }
                     if let Some(finally) = finally_block {

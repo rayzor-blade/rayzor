@@ -576,6 +576,19 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// The `Any` abstract, which holds a value as Dynamic does.
+    pub(crate) fn is_any_type(&self, ty: TypeId) -> bool {
+        match self.type_table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Abstract { symbol_id, .. }) => {
+                self.symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|s| self.string_interner.get(s.name))
+                    == Some("Any")
+            }
+            _ => false,
+        }
+    }
+
     /// This module's constant default arguments, for modules that call in.
     pub(crate) fn exported_param_defaults(&self) -> crate::ir::mir::ParamDefaults {
         let constant = |e: &HirExpr| match &e.kind {
@@ -695,7 +708,8 @@ impl<'a> HirToMirContext<'a> {
                         matches!(
                             type_table.get(resolved_param).map(|t| &t.kind),
                             Some(TypeKind::Dynamic)
-                        ) || param_is_optional_scalar
+                        ) || self.is_any_type(resolved_param)
+                            || param_is_optional_scalar
                     };
                     // A `T` into a generic callee's Dynamic formal stays raw: an
                     // unannotated parameter of a generic function decays to
@@ -710,8 +724,12 @@ impl<'a> HirToMirContext<'a> {
                         .get(&func_id)
                         .is_some_and(|f| !f.signature.type_params.is_empty());
                     if param_is_dynamic && !erased_into_generic {
-                        if let Some(boxed) =
-                            self.maybe_box_value(arg_reg, arg_expr.ty, param_type_id)
+                        let box_target = if self.is_any_type(resolved_param) {
+                            self.type_table.dynamic_type()
+                        } else {
+                            param_type_id
+                        };
+                        if let Some(boxed) = self.maybe_box_value(arg_reg, arg_expr.ty, box_target)
                         {
                             if boxed != arg_reg {
                                 return boxed;

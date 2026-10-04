@@ -20,6 +20,9 @@ impl<'a> AstLowering<'a> {
         &mut self,
         catch: &parser::Catch,
     ) -> Result<TypedCatchClause, LoweringError> {
+        if catch.filter.is_none() && self.catches_as_exception(catch)? {
+            return self.lower_catch_clause(&Self::wrapped_catch(catch));
+        }
         // Create a new scope for the catch block
         let catch_scope = self.context.enter_scope(ScopeKind::Block);
 
@@ -66,5 +69,83 @@ impl<'a> AstLowering<'a> {
             },
             source_location: self.context.create_location(),
         })
+    }
+
+    /// An untyped catch, or one typed `haxe.Exception`: Haxe hands it every
+    /// thrown value, wrapping one that is not an exception.
+    fn catches_as_exception(&mut self, catch: &parser::Catch) -> Result<bool, LoweringError> {
+        let Some(hint) = &catch.type_hint else {
+            return Ok(true);
+        };
+        let ty = self.lower_type(hint)?;
+        let symbol = match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Class { symbol_id, .. }) => *symbol_id,
+            _ => return Ok(false),
+        };
+        Ok(self
+            .context
+            .symbol_table
+            .get_symbol(symbol)
+            .and_then(|s| s.qualified_name)
+            .and_then(|n| self.context.string_interner.get(n))
+            == Some("haxe.Exception"))
+    }
+
+    /// `catch (raw:Dynamic) { var e:haxe.Exception = <raw as an exception>; body }`.
+    fn wrapped_catch(catch: &parser::Catch) -> parser::Catch {
+        let span = catch.span;
+        let at = |kind: ExprKind| Expr { kind, span };
+        let path = |package: &[&str], name: &str| parser::TypePath {
+            package: package.iter().map(|s| s.to_string()).collect(),
+            name: name.to_string(),
+            sub: None,
+        };
+        let ty = |package: &[&str], name: &str| Type::Path {
+            path: path(package, name),
+            params: Vec::new(),
+            span,
+        };
+        let raw = format!("__caught_{}", catch.var);
+        let raw_ident = || at(ExprKind::Ident(raw.clone()));
+        let exception_class = at(ExprKind::Field {
+            expr: Box::new(at(ExprKind::Ident("haxe".to_string()))),
+            field: "Exception".to_string(),
+            is_optional: false,
+        });
+        let is_exception = at(ExprKind::Call {
+            expr: Box::new(at(ExprKind::Field {
+                expr: Box::new(at(ExprKind::Ident("Std".to_string()))),
+                field: "isOfType".to_string(),
+                is_optional: false,
+            })),
+            args: vec![raw_ident(), exception_class],
+        });
+        let as_exception = at(ExprKind::Ternary {
+            cond: Box::new(is_exception),
+            then_expr: Box::new(at(ExprKind::Cast {
+                expr: Box::new(raw_ident()),
+                type_hint: Some(ty(&["haxe"], "Exception")),
+            })),
+            else_expr: Box::new(at(ExprKind::New {
+                type_path: path(&["haxe"], "ValueException"),
+                params: Vec::new(),
+                args: vec![raw_ident()],
+            })),
+        });
+        let bind = at(ExprKind::Var {
+            name: catch.var.clone(),
+            type_hint: Some(ty(&["haxe"], "Exception")),
+            expr: Some(Box::new(as_exception)),
+        });
+        parser::Catch {
+            var: raw,
+            type_hint: Some(ty(&[], "Dynamic")),
+            filter: None,
+            body: at(ExprKind::Block(vec![
+                BlockElement::Expr(bind),
+                BlockElement::Expr(catch.body.clone()),
+            ])),
+            span,
+        }
     }
 }

@@ -1038,6 +1038,10 @@ register_symbol!(
     crate::type_system::haxe_coerce_dynamic_to_float
 );
 register_symbol!(
+    "haxe_dynamic_ref_equals",
+    crate::type_system::haxe_dynamic_ref_equals
+);
+register_symbol!(
     "haxe_dynamic_equals",
     crate::type_system::haxe_dynamic_equals
 );

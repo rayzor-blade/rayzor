@@ -952,11 +952,15 @@ impl<'a> AstLowering<'a> {
                 // waiting).
                 if matches!(op, parser::AssignOp::Assign) {
                     if let TypedExpressionKind::Variable { symbol_id } = &target_expr.kind {
+                        let from_closure = self
+                            .null_decl_depth
+                            .get(symbol_id)
+                            .is_some_and(|d| *d < self.closure_depth);
                         if self.null_inferred.contains(symbol_id)
-                            && self.null_read_in_closure.contains(symbol_id)
+                            && (from_closure || self.null_read_in_closure.contains(symbol_id))
                         {
-                            // A closure already reads it as Dynamic; storing
-                            // the assigned type raw would break that read.
+                            // A closure reads or writes it as Dynamic; storing
+                            // the assigned type raw would break that access.
                             self.null_inferred.remove(symbol_id);
                         } else if self.null_inferred.contains(symbol_id) {
                             if let Some(t) = self.null_local_binding(value_expr.expr_type) {
@@ -1039,7 +1043,10 @@ impl<'a> AstLowering<'a> {
                     Some(params) => arg_exprs
                         .into_iter()
                         .enumerate()
-                        .map(|(i, a)| self.coerce_arg_via_abstract_from(a, params.get(i).copied()))
+                        .map(|(i, a)| {
+                            let a = self.coerce_arg_via_abstract_from(a, params.get(i).copied());
+                            self.string_as_any(a, params.get(i).copied())
+                        })
                         .collect(),
                     None => arg_exprs,
                 };
@@ -1877,9 +1884,25 @@ impl<'a> AstLowering<'a> {
             }
             ExprKind::Object(fields) => {
                 // Object literal
+                let expected = self.expected_arg_type_stack.last().copied().flatten();
                 let mut typed_fields = Vec::with_capacity(fields.len());
                 for field in fields {
-                    let value = self.lower_expression(&field.expr)?;
+                    // A function literal takes its untyped parameters from the
+                    // expected structure's field, as a call argument does.
+                    let lambda_hint = matches!(
+                        field.expr.kind,
+                        ExprKind::Function(_) | ExprKind::Arrow { .. }
+                    )
+                    .then(|| expected.and_then(|t| self.expected_field_params(t, &field.name)))
+                    .flatten();
+                    let value = if lambda_hint.is_some() {
+                        self.expected_lambda_params_stack.push(lambda_hint);
+                        let value = self.lower_expression(&field.expr);
+                        self.expected_lambda_params_stack.pop();
+                        value?
+                    } else {
+                        self.lower_expression(&field.expr)?
+                    };
                     let field_name = self.context.intern_string(&field.name);
                     typed_fields.push(TypedObjectField {
                         name: field_name,

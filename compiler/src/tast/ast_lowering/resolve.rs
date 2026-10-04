@@ -27,6 +27,52 @@ impl<'a> AstLowering<'a> {
         current
     }
 
+    /// The parameter types of field `name` of structure `ty`, when it is a
+    /// function type.
+    pub(crate) fn expected_field_params(&self, ty: TypeId, name: &str) -> Option<Vec<TypeId>> {
+        let ty = self.placeholder_typedef(ty).unwrap_or(ty);
+        let tt = self.context.type_table.borrow();
+        let unwrap = |t: TypeId| {
+            let mut t = Self::resolve_alias_chain(&tt, t);
+            if let Some(TypeKind::Optional { inner_type }) = tt.get(t).map(|i| &i.kind) {
+                t = Self::resolve_alias_chain(&tt, *inner_type);
+            }
+            t
+        };
+        let Some(TypeKind::Anonymous { fields }) = tt.get(unwrap(ty)).map(|t| &t.kind) else {
+            return None;
+        };
+        let field = fields
+            .iter()
+            .find(|f| self.context.string_interner.get(f.name) == Some(name))?;
+        match tt.get(unwrap(field.type_id)).map(|t| &t.kind) {
+            Some(TypeKind::Function { params, .. }) => Some(params.clone()),
+            _ => None,
+        }
+    }
+
+    /// The typedef a forward-referenced placeholder names, when every typedef
+    /// of that name is the same declaration (a retried file registers again).
+    fn placeholder_typedef(&self, ty: TypeId) -> Option<TypeId> {
+        let name = match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Placeholder { name }) => *name,
+            _ => return None,
+        };
+        let tt = self.context.type_table.borrow();
+        let matches = self.context.symbol_table.find_symbols(|s| {
+            s.name == name
+                && matches!(
+                    tt.get(s.type_id).map(|t| &t.kind),
+                    Some(TypeKind::TypeAlias { .. })
+                )
+        });
+        let latest = matches.iter().max_by_key(|s| s.id)?;
+        matches
+            .iter()
+            .all(|s| s.qualified_name == latest.qualified_name)
+            .then_some(latest.type_id)
+    }
+
     /// Find the parent enum symbol for an enum constructor
     pub(crate) fn find_parent_enum_for_constructor(
         &self,
