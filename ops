@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1791080384,"nonce":"AfopUSKbV9QSPJtwetVoDazZyY4=","added":["bug","area:tast"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1791081581,"nonce":"PP8o+i/0fSLdu56IZJ8ipivRP48=","message":"Issue5556 lost its accidental pass at 01966c22, when dynamic method rebinding started working.","files":null}]}
