@@ -1070,6 +1070,9 @@ pub fn lower_hir_to_mir_with_externals(
 }
 
 /// Result of MIR lowering that includes both the module and the function mappings
+/// Constant default arguments by function symbol, with the parameter symbols.
+pub type ParamDefaults = BTreeMap<SymbolId, (Vec<Option<HirExpr>>, Vec<SymbolId>)>;
+
 pub struct MirLoweringResult {
     /// The compiled MIR module
     pub module: IrModule,
@@ -1099,6 +1102,8 @@ pub struct MirLoweringResult {
     /// Field SymbolId → class name string. Used by BLADE cache to store field entries
     /// with class names that survive across compilation contexts (where TypeIds differ).
     pub field_class_names: BTreeMap<SymbolId, String>,
+    /// Default arguments other modules fill at their call sites.
+    pub param_defaults: ParamDefaults,
     /// Interface metadata — accumulated across files so cross-file interface
     /// dispatch (e.g. `var t:Tokenizer = ...; t.method()` in a file that
     /// imports the interface declared elsewhere) can resolve methods, look
@@ -1160,6 +1165,7 @@ pub fn lower_hir_to_mir_with_function_map(
     static_sig_index: Option<
         std::rc::Rc<std::cell::RefCell<crate::tast::sig_index::StaticSigIndex>>,
     >,
+    external_param_defaults: &ParamDefaults,
     retryable_module: bool,
 ) -> Result<MirLoweringResult, Vec<LoweringError>> {
     let type_table_ref = type_table.borrow();
@@ -1177,6 +1183,7 @@ pub fn lower_hir_to_mir_with_function_map(
 
     context.external_function_map = external_functions;
     context.seed_external_param_types();
+    context.seed_external_param_defaults(external_param_defaults);
     context.external_function_name_map = external_functions_by_name;
     context.external_global_types = external_globals
         .values()
@@ -1315,8 +1322,10 @@ pub fn lower_hir_to_mir_with_function_map(
         }
     }
 
+    let param_defaults = context.exported_param_defaults();
     Ok(MirLoweringResult {
         module,
+        param_defaults,
         function_map: context.function_map,
         field_index_map: context.field_index_map,
         property_access_map: context.property_access_map,

@@ -688,6 +688,7 @@ impl CompilationUnit {
             self.import_field_class_names.clone(),
             self.import_abstract_cast_rules.clone(),
             Some(Rc::clone(&self.static_sig_index)),
+            &self.import_param_defaults,
             // Only the import loop passes skip_stdlib_merge, and it retries.
             skip_stdlib_merge,
         ) {
@@ -847,6 +848,7 @@ impl CompilationUnit {
         for (sym, name) in mir_result.field_class_names {
             self.import_field_class_names.insert(sym, name);
         }
+        self.import_param_defaults.extend(mir_result.param_defaults);
         self.import_abstract_cast_rules
             .from
             .extend(mir_result.abstract_cast_rules.from);

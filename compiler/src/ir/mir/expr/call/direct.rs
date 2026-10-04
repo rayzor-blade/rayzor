@@ -373,6 +373,7 @@ impl<'a> HirToMirContext<'a> {
                                 arg_regs.push(reg);
                             }
                         }
+                        self.fill_default_args(func_id, &mut arg_regs, true);
                         self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, false);
                         let hir_types: Vec<Option<TypeId>> =
                             args.iter().map(|a| Some(a.ty)).collect();

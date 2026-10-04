@@ -576,6 +576,45 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// This module's constant default arguments, for modules that call in.
+    pub(crate) fn exported_param_defaults(&self) -> crate::ir::mir::ParamDefaults {
+        let constant = |e: &HirExpr| match &e.kind {
+            HirExprKind::Literal(_) => true,
+            HirExprKind::Unary { operand, .. } => matches!(operand.kind, HirExprKind::Literal(_)),
+            _ => false,
+        };
+        self.function_map
+            .iter()
+            .filter_map(|(symbol, func_id)| {
+                let defaults = self.function_param_defaults.get(func_id)?;
+                if !defaults.iter().flatten().all(constant) {
+                    return None;
+                }
+                let symbols = self.function_param_symbols.get(func_id)?.clone();
+                Some((*symbol, (defaults.clone(), symbols)))
+            })
+            .collect()
+    }
+
+    /// Default arguments of imported functions, so a call that leaves them
+    /// out passes the declared values rather than zeros.
+    pub(crate) fn seed_external_param_defaults(
+        &mut self,
+        defaults: &crate::ir::mir::ParamDefaults,
+    ) {
+        for (symbol, func_id) in &self.external_function_map {
+            if self.function_param_defaults.contains_key(func_id) {
+                continue;
+            }
+            if let Some((values, symbols)) = defaults.get(symbol) {
+                self.function_param_defaults
+                    .insert(*func_id, values.clone());
+                self.function_param_symbols
+                    .insert(*func_id, symbols.clone());
+            }
+        }
+    }
+
     pub(crate) fn maybe_materialize_for_call(
         &mut self,
         arg_expr: &HirExpr,

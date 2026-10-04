@@ -344,8 +344,15 @@ impl<'a> HirToMirContext<'a> {
             // field symbols may be registered with SymbolKind::Variable.
             let field_entry = self.field_index_map.get(symbol).copied().or_else(|| {
                 // Name-based fallback: SymbolIds differ between compilation contexts
-                // (e.g., ArrayIterator.current in stdlib vs user code)
+                // (e.g., ArrayIterator.current in stdlib vs user code).
+                // A static is never an instance slot of `this`.
                 if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
+                    if sym_info
+                        .flags
+                        .contains(crate::tast::symbols::SymbolFlags::STATIC)
+                    {
+                        return None;
+                    }
                     if let Some(this_type) = self.current_this_type {
                         let field_name = sym_info.name;
                         self.resolve_field_index_by_name(field_name, this_type)
