@@ -30,6 +30,23 @@ impl CompilationUnit {
             all_func_ids.extend(m.extern_functions.keys().copied());
         }
 
+        // Parameter counts of every loaded function, to tell when a name record
+        // keyed by a call's id belongs to some other call site (see below).
+        let mut arity_by_id: std::collections::BTreeMap<crate::ir::IrFunctionId, usize> =
+            std::collections::BTreeMap::new();
+        for m in self
+            .import_mir_modules
+            .iter()
+            .chain(self.mir_modules.iter().map(|m| &**m))
+        {
+            for (id, f) in &m.functions {
+                arity_by_id.insert(*id, f.signature.parameters.len());
+            }
+            for (id, f) in &m.extern_functions {
+                arity_by_id.insert(*id, f.signature.parameters.len());
+            }
+        }
+
         // Also build a "forward-ref stub → name" map. A stub is an
         // `IrFunction` registered by `register_stdlib_mir_forward_ref` while
         // lowering a user file whose dispatch target wasn't yet compiled
@@ -299,13 +316,34 @@ impl CompilationUnit {
                 .iter()
                 .map(|(id, ext)| (*id, (ext.name.clone(), ext.signature.clone())))
                 .collect();
+            let own_ids: std::collections::BTreeSet<crate::ir::IrFunctionId> = module
+                .functions
+                .keys()
+                .chain(module.extern_functions.keys())
+                .copied()
+                .collect();
             for func in module.functions.values_mut() {
                 for block in func.cfg.blocks.values_mut() {
                     for inst in &mut block.instructions {
+                        let argc = match inst {
+                            IrInstruction::CallDirect { args, .. } => Some(args.len()),
+                            _ => None,
+                        };
                         match inst {
                             IrInstruction::CallDirect { func_id, .. }
                             | IrInstruction::FunctionRef { func_id, .. }
                             | IrInstruction::MakeClosure { func_id, .. } => {
+                                // A merged module carries every import's name
+                                // records, so a record can share its id with
+                                // a function this module declares itself. When
+                                // the named target cannot take this call's
+                                // arguments, the record is someone else's.
+                                let own = own_ids.contains(func_id);
+                                let foreign = |target: crate::ir::IrFunctionId| {
+                                    own && argc.is_some_and(|n| {
+                                        arity_by_id.get(&target).is_some_and(|&a| a != n)
+                                    })
+                                };
                                 // If the cached MIR recorded this call site
                                 // as an external reference (ext_names has an
                                 // entry for the func_id), ALWAYS resolve it
@@ -321,21 +359,24 @@ impl CompilationUnit {
                                 // makes the fixup robust against any
                                 // import-order-dependent id assignment.
                                 if let Some(name) = ext_names.get(func_id) {
-                                    if let Some(&current_id) = stdlib_map.get(name) {
-                                        *func_id = current_id;
-                                        continue;
-                                    }
-                                    if let Some(sig) = ext_sigs.get(func_id) {
-                                        if let Some(real_id) = unique_bare_match(
-                                            name,
-                                            sig,
-                                            real_funcs_by_bare_name,
-                                            None,
-                                        ) {
-                                            *func_id = real_id;
+                                    let resolved = stdlib_map.get(name).copied().or_else(|| {
+                                        ext_sigs.get(func_id).and_then(|sig| {
+                                            unique_bare_match(
+                                                name,
+                                                sig,
+                                                real_funcs_by_bare_name,
+                                                None,
+                                            )
+                                        })
+                                    });
+                                    match resolved {
+                                        Some(target) if foreign(target) => {}
+                                        Some(target) => {
+                                            *func_id = target;
+                                            continue;
                                         }
+                                        None => continue,
                                     }
-                                    continue;
                                 }
                                 if let Some((name, sig)) = ext_decl_by_id.get(func_id) {
                                     if let Some(&current_id) = stdlib_map.get(name.as_str()) {
