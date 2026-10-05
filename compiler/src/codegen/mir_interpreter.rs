@@ -2872,6 +2872,10 @@ impl MirInterpreter {
     ) -> Result<InterpValue, InterpError> {
         // Built-in functions (simple implementations for common operations)
         match name {
+            // These record a closure's native code pointer, which an interpreted
+            // function reference does not have. The native tier replays
+            // `__vtable_init__` when it takes over and registers the real ones.
+            "haxe_closure_register_entries" | "haxe_register_method" => Ok(InterpValue::Void),
             "trace" | "haxe_print" | "print" => {
                 // Print function - handle all numeric types
                 if let Some(arg) = args.first() {

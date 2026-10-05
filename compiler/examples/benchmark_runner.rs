@@ -741,27 +741,31 @@ const TIER_PROMOTION_TARGET: compiler::codegen::tiered_backend::OptimizationTier
 
 /// Iterate until the function reaches `TIER_PROMOTION_TARGET`, or give up.
 ///
-/// Returns whether promotion was observed. Polling the backend's own tier map
-/// replaces guessing a fixed iteration count for work another thread is doing.
-fn wait_for_tier_promotion(state: &mut TieredBenchmarkState, limit: usize) -> bool {
+/// Returns whether promotion was observed, or the first failed iteration's
+/// error. Polling the backend's own tier map replaces guessing a fixed
+/// iteration count for work another thread is doing.
+fn wait_for_tier_promotion(state: &mut TieredBenchmarkState, limit: usize) -> Result<bool, String> {
     for _ in 0..limit {
         if state.backend.get_function_tier(state.main_id) >= TIER_PROMOTION_TARGET {
-            return true;
+            return Ok(true);
         }
-        let _ = run_tiered_iteration(state);
+        run_tiered_iteration(state)?;
     }
-    state.backend.get_function_tier(state.main_id) >= TIER_PROMOTION_TARGET
+    Ok(state.backend.get_function_tier(state.main_id) >= TIER_PROMOTION_TARGET)
 }
 
 /// As `wait_for_tier_promotion`, for the bundle-loading state.
-fn wait_for_precompiled_tier_promotion(state: &mut PrecompiledTieredState, limit: usize) -> bool {
+fn wait_for_precompiled_tier_promotion(
+    state: &mut PrecompiledTieredState,
+    limit: usize,
+) -> Result<bool, String> {
     for _ in 0..limit {
         if state.backend.get_function_tier(state.main_id) >= TIER_PROMOTION_TARGET {
-            return true;
+            return Ok(true);
         }
-        let _ = run_precompiled_tiered_iteration(state);
+        run_precompiled_tiered_iteration(state)?;
     }
-    state.backend.get_function_tier(state.main_id) >= TIER_PROMOTION_TARGET
+    Ok(state.backend.get_function_tier(state.main_id) >= TIER_PROMOTION_TARGET)
 }
 
 fn run_tiered_iteration(state: &mut TieredBenchmarkState) -> Result<Duration, String> {
@@ -1411,7 +1415,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             // run-to-run inconsistency in CI — bimodal, not noisy. So wait for
             // the tier the run is supposed to measure, and say so when it
             // never arrives rather than quietly measuring something else.
-            let promoted = wait_for_tier_promotion(&mut state, TIER_PROMOTION_ITERATION_LIMIT);
+            let promoted = wait_for_tier_promotion(&mut state, TIER_PROMOTION_ITERATION_LIMIT)?;
             if !promoted {
                 return Err(format!(
                     "{} never left {:?} after {} iterations; refusing to publish an \
@@ -1488,7 +1492,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             // Wait for the promotion rather than assume a fixed number of
             // iterations covers it; see `wait_for_tier_promotion`.
             let promoted =
-                wait_for_precompiled_tier_promotion(&mut state, TIER_PROMOTION_ITERATION_LIMIT);
+                wait_for_precompiled_tier_promotion(&mut state, TIER_PROMOTION_ITERATION_LIMIT)?;
             if !promoted {
                 return Err(format!(
                     "{} never left {:?} after {} iterations; refusing to publish an \
