@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rayzor Benchmarks</title>
+  <meta name="description"
+    content="Rayzor against hxcpp, HashLink, HashLink/C and the JVM on the same Haxe source, measured in CI on every push.">
+  <meta name="theme-color" content="#0A0B0D">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.png" type="image/png" sizes="32x32">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
+    rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0A0B0D;
+      --panel: #0E1013;
+      --line: #22242A;
+      --line-soft: #1A1C21;
+      --text: #E9EAEE;
+      --text-2: #9AA0AA;
+      --muted: #6F757E;
+      --accent: #F97316;
+      --track: rgba(233, 234, 238, 0.05);
+      --mono: 'JetBrains Mono', monospace;
+    }
+
+    * { box-sizing: border-box }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      -webkit-font-smoothing: antialiased
+    }
+
+    a { color: var(--accent); text-decoration: none }
+    a:hover { color: #FB8B3C }
+    code { font-family: var(--mono); font-size: 0.92em; color: #C9CCD2 }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      border-bottom: 1px solid var(--line-soft);
+      background: #0A0B0DE6;
+      backdrop-filter: blur(12px)
+    }
+
+    .bar-wrap {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 clamp(16px, 4vw, 32px);
+      height: 64px;
+      display: flex;
+      align-items: center;
+      gap: clamp(16px, 4vw, 40px)
+    }
+
+    .brand { display: flex; align-items: center; gap: 10px; color: var(--text) }
+    .brand span { font-size: 16px; font-weight: 600; letter-spacing: -0.01em }
+    nav { display: flex; gap: clamp(14px, 3vw, 26px); font-size: 14px }
+    nav a { color: var(--text-2) }
+    nav a:hover, nav a.on { color: var(--text) }
+
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: clamp(48px, 7vw, 96px) clamp(16px, 4vw, 32px)
+    }
+
+    .eyebrow {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent)
+    }
+
+    h1 {
+      margin: 16px 0 0;
+      font-size: clamp(30px, 4.4vw, 44px);
+      line-height: 1.06;
+      letter-spacing: -0.03em;
+      font-weight: 600
+    }
+
+    .lede {
+      margin: 18px 0 0;
+      max-width: 720px;
+      font-size: clamp(15px, 1.6vw, 17px);
+      line-height: 1.6;
+      color: var(--text-2)
+    }
+
+    .card {
+      margin-top: 36px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+      overflow: hidden
+    }
+
+    .card-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line-soft)
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2)
+    }
+
+    .legend span { display: flex; align-items: center; gap: 7px; white-space: nowrap }
+    .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block }
+
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center }
+
+    .seg {
+      display: inline-flex;
+      gap: 3px;
+      padding: 3px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #0B0C0F
+    }
+
+    .seg button {
+      padding: 6px 13px;
+      border-radius: 999px;
+      border: none;
+      cursor: pointer;
+      font-family: var(--mono);
+      font-size: 11px;
+      background: transparent;
+      color: #8A9099
+    }
+
+    .seg button[aria-pressed="true"] { background: var(--accent); color: var(--bg); font-weight: 700 }
+
+    .scale-note {
+      padding: 10px 24px;
+      border-bottom: 1px solid var(--line-soft);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted)
+    }
+
+    .bench-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 16px;
+      align-items: center;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line-soft)
+    }
+
+    .bench-row:last-child { border-bottom: none }
+
+    .bench-name {
+      width: 168px;
+      flex: none;
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text)
+    }
+
+    .bench-name small { display: block; margin-top: 3px; font-size: 10.5px; color: var(--muted) }
+
+    .bench-bars { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 6px }
+    .bench-line { display: flex; align-items: center; gap: 10px }
+
+    .bench-label {
+      width: clamp(84px, 20vw, 132px);
+      flex: none;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: #8A9099;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis
+    }
+
+    .bench-track {
+      flex: 1;
+      min-width: 0;
+      height: 14px;
+      background: var(--track);
+      border-radius: 3px;
+      overflow: hidden;
+      display: flex
+    }
+
+    .seg-compile { height: 100%; opacity: 0.38 }
+    .seg-exec { height: 100% }
+
+    .bench-num {
+      width: 84px;
+      flex: none;
+      font-family: var(--mono);
+      font-size: 12px;
+      text-align: right;
+      white-space: nowrap;
+      line-height: 1.35
+    }
+
+    .bench-num .ms { display: block }
+    .bench-num .ratio { display: block; font-size: 10.5px; opacity: 0.7 }
+    .missing { font-family: var(--mono); font-size: 11px; color: var(--muted) }
+
+    .tag {
+      display: inline-block;
+      margin-left: 5px;
+      padding: 0 3px;
+      border: 1px solid #3A3D45;
+      border-radius: 2px;
+      font-size: 8.5px;
+      letter-spacing: .04em;
+      vertical-align: 1px;
+      color: #8A9099
+    }
+
+    .footnote {
+      padding: 14px 24px;
+      border-top: 1px solid var(--line-soft);
+      font-size: 12.5px;
+      line-height: 1.65;
+      color: var(--muted)
+    }
+
+    .footnote strong { color: var(--text-2); font-weight: 500 }
+
+    .provenance {
+      margin: 20px 0 0;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted)
+    }
+
+    footer {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px clamp(16px, 4vw, 32px) 48px;
+      border-top: 1px solid var(--line-soft);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 12.5px;
+      color: var(--muted)
+    }
+
+    footer a { color: var(--text-2) }
+
+    @media (max-width: 560px) {
+      nav a.opt { display: none }
+      .bench-name { width: 100% }
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <div class="bar-wrap">
+      <a class="brand" href="/">
+        <img src="/logo.svg" alt="" width="26" height="26" style="display:block">
+        <span>Rayzor</span>
+      </a>
+      <nav>
+        <a class="opt" href="/docs.html">Docs</a>
+        <a class="on" href="/benchmarks/">Benchmarks</a>
+        <a href="https://github.com/rayzor-blade/rayzor">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="eyebrow">Benchmarks</div>
+    <h1>The same Haxe source on every target</h1>
+    <p class="lede">Each kernel runs unchanged on Rayzor, hxcpp, HashLink, HashLink/C and the JVM. The set covers
+      recursion, floating-point loops, object graphs and allocation, plus the Computer Language Benchmarks Game
+      kernels: permutations, matrix-vector products, sequence generation, hashing, string reversal, bignum
+      arithmetic and regular expressions. CI measures every push to <code>main</code>.</p>
+
+    <section class="card" aria-label="Benchmark results">
+      <div class="card-head">
+        <div class="legend" id="legend"></div>
+        <div class="controls">
+          <div class="seg" role="group" aria-label="Metric">
+            <button type="button" data-metric="exec" aria-pressed="true">execution</button>
+            <button type="button" data-metric="total" aria-pressed="false">compile + run</button>
+          </div>
+          <div class="seg" role="group" aria-label="Rayzor tiers">
+            <button type="button" data-tiers="default" aria-pressed="true">rayzor run</button>
+            <button type="button" data-tiers="all" aria-pressed="false">all tiers</button>
+          </div>
+        </div>
+      </div>
+      <div class="scale-note" id="scale-note">lower is better</div>
+      <div id="bench-rows">
+        <div class="bench-row"><span class="missing">Loading benchmark results…</span></div>
+      </div>
+      <div class="footnote">
+        Bars show the mean of the measured iterations after warm-up; hover over a time for its spread, iteration
+        count and compile time. <strong>Execution</strong> times the program alone.
+        <strong>Compile + run</strong> adds what it takes to get there: Rayzor parses, types and JIT-compiles in-process
+        in tens of milliseconds, while hxcpp, HashLink/C and the JVM build ahead of time (tagged
+        <span class="tag">AOT</span>) and their build is added to the bar. <code>Rayzor</code> is what
+        <code>rayzor run</code> does: start on Cranelift and promote hot code to LLVM. <em>All tiers</em> also shows the
+        Cranelift-only and LLVM-only modes and the precompiled bundles (<span class="tag">RZB</span>).
+        Each kernel runs as its own CI job, so different rows may come from different machines: compare targets
+        within a row. Kernel sources live in <a
+          href="https://github.com/rayzor-blade/rayzor/tree/main/compiler/benchmarks">compiler/benchmarks</a>.
+      </div>
+    </section>
+
+    <p class="provenance" id="provenance"></p>
+  </main>
+
+  <footer>
+    <span>rayzor · benchmark data regenerated by CI</span>
+    <span><a href="/">Home</a> · <a href="https://github.com/rayzor-blade/rayzor">GitHub</a> · <a
+        href="https://haxe.org/">Haxe</a></span>
+  </footer>
+
+  <script id="bench-data" type="application/json">/*BENCH_DATA*/</script>
+  <script>
+    (function () {
+      'use strict';
+
+      // Engines in display order. `tier: 'all'` rows appear only with "all tiers".
+      var ENGINES = [
+        { target: 'rayzor-tiered', label: 'Rayzor', color: '#F97316', tier: 'default', rz: true },
+        { target: 'rayzor-precompiled-tiered', label: 'Rayzor', color: '#FB923C', tier: 'all', rz: true, tag: 'RZB' },
+        { target: 'rayzor-llvm', label: 'Rayzor LLVM', color: '#C2410C', tier: 'all', rz: true },
+        { target: 'rayzor-cranelift', label: 'Rayzor Cranelift', color: '#FDBA74', tier: 'all', rz: true },
+        { target: 'rayzor-precompiled', label: 'Rayzor Cranelift', color: '#FED7AA', tier: 'all', rz: true, tag: 'RZB' },
+        { target: 'haxe-cpp', label: 'hxcpp', color: '#C9CCD2', tier: 'default', tag: 'AOT' },
+        { target: 'haxe-hashlink-c', label: 'HashLink/C', color: '#8A9099', tier: 'default', tag: 'AOT' },
+        { target: 'haxe-hashlink', label: 'HashLink', color: '#5B616B', tier: 'default' },
+        { target: 'haxe-jvm', label: 'JVM', color: '#6E8CA0', tier: 'default', tag: 'AOT' },
+        { target: 'haxe-interp', label: 'Haxe eval', color: '#3A3D45', tier: 'default' }
+      ];
+      var BASELINE = 'haxe-cpp';
+
+      // Kernel file names cannot carry hyphens; the page uses the Benchmarks Game's.
+      var KERNELS = {
+        fibonacci: ['fibonacci', 'recursive calls'],
+        mandelbrot: ['mandelbrot', 'float loops, small objects'],
+        nbody: ['nbody', 'float fields'],
+        deltablue: ['deltablue', 'object graph, dispatch'],
+        binarytrees: ['binarytrees', 'allocation'],
+        fannkuchredux: ['fannkuch-redux', 'Int arrays'],
+        spectralnorm: ['spectral-norm', 'float matrix-vector'],
+        fasta: ['fasta', 'generation'],
+        knucleotide: ['k-nucleotide', 'String hashing'],
+        revcomp: ['reverse-complement', 'string scanning'],
+        pidigits: ['pidigits', 'bignum'],
+        regexredux: ['regex-redux', 'EReg']
+      };
+      var ORDER = Object.keys(KERNELS);
+
+      var state = { metric: 'exec', tiers: 'default' };
+      var data = null;
+      try {
+        data = JSON.parse(document.getElementById('bench-data').textContent);
+      } catch (e) { data = null; }
+
+      function el(tag, cls, text) {
+        var e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+      }
+
+      function fmtMs(x) {
+        if (x >= 10000) return (x / 1000).toFixed(1) + 's';
+        if (x >= 100) return Math.round(x) + 'ms';
+        return x.toFixed(1) + 'ms';
+      }
+
+      function valueOf(r) {
+        return state.metric === 'exec' ? r.runtime_ms : r.compile_time_ms + r.runtime_ms;
+      }
+
+      function engines() {
+        return ENGINES.filter(function (e) { return state.tiers === 'all' || e.tier === 'default'; });
+      }
+
+      function renderLegend(present) {
+        var legend = document.getElementById('legend');
+        legend.textContent = '';
+        engines().forEach(function (e) {
+          if (!present[e.target]) return;
+          var s = el('span');
+          var sw = el('span', 'swatch');
+          sw.style.background = e.color;
+          s.appendChild(sw);
+          s.appendChild(document.createTextNode(e.label));
+          if (e.tag) s.appendChild(el('span', 'tag', e.tag));
+          legend.appendChild(s);
+        });
+      }
+
+      function render() {
+        var mount = document.getElementById('bench-rows');
+        mount.textContent = '';
+        if (!data || !Array.isArray(data.benchmarks) || !data.benchmarks.length) {
+          var row = el('div', 'bench-row');
+          row.appendChild(el('span', 'missing', 'No benchmark results were published with this build.'));
+          mount.appendChild(row);
+          return;
+        }
+
+        var byName = {};
+        data.benchmarks.forEach(function (b) { byName[b.name] = b; });
+        var names = ORDER.filter(function (n) { return byName[n]; })
+          .concat(data.benchmarks.map(function (b) { return b.name; })
+            .filter(function (n) { return ORDER.indexOf(n) < 0; }));
+
+        var present = {};
+        var anyBaseline = false;
+        var info = data.system_info || {};
+
+        names.forEach(function (name) {
+          var b = byName[name];
+          var results = {};
+          (b.results || []).forEach(function (r) {
+            if (r.runtime_ms > 0) results[r.target] = r;
+          });
+          var rows = engines().filter(function (e) { return results[e.target]; });
+          if (!rows.length) return;
+          rows.forEach(function (e) { present[e.target] = true; });
+
+          var base = results[BASELINE] ? valueOf(results[BASELINE]) : null;
+          if (base) anyBaseline = true;
+          var values = rows.map(function (e) { return valueOf(results[e.target]); });
+          var fastest = Math.min.apply(null, values);
+          // The longest bar fills 92% of the track.
+          var unit = 92 / Math.max.apply(null, values);
+
+          var row = el('div', 'bench-row');
+          var title = el('div', 'bench-name', (KERNELS[name] || [name])[0]);
+          if (KERNELS[name]) title.appendChild(el('small', null, KERNELS[name][1]));
+          row.appendChild(title);
+          var bars = el('div', 'bench-bars');
+
+          // A kernel with no Rayzor result says so rather than hiding the gap.
+          if (!rows.some(function (e) { return e.rz; })) {
+            var gap = el('div', 'bench-line');
+            gap.appendChild(el('div', 'bench-label', 'Rayzor'));
+            gap.appendChild(el('span', 'missing', 'no result in this sweep'));
+            bars.appendChild(gap);
+          }
+
+          rows.forEach(function (e) {
+            var r = results[e.target];
+            var v = valueOf(r);
+            var line = el('div', 'bench-line');
+            var label = el('div', 'bench-label', e.label);
+            if (e.tag) label.appendChild(el('span', 'tag', e.tag));
+            line.appendChild(label);
+
+            var track = el('div', 'bench-track');
+            if (state.metric === 'total') {
+              var c = el('div', 'seg-compile');
+              c.style.background = e.color;
+              c.style.width = Math.max(r.compile_time_ms * unit, 0) + '%';
+              track.appendChild(c);
+            }
+            var x = el('div', 'seg-exec');
+            x.style.background = e.color;
+            x.style.width = Math.max(r.runtime_ms * unit, 1.2) + '%';
+            track.appendChild(x);
+            line.appendChild(track);
+
+            var num = el('div', 'bench-num');
+            num.style.color = e.rz ? e.color : '#9AA0AA';
+            var ms = el('span', 'ms', fmtMs(v));
+            if (v === fastest) ms.style.fontWeight = '700';
+            num.appendChild(ms);
+            if (base) num.appendChild(el('span', 'ratio', (v / base).toFixed(2) + '×'));
+            var tip = fmtMs(r.runtime_ms) + ' execution, mean of ' + (r.iterations || '?') + ' runs';
+            if (r.runtime_min_ms > 0 && r.runtime_max_ms > 0) {
+              tip += ' (' + fmtMs(r.runtime_min_ms) + '–' + fmtMs(r.runtime_max_ms) + ')';
+            }
+            tip += ' · compile ' + fmtMs(r.compile_time_ms);
+            if (info.cpu_model) tip += ' · ' + info.cpu_model;
+            num.title = tip;
+            line.appendChild(num);
+            bars.appendChild(line);
+          });
+
+          row.appendChild(bars);
+          mount.appendChild(row);
+        });
+
+        renderLegend(present);
+        document.getElementById('scale-note').textContent =
+          'lower is better · ' + (state.metric === 'exec' ? 'execution' : 'compile + execution') +
+          ' · mean ms' + (anyBaseline ? ' · 1.00× = hxcpp' : '');
+
+        var bits = [];
+        if (info.cpu_model) bits.push(info.cpu_model);
+        if (info.os && info.arch) bits.push(info.os + '/' + info.arch);
+        if (info.cpu_cores) bits.push(info.cpu_cores + ' cores');
+        if (data.date) bits.push('measured ' + data.date);
+        document.getElementById('provenance').textContent = bits.join(' · ');
+      }
+
+      document.querySelectorAll('[data-metric]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          state.metric = btn.getAttribute('data-metric');
+          document.querySelectorAll('[data-metric]').forEach(function (b) {
+            b.setAttribute('aria-pressed', String(b === btn));
+          });
+          render();
+        });
+      });
+      document.querySelectorAll('[data-tiers]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          state.tiers = btn.getAttribute('data-tiers');
+          document.querySelectorAll('[data-tiers]').forEach(function (b) {
+            b.setAttribute('aria-pressed', String(b === btn));
+          });
+          render();
+        });
+      });
+
+      render();
+    })();
+  </script>
+</body>
+
+</html>

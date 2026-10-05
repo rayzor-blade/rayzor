@@ -1881,156 +1881,24 @@ fn save_results(suite: &BenchmarkSuite) -> Result<BenchmarkSuite, String> {
     Ok(merged)
 }
 
+/// The published benchmarks page: `benchmarks/chart_template.html` with the
+/// suite embedded as JSON, so the page needs no second request and no name for
+/// the dated results file.
 fn generate_chart_html(suite: &BenchmarkSuite) -> Result<(), String> {
+    const TEMPLATE: &str = include_str!("../benchmarks/chart_template.html");
+    const SLOT: &str = "/*BENCH_DATA*/";
+
     let charts_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("benchmarks/charts");
     fs::create_dir_all(&charts_dir).map_err(|e| format!("mkdir: {}", e))?;
 
-    let mut html = String::from(
-        r#"<!DOCTYPE html>
-<html>
-<head>
-    <title>Rayzor Benchmark Results</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; }
-        .chart-container { width: 800px; height: 400px; margin: 20px auto; }
-        h1 { text-align: center; }
-        h2 { margin-top: 40px; }
-        .summary { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; }
-    </style>
-</head>
-<body>
-    <h1>Rayzor Benchmark Results</h1>
-    <p style="text-align: center">Generated: "#,
-    );
-
-    html.push_str(&suite.date);
-    html.push_str(
-        r#"</p>
-"#,
-    );
-
-    if let Some(info) = &suite.system_info {
-        html.push_str(&format!(
-            r#"    <div class="summary">
-        <h3>System</h3>
-        <p><strong>OS:</strong> {} | <strong>Arch:</strong> {} | <strong>CPU cores:</strong> {} | <strong>RAM:</strong> {:.1} GB | <strong>Host:</strong> {}</p>
-    </div>
-"#,
-            info.os,
-            info.arch,
-            info.cpu_cores,
-            info.ram_mb as f64 / 1024.0,
-            info.hostname
-        ));
+    // `</` would end the <script> element that carries the JSON.
+    let json = serde_json::to_string(suite)
+        .map_err(|e| format!("serialize: {}", e))?
+        .replace("</", "<\\/");
+    if !TEMPLATE.contains(SLOT) {
+        return Err(format!("chart template has no {} slot", SLOT));
     }
-
-    html.push_str(
-        r#"    <div class="summary">
-        <h3>Summary</h3>
-        <ul>
-"#,
-    );
-
-    for bench in &suite.benchmarks {
-        html.push_str(&format!(
-            "            <li><strong>{}</strong>: {} targets measured</li>\n",
-            bench.name,
-            bench.results.len()
-        ));
-    }
-
-    html.push_str(
-        r#"        </ul>
-    </div>
-    <div class="summary">
-        <h3>Methodology</h3>
-        <p>Each benchmark is run <strong>15 warmup iterations</strong> followed by <strong>10 measured iterations</strong>.
-        Compile time and execution time are measured separately. Results show the <strong>mean</strong> of measured iterations.</p>
-        <ul>
-            <li><strong>rayzor-cranelift</strong> &mdash; Source &rarr; MIR (O2) &rarr; Cranelift JIT. Compile includes parsing, type-checking, MIR lowering, optimization, and JIT compilation.</li>
-            <li><strong>rayzor-llvm</strong> &mdash; Source &rarr; MIR (O2) &rarr; LLVM MCJIT. Same frontend pipeline, LLVM backend for peak throughput.</li>
-            <li><strong>rayzor-tiered</strong> &mdash; Source &rarr; interpreter &rarr; Cranelift JIT &rarr; per-function LLVM through Beadie + OSR. Beadie's heat broker automatically requests Maximum promotion at the <em>Benchmark</em> preset threshold; the runner only executes warmups and observes the resulting tier. Compile includes parsing + module loading; execution includes interpreter startup and automatic tier-up.</li>
-            <li><strong>rayzor-precompiled</strong> &mdash; Pre-bundled .rzb (MIR already O2-optimized) &rarr; Cranelift JIT. Compile is bundle load + JIT only (no parsing/lowering).</li>
-            <li><strong>rayzor-precompiled-tiered</strong> &mdash; Pre-bundled .rzb &rarr; automatic tiered execution through per-function LLVM promotion.</li>
-        </ul>
-        <p>All targets share the same runtime (<code>librayzor_runtime</code>) and execute the same Haxe source code.
-        MIR optimization level O2 includes: dead code elimination, constant folding, copy propagation, function inlining, LICM, and CSE.</p>
-    </div>
-"#,
-    );
-
-    for (i, bench) in suite.benchmarks.iter().enumerate() {
-        let canvas_id = format!("chart_{}", i);
-
-        html.push_str(&format!(
-            r#"
-    <h2>{}</h2>
-    <div class="chart-container">
-        <canvas id="{}"></canvas>
-    </div>
-    <script>
-        new Chart(document.getElementById('{}'), {{
-            type: 'bar',
-            data: {{
-                labels: [{}],
-                datasets: [
-                    {{
-                        label: 'Compile (ms)',
-                        data: [{}],
-                        backgroundColor: 'rgba(54, 162, 235, 0.8)'
-                    }},
-                    {{
-                        label: 'Execute (ms)',
-                        data: [{}],
-                        backgroundColor: 'rgba(255, 99, 132, 0.8)'
-                    }}
-                ]
-            }},
-            options: {{
-                responsive: true,
-                scales: {{
-                    x: {{ stacked: true }},
-                    y: {{ stacked: true, title: {{ display: true, text: 'Time (ms)' }} }}
-                }},
-                plugins: {{
-                    title: {{ display: true, text: '{}' }}
-                }}
-            }}
-        }});
-    </script>
-"#,
-            bench.name,
-            canvas_id,
-            canvas_id,
-            bench
-                .results
-                .iter()
-                .map(|r| format!("'{}'", r.target))
-                .collect::<Vec<_>>()
-                .join(", "),
-            bench
-                .results
-                .iter()
-                .map(|r| format!("{:.2}", r.compile_time_ms))
-                .collect::<Vec<_>>()
-                .join(", "),
-            bench
-                .results
-                .iter()
-                .map(|r| format!("{:.2}", r.runtime_ms))
-                .collect::<Vec<_>>()
-                .join(", "),
-            bench.name
-        ));
-    }
-
-    html.push_str(
-        r#"
-</body>
-</html>
-"#,
-    );
+    let html = TEMPLATE.replacen(SLOT, &json, 1);
 
     let path = charts_dir.join("index.html");
     fs::write(&path, html).map_err(|e| format!("write: {}", e))?;
