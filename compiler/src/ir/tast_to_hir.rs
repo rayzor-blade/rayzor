@@ -5711,8 +5711,9 @@ impl<'a> TastToHirContext<'a> {
         if self
             .symbol_table
             .get_symbol(abstract_symbol)
-            .and_then(|s| self.string_interner.get(s.name))
-            .is_some_and(|name| matches!(name, "Int32" | "Int64"))
+            .is_some_and(|s| {
+                crate::tast::core::is_haxe_std_type(s, self.string_interner, &["Int32", "Int64"])
+            })
         {
             return None;
         }

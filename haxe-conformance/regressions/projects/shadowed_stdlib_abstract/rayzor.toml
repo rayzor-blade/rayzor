@@ -1,0 +1,6 @@
+[project]
+name = "shadowed-stdlib-abstract"
+entry = "unit/ShadowedStdlibAbstract.hx"
+
+[build]
+class-paths = ["."]

@@ -907,13 +907,12 @@ impl<'a> AstLowering<'a> {
                     symbol_id,
                     ..
                 }) => {
-                    let qn = self
+                    let handle = self
                         .context
                         .symbol_table
                         .get_symbol(symbol_id)
-                        .and_then(|s| s.qualified_name)
-                        .and_then(|q| self.context.string_interner.get(q));
-                    if qn.is_some_and(is_handle_abstract) {
+                        .is_some_and(|s| is_handle_abstract(s, self.context.string_interner));
+                    if handle {
                         return ty;
                     }
                     // An instantiation (`EnumFlags<E>`) carries no underlying.

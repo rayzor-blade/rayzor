@@ -207,7 +207,7 @@ impl<'a> AstLowering<'a> {
         // A namesake from an enclosing scope, now that the class hierarchy has
         // had its turn.
         if let Some(found) = outer_match {
-            return Some(found);
+            return Some(self.prefer_own_module_type(name, found));
         }
 
         // Fallback: explicitly check the global root scope (ScopeId::first())
@@ -217,11 +217,56 @@ impl<'a> AstLowering<'a> {
         let root_scope = ScopeId::first();
         if current_scope != root_scope {
             if let Some(symbol) = self.context.symbol_table.lookup_symbol(root_scope, name) {
-                return Some(symbol.id);
+                return Some(self.prefer_own_module_type(name, symbol.id));
             }
         }
 
         None
+    }
+
+    /// A type this module declares shadows another package's type of the same
+    /// name in the root slot (a private `Int64` beside `haxe.Int64`).
+    fn prefer_own_module_type(&self, name: InternedString, found: SymbolId) -> SymbolId {
+        use crate::tast::symbols::SymbolKind;
+        let is_type = |k: SymbolKind| {
+            matches!(
+                k,
+                SymbolKind::Class
+                    | SymbolKind::Abstract
+                    | SymbolKind::Enum
+                    | SymbolKind::Interface
+                    | SymbolKind::TypeAlias
+            )
+        };
+        let Some(pkg) = self.context.current_package else {
+            return found;
+        };
+        let foreign_type = self
+            .context
+            .symbol_table
+            .get_symbol(found)
+            .is_some_and(|s| is_type(s.kind) && s.package_id != Some(pkg));
+        let declared_here = self
+            .context
+            .string_interner
+            .get(name)
+            .is_some_and(|n| self.current_module_types.contains(n));
+        if !foreign_type || !declared_here {
+            return found;
+        }
+        self.context
+            .namespace_resolver
+            .find_symbols_by_name(name, pkg)
+            .into_iter()
+            .filter(|(p, _)| *p == pkg)
+            .map(|(_, id)| id)
+            .find(|id| {
+                self.context
+                    .symbol_table
+                    .get_symbol(*id)
+                    .is_some_and(|s| is_type(s.kind))
+            })
+            .unwrap_or(found)
     }
 
     /// Resolve built-in types

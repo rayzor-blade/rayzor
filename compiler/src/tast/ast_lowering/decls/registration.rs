@@ -211,8 +211,27 @@ impl<'a> AstLowering<'a> {
                 })
     }
 
-    /// The class symbol registered for `name` in the current package, if any.
-    pub(crate) fn package_class_symbol(&self, name: InternedString) -> Option<SymbolId> {
+    /// The root slot for `name` holds a type of another named package. An
+    /// unpackaged root symbol is a top-level placeholder the declaration
+    /// claims, so it does not count.
+    pub(crate) fn root_slot_is_other_package_type(&self, name: InternedString) -> bool {
+        let Some(pkg) = self.context.current_package else {
+            return false;
+        };
+        self.root_slot_is_foreign_type(name)
+            && self
+                .context
+                .symbol_table
+                .lookup_symbol(ScopeId::first(), name)
+                .is_some_and(|s| s.package_id.is_some_and(|p| p != pkg))
+    }
+
+    /// The symbol of `kind` registered for `name` in the current package, if any.
+    pub(crate) fn package_type_symbol(
+        &self,
+        name: InternedString,
+        kind: crate::tast::SymbolKind,
+    ) -> Option<SymbolId> {
         let pkg = self.context.current_package?;
         let id = *self
             .context
@@ -223,7 +242,7 @@ impl<'a> AstLowering<'a> {
         self.context
             .symbol_table
             .get_symbol(id)
-            .filter(|s| s.kind == crate::tast::SymbolKind::Class)
+            .filter(|s| s.kind == kind)
             .map(|s| s.id)
     }
 
@@ -303,7 +322,10 @@ impl<'a> AstLowering<'a> {
                 self.record_type_usings(class_name, &class_decl.meta);
 
                 if self.root_slot_is_foreign_type(class_name) {
-                    if self.package_class_symbol(class_name).is_none() {
+                    if self
+                        .package_type_symbol(class_name, crate::tast::SymbolKind::Class)
+                        .is_none()
+                    {
                         let class_symbol = self
                             .context
                             .symbol_table
@@ -680,6 +702,33 @@ impl<'a> AstLowering<'a> {
                     self.context.pop_type_parameters();
                 }
 
+                // The root slot holds another package's type (`haxe.Int64`
+                // beside a private `Int64`): register under this package only.
+                if self.root_slot_is_other_package_type(abstract_name) {
+                    if self
+                        .package_type_symbol(abstract_name, crate::tast::SymbolKind::Abstract)
+                        .is_none()
+                    {
+                        let abstract_symbol = self
+                            .context
+                            .symbol_table
+                            .create_abstract_in_scope(abstract_name, ScopeId::first());
+                        let abstract_type = self
+                            .context
+                            .type_table
+                            .borrow_mut()
+                            .create_abstract_type(abstract_symbol, pre_underlying, Vec::new());
+                        self.context
+                            .symbol_table
+                            .update_symbol_type(abstract_symbol, abstract_type);
+                        self.context
+                            .symbol_table
+                            .register_type_symbol_mapping(abstract_type, abstract_symbol);
+                        self.register_symbol_with_package(abstract_symbol, &abstract_decl.name);
+                    }
+                    return Ok(());
+                }
+
                 // Check if this abstract already exists in the root scope
                 if let Some(existing) = self
                     .context
@@ -687,6 +736,11 @@ impl<'a> AstLowering<'a> {
                     .lookup_symbol(ScopeId::first(), abstract_name)
                 {
                     let existing_id = existing.id;
+                    // A top-level placeholder this declaration claims takes its
+                    // package, so a same-named type elsewhere sees it as foreign.
+                    if existing.package_id.is_none() {
+                        self.register_symbol_with_package(existing_id, &abstract_decl.name);
+                    }
                     // The symbol may have been created as SymbolKind::Class by import resolution
                     // (which doesn't know the declaration kind). Fix it to Abstract now that we
                     // know the actual declaration type. We must fix BOTH:

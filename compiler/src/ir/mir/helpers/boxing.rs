@@ -1638,12 +1638,10 @@ impl<'a> HirToMirContext<'a> {
                     symbol_id,
                     ..
                 } => {
-                    let qn = self
-                        .symbol_table
-                        .get_symbol(symbol_id)
-                        .and_then(|sym| sym.qualified_name)
-                        .and_then(|q| self.string_interner.get(q));
-                    if qn.is_some_and(crate::tast::core::is_handle_abstract) {
+                    let handle = self.symbol_table.get_symbol(symbol_id).is_some_and(|sym| {
+                        crate::tast::core::is_handle_abstract(sym, self.string_interner)
+                    });
+                    if handle {
                         return false;
                     }
                     // An instantiation (`EnumFlags<E>`) carries no underlying.

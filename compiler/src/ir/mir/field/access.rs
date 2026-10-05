@@ -1783,11 +1783,9 @@ impl<'a> HirToMirContext<'a> {
             Some(crate::tast::TypeKind::Float) => "F64",
             Some(crate::tast::TypeKind::Bool) => "Bool",
             Some(crate::tast::TypeKind::Class { symbol_id, .. })
-                if self
-                    .symbol_table
-                    .get_symbol(*symbol_id)
-                    .and_then(|s| self.string_interner.get(s.name))
-                    == Some("Int64") =>
+                if self.symbol_table.get_symbol(*symbol_id).is_some_and(|s| {
+                    crate::tast::core::is_haxe_std_type(s, self.string_interner, &["Int64"])
+                }) =>
             {
                 "I64"
             }

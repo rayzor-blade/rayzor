@@ -137,10 +137,13 @@ impl<'a> HirToMirContext<'a> {
     /// the abstract's own symbol seen as a class (a typedef and its target
     /// share a root symbol here).
     pub(crate) fn is_int64_underlying_class(&self, symbol_id: SymbolId) -> bool {
-        self.symbol_table
-            .get_symbol(symbol_id)
-            .and_then(|s| self.string_interner.get(s.name))
-            .is_some_and(|n| matches!(n, "Int64" | "__Int64" | "___Int64"))
+        self.symbol_table.get_symbol(symbol_id).is_some_and(|s| {
+            crate::tast::core::is_haxe_std_type(
+                s,
+                self.string_interner,
+                &["Int64", "__Int64", "___Int64"],
+            )
+        })
     }
 
     /// `Int64`, or the class under it, through aliases: the native i64.
@@ -153,11 +156,9 @@ impl<'a> HirToMirContext<'a> {
                     return self.is_int64_underlying_class(*symbol_id);
                 }
                 Some(TypeKind::Abstract { symbol_id, .. }) => {
-                    return self
-                        .symbol_table
-                        .get_symbol(*symbol_id)
-                        .and_then(|s| self.string_interner.get(s.name))
-                        .is_some_and(|n| n == "Int64");
+                    return self.symbol_table.get_symbol(*symbol_id).is_some_and(|s| {
+                        crate::tast::core::is_haxe_std_type(s, self.string_interner, &["Int64"])
+                    });
                 }
                 Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
                 _ => return false,
@@ -276,12 +277,14 @@ impl<'a> HirToMirContext<'a> {
                 // Pointer-sized abstracts (Usize, Ptr, Ref, Box) are I64 regardless
                 // of their declared underlying type: they carry machine addresses
                 // and must never be truncated.
-                let name_str = self
-                    .symbol_table
-                    .get_symbol(*symbol_id)
-                    .and_then(|sym| self.string_interner.get(sym.name))
+                let sym = self.symbol_table.get_symbol(*symbol_id);
+                let name_str = sym
+                    .and_then(|s| self.string_interner.get(s.name))
                     .unwrap_or("");
-                if matches!(name_str, "Usize" | "Ptr" | "Ref" | "Box") {
+                let native = sym
+                    .and_then(|s| s.native_name)
+                    .and_then(|n| self.string_interner.get(n));
+                if native.is_some_and(|n| crate::tast::core::HANDLE_NATIVES.contains(&n)) {
                     return IrType::I64;
                 }
                 // Int64 is a real 64-bit integer here. Haxe declares it as an
@@ -291,7 +294,13 @@ impl<'a> HirToMirContext<'a> {
                 // nothing. It was reaching the underlying-type fallback below
                 // and coming out as I32, which does not merely cost
                 // performance: every Int64 was being truncated to 32 bits.
-                if matches!(name_str, "Int64" | "__Int64" | "___Int64") {
+                if sym.is_some_and(|s| {
+                    crate::tast::core::is_haxe_std_type(
+                        s,
+                        self.string_interner,
+                        &["Int64", "__Int64", "___Int64"],
+                    )
+                }) {
                     return IrType::I64;
                 }
                 // `Single`'s `to`/`from Float` are cast compatibility, not identity:

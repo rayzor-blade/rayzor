@@ -235,7 +235,13 @@ impl<'a> HirToMirContext<'a> {
                         crate::tast::TypeKind::Class { symbol_id, .. } => {
                             if let Some(class_info) = self.symbol_table.get_symbol(*symbol_id) {
                                 if let Some(name) = self.string_interner.get(class_info.name) {
-                                    if name == "Int64" {
+                                    if name == "Int64"
+                                        && crate::tast::core::is_haxe_std_type(
+                                            class_info,
+                                            self.string_interner,
+                                            &["Int64"],
+                                        )
+                                    {
                                         Some("I64")
                                     } else {
                                         Some("Ptr") // Other classes are reference types

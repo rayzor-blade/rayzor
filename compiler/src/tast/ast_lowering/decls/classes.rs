@@ -48,7 +48,7 @@ impl<'a> AstLowering<'a> {
 
         // Look up the existing symbol that was created during pre-registration
         let class_symbol = if self.root_slot_is_foreign_type(class_name) {
-            match self.package_class_symbol(class_name) {
+            match self.package_type_symbol(class_name, crate::tast::SymbolKind::Class) {
                 Some(symbol) => symbol,
                 None => {
                     let symbol = self

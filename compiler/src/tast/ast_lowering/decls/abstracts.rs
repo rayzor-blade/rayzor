@@ -80,20 +80,38 @@ impl<'a> AstLowering<'a> {
         // Reuse the symbol created by the declaration pre-pass. Creating a
         // second abstract symbol here disconnects qualified field lookups from
         // the field initializers lowered below.
-        let abstract_symbol = self
-            .context
-            .symbol_table
-            .lookup_symbol(ScopeId::first(), abstract_name)
-            .filter(|entry| entry.kind == crate::tast::SymbolKind::Abstract)
-            .map(|entry| entry.id)
-            .unwrap_or_else(|| {
-                self.context
-                    .symbol_table
-                    .create_abstract_in_scope(abstract_name, ScopeId::first())
-            });
+        let shadows_foreign = self.root_slot_is_other_package_type(abstract_name);
+        let abstract_symbol = if shadows_foreign {
+            match self.package_type_symbol(abstract_name, crate::tast::SymbolKind::Abstract) {
+                Some(symbol) => symbol,
+                None => {
+                    let symbol = self
+                        .context
+                        .symbol_table
+                        .create_abstract_in_scope(abstract_name, ScopeId::first());
+                    self.register_symbol_with_package(symbol, &abstract_decl.name);
+                    symbol
+                }
+            }
+        } else {
+            self.context
+                .symbol_table
+                .lookup_symbol(ScopeId::first(), abstract_name)
+                .filter(|entry| entry.kind == crate::tast::SymbolKind::Abstract)
+                .map(|entry| entry.id)
+                .unwrap_or_else(|| {
+                    self.context
+                        .symbol_table
+                        .create_abstract_in_scope(abstract_name, ScopeId::first())
+                })
+        };
 
-        // Update qualified name (full path including class hierarchy)
-        self.context.update_symbol_qualified_name(abstract_symbol);
+        // Update qualified name (full path including class hierarchy). A
+        // shadowing abstract keeps the package-qualified name it registered
+        // with: the scope path would reduce it to the bare name it shadows.
+        if !shadows_foreign {
+            self.context.update_symbol_qualified_name(abstract_symbol);
+        }
 
         // Extract @:native metadata for abstracts
         let mut abstract_meta_flags =

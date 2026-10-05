@@ -1302,22 +1302,58 @@ impl TypeTable {
     }
 }
 
+/// Whether `sym` is the std `haxe.<name>` (or a private type of its module,
+/// `haxe.Int64.__Int64`) rather than a user type of the same bare name in
+/// another package. An unpackaged or unqualified symbol matches by name.
+pub fn is_haxe_std_type(
+    sym: &crate::tast::symbols::Symbol,
+    interner: &crate::tast::StringInterner,
+    names: &[&str],
+) -> bool {
+    let Some(name) = interner.get(sym.name) else {
+        return false;
+    };
+    if !names.contains(&name) {
+        return false;
+    }
+    match sym.qualified_name.and_then(|q| interner.get(q)) {
+        // Top-level stdlib names are registered unpackaged.
+        Some(qn) if !qn.contains('.') => true,
+        Some(qn) => qn
+            .strip_prefix("haxe.")
+            .and_then(|rest| rest.strip_suffix(name))
+            .is_some_and(|module| {
+                module.is_empty() || module.strip_suffix('.').is_some_and(|m| !m.contains('.'))
+            }),
+        None => true,
+    }
+}
+
+/// Handle-sized `rayzor` externs (`@:native("rayzor::Ptr")`, ...). Keyed on
+/// the native name: a user type of the same bare name never carries it.
+pub const HANDLE_NATIVES: [&str; 4] =
+    ["rayzor::Usize", "rayzor::Ptr", "rayzor::Ref", "rayzor::Box"];
+
 /// Abstracts whose values are machine handles or vector registers: never
 /// boxed as a `Null<T>` primitive, whatever their underlying type.
-pub fn is_handle_abstract(qualified_name: &str) -> bool {
-    matches!(
-        qualified_name,
-        "rayzor.Usize"
-            | "rayzor.Ptr"
-            | "rayzor.Ref"
-            | "rayzor.Box"
-            | "rayzor.Atomic"
-            | "rayzor.SIMD4f"
-            | "rayzor.SIMD4i32"
-            | "rayzor.SIMD16i8"
-            | "rayzor.SIMD8i32"
-            | "rayzor.SIMD32i8"
-    )
+pub fn is_handle_abstract(
+    sym: &crate::tast::symbols::Symbol,
+    interner: &crate::tast::StringInterner,
+) -> bool {
+    sym.native_name
+        .and_then(|n| interner.get(n))
+        .is_some_and(|n| {
+            HANDLE_NATIVES.contains(&n)
+                || matches!(
+                    n,
+                    "rayzor::Atomic"
+                        | "rayzor::SIMD4f"
+                        | "rayzor::SIMD4i32"
+                        | "rayzor::SIMD16i8"
+                        | "rayzor::SIMD8i32"
+                        | "rayzor::SIMD32i8"
+                )
+        })
 }
 
 impl Default for TypeTable {

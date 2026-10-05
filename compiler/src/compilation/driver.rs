@@ -1314,6 +1314,31 @@ impl CompilationUnit {
             let keeps_body = |existing_id: &IrFunctionId, stdlib_func: &crate::ir::IrFunction| {
                 stdlib_func.cfg.blocks.is_empty() && bodied_existing.contains(existing_id)
             };
+            // Nor may a bodied method of another type that shares the bare
+            // name (`pk.Int64.make` beside `haxe.Int64.make`). Qualified names
+            // compare up to qualification: `Int64.make` is `haxe.Int64.make`.
+            let qualified_by_id: BTreeMap<IrFunctionId, String> = mir_module
+                .functions
+                .iter()
+                .filter_map(|(id, f)| Some((*id, f.qualified_name.clone()?)))
+                .collect();
+            let other_owner = |existing_id: &IrFunctionId, stdlib_func: &crate::ir::IrFunction| {
+                let (Some(mine), Some(theirs)) = (
+                    qualified_by_id.get(existing_id),
+                    stdlib_func.qualified_name.as_deref(),
+                ) else {
+                    return false;
+                };
+                let suffix_of = |long: &str, short: &str| {
+                    long == short
+                        || long
+                            .strip_suffix(short)
+                            .is_some_and(|head| head.ends_with('.'))
+                };
+                bodied_existing.contains(existing_id)
+                    && !suffix_of(mine, theirs)
+                    && !suffix_of(theirs, mine)
+            };
 
             for (func_id, func) in &renumbered_functions {
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
@@ -1321,6 +1346,7 @@ impl CompilationUnit {
                         // Protect source-level import functions from stdlib replacement.
                         if !merged_import_func_ids.contains(&existing_id)
                             && !keeps_body(&existing_id, func)
+                            && !other_owner(&existing_id, func)
                         {
                             id_replacements.insert(existing_id, *func_id);
                         } else if func.name == "match" || func.name == "matched" {

@@ -95,7 +95,19 @@ impl<'a> HirToMirContext<'a> {
                             .find_by_name_and_params(key, mn, args.len())
                             .or_else(|| self.stdlib_mapping.find_by_name(key, mn))
                     })
-                    .map(|(sig, mapping)| (sig.class, sig.method, mapping));
+                    .map(|(sig, mapping)| (sig.class, sig.method, mapping))
+                    // The method belongs to a type the runtime mapping does not
+                    // know (`pk.Int64.make` beside `haxe.Int64.make`): its own
+                    // body, not the mapped one.
+                    .filter(|_| {
+                        let owner = self
+                            .symbol_table
+                            .get_symbol(*field)
+                            .and_then(|s| s.qualified_name)
+                            .and_then(|q| self.string_interner.get(q))
+                            .and_then(|q| q.rsplit_once('.').map(|(owner, _)| owner));
+                        owner.is_none_or(|owner| self.stdlib_mapping.class_key(owner).is_some())
+                    });
 
                 if let Some((sc_class_name, sc_method_name, runtime_call)) = static_stdlib_info {
                     let runtime_func = runtime_call.runtime_name;
