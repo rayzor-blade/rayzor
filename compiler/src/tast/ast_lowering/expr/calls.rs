@@ -3075,6 +3075,15 @@ impl<'a> AstLowering<'a> {
                             }
                         };
 
+                        // Type parameters the return mentions bind from the
+                        // arguments, through function types too.
+                        let return_type = match &kind {
+                            TypedExpressionKind::StaticMethodCall { arguments, .. }
+                            | TypedExpressionKind::MethodCall { arguments, .. } => {
+                                self.bind_return_type_params(return_type, method_symbol, arguments)
+                            }
+                            _ => return_type,
+                        };
                         let usage = VariableUsage::Copy;
                         let lifetime_id = self.assign_lifetime(&kind, &return_type);
                         let metadata = self.analyze_expression_metadata(&kind);

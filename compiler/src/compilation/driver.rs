@@ -322,6 +322,9 @@ impl CompilationUnit {
         // Skip pre-registration if requested (types already registered by CompilationUnit)
         lowering.set_skip_pre_registration(skip_pre_registration);
         lowering.retrying_failed_attempt = self.failed_attempts.contains(filename);
+        lowering.incomplete_classes = self.incomplete_classes.clone();
+        // Only the import loop passes skip_stdlib_merge, and it retries.
+        lowering.retryable_import = skip_stdlib_merge;
 
         // CompilationUnit manages stdlib loading itself via load_stdlib() and the
         // later stdlib MIR merge. Re-loading the stdlib inside AstLowering causes
@@ -371,10 +374,21 @@ impl CompilationUnit {
         // Export class_fields for subsequent compilations. A failed attempt
         // exports too: its members are declared, and a file compiled before
         // its retry must read `Class.staticField` as the static it is.
+        // A successful retry replaces what its failed attempt exported.
+        let replaces = lowered.is_ok() && self.failed_attempts.contains(filename);
         for (class_sym, fields) in lowering.export_class_fields() {
-            self.global_class_fields
-                .entry(*class_sym)
-                .or_insert_with(|| fields.clone());
+            if lowered.is_ok() {
+                self.incomplete_classes.remove(class_sym);
+            } else {
+                self.incomplete_classes.insert(*class_sym);
+            }
+            if replaces {
+                self.global_class_fields.insert(*class_sym, fields.clone());
+            } else {
+                self.global_class_fields
+                    .entry(*class_sym)
+                    .or_insert_with(|| fields.clone());
+            }
         }
         let typed_file = lowered.map_err(|e| vec![e.to_compilation_error()])?;
 

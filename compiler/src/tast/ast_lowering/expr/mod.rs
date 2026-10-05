@@ -2679,6 +2679,17 @@ impl<'a> AstLowering<'a> {
                     scope.add_symbol(var_symbol, var_name);
                 }
 
+                // An untyped `final x = []` takes its element type from the
+                // first push, as `var` does.
+                if declared_type.is_none()
+                    && expr
+                        .as_ref()
+                        .is_some_and(|e| matches!(&e.kind, ExprKind::Array(els) if els.is_empty()))
+                {
+                    let loc = self.context.span_to_location(&expression.span);
+                    self.empty_array_inferred.insert(var_symbol, loc);
+                }
+
                 TypedExpressionKind::FinalDeclarationExpr {
                     symbol_id: var_symbol,
                     var_type,

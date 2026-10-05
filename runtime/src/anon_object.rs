@@ -589,6 +589,7 @@ fn box_value_as_dynamic(type_id: u32, value: u64) -> *mut u8 {
         }
         t if t == TYPE_FLOAT => crate::type_system::haxe_box_float_ptr(f64::from_bits(value)),
         t if t == TYPE_BOOL => crate::type_system::haxe_box_bool_ptr(value != 0),
+        t if t == TYPE_STRING && value == 0 => std::ptr::null_mut(),
         t if t == TYPE_STRING => {
             crate::type_system::haxe_box_reference_ptr(value as *mut u8, TYPE_STRING.0)
         }
@@ -598,6 +599,13 @@ fn box_value_as_dynamic(type_id: u32, value: u64) -> *mut u8 {
                 value_ptr: std::ptr::null_mut(),
             };
             Box::into_raw(Box::new(dv)) as *mut u8
+        }
+        // A reference slot holding 0 is null; an enum's 0 is its first value.
+        _ if value == 0
+            && !crate::type_system::get_type_info(TypeId(type_id))
+                .is_some_and(|t| t.enum_info.is_some()) =>
+        {
+            std::ptr::null_mut()
         }
         _ => {
             // Object or anon type — the value is a pointer

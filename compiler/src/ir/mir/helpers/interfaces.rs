@@ -521,6 +521,60 @@ impl<'a> HirToMirContext<'a> {
             };
         }
 
+        // `Null<Class>`: a null stays null, anything else is wrapped.
+        let nullable_class = match self.type_table.get(value_type).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => {
+                self.get_class_symbol(*inner_type).map(|c| (*inner_type, c))
+            }
+            _ => None,
+        };
+        if let Some((inner_type, class_sym)) = nullable_class {
+            if self.interface_wrapped_args.contains(&value_reg) {
+                return (value_reg, false);
+            }
+            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+            let wrapped = (|| {
+                let as_int = self
+                    .builder
+                    .build_bitcast(value_reg, IrType::I64)
+                    .unwrap_or(value_reg);
+                let zero = self.builder.build_const(IrValue::I64(0))?;
+                let is_null = self.builder.build_cmp(CompareOp::Eq, as_int, zero)?;
+                let null_block = self.builder.create_block()?;
+                let wrap_block = self.builder.create_block()?;
+                let join_block = self.builder.create_block()?;
+                self.builder
+                    .build_cond_branch(is_null, null_block, wrap_block)?;
+                self.builder.switch_to_block(null_block);
+                let null_ptr = self.builder.build_const(IrValue::I64(0))?;
+                let null_ptr = self
+                    .builder
+                    .build_bitcast(null_ptr, ptr_u8.clone())
+                    .unwrap_or(null_ptr);
+                self.builder.build_branch(join_block)?;
+                self.builder.switch_to_block(wrap_block);
+                let fat = self
+                    .wrap_in_interface_fat_ptr_for(value_reg, inner_type, class_sym, iface_sym)?;
+                let fat = self
+                    .builder
+                    .build_bitcast(fat, ptr_u8.clone())
+                    .unwrap_or(fat);
+                let wrap_end = self.builder.current_block()?;
+                self.builder.build_branch(join_block)?;
+                self.builder.switch_to_block(join_block);
+                let result = self.builder.build_phi(join_block, ptr_u8.clone())?;
+                self.builder
+                    .add_phi_incoming(join_block, result, null_block, null_ptr);
+                self.builder
+                    .add_phi_incoming(join_block, result, wrap_end, fat);
+                Some(result)
+            })();
+            return match wrapped {
+                Some(w) => (w, true),
+                None => (value_reg, false),
+            };
+        }
+
         // Interface -> same or different interface: clone the fat pointer so destination
         // does not alias source wrapper. This prevents use-after-free when one variable
         // is later reassigned (freeing its old fat pointer while the other still uses it).

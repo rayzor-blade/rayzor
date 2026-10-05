@@ -791,13 +791,19 @@ impl<'a> HirToMirContext<'a> {
                         None
                     };
 
-                    // A function-typed member is read by name: a class instance
-                    // under the structural type has a method there, not a slot.
-                    if let Some((_, member_ty)) = sorted_result
-                        && matches!(
-                            type_table.get(member_ty).map(|t| &t.kind),
+                    // A function-typed member (optional or not) is read by name:
+                    // a class instance under the structural type has a method
+                    // there, not a slot, and an optional one may be absent.
+                    let function_member = |ty: TypeId| match type_table.get(ty).map(|t| &t.kind) {
+                        Some(TypeKind::Function { .. }) => true,
+                        Some(TypeKind::Optional { inner_type }) => matches!(
+                            type_table.get(*inner_type).map(|t| &t.kind),
                             Some(TypeKind::Function { .. })
-                        )
+                        ),
+                        _ => false,
+                    };
+                    if let Some((_, member_ty)) = sorted_result
+                        && function_member(member_ty)
                     {
                         let dynamic_ty = type_table.dynamic_type();
                         let member = self.raw_anon_reflect_field_read(obj, field, dynamic_ty)?;

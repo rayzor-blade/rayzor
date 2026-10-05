@@ -42,6 +42,8 @@ impl<'a> AstLowering<'a> {
             class_methods: BTreeMap::new(),
             class_fields: BTreeMap::new(),
             retrying_failed_attempt: false,
+            incomplete_classes: std::collections::BTreeSet::new(),
+            retryable_import: false,
             current_module_types: std::collections::BTreeSet::new(),
             unknown_return_slots: std::collections::BTreeSet::new(),
             class_parents: BTreeMap::new(),

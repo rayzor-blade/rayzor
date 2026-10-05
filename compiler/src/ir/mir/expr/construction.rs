@@ -465,6 +465,26 @@ impl<'a> HirToMirContext<'a> {
         // always correct because they reach the alloc + stub below. Still
         // carries externs and generics, where an unbindable stub would SIGILL.
         if !has_constructor && args.len() == 1 && unlowered_ctor_class.is_none() {
+            // A class whose constructor is not visible yet (its module failed
+            // its first attempt, as in an import cycle): fail this module so
+            // the import loop retries it, rather than returning the argument.
+            let pending_class = actual_symbol_id
+                .and_then(|sid| self.symbol_table.get_symbol(sid))
+                .is_some_and(|s| {
+                    s.kind == crate::tast::SymbolKind::Class
+                        && !s.flags.contains(crate::tast::symbols::SymbolFlags::EXTERN)
+                        && !self.declares_class(s.id, final_class_name)
+                });
+            if self.retryable_module && pending_class {
+                self.errors.push(LoweringError {
+                    message: format!(
+                        "constructor of `{}` is not available to this module",
+                        debug_class_name.unwrap_or("?")
+                    ),
+                    location: expr.source_location,
+                });
+                return None;
+            }
             if crate::debug_flags::ctor_debug() {
                 eprintln!(
                     "[CTOR] class={} path=VALUE-WRAP class_type={:?} (no constructor, 1 arg)",

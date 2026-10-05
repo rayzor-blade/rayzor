@@ -2063,6 +2063,39 @@ pub extern "C" fn haxe_enum_to_string_boxed(type_id: u32, ptr: *const u8) -> *mu
     unsafe { alloc_haxe_string(&format_enum_boxed(type_id, ptr)) }
 }
 
+/// `Std.string` of an `Array<E>` whose elements are values of enum `type_id`:
+/// heap values when `boxed`, discriminants otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_to_string_enum(
+    arr: *const crate::haxe_array::HaxeArray,
+    type_id: u32,
+    boxed: bool,
+) -> *mut u8 {
+    let mut out = String::from("[");
+    if !arr.is_null() {
+        unsafe {
+            let arr = &*arr;
+            let data = arr.ptr as *const i64;
+            for i in 0..arr.len {
+                if i > 0 {
+                    out.push(',');
+                }
+                let slot = *data.add(i);
+                if boxed {
+                    out.push_str(&format_enum_boxed(type_id, slot as *const u8));
+                } else {
+                    match get_enum_variant_name(TypeId(type_id), slot) {
+                        Some(name) => out.push_str(name),
+                        None => out.push_str(&slot.to_string()),
+                    }
+                }
+            }
+        }
+    }
+    out.push(']');
+    unsafe { alloc_haxe_string(&out) }
+}
+
 /// `Std.string` of a plain enum value (a discriminant), as a HaxeString.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_enum_to_string(type_id: i64, discriminant: i64) -> *mut u8 {

@@ -1520,6 +1520,11 @@ pub struct AstLowering<'a> {
     /// A retry of a file whose last attempt failed: its fields keep the
     /// symbols that attempt declared, which other files already resolved.
     pub(crate) retrying_failed_attempt: bool,
+    /// Classes declared by a file whose last attempt failed: their inherited
+    /// members are not in place, so a subclass waits for the retry.
+    pub(crate) incomplete_classes: std::collections::BTreeSet<SymbolId>,
+    /// This file is compiled by the import loop, which retries a failed file.
+    pub(crate) retryable_import: bool,
     /// Bare names of the types the file being lowered declares: they take
     /// precedence over imports, default imports included.
     pub(crate) current_module_types: std::collections::BTreeSet<String>,

@@ -39,6 +39,18 @@ impl<'a> HirToMirContext<'a> {
                     Some(TypeKind::GenericInstance { base_type, .. }) => {
                         current = *base_type;
                     }
+                    // A type that is never a class is not looked up by id: the
+                    // map's keys come from other modules' type tables, so an
+                    // Array's id can name some other class.
+                    Some(
+                        TypeKind::Array { .. }
+                        | TypeKind::String
+                        | TypeKind::Int
+                        | TypeKind::Float
+                        | TypeKind::Bool
+                        | TypeKind::Function { .. }
+                        | TypeKind::Anonymous { .. },
+                    ) => return None,
                     _ => break,
                 }
             }

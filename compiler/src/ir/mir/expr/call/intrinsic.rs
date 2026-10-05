@@ -395,19 +395,16 @@ impl<'a> HirToMirContext<'a> {
                     Some(crate::tast::core::TypeKind::Array { element_type }) => *element_type,
                     _ => self.type_table.dynamic_type(),
                 };
-                let formatter = self.array_to_string_fn(element_type);
-                if formatter != "haxe_array_to_string" {
-                    let ptr_string = IrType::Ptr(Box::new(IrType::String));
-                    let to_string_id = self.get_or_register_extern_function(
-                        formatter,
-                        vec![IrType::Ptr(Box::new(IrType::Void))],
-                        ptr_string.clone(),
+                let typed = self.array_to_string_fn(element_type) != "haxe_array_to_string"
+                    || matches!(
+                        self.type_table
+                            .get(self.resolve_through_aliases(element_type))
+                            .map(|t| &t.kind),
+                        Some(TypeKind::Enum { .. })
                     );
-                    let text = self.builder.build_call_direct(
-                        to_string_id,
-                        vec![arg_reg],
-                        ptr_string.clone(),
-                    )?;
+                if typed {
+                    let ptr_string = IrType::Ptr(Box::new(IrType::String));
+                    let text = self.build_array_to_string(arg_reg, element_type)?;
                     let trace_id = self.get_or_register_extern_function(
                         "haxe_trace_string_struct",
                         vec![ptr_string.clone()],
@@ -718,16 +715,7 @@ impl<'a> HirToMirContext<'a> {
                     Some(TypeKind::Array { element_type }) => *element_type,
                     _ => self.type_table.dynamic_type(),
                 };
-                let conv_fn = self.get_or_register_extern_function(
-                    self.array_to_string_fn(element_type),
-                    vec![IrType::Ptr(Box::new(IrType::Void))],
-                    IrType::Ptr(Box::new(IrType::String)),
-                );
-                return self.builder.build_call_direct(
-                    conv_fn,
-                    vec![arg_reg],
-                    IrType::Ptr(Box::new(IrType::String)),
-                );
+                return self.build_array_to_string(arg_reg, element_type);
             }
 
             // An anonymous object prints through its box: the runtime's

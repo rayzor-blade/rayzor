@@ -32,7 +32,13 @@ impl<'a> HirToMirContext<'a> {
     ) {
         self.record_param_ownership(symbol_id, hir_func);
         self.record_consume_method(symbol_id, hir_func);
-        let mut signature = self.build_function_signature(hir_func);
+        // A generic module-level function returns a type variable, as a
+        // generic method does, so its calls specialize.
+        let mut signature = if this_type.is_none() && !hir_func.type_params.is_empty() {
+            self.build_function_signature_with_class_type_params(hir_func, &[])
+        } else {
+            self.build_function_signature(hir_func)
+        };
 
         // 'this' is always a pointer to the instance, generic parameters or not
         // -- except the native i64 under `Int64`, which is the value itself.

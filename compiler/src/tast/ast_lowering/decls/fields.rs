@@ -442,12 +442,9 @@ impl<'a> AstLowering<'a> {
         // Enter function scope
         let function_scope = self.context.enter_scope(ScopeKind::Function);
 
-        // Process type parameters
+        // Type parameters, so a call binds them from its arguments.
         let type_params = self.lower_type_parameters(&func.type_params)?;
-        let type_param_map: BTreeMap<InternedString, TypeId> = type_params
-            .iter()
-            .map(|tp| (tp.name, TypeId::invalid()))
-            .collect();
+        let type_param_map = self.function_type_parameter_map(&func.type_params)?;
         self.context.push_type_parameters(type_param_map);
 
         // Process parameters
@@ -510,7 +507,7 @@ impl<'a> AstLowering<'a> {
                 is_inline,
                 ..crate::tast::node::FunctionEffects::default()
             },
-            type_parameters: Vec::new(), // TODO: Convert type parameters
+            type_parameters: type_params,
             is_static,
             source_location: self.context.create_location(),
             metadata: FunctionMetadata::default(),

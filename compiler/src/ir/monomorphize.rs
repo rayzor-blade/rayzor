@@ -465,6 +465,32 @@ impl Monomorphizer {
         // Substitute types in CFG instructions
         self.substitute_cfg(&mut specialized.cfg);
 
+        // A value returned from an erased slot is still the slot's bits; a
+        // float return reinterprets them rather than converting the integer.
+        if matches!(specialized.signature.return_type, IrType::F64 | IrType::F32) {
+            let ret_ty = specialized.signature.return_type.clone();
+            let block_ids: Vec<_> = specialized.cfg.blocks.keys().copied().collect();
+            for block_id in block_ids {
+                let returned = match specialized.cfg.blocks.get(&block_id).map(|b| &b.terminator) {
+                    Some(IrTerminator::Return { value: Some(v) }) => *v,
+                    _ => continue,
+                };
+                if !matches!(specialized.register_types.get(&returned), Some(IrType::I64)) {
+                    continue;
+                }
+                let dest = specialized.alloc_reg();
+                specialized.register_types.insert(dest, ret_ty.clone());
+                if let Some(block) = specialized.cfg.blocks.get_mut(&block_id) {
+                    block.instructions.push(IrInstruction::BitCast {
+                        dest,
+                        src: returned,
+                        ty: ret_ty.clone(),
+                    });
+                    block.terminator = IrTerminator::Return { value: Some(dest) };
+                }
+            }
+        }
+
         // Process type parameter tag fixups: replace placeholder const values
         // with concrete type tags based on the substitution map
         self.apply_type_param_tag_fixups(&mut specialized);

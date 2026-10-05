@@ -237,7 +237,37 @@ impl<'a> AstLowering<'a> {
 
         // Process extends clause
         let extends = if let Some(extends_type) = &class_decl.extends {
-            Some(self.lower_type(extends_type)?)
+            let parent = self.lower_type(extends_type)?;
+            // A parent not compiled yet, or whose own file failed: fail so the
+            // import loop retries this file after it, rather than lowering
+            // without the inherited members.
+            let placeholder = match self
+                .context
+                .type_table
+                .borrow()
+                .get(parent)
+                .map(|t| &t.kind)
+            {
+                Some(crate::tast::core::TypeKind::Placeholder { .. }) => true,
+                Some(crate::tast::core::TypeKind::Class { symbol_id, .. }) => {
+                    self.incomplete_classes.contains(symbol_id)
+                }
+                _ => false,
+            };
+            if placeholder && self.retryable_import {
+                let type_name = match extends_type {
+                    parser::haxe_ast::Type::Path { path, .. } if !path.package.is_empty() => {
+                        format!("{}.{}", path.package.join("."), path.name)
+                    }
+                    parser::haxe_ast::Type::Path { path, .. } => path.name.clone(),
+                    other => format!("{:?}", other),
+                };
+                return Err(LoweringError::UnresolvedType {
+                    type_name,
+                    location: self.context.create_location_from_span(class_decl.span),
+                });
+            }
+            Some(parent)
         } else {
             None
         };

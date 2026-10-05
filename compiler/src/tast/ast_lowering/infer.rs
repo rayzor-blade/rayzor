@@ -722,8 +722,10 @@ impl<'a> AstLowering<'a> {
                 {
                     return Ok(mapped);
                 }
-                // Extract return type from method signature and substitute type parameters
-                self.infer_method_call_return_type(*method_symbol, receiver.expr_type)
+                // Extract return type from method signature and substitute type parameters;
+                // the method's own parameters bind from the arguments.
+                let ret = self.infer_method_call_return_type(*method_symbol, receiver.expr_type)?;
+                Ok(self.bind_return_type_params(ret, *method_symbol, arguments))
             }
             TypedExpressionKind::StaticMethodCall {
                 method_symbol,

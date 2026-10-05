@@ -143,8 +143,11 @@ impl StaticSigIndex {
     /// matching), and the loader must have resolved it to a file of its own.
     /// `extern class String` records no arity, so it keeps the value wrap.
     pub fn declared_constructor_arity(&mut self, class_name: &str) -> Option<usize> {
-        self.known_file(class_name)?;
-        self.ensure_indexed_from_known_files(class_name);
+        // A module's secondary type has no file of its own but is indexed
+        // with the module that declares it.
+        if self.known_file(class_name).is_some() {
+            self.ensure_indexed_from_known_files(class_name);
+        }
         self.classes.get(class_name)?.ctor_params
     }
 

@@ -1206,6 +1206,35 @@ impl<'a> HirToMirContext<'a> {
                                         return Some(w);
                                     }
                                 }
+                                // Neither the class's vtable nor the interface's
+                                // method list is known here (both lower in a module
+                                // this one cycles with): the runtime builds the
+                                // wrapper from the vtable that module registers.
+                                if self.get_class_symbol(e.ty).is_some() {
+                                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                                    let build = self.get_or_register_extern_function(
+                                        "haxe_iface_fat_ptr_build",
+                                        vec![ptr_u8.clone(), IrType::I32],
+                                        ptr_u8.clone(),
+                                    );
+                                    let iface_id = self
+                                        .deterministic_iface_or_enum_type_id(iface_sym, "iface");
+                                    if let (Some(id), Some(obj)) = (
+                                        iface_id.and_then(|id| {
+                                            self.builder.build_const(IrValue::I32(id as i32))
+                                        }),
+                                        self.coerce_reg_to(val, &ptr_u8),
+                                    ) {
+                                        if let Some(w) = self.builder.build_call_direct(
+                                            build,
+                                            vec![obj, id],
+                                            ptr_u8,
+                                        ) {
+                                            self.interface_wrapped_args.insert(w);
+                                            return Some(w);
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -1387,12 +1416,12 @@ impl<'a> HirToMirContext<'a> {
                         );
                     }
 
-                    // Populate the exception's `stack` field with the current call stack trace.
+                    // Populate the exception's `__nativeStack` field with the current call stack trace.
                     // This must happen AFTER rayzor_update_call_frame_location (so the
                     // throw location is in the trace) but BEFORE rayzor_throw_typed.
                     // Only for class types (Exception subclasses), not primitive throws.
                     if let Some(thrown_class) = self.get_class_symbol(thrown_type) {
-                        let stack_name = self.string_interner.intern("stack");
+                        let stack_name = self.string_interner.intern("__nativeStack");
                         // Only a class that declares or inherits `stack` gets
                         // one. The lookup is by name across every class, so
                         // the owner is checked against the thrown class's

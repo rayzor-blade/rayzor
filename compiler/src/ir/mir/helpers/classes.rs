@@ -880,6 +880,30 @@ impl<'a> HirToMirContext<'a> {
         Some(format!("{}.new", owner))
     }
 
+    /// Whether this module declares the class `sym` (or bare `name`) names.
+    /// Compared by qualified and bare name too: the entry file is typed
+    /// twice, and a module-private class can resolve to a std type's symbol.
+    pub(crate) fn declares_class(&self, sym: SymbolId, name: Option<&str>) -> bool {
+        let qname = self
+            .symbol_table
+            .get_symbol(sym)
+            .and_then(|s| s.qualified_name);
+        let bare = name.map(|n| n.rsplit('.').next().unwrap_or(n));
+        self.current_hir_types.values().any(|decl| match decl {
+            crate::ir::hir::HirTypeDecl::Class(c) => {
+                c.symbol_id == sym
+                    || qname.is_some()
+                        && self
+                            .symbol_table
+                            .get_symbol(c.symbol_id)
+                            .and_then(|s| s.qualified_name)
+                            == qname
+                    || bare.is_some() && self.string_interner.get(c.name) == bare
+            }
+            _ => false,
+        })
+    }
+
     /// Class key for a `new C(x)` no constructor path resolved, when the parsed
     /// declaration says `C` is a constructible class. `Some` means emit
     /// alloc + the named forward-ref stub; `None` keeps the caller's fallback.
@@ -895,11 +919,16 @@ impl<'a> HirToMirContext<'a> {
         if crate::debug_flags::no_xmodule_ctor() {
             return None;
         }
+        // A class this module declares lowers here, not later elsewhere.
+        if actual_symbol_id.is_some_and(|sym| self.declares_class(sym, final_class_name)) {
+            return None;
+        }
         let index = self.static_sig_index.as_ref()?.clone();
         let key = self.cross_module_constructor_fqn_key(actual_symbol_id, final_class_name)?;
         let class_fqn = key.strip_suffix(".new")?.to_string();
         let mut index = index.borrow_mut();
-        let arity = index.declared_constructor_arity(&class_fqn)?;
+        // Its own constructor, else the one it inherits.
+        let (_, arity) = index.constructor_owner(&class_fqn)?;
         // Fewer declared params than the call passes means we resolved the wrong class.
         (arity >= argc).then_some(class_fqn)
     }

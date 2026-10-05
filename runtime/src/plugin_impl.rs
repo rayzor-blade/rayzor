@@ -1042,6 +1042,10 @@ register_symbol!(
     crate::type_system::haxe_dynamic_ref_equals
 );
 register_symbol!(
+    "haxe_array_to_string_enum",
+    crate::type_system::haxe_array_to_string_enum
+);
+register_symbol!(
     "haxe_dynamic_equals",
     crate::type_system::haxe_dynamic_equals
 );

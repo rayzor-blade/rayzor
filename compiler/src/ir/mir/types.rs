@@ -801,6 +801,45 @@ impl<'a> HirToMirContext<'a> {
         self.normalize_dynamic_args_for_erased_formals(func_id, arg_regs, arg_types, skip_first);
     }
 
+    /// `Std.string` of an array whose element type is known statically.
+    pub(crate) fn build_array_to_string(
+        &mut self,
+        array: IrId,
+        element_type: TypeId,
+    ) -> Option<IrId> {
+        let string_ptr = IrType::Ptr(Box::new(IrType::String));
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        let enum_symbol = match self
+            .type_table
+            .get(self.resolve_through_aliases(element_type))
+            .map(|t| &t.kind)
+        {
+            Some(crate::tast::TypeKind::Enum { symbol_id, .. }) => Some(*symbol_id),
+            _ => None,
+        };
+        if let Some(enum_symbol) = enum_symbol {
+            let type_id = self.enum_runtime_id(enum_symbol);
+            let boxed = self.enum_is_boxed(enum_symbol);
+            let func = self.get_or_register_extern_function(
+                "haxe_array_to_string_enum",
+                vec![ptr_void, IrType::U32, IrType::Bool],
+                string_ptr.clone(),
+            );
+            let tid = self.builder.build_const(IrValue::U32(type_id as u32))?;
+            let boxed = self.builder.build_const(IrValue::Bool(boxed))?;
+            return self
+                .builder
+                .build_call_direct(func, vec![array, tid, boxed], string_ptr);
+        }
+        let func = self.get_or_register_extern_function(
+            self.array_to_string_fn(element_type),
+            vec![ptr_void],
+            string_ptr.clone(),
+        );
+        self.builder
+            .build_call_direct(func, vec![array], string_ptr)
+    }
+
     /// The array formatter for a statically known element type; the untyped
     /// one guesses what each raw slot holds and reads a zero as `null`.
     pub(crate) fn array_to_string_fn(&self, element_type: TypeId) -> &'static str {
@@ -887,17 +926,25 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             if let Some(TypeKind::Array { element_type }) = type_kind.as_ref() {
-                let runtime_name = self.array_to_string_fn(*element_type);
-                let func_id = self.get_or_register_extern_function(
-                    runtime_name,
-                    vec![IrType::Ptr(Box::new(IrType::Void))],
-                    IrType::Ptr(Box::new(IrType::String)),
-                );
-                return self.builder.build_call_direct(
-                    func_id,
-                    vec![value],
-                    IrType::Ptr(Box::new(IrType::String)),
-                );
+                return self.build_array_to_string(value, *element_type);
+            }
+            // An abstract over an array prints as the array it wraps.
+            if let Some(TypeKind::Abstract {
+                symbol_id,
+                underlying,
+                ..
+            }) = type_kind.as_ref()
+            {
+                let underlying = underlying
+                    .or_else(|| self.type_table.resolve_abstract_underlying(*symbol_id))
+                    .map(|u| self.resolve_through_aliases(u));
+                if let Some(TypeKind::Array { element_type }) = underlying
+                    .and_then(|u| self.type_table.get(u))
+                    .map(|t| &t.kind)
+                {
+                    let element_type = *element_type;
+                    return self.build_array_to_string(value, element_type);
+                }
             }
         }
         // An anonymous object prints through its box: the stringifier reads
