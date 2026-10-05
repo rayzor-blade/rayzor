@@ -72,6 +72,13 @@ jobs:
           ./target/release/rayzor bundle compiler/benchmarks/src/mandelbrot.hx -o compiler/benchmarks/precompiled/mandelbrot.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/nbody.hx -o compiler/benchmarks/precompiled/nbody.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/binarytrees.hx -o compiler/benchmarks/precompiled/binarytrees.rzb --strip
+          ./target/release/rayzor bundle compiler/benchmarks/src/fannkuchredux.hx -o compiler/benchmarks/precompiled/fannkuchredux.rzb --strip
+          ./target/release/rayzor bundle compiler/benchmarks/src/spectralnorm.hx -o compiler/benchmarks/precompiled/spectralnorm.rzb --strip
+          ./target/release/rayzor bundle compiler/benchmarks/src/fasta.hx -o compiler/benchmarks/precompiled/fasta.rzb --strip
+          ./target/release/rayzor bundle compiler/benchmarks/src/knucleotide.hx -o compiler/benchmarks/precompiled/knucleotide.rzb --strip
+          ./target/release/rayzor bundle compiler/benchmarks/src/revcomp.hx -o compiler/benchmarks/precompiled/revcomp.rzb --strip
+          ./target/release/rayzor bundle compiler/benchmarks/src/pidigits.hx -o compiler/benchmarks/precompiled/pidigits.rzb --strip
+          ./target/release/rayzor bundle compiler/benchmarks/src/regexredux.hx -o compiler/benchmarks/precompiled/regexredux.rzb --strip
           ./target/release/rayzor preblade --out .rayzor/blade/stdlib
 
       - name: Upload precompiled bundles and stdlib cache
@@ -113,6 +120,15 @@ jobs:
           # SRA started scalarizing mandelbrot's per-iteration objects nothing
           # else exercises the allocator on a hot path.
           - binarytrees
+          # Benchmarks Game kernels: integer permutation, float
+          # matrix-vector, generation, hashing, string reversal, bignum, regex.
+          - fannkuchredux
+          - spectralnorm
+          - fasta
+          - knucleotide
+          - revcomp
+          - pidigits
+          - regexredux
     steps:
       - uses: actions/checkout@v5
 

@@ -75,7 +75,7 @@ use std::time::{Duration, Instant};
 #[derive(Parser)]
 #[command(name = "benchmark_runner")]
 struct Cli {
-    /// Benchmark to run (e.g. nbody, deltablue, fibonacci, mandelbrot). Runs all if omitted.
+    /// Benchmark to run (e.g. nbody, deltablue, fannkuchredux). Runs all if omitted.
     benchmark: Option<String>,
 
     /// Comma-separated list of targets (e.g. rayzor-cranelift,rayzor-gcc,haxe-cpp)
@@ -625,6 +625,8 @@ struct TieredBenchmarkState {
 fn reps_for(name: &str) -> (usize, usize) {
     match name {
         "binarytrees" => (0, 3),
+        // ~350 MB of strings and map entries per run, not freed between runs.
+        "knucleotide" => (1, 5),
         _ => (WARMUP_RUNS, BENCH_RUNS),
     }
 }
@@ -636,7 +638,18 @@ fn reps_for(name: &str) -> (usize, usize) {
 fn is_heavy_benchmark(name: &str) -> bool {
     matches!(
         name,
-        "mandelbrot" | "nbody" | "fibonacci" | "deltablue" | "binarytrees"
+        "mandelbrot"
+            | "nbody"
+            | "fibonacci"
+            | "deltablue"
+            | "binarytrees"
+            | "fannkuchredux"
+            | "spectralnorm"
+            | "fasta"
+            | "knucleotide"
+            | "revcomp"
+            | "pidigits"
+            | "regexredux"
     )
 }
 
@@ -964,6 +977,13 @@ fn get_haxe_source(bench_name: &str) -> Option<(&'static str, &'static str)> {
         "fibonacci" => Some(("BMFibonacciCode.hx", "BMFibonacciCode")),
         "nbody" => Some(("BMNBodyCode.hx", "BMNBodyCode")),
         "mandelbrot" => Some(("BMMandelbrotCode.hx", "BMMandelbrotCode")),
+        "fannkuchredux" => Some(("BMFannkuchReduxCode.hx", "BMFannkuchReduxCode")),
+        "spectralnorm" => Some(("BMSpectralNormCode.hx", "BMSpectralNormCode")),
+        "fasta" => Some(("BMFastaCode.hx", "BMFastaCode")),
+        "knucleotide" => Some(("BMKNucleotideCode.hx", "BMKNucleotideCode")),
+        "revcomp" => Some(("BMReverseComplementCode.hx", "BMReverseComplementCode")),
+        "pidigits" => Some(("BMPidigitsCode.hx", "BMPidigitsCode")),
+        "regexredux" => Some(("BMRegexReduxCode.hx", "BMRegexReduxCode")),
         _ => None,
     }
 }

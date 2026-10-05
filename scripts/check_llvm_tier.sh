@@ -23,7 +23,8 @@ cd "$(dirname "$0")/.."
 
 BENCHES=("$@")
 if [ ${#BENCHES[@]} -eq 0 ]; then
-    BENCHES=(binarytrees deltablue fibonacci mandelbrot nbody)
+    BENCHES=(binarytrees deltablue fibonacci mandelbrot nbody
+             fannkuchredux spectralnorm fasta knucleotide revcomp pidigits regexredux)
 fi
 
 RUNNER=(cargo run --release -q -p compiler --example benchmark_runner --)
