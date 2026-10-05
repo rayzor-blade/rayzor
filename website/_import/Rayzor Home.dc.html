@@ -229,7 +229,7 @@
       </div>
       <div style="border:1px solid #22242A;border-radius:14px;background:#0E1013;padding:26px 30px 24px">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:26px">
-          <div style="display:flex;gap:2px">
+          <div style="display:flex;flex-wrap:wrap;gap:2px">
             <sc-for list="{{ workloads }}" as="w" hint-placeholder-count="3">
               <button onClick="{{ w.pick }}" style="{{ w.style }}">{{ w.name }}</button>
             </sc-for>

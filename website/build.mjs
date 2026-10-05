@@ -919,6 +919,15 @@ const CHART_TARGETS = [
 
 const OS_LABELS = { macos: "macOS", linux: "linux", windows: "windows" };
 
+// Kernel file names cannot carry hyphens; the page uses the Benchmarks Game's.
+const WORKLOAD_LABELS = {
+  fannkuchredux: "fannkuch-redux",
+  spectralnorm: "spectral-norm",
+  knucleotide: "k-nucleotide",
+  revcomp: "reverse-complement",
+  regexredux: "regex-redux",
+};
+
 function loadBenchmarks(dir) {
   if (!fs.existsSync(dir)) return null;
   const files = [];
@@ -955,12 +964,17 @@ function loadBenchmarks(dir) {
     for (const r of bench.results || []) {
       if (!CHART_TARGETS.some(([t]) => t === r.target)) untracked.add(r.target);
     }
-    // A chart of one bar compares nothing.
+    // A chart of one bar compares nothing, and one without Rayzor says
+    // nothing about Rayzor.
     if (rows.length < 2) {
       skipped.push(`${bench.name} (${rows.length} of ${CHART_TARGETS.length} targets)`);
       continue;
     }
-    workloads.push({ id: bench.name, name: bench.name });
+    if (!rows.some((r) => r.rz)) {
+      skipped.push(`${bench.name} (no Rayzor result)`);
+      continue;
+    }
+    workloads.push({ id: bench.name, name: WORKLOAD_LABELS[bench.name] || bench.name });
     runs[bench.name] = rows;
   }
   // Coverage the chart drops is reported, never silently absent — a kernel
