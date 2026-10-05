@@ -229,11 +229,14 @@
       </div>
       <div style="border:1px solid #22242A;border-radius:14px;background:#0E1013;padding:26px 30px 24px">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:26px">
-          <div style="display:flex;flex-wrap:wrap;gap:2px">
-            <sc-for list="{{ workloads }}" as="w" hint-placeholder-count="3">
-              <button onClick="{{ w.pick }}" style="{{ w.style }}">{{ w.name }}</button>
-            </sc-for>
-          </div>
+          <label style="display:inline-flex;align-items:center;gap:10px;font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#6F757E">Kernel
+            <select onChange="{{ pickWork }}" aria-label="Benchmark kernel" style="color-scheme:dark;min-width:190px;max-width:100%;padding:8px 12px;border:1px solid #22242A;border-radius:8px;background:#0B0C0F;color:#E9EAEE;font-family:'JetBrains Mono',monospace;font-size:12.5px;letter-spacing:0;text-transform:none;cursor:pointer">
+              <sc-for list="{{ workloads }}" as="w" hint-placeholder-count="3">
+                <sc-if value="{{ w.on }}"><option value="{{ w.id }}" selected>{{ w.name }}</option></sc-if>
+                <sc-if value="{{ w.off }}"><option value="{{ w.id }}">{{ w.name }}</option></sc-if>
+              </sc-for>
+            </select>
+          </label>
           <span style="flex:1"></span>
           <div style="display:inline-flex;gap:3px;padding:3px;border:1px solid #22242A;border-radius:999px;background:#0B0C0F">
             <button onClick="{{ pickExec }}" style="{{ metricExec }}">execution</button>
@@ -673,7 +676,8 @@ class Component extends DCLogic {
       demoLines: s.lines, demoIdle: s.lines.length === 0,
       policy: POLICY, audience: AUDIENCE, soon: SOON, targets: TARGETS, crossFlags: CROSS_FLAGS,
       nueModels: NUE_MODELS.map(m => ({ ...m, w: s.barsIn ? m.w : "0%" })), nueParity: NUE_PARITY, nueTags: NUE_TAGS,
-      workloads: WORKLOADS.map(w => ({ name: w.name, style: this.tab(s.work === w.id), pick: () => this.setState({ work: w.id }) })),
+      workloads: WORKLOADS.map(w => ({ id: w.id, name: w.name, on: s.work === w.id, off: s.work !== w.id })),
+      pickWork: (e) => this.setState({ work: e.target.value }),
       isTotal: s.metric === "total",
       metricExec: this.seg(s.metric !== "total"), metricTotal: this.seg(s.metric === "total"),
       pickExec: () => this.setState({ metric: "exec" }), pickTotal: () => this.setState({ metric: "total" }),

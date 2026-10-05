@@ -917,6 +917,11 @@ const CHART_TARGETS = [
   ["haxe-hashlink", "HashLink", false],
 ];
 
+const RAYZOR_FALLBACKS = [
+  ["rayzor-llvm", "Rayzor · LLVM"],
+  ["rayzor-cranelift", "Rayzor · Cranelift"],
+];
+
 const OS_LABELS = { macos: "macOS", linux: "linux", windows: "windows" };
 
 // Kernel file names cannot carry hyphens; the page uses the Benchmarks Game's.
@@ -970,9 +975,19 @@ function loadBenchmarks(dir) {
       skipped.push(`${bench.name} (${rows.length} of ${CHART_TARGETS.length} targets)`);
       continue;
     }
+    // The tiered run is the one charted; when it failed, the best tier that
+    // ran stands in under its own name rather than leaving Rayzor out.
     if (!rows.some((r) => r.rz)) {
-      skipped.push(`${bench.name} (no Rayzor result)`);
-      continue;
+      const stand = RAYZOR_FALLBACKS.map(([target, label]) => {
+        const hit = (bench.results || []).find((r) => r.target === target);
+        return hit && { name: label, comp: round(hit.compile_time_ms), exec: round(hit.runtime_ms), rz: 1 };
+      }).find(Boolean);
+      if (!stand) {
+        skipped.push(`${bench.name} (no Rayzor result)`);
+        continue;
+      }
+      rows.unshift(stand);
+      console.warn(`  ! ${bench.name}: no tiered result, charting ${stand.name}`);
     }
     workloads.push({ id: bench.name, name: WORKLOAD_LABELS[bench.name] || bench.name });
     runs[bench.name] = rows;
@@ -994,11 +1009,18 @@ function loadBenchmarks(dir) {
   return { workloads, runs, note, source: path.basename(newest) };
 }
 
+// The count most results used: a capped kernel (binarytrees) must not set the
+// caption for the rest.
 function firstIterations(data) {
+  const counts = new Map();
   for (const bench of data.benchmarks || []) {
-    for (const r of bench.results || []) if (r.iterations) return r.iterations;
+    for (const r of bench.results || []) {
+      if (r.iterations) counts.set(r.iterations, (counts.get(r.iterations) || 0) + 1);
+    }
   }
-  return null;
+  let best = null;
+  for (const [n, c] of counts) if (best == null || c > counts.get(best)) best = n;
+  return best;
 }
 
 function round(ms) {
