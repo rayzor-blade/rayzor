@@ -10,9 +10,9 @@ use crate::ir::mir_builder::MirBuilder;
 use crate::ir::{CallingConvention, InlineHint, IrType};
 
 /// HaxeArray runtime structure size in bytes
-/// struct HaxeArray { ptr: *mut u8, len: usize, cap: usize, elem_size: usize }
-/// On 64-bit: 8 + 8 + 8 + 8 = 32 bytes
-const HAXE_ARRAY_STRUCT_SIZE: usize = 32;
+/// struct HaxeArray { ptr: *mut u8, len: usize, cap: usize, elem_size: usize, flags: usize }
+/// On 64-bit: 5 x 8 = 40 bytes
+const HAXE_ARRAY_STRUCT_SIZE: usize = 40;
 
 /// Iterator object size: __type_id (8) + field1 (8) + field2 (8) = 24 bytes
 const ITERATOR_STRUCT_SIZE: usize = 24;

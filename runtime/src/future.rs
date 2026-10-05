@@ -582,6 +582,7 @@ pub extern "C" fn rayzor_future_all(arr_ptr: *const u8) -> *mut u8 {
                 len: 0,
                 cap: 0,
                 elem_size: 8,
+                flags: 0,
             };
             crate::haxe_array::haxe_array_new(&mut result_arr, 8);
 

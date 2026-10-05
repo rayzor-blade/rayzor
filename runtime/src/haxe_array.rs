@@ -16,7 +16,14 @@ pub struct HaxeArray {
     pub len: usize,       // Number of elements
     pub cap: usize,       // Capacity (number of elements)
     pub elem_size: usize, // Size of each element in bytes
+    /// HAXE_ARRAY_VIEW and future bits; compiled code stores inline only
+    /// while this is zero.
+    pub flags: usize,
 }
+
+/// A `Bytes.getData()` view: stores must keep the byte buffer in sync, so
+/// they go through `haxe_array_set_*`.
+pub const HAXE_ARRAY_VIEW: usize = 1;
 
 const INITIAL_CAPACITY: usize = 8;
 
@@ -40,6 +47,7 @@ pub extern "C" fn haxe_array_new(out: *mut HaxeArray, elem_size: usize) {
         (*out).len = 0;
         (*out).cap = INITIAL_CAPACITY;
         (*out).elem_size = elem_size;
+        (*out).flags = 0;
     })
 }
 
@@ -73,6 +81,7 @@ pub extern "C" fn haxe_array_from_elements(
         (*out).len = count;
         (*out).cap = cap;
         (*out).elem_size = elem_size;
+        (*out).flags = 0;
     }
 }
 
@@ -1114,6 +1123,7 @@ pub extern "C" fn haxe_array_join_enum(
             len: names.len(),
             cap: names.capacity(),
             elem_size: 8,
+            flags: 0,
         };
         haxe_array_join(&names_array, sep)
     }
@@ -1180,6 +1190,7 @@ pub extern "C" fn haxe_array_map(
         (*out).len = len;
         (*out).cap = out_cap;
         (*out).elem_size = 8;
+        (*out).flags = 0;
     }
 }
 
@@ -1237,6 +1248,7 @@ pub extern "C" fn haxe_array_filter(
         (*out).len = out_len;
         (*out).cap = out_cap;
         (*out).elem_size = 8;
+        (*out).flags = 0;
     }
 }
 
@@ -1511,6 +1523,7 @@ pub extern "C" fn haxe_array_concat(
         (*out).len = total_len;
         (*out).cap = cap;
         (*out).elem_size = es;
+        (*out).flags = 0;
     }
 }
 

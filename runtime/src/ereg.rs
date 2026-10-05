@@ -293,6 +293,7 @@ pub extern "C" fn haxe_ereg_split(ereg: *mut u8, s: *const HaxeString) -> *mut H
             len: 0,
             cap: 0,
             elem_size: 8,
+            flags: 0,
         });
         return Box::into_raw(arr);
     }
@@ -337,6 +338,7 @@ pub extern "C" fn haxe_ereg_split(ereg: *mut u8, s: *const HaxeString) -> *mut H
             len: count,
             cap: count,
             elem_size: 8,
+            flags: 0,
         });
         Box::into_raw(arr)
     }

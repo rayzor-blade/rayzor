@@ -1105,11 +1105,7 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or(value),
                     None => value,
                 };
-                self.builder.build_call_direct(
-                    func_id,
-                    vec![obj_reg, idx_i64, value_f64],
-                    IrType::Bool,
-                );
+                self.build_array_store(obj_reg, idx_i64, value_f64, IrType::F64, func_id);
             }
             _ => {
                 // For Int, Bool, null, pointers: use haxe_array_set_i64
@@ -1156,12 +1152,61 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or(value),
                     None => value,
                 };
-                self.builder.build_call_direct(
-                    func_id,
-                    vec![obj_reg, idx_i64, value_i64],
-                    IrType::Bool,
-                );
+                self.build_array_store(obj_reg, idx_i64, value_i64, IrType::I64, func_id);
             }
         }
+    }
+
+    /// `arr[idx] = value` for a HaxeArray: an index inside `len` stores into
+    /// its 8-byte slot inline, as `lower_index_access` reads it. Growth and
+    /// arrays with header flags (a `Bytes.getData()` view, whose writes must
+    /// reach the byte buffer) go through the runtime setter `set_fn`.
+    fn build_array_store(
+        &mut self,
+        obj: IrId,
+        idx64: IrId,
+        value: IrId,
+        slot_type: IrType,
+        set_fn: IrFunctionId,
+    ) {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let in_bounds = (|| {
+            let len_off = self.builder.build_const(IrValue::I64(8))?;
+            let len_ptr = self.builder.build_ptr_add(obj, len_off, ptr_u8.clone())?;
+            let len = self.builder.build_load(len_ptr, IrType::I64)?;
+            let below_len = self.builder.build_cmp(CompareOp::ULt, idx64, len)?;
+            let flags_off = self.builder.build_const(IrValue::I64(32))?;
+            let flags_ptr = self.builder.build_ptr_add(obj, flags_off, ptr_u8.clone())?;
+            let flags = self.builder.build_load(flags_ptr, IrType::I64)?;
+            let zero = self.builder.build_const(IrValue::I64(0))?;
+            let plain = self.builder.build_cmp(CompareOp::Eq, flags, zero)?;
+            self.builder.build_binop(BinaryOp::And, below_len, plain)
+        })();
+        let (Some(in_bounds), Some(fast), Some(slow), Some(merge)) = (
+            in_bounds,
+            self.builder.create_block(),
+            self.builder.create_block(),
+            self.builder.create_block(),
+        ) else {
+            self.builder
+                .build_call_direct(set_fn, vec![obj, idx64, value], IrType::Bool);
+            return;
+        };
+        self.builder.build_cond_branch(in_bounds, fast, slow);
+
+        self.builder.switch_to_block(fast);
+        if let Some(data) = self.builder.build_load(obj, ptr_u8) {
+            if let Some(slot) = self.builder.build_gep(data, vec![idx64], slot_type) {
+                self.builder.build_store(slot, value);
+            }
+        }
+        self.builder.build_branch(merge);
+
+        self.builder.switch_to_block(slow);
+        self.builder
+            .build_call_direct(set_fn, vec![obj, idx64, value], IrType::Bool);
+        self.builder.build_branch(merge);
+
+        self.builder.switch_to_block(merge);
     }
 }

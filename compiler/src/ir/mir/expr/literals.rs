@@ -141,16 +141,16 @@ impl<'a> HirToMirContext<'a> {
 
         let element_count = elements.len();
 
-        // HaxeArray is 4 x i64 = 32 bytes: { len, cap, elem_size, ptr }
+        // HaxeArray is 5 x i64 = 40 bytes: { ptr, len, cap, elem_size, flags }
         let malloc_func_id = self.get_or_register_extern_function(
             "malloc",
             vec![IrType::U64],
             IrType::Ptr(Box::new(IrType::U8)),
         );
-        let size_32 = self.builder.build_const(IrValue::U64(32))?;
+        let header_size = self.builder.build_const(IrValue::U64(40))?;
         let array_ptr = self.builder.build_call_direct(
             malloc_func_id,
-            vec![size_32],
+            vec![header_size],
             IrType::Ptr(Box::new(IrType::U8)),
         )?;
 
@@ -192,6 +192,15 @@ impl<'a> HirToMirContext<'a> {
                     {
                         self.builder.build_store(elem_size_field, elem_size_val);
                     }
+                }
+            }
+            // Zero out flags field (offset 32)
+            if let Some(index_4) = self.builder.build_const(IrValue::I32(4)) {
+                if let Some(flags_field) =
+                    self.builder
+                        .build_gep(array_ptr, vec![index_4], IrType::I64)
+                {
+                    self.builder.build_store(flags_field, zero_i64);
                 }
             }
         }

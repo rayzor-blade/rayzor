@@ -530,6 +530,7 @@ pub extern "C" fn haxe_string_split_array(
             len: 0,
             cap: 0,
             elem_size: 8, // size of pointer (i64)
+            flags: 0,
         });
         return Box::into_raw(arr);
     }
@@ -607,6 +608,7 @@ pub extern "C" fn haxe_string_split_array(
             len: count,
             cap: count,
             elem_size: 8,
+            flags: 0,
         });
         let arr_ptr = Box::into_raw(arr);
         debug!(

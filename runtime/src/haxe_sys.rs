@@ -5,7 +5,7 @@
 use log::debug;
 use std::cell::RefCell;
 use std::io::Write;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 // Use the canonical HaxeString definition from haxe_string module
@@ -20,6 +20,19 @@ type TraceCallback = Box<dyn Fn(&str) + Send>;
 static TRACE_CALLBACK: Mutex<Option<TraceCallback>> = Mutex::new(None);
 static BYTES_DATA_VIEWS: LazyLock<Mutex<HashMap<usize, usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+// Entries in BYTES_DATA_VIEWS, written under its lock. Zero lets every array
+// store and byte write skip the lock when no `getData()` view exists.
+static BYTES_DATA_VIEW_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn no_bytes_data_views() -> bool {
+    BYTES_DATA_VIEW_COUNT.load(Ordering::Acquire) == 0
+}
+
+fn update_bytes_data_views(f: impl FnOnce(&mut HashMap<usize, usize>)) {
+    let mut views = BYTES_DATA_VIEWS.lock().unwrap();
+    f(&mut views);
+    BYTES_DATA_VIEW_COUNT.store(views.len(), Ordering::Release);
+}
 
 // Thread-local trace prefix for identifying which backend owns the output
 thread_local! {
@@ -1313,6 +1326,7 @@ fn build_args_array(args: &[&str]) -> *mut crate::haxe_array::HaxeArray {
         len: count,
         cap: count,
         elem_size,
+        flags: 0,
     });
     Box::into_raw(arr)
 }
@@ -3352,15 +3366,21 @@ pub extern "C" fn haxe_bytes_of_data(data: *const crate::haxe_array::HaxeArray) 
     let len = crate::haxe_array::haxe_array_length(data).min(i32::MAX as usize) as i32;
     let bytes = haxe_bytes_of_int_array(len, data);
     if !data.is_null() && !bytes.is_null() {
-        BYTES_DATA_VIEWS
-            .lock()
-            .unwrap()
-            .insert(data as usize, bytes as usize);
+        unsafe {
+            (*(data as *mut crate::haxe_array::HaxeArray)).flags |=
+                crate::haxe_array::HAXE_ARRAY_VIEW;
+        }
+        update_bytes_data_views(|v| {
+            v.insert(data as usize, bytes as usize);
+        });
     }
     bytes
 }
 
 fn bytes_data_source(data: *const crate::haxe_array::HaxeArray) -> Option<*mut HaxeBytes> {
+    if no_bytes_data_views() {
+        return None;
+    }
     BYTES_DATA_VIEWS
         .lock()
         .unwrap()
@@ -3394,7 +3414,7 @@ pub(crate) fn bytes_data_set(data: *const crate::haxe_array::HaxeArray, index: u
 
 // Array<Int> indexes its 8-byte slots directly, so byte writes refresh each view's slots.
 fn sync_bytes_data_views(bytes: *const HaxeBytes, start: usize, count: usize) {
-    if bytes.is_null() || count == 0 {
+    if bytes.is_null() || count == 0 || no_bytes_data_views() {
         return;
     }
     unsafe {
@@ -3423,7 +3443,12 @@ fn sync_bytes_data_views(bytes: *const HaxeBytes, start: usize, count: usize) {
 }
 
 pub(crate) fn bytes_data_forget(data: *const crate::haxe_array::HaxeArray) {
-    BYTES_DATA_VIEWS.lock().unwrap().remove(&(data as usize));
+    if no_bytes_data_views() {
+        return;
+    }
+    update_bytes_data_views(|v| {
+        v.remove(&(data as usize));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -3451,10 +3476,12 @@ pub extern "C" fn haxe_bytes_get_data(
             haxe_array_push_i64(arr, *b.ptr.add(i) as i64);
         }
     }
-    BYTES_DATA_VIEWS
-        .lock()
-        .unwrap()
-        .insert(arr as usize, bytes as usize);
+    unsafe {
+        (*arr).flags |= crate::haxe_array::HAXE_ARRAY_VIEW;
+    }
+    update_bytes_data_views(|v| {
+        v.insert(arr as usize, bytes as usize);
+    });
     arr
 }
 
@@ -4131,10 +4158,9 @@ pub extern "C" fn haxe_bytes_free(bytes: *mut HaxeBytes) {
         let b = &mut *bytes;
         match b.kind {
             HAXE_BYTES_KIND_VIEW => {
-                BYTES_DATA_VIEWS
-                    .lock()
-                    .unwrap()
-                    .retain(|_, ptr| *ptr != bytes as usize);
+                if !no_bytes_data_views() {
+                    update_bytes_data_views(|v| v.retain(|_, ptr| *ptr != bytes as usize));
+                }
                 let owner = b.owner;
                 let _ = Box::from_raw(bytes); // drop view struct
                 if !owner.is_null() {
@@ -4147,10 +4173,9 @@ pub extern "C" fn haxe_bytes_free(bytes: *mut HaxeBytes) {
             HAXE_BYTES_KIND_MMAP => {
                 b.refcount -= 1;
                 if b.refcount <= 0 {
-                    BYTES_DATA_VIEWS
-                        .lock()
-                        .unwrap()
-                        .retain(|_, ptr| *ptr != bytes as usize);
+                    if !no_bytes_data_views() {
+                        update_bytes_data_views(|v| v.retain(|_, ptr| *ptr != bytes as usize));
+                    }
                     let boxed = Box::from_raw(bytes);
                     #[cfg(unix)]
                     {
@@ -4169,10 +4194,9 @@ pub extern "C" fn haxe_bytes_free(bytes: *mut HaxeBytes) {
                 // Malloc backend (legacy default).
                 b.refcount -= 1;
                 if b.refcount <= 0 {
-                    BYTES_DATA_VIEWS
-                        .lock()
-                        .unwrap()
-                        .retain(|_, ptr| *ptr != bytes as usize);
+                    if !no_bytes_data_views() {
+                        update_bytes_data_views(|v| v.retain(|_, ptr| *ptr != bytes as usize));
+                    }
                     let boxed = Box::from_raw(bytes);
                     if !boxed.ptr.is_null() && boxed.cap > 0 {
                         let layout = std::alloc::Layout::from_size_align(boxed.cap, 1).unwrap();

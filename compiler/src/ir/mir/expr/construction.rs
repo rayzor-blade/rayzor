@@ -505,12 +505,12 @@ impl<'a> HirToMirContext<'a> {
         };
 
         if is_array {
-            // 32 bytes = 4 x 8 for ptr, len, cap, elem_size. Heap, not stack:
-            // array pointers escape the creating function (stored in fields,
-            // returned from functions).
-            let array_ptr = self.build_heap_alloc(32)?;
+            // 40 bytes = 5 x 8 for ptr, len, cap, elem_size, flags. Heap, not
+            // stack: array pointers escape the creating function (stored in
+            // fields, returned from functions).
+            let array_ptr = self.build_heap_alloc(40)?;
 
-            // Empty array: ptr=null, len=0, cap=0, elem_size=8.
+            // Empty array: ptr=null, len=0, cap=0, elem_size=8, flags=0.
             if let Some(zero_i64) = self.builder.build_const(IrValue::I64(0)) {
                 // Zero out ptr field (offset 0)
                 if let Some(index_0) = self.builder.build_const(IrValue::I32(0)) {
@@ -548,6 +548,15 @@ impl<'a> HirToMirContext<'a> {
                         {
                             self.builder.build_store(elem_size_field, elem_size_val);
                         }
+                    }
+                }
+                // Zero out flags field (offset 32)
+                if let Some(index_4) = self.builder.build_const(IrValue::I32(4)) {
+                    if let Some(flags_field) =
+                        self.builder
+                            .build_gep(array_ptr, vec![index_4], IrType::I64)
+                    {
+                        self.builder.build_store(flags_field, zero_i64);
                     }
                 }
             }

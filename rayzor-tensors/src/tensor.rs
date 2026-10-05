@@ -1405,7 +1405,7 @@ pub unsafe extern "C" fn rayzor_tensor_dtype(tensor_ptr: i64) -> i64 {
 /// tensor.shape() -> i64 (returns pointer to a heap-allocated HaxeArray of Int)
 ///
 /// Allocates a HaxeArray struct + data buffer, copies shape dims as i64 values.
-/// HaxeArray layout: { ptr: *mut u8, len: usize, cap: usize, elem_size: usize }
+/// HaxeArray layout: { ptr: *mut u8, len: usize, cap: usize, elem_size: usize, flags: usize }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_shape(tensor_ptr: i64) -> i64 {
     unsafe {
@@ -1416,8 +1416,8 @@ pub unsafe extern "C" fn rayzor_tensor_shape(tensor_ptr: i64) -> i64 {
         let ndim = t.ndim;
         let shape_slice = std::slice::from_raw_parts(t.shape, ndim);
 
-        // Allocate HaxeArray struct (4 fields x 8 bytes = 32 bytes)
-        let arr_ptr = malloc(32) as *mut usize;
+        // Allocate HaxeArray struct (5 fields x 8 bytes = 40 bytes)
+        let arr_ptr = malloc(40) as *mut usize;
         if arr_ptr.is_null() {
             return 0;
         }
@@ -1442,6 +1442,7 @@ pub unsafe extern "C" fn rayzor_tensor_shape(tensor_ptr: i64) -> i64 {
         *arr_ptr.add(1) = ndim; // len
         *arr_ptr.add(2) = cap; // cap
         *arr_ptr.add(3) = elem_size; // elem_size
+        *arr_ptr.add(4) = 0; // flags
 
         arr_ptr as i64
     }

@@ -612,6 +612,7 @@ fn alloc_haxe_array() -> *mut u8 {
         len: 0,
         cap: 0,
         elem_size: 8,
+        flags: 0,
     });
     Box::into_raw(arr) as *mut u8
 }
