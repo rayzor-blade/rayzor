@@ -744,8 +744,12 @@ impl<'a> AstLowering<'a> {
                 typed_iterator = self.lower_expression(&call)?;
             }
 
-            // Determine the element type from the iterator
-            let (element_type, key_type) = self.infer_iterator_types(&typed_iterator)?;
+            // Determine the element type from the iterator, as a `for`
+            // statement over the same iterable would.
+            let (mut element_type, key_type) = self.infer_iterator_types(&typed_iterator)?;
+            if element_type == self.context.type_table.borrow().dynamic_type() {
+                element_type = self.infer_element_type_from_iterable(&typed_iterator);
+            }
 
             // Create symbol for the loop variable
             let var_name = self.context.intern_string(&for_part.var);
@@ -838,8 +842,12 @@ impl<'a> AstLowering<'a> {
                 typed_iterator = self.lower_expression(&call)?;
             }
 
-            // Determine the element type from the iterator
-            let (element_type, key_type) = self.infer_iterator_types(&typed_iterator)?;
+            // Determine the element type from the iterator, as a `for`
+            // statement over the same iterable would.
+            let (mut element_type, key_type) = self.infer_iterator_types(&typed_iterator)?;
+            if element_type == self.context.type_table.borrow().dynamic_type() {
+                element_type = self.infer_element_type_from_iterable(&typed_iterator);
+            }
 
             // Create symbol for the loop variable
             let var_name = self.context.intern_string(&for_part.var);
