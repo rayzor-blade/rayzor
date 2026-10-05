@@ -1297,10 +1297,27 @@ impl TypeTable {
             }
         }
 
-        // Not found, cache as dynamic (sentinel for None)
-        self.type_cache.insert(cache_key, self.dynamic_type());
+        // Not cached: the abstract may simply not be lowered yet.
         None
     }
+}
+
+/// Abstracts whose values are machine handles or vector registers: never
+/// boxed as a `Null<T>` primitive, whatever their underlying type.
+pub fn is_handle_abstract(qualified_name: &str) -> bool {
+    matches!(
+        qualified_name,
+        "rayzor.Usize"
+            | "rayzor.Ptr"
+            | "rayzor.Ref"
+            | "rayzor.Box"
+            | "rayzor.Atomic"
+            | "rayzor.SIMD4f"
+            | "rayzor.SIMD4i32"
+            | "rayzor.SIMD16i8"
+            | "rayzor.SIMD8i32"
+            | "rayzor.SIMD32i8"
+    )
 }
 
 impl Default for TypeTable {

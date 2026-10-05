@@ -887,19 +887,46 @@ impl<'a> AstLowering<'a> {
         })
     }
 
-    /// Haxe types `?x:Int` -- optional, no default -- as `Null<Int>`; a
-    /// parameter with a default keeps its basic type, as does a reference.
+    /// Haxe types `?x:Int` -- optional, no default -- as `Null<Int>`, and so
+    /// an abstract over a basic type (`?f:EnumFlags<E>`); a parameter with a
+    /// default keeps its basic type, as does a reference.
     pub(crate) fn optional_param_type(&self, param: &FunctionParam, ty: TypeId) -> TypeId {
         if !param.optional || param.default_value.is_some() {
             return ty;
         }
         let mut tt = self.context.type_table.borrow_mut();
-        match tt.get(ty).map(|t| &t.kind) {
-            Some(crate::tast::core::TypeKind::Int)
-            | Some(crate::tast::core::TypeKind::Float)
-            | Some(crate::tast::core::TypeKind::Bool) => tt.create_optional_type(ty),
-            _ => ty,
+        let mut cur = ty;
+        // Bounded: abstracts and aliases can chain.
+        for _ in 0..8 {
+            match tt.get(cur).map(|t| t.kind.clone()) {
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool) => {
+                    return tt.create_optional_type(ty);
+                }
+                Some(TypeKind::Abstract {
+                    underlying,
+                    symbol_id,
+                    ..
+                }) => {
+                    let qn = self
+                        .context
+                        .symbol_table
+                        .get_symbol(symbol_id)
+                        .and_then(|s| s.qualified_name)
+                        .and_then(|q| self.context.string_interner.get(q));
+                    if qn.is_some_and(is_handle_abstract) {
+                        return ty;
+                    }
+                    // An instantiation (`EnumFlags<E>`) carries no underlying.
+                    match underlying.or_else(|| tt.resolve_abstract_underlying(symbol_id)) {
+                        Some(u) => cur = u,
+                        None => return ty,
+                    }
+                }
+                Some(TypeKind::TypeAlias { target_type, .. }) => cur = target_type,
+                _ => return ty,
+            }
         }
+        ty
     }
 
     pub(crate) fn lower_parameter(

@@ -1638,30 +1638,18 @@ impl<'a> HirToMirContext<'a> {
                     symbol_id,
                     ..
                 } => {
-                    // Pointer-sized abstracts (Usize/Ptr/Ref/Box) and SIMD
-                    // vectors carry machine addresses / wide registers; never
-                    // int-box them even if a stray underlying is present.
-                    let name = self
+                    let qn = self
                         .symbol_table
                         .get_symbol(symbol_id)
-                        .and_then(|sym| self.string_interner.get(sym.name))
-                        .unwrap_or("");
-                    if matches!(
-                        name,
-                        "Usize"
-                            | "Ptr"
-                            | "Ref"
-                            | "Box"
-                            | "SIMD4f"
-                            | "SIMD4i32"
-                            | "SIMD16i8"
-                            | "SIMD8i32"
-                            | "SIMD32i8"
-                            | "Atomic"
-                    ) {
+                        .and_then(|sym| sym.qualified_name)
+                        .and_then(|q| self.string_interner.get(q));
+                    if qn.is_some_and(crate::tast::core::is_handle_abstract) {
                         return false;
                     }
-                    match underlying {
+                    // An instantiation (`EnumFlags<E>`) carries no underlying.
+                    match underlying
+                        .or_else(|| self.type_table.resolve_abstract_underlying(symbol_id))
+                    {
                         Some(u) => ty = u,
                         None => return false,
                     }
