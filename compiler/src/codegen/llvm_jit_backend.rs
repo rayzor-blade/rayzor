@@ -3181,6 +3181,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         self.block_map.clear();
         self.phi_map.clear();
         self.alloca_ids.clear();
+        // Keyed by IrId, which every function numbers from zero.
+        self.gep_byte_offsets.clear();
+        self.gep_results.clear();
         self.current_sret_ptr = None;
         self.current_env_param = None;
 
