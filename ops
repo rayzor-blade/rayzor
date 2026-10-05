@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1791198820,"nonce":"ZY+wOFQLJL8Vq00CjsDNLrHnepg=","message":"Fixed in d2d53779 (not yet pushed). Run 37298852052 made green by deleting its two stale github-pages artifacts and re-running (attempt 3: success).","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1791198820,"nonce":"8DZ5bNpo24gJSpYGagswwTA1CuE=","status":2}]}
