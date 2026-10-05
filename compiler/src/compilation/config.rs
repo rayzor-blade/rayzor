@@ -70,13 +70,19 @@ impl CompilationConfig {
             }
         }
 
-        // 2. Walk up from the binary location looking for haxe-std/
-        if let Ok(exe) = std::env::current_exe() {
+        // 2. Walk up from the binary location looking for haxe-std/. Linux's
+        // current_exe() resolves symlinks, so a binary symlinked out of its
+        // checkout is also searched from the path it was invoked by (argv[0]).
+        let invoked = std::env::args_os()
+            .next()
+            .map(PathBuf::from)
+            .filter(|p| p.parent().is_some_and(|d| !d.as_os_str().is_empty()));
+        for exe in std::env::current_exe().ok().into_iter().chain(invoked) {
             if let Some(mut dir) = exe.parent().map(|p| p.to_path_buf()) {
                 for _ in 0..5 {
                     for name in &["haxe-std", "compiler/haxe-std"] {
                         let candidate = dir.join(name);
-                        if candidate.is_dir() {
+                        if candidate.is_dir() && !paths.contains(&candidate) {
                             paths.push(candidate);
                         }
                     }

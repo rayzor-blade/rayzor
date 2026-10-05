@@ -832,7 +832,12 @@ fn ensure_jemalloc() {
         Ok(v) if !v.is_empty() => format!("{v}:{lib}"),
         _ => lib.to_string(),
     };
-    let _ = std::process::Command::new(exe)
+    let mut cmd = std::process::Command::new(exe);
+    // Keep the invoked argv[0]: stdlib discovery searches from it.
+    if let Some(arg0) = std::env::args_os().next() {
+        cmd.arg0(arg0);
+    }
+    let _ = cmd
         .args(std::env::args_os().skip(1))
         .env("LD_PRELOAD", preload)
         .env("RAYZOR_JEMALLOC_ACTIVE", "1")
