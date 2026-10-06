@@ -119,10 +119,23 @@ impl ReificationEngine {
                 is_optional,
             } => {
                 let new_base = Self::process_expr(base, env)?;
+                let field = if let Some(name) = field.strip_prefix('$') {
+                    match env.get(name) {
+                        Some(MacroValue::String(value)) => value.to_string(),
+                        _ => {
+                            return Err(MacroError::ReificationError {
+                                message: format!("field splice '${name}' requires a String"),
+                                location: ast_bridge::span_to_location(expr.span),
+                            });
+                        }
+                    }
+                } else {
+                    field.clone()
+                };
                 Ok(Expr {
                     kind: ExprKind::Field {
                         expr: Box::new(new_base),
-                        field: field.clone(),
+                        field,
                         is_optional: *is_optional,
                     },
                     span: expr.span,

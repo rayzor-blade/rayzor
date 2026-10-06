@@ -4,7 +4,9 @@
 //! as AST bodies. The macro interpreter consults this registry as a fallback when
 //! hardcoded class dispatch (Std, Math, etc.) doesn't match.
 
-use parser::{ClassFieldKind, Expr, FunctionParam, HaxeFile, Modifier, TypeDeclaration};
+use parser::{
+    Access, ClassFieldKind, Expr, FunctionParam, HaxeFile, Metadata, Modifier, TypeDeclaration,
+};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -34,6 +36,21 @@ pub struct ClassInfo {
     pub static_vars: Vec<FieldVarInfo>,
 }
 
+struct TypeDefinition {
+    module: String,
+    metadata: Vec<Metadata>,
+    fields: Vec<FieldDefinition>,
+    is_abstract: bool,
+    is_enum_abstract: bool,
+}
+
+struct FieldDefinition {
+    name: String,
+    metadata: Vec<Metadata>,
+    is_static: bool,
+    is_enum_value: bool,
+}
+
 /// Registry of all known classes for macro interpretation.
 ///
 /// Built from parsed HaxeFiles (stdlib + imports + user files) before macro expansion.
@@ -47,6 +64,7 @@ pub struct ClassRegistry {
     classes: BTreeMap<String, ClassInfo>,
     /// short_name → qualified_name (for unambiguous lookups)
     short_name_index: BTreeMap<String, String>,
+    type_definitions: BTreeMap<String, Arc<TypeDefinition>>,
     /// Static variables' current values, `Class.field` → value. Shared by
     /// every macro call of the compile, as macro-time statics are.
     statics: MacroStatics,
@@ -57,6 +75,7 @@ impl ClassRegistry {
         Self {
             classes: BTreeMap::new(),
             short_name_index: BTreeMap::new(),
+            type_definitions: BTreeMap::new(),
             statics: MacroStatics::default(),
         }
     }
@@ -109,6 +128,76 @@ impl ClassRegistry {
             Some(pkg) if !pkg.path.is_empty() => format!("{}.", pkg.path.join(".")),
             _ => String::new(),
         };
+
+        let module_name = std::path::Path::new(&file.filename)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        for decl in &file.declarations {
+            let (name, access, metadata, fields, is_abstract, is_enum_abstract) = match decl {
+                TypeDeclaration::Class(c) => (
+                    &c.name,
+                    c.access,
+                    &c.meta,
+                    c.fields.as_slice(),
+                    false,
+                    false,
+                ),
+                TypeDeclaration::Interface(c) => (
+                    &c.name,
+                    c.access,
+                    &c.meta,
+                    c.fields.as_slice(),
+                    false,
+                    false,
+                ),
+                TypeDeclaration::Abstract(a) => (
+                    &a.name,
+                    a.access,
+                    &a.meta,
+                    a.fields.as_slice(),
+                    true,
+                    a.is_enum_abstract,
+                ),
+                TypeDeclaration::Typedef(t) => (&t.name, t.access, &t.meta, &[][..], false, false),
+                TypeDeclaration::Enum(e) => (&e.name, e.access, &e.meta, &[][..], false, false),
+                _ => continue,
+            };
+            let definition = Arc::new(TypeDefinition {
+                module: format!("{package_prefix}{module_name}"),
+                metadata: metadata.clone(),
+                is_abstract,
+                is_enum_abstract,
+                fields: fields
+                    .iter()
+                    .map(|field| {
+                        let (name, is_enum_value) = match &field.kind {
+                            ClassFieldKind::Function(f) => (&f.name, false),
+                            ClassFieldKind::Var { name, .. }
+                            | ClassFieldKind::Final { name, .. } => (
+                                name,
+                                is_enum_abstract && !field.modifiers.contains(&Modifier::Static),
+                            ),
+                            ClassFieldKind::Property { name, .. } => (name, false),
+                        };
+                        FieldDefinition {
+                            name: name.clone(),
+                            metadata: field.meta.clone(),
+                            is_static: field.modifiers.contains(&Modifier::Static) || is_enum_value,
+                            is_enum_value,
+                        }
+                    })
+                    .collect(),
+            });
+            self.type_definitions
+                .insert(format!("{package_prefix}{name}"), definition.clone());
+            let module_path = if access == Some(Access::Private) {
+                format!("{package_prefix}_{module_name}.{name}")
+            } else {
+                format!("{package_prefix}{module_name}.{name}")
+            };
+            self.type_definitions.insert(module_path, definition);
+        }
 
         for decl in &file.declarations {
             if let TypeDeclaration::Class(class) = decl {
@@ -197,6 +286,125 @@ impl ClassRegistry {
         }
     }
 
+    pub fn enrich_type_view(&self, view: super::value::MacroValue) -> super::value::MacroValue {
+        use super::value::MacroValue as V;
+        let V::Object(mut view) = view else {
+            return view;
+        };
+        let Some(name) = view.get("name").and_then(V::as_string) else {
+            return V::Object(view);
+        };
+        let mut path = match view.get("pack") {
+            Some(V::Array(pack)) => pack.iter().map(V::to_display_string).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        path.push(name.to_string());
+        let Some(definition) = self.type_definitions.get(&path.join(".")) else {
+            return V::Object(view);
+        };
+        let view = Arc::make_mut(&mut view);
+        view.insert(
+            "module".to_string(),
+            V::String(Arc::from(definition.module.as_str())),
+        );
+        let mut metadata = metadata_entries(&definition.metadata);
+        if let Some(V::Object(meta)) = view.get("meta")
+            && let Some(V::Array(entries)) = meta.get("__meta__")
+        {
+            for entry in entries.iter() {
+                let name = match entry {
+                    V::Object(entry) => entry.get("name"),
+                    _ => None,
+                };
+                if !metadata.iter().any(|candidate| matches!(candidate, V::Object(candidate) if candidate.get("name") == name)) {
+                    metadata.push(entry.clone());
+                }
+            }
+        }
+        if definition.is_enum_abstract {
+            metadata.push(metadata_entry(":enum"));
+        }
+        view.insert("meta".to_string(), metadata_access(metadata));
+        let mut implementation_fields = Vec::new();
+        for (key, is_static) in [("fields", false), ("statics", true)] {
+            let typed_fields = match view.get(key) {
+                Some(V::Object(reference)) => match reference.get("__ref__") {
+                    Some(V::Array(fields)) => fields.as_ref().clone(),
+                    _ => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+            let mut fields = Vec::new();
+            for field in definition
+                .fields
+                .iter()
+                .filter(|f| f.is_static == is_static)
+            {
+                let mut entry = typed_fields
+                    .iter()
+                    .find_map(|v| match v {
+                        V::Object(o)
+                            if o.get("name").and_then(V::as_string) == Some(&field.name) =>
+                        {
+                            Some(o.as_ref().clone())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                entry.insert(
+                    "name".to_string(),
+                    V::String(Arc::from(field.name.as_str())),
+                );
+                let mut metadata = metadata_entries(&field.metadata);
+                if definition.is_abstract {
+                    metadata.push(metadata_entry(":impl"));
+                }
+                if field.is_enum_value {
+                    metadata.push(metadata_entry(":enum"));
+                }
+                entry.insert("meta".to_string(), metadata_access(metadata));
+                let entry = V::Object(Arc::new(entry));
+                if definition.is_abstract {
+                    implementation_fields.push(entry.clone());
+                }
+                fields.push(entry);
+            }
+            for entry in typed_fields {
+                let name = match &entry {
+                    V::Object(entry) => entry.get("name").and_then(V::as_string),
+                    _ => None,
+                };
+                if !definition
+                    .fields
+                    .iter()
+                    .any(|f| f.is_static == is_static && Some(f.name.as_str()) == name)
+                {
+                    if definition.is_abstract {
+                        implementation_fields.push(entry.clone());
+                    }
+                    fields.push(entry);
+                }
+            }
+            view.insert(key.to_string(), reference(V::Array(Arc::new(fields))));
+        }
+        if definition.is_abstract {
+            let mut implementation = view.clone();
+            implementation.insert(
+                "statics".to_string(),
+                reference(V::Array(Arc::new(implementation_fields))),
+            );
+            implementation.insert(
+                "fields".to_string(),
+                reference(V::Array(Arc::new(Vec::new()))),
+            );
+            view.insert(
+                "impl".to_string(),
+                reference(V::Object(Arc::new(implementation))),
+            );
+        }
+        V::Object(Arc::new(view.clone()))
+    }
+
     /// Register all classes from multiple HaxeFiles.
     pub fn register_files(&mut self, files: &[HaxeFile]) {
         for file in files {
@@ -242,4 +450,54 @@ impl ClassRegistry {
     pub fn iter_class_names(&self) -> impl Iterator<Item = &str> {
         self.classes.keys().map(|s| s.as_str())
     }
+}
+
+fn reference(value: super::value::MacroValue) -> super::value::MacroValue {
+    super::value::MacroValue::Object(Arc::new(BTreeMap::from([("__ref__".to_string(), value)])))
+}
+
+fn metadata_entry(name: &str) -> super::value::MacroValue {
+    use super::value::MacroValue as V;
+    V::Object(Arc::new(BTreeMap::from([
+        ("name".to_string(), V::String(Arc::from(name))),
+        ("params".to_string(), V::Array(Arc::new(Vec::new()))),
+    ])))
+}
+
+fn metadata_entries(metadata: &[Metadata]) -> Vec<super::value::MacroValue> {
+    use super::value::MacroValue as V;
+    metadata
+        .iter()
+        .map(|m| {
+            let name = if m.compile_time {
+                format!(":{}", m.name.trim_start_matches(':'))
+            } else {
+                m.name.clone()
+            };
+            V::Object(Arc::new(BTreeMap::from([
+                ("name".to_string(), V::String(Arc::from(name))),
+                (
+                    "params".to_string(),
+                    V::Array(Arc::new(
+                        m.params
+                            .iter()
+                            .map(|p| V::Expr(Arc::new(p.clone())))
+                            .collect(),
+                    )),
+                ),
+                (
+                    "pos".to_string(),
+                    V::Position(super::ast_bridge::span_to_location(m.span)),
+                ),
+            ])))
+        })
+        .collect()
+}
+
+fn metadata_access(entries: Vec<super::value::MacroValue>) -> super::value::MacroValue {
+    use super::value::MacroValue as V;
+    V::Object(Arc::new(BTreeMap::from([(
+        "__meta__".to_string(),
+        V::Array(Arc::new(entries)),
+    )])))
 }

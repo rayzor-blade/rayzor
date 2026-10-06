@@ -1973,6 +1973,51 @@ impl MacroInterpreter {
                 self.expr_tools(method, args, location).map(Some)
             }
             "haxe.macro.TypeTools" | "TypeTools" => match method {
+                "map" => {
+                    let Some(ctx) = self.macro_context.as_mut() else {
+                        return Err(MacroError::NeedsTyper { location });
+                    };
+                    let id = args
+                        .first()
+                        .and_then(|v| ctx.coerce_type_value(v))
+                        .ok_or_else(|| MacroError::TypeError {
+                            message: "TypeTools.map expects a Type".to_string(),
+                            location,
+                        })?;
+                    let children = ctx
+                        .type_children(id)
+                        .ok_or(MacroError::NeedsTyper { location })?;
+                    let mapper = args.get(1).cloned().unwrap_or(MacroValue::Null);
+                    let mut mapped = Vec::with_capacity(children.len());
+                    for child in children {
+                        let value = self.call_value(
+                            mapper.clone(),
+                            vec![MacroValue::Type(child)],
+                            location,
+                        )?;
+                        let child = self
+                            .macro_context
+                            .as_mut()
+                            .and_then(|ctx| ctx.coerce_type_value(&value))
+                            .ok_or_else(|| MacroError::TypeError {
+                                message: "TypeTools.map callback must return a Type".to_string(),
+                                location,
+                            })?;
+                        mapped.push(child);
+                    }
+                    let rebuilt = self
+                        .macro_context
+                        .as_mut()
+                        .and_then(|ctx| ctx.rebuild_type(id, &mapped))
+                        .ok_or(MacroError::NeedsTyper { location })?;
+                    Ok(Some(MacroValue::Type(rebuilt)))
+                }
+                "follow" | "followWithAbstracts" | "applyTypeParameters" => {
+                    let Some(ctx) = self.macro_context.as_mut() else {
+                        return Err(MacroError::NeedsTyper { location });
+                    };
+                    ctx.dispatch(method, args, location).map(Some)
+                }
                 "toComplexType" => {
                     let result = match self.macro_context.as_mut() {
                         Some(ctx) => ctx.dispatch("toComplexType", args, location)?,
@@ -2232,12 +2277,48 @@ impl MacroInterpreter {
         }
 
         match base {
+            MacroValue::Type(id) if method == "get" && args.is_empty() => {
+                let view = self
+                    .macro_context
+                    .as_mut()
+                    .and_then(|ctx| ctx.type_ref_view(*id))
+                    .ok_or(MacroError::NeedsTyper { location })?;
+                Ok(self
+                    .class_registry
+                    .as_ref()
+                    .map_or_else(|| view.clone(), |r| r.enrich_type_view(view.clone())))
+            }
+            MacroValue::Type(_)
+                if matches!(
+                    method,
+                    "follow"
+                        | "followWithAbstracts"
+                        | "applyTypeParameters"
+                        | "map"
+                        | "toString"
+                        | "toComplexType"
+                ) =>
+            {
+                let mut all = vec![base.clone()];
+                all.extend(args);
+                self.try_static_call("haxe.macro.TypeTools", method, &all, location)?
+                    .ok_or_else(|| MacroError::UnsupportedOperation {
+                        operation: format!("TypeTools.{}", method),
+                        location,
+                    })
+            }
             MacroValue::Array(arr) => self.array_method(arr.as_ref(), method, args, location),
             MacroValue::Object(obj) => {
                 // Check if the field is a function
                 if let Some(MacroValue::Function(func)) = obj.get(method) {
                     self.call_function(func.as_ref(), args, location)
-                } else if method == "get" && args.is_empty() && !obj.contains_key("get") {
+                } else if method == "get" && args.is_empty() && obj.contains_key("__ref__") {
+                    Ok(obj["__ref__"].clone())
+                } else if method == "get"
+                    && args.is_empty()
+                    && !obj.contains_key("get")
+                    && !obj.contains_key("__meta__")
+                {
                     // `Ref<T>.get()`: the interpreter holds the referenced
                     // value itself.
                     Ok(base.clone())
@@ -3199,6 +3280,15 @@ impl MacroInterpreter {
                         .map(|a| walk(interp, a, counter))
                         .collect::<Result<Vec<_>, _>>()?,
                 ),
+                ExprKind::Object(fields) => ExprKind::Object(
+                    fields
+                        .into_iter()
+                        .map(|mut field| {
+                            field.expr = walk(interp, field.expr, counter)?;
+                            Ok(field)
+                        })
+                        .collect::<Result<Vec<_>, MacroError>>()?,
+                ),
                 other => other,
             };
             Ok(e)
@@ -3585,6 +3675,8 @@ fn expr_enum_ctor(name: &str) -> Option<(&'static str, &'static str)> {
         "TInst" => Some(("Type", "TInst")),
         "TEnum" => Some(("Type", "TEnum")),
         "TType" => Some(("Type", "TType")),
+        "TAbstract" => Some(("Type", "TAbstract")),
+        "TAnonymous" => Some(("Type", "TAnonymous")),
         "TFun" => Some(("Type", "TFun")),
         "TMono" => Some(("Type", "TMono")),
         "TDynamic" => Some(("Type", "TDynamic")),

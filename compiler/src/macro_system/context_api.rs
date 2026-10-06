@@ -63,6 +63,21 @@ pub trait MacroTyper {
     /// `TType(td, [args])`.
     fn type_adt_view(&mut self, id: TypeId) -> Option<(String, Vec<super::value::MacroValue>)>;
 
+    /// The definition behind a macro type constructor's `Ref` payload.
+    fn type_ref_view(&mut self, id: TypeId) -> Option<MacroValue>;
+
+    /// Follow typedefs and monomorphs, optionally following abstract storage.
+    fn follow_type(&mut self, id: TypeId, once: bool, abstracts: bool) -> TypeId;
+
+    /// Substitute the declared parameters of a macro type definition.
+    fn apply_type_parameters(&mut self, id: TypeId, params: &[TypeId], args: &[TypeId]) -> TypeId;
+
+    /// Direct children visited by `TypeTools.map`, in constructor order.
+    fn type_children(&mut self, id: TypeId) -> Vec<TypeId>;
+
+    /// Rebuild a type with mapped children, preserving its declaration data.
+    fn rebuild_type(&mut self, id: TypeId, children: &[TypeId]) -> TypeId;
+
     /// Rebuild a typedef instance from its handle and fresh arguments —
     /// the reconstruction half of the round trip above.
     fn instantiate_alias(&mut self, def: TypeId, args: Vec<TypeId>) -> Option<TypeId>;
@@ -367,6 +382,21 @@ impl MacroContext {
     pub fn project_type(&mut self, id: TypeId) -> Option<(String, Vec<MacroValue>)> {
         let t = self.typer.as_mut()?;
         t.get().type_adt_view(id)
+    }
+
+    pub fn type_ref_view(&mut self, id: TypeId) -> Option<MacroValue> {
+        if let Some(&bound) = self.mono_bindings.get(&id) {
+            return Some(MacroValue::Type(bound));
+        }
+        self.typer.as_mut()?.get().type_ref_view(id)
+    }
+
+    pub fn type_children(&mut self, id: TypeId) -> Option<Vec<TypeId>> {
+        Some(self.typer.as_mut()?.get().type_children(id))
+    }
+
+    pub fn rebuild_type(&mut self, id: TypeId, children: &[TypeId]) -> Option<TypeId> {
+        Some(self.typer.as_mut()?.get().rebuild_type(id, children))
     }
 
     /// A `haxe.macro.Type` value in whatever shape a macro produced it,
@@ -875,6 +905,90 @@ impl MacroContext {
             // site is not tracked. A macro that branches on it takes its
             // unknown path instead of failing to expand at all.
             "getExpectedType" => Ok(MacroValue::Null),
+            "follow" | "followWithAbstracts" => {
+                let id = args
+                    .first()
+                    .and_then(|v| self.coerce_type_value(v))
+                    .ok_or_else(|| MacroError::ContextError {
+                        method: method.to_string(),
+                        message: "follow expects a Type argument".to_string(),
+                        location,
+                    })?;
+                let mut id = id;
+                let mut seen = std::collections::BTreeSet::new();
+                while seen.insert(id) {
+                    let Some(&bound) = self.mono_bindings.get(&id) else {
+                        break;
+                    };
+                    id = bound;
+                }
+                let Some(typer) = self.typer.as_mut() else {
+                    return Err(MacroError::NeedsTyper { location });
+                };
+                let once = matches!(args.get(1), Some(MacroValue::Bool(true)));
+                Ok(MacroValue::Type(typer.get().follow_type(
+                    id,
+                    once,
+                    method == "followWithAbstracts",
+                )))
+            }
+            "applyTypeParameters" => {
+                let Some(value) = args.first() else {
+                    return Err(MacroError::ContextError {
+                        method: method.to_string(),
+                        message: "applyTypeParameters expects a Type and two arrays".to_string(),
+                        location,
+                    });
+                };
+                let Some(id) = self.coerce_type_value(value) else {
+                    return Err(MacroError::ContextError {
+                        method: method.to_string(),
+                        message: "applyTypeParameters expects a Type".to_string(),
+                        location,
+                    });
+                };
+                let (Some(MacroValue::Array(params)), Some(MacroValue::Array(types))) =
+                    (args.get(1), args.get(2))
+                else {
+                    return Err(MacroError::ContextError {
+                        method: method.to_string(),
+                        message: "applyTypeParameters expects two arrays".to_string(),
+                        location,
+                    });
+                };
+                let params: Option<Vec<TypeId>> = params
+                    .iter()
+                    .map(|param| {
+                        let value = match param {
+                            MacroValue::Object(fields) => fields.get("t")?,
+                            other => other,
+                        };
+                        self.coerce_type_value(value)
+                    })
+                    .collect();
+                let types: Option<Vec<TypeId>> =
+                    types.iter().map(|t| self.coerce_type_value(t)).collect();
+                let (Some(params), Some(types)) = (params, types) else {
+                    return Err(MacroError::ContextError {
+                        method: method.to_string(),
+                        message: "invalid type parameters".to_string(),
+                        location,
+                    });
+                };
+                if params.len() != types.len() {
+                    return Err(MacroError::ContextError {
+                        method: method.to_string(),
+                        message: "type parameter count mismatch".to_string(),
+                        location,
+                    });
+                }
+                let Some(typer) = self.typer.as_mut() else {
+                    return Err(MacroError::NeedsTyper { location });
+                };
+                Ok(MacroValue::Type(
+                    typer.get().apply_type_parameters(id, &params, &types),
+                ))
+            }
             // `Context.toComplexType(t)` — the syntax form of a type. Built
             // from the type's source spelling, so a plain path converts and
             // anything with parameters, a function arrow or a structure gives

@@ -20,6 +20,44 @@ pub(crate) struct DeferredMacroTyper<'l, 'a> {
     pub lowering: &'l mut AstLowering<'a>,
 }
 
+impl DeferredMacroTyper<'_, '_> {
+    fn definition_target(&self, symbol: crate::tast::SymbolId) -> Option<TypeId> {
+        let table = self.lowering.context.type_table.borrow();
+        let sym = self.lowering.context.symbol_table.get_symbol(symbol)?;
+        match table.get(sym.type_id).map(|t| &t.kind) {
+            Some(crate::tast::TypeKind::Abstract { underlying, .. }) => *underlying,
+            Some(crate::tast::TypeKind::TypeAlias { target_type, .. }) => Some(*target_type),
+            _ => match sym.kind {
+                crate::tast::SymbolKind::Abstract => table.resolve_abstract_underlying(symbol),
+                crate::tast::SymbolKind::TypeAlias => Some(table.resolve_type_alias(symbol)),
+                _ => None,
+            },
+        }
+    }
+
+    fn definition_parameters(&self, symbol: crate::tast::SymbolId) -> Vec<TypeId> {
+        if let Some(params) = self
+            .lowering
+            .context
+            .symbol_table
+            .get_class_type_params(symbol)
+        {
+            return params.clone();
+        }
+        let table = self.lowering.context.type_table.borrow();
+        self.lowering
+            .context
+            .symbol_table
+            .get_symbol(symbol)
+            .and_then(|s| table.get(s.type_id))
+            .and_then(|t| match &t.kind {
+                crate::tast::TypeKind::TypeAlias { type_args, .. } => Some(type_args.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+}
+
 impl MacroTyper for DeferredMacroTyper<'_, '_> {
     fn type_expr_in_scope(&mut self, expr: &parser::Expr) -> Result<TypeId, String> {
         // A typing PROBE: lower the expression for its type and discard the
@@ -284,12 +322,14 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 "TAbstract".to_string(),
                 vec![V::Type(id), args_of(&[inner_type])],
             ),
-            TypeKind::Int
-            | TypeKind::Float
-            | TypeKind::Bool
-            | TypeKind::String
-            | TypeKind::Void
-            | TypeKind::Char => ("TAbstract".to_string(), vec![V::Type(id), args_of(&[])]),
+            TypeKind::String => ("TInst".to_string(), vec![V::Type(id), args_of(&[])]),
+            TypeKind::Array { element_type } => (
+                "TInst".to_string(),
+                vec![V::Type(id), args_of(&[element_type])],
+            ),
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Void | TypeKind::Char => {
+                ("TAbstract".to_string(), vec![V::Type(id), args_of(&[])])
+            }
             TypeKind::Function {
                 params,
                 return_type,
@@ -305,6 +345,362 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
             }
             _ => return None,
         })
+    }
+
+    fn type_ref_view(&mut self, id: TypeId) -> Option<crate::macro_system::value::MacroValue> {
+        use crate::macro_system::value::MacroValue as V;
+        use crate::tast::core::TypeKind;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        let kind = self
+            .lowering
+            .context
+            .type_table
+            .borrow()
+            .get(id)?
+            .kind
+            .clone();
+        if matches!(kind, TypeKind::Placeholder { .. } | TypeKind::Unknown) {
+            return Some(V::Null);
+        }
+        let (symbol, underlying, builtin) = match &kind {
+            TypeKind::Class { symbol_id, .. }
+            | TypeKind::Interface { symbol_id, .. }
+            | TypeKind::Enum { symbol_id, .. } => (Some(*symbol_id), None, None),
+            TypeKind::Abstract {
+                symbol_id,
+                underlying,
+                ..
+            } => (Some(*symbol_id), *underlying, None),
+            TypeKind::TypeAlias {
+                symbol_id,
+                target_type,
+                ..
+            } => (Some(*symbol_id), Some(*target_type), None),
+            TypeKind::Optional { inner_type } => (None, Some(*inner_type), Some("Null")),
+            TypeKind::Int => (None, Some(id), Some("Int")),
+            TypeKind::Float => (None, Some(id), Some("Float")),
+            TypeKind::Bool => (None, Some(id), Some("Bool")),
+            TypeKind::Void => (None, Some(id), Some("Void")),
+            TypeKind::String => (None, None, Some("String")),
+            TypeKind::Array { .. } => (None, None, Some("Array")),
+            TypeKind::Anonymous { .. } => (None, None, Some("")),
+            _ => return None,
+        };
+        let string = |s: &str| V::String(Arc::from(s));
+        let array = |values: Vec<V>| V::Array(Arc::new(values));
+        let object = |fields: BTreeMap<String, V>| V::Object(Arc::new(fields));
+        let reference = |value: V| object(BTreeMap::from([("__ref__".to_string(), value)]));
+        let qualified = symbol
+            .and_then(|s| self.lowering.context.symbol_table.get_symbol(s))
+            .and_then(|s| {
+                self.lowering
+                    .context
+                    .string_interner
+                    .get(s.qualified_name.unwrap_or(s.name))
+            })
+            .unwrap_or(builtin.unwrap_or(""));
+        let mut parts: Vec<&str> = qualified.split('.').collect();
+        let name = parts.pop().unwrap_or("");
+        let mut view = BTreeMap::from([
+            ("name".to_string(), string(name)),
+            (
+                "pack".to_string(),
+                array(parts.iter().map(|p| string(p)).collect()),
+            ),
+            ("module".to_string(), string(qualified)),
+            (
+                "isInterface".to_string(),
+                V::Bool(matches!(kind, TypeKind::Interface { .. })),
+            ),
+        ]);
+        let mut metadata = Vec::new();
+        if matches!(
+            kind,
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Void
+        ) {
+            for name in [":coreType", ":notNull"] {
+                metadata.push(object(BTreeMap::from([("name".to_string(), string(name))])));
+            }
+        } else if symbol
+            .and_then(|s| self.lowering.context.symbol_table.get_symbol(s))
+            .is_some_and(|s| {
+                s.flags
+                    .contains(crate::tast::symbols::SymbolFlags::NOT_NULL)
+            })
+        {
+            metadata.push(object(BTreeMap::from([(
+                "name".to_string(),
+                string(":notNull"),
+            )])));
+        }
+        view.insert(
+            "meta".to_string(),
+            object(BTreeMap::from([("__meta__".to_string(), array(metadata))])),
+        );
+        let params = symbol
+            .map(|s| self.definition_parameters(s))
+            .unwrap_or_default();
+        view.insert(
+            "params".to_string(),
+            array(
+                params
+                    .iter()
+                    .map(|&t| {
+                        object(BTreeMap::from([
+                            ("name".to_string(), string(&self.type_display(t))),
+                            ("t".to_string(), V::Type(t)),
+                        ]))
+                    })
+                    .collect(),
+            ),
+        );
+        let underlying = symbol
+            .and_then(|s| self.definition_target(s))
+            .or(underlying);
+        view.insert(
+            "type".to_string(),
+            underlying.map(V::Type).unwrap_or(V::Null),
+        );
+        let mut fields = Vec::new();
+        let mut statics = Vec::new();
+        if let Some(symbol) = symbol {
+            let members = self
+                .lowering
+                .class_fields
+                .get(&symbol)
+                .cloned()
+                .unwrap_or_default();
+            for (name, member, is_static) in members {
+                let Some(sym) = self.lowering.context.symbol_table.get_symbol(member) else {
+                    continue;
+                };
+                let entry = object(BTreeMap::from([
+                    (
+                        "name".to_string(),
+                        string(
+                            self.lowering
+                                .context
+                                .string_interner
+                                .get(name)
+                                .unwrap_or(""),
+                        ),
+                    ),
+                    ("type".to_string(), V::Type(sym.type_id)),
+                    (
+                        "meta".to_string(),
+                        object(BTreeMap::from([(
+                            "__meta__".to_string(),
+                            array(Vec::new()),
+                        )])),
+                    ),
+                ]));
+                if is_static {
+                    statics.push(entry);
+                } else {
+                    fields.push(entry);
+                }
+            }
+        } else if let TypeKind::Anonymous { fields: members } = &kind {
+            fields.extend(members.iter().map(|f| {
+                object(BTreeMap::from([
+                    (
+                        "name".to_string(),
+                        string(
+                            self.lowering
+                                .context
+                                .string_interner
+                                .get(f.name)
+                                .unwrap_or(""),
+                        ),
+                    ),
+                    ("type".to_string(), V::Type(f.type_id)),
+                ]))
+            }));
+        }
+        let fields = array(fields);
+        view.insert(
+            "fields".to_string(),
+            if matches!(kind, TypeKind::Anonymous { .. }) {
+                fields
+            } else {
+                reference(fields)
+            },
+        );
+        view.insert("statics".to_string(), reference(array(statics)));
+        Some(object(view))
+    }
+
+    fn follow_type(&mut self, id: TypeId, once: bool, abstracts: bool) -> TypeId {
+        use crate::tast::core::TypeKind;
+        let mut current = id;
+        let mut seen = std::collections::BTreeSet::new();
+        while seen.insert(current) {
+            let kind = self
+                .lowering
+                .context
+                .type_table
+                .borrow()
+                .get(current)
+                .map(|t| t.kind.clone());
+            let (next, parameterization) = match kind {
+                Some(TypeKind::TypeAlias {
+                    target_type,
+                    symbol_id,
+                    type_args,
+                }) => (Some(target_type), Some((symbol_id, type_args))),
+                Some(TypeKind::Optional { inner_type }) => (Some(inner_type), None),
+                Some(TypeKind::Class {
+                    symbol_id,
+                    type_args,
+                }) => {
+                    let next = self
+                        .lowering
+                        .context
+                        .symbol_table
+                        .get_symbol(symbol_id)
+                        .and_then(|s| match s.kind {
+                            crate::tast::symbols::SymbolKind::TypeAlias => {
+                                self.definition_target(symbol_id)
+                            }
+                            crate::tast::symbols::SymbolKind::Abstract if abstracts => {
+                                self.definition_target(symbol_id)
+                            }
+                            _ => None,
+                        });
+                    (next, Some((symbol_id, type_args)))
+                }
+                Some(TypeKind::Abstract {
+                    underlying,
+                    symbol_id,
+                    type_args,
+                }) if abstracts => (
+                    self.definition_target(symbol_id).or(underlying),
+                    Some((symbol_id, type_args)),
+                ),
+                _ => (None, None),
+            };
+            let Some(mut next) = next else { break };
+            if let Some((symbol, args)) = parameterization {
+                let params = self.definition_parameters(symbol);
+                next = self.apply_type_parameters(next, &params, &args);
+            }
+            current = next;
+            if once {
+                break;
+            }
+        }
+        current
+    }
+
+    fn apply_type_parameters(&mut self, id: TypeId, params: &[TypeId], args: &[TypeId]) -> TypeId {
+        let bindings: Vec<_> = params
+            .iter()
+            .zip(args)
+            .filter_map(|(param, &arg)| {
+                let table = self.lowering.context.type_table.borrow();
+                match table.get(*param).map(|t| &t.kind) {
+                    Some(crate::tast::core::TypeKind::TypeParameter { symbol_id, .. }) => {
+                        Some((*symbol_id, arg))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        self.lowering.substitute_type_bindings(id, &bindings, false)
+    }
+
+    fn type_children(&mut self, id: TypeId) -> Vec<TypeId> {
+        use crate::tast::TypeKind;
+        let table = self.lowering.context.type_table.borrow();
+        match table.get(id).map(|t| &t.kind) {
+            Some(
+                TypeKind::Class { type_args, .. }
+                | TypeKind::Interface { type_args, .. }
+                | TypeKind::Enum { type_args, .. }
+                | TypeKind::Abstract { type_args, .. }
+                | TypeKind::TypeAlias { type_args, .. }
+                | TypeKind::GenericInstance { type_args, .. },
+            ) => type_args.clone(),
+            Some(TypeKind::Array { element_type }) => vec![*element_type],
+            Some(TypeKind::Optional { inner_type }) => vec![*inner_type],
+            Some(TypeKind::Map {
+                key_type,
+                value_type,
+            }) => vec![*key_type, *value_type],
+            Some(TypeKind::Function {
+                params,
+                return_type,
+                ..
+            }) => params
+                .iter()
+                .copied()
+                .chain(std::iter::once(*return_type))
+                .collect(),
+            Some(TypeKind::Anonymous { fields }) => fields.iter().map(|f| f.type_id).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn rebuild_type(&mut self, id: TypeId, children: &[TypeId]) -> TypeId {
+        use crate::tast::TypeKind;
+        if self.type_children(id) == children {
+            return id;
+        }
+        let Some(mut kind) = self
+            .lowering
+            .context
+            .type_table
+            .borrow()
+            .get(id)
+            .map(|t| t.kind.clone())
+        else {
+            return id;
+        };
+        let mut children = children.iter().copied();
+        match &mut kind {
+            TypeKind::Class { type_args, .. }
+            | TypeKind::Interface { type_args, .. }
+            | TypeKind::Enum { type_args, .. }
+            | TypeKind::Abstract { type_args, .. }
+            | TypeKind::TypeAlias { type_args, .. }
+            | TypeKind::GenericInstance { type_args, .. } => *type_args = children.collect(),
+            TypeKind::Array { element_type } => {
+                *element_type = children.next().unwrap_or(*element_type)
+            }
+            TypeKind::Optional { inner_type } => {
+                *inner_type = children.next().unwrap_or(*inner_type)
+            }
+            TypeKind::Map {
+                key_type,
+                value_type,
+            } => {
+                *key_type = children.next().unwrap_or(*key_type);
+                *value_type = children.next().unwrap_or(*value_type);
+            }
+            TypeKind::Function {
+                params,
+                return_type,
+                ..
+            } => {
+                for param in params {
+                    *param = children.next().unwrap_or(*param);
+                }
+                *return_type = children.next().unwrap_or(*return_type);
+            }
+            TypeKind::Anonymous { fields } => {
+                for field in fields {
+                    field.type_id = children.next().unwrap_or(field.type_id);
+                }
+            }
+            _ => return id,
+        }
+        self.lowering
+            .context
+            .type_table
+            .borrow_mut()
+            .create_type(kind)
     }
 
     fn instantiate_alias(&mut self, def: TypeId, args: Vec<TypeId>) -> Option<TypeId> {
