@@ -117,7 +117,31 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
         }
-        field_type_id
+        let Some(mut kind) = type_table.get(field_type_id).map(|t| t.kind.clone()) else {
+            return field_type_id;
+        };
+        match &mut kind {
+            TypeKind::Enum { type_args, .. }
+            | TypeKind::Class { type_args, .. }
+            | TypeKind::Interface { type_args, .. }
+            | TypeKind::Abstract { type_args, .. }
+            | TypeKind::GenericInstance { type_args, .. } => {
+                for arg in type_args {
+                    *arg = self.resolve_field_type_id(*arg, generic_info);
+                }
+            }
+            TypeKind::Array { element_type }
+            | TypeKind::Optional {
+                inner_type: element_type,
+            } => {
+                *element_type = self.resolve_field_type_id(*element_type, generic_info);
+            }
+            _ => return field_type_id,
+        }
+        // TAST substitution interns concrete composite payload types before MIR.
+        type_table
+            .find_type_with_kind(&kind)
+            .unwrap_or(field_type_id)
     }
 
     /// Extract the element type from an Array type.

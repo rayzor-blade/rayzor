@@ -3501,6 +3501,20 @@ impl<'a> AstLowering<'a> {
                     .borrow_mut()
                     .create_class_type(symbol_id, args);
             }
+            Some(TypeKind::Enum {
+                symbol_id,
+                type_args,
+            }) => {
+                let args = sub(&type_args);
+                if args == type_args {
+                    return ty;
+                }
+                return self
+                    .context
+                    .type_table
+                    .borrow_mut()
+                    .create_enum_type(symbol_id, args);
+            }
             Some(TypeKind::Optional { inner_type }) => {
                 let inner = self.substitute_type_bindings(inner_type, bindings, expand_bindings);
                 if inner == inner_type {

@@ -15,7 +15,7 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
-    /// Bind a member's declared type to the receiver's class arguments.
+    /// Bind a member's declared type to the receiver's type arguments.
     pub(crate) fn substitute_receiver_type(&self, member_type: TypeId, receiver: TypeId) -> TypeId {
         let mut bindings = {
             let tt = self.context.type_table.borrow();
@@ -43,6 +43,19 @@ impl<'a> AstLowering<'a> {
                     };
                     (params.as_slice(), type_args.as_slice())
                 }
+                Some(TypeKind::Enum {
+                    symbol_id,
+                    type_args,
+                }) => {
+                    let declared = self.context.symbol_table.get_symbol(*symbol_id);
+                    let Some(TypeKind::Enum {
+                        type_args: params, ..
+                    }) = declared.and_then(|s| tt.get(s.type_id)).map(|t| &t.kind)
+                    else {
+                        return member_type;
+                    };
+                    (params.as_slice(), type_args.as_slice())
+                }
                 Some(TypeKind::GenericInstance {
                     base_type,
                     type_args,
@@ -52,6 +65,9 @@ impl<'a> AstLowering<'a> {
                         type_args: params, ..
                     })
                     | Some(TypeKind::Interface {
+                        type_args: params, ..
+                    })
+                    | Some(TypeKind::Enum {
                         type_args: params, ..
                     }) => (params.as_slice(), type_args.as_slice()),
                     _ => return member_type,

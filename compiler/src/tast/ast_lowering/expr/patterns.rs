@@ -49,8 +49,7 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    /// A switch case's bindings: `case var x` captures the subject, so it
-    /// takes the subject's type (a Dynamic subject stays untyped).
+    /// Bind captures and constructor payloads using the switch subject's type.
     pub(crate) fn bind_case_pattern_variables(
         &mut self,
         pattern: &parser::Pattern,
@@ -61,12 +60,7 @@ impl<'a> AstLowering<'a> {
                 None | Some(TypeKind::Dynamic) | Some(TypeKind::Unknown)
             )
         });
-        match (pattern, subject) {
-            (parser::Pattern::Var(_), Some(ty)) => {
-                self.bind_pattern_variables_typed(pattern, Some(ty))
-            }
-            _ => self.bind_pattern_variables(pattern),
-        }
+        self.bind_pattern_variables_typed(pattern, subject)
     }
 
     /// Bind pattern variables in the current scope
@@ -112,19 +106,19 @@ impl<'a> AstLowering<'a> {
                 Ok(vec![(interned_name, var_symbol)])
             }
             Pattern::Constructor { path, params } => {
-                // Resolve the constructor's parameter types so sub-pattern
-                // variable bindings get proper type info (e.g. JString(s)
-                // where s is String). Without this, `s.length` later fails
-                // because the destructured variable has TypeId::invalid().
+                // Nested constructor patterns resolve against their payload type.
                 let ctor_name = self.context.intern_string(&path.name);
-                let ctor_sym = self
-                    .resolve_enum_constructor_from_discriminant(ctor_name)
+                let ctor_sym = expected_type
+                    .and_then(|ty| self.resolve_enum_constructor_of(ty, ctor_name))
+                    .or_else(|| self.resolve_enum_constructor_from_discriminant(ctor_name))
                     .or_else(|| self.resolve_symbol_in_scope_hierarchy(ctor_name));
 
                 let mut param_types: Vec<Option<TypeId>> = vec![None; params.len()];
                 if let Some(sym_id) = ctor_sym {
                     if let Some(sym) = self.context.symbol_table.get_symbol(sym_id) {
-                        let ctor_type_id = sym.type_id;
+                        let ctor_type_id = expected_type
+                            .map(|ty| self.substitute_receiver_type(sym.type_id, ty))
+                            .unwrap_or(sym.type_id);
                         if ctor_type_id != TypeId::invalid() {
                             let type_table = self.context.type_table.borrow();
                             if let Some(ty) = type_table.get(ctor_type_id) {
@@ -224,7 +218,7 @@ impl<'a> AstLowering<'a> {
                 }
                 let mut bindings = Vec::new();
                 if let Some(p) = patterns.get(chosen_idx) {
-                    bindings = self.bind_pattern_variables(p)?;
+                    bindings = self.bind_pattern_variables_typed(p, expected_type)?;
                 }
                 // TODO: Validate that all branches bind the same variables
                 Ok(bindings)

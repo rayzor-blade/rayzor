@@ -201,7 +201,12 @@ impl<'a> HirToMirContext<'a> {
                                             self.symbol_type_ids.insert(*symbol, resolved_type_id);
                                         }
                                     }
-                                    self.bind_pattern(field_pattern, field_val);
+                                    self.bind_pattern_with_scrutinee_type(
+                                        field_pattern,
+                                        field_val,
+                                        (resolved_type_id != TypeId::invalid())
+                                            .then_some(resolved_type_id),
+                                    );
                                 }
                             }
                         }
@@ -224,17 +229,17 @@ impl<'a> HirToMirContext<'a> {
             }
             HirPattern::Typed { pattern, .. } => {
                 // Type annotations in patterns don't affect binding
-                self.bind_pattern(pattern, value);
+                self.bind_pattern_with_scrutinee_type(pattern, value, scrutinee_type);
             }
             HirPattern::Guard { pattern, .. } => {
                 // Guards are conditions, not bindings
-                self.bind_pattern(pattern, value);
+                self.bind_pattern_with_scrutinee_type(pattern, value, scrutinee_type);
             }
             HirPattern::Or(patterns) => {
                 // Only the first alternative is bound; binding all of them is
                 // not implemented.
                 if let Some(first) = patterns.first() {
-                    self.bind_pattern(first, value);
+                    self.bind_pattern_with_scrutinee_type(first, value, scrutinee_type);
                 }
             }
         }
