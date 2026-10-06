@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1791308598,"nonce":"G5gED8zfISmNN7JSLqDzCxaVQPE=","message":"Landed as 7eca660fc94820fe4c715be81f3572338061a48a. Member and macro alias bindings are verified; the separate nullable-type assertion and abstract static-field storage failures remain tracked independently.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1791308601,"nonce":"Y8tzq0g83IiuPcKuPm8hfD7XmG0=","status":2}]}
