@@ -459,13 +459,18 @@ impl<'a> AstLowering<'a> {
                 self.record_type_usings(type_name, &enum_decl.meta);
                 let enum_name = self.context.intern_string(&enum_decl.name);
 
-                // Check if this enum already exists in the root scope
-                if let Some(existing) = self
-                    .context
-                    .symbol_table
-                    .lookup_symbol(ScopeId::first(), enum_name)
-                {
-                    let existing_id = existing.id;
+                let existing_id = self
+                    .package_type_symbol(enum_name, crate::tast::SymbolKind::Enum)
+                    .or_else(|| {
+                        if self.root_slot_is_foreign_type(enum_name) {
+                            return None;
+                        }
+                        self.context
+                            .symbol_table
+                            .lookup_symbol(ScopeId::first(), enum_name)
+                            .map(|symbol| symbol.id)
+                    });
+                if let Some(existing_id) = existing_id {
                     // The symbol may have been created as `SymbolKind::Class` by
                     // earlier import resolution (e.g. a sibling file imported
                     // `pkg.X.Y` before `Y`'s declaration was lowered, so the

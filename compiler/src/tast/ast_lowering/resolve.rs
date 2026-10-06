@@ -207,7 +207,7 @@ impl<'a> AstLowering<'a> {
         // A namesake from an enclosing scope, now that the class hierarchy has
         // had its turn.
         if let Some(found) = outer_match {
-            return Some(self.prefer_own_module_type(name, found));
+            return Some(self.prefer_package_type(name, found));
         }
 
         // Fallback: explicitly check the global root scope (ScopeId::first())
@@ -217,16 +217,15 @@ impl<'a> AstLowering<'a> {
         let root_scope = ScopeId::first();
         if current_scope != root_scope {
             if let Some(symbol) = self.context.symbol_table.lookup_symbol(root_scope, name) {
-                return Some(self.prefer_own_module_type(name, symbol.id));
+                return Some(self.prefer_package_type(name, symbol.id));
             }
         }
 
         None
     }
 
-    /// A type this module declares shadows another package's type of the same
-    /// name in the root slot (a private `Int64` beside `haxe.Int64`).
-    fn prefer_own_module_type(&self, name: InternedString, found: SymbolId) -> SymbolId {
+    /// Module declarations, explicit imports and package siblings precede ambient types.
+    fn prefer_package_type(&self, name: InternedString, found: SymbolId) -> SymbolId {
         use crate::tast::symbols::SymbolKind;
         let is_type = |k: SymbolKind| {
             matches!(
@@ -251,8 +250,35 @@ impl<'a> AstLowering<'a> {
             .string_interner
             .get(name)
             .is_some_and(|n| self.current_module_types.contains(n));
-        if !foreign_type || !declared_here {
+        if !foreign_type {
             return found;
+        }
+        if !declared_here {
+            let mut scope = Some(self.context.current_scope);
+            while let Some(current) = scope {
+                for import in self
+                    .context
+                    .import_resolver
+                    .get_imports(current)
+                    .iter()
+                    .rev()
+                {
+                    if !import.is_wildcard
+                        && import.alias.unwrap_or(import.package_path.name) == name
+                    {
+                        return self
+                            .context
+                            .namespace_resolver
+                            .lookup_symbol(&import.package_path)
+                            .unwrap_or(found);
+                    }
+                }
+                scope = self
+                    .context
+                    .scope_tree
+                    .get_scope(current)
+                    .and_then(|s| s.parent_id);
+            }
         }
         self.context
             .namespace_resolver

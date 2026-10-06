@@ -1,0 +1,6 @@
+[project]
+name = "package-siblings"
+entry = "PackageSiblings.hx"
+
+[build]
+class-paths = ["."]

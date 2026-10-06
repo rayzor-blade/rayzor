@@ -386,19 +386,25 @@ impl<'a> AstLowering<'a> {
     ) -> LoweringResult<TypedDeclaration> {
         let enum_name = self.context.intern_string(&enum_decl.name);
 
-        // Look up existing symbol from pre-registration, or create a new one
-        let enum_symbol = if let Some(existing_symbol) = self
-            .context
-            .symbol_table
-            .lookup_symbol(ScopeId::first(), enum_name)
-        {
-            existing_symbol.id
+        let existing = self
+            .package_type_symbol(enum_name, crate::tast::SymbolKind::Enum)
+            .or_else(|| {
+                if self.root_slot_is_foreign_type(enum_name) {
+                    return None;
+                }
+                self.context
+                    .symbol_table
+                    .lookup_symbol(ScopeId::first(), enum_name)
+                    .map(|symbol| symbol.id)
+            });
+        let enum_symbol = if let Some(existing) = existing {
+            existing
         } else {
             let new_symbol = self
                 .context
                 .symbol_table
                 .create_enum_in_scope(enum_name, ScopeId::first());
-            self.context.update_symbol_qualified_name(new_symbol);
+            self.register_symbol_with_package(new_symbol, &enum_decl.name);
             self.context
                 .scope_tree
                 .get_scope_mut(ScopeId::first())
