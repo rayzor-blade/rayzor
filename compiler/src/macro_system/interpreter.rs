@@ -240,18 +240,14 @@ impl MacroInterpreter {
             ExprKind::String(s) => Ok(MacroValue::String(Arc::from(s.as_str()))),
             ExprKind::Bool(b) => Ok(MacroValue::Bool(*b)),
             ExprKind::Null => Ok(MacroValue::Null),
-            ExprKind::This => self
-                .env
-                .get("this")
-                .cloned()
-                .ok_or(MacroError::UndefinedVariable {
-                    name: "this".to_string(),
-                    location,
-                }),
+            ExprKind::This => self.env.get("this").ok_or(MacroError::UndefinedVariable {
+                name: "this".to_string(),
+                location,
+            }),
 
             // --- Identifiers ---
             ExprKind::Ident(name) => {
-                if let Some(v) = self.env.get(name).cloned() {
+                if let Some(v) = self.env.get(name) {
                     return Ok(v);
                 }
                 // A bare instance field inside a method or constructor.
@@ -894,13 +890,10 @@ impl MacroInterpreter {
                     Ok(MacroValue::Expr(Arc::new(result_expr)))
                 } else {
                     // $name — lookup in environment
-                    self.env
-                        .get(name)
-                        .cloned()
-                        .ok_or(MacroError::UndefinedVariable {
-                            name: format!("${}", name),
-                            location,
-                        })
+                    self.env.get(name).ok_or(MacroError::UndefinedVariable {
+                        name: format!("${}", name),
+                        location,
+                    })
                 }
             }
 
@@ -1126,7 +1119,7 @@ impl MacroInterpreter {
                     return Ok(result);
                 }
                 // Look up in environment
-                if let Some(func_val) = self.env.get(name).cloned() {
+                if let Some(func_val) = self.env.get(name) {
                     return self.call_value(func_val, arg_vals, location);
                 }
                 // Look up in macro registry
@@ -1473,7 +1466,7 @@ impl MacroInterpreter {
 
         // Restore captured variables
         for (name, value) in &func.captures {
-            self.env.define(name, value.clone());
+            self.env.define_binding(name, value.clone());
         }
 
         // Bind parameters (use define_owned to avoid &str → to_string() allocation).
@@ -2880,7 +2873,6 @@ impl MacroInterpreter {
             let final_obj = self
                 .env
                 .get("this")
-                .cloned()
                 .unwrap_or(MacroValue::Object(Arc::new(obj)));
             self.env.pop_scope();
             Ok(final_obj)
@@ -3076,7 +3068,7 @@ impl MacroInterpreter {
 
         match &target.kind {
             ExprKind::Ident(name) => {
-                let old = match self.env.get(name).cloned() {
+                let old = match self.env.get(name) {
                     Some(v) => v,
                     None => self.read_class_static(None, name)?.ok_or_else(|| {
                         MacroError::UndefinedVariable {

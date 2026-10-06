@@ -415,7 +415,7 @@ impl ReificationEngine {
             // $name (no argument) — simple variable splice from environment
             (var_name, None) => {
                 if let Some(value) = env.get(var_name) {
-                    Ok(ast_bridge::value_to_expr(value))
+                    Ok(ast_bridge::value_to_expr(&value))
                 } else {
                     Err(MacroError::UndefinedVariable {
                         name: format!("${}", var_name),
@@ -445,7 +445,7 @@ impl ReificationEngine {
     ) -> Result<MacroValue, MacroError> {
         let location = span_to_location(span);
         match &expr.kind {
-            ExprKind::Ident(name) => env.get(name).cloned().ok_or(MacroError::UndefinedVariable {
+            ExprKind::Ident(name) => env.get(name).ok_or(MacroError::UndefinedVariable {
                 name: name.clone(),
                 location,
             }),

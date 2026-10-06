@@ -13,8 +13,8 @@ pub struct MacroFunction {
     pub params: Vec<MacroParam>,
     /// The function body AST (interpreted at call time)
     pub body: Arc<Expr>,
-    /// Captured environment variables (for closures)
-    pub captures: BTreeMap<String, MacroValue>,
+    /// Shared lexical variables retained by the closure.
+    pub captures: BTreeMap<String, super::environment::VariableBinding>,
 }
 
 /// A parameter in a macro function definition

@@ -613,7 +613,10 @@ impl MacroVm {
                     for (slot, name) in &self.frames[frame_idx].chunk.local_names {
                         let idx = bp + *slot as usize;
                         if idx < self.stack.len() {
-                            captures.insert(name.clone(), self.stack[idx].clone());
+                            captures.insert(
+                                name.clone(),
+                                Arc::new(std::sync::Mutex::new(self.stack[idx].clone())),
+                            );
                         }
                     }
 

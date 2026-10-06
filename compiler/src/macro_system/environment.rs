@@ -1,6 +1,8 @@
 use super::value::MacroValue;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+pub type VariableBinding = Arc<Mutex<MacroValue>>;
 
 /// Scoped variable environment for the macro interpreter.
 ///
@@ -9,7 +11,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct Environment {
     /// Stack of variable scopes (innermost last)
-    scopes: Vec<BTreeMap<String, MacroValue>>,
+    scopes: Vec<BTreeMap<String, VariableBinding>>,
 }
 
 impl Environment {
@@ -28,7 +30,7 @@ impl Environment {
     /// Pop the innermost scope (e.g., leaving a block or function)
     ///
     /// Returns the popped scope's variables, or None if only the global scope remains.
-    pub fn pop_scope(&mut self) -> Option<BTreeMap<String, MacroValue>> {
+    pub fn pop_scope(&mut self) -> Option<BTreeMap<String, VariableBinding>> {
         if self.scopes.len() > 1 {
             self.scopes.pop()
         } else {
@@ -37,10 +39,10 @@ impl Environment {
     }
 
     /// Look up a variable by name, searching from innermost to outermost scope
-    pub fn get(&self, name: &str) -> Option<&MacroValue> {
+    pub fn get(&self, name: &str) -> Option<MacroValue> {
         for scope in self.scopes.iter().rev() {
             if let Some(value) = scope.get(name) {
-                return Some(value);
+                return Some(value.lock().expect("macro variable lock poisoned").clone());
             }
         }
         None
@@ -52,8 +54,8 @@ impl Environment {
     /// occurrence found. Returns true if the variable was found and updated.
     pub fn set(&mut self, name: &str, value: MacroValue) -> bool {
         for scope in self.scopes.iter_mut().rev() {
-            if let Some(slot) = scope.get_mut(name) {
-                *slot = value;
+            if let Some(slot) = scope.get(name) {
+                *slot.lock().expect("macro variable lock poisoned") = value;
                 return true;
             }
         }
@@ -67,8 +69,9 @@ impl Environment {
     /// directly. Returns true if the variable was found and is an Object.
     pub fn mutate_object_field(&mut self, var_name: &str, field: &str, value: MacroValue) -> bool {
         for scope in self.scopes.iter_mut().rev() {
-            if let Some(mac_val) = scope.get_mut(var_name) {
-                if let MacroValue::Object(arc_map) = mac_val {
+            if let Some(binding) = scope.get(var_name) {
+                let mut value_guard = binding.lock().expect("macro variable lock poisoned");
+                if let MacroValue::Object(arc_map) = &mut *value_guard {
                     Arc::make_mut(arc_map).insert(field.to_string(), value);
                     return true;
                 }
@@ -84,7 +87,7 @@ impl Environment {
     /// it will be overwritten (shadowing).
     pub fn define(&mut self, name: &str, value: MacroValue) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), value);
+            scope.insert(name.to_string(), Arc::new(Mutex::new(value)));
         }
     }
 
@@ -94,7 +97,14 @@ impl Environment {
     /// already has an owned String (e.g., cloned param names in function calls).
     pub fn define_owned(&mut self, name: String, value: MacroValue) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name, value);
+            scope.insert(name, Arc::new(Mutex::new(value)));
+        }
+    }
+
+    /// Install the same lexical variable cell when entering a closure.
+    pub fn define_binding(&mut self, name: &str, binding: VariableBinding) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), binding);
         }
     }
 
@@ -132,7 +142,10 @@ impl Environment {
         // From outermost to innermost so inner scopes shadow outer
         for scope in &self.scopes {
             for (name, value) in scope {
-                captured.insert(name.clone(), value.clone());
+                captured.insert(
+                    name.clone(),
+                    value.lock().expect("macro variable lock poisoned").clone(),
+                );
             }
         }
         captured
@@ -140,13 +153,11 @@ impl Environment {
 
     /// Selectively capture only the specified variables (for closures)
     ///
-    /// Only clones values for variables that are actually referenced in the closure body.
-    /// This is much cheaper than `capture_all()` when the closure only uses a few variables
-    /// from a large enclosing scope.
+    /// Retains shared cells so assignments remain visible after the declaring scope exits.
     pub fn capture_used(
         &self,
         used_names: &std::collections::BTreeSet<String>,
-    ) -> BTreeMap<String, MacroValue> {
+    ) -> BTreeMap<String, VariableBinding> {
         let mut captured = BTreeMap::new();
         // From outermost to innermost so inner scopes shadow outer
         for scope in &self.scopes {
@@ -174,7 +185,7 @@ mod tests {
     fn test_define_and_get() {
         let mut env = Environment::new();
         env.define("x", MacroValue::Int(42));
-        assert_eq!(env.get("x"), Some(&MacroValue::Int(42)));
+        assert_eq!(env.get("x"), Some(MacroValue::Int(42)));
         assert_eq!(env.get("y"), None);
     }
 
@@ -186,11 +197,11 @@ mod tests {
         env.push_scope();
         env.define("x", MacroValue::Int(2)); // shadow
         env.define("y", MacroValue::Int(3));
-        assert_eq!(env.get("x"), Some(&MacroValue::Int(2)));
-        assert_eq!(env.get("y"), Some(&MacroValue::Int(3)));
+        assert_eq!(env.get("x"), Some(MacroValue::Int(2)));
+        assert_eq!(env.get("y"), Some(MacroValue::Int(3)));
 
         env.pop_scope();
-        assert_eq!(env.get("x"), Some(&MacroValue::Int(1)));
+        assert_eq!(env.get("x"), Some(MacroValue::Int(1)));
         assert_eq!(env.get("y"), None);
     }
 
@@ -202,11 +213,11 @@ mod tests {
         env.push_scope();
         // set should update the outer scope's variable, not create a new one
         assert!(env.set("x", MacroValue::Int(99)));
-        assert_eq!(env.get("x"), Some(&MacroValue::Int(99)));
+        assert_eq!(env.get("x"), Some(MacroValue::Int(99)));
 
         env.pop_scope();
         // The outer scope's value should be updated
-        assert_eq!(env.get("x"), Some(&MacroValue::Int(99)));
+        assert_eq!(env.get("x"), Some(MacroValue::Int(99)));
     }
 
     #[test]
@@ -267,6 +278,6 @@ mod tests {
         assert!(env.pop_scope().is_none());
         // Should still work after trying to pop
         env.define("x", MacroValue::Int(1));
-        assert_eq!(env.get("x"), Some(&MacroValue::Int(1)));
+        assert_eq!(env.get("x"), Some(MacroValue::Int(1)));
     }
 }

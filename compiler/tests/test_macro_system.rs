@@ -200,15 +200,15 @@ fn test_environment_nested_scoping() {
     env.push_scope();
     env.define("x", MacroValue::Int(10));
     env.define("z", MacroValue::Int(30));
-    assert_eq!(env.get("x"), Some(&MacroValue::Int(10)));
-    assert_eq!(env.get("y"), Some(&MacroValue::Int(2)));
-    assert_eq!(env.get("z"), Some(&MacroValue::Int(30)));
+    assert_eq!(env.get("x"), Some(MacroValue::Int(10)));
+    assert_eq!(env.get("y"), Some(MacroValue::Int(2)));
+    assert_eq!(env.get("z"), Some(MacroValue::Int(30)));
     assert_eq!(env.depth(), 1);
 
     // Pop inner scope
     env.pop_scope();
-    assert_eq!(env.get("x"), Some(&MacroValue::Int(1)));
-    assert_eq!(env.get("y"), Some(&MacroValue::Int(2)));
+    assert_eq!(env.get("x"), Some(MacroValue::Int(1)));
+    assert_eq!(env.get("y"), Some(MacroValue::Int(2)));
     assert_eq!(env.get("z"), None);
     assert_eq!(env.depth(), 0);
 }
@@ -221,11 +221,11 @@ fn test_environment_set_updates_outer_scope() {
     env.push_scope();
     // set should find and update the outer scope's variable
     assert!(env.set("counter", MacroValue::Int(5)));
-    assert_eq!(env.get("counter"), Some(&MacroValue::Int(5)));
+    assert_eq!(env.get("counter"), Some(MacroValue::Int(5)));
 
     env.pop_scope();
     // Outer scope should reflect the update
-    assert_eq!(env.get("counter"), Some(&MacroValue::Int(5)));
+    assert_eq!(env.get("counter"), Some(MacroValue::Int(5)));
 }
 
 #[test]
