@@ -36,6 +36,7 @@
 	A detailed explanation of the supported operations is available at
 	<https://haxe.org/manual/std-regex.html>
 **/
+@:native("EReg")
 class EReg {
 	/**
 		Creates a new regular expression with pattern `r` and modifiers `opt`.

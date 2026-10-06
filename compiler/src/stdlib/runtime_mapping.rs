@@ -3035,7 +3035,7 @@ impl StdlibMapping {
     fn register_date_methods(&mut self) {
         let mappings = vec![
             // Date.new(year, month, day, hour, min, sec): Date (constructor)
-            map_method!(static "Date", "new" => "haxe_date_new", params: 6, returns: primitive),
+            map_method!(constructor "Date", "new" => "haxe_date_new", params: 6, returns: primitive),
             // Date.now(): Date
             map_method!(static "Date", "now" => "haxe_date_now", params: 0, returns: primitive),
             // Date.fromTime(t: Float): Date

@@ -1255,6 +1255,11 @@ impl<'a> HirToMirContext<'a> {
             matches!(actual_ty, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void));
 
         if !actual_is_ptr_u8 {
+            // Runtime integer predicates become Haxe booleans at the call boundary.
+            if actual_ty.is_integer() && *expected_ty == IrType::Bool {
+                let zero = self.builder.build_const(actual_ty.default_value())?;
+                return self.builder.build_cmp(CompareOp::Ne, value, zero);
+            }
             // Truncate I64 → I32 when extern returns i64 but Haxe type is Int (I32).
             if matches!(actual_ty, IrType::I64) && matches!(expected_ty, IrType::I32) {
                 return self.builder.build_cast(value, IrType::I64, IrType::I32);

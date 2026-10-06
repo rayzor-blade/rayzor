@@ -44,6 +44,7 @@ impl<'a> AstLowering<'a> {
         typed_file.metadata.file_name = Some(self.context.string_interner.intern(&file_name));
 
         // Process package declaration
+        self.context.current_package = None;
         if let Some(package) = &file.package {
             typed_file.metadata.package_name = Some(package.path.join("."));
 

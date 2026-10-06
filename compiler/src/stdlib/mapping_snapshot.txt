@@ -40,7 +40,7 @@ Date getUTCHours static=false ctor=false params=0 -> haxe_date_get_utc_hours
 Date getUTCMinutes static=false ctor=false params=0 -> haxe_date_get_utc_minutes
 Date getUTCMonth static=false ctor=false params=0 -> haxe_date_get_utc_month
 Date getUTCSeconds static=false ctor=false params=0 -> haxe_date_get_utc_seconds
-Date new static=true ctor=false params=6 -> haxe_date_new
+Date new static=true ctor=true params=6 -> haxe_date_new
 Date now static=true ctor=false params=0 -> haxe_date_now
 Date toString static=false ctor=false params=0 -> haxe_date_to_string
 EReg escape static=true ctor=false params=1 -> haxe_ereg_escape

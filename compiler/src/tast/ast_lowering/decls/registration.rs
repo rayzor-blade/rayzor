@@ -21,6 +21,7 @@ impl<'a> AstLowering<'a> {
     /// type names need to be available before any file is fully compiled.
     pub fn pre_register_file(&mut self, file: &HaxeFile) -> LoweringResult<()> {
         // Process package declaration to set up the namespace context
+        self.context.current_package = None;
         if let Some(package) = &file.package {
             // Create or get package in namespace resolver
             let package_path: Vec<_> = package
@@ -179,36 +180,32 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    /// Register a symbol with package information
-    /// Whether the root slot for `name` holds an enum, abstract or class
-    /// declared in another package while a class of that name is declared in
-    /// the current, named package. The class then gets its own packaged symbol instead of
-    /// lowering onto the other type's.
+    /// Keep declarations in distinct packages from sharing a root name's symbol.
     pub(crate) fn root_slot_is_foreign_type(&self, name: InternedString) -> bool {
-        let Some(pkg) = self.context.current_package else {
-            return false;
+        let named_package = |package: Option<crate::tast::namespace::PackageId>| {
+            package.filter(|&id| {
+                self.context
+                    .namespace_resolver
+                    .get_package(id)
+                    .is_some_and(|p| !p.full_path.is_empty())
+            })
         };
-        let named = self
-            .context
-            .namespace_resolver
-            .get_package(pkg)
-            .is_some_and(|p| !p.full_path.is_empty());
-        named
-            && self
-                .context
-                .symbol_table
-                .lookup_symbol(ScopeId::first(), name)
-                .is_some_and(|s| match s.kind {
-                    crate::tast::SymbolKind::Enum | crate::tast::SymbolKind::Abstract => {
-                        s.package_id != Some(pkg)
-                    }
-                    // A class of another named package: `sys.thread.Thread`
-                    // beside the default-imported `rayzor.concurrent.Thread`.
-                    crate::tast::SymbolKind::Class => {
-                        s.package_id.is_some() && s.package_id != Some(pkg)
-                    }
-                    _ => false,
-                })
+        let pkg = named_package(self.context.current_package);
+        self.context
+            .symbol_table
+            .lookup_symbol(ScopeId::first(), name)
+            .is_some_and(|s| match s.kind {
+                crate::tast::SymbolKind::Enum | crate::tast::SymbolKind::Abstract => {
+                    named_package(s.package_id) != pkg
+                }
+                // A class of another named package: `sys.thread.Thread`
+                // beside the default-imported `rayzor.concurrent.Thread`.
+                crate::tast::SymbolKind::Class => {
+                    let owner = named_package(s.package_id);
+                    owner.is_some() && owner != pkg
+                }
+                _ => false,
+            })
     }
 
     /// The root slot for `name` holds a type of another named package. An

@@ -1,0 +1,6 @@
+[project]
+name = "date-constructor-identity"
+entry = "./DateConstructorIdentity.hx"
+
+[build]
+class-paths = ["."]

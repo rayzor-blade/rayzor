@@ -299,7 +299,17 @@ impl<'a> HirToMirContext<'a> {
                                 .and_then(|qn| self.stdlib_mapping.class_key(qn))
                         })
                 })
-                .or_else(|| self.stdlib_mapping.class_key(class_name));
+                .or_else(|| self.stdlib_mapping.class_key(class_name))
+                .filter(|key| {
+                    // Bare native names do not override a defined Haxe class.
+                    key.as_str().contains('.')
+                        || actual_symbol_id.is_none_or(|sid| {
+                            self.symbol_table.get_symbol(sid).is_some_and(|sym| {
+                                sym.native_name.is_some()
+                                    || sym.flags.contains(crate::tast::SymbolFlags::EXTERN)
+                            })
+                        })
+                });
 
                 // Param-count-aware lookup first, then any-param, so
                 // overloaded constructors (e.g. Uncompress with 0 or 1 args)

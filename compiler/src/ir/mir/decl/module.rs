@@ -366,48 +366,49 @@ impl<'a> HirToMirContext<'a> {
                         // its constructor from the mapping system, so no MIR
                         // constructor is generated. Qualified class name first
                         // (e.g. "rayzor_Bytes"), then the simple name.
-                        let should_skip_constructor = {
-                            let check_class_runtime = |name: &str| -> bool {
-                                if let Some(class_name_static) =
-                                    self.stdlib_mapping.get_class_static_str(name)
-                                {
-                                    let method_sig =
-                                        crate::stdlib::runtime_mapping::MethodSignature {
-                                            class: class_name_static,
-                                            method: "new",
-                                            is_static: true,
-                                            is_constructor: true,
-                                            param_count: 0,
-                                        };
-                                    if self.stdlib_mapping.get(&method_sig).is_some() {
-                                        debug!(
-                                            "Skipping constructor lowering for extern class '{}' - using runtime mapping",
-                                            name
-                                        );
-                                        return true;
+                        let should_skip_constructor = class.is_extern
+                            || {
+                                let check_class_runtime = |name: &str| -> bool {
+                                    if let Some(class_name_static) =
+                                        self.stdlib_mapping.get_class_static_str(name)
+                                    {
+                                        let method_sig =
+                                            crate::stdlib::runtime_mapping::MethodSignature {
+                                                class: class_name_static,
+                                                method: "new",
+                                                is_static: true,
+                                                is_constructor: true,
+                                                param_count: 0,
+                                            };
+                                        if self.stdlib_mapping.get(&method_sig).is_some() {
+                                            debug!(
+                                                "Skipping constructor lowering for extern class '{}' - using runtime mapping",
+                                                name
+                                            );
+                                            return true;
+                                        }
                                     }
+                                    false
+                                };
+
+                                let found_in_qualified = qualified_class_name
+                                    .as_ref()
+                                    .map(|qn| check_class_runtime(qn))
+                                    .unwrap_or(false);
+
+                                if found_in_qualified {
+                                    true
+                                } else {
+                                    // Also skip if this is an extern class (using TAST flags)
+                                    self.symbol_table
+                                        .get_symbol(class.symbol_id)
+                                        .map(|sym| {
+                                            sym.flags
+                                                .contains(crate::tast::symbols::SymbolFlags::EXTERN)
+                                        })
+                                        .unwrap_or(false)
                                 }
-                                false
                             };
-
-                            let found_in_qualified = qualified_class_name
-                                .as_ref()
-                                .map(|qn| check_class_runtime(qn))
-                                .unwrap_or(false);
-
-                            if found_in_qualified {
-                                true
-                            } else {
-                                // Also skip if this is an extern class (using TAST flags)
-                                self.symbol_table
-                                    .get_symbol(class.symbol_id)
-                                    .map(|sym| {
-                                        sym.flags
-                                            .contains(crate::tast::symbols::SymbolFlags::EXTERN)
-                                    })
-                                    .unwrap_or(false)
-                            }
-                        };
 
                         if !should_skip_constructor {
                             self.lower_constructor_body(
