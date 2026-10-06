@@ -179,8 +179,7 @@ pub extern "C" fn haxe_reflect_has_field(obj: *mut u8, field: *mut u8) -> bool {
 /// obj: class-instance pointer, anon-object handle, or
 /// DynamicValue wrapping either.
 /// field: HaxeString pointer.
-/// Returns: freshly-allocated `DynamicValue*` (caller manages), or
-/// null on miss.
+/// Returns: `DynamicValue*`, or null on miss.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
     // A class used as a value is its 32-bit type id, not an object.

@@ -666,6 +666,25 @@ impl<'a> HirToMirContext<'a> {
             "haxe_reflect_make_var_args" | "Reflect.makeVarArgs" => {
                 Some(self.lower_reflect_make_var_args(args, result_type, location))
             }
+            "haxe_reflect_set_field" if args.len() == 3 => {
+                let object = self.lower_expression(&args[0])?;
+                let name = self.lower_expression(&args[1])?;
+                let value = self.lower_expression(&args[2])?;
+                // Reflect setters consume a Dynamic box, including reference values.
+                let value_ty = self.resolve_storage_type(args[2].ty);
+                let value = self
+                    .maybe_box_value(value, value_ty, self.type_table.dynamic_type())
+                    .unwrap_or(value);
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let setter = self.get_or_register_extern_function(
+                    runtime_func,
+                    vec![ptr_u8.clone(), ptr_u8.clone(), ptr_u8],
+                    IrType::Void,
+                );
+                self.builder
+                    .build_call_direct(setter, vec![object, name, value], IrType::Void);
+                Some(None)
+            }
             "haxe_type_typeof" | "Type.typeof" => {
                 Some(self.lower_type_typeof_call(args, result_type))
             }

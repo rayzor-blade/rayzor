@@ -60,7 +60,7 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::Int) => 3,
             Some(TypeKind::Float) => 4,
             Some(TypeKind::String) => 5,
-            Some(TypeKind::Dynamic) => 5, // Dynamic matches anything
+            Some(TypeKind::Dynamic) => rayzor_runtime::type_system::TYPE_DYNAMIC_TOKEN.0,
             Some(TypeKind::Class { symbol_id, .. }) => {
                 // `Array` as a class (`Std.isOfType(d, Array)`) is the runtime's
                 // TYPE_ARRAY, the tag an array boxes with.

@@ -15,7 +15,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::type_system::{
-    DynamicValue, TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_NULL, TYPE_STRING, TypeId,
+    DynamicValue, TYPE_BOOL, TYPE_DYNAMIC_TOKEN, TYPE_FLOAT, TYPE_INT, TYPE_NULL, TYPE_STRING,
+    TypeId,
 };
 
 /// Type ID for anonymous objects in the DynamicValue type system
@@ -351,7 +352,7 @@ pub(crate) fn anon_raw_field(ptr: *mut u8, name: &str) -> Option<u64> {
     }
 }
 
-/// Get field by name, returns boxed DynamicValue pointer (caller must free)
+/// Get field by name as a DynamicValue pointer; Dynamic slots return their stored box.
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_get_field(
     ptr: *mut u8,
@@ -438,6 +439,10 @@ pub extern "C" fn rayzor_anon_set_field(
                 if let Some(shape) = get_shape(obj.shape_id)
                     && let Some(idx) = shape.field_names.iter().position(|n| n == &name)
                 {
+                    if shape.field_types[idx] == TYPE_DYNAMIC_TOKEN.0 {
+                        fields[idx] = value_ptr as u64;
+                        return;
+                    }
                     fields[idx] = raw_value;
                     // A slot that held `null` (or another type) now reads as
                     // what was stored; the layout and indices stay the same.
@@ -458,7 +463,15 @@ pub extern "C" fn rayzor_anon_set_field(
                 obj.data = AnonData::Map(map);
             }
             AnonData::Map(map) => {
-                map.insert(name, (type_id, raw_value));
+                let value = if map
+                    .get(&name)
+                    .is_some_and(|(ty, _)| *ty == TYPE_DYNAMIC_TOKEN.0)
+                {
+                    (TYPE_DYNAMIC_TOKEN.0, value_ptr as u64)
+                } else {
+                    (type_id, raw_value)
+                };
+                map.insert(name, value);
             }
         }
     }
@@ -583,6 +596,8 @@ pub extern "C" fn rayzor_anon_copy(ptr: *mut u8) -> *mut u8 {
 /// Box a raw u64 value as a DynamicValue pointer based on type_id
 fn box_value_as_dynamic(type_id: u32, value: u64) -> *mut u8 {
     match TypeId(type_id) {
+        // Dynamic slots already hold a box describing the payload's concrete type.
+        t if t == TYPE_DYNAMIC_TOKEN => value as *mut u8,
         t if t == TYPE_INT => {
             crate::type_system::BOX_INT_VIA_ANON.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             crate::type_system::haxe_box_int_ptr(value as i64)
