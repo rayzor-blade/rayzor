@@ -1814,6 +1814,40 @@ impl<'a> AstLowering<'a> {
                                 // This is a static method call
                                 let method_name = self.context.intern_string(field);
 
+                                if self
+                                    .lookup_data_field(class_symbol, method_name)
+                                    .is_some_and(|id| {
+                                        self.context.symbol_table.get_symbol(id).is_some_and(
+                                            |field| {
+                                                field.is_static()
+                                                    && field.kind
+                                                        != crate::tast::SymbolKind::Function
+                                            },
+                                        )
+                                    })
+                                {
+                                    let function = self.lower_expression(expr)?;
+                                    let kind = TypedExpressionKind::FunctionCall {
+                                        function: Box::new(function),
+                                        arguments: arg_exprs,
+                                        type_arguments: Vec::new(),
+                                    };
+                                    let expr_type = self.infer_expression_type(&kind)?;
+                                    let usage = self.determine_variable_usage(&kind);
+                                    let lifetime_id = self.assign_lifetime(&kind, &expr_type);
+                                    let metadata = self.analyze_expression_metadata(&kind);
+                                    return Ok(TypedExpression {
+                                        expr_type,
+                                        kind,
+                                        usage,
+                                        lifetime_id,
+                                        source_location: self
+                                            .context
+                                            .span_to_location(&expression.span),
+                                        metadata,
+                                    });
+                                }
+
                                 // Look for the method in this class:
                                 // 1. local class_methods
                                 // 2. exact qualified-name match

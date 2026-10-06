@@ -872,6 +872,9 @@ impl<'a> AstLowering<'a> {
             // Mark as field
             if let Some(sym) = self.context.symbol_table.get_symbol_mut(field_symbol) {
                 sym.kind = crate::tast::SymbolKind::Field;
+                if is_static {
+                    sym.flags = sym.flags.union(crate::tast::SymbolFlags::STATIC);
+                }
             }
 
             // Add to class_fields
@@ -946,7 +949,7 @@ impl<'a> AstLowering<'a> {
             .insert(abstract_symbol, (from_types, to_types));
     }
 
-    pub(crate) fn pre_register_enum_abstract_fields(
+    pub(crate) fn pre_register_abstract_fields(
         &mut self,
         abstract_decl: &parser::AbstractDecl,
     ) -> LoweringResult<()> {
@@ -968,6 +971,11 @@ impl<'a> AstLowering<'a> {
 
         self.class_fields.entry(abstract_symbol).or_default();
         for field in &abstract_decl.fields {
+            if !abstract_decl.is_enum_abstract
+                && !field.modifiers.contains(&parser::Modifier::Static)
+            {
+                continue;
+            }
             let (name, type_hint) = match &field.kind {
                 parser::ClassFieldKind::Var {
                     name, type_hint, ..
@@ -991,7 +999,13 @@ impl<'a> AstLowering<'a> {
 
             let field_type = type_hint
                 .and_then(|ty| self.lower_type(ty).ok())
-                .unwrap_or(underlying_type);
+                .unwrap_or_else(|| {
+                    if abstract_decl.is_enum_abstract {
+                        underlying_type
+                    } else {
+                        self.context.type_table.borrow().dynamic_type()
+                    }
+                });
             let field_symbol = self.context.symbol_table.create_variable(member_name);
             self.context
                 .symbol_table
@@ -1006,19 +1020,23 @@ impl<'a> AstLowering<'a> {
             }
             self.class_fields
                 .get_mut(&abstract_symbol)
-                .expect("enum abstract field map was initialized")
+                .expect("abstract field map was initialized")
                 .push((member_name, field_symbol, true));
 
-            self.context
-                .symbol_table
-                .add_symbol_alias(field_symbol, ScopeId::first(), member_name);
-            let root = self
-                .context
-                .scope_tree
-                .get_scope_mut(ScopeId::first())
-                .expect("Root scope should exist");
-            if !root.has_symbol(member_name) {
-                root.add_symbol(field_symbol, member_name);
+            if abstract_decl.is_enum_abstract {
+                self.context.symbol_table.add_symbol_alias(
+                    field_symbol,
+                    ScopeId::first(),
+                    member_name,
+                );
+                let root = self
+                    .context
+                    .scope_tree
+                    .get_scope_mut(ScopeId::first())
+                    .expect("Root scope should exist");
+                if !root.has_symbol(member_name) {
+                    root.add_symbol(field_symbol, member_name);
+                }
             }
         }
 

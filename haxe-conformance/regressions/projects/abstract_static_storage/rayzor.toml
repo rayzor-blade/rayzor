@@ -1,0 +1,5 @@
+[project]
+name = "abstract-static-storage"
+entry = "./AbstractStaticStorage.hx"
+[build]
+class-paths = ["."]

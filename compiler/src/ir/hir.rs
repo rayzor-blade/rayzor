@@ -119,7 +119,7 @@ pub struct HirAbstract {
     pub from_rules: Vec<HirCastRule>,
     pub to_rules: Vec<HirCastRule>,
     pub operators: Vec<HirOperatorOverload>,
-    pub fields: Vec<HirAbstractField>,
+    pub fields: Vec<HirClassField>,
     pub methods: Vec<HirMethod>,
     pub constructor: Option<HirConstructor>,
     pub metadata: Vec<HirAttribute>,
@@ -716,18 +716,6 @@ pub struct HirInterfaceMethod {
 pub struct HirEnumField {
     pub name: InternedString,
     pub ty: TypeId,
-}
-
-#[derive(Debug, Clone)]
-pub struct HirAbstractField {
-    pub symbol_id: SymbolId,
-    pub name: InternedString,
-    pub ty: TypeId,
-    pub getter: Option<SymbolId>,
-    pub setter: Option<SymbolId>,
-    /// `(get, set)` accessors, as on a class field; a property of an
-    /// abstract has no slot and reads and writes through them.
-    pub property_access: Option<crate::tast::node::PropertyAccessInfo>,
 }
 
 #[derive(Debug, Clone)]

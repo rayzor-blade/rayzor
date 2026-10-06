@@ -22,6 +22,92 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    fn register_static_field_metadata(
+        &mut self,
+        owner_symbol: SymbolId,
+        owner_name: InternedString,
+        field: &HirClassField,
+    ) {
+        self.static_field_owners
+            .insert(field.symbol_id, owner_symbol);
+        let qualified_owner = self
+            .symbol_table
+            .get_symbol(owner_symbol)
+            .and_then(|s| s.qualified_name)
+            .and_then(|q| self.string_interner.get(q))
+            .or_else(|| self.string_interner.get(owner_name))
+            .unwrap_or("<unknown>");
+        self.field_class_names
+            .insert(field.symbol_id, qualified_owner.to_owned());
+        if let Some(info) = &field.property_access {
+            self.property_access_map
+                .insert(field.symbol_id, info.clone());
+        }
+        let field_name = self.string_interner.get(field.name).unwrap_or("<unknown>");
+        let class_name = self.string_interner.get(owner_name).unwrap_or("<unknown>");
+
+        // Reuse storage when the declaring type has already been compiled.
+        if let Some((gid, _)) = self
+            .external_globals
+            .get(&format!("{}.{}", class_name, field_name))
+            .cloned()
+        {
+            self.global_symbol_map.insert(field.symbol_id, gid);
+            return;
+        }
+        let global_id = self.builder.module.alloc_global_id();
+
+        let initializer = if let Some(ref init_expr) = field.init {
+            // A literal bound for an abstract of another type is not
+            // a constant: it goes through the abstract's `@:from` in
+            // __init__.
+            // A scalar into a Null<primitive> static is boxed there, too.
+            let converts_at_init = (matches!(
+                self.type_table.get(field.ty).map(|t| &t.kind),
+                Some(TypeKind::Abstract { .. })
+            ) && init_expr.ty != field.ty
+                && !self.is_int64_type(field.ty))
+                || (self.is_optional_primitive(field.ty)
+                    && !matches!(init_expr.kind, HirExprKind::Null));
+            let constant_init = if converts_at_init {
+                None
+            } else {
+                self.try_evaluate_constant_init(init_expr)
+            };
+            if constant_init.is_none() {
+                // Non-constant static field initializers must run through __init__
+                // so Haxe-style `static var x = new Foo()` works without manual setup.
+                self.dynamic_globals
+                    .push((field.symbol_id, init_expr.clone()));
+            }
+            constant_init
+        } else {
+            None
+        };
+
+        let global_ty = self
+            .refine_global_type_from_initializer(self.convert_type(field.ty), initializer.as_ref());
+
+        let ir_global = IrGlobal {
+            id: global_id,
+            name: format!("{}.{}", class_name, field_name),
+            symbol_id: field.symbol_id,
+            ty: global_ty,
+            initializer,
+            mutable: !field.is_final,
+            linkage: Linkage::Internal,
+            alignment: None,
+            source_location: IrSourceLocation::unknown(),
+        };
+
+        self.builder.module.add_global(ir_global);
+        self.global_symbol_map.insert(field.symbol_id, global_id);
+        debug!(
+            "[STATIC FIELD] Registered static field {}.{} ({:?}) as global {:?}",
+            class_name, field_name, field.symbol_id, global_id
+        );
+    }
+
     pub(crate) fn register_class_metadata(&mut self, type_id: TypeId, class: &HirClass) {
         if std::env::var_os("RAYZOR_E0100_DEBUG").is_some() {
             let cname = self
@@ -64,89 +150,8 @@ impl<'a> HirToMirContext<'a> {
         for field in &class.fields {
             // Static fields should be stored as globals, not instance fields
             if field.is_static {
-                self.static_field_owners
-                    .insert(field.symbol_id, class.symbol_id);
-                let owner_name = self
-                    .symbol_table
-                    .get_symbol(class.symbol_id)
-                    .and_then(|s| s.qualified_name)
-                    .and_then(|q| self.string_interner.get(q))
-                    .or_else(|| self.string_interner.get(class.name))
-                    .unwrap_or("<unknown>");
-                self.field_class_names
-                    .insert(field.symbol_id, owner_name.to_owned());
-                if let Some(info) = &field.property_access {
-                    self.property_access_map
-                        .insert(field.symbol_id, info.clone());
-                }
-                let field_name = self.string_interner.get(field.name).unwrap_or("<unknown>");
-                let class_name = self.string_interner.get(class.name).unwrap_or("<unknown>");
-
-                // The same class compiled once already -- the entry file also
-                // reached as an import of itself -- owns this static; a second
-                // global would give it two homes, one written and one read.
-                if let Some((gid, _)) = self
-                    .external_globals
-                    .get(&format!("{}.{}", class_name, field_name))
-                    .cloned()
-                {
-                    self.global_symbol_map.insert(field.symbol_id, gid);
-                    continue;
-                }
-                let global_id = self.builder.module.alloc_global_id();
-
-                let initializer = if let Some(ref init_expr) = field.init {
-                    // A literal bound for an abstract of another type is not
-                    // a constant: it goes through the abstract's `@:from` in
-                    // __init__.
-                    // A scalar into a Null<primitive> static is boxed there, too.
-                    let converts_at_init = (matches!(
-                        self.type_table.get(field.ty).map(|t| &t.kind),
-                        Some(TypeKind::Abstract { .. })
-                    ) && init_expr.ty != field.ty
-                        && !self.is_int64_type(field.ty))
-                        || (self.is_optional_primitive(field.ty)
-                            && !matches!(init_expr.kind, HirExprKind::Null));
-                    let constant_init = if converts_at_init {
-                        None
-                    } else {
-                        self.try_evaluate_constant_init(init_expr)
-                    };
-                    if constant_init.is_none() {
-                        // Non-constant static field initializers must run through __init__
-                        // so Haxe-style `static var x = new Foo()` works without manual setup.
-                        self.dynamic_globals
-                            .push((field.symbol_id, init_expr.clone()));
-                    }
-                    constant_init
-                } else {
-                    None
-                };
-
-                let global_ty = self.refine_global_type_from_initializer(
-                    self.convert_type(field.ty),
-                    initializer.as_ref(),
-                );
-
-                let ir_global = IrGlobal {
-                    id: global_id,
-                    name: format!("{}.{}", class_name, field_name),
-                    symbol_id: field.symbol_id,
-                    ty: global_ty,
-                    initializer,
-                    mutable: !field.is_final,
-                    linkage: Linkage::Internal,
-                    alignment: None,
-                    source_location: IrSourceLocation::unknown(),
-                };
-
-                self.builder.module.add_global(ir_global);
-                self.global_symbol_map.insert(field.symbol_id, global_id);
-                debug!(
-                    "[STATIC FIELD] Registered static field {}.{} ({:?}) as global {:?}",
-                    class_name, field_name, field.symbol_id, global_id
-                );
-                continue; // Don't add to instance fields
+                self.register_static_field_metadata(class.symbol_id, class.name, field);
+                continue;
             }
 
             if let Some(ref property_info) = field.property_access {
@@ -846,6 +851,16 @@ impl<'a> HirToMirContext<'a> {
         type_id: TypeId,
         abstract_decl: &HirAbstract,
     ) {
+        for field in &abstract_decl.fields {
+            if field.is_static {
+                self.register_static_field_metadata(
+                    abstract_decl.symbol_id,
+                    abstract_decl.name,
+                    field,
+                );
+            }
+        }
+
         // Abstract types are type aliases with additional constraints
         let typedef_id = self.builder.module.alloc_typedef_id();
 

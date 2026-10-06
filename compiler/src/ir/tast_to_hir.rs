@@ -412,10 +412,13 @@ impl<'a> TastToHirContext<'a> {
                 field.is_static && field.initializer.is_some() && is_inline_field(field)
             })
             .chain(
-                // Abstract fields are always inline constants (enum abstract values)
                 file.abstracts
                     .iter()
-                    .flat_map(|abs| abs.fields.iter())
+                    .flat_map(|abs| {
+                        abs.fields
+                            .iter()
+                            .filter(move |field| abs.is_enum_abstract || is_inline_field(field))
+                    })
                     .filter(|field| field.is_static && field.initializer.is_some()),
             )
             .map(|field| (field.symbol_id, field.initializer.as_ref().unwrap().clone()))
@@ -998,18 +1001,22 @@ impl<'a> TastToHirContext<'a> {
             .collect();
 
         // Extract abstract fields
-        let fields: Vec<HirAbstractField> = abstract_decl
+        let fields: Vec<HirClassField> = abstract_decl
             .fields
             .iter()
-            .map(|field| {
-                HirAbstractField {
-                    symbol_id: field.symbol_id,
-                    name: field.name.clone(),
-                    ty: field.field_type,
-                    getter: None, // Will be resolved during type checking
-                    setter: None, // Will be resolved during type checking
-                    property_access: field.property_access.clone(),
-                }
+            .map(|field| HirClassField {
+                symbol_id: field.symbol_id,
+                name: field.name.clone(),
+                ty: field.field_type,
+                init: field.initializer.as_ref().map(|e| self.lower_expression(e)),
+                visibility: self.convert_visibility(field.visibility),
+                is_static: field.is_static,
+                is_final: !matches!(field.mutability, crate::tast::Mutability::Mutable),
+                property_access: field.property_access.clone(),
+                metadata_default: field
+                    .metadata_default
+                    .as_ref()
+                    .map(|e| self.lower_expression(e)),
             })
             .collect();
 
@@ -2175,10 +2182,16 @@ impl<'a> TastToHirContext<'a> {
                     TypedExpressionKind::StaticFieldAccess {
                         class_symbol,
                         field_symbol,
-                    } => CallTarget::Static {
-                        class: *class_symbol,
-                        method: *field_symbol,
-                    },
+                    } if self
+                        .symbol_table
+                        .get_symbol(*field_symbol)
+                        .is_some_and(|symbol| symbol.kind == crate::tast::SymbolKind::Function) =>
+                    {
+                        CallTarget::Static {
+                            class: *class_symbol,
+                            method: *field_symbol,
+                        }
+                    }
                     _ => CallTarget::Function,
                 };
 

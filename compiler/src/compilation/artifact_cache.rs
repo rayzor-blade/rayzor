@@ -839,6 +839,15 @@ impl CompilationUnit {
                 if !field.is_static {
                     continue;
                 }
+                let is_inline = symbol_table
+                    .get_symbol(field.symbol_id)
+                    .is_some_and(|symbol| symbol.is_inline());
+                if !abs.is_enum_abstract
+                    && !is_inline
+                    && field.mutability == crate::tast::Mutability::Mutable
+                {
+                    continue;
+                }
                 let Some(init) = &field.initializer else {
                     continue;
                 };
