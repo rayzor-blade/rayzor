@@ -203,12 +203,14 @@ impl NamespaceResolver {
 
     /// Mark a file as loaded
     pub fn mark_file_loaded(&mut self, path: PathBuf) {
-        self.loaded_files.insert(path);
+        self.loaded_files
+            .insert(path.canonicalize().unwrap_or(path));
     }
 
     /// Check if a file has been loaded
-    pub fn is_file_loaded(&self, path: &PathBuf) -> bool {
-        self.loaded_files.contains(path)
+    pub fn is_file_loaded(&self, path: &std::path::Path) -> bool {
+        let identity = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.loaded_files.contains(&identity)
     }
 
     /// Get all loaded files

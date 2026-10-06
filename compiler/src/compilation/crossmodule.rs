@@ -3,6 +3,55 @@
 use super::*;
 
 impl CompilationUnit {
+    /// Preserve the nominal type or iteration protocol used to wrap a call
+    /// argument, including when the callee is restored from BLADE.
+    pub(crate) fn call_param_type_name(&self, mut ty: crate::tast::TypeId) -> Option<String> {
+        use crate::tast::TypeKind;
+        let type_table = self.type_table.borrow();
+        for _ in 0..type_table.len() {
+            match &type_table.get(ty)?.kind {
+                TypeKind::GenericInstance { base_type, .. } => ty = *base_type,
+                TypeKind::TypeAlias {
+                    symbol_id,
+                    target_type,
+                    ..
+                } => {
+                    let name = self.symbol_table.get_symbol(*symbol_id).and_then(|symbol| {
+                        self.string_interner
+                            .get(symbol.qualified_name.unwrap_or(symbol.name))
+                    });
+                    if name.is_some_and(|name| {
+                        matches!(name.rsplit('.').next(), Some("Iterable" | "Iterator"))
+                    }) {
+                        return name.map(str::to_owned);
+                    }
+                    ty = *target_type;
+                }
+                _ => break,
+            }
+        }
+        let symbol_id = match &type_table.get(ty)?.kind {
+            TypeKind::Class { symbol_id, .. } | TypeKind::Interface { symbol_id, .. } => *symbol_id,
+            // A constrained parameter keeps its interface's wrapping convention
+            // after the importing context has erased the parameter constraints.
+            TypeKind::TypeParameter { constraints, .. } => {
+                constraints
+                    .iter()
+                    .find_map(|ty| match &type_table.get(*ty)?.kind {
+                        TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
+                        _ => None,
+                    })?
+            }
+            _ => return None,
+        };
+        let symbol = self.symbol_table.get_symbol(symbol_id)?;
+        symbol
+            .qualified_name
+            .and_then(|name| self.string_interner.get(name))
+            .or_else(|| self.string_interner.get(symbol.name))
+            .map(str::to_owned)
+    }
+
     /// Post-load fixup: resolve stale cross-module function references in all import modules.
     /// During renumbering, some refs couldn't be resolved because the target module hadn't
     /// been loaded yet. Now all modules are loaded and stdlib_function_name_map is complete.
@@ -565,6 +614,20 @@ impl CompilationUnit {
                 .entry(*old_id)
                 .or_insert(IrFunctionId(old_id.0 + import_base));
         }
+        let local_functions_by_name: BTreeMap<String, IrFunctionId> = import_mir
+            .functions
+            .iter()
+            .map(|(id, function)| {
+                (
+                    function
+                        .qualified_name
+                        .as_ref()
+                        .unwrap_or(&function.name)
+                        .clone(),
+                    id_map[id],
+                )
+            })
+            .collect();
 
         // Globals get the same disjoint-range treatment as functions: every
         // module numbers its globals densely from 0, so an unrenumbered
@@ -599,7 +662,12 @@ impl CompilationUnit {
                         | IrInstruction::FunctionRef { func_id, .. }
                         | IrInstruction::MakeClosure { func_id, .. } => {
                             if let Some(name) = import_mir.external_function_names.get(func_id) {
-                                if let Some(&current_id) = self.stdlib_function_name_map.get(name) {
+                                // A reference inferred through a parent or alias
+                                // can name a function defined in this module.
+                                if let Some(&current_id) = local_functions_by_name
+                                    .get(name)
+                                    .or_else(|| self.stdlib_function_name_map.get(name))
+                                {
                                     *func_id = current_id;
                                 }
                                 // If name lookup fails the post-pass
@@ -650,7 +718,11 @@ impl CompilationUnit {
         // silently degrades cross-module resolution to raw-number trust.
         let old_ext_names = std::mem::take(&mut import_mir.external_function_names);
         for (old_id, name) in old_ext_names {
-            let new_id = id_map.get(&old_id).copied().unwrap_or(old_id);
+            let new_id = local_functions_by_name
+                .get(&name)
+                .or_else(|| id_map.get(&old_id))
+                .copied()
+                .unwrap_or(old_id);
             import_mir.external_function_names.insert(new_id, name);
         }
 

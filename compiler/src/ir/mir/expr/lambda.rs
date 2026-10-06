@@ -483,6 +483,22 @@ impl<'a> HirToMirContext<'a> {
         method_symbol: SymbolId,
     ) -> Option<IrId> {
         let receiver_reg = self.lower_expression(receiver)?;
+        if self
+            .symbol_table
+            .get_symbol(method_symbol)
+            .is_some_and(|symbol| symbol.is_static())
+        {
+            let function = self.get_function_id(&method_symbol)?;
+            let target = self
+                .ensure_closure_value_adapter(function)
+                .unwrap_or(function);
+            let method_type = self
+                .symbol_table
+                .get_symbol(method_symbol)
+                .map(|symbol| symbol.type_id);
+            self.closure_targets.insert(target, method_type);
+            return self.builder.build_function_ref(target);
+        }
         let thunk_id = match self.function_map.get(&method_symbol) {
             Some(&id) => self.ensure_method_ref_thunk(id)?,
             // A method compiled in another module: its parameter types were

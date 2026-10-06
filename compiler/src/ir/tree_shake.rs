@@ -208,6 +208,11 @@ fn find_entry(
 ) -> Option<(usize, IrFunctionId)> {
     for (idx, module) in modules.iter().enumerate() {
         if module.name == entry_module {
+            if entry_function == "main" {
+                if let Some(entry) = module.entry_function() {
+                    return Some((idx, entry.id));
+                }
+            }
             for (func_id, func) in &module.functions {
                 if func.name == entry_function {
                     return Some((idx, *func_id));
@@ -248,6 +253,21 @@ mod tests {
                 uses_sret: false,
             },
         )
+    }
+
+    #[test]
+    fn entry_module_main_survives_import_renumbering() {
+        let mut module = IrModule::new("Main".into(), "unit/./Main.hx".into());
+        let mut imported = make_function(100_000, 1, "main");
+        imported.qualified_name = Some("unit.Other.main".into());
+        let mut entry = make_function(200_000, 2, "main");
+        entry.qualified_name = Some("unit.Main.main".into());
+        module.add_function(imported);
+        module.add_function(entry);
+        let mut modules = vec![module];
+        tree_shake_bundle(&mut modules, "Main", "main");
+        assert!(modules[0].functions.contains_key(&IrFunctionId(200_000)));
+        assert!(!modules[0].functions.contains_key(&IrFunctionId(100_000)));
     }
 
     #[test]

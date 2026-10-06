@@ -646,6 +646,28 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Imported parameter names retain protocol identity even when a
+        // restored method symbol supplied an erased local signature.
+        let imported_param_name = callee_func_id
+            .and_then(|id| self.external_function_param_iface_names.get(&id))
+            .and_then(|names| names.get(param_index))
+            .cloned()
+            .flatten();
+        if let Some(name) = imported_param_name
+            .filter(|name| matches!(name.rsplit('.').next(), Some("Iterable" | "Iterator")))
+        {
+            if self
+                .lookup_interface_symbol_by_qualified_name(&name)
+                .is_none()
+            {
+                if let Some(handle) =
+                    self.maybe_wrap_for_named_iter_protocol(arg_reg, arg_expr.ty, &name)
+                {
+                    return handle;
+                }
+            }
+        }
+
         // Path 2: direct class→anon or wider-anon→anon conversion at the call boundary.
         if let Some(func_id) = callee_func_id {
             if let Some(param_types) = self.function_param_hir_types.get(&func_id).cloned() {

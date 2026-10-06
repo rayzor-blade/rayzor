@@ -1,0 +1,6 @@
+[project]
+name = "packaged-entry-identity"
+entry = "./unit/PackagedEntryIdentity.hx"
+
+[build]
+class-paths = [".", "./."]

@@ -196,7 +196,8 @@ impl CompilationUnit {
         for (filename, source) in &self.file_source_by_filename {
             sources.insert(filename.clone(), source.clone());
         }
-        for (filename, _) in &self.compiled_files {
+        for file in self.compiled_files.values() {
+            let filename = &file.metadata.file_path;
             if !sources.contains_key(filename) {
                 if let Ok(source) = std::fs::read_to_string(filename) {
                     sources.insert(filename.clone(), source);

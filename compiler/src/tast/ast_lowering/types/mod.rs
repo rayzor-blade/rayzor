@@ -98,8 +98,23 @@ impl<'a> AstLowering<'a> {
                     .and_then(|sym_id| self.context.symbol_table.get_symbol(sym_id))
                     .map(|s| (s.id, s.kind.clone()));
 
-                // If import resolution found a symbol, use it. Otherwise fall back to scope lookup.
-                let symbol_info = import_resolved_symbol
+                let own_symbol =
+                    if path.package.is_empty() && self.current_module_types.contains(&path.name) {
+                        self.context.current_package.and_then(|package| {
+                            self.context
+                                .namespace_resolver
+                                .find_symbols_by_name(interned_name, package)
+                                .into_iter()
+                                .find(|(owner, _)| *owner == package)
+                                .and_then(|(_, id)| self.context.symbol_table.get_symbol(id))
+                                .map(|symbol| (symbol.id, symbol.kind))
+                        })
+                    } else {
+                        None
+                    };
+                // A declaration in this module precedes imports and root names.
+                let symbol_info = own_symbol
+                    .or(import_resolved_symbol)
                     .or_else(|| {
                         self.context
                             .symbol_table

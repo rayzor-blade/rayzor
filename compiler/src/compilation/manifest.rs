@@ -248,9 +248,23 @@ impl CompilationUnit {
 
         // Create class symbol using the existing helper method
         let root_name = manifest_root_name(&class_info.package, short_name, qualified_interned);
+        // Headers and earlier signatures may already refer to this class.
+        // Restoring its members must keep that nominal identity.
         let symbol_id = self
-            .symbol_table
-            .create_class_in_scope(root_name, ScopeId::first());
+            .lookup_type_symbol(&qualified_name)
+            .filter(|id| {
+                self.symbol_table.get_symbol(*id).is_some_and(|symbol| {
+                    symbol.kind == crate::tast::SymbolKind::Class
+                        && self
+                            .string_interner
+                            .get(symbol.qualified_name.unwrap_or(symbol.name))
+                            == Some(qualified_name.as_str())
+                })
+            })
+            .unwrap_or_else(|| {
+                self.symbol_table
+                    .create_class_in_scope(root_name, ScopeId::first())
+            });
         self.index_manifest_short_name(&class_info.package, short_name, symbol_id);
 
         // Update symbol metadata including the class scope
@@ -402,10 +416,26 @@ impl CompilationUnit {
                 .map(|s| s.to_string())
         });
 
-        // Create the function symbol
-        let method_symbol = self
-            .symbol_table
-            .create_function_in_scope(method_name, class_scope);
+        let qualified_method_name = class_qualified_name.as_ref().map(|name| {
+            self.string_interner
+                .intern(&format!("{}.{}", name, method.name))
+        });
+        // Existing call sites keep their method symbol when its signature is
+        // refined from the compiled import.
+        let method_symbol = qualified_method_name
+            .and_then(|name| {
+                self.symbol_table
+                    .find_symbols(|symbol| {
+                        symbol.kind == crate::tast::SymbolKind::Function
+                            && symbol.qualified_name == Some(name)
+                    })
+                    .first()
+                    .map(|symbol| symbol.id)
+            })
+            .unwrap_or_else(|| {
+                self.symbol_table
+                    .create_function_in_scope(method_name, class_scope)
+            });
 
         // Parse parameter types and return type to create a function type
         let param_types: Vec<TypeId> = method
@@ -436,6 +466,7 @@ impl CompilationUnit {
         // Update symbol with type and flags
         if let Some(sym) = self.symbol_table.get_symbol_mut(method_symbol) {
             sym.type_id = func_type;
+            sym.scope_id = class_scope;
             if is_static {
                 sym.flags = sym.flags.union(SymbolFlags::STATIC);
             }
@@ -445,11 +476,8 @@ impl CompilationUnit {
             if !method.is_public {
                 sym.visibility = crate::tast::symbols::Visibility::Private;
             }
-            if let Some(class_name) = &class_qualified_name {
-                let method_qualified_name = self
-                    .string_interner
-                    .intern(&format!("{}.{}", class_name, method.name));
-                sym.qualified_name = Some(method_qualified_name);
+            if let Some(name) = qualified_method_name {
+                sym.qualified_name = Some(name);
             }
             // Restore `@:native("foo")` from the BLADE cache. Without this,
             // stdlib runtime mappings have to be keyed by Haxe method name

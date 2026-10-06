@@ -4,6 +4,63 @@
 use super::*;
 
 impl CompilationUnit {
+    /// Keep inferred primitive return types when an import is restored.
+    pub(crate) fn cache_inferred_primitive_returns(&mut self, file: &TypedFile) {
+        let Some(info) = self.last_compiled_type_info.as_mut() else {
+            return;
+        };
+        let table = self.type_table.borrow();
+        let primitive = |ty| {
+            let name = match &table.get(ty)?.kind {
+                crate::tast::TypeKind::Int => "Int",
+                crate::tast::TypeKind::Float => "Float",
+                crate::tast::TypeKind::Bool => "Bool",
+                crate::tast::TypeKind::String => "String",
+                crate::tast::TypeKind::Void => "Void",
+                _ => return None,
+            };
+            Some(bsym::BladeType::Path {
+                package: Vec::new(),
+                name: name.to_owned(),
+                sub: None,
+                params: Vec::new(),
+            })
+        };
+        let refine = |methods: &mut [BladeMethodInfo],
+                      typed: &[crate::tast::node::TypedFunction]| {
+            for method in methods {
+                if method.return_type.is_none() {
+                    method.return_type = typed
+                        .iter()
+                        .find(|function| {
+                            function.is_static == method.is_static
+                                && self.string_interner.get(function.name)
+                                    == Some(method.name.as_str())
+                        })
+                        .and_then(|function| primitive(function.return_type));
+                }
+            }
+        };
+        for class in &mut info.classes {
+            if let Some(typed) = file
+                .classes
+                .iter()
+                .find(|typed| self.string_interner.get(typed.name) == Some(class.name.as_str()))
+            {
+                refine(&mut class.methods, &typed.methods);
+                refine(&mut class.static_methods, &typed.methods);
+            }
+        }
+        for abstract_type in &mut info.abstracts {
+            if let Some(typed) = file.abstracts.iter().find(|typed| {
+                self.string_interner.get(typed.name) == Some(abstract_type.name.as_str())
+            }) {
+                refine(&mut abstract_type.methods, &typed.methods);
+                refine(&mut abstract_type.static_methods, &typed.methods);
+            }
+        }
+    }
+
     // === BLADE Caching Methods ===
 
     /// Get the BLADE cache path for a source file.
@@ -400,29 +457,14 @@ impl CompilationUnit {
         // each time is quadratic in a table that does not change here.
         let class_names_by_scope = self.class_names_by_scope();
 
-        // Resolve a HIR TypeId to a qualified-name string for the cache.
-        // Only Class/Interface types matter to Path 3 of
-        // `maybe_materialize_for_call`; everything else (primitives,
-        // abstracts, anonymous, …) we encode as None so the restore
-        // side leaves the corresponding param-type slot unwrapped.
-        let resolve_hir_type_name = |ty: crate::tast::TypeId| -> Option<String> {
-            let type_table = self.type_table.borrow();
-            let info = type_table.get(ty)?;
-            let symbol_id = match &info.kind {
-                crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                crate::tast::TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
-                _ => None,
-            }?;
-            let sym = self.symbol_table.get_symbol(symbol_id)?;
-            sym.qualified_name
-                .and_then(|n| self.string_interner.get(n))
-                .or_else(|| self.string_interner.get(sym.name))
-                .map(|s| s.to_string())
-        };
         let param_names_for = |func_id: crate::ir::IrFunctionId| -> Vec<Option<String>> {
             function_param_hir_types
                 .get(&func_id)
-                .map(|tys| tys.iter().copied().map(resolve_hir_type_name).collect())
+                .map(|tys| {
+                    tys.iter()
+                        .map(|ty| self.call_param_type_name(*ty))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
 
@@ -624,7 +666,7 @@ impl CompilationUnit {
             let Some(iface_name) = qname_of(*iface_sym) else {
                 continue;
             };
-            let Some(return_type_name) = resolve_hir_type_name(*ty) else {
+            let Some(return_type_name) = self.call_param_type_name(*ty) else {
                 continue;
             };
             let method_name_str = self

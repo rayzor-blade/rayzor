@@ -106,10 +106,11 @@ impl<'a> AstLowering<'a> {
                 })
         };
 
-        // Update qualified name (full path including class hierarchy). A
-        // shadowing abstract keeps the package-qualified name it registered
-        // with: the scope path would reduce it to the bare name it shadows.
-        if !shadows_foreign {
+        // A pre-registered type starts in the root scope. Its identity comes
+        // from the declaring package rather than that scope's path.
+        if self.context.current_package.is_some() {
+            self.register_symbol_with_package(abstract_symbol, &abstract_decl.name);
+        } else {
             self.context.update_symbol_qualified_name(abstract_symbol);
         }
 

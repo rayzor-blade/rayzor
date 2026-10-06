@@ -333,15 +333,33 @@ impl Default for ModuleMetadata {
 }
 
 impl IrModule {
-    /// The program's entry: a function named exactly `main` (the entry
-    /// file's own, numbered below the imports, first), else the legacy
-    /// `*_main` / `*.main` spellings. A `get_main` accessor is not one.
+    /// Prefer the source module's `main`, then an unrenumbered `main`,
+    /// then the legacy `*_main` / `*.main` spellings.
     pub fn entry_function(&self) -> Option<&IrFunction> {
         let named = |f: &&IrFunction| f.name == "main";
+        let entry_owner = std::path::Path::new(&self.source_file)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|name| format!("{}.main", name));
         self.functions
             .values()
             .filter(named)
-            .find(|f| f.id.0 < 100_000)
+            .find(|f| {
+                entry_owner.as_deref().is_some_and(|owner| {
+                    f.qualified_name.as_deref().is_some_and(|name| {
+                        name == owner
+                            || name
+                                .strip_suffix(owner)
+                                .is_some_and(|prefix| prefix.ends_with('.'))
+                    })
+                })
+            })
+            .or_else(|| {
+                self.functions
+                    .values()
+                    .filter(named)
+                    .find(|f| f.id.0 < 100_000)
+            })
             .or_else(|| self.functions.values().find(named))
             .or_else(|| {
                 self.functions.values().find(|f| {

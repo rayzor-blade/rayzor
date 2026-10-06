@@ -35,6 +35,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+fn source_file_identity(filename: &str) -> PathBuf {
+    let path = PathBuf::from(filename);
+    path.canonicalize().unwrap_or(path)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TypecheckStageTimings {
     pub hdll_ms: f64,
@@ -313,7 +318,7 @@ pub struct CompilationUnit {
 
     /// Cache of files that have been successfully compiled (to avoid redundant recompilation)
     /// Maps filename to the TypedFile result
-    compiled_files: BTreeMap<String, TypedFile>,
+    compiled_files: BTreeMap<PathBuf, TypedFile>,
 
     /// Internal compilation pipeline (delegates to HaxeCompilationPipeline)
     pipeline: HaxeCompilationPipeline,
@@ -572,6 +577,7 @@ mod manifest;
 mod ownership;
 mod runtime_metadata;
 mod sources;
+mod stdlib_merge;
 
 /// The name of a type parameter a manifest type refers to, if that is all it
 /// is — a bare name with no package and no arguments.
@@ -1066,6 +1072,37 @@ fn collect_qualified_type_refs_from_ast(ast: &parser::HaxeFile, out: &mut Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_class_keeps_predeclared_identity() {
+        let mut unit = CompilationUnit::new(CompilationConfig::default());
+        let source = "package unit; class Collection { public function iterator():Int return 1; }";
+        unit.pre_register_file_types("Collection.hx", source)
+            .expect("class header");
+        let symbol_id = unit.lookup_type_symbol("unit.Collection").unwrap();
+        let type_id = unit.symbol_table.get_symbol(symbol_id).unwrap().type_id;
+        let ast = unit.parse_file("Collection.hx", source).unwrap();
+        let symbols = bsym::extract_type_info_from_ast(&ast);
+        let initial = unit.register_symbols_from_type_info(&symbols);
+        let iterator = unit.string_interner.intern("iterator");
+        let method_id = unit
+            .scope_tree
+            .get_scope(initial["unit.Collection"].2)
+            .unwrap()
+            .get_symbol(iterator)
+            .unwrap();
+        let restored = unit.register_symbols_from_type_info(&symbols);
+        let (restored_symbol, restored_type, scope) = restored["unit.Collection"];
+        assert_eq!(restored_symbol, symbol_id);
+        assert_eq!(restored_type, type_id);
+        assert_eq!(
+            unit.scope_tree
+                .get_scope(scope)
+                .unwrap()
+                .get_symbol(iterator),
+            Some(method_id)
+        );
+    }
 
     #[test]
     fn test_compilation_unit_with_stdlib() {

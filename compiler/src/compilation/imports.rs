@@ -103,6 +103,9 @@ impl CompilationUnit {
         // Helper to extract dependencies from an expression
         fn extract_expr_deps(expr: &parser::Expr, deps: &mut std::collections::BTreeSet<String>) {
             match &expr.kind {
+                ExprKind::Regex { .. } => {
+                    deps.insert("EReg".to_owned());
+                }
                 ExprKind::Ident(name)
                     if name
                         .chars()
@@ -651,6 +654,7 @@ impl CompilationUnit {
             to_process.push_back(name.clone());
         }
         let mut visited: BTreeSet<String> = BTreeSet::new();
+        let mut discovered_paths = BTreeSet::new();
 
         let t_discover = profile_timer(self.config.profile_typecheck);
         while let Some(qualified_path) = to_process.pop_front() {
@@ -700,10 +704,7 @@ impl CompilationUnit {
             // Deduplicate by file path — the same file can appear under different
             // qualified names (e.g., "BalancedTree" and "haxe.ds.BalancedTree")
             let file_path_str = file_path.to_string_lossy().to_string();
-            if all_files
-                .values()
-                .any(|(p, _, _)| p.to_string_lossy() == file_path_str)
-            {
+            if !discovered_paths.insert(source_file_identity(&file_path_str)) {
                 continue;
             }
 
@@ -952,6 +953,18 @@ impl CompilationUnit {
             }
         }
 
+        // Entry bodies need the inferred signatures of their imports. Cyclic
+        // imports still receive the entry's declarations through the retry pass.
+        let user_paths: BTreeSet<PathBuf> = self
+            .user_files
+            .iter()
+            .map(|file| source_file_identity(&file.filename))
+            .collect();
+        compile_order.sort_by_key(|name| {
+            all_files.get(name).is_some_and(|(path, _, _)| {
+                user_paths.contains(&source_file_identity(&path.to_string_lossy()))
+            })
+        });
         add_profile_ms(&mut self.typecheck_timings.import_toposort_ms, t_toposort);
 
         let t_import_compile = profile_timer(self.config.profile_typecheck);
@@ -974,8 +987,13 @@ impl CompilationUnit {
         // before haxe.io.FPHelper) even though the retry succeeds.
         let first_pass_snapshot = self.collected_diagnostics.len();
         let mut retry_queue: Vec<(String, PathBuf, String, Vec<String>, usize)> = Vec::new();
+        let mut deferred_entries = Vec::new();
         for name in compile_order {
             if let Some((file_path, source, deps)) = all_files.remove(&name) {
+                if user_paths.contains(&source_file_identity(&file_path.to_string_lossy())) {
+                    deferred_entries.push((name, file_path, source, deps));
+                    continue;
+                }
                 let diag_snapshot = self.collected_diagnostics.len();
                 if !self.try_compile_import(&name, &file_path, &source, deps.clone()) {
                     retry_queue.push((name, file_path, source, deps, diag_snapshot));
@@ -1015,6 +1033,13 @@ impl CompilationUnit {
             // No progress: the survivors are genuine failures; their errors
             // (pushed after first_pass_snapshot during this pass) are kept.
             if next.len() == before {
+                // Finish import inference before typing entry bodies. If an
+                // import needs an entry declaration, retry it after the entry.
+                if !deferred_entries.is_empty() {
+                    next.append(&mut deferred_entries);
+                    pending = next;
+                    continue;
+                }
                 break next.into_iter().map(|(n, ..)| n).collect();
             }
             pending = next;
@@ -1066,7 +1091,8 @@ impl CompilationUnit {
         let filename = file_path.to_string_lossy().to_string();
 
         // Skip if already compiled
-        if self.compiled_files.contains_key(&filename) {
+        let identity = source_file_identity(&filename);
+        if self.compiled_files.contains_key(&identity) {
             if self.config.profile_typecheck {
                 self.typecheck_timings.import_already_compiled += 1;
             }
@@ -1094,7 +1120,11 @@ impl CompilationUnit {
         // dependencies are still walked by the import loader before consumers
         // resolve the alias target in the current compilation context.
         let source_has_typedef = source.contains("typedef ");
-        let cache_hit = if self.config.enable_cache {
+        let is_user_file = self
+            .user_files
+            .iter()
+            .any(|file| source_file_identity(&file.filename) == identity);
+        let cache_hit = if self.config.enable_cache && !is_user_file {
             let t_cache_load = profile_timer(self.config.profile_typecheck);
             let hit = self.try_load_import_from_cache(&filename, source);
             add_profile_ms(

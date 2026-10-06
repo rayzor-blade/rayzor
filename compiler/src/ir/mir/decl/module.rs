@@ -134,6 +134,14 @@ impl<'a> HirToMirContext<'a> {
                     // first, since a slot found by name would be the wrong one;
                     // a read consults it last.
                     for field in &abstract_decl.fields {
+                        if self
+                            .symbol_table
+                            .get_symbol(field.symbol_id)
+                            .is_some_and(|symbol| symbol.is_static())
+                        {
+                            self.static_field_owners
+                                .insert(field.symbol_id, abstract_decl.symbol_id);
+                        }
                         if let Some(owner) = self
                             .symbol_table
                             .get_symbol(abstract_decl.symbol_id)
@@ -164,6 +172,10 @@ impl<'a> HirToMirContext<'a> {
                     // Register abstract method signatures — same as classes but
                     // this_type uses the underlying type (value, not pointer)
                     for method in &abstract_decl.methods {
+                        self.class_method_by_name.insert(
+                            (abstract_decl.symbol_id, method.function.name),
+                            method.function.symbol_id,
+                        );
                         // Named under the abstract, as a class's are, so an
                         // importer resolves `rest.length`'s getter to this one.
                         self.class_method_symbols.insert(
@@ -457,6 +469,7 @@ impl<'a> HirToMirContext<'a> {
         // After __init__: a static initializer's lambda is a closure target
         // too, and __vtable_init__ registers every target's entries.
         if !self.class_vtables.is_empty()
+            || !self.interface_vtables.is_empty()
             || !self.constructor_reflect_wrappers.is_empty()
             || !self.closure_targets.is_empty()
             || !self.dynamic_member_names.is_empty()
