@@ -116,6 +116,14 @@ impl<'a> AstLowering<'a> {
         if let Some(&parent) = self.class_parents.get(&class_symbol) {
             return Some(parent);
         }
+        if let Some(parent) = self
+            .context
+            .symbol_table
+            .get_class_super_type(class_symbol)
+            .and_then(|ty| self.resolve_type_to_class_symbol(ty))
+        {
+            return Some(parent);
+        }
         let child = self
             .context
             .symbol_table

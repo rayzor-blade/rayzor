@@ -613,6 +613,9 @@ pub struct SymbolTable {
     /// `infer_type_args_from_constructor` to substitute T → concrete arg.
     class_type_params: BTreeMap<SymbolId, Vec<TypeId>>,
 
+    /// Declared superclass instantiations, including their type arguments.
+    class_super_types: BTreeMap<SymbolId, TypeId>,
+
     /// Declared default type arguments per class, positionally aligned with
     /// `class_type_params`. `None` where a parameter has no default.
     class_type_param_defaults: BTreeMap<SymbolId, Vec<Option<TypeId>>>,
@@ -641,6 +644,7 @@ impl SymbolTable {
             supertype_cache: BTreeMap::new(),
             enum_variants: BTreeMap::new(),
             class_type_params: BTreeMap::new(),
+            class_super_types: BTreeMap::new(),
             class_type_param_defaults: BTreeMap::new(),
             class_constructor_symbols: BTreeMap::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::new(1000)),
@@ -663,6 +667,7 @@ impl SymbolTable {
             supertype_cache: BTreeMap::new(),
             enum_variants: BTreeMap::new(), // Estimate fewer enums
             class_type_params: BTreeMap::new(),
+            class_super_types: BTreeMap::new(),
             class_type_param_defaults: BTreeMap::new(),
             class_constructor_symbols: BTreeMap::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::with_sizes(capacity, capacity / 2)),
@@ -1384,6 +1389,18 @@ impl SymbolTable {
     /// Look up a class's ordered TypeParameter TypeIds (e.g. `[T_id]` for `Arc<T>`).
     pub fn get_class_type_params(&self, class_symbol: SymbolId) -> Option<&Vec<TypeId>> {
         self.class_type_params.get(&class_symbol)
+    }
+
+    pub fn set_class_super_type(&mut self, class_symbol: SymbolId, superclass: Option<TypeId>) {
+        if let Some(superclass) = superclass {
+            self.class_super_types.insert(class_symbol, superclass);
+        } else {
+            self.class_super_types.remove(&class_symbol);
+        }
+    }
+
+    pub fn get_class_super_type(&self, class_symbol: SymbolId) -> Option<TypeId> {
+        self.class_super_types.get(&class_symbol).copied()
     }
 
     /// How many type parameters the class declaring `type_param` has. A class

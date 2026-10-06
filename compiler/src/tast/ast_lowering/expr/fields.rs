@@ -95,11 +95,22 @@ impl<'a> AstLowering<'a> {
         class_sym: SymbolId,
         field_name: InternedString,
     ) -> Option<SymbolId> {
-        let fields = self.class_fields.get(&class_sym)?;
-        fields
-            .iter()
-            .find(|(n, _, _)| *n == field_name)
-            .map(|(_, sym, _)| *sym)
+        let mut current = Some(class_sym);
+        let mut visited = std::collections::BTreeSet::new();
+        while let Some(class) = current {
+            if !visited.insert(class) {
+                break;
+            }
+            if let Some(field) = self
+                .class_fields
+                .get(&class)
+                .and_then(|fields| fields.iter().find(|(name, _, _)| *name == field_name))
+            {
+                return Some(field.1);
+            }
+            current = self.parent_class_symbol(class);
+        }
+        None
     }
 
     /// Lower a field access expression (ExprKind::Field).
@@ -619,10 +630,8 @@ impl<'a> AstLowering<'a> {
         // so we must check both to resolve instance method calls like `obj.lock()`.
         let resolve_in_class =
             |this: &Self, class_sym: &SymbolId, name: InternedString| -> Option<SymbolId> {
-                if let Some(fields) = this.class_fields.get(class_sym) {
-                    if let Some((_, sym, _)) = fields.iter().find(|(n, _, _)| *n == name) {
-                        return Some(*sym);
-                    }
+                if let Some(field) = this.lookup_data_field(*class_sym, name) {
+                    return Some(field);
                 }
                 if let Some(methods) = this.class_methods.get(class_sym) {
                     if let Some((_, sym, _)) = methods.iter().find(|(n, _, _)| *n == name) {

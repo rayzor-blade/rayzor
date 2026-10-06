@@ -17,74 +17,106 @@ use tracing::warn;
 impl<'a> AstLowering<'a> {
     /// Bind a member's declared type to the receiver's type arguments.
     pub(crate) fn substitute_receiver_type(&self, member_type: TypeId, receiver: TypeId) -> TypeId {
-        let mut bindings = {
-            let tt = self.context.type_table.borrow();
-            let (params, args) = match tt.get(receiver).map(|t| &t.kind) {
-                Some(TypeKind::Class {
-                    symbol_id,
-                    type_args,
-                })
-                | Some(TypeKind::Interface {
-                    symbol_id,
-                    type_args,
-                })
-                | Some(TypeKind::Abstract {
-                    symbol_id,
-                    type_args,
-                    ..
-                }) => {
-                    let params = self
-                        .context
-                        .symbol_table
-                        .get_class_type_params(*symbol_id)
-                        .or_else(|| self.class_type_params.get(symbol_id));
-                    let Some(params) = params else {
-                        return member_type;
-                    };
-                    (params.as_slice(), type_args.as_slice())
+        let mut bindings = Vec::new();
+        let mut current = receiver;
+        let mut visited = std::collections::BTreeSet::new();
+        for _ in 0..32 {
+            if !visited.insert(current) {
+                break;
+            }
+            let (current_bindings, superclass) = {
+                let tt = self.context.type_table.borrow();
+                if let Some(TypeKind::TypeAlias { target_type, .. }) =
+                    tt.get(current).map(|t| &t.kind)
+                {
+                    current = *target_type;
+                    continue;
                 }
-                Some(TypeKind::Enum {
-                    symbol_id,
-                    type_args,
-                }) => {
-                    let declared = self.context.symbol_table.get_symbol(*symbol_id);
-                    let Some(TypeKind::Enum {
-                        type_args: params, ..
-                    }) = declared.and_then(|s| tt.get(s.type_id)).map(|t| &t.kind)
-                    else {
-                        return member_type;
-                    };
-                    (params.as_slice(), type_args.as_slice())
-                }
-                Some(TypeKind::GenericInstance {
-                    base_type,
-                    type_args,
-                    ..
-                }) => match tt.get(*base_type).map(|t| &t.kind) {
+                let (class_symbol, params, args) = match tt.get(current).map(|t| &t.kind) {
                     Some(TypeKind::Class {
-                        type_args: params, ..
+                        symbol_id,
+                        type_args,
                     })
                     | Some(TypeKind::Interface {
-                        type_args: params, ..
+                        symbol_id,
+                        type_args,
                     })
-                    | Some(TypeKind::Enum {
-                        type_args: params, ..
-                    }) => (params.as_slice(), type_args.as_slice()),
-                    _ => return member_type,
-                },
-                _ => return member_type,
-            };
-            params
-                .iter()
-                .zip(args)
-                .filter_map(|(param, arg)| match tt.get(*param).map(|t| &t.kind) {
-                    Some(TypeKind::TypeParameter { symbol_id, .. }) if param != arg => {
-                        Some((*symbol_id, *arg))
+                    | Some(TypeKind::Abstract {
+                        symbol_id,
+                        type_args,
+                        ..
+                    }) => {
+                        let params = self
+                            .context
+                            .symbol_table
+                            .get_class_type_params(*symbol_id)
+                            .or_else(|| self.class_type_params.get(symbol_id));
+                        (
+                            Some(*symbol_id),
+                            params.map(Vec::as_slice).unwrap_or(&[]),
+                            type_args.as_slice(),
+                        )
                     }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
+                    Some(TypeKind::Enum {
+                        symbol_id,
+                        type_args,
+                    }) => {
+                        let declared = self.context.symbol_table.get_symbol(*symbol_id);
+                        let Some(TypeKind::Enum {
+                            type_args: params, ..
+                        }) = declared.and_then(|s| tt.get(s.type_id)).map(|t| &t.kind)
+                        else {
+                            break;
+                        };
+                        (None, params.as_slice(), type_args.as_slice())
+                    }
+                    Some(TypeKind::GenericInstance {
+                        base_type,
+                        type_args,
+                        ..
+                    }) => match tt.get(*base_type).map(|t| &t.kind) {
+                        Some(TypeKind::Class {
+                            symbol_id,
+                            type_args: params,
+                        })
+                        | Some(TypeKind::Interface {
+                            symbol_id,
+                            type_args: params,
+                        }) => (
+                            Some(*symbol_id),
+                            self.context
+                                .symbol_table
+                                .get_class_type_params(*symbol_id)
+                                .map(Vec::as_slice)
+                                .unwrap_or(params.as_slice()),
+                            type_args.as_slice(),
+                        ),
+                        Some(TypeKind::Enum {
+                            type_args: params, ..
+                        }) => (None, params.as_slice(), type_args.as_slice()),
+                        _ => break,
+                    },
+                    _ => break,
+                };
+                let current_bindings = params
+                    .iter()
+                    .zip(args)
+                    .filter_map(|(param, arg)| match tt.get(*param).map(|t| &t.kind) {
+                        Some(TypeKind::TypeParameter { symbol_id, .. }) if param != arg => {
+                            Some((*symbol_id, *arg))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let superclass = class_symbol
+                    .and_then(|symbol| self.context.symbol_table.get_class_super_type(symbol));
+                (current_bindings, superclass)
+            };
+            bindings.extend(current_bindings);
+            let Some(superclass) = superclass else { break };
+            // Instantiate each parent before binding its own parameters.
+            current = self.substitute_type_bindings(superclass, &bindings, false);
+        }
         // Imported declarations can retain a different symbol for the same
         // class parameter. Match its declared name within this receiver.
         let mut mentioned = std::collections::BTreeSet::new();

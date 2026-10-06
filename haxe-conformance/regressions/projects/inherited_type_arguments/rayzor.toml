@@ -1,0 +1,6 @@
+[project]
+name = "inherited-type-arguments-regression"
+entry = "ImportedTypeArguments.hx"
+
+[build]
+class-paths = ["."]

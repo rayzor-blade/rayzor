@@ -1210,6 +1210,17 @@ pub fn lower_hir_to_mir_with_function_map(
     context.class_type_to_symbol = external_class_type_to_symbol;
     context.class_alloc_sizes_by_name = external_class_alloc_sizes_by_name;
 
+    // Imported declarations retain their parent even when their bodies came from cache.
+    let imported_classes: BTreeSet<_> = context.class_type_to_symbol.values().copied().collect();
+    for class in imported_classes {
+        if let Some(parent) = symbol_table
+            .get_class_super_type(class)
+            .and_then(|ty| context.resolve_receiver_class_symbol(ty))
+        {
+            context.class_parent_map.insert(class, parent);
+        }
+    }
+
     // Per-function HIR param qualified names let Path 3 of
     // `maybe_materialize_for_call` recover class→interface wrap decisions
     // for imported constructors.

@@ -272,6 +272,10 @@ impl<'a> AstLowering<'a> {
             None
         };
 
+        self.context
+            .symbol_table
+            .set_class_super_type(class_symbol, extends);
+
         // Copy parent FIELDS and METHODS before processing child's members
         // This ensures:
         // 1. Field inheritance works (constructor can access parent fields)

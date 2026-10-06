@@ -342,6 +342,16 @@ impl CompilationUnit {
         };
         let outer_type_params = std::mem::replace(&mut self.manifest_type_params, type_params);
 
+        let superclass = self
+            .static_sig_index
+            .borrow_mut()
+            .superclass_type_of(&qualified_name);
+        if let Some(superclass) = superclass {
+            let superclass = self.resolve_blade_type(&bsym::type_to_blade(&superclass));
+            self.symbol_table
+                .set_class_super_type(symbol_id, Some(superclass));
+        }
+
         // Register instance methods
         for method in &class_info.methods {
             self.register_method_from_blade(method, symbol_id, class_scope, false);

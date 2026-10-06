@@ -44,6 +44,8 @@ struct ClassSigs {
     /// Parent class name from `extends`, exactly as written. Needed because a
     /// subclass's object layout is parent slots followed by own slots.
     extends: Option<String>,
+    /// The superclass type retains generic arguments for restored declarations.
+    extends_type: Option<parser::Type>,
     /// Package that declared this class, used to qualify a bare `extends`.
     package: String,
     /// Instance methods this class declares with `override`.
@@ -159,6 +161,13 @@ impl StaticSigIndex {
         let class = self.classes.get(class_name)?;
         let (parent, pkg) = (class.extends.clone()?, class.package.clone());
         Some(self.qualify_parent(parent, &pkg))
+    }
+
+    pub fn superclass_type_of(&mut self, class_name: &str) -> Option<parser::Type> {
+        if self.known_file(class_name).is_some() {
+            self.ensure_indexed_from_known_files(class_name);
+        }
+        self.classes.get(class_name)?.extends_type.clone()
     }
 
     /// Whether any indexed class below `class_name` (qualified, or bare when
@@ -385,6 +394,10 @@ impl StaticSigIndex {
                     .iter()
                     .any(|m| matches!(m, parser::Modifier::Extern));
                 self.index_fields(package, &c.name, &c.fields, parent, record_ctor);
+                let qname = Self::qualify(package, &c.name);
+                if let Some(class) = self.classes.get_mut(&qname) {
+                    class.extends_type = c.extends.clone();
+                }
             }
             TypeDeclaration::Abstract(a) => {
                 // `false`: an abstract must never record a constructor. Its

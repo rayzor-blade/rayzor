@@ -881,7 +881,7 @@ fn access_to_blade(
 /// A direct transcription: no name is resolved and nothing is looked up, so
 /// extraction still needs only a parser. `Parenthesis` carries no meaning of
 /// its own and collapses to what it wraps.
-fn type_to_blade(ty: &parser::Type) -> BladeType {
+pub fn type_to_blade(ty: &parser::Type) -> BladeType {
     match ty {
         parser::Type::Path { path, params, .. } => BladeType::Path {
             package: path.package.clone(),
