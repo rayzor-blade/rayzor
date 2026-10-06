@@ -25,6 +25,60 @@ mod access;
 mod lvalue;
 
 impl<'a> HirToMirContext<'a> {
+    fn call_instance_accessor(
+        &mut self,
+        receiver_ty: TypeId,
+        method_name: InternedString,
+        func_id: IrFunctionId,
+        args: Vec<IrId>,
+        return_type: IrType,
+        receiver_is_super: bool,
+    ) -> Option<IrId> {
+        let slot = (!receiver_is_super)
+            .then(|| {
+                self.builder
+                    .module
+                    .functions
+                    .get(&func_id)
+                    .and_then(|function| self.virtual_dispatch_info.get(&function.symbol_id))
+                    .copied()
+                    .or_else(|| {
+                        let class = self.resolve_receiver_class_symbol(receiver_ty)?;
+                        let method = self.resolve_class_method_symbol(class, method_name)?;
+                        self.virtual_dispatch_info.get(&method).copied()
+                    })
+                    .map(|(slot, _)| slot)
+                    .or_else(|| self.indexed_virtual_method_slot(receiver_ty, method_name))
+            })
+            .flatten();
+        if let Some(slot) = slot {
+            let lookup = self.get_or_register_extern_function(
+                "haxe_vtable_lookup",
+                vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
+                IrType::I64,
+            );
+            let slot = self.builder.build_const(IrValue::I32(slot as i32))?;
+            let pointer =
+                self.builder
+                    .build_call_direct(lookup, vec![args[0], slot], IrType::I64)?;
+            let params = args
+                .iter()
+                .map(|arg| self.builder.get_register_type(*arg).unwrap_or(IrType::I64))
+                .collect();
+            self.builder.build_call_indirect(
+                pointer,
+                args,
+                IrType::Function {
+                    params,
+                    return_type: Box::new(return_type),
+                    varargs: false,
+                },
+            )
+        } else {
+            self.builder.build_call_direct(func_id, args, return_type)
+        }
+    }
+
     /// Direct field access for class objects without Dynamic unboxing.
     /// Used when we know the object is a raw pointer (e.g., from StringMap<Point>.get())
     /// but TAST thinks it's Dynamic because the type parameter wasn't resolved.

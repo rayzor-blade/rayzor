@@ -1276,11 +1276,7 @@ impl<'a> TastToHirContext<'a> {
     ) -> HirConstructor {
         let mut body = self.lower_block(&method.body);
 
-        // Extract super() call from constructor body if present.
-        // In Haxe, super(args) must be the first statement in a child constructor.
-        // We scan the first statement for Call { callee: Super, args } and extract it
-        // into HirConstructor.super_call so the MIR lowering can emit the parent
-        // constructor call before the child's field initializations.
+        // Separate super() from source statements while preserving their order.
         let mut super_call = None;
         // super() may be inside a nested Block (the constructor body gets wrapped).
         // Scan both top-level and one-level-deep block statements.
@@ -3962,6 +3958,10 @@ impl<'a> TastToHirContext<'a> {
         operand: &TypedExpression,
         statements: &mut Vec<HirStatement>,
     ) -> TypedExpression {
+        // Preserve super's direct parent dispatch when binding assignment targets.
+        if matches!(operand.kind, TypedExpressionKind::Super { .. }) {
+            return operand.clone();
+        }
         let init = self.lower_expression(operand);
         let (name, symbol) = self.gen_temp_var();
         statements.push(HirStatement::Let {

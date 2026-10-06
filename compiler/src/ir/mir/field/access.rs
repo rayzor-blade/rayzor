@@ -133,6 +133,7 @@ impl<'a> HirToMirContext<'a> {
         field: SymbolId,
         receiver_ty: TypeId,
         field_ty: TypeId,
+        receiver_is_super: bool,
     ) -> Option<IrId> {
         // `Null<String>` is the same pointer as `String`, so its members resolve
         // through the inner type (an alias likewise through its target).
@@ -640,9 +641,14 @@ impl<'a> HirToMirContext<'a> {
                                 let ty = def_sym_type.unwrap_or(field_ty);
                                 self.convert_type(ty)
                             });
-                        return self
-                            .builder
-                            .build_call_direct(func_id, vec![obj], result_type);
+                        return self.call_instance_accessor(
+                            receiver_ty,
+                            *getter_method_name,
+                            func_id,
+                            vec![obj],
+                            result_type,
+                            receiver_is_super,
+                        );
                     }
 
                     // Fallback: extern-class accessor — try the stdlib mapping
@@ -1641,7 +1647,13 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        let result = self.lower_field_access(obj_reg, *field, receiver_ty, expr.ty);
+        let result = self.lower_field_access(
+            obj_reg,
+            *field,
+            receiver_ty,
+            expr.ty,
+            matches!(object.kind, HirExprKind::Super),
+        );
         debug!(
             "[Field expression] lower_field_access returned {:?}",
             result

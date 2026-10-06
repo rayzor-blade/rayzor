@@ -52,6 +52,21 @@ fn index_slot_layout(
 }
 
 impl<'a> HirToMirContext<'a> {
+    pub(crate) fn indexed_virtual_method_slot(
+        &self,
+        receiver_ty: TypeId,
+        method_name: InternedString,
+    ) -> Option<u32> {
+        let class_name = self.class_qualified_name_of_type(receiver_ty)?;
+        let method_name = self.string_interner.get(method_name)?;
+        let index = self.static_sig_index.as_ref()?;
+        let layout = index_slot_layout(&mut index.borrow_mut(), &class_name)?;
+        layout
+            .iter()
+            .position(|name| name == method_name)
+            .map(|slot| slot as u32)
+    }
+
     /// Build the vtable for a single class — inherits parent's slots and uses
     /// the most-derived implementation for each slot.
     pub(crate) fn build_vtable_for_class(&mut self, class_sym: SymbolId) {

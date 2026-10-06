@@ -961,6 +961,44 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Apply field initializers declared at field-declaration sites
+        // before source statements and super(), so parent virtual calls see them.
+        for field_init in &constructor.field_inits {
+            let Some(value_reg) = self.lower_expression(&field_init.value) else {
+                continue;
+            };
+            let Some(&(_class_type, field_index)) = self.field_index_map.get(&field_init.field)
+            else {
+                continue;
+            };
+            let Some(index_const) = self.builder.build_const(IrValue::I32(field_index as i32))
+            else {
+                continue;
+            };
+            let field_type_id = self
+                .symbol_table
+                .get_symbol(field_init.field)
+                .map(|s| s.type_id);
+            let field_ty = field_type_id
+                .map(|t| self.convert_type(t))
+                .unwrap_or(IrType::I32);
+            // The slot takes what an assignment would store: a `Null<Int>`
+            // field holds a box, not the raw scalar, and an abstract field
+            // its `@:from` conversion.
+            let value_reg = field_type_id
+                .and_then(|t| self.maybe_box_value(value_reg, field_init.value.ty, t))
+                .unwrap_or(value_reg);
+            let value_reg = field_type_id
+                .and_then(|t| self.maybe_abstract_from_convert(value_reg, field_init.value.ty, t))
+                .unwrap_or(value_reg);
+            if let Some(field_ptr) = self
+                .builder
+                .build_gep(this_reg, vec![index_const], field_ty)
+            {
+                self.builder.build_store(field_ptr, value_reg);
+            }
+        }
+
         // Execute pre-super statements (e.g., field assignments that come before
         // super() in the source code and are needed by virtual methods called from super)
         for stmt in &constructor.pre_super_stmts {
@@ -1102,45 +1140,6 @@ impl<'a> HirToMirContext<'a> {
                 }
                 // An implicit `super()` to a chain with no constructor at all
                 // has nothing to run.
-            }
-        }
-
-        // Apply field initializers declared at field-declaration sites
-        // (e.g. `public var num:Int = 42;`). These run after super() but before
-        // the user-written body so explicit assignments in the body can override.
-        for field_init in &constructor.field_inits {
-            let Some(value_reg) = self.lower_expression(&field_init.value) else {
-                continue;
-            };
-            let Some(&(_class_type, field_index)) = self.field_index_map.get(&field_init.field)
-            else {
-                continue;
-            };
-            let Some(index_const) = self.builder.build_const(IrValue::I32(field_index as i32))
-            else {
-                continue;
-            };
-            let field_type_id = self
-                .symbol_table
-                .get_symbol(field_init.field)
-                .map(|s| s.type_id);
-            let field_ty = field_type_id
-                .map(|t| self.convert_type(t))
-                .unwrap_or(IrType::I32);
-            // The slot takes what an assignment would store: a `Null<Int>`
-            // field holds a box, not the raw scalar, and an abstract field
-            // its `@:from` conversion.
-            let value_reg = field_type_id
-                .and_then(|t| self.maybe_box_value(value_reg, field_init.value.ty, t))
-                .unwrap_or(value_reg);
-            let value_reg = field_type_id
-                .and_then(|t| self.maybe_abstract_from_convert(value_reg, field_init.value.ty, t))
-                .unwrap_or(value_reg);
-            if let Some(field_ptr) = self
-                .builder
-                .build_gep(this_reg, vec![index_const], field_ty)
-            {
-                self.builder.build_store(field_ptr, value_reg);
             }
         }
 

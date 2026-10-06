@@ -60,7 +60,13 @@ impl<'a> HirToMirContext<'a> {
                     // TODO: look up the field type from the symbol table; the runtime
                     // call path does not need it.
                     let field_ty = TypeId(u32::MAX);
-                    self.lower_field_access(obj_reg, *field, receiver_ty, field_ty)
+                    self.lower_field_access(
+                        obj_reg,
+                        *field,
+                        receiver_ty,
+                        field_ty,
+                        matches!(object.kind, HirExprKind::Super),
+                    )
                 } else {
                     None
                 }
@@ -347,10 +353,13 @@ impl<'a> HirToMirContext<'a> {
                             .or_else(|| self.builder.get_register_type(value))
                             .unwrap_or(IrType::I32);
 
-                        return self.builder.build_call_direct(
+                        return self.call_instance_accessor(
+                            object.ty,
+                            *setter_method_name,
                             func_id,
                             vec![obj_reg, value],
                             return_type,
+                            matches!(object.kind, HirExprKind::Super),
                         );
                     }
 
@@ -405,10 +414,13 @@ impl<'a> HirToMirContext<'a> {
                             vec![IrType::Ptr(Box::new(IrType::Void)), value_ty.clone()],
                             value_ty.clone(),
                         );
-                        return self.builder.build_call_direct(
+                        return self.call_instance_accessor(
+                            receiver_ty,
+                            *setter_method_name,
                             forward,
                             vec![obj_reg, value],
                             value_ty,
+                            matches!(object.kind, HirExprKind::Super),
                         );
                     }
 

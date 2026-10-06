@@ -1,0 +1,6 @@
+[project]
+name = "virtual-property-imports-regression"
+entry = "VirtualPropertyImports.hx"
+
+[build]
+class-paths = ["."]

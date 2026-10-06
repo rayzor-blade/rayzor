@@ -1857,11 +1857,16 @@ impl<'a> AstLowering<'a> {
                 // Find current class context and get super type
                 let super_type =
                     if let Some(current_class) = self.context.class_context_stack.last() {
-                        type_resolution::resolve_super_type(
-                            &self.context.type_table,
-                            self.context.symbol_table,
-                            Some(*current_class),
-                        )
+                        self.parent_class_symbol(*current_class)
+                            .and_then(|parent| self.context.symbol_table.get_symbol(parent))
+                            .map(|parent| parent.type_id)
+                            .unwrap_or_else(|| {
+                                type_resolution::resolve_super_type(
+                                    &self.context.type_table,
+                                    self.context.symbol_table,
+                                    Some(*current_class),
+                                )
+                            })
                     } else {
                         self.context.type_table.borrow().dynamic_type()
                     };

@@ -367,7 +367,7 @@ impl<'a> HirToMirContext<'a> {
                 // Get 'this' pointer (SymbolId(0) is the special 'this' mapping)
                 if let Some(&this_reg) = self.symbol_map.get(&SymbolId::from_raw(0)) {
                     let owner_type = self.current_this_type.unwrap_or(field_class_type);
-                    return self.lower_field_access(this_reg, *symbol, owner_type, expr.ty);
+                    return self.lower_field_access(this_reg, *symbol, owner_type, expr.ty, false);
                 }
             }
 
@@ -377,7 +377,8 @@ impl<'a> HirToMirContext<'a> {
                 if sym.kind == SymbolKind::Field {
                     if let Some(&this_reg) = self.symbol_map.get(&SymbolId::from_raw(0)) {
                         if let Some(owner_type) = self.current_this_type {
-                            return self.lower_field_access(this_reg, *symbol, owner_type, expr.ty);
+                            return self
+                                .lower_field_access(this_reg, *symbol, owner_type, expr.ty, false);
                         }
                     }
                 } else if sym.kind == SymbolKind::EnumVariant {
