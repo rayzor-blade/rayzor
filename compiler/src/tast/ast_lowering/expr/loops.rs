@@ -16,44 +16,15 @@ use tracing::warn;
 
 impl<'a> AstLowering<'a> {
     /// The abstract declaring the iterable's type, looked through generic
-    /// instances. An abstract over an Array (Rest, Vector) iterates as the
-    /// array it is.
+    /// instances. Its explicit iterator takes precedence over the underlying
+    /// representation's iteration protocol.
     fn iterable_abstract(&self, iterable_ty: TypeId) -> Option<SymbolId> {
         let tt = self.context.type_table.borrow();
         let mut ty = iterable_ty;
         for _ in 0..8 {
             match tt.get(ty).map(|t| &t.kind) {
                 Some(TypeKind::GenericInstance { base_type, .. }) => ty = *base_type,
-                Some(TypeKind::Abstract {
-                    symbol_id,
-                    underlying,
-                    ..
-                }) => {
-                    let mut under =
-                        underlying.or_else(|| tt.resolve_abstract_underlying(*symbol_id));
-                    for _ in 0..8 {
-                        match under.and_then(|u| tt.get(u)).map(|t| &t.kind) {
-                            Some(TypeKind::TypeAlias { target_type, .. }) => {
-                                under = Some(*target_type)
-                            }
-                            Some(TypeKind::GenericInstance { base_type, .. }) => {
-                                under = Some(*base_type)
-                            }
-                            _ => break,
-                        }
-                    }
-                    // An abstract over a class (Array, or an alias the typer
-                    // left as a class placeholder) or over an unresolved type
-                    // keeps the loop it had.
-                    let keeps_loop = matches!(
-                        under.and_then(|u| tt.get(u)).map(|t| &t.kind),
-                        None | Some(TypeKind::Array { .. })
-                            | Some(TypeKind::Class { .. })
-                            | Some(TypeKind::Placeholder { .. })
-                            | Some(TypeKind::Unknown)
-                    );
-                    return (!keeps_loop).then_some(*symbol_id);
-                }
+                Some(TypeKind::Abstract { symbol_id, .. }) => return Some(*symbol_id),
                 _ => return None,
             }
         }
