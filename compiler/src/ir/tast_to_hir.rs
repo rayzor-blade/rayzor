@@ -1776,11 +1776,15 @@ impl<'a> TastToHirContext<'a> {
                 // (e.g., the defining file was loaded from BLADE cache so its symbols got
                 // renumbered, but the referring file still holds the original SymbolId).
                 let inline_lookup = self.inline_var_values.get(symbol_id).cloned().or_else(|| {
-                    let want_name = self
-                        .symbol_table
-                        .get_symbol(*symbol_id)
-                        .and_then(|s| self.string_interner.get(s.name))?
-                        .to_string();
+                    let want = self.symbol_table.get_symbol(*symbol_id)?;
+                    // Callable declarations do not inherit a same-named field's constant.
+                    if matches!(
+                        want.kind,
+                        crate::tast::SymbolKind::Function | crate::tast::SymbolKind::EnumVariant
+                    ) {
+                        return None;
+                    }
+                    let want_name = self.string_interner.get(want.name)?.to_string();
                     if want_name.is_empty() {
                         return None;
                     }
@@ -1991,11 +1995,15 @@ impl<'a> TastToHirContext<'a> {
                         .cloned()
                         .or_else(|| {
                             // Fallback: match by resolved string name for cross-file inline vars.
-                            let field_name_str = self
-                                .symbol_table
-                                .get_symbol(*field_symbol)
-                                .and_then(|s| self.string_interner.get(s.name))
-                                .map(|s| s.to_string())?;
+                            let field = self.symbol_table.get_symbol(*field_symbol)?;
+                            if matches!(
+                                field.kind,
+                                crate::tast::SymbolKind::Function
+                                    | crate::tast::SymbolKind::EnumVariant
+                            ) {
+                                return None;
+                            }
+                            let field_name_str = self.string_interner.get(field.name)?.to_string();
                             for (sym_id, lit) in &self.inline_var_values {
                                 if let Some(sym) = self.symbol_table.get_symbol(*sym_id) {
                                     if let Some(name_str) = self.string_interner.get(sym.name) {
