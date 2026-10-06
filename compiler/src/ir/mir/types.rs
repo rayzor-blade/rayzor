@@ -1455,6 +1455,16 @@ impl<'a> HirToMirContext<'a> {
         }
 
         let ir_type = self.convert_type(concrete_type_id);
+        if self.is_int64_type(concrete_type_id) {
+            let box_func = self.get_or_register_extern_function(
+                "haxe_box_int64_ptr",
+                vec![IrType::I64],
+                dyn_ptr.clone(),
+            );
+            return self
+                .builder
+                .build_call_direct(box_func, vec![value], dyn_ptr);
+        }
         let (is_string, is_enum, is_function, is_class_like) = {
             let type_table = self.type_table;
             let ti = type_table.get(concrete_type_id);

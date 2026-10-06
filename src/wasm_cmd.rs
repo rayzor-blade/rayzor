@@ -1060,6 +1060,7 @@ const rayzor = {{
   haxe_box_float: (f) => f,
   haxe_box_bool: (b) => b,
   haxe_box_int_ptr: (n) => n,
+  haxe_box_int64_ptr: (n) => n,
   haxe_box_float_ptr: (f) => f,
   haxe_unbox_int: (n) => n,
   haxe_unbox_float: (f) => f,

@@ -126,6 +126,11 @@ impl<'a> HirToMirContext<'a> {
     /// primitive `runtime_type_id` slots (0=Void, 2=Bool, 3=Int, 4=Float,
     /// 5=String). Returns None when the symbol has no resolvable name.
     pub(crate) fn deterministic_class_type_id(&self, symbol_id: SymbolId) -> Option<u32> {
+        // The private Int64 typedef can be represented as a class placeholder.
+        // Its type token must name the same backing class as a boxed value.
+        if self.is_int64_underlying_class(symbol_id) {
+            return Some(Self::fnv1a_class_type_id("haxe.___Int64"));
+        }
         let sym = self.symbol_table.get_symbol(symbol_id)?;
         // Prefer qualified_name; the bare-name fallback can collide across
         // packages.

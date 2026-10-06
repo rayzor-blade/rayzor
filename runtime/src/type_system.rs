@@ -1001,6 +1001,9 @@ pub(crate) fn class_instance_to_string(
     type_id: u32,
     obj: *mut u8,
 ) -> *mut crate::haxe_string::HaxeString {
+    if type_id == stable_class_type_id("haxe.___Int64") {
+        return crate::haxe_sys::haxe_string_from_int(unsafe { int64_from_object(obj) });
+    }
     let to_string = {
         let registry = TO_STRING_REGISTRY.read().unwrap();
         registry.as_ref().and_then(|m| m.get(&type_id).copied())
@@ -2496,6 +2499,8 @@ pub extern "C" fn haxe_box_null() -> DynamicValue {
 pub extern "C" fn haxe_unbox_int(dynamic: DynamicValue) -> i64 {
     if dynamic.type_id == TYPE_INT {
         unsafe { *(dynamic.value_ptr as *const i64) }
+    } else if dynamic.type_id.0 == stable_class_type_id("haxe.___Int64") {
+        unsafe { int64_from_object(dynamic.value_ptr) }
     } else if dynamic.type_id == TYPE_FLOAT {
         unsafe { *(dynamic.value_ptr as *const f64) as i64 }
     } else if dynamic.type_id == TYPE_BOOL {
@@ -2566,6 +2571,10 @@ pub extern "C" fn haxe_std_string(dynamic: DynamicValue) -> StringPtr {
     // Handle null specially
     if dynamic.type_id == TYPE_NULL || dynamic.value_ptr.is_null() {
         return unsafe { null_to_string(std::ptr::null()) };
+    }
+    if dynamic.type_id.0 == stable_class_type_id("haxe.___Int64") {
+        let value = unsafe { int64_from_object(dynamic.value_ptr) };
+        return unsafe { int_to_string((&value as *const i64).cast()) };
     }
 
     // Look up type info and call toString
@@ -3008,6 +3017,26 @@ pub extern "C" fn haxe_box_int_ptr(value: i64) -> *mut u8 {
     let dynamic = haxe_box_int(value);
     let boxed = Box::new(dynamic);
     Box::into_raw(boxed) as *mut u8
+}
+
+/// Box a native Int64 with the type ID of its Haxe backing class.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_box_int64_ptr(value: i64) -> *mut u8 {
+    let type_id = stable_class_type_id("haxe.___Int64");
+    // Class slots expose high/low to reflection and reconstruct the native i64.
+    let payload =
+        Box::into_raw(Box::new([type_id as i64, value >> 32, value as i32 as i64])) as *mut u8;
+    Box::into_raw(Box::new(DynamicValue {
+        type_id: TypeId(type_id),
+        value_ptr: payload,
+    })) as *mut u8
+}
+
+unsafe fn int64_from_object(obj: *const u8) -> i64 {
+    unsafe {
+        let words = obj as *const i64;
+        (*words.add(1) << 32) | (*words.add(2) as u32 as i64)
+    }
 }
 
 /// Box a Float as Dynamic (returns opaque pointer to DynamicValue)

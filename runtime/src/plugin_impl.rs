@@ -1005,6 +1005,7 @@ register_symbol!("haxe_unbox_string", crate::type_system::haxe_unbox_string);
 
 // Pointer-based boxing/unboxing for MIR (simpler ABI)
 register_symbol!("haxe_box_int_ptr", crate::type_system::haxe_box_int_ptr);
+register_symbol!("haxe_box_int64_ptr", crate::type_system::haxe_box_int64_ptr);
 register_symbol!("haxe_box_float_ptr", crate::type_system::haxe_box_float_ptr);
 register_symbol!("haxe_box_bool_ptr", crate::type_system::haxe_box_bool_ptr);
 register_symbol!("haxe_box_typed_ptr", crate::type_system::haxe_box_typed_ptr);

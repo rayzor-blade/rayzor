@@ -92,12 +92,12 @@ impl<'a> HirToMirContext<'a> {
             return Some(value);
         }
 
-        // Int64 is the native i64; its box is an Int box with a 64-bit payload.
+        // Int64 keeps its backing class identity across Dynamic.
         if self.is_int64_type(value_ty) {
             let value_mir_type = self.builder.get_register_type(value).unwrap_or(IrType::I64);
             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
             let box_func_id = self.get_or_register_extern_function(
-                "haxe_box_int_ptr",
+                "haxe_box_int64_ptr",
                 vec![value_mir_type],
                 ptr_u8.clone(),
             );
@@ -948,13 +948,9 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Int64 is the native i64: a `Null<Int64>` (or a box this lowering
-        // made) yields the Int box's 64-bit payload whole. An i64 the typer
-        // calls Dynamic (`cast this` in the abstract) is not a box.
+        // Primitive MIR registers already passed through above. A pointer
+        // crossing from Dynamic or Null<Int64> must yield the full native i64.
         if self.is_int64_type(target_ty) {
-            if !value_is_optional_scalar && !self.boxed_value_regs.contains(&value) {
-                return Some(value);
-            }
             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
             let unbox_func_id = self.get_or_register_extern_function(
                 "haxe_unbox_int_ptr",
