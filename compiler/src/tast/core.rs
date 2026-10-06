@@ -1274,13 +1274,8 @@ impl TypeTable {
     pub fn resolve_abstract_underlying(&self, symbol_id: SymbolId) -> Option<TypeId> {
         let cache_key = TypeCacheKey::AbstractUnderlying(symbol_id);
 
-        // Check cache first - use dynamic_type as sentinel for None
         if let Some(cached_id) = self.type_cache.get(&cache_key) {
-            return if cached_id == self.dynamic_type() {
-                None
-            } else {
-                Some(cached_id)
-            };
+            return Some(cached_id);
         }
 
         // Look up the abstract type

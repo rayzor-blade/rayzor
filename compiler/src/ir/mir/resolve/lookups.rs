@@ -2006,11 +2006,7 @@ impl<'a> HirToMirContext<'a> {
                     current = *inner_type
                 }
                 Some(TypeKind::Placeholder { name }) => {
-                    // Match a class OR a typedef by name: a cross-module structural
-                    // typedef (`typedef Loaded = { var m:Base; ... }`) decays to a
-                    // Placeholder exactly as a class does, and without the TypeAlias
-                    // arm field access on it never recognises it as Anonymous and
-                    // falls through to class-field GEP.
+                    // Forward references retain their placeholder after declaration.
                     if let Some(name_str) = self.string_interner.get(*name) {
                         // Match on the qualified name ("rayzor.Bytes") or bare ("Bytes").
                         let bare_name = name_str.rsplit('.').next().unwrap_or(name_str);
@@ -2018,7 +2014,8 @@ impl<'a> HirToMirContext<'a> {
                         let mut found_alias_target = None;
                         for (tid, ti) in type_table.iter() {
                             match &ti.kind {
-                                TypeKind::Class { symbol_id, .. } => {
+                                TypeKind::Class { symbol_id, .. }
+                                | TypeKind::Abstract { symbol_id, .. } => {
                                     if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
                                         let sym_name =
                                             self.string_interner.get(sym.name).unwrap_or("");

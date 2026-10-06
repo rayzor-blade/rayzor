@@ -23,6 +23,51 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    pub(crate) fn method_uses_dynamic_storage(
+        &self,
+        method: SymbolId,
+        function: IrFunctionId,
+    ) -> bool {
+        self.class_method_symbols
+            .iter()
+            .any(|((owner, _), candidate)| {
+                if *candidate != method
+                    && self
+                        .function_map
+                        .get(candidate)
+                        .or_else(|| self.external_function_map.get(candidate))
+                        != Some(&function)
+                {
+                    return false;
+                }
+                let storage = self
+                    .current_hir_types
+                    .values()
+                    .find_map(|declaration| match declaration {
+                        HirTypeDecl::Abstract(abstract_decl)
+                            if abstract_decl.symbol_id == *owner =>
+                        {
+                            Some(abstract_decl.underlying)
+                        }
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        self.symbol_table
+                            .get_symbol(*owner)
+                            .filter(|symbol| symbol.kind == crate::tast::SymbolKind::Abstract)
+                            .map(|symbol| symbol.type_id)
+                    });
+                storage.is_some_and(|ty| {
+                    matches!(
+                        self.type_table
+                            .get(self.resolve_storage_type(ty))
+                            .map(|t| &t.kind),
+                        Some(TypeKind::Dynamic)
+                    )
+                })
+            })
+    }
+
     pub(crate) fn try_resolved_method_call(
         &mut self,
         expr: &HirExpr,
@@ -473,8 +518,7 @@ impl<'a> HirToMirContext<'a> {
 
             let obj_reg = self.lower_expression(object)?;
 
-            // Dynamic variables hold a boxed DynamicValue*, but the method expects
-            // a raw class pointer as 'this'.
+            // Class methods take raw objects; Dynamic-backed abstracts take boxes.
             let obj_reg = {
                 let is_dynamic = {
                     let type_table = self.type_table;
@@ -483,7 +527,7 @@ impl<'a> HirToMirContext<'a> {
                         .map(|t| matches!(t.kind, TypeKind::Dynamic))
                         .unwrap_or(false)
                 };
-                if is_dynamic {
+                if is_dynamic && !self.method_uses_dynamic_storage(*field, func_id) {
                     let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                     let unbox_func_id = self.get_or_register_extern_function(
                         "haxe_unbox_reference_ptr",
@@ -1150,18 +1194,21 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(func_id) = found_func {
                             let obj_reg = self.lower_expression(object)?;
 
-                            // Unbox the Dynamic to get the actual object pointer
-                            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                            let unbox_func_id = self.get_or_register_extern_function(
-                                "haxe_unbox_reference_ptr",
-                                vec![ptr_u8.clone()],
-                                ptr_u8.clone(),
-                            );
-                            let unboxed_obj = self.builder.build_call_direct(
-                                unbox_func_id,
-                                vec![obj_reg],
-                                ptr_u8,
-                            )?;
+                            let unboxed_obj = if self.method_uses_dynamic_storage(*field, func_id) {
+                                obj_reg
+                            } else {
+                                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                                let unbox_func_id = self.get_or_register_extern_function(
+                                    "haxe_unbox_reference_ptr",
+                                    vec![ptr_u8.clone()],
+                                    ptr_u8.clone(),
+                                );
+                                self.builder.build_call_direct(
+                                    unbox_func_id,
+                                    vec![obj_reg],
+                                    ptr_u8,
+                                )?
+                            };
 
                             let arg_regs: Vec<_> =
                                 std::iter::once(unboxed_obj) // unboxed 'this' as first arg

@@ -765,7 +765,11 @@ impl<'a> HirToMirContext<'a> {
                             } else {
                                 reg
                             };
-                            if i == 0 && receiver_is_dynamic && callee_is_user_defined {
+                            if i == 0
+                                && receiver_is_dynamic
+                                && callee_is_user_defined
+                                && !self.method_uses_dynamic_storage(*symbol, func_id)
+                            {
                                 // Dynamic receiver: unbox DynamicValue* to get raw object pointer
                                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                                 let unbox_func_id = self.get_or_register_extern_function(

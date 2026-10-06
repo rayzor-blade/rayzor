@@ -941,7 +941,16 @@ impl<'a> AstLowering<'a> {
                     // (`v = Red` with `v:ColorA`).
                     self.expected_arg_type_stack
                         .push(Some(target_expr.expr_type));
+                    let lambda_hint = {
+                        let tt = self.context.type_table.borrow();
+                        match tt.get(target_expr.expr_type).map(|t| &t.kind) {
+                            Some(TypeKind::Function { params, .. }) => Some(params.clone()),
+                            _ => None,
+                        }
+                    };
+                    self.expected_lambda_params_stack.push(lambda_hint);
                     let result = self.lower_expression(right);
+                    self.expected_lambda_params_stack.pop();
                     self.expected_arg_type_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;
                     result?

@@ -111,6 +111,27 @@ impl<'a> HirToMirContext<'a> {
             return Some(value);
         }
 
+        let source_storage = self.resolve_storage_type(expr.ty);
+        let target_storage = self.resolve_storage_type(*target);
+        let target_stores_dynamic = matches!(
+            self.type_table.get(target_storage).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        );
+        if target_stores_dynamic
+            && (target_storage != *target || source_storage != expr.ty)
+            && matches!(
+                self.type_table.get(source_storage).map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            )
+        {
+            return self.lower_expression(expr);
+        }
+        // Abstracts backed by Dynamic store the same boxes as Dynamic itself.
+        if target_stores_dynamic && target_storage != *target {
+            let value = self.lower_expression(expr)?;
+            return self.maybe_box_value(value, source_storage, target_storage);
+        }
+
         let from_type = self.convert_type(expr.ty);
         let to_type = self.convert_type(*target);
 

@@ -132,12 +132,12 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(func_id) = user_func_for_dynamic {
                             let receiver_reg = self.lower_expression(&args[0])?;
 
-                            // Dynamic receivers are always boxed by haxe_box_reference_ptr,
-                            // even when the register type reads Ptr(Void) after a cast, so
-                            // unbox unless a class hint marks it a raw stdlib container.
+                            // Class receivers unwrap their boxes; abstract receivers
+                            // keep the representation of their underlying storage.
                             let has_class_hint =
                                 self.register_class_hints.contains_key(&receiver_reg);
-                            let should_unbox = !has_class_hint;
+                            let should_unbox = !has_class_hint
+                                && !self.method_uses_dynamic_storage(*symbol, func_id);
                             let actual_receiver = if should_unbox {
                                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                                 let unbox_func_id = self.get_or_register_extern_function(
@@ -641,16 +641,14 @@ impl<'a> HirToMirContext<'a> {
                                 if let Some(func_id) = found_func {
                                     let receiver_reg = self.lower_expression(&args[0])?;
 
-                                    // A class hint means the receiver is a raw class pointer
-                                    // from a stdlib MIR wrapper (e.g. MutexGuard_get), not a
-                                    // boxed DynamicValue. Every other Dynamic receiver is
-                                    // boxed by haxe_box_reference_ptr even when the register
-                                    // type reads Ptr(Void) after a cast.
+                                    // A class hint marks a raw pointer. Dynamic-backed
+                                    // abstract methods receive the box itself.
                                     let has_class_hint =
                                         self.register_class_hints.contains_key(&receiver_reg);
                                     let receiver_mir_type =
                                         self.builder.get_register_type(receiver_reg);
-                                    let should_unbox = !has_class_hint;
+                                    let should_unbox = !has_class_hint
+                                        && !self.method_uses_dynamic_storage(*symbol, func_id);
 
                                     let actual_receiver = if should_unbox {
                                         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));

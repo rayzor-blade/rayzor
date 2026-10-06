@@ -22,6 +22,44 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    fn emit_dynamic_arithmetic(
+        &mut self,
+        code: i32,
+        lhs: IrId,
+        lhs_ty: TypeId,
+        rhs: IrId,
+        rhs_ty: TypeId,
+    ) -> Option<IrId> {
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let operand = |ctx: &mut Self, value, ty| {
+            let reg_ty = ctx.builder.get_register_type(value)?;
+            let boxed = if let Some(boxed) = ctx.box_primitive_to_dynamic(value, reg_ty) {
+                ctx.boxed_value_regs.insert(boxed);
+                boxed
+            } else {
+                ctx.maybe_box_value(
+                    value,
+                    ctx.resolve_storage_type(ty),
+                    ctx.type_table.dynamic_type(),
+                )?
+            };
+            ctx.coerce_reg_to(boxed, &ptr)
+        };
+        let lhs = operand(self, lhs, lhs_ty)?;
+        let rhs = operand(self, rhs, rhs_ty)?;
+        let function = self.get_or_register_extern_function(
+            "haxe_dynamic_arith",
+            vec![IrType::I32, ptr.clone(), ptr.clone()],
+            ptr.clone(),
+        );
+        let code = self.builder.build_const(IrValue::I32(code))?;
+        let result = self
+            .builder
+            .build_call_direct(function, vec![code, lhs, rhs], ptr)?;
+        self.boxed_value_regs.insert(result);
+        Some(result)
+    }
+
     /// `x + 1` or `x - 1` for `++`/`--`; a Dynamic operand is a box or a raw
     /// slot, so it steps through the runtime's Dynamic arithmetic.
     fn step_value(&mut self, old: IrId, operand_ty: TypeId, increment: bool) -> Option<IrId> {
@@ -685,6 +723,20 @@ impl<'a> HirToMirContext<'a> {
                 } else {
                     (rhs_reg, lhs_reg)
                 };
+                // An erased field type can still load an unboxed scalar.
+                if self
+                    .builder
+                    .get_register_type(dyn_reg)
+                    .is_some_and(|ty| ty.is_integer() || ty.is_float() || ty == IrType::Bool)
+                    && tag != 5
+                {
+                    let cmp = if matches!(op, HirBinaryOp::Eq) {
+                        CompareOp::Eq
+                    } else {
+                        CompareOp::Ne
+                    };
+                    return self.builder.build_cmp(cmp, lhs_reg, rhs_reg);
+                }
                 // Floats reach the i64 slot by bitcast, as tag 4 reads them back.
                 let concrete_i64 = self.erase_reflect_compare_arg(concrete_reg);
                 let tag = self.builder.build_const(IrValue::I32(tag))?;
@@ -837,11 +889,11 @@ impl<'a> HirToMirContext<'a> {
             let (lhs_is_dyn, rhs_is_dyn) = {
                 let type_table = self.type_table;
                 let lhs_dyn = type_table
-                    .get(lhs.ty)
+                    .get(self.resolve_storage_type(lhs.ty))
                     .map(|t| matches!(t.kind, TypeKind::Dynamic))
                     .unwrap_or(false);
                 let rhs_dyn = type_table
-                    .get(rhs.ty)
+                    .get(self.resolve_storage_type(rhs.ty))
                     .map(|t| matches!(t.kind, TypeKind::Dynamic))
                     .unwrap_or(false);
                 (lhs_dyn, rhs_dyn)
@@ -1367,6 +1419,35 @@ impl<'a> HirToMirContext<'a> {
                 if is_arith {
                     let mut lhs_reg = self.lower_expression(lhs)?;
                     let mut rhs_reg = self.lower_expression(rhs)?;
+
+                    let arithmetic_code = match op {
+                        HirBinaryOp::Add => Some(0),
+                        HirBinaryOp::Sub => Some(1),
+                        HirBinaryOp::Mul => Some(2),
+                        HirBinaryOp::Div => Some(3),
+                        HirBinaryOp::Mod => Some(4),
+                        _ => None,
+                    };
+                    if let Some(code) = arithmetic_code {
+                        let has_pointer_operand = matches!(
+                            self.builder.get_register_type(lhs_reg),
+                            Some(IrType::Ptr(_))
+                        ) || matches!(
+                            self.builder.get_register_type(rhs_reg),
+                            Some(IrType::Ptr(_))
+                        );
+                        if has_pointer_operand
+                            && matches!(
+                                self.type_table
+                                    .get(self.resolve_storage_type(expr.ty))
+                                    .map(|t| &t.kind),
+                                Some(TypeKind::Dynamic)
+                            )
+                        {
+                            return self
+                                .emit_dynamic_arithmetic(code, lhs_reg, lhs.ty, rhs_reg, rhs.ty);
+                        }
+                    }
 
                     let concrete_ty = if lhs_is_dyn {
                         // A Null<prim> right operand is a box; unbox it and

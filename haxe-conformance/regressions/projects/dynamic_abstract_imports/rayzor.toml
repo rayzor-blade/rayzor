@@ -1,0 +1,6 @@
+[project]
+name = "dynamic-abstract-imports"
+entry = "ImportedArithmetic.hx"
+
+[build]
+class-paths = ["."]
