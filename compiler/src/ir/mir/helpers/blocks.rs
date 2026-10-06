@@ -313,9 +313,23 @@ impl<'a> HirToMirContext<'a> {
             self.loop_stack.pop();
             return;
         };
+        let next_return = self
+            .builder
+            .module
+            .functions
+            .get(&next_fn)
+            .map(|f| f.signature.return_type.clone())
+            .or_else(|| {
+                self.builder
+                    .module
+                    .extern_functions
+                    .get(&next_fn)
+                    .map(|f| f.signature.return_type.clone())
+            })
+            .unwrap_or(IrType::I64);
         let Some(next_value) =
             self.builder
-                .build_call_direct(next_fn, vec![obj_for_body], IrType::I64)
+                .build_call_direct(next_fn, vec![obj_for_body], next_return.clone())
         else {
             self.loop_stack.pop();
             return;
@@ -323,6 +337,17 @@ impl<'a> HirToMirContext<'a> {
 
         match pattern {
             HirPattern::Variable { symbol, .. } => {
+                // Imported generic next() returns Float elements as erased bits.
+                let next_value = if matches!(next_return, IrType::I64 | IrType::TypeVar(_)) {
+                    self.symbol_table
+                        .get_symbol(*symbol)
+                        .map(|s| s.type_id)
+                        .filter(|ty| matches!(self.convert_type(*ty), IrType::F32 | IrType::F64))
+                        .and_then(|ty| self.coerce_from_i64(next_value, ty))
+                        .unwrap_or(next_value)
+                } else {
+                    next_value
+                };
                 self.symbol_map.insert(*symbol, next_value);
             }
             HirPattern::Tuple(sub_patterns) if sub_patterns.len() == 2 => {

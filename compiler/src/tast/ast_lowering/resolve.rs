@@ -679,7 +679,9 @@ impl<'a> AstLowering<'a> {
                         _ => None,
                     }
                 };
-                if let Some(elem) = array_elem {
+                if let Some(elem) =
+                    array_elem.filter(|_| matches!(field.as_str(), "map" | "filter" | "sort"))
+                {
                     let name: &str = field;
                     let (params, ret) = {
                         let tt = self.context.type_table.borrow();
@@ -705,10 +707,26 @@ impl<'a> AstLowering<'a> {
                         crate::tast::core::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
                         _ => None,
                     }
-                }?;
+                };
                 let method_name = self.context.string_interner.intern(field);
-                let method_sym = self.resolve_class_method_symbol(class_symbol, method_name)?;
-                self.function_param_types_from_symbol(method_sym)
+                if let Some(method_sym) = class_symbol
+                    .and_then(|class| self.resolve_class_method_symbol(class, method_name))
+                {
+                    return self.function_param_types_from_symbol(method_sym);
+                }
+
+                // Extension calls omit the receiver from their written arguments.
+                let (_, method) =
+                    self.find_static_extension_method(method_name, receiver_type_id)?;
+                let params = self.function_param_types_from_symbol(method)?;
+                let mut bindings = Vec::new();
+                self.unify_type_args(*params.first()?, receiver_type_id, 0, &mut bindings);
+                Some(
+                    params[1..]
+                        .iter()
+                        .map(|p| self.substitute_alias_args(*p, &bindings))
+                        .collect(),
+                )
             }
             _ => None,
         }

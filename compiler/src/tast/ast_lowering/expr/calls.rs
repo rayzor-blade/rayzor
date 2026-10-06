@@ -4963,7 +4963,38 @@ impl<'a> AstLowering<'a> {
         if args.len() == formals.len() && self.rest_elem_of(args[fixed].expr_type).is_some() {
             return args;
         }
-        let tail = args.split_off(fixed);
+        let mut tail = args.split_off(fixed);
+        let (elem, last) = if self.context.type_table.borrow().is_type_parameter(elem) {
+            let mut bindings = BTreeMap::new();
+            for (formal, arg) in formals.iter().zip(&args) {
+                self.bind_type_params(*formal, arg.expr_type, &mut bindings);
+            }
+            let bound = self.substitute_bound_type_params(elem, &bindings);
+            let elem = if bound != elem {
+                bound
+            } else {
+                let tt = self.context.type_table.borrow();
+                let first = tail.first().map_or(tt.dynamic_type(), |a| a.expr_type);
+                if tail.iter().all(|a| a.expr_type == first) {
+                    first
+                } else if tail
+                    .iter()
+                    .all(|a| a.expr_type == tt.int_type() || a.expr_type == tt.float_type())
+                {
+                    tt.float_type()
+                } else {
+                    tt.dynamic_type()
+                }
+            };
+            (elem, self.rest_type_of(elem).unwrap_or(last))
+        } else {
+            (elem, last)
+        };
+        // Numeric rest arrays use one element representation, including Int tails.
+        tail = tail
+            .into_iter()
+            .map(|a| self.retype_literal_to(a, elem))
+            .collect();
         let array_ty = self.context.type_table.borrow_mut().create_array_type(elem);
         let literal = TypedExpression {
             expr_type: array_ty,
