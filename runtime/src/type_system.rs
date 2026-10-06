@@ -1283,7 +1283,13 @@ pub extern "C" fn haxe_type_create_enum(
                 if boxed && variant.param_count == 0 {
                     return haxe_enum_nullary_cell(reflected_type_id(type_id), idx as i32) as i64;
                 }
-                let value = create_enum_value(idx as i32, variant.param_count, params_ptr, boxed);
+                let value = create_enum_value(
+                    idx as i32,
+                    variant.param_count,
+                    variant.param_types,
+                    params_ptr,
+                    boxed,
+                );
                 if boxed {
                     register_reflected_enum_value(value, reflected_type_id(type_id));
                 }
@@ -1315,7 +1321,13 @@ pub extern "C" fn haxe_type_create_enum_index(
         if boxed && variant.param_count == 0 {
             return haxe_enum_nullary_cell(reflected_type_id(type_id), index as i32) as i64;
         }
-        let value = create_enum_value(index as i32, variant.param_count, params_ptr, boxed);
+        let value = create_enum_value(
+            index as i32,
+            variant.param_count,
+            variant.param_types,
+            params_ptr,
+            boxed,
+        );
         if boxed {
             register_reflected_enum_value(value, reflected_type_id(type_id));
         }
@@ -1325,7 +1337,13 @@ pub extern "C" fn haxe_type_create_enum_index(
 }
 
 /// Helper: create an enum value (unboxed tag or boxed struct)
-fn create_enum_value(tag: i32, param_count: usize, params_ptr: *mut u8, boxed: bool) -> i64 {
+fn create_enum_value(
+    tag: i32,
+    param_count: usize,
+    param_types: &[ParamType],
+    params_ptr: *mut u8,
+    boxed: bool,
+) -> i64 {
     if !boxed {
         // Unboxed: just the tag
         return tag as i64;
@@ -1346,10 +1364,28 @@ fn create_enum_value(tag: i32, param_count: usize, params_ptr: *mut u8, boxed: b
         if !params_ptr.is_null() {
             let arr = &*(params_ptr as *const crate::haxe_array::HaxeArray);
             for i in 0..param_count.min(arr.len) {
-                let val = crate::haxe_array::haxe_array_get_i64(
+                let mut val = crate::haxe_array::haxe_array_get_i64(
                     params_ptr as *const crate::haxe_array::HaxeArray,
                     i,
                 );
+                // Array<Dynamic> holds boxed values, while an enum field uses
+                // its declared representation. Match only the expected box tag
+                // so a raw pointer cannot be mistaken for a DynamicValue.
+                if let Some(param_type) = param_types.get(i)
+                    && let Some(dynamic) = dynamic_box_at(val as *mut u8)
+                {
+                    val = match (param_type, dynamic.type_id) {
+                        (ParamType::String, TYPE_STRING) => dynamic.value_ptr as i64,
+                        (ParamType::Int, TYPE_INT) | (ParamType::Bool, TYPE_BOOL) => {
+                            haxe_unbox_int(dynamic)
+                        }
+                        (ParamType::Float, TYPE_FLOAT) => {
+                            haxe_unbox_float(dynamic).to_bits() as i64
+                        }
+                        (_, TYPE_NULL) => 0,
+                        _ => val,
+                    };
+                }
                 let field_ptr = ptr.add(8 + i * 8);
                 *(field_ptr as *mut i64) = val;
             }
@@ -3844,7 +3880,7 @@ pub extern "C" fn haxe_enum_nullary_cell(type_id: u32, tag: i32) -> *mut u8 {
     let mut cells = ENUM_NULLARY_CELLS.write().unwrap();
     let cells = cells.get_or_insert_with(HashMap::new);
     let cell = *cells.entry((type_id, tag)).or_insert_with(|| {
-        let value = create_enum_value(tag, 0, std::ptr::null_mut(), true);
+        let value = create_enum_value(tag, 0, &[], std::ptr::null_mut(), true);
         register_reflected_enum_value(value, type_id);
         value as usize
     });
