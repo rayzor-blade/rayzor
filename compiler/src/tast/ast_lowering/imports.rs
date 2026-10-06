@@ -295,6 +295,10 @@ impl<'a> AstLowering<'a> {
             .import_resolver
             .add_import(self.context.current_scope, import_entry);
 
+        if let Some(imported) = self.try_static_member_import(import) {
+            return Ok(imported);
+        }
+
         // Register imported symbols in the symbol table for type resolution
         if let Some(ref symbols) = imported_symbols {
             for &symbol_name in symbols {
@@ -428,6 +432,77 @@ impl<'a> AstLowering<'a> {
             module_path: self.context.intern_string(&import.path.join(".")),
             imported_symbols,
             alias,
+            source_location: self.context.create_location_from_span(import.span),
+        })
+    }
+
+    fn try_static_member_import(&mut self, import: &Import) -> Option<TypedImport> {
+        let (owner_path, member_name, binding_name, alias) = match &import.mode {
+            parser::ImportMode::Field(field) => {
+                (import.path.as_slice(), field.as_str(), field.as_str(), None)
+            }
+            parser::ImportMode::Normal | parser::ImportMode::Alias(_) => {
+                let (member, owner) = import.path.split_last()?;
+                if owner.is_empty() {
+                    return None;
+                }
+                let alias = match &import.mode {
+                    parser::ImportMode::Alias(alias) => Some(alias.as_str()),
+                    _ => None,
+                };
+                (owner, member.as_str(), alias.unwrap_or(member), alias)
+            }
+            _ => return None,
+        };
+        let (owner_name, package) = owner_path.split_last()?;
+        let name = self.context.intern_string(owner_name);
+        let package = package
+            .iter()
+            .map(|p| self.context.intern_string(p))
+            .collect();
+        let path = super::namespace::QualifiedPath::new(package, name);
+        let qualified = self.context.intern_string(&owner_path.join("."));
+        let owner = self
+            .context
+            .namespace_resolver
+            .lookup_symbol(&path)
+            .or_else(|| self.lookup_module_subtype(owner_path))
+            .or_else(|| self.context.symbol_table.resolve_qualified_name(qualified))
+            .or_else(|| {
+                (owner_path.len() == 1)
+                    .then(|| self.resolve_symbol_in_scope_hierarchy(name))
+                    .flatten()
+            })?;
+        let owner_scope = self.context.symbol_table.get_symbol(owner)?.scope_id;
+        let member_name = self.context.intern_string(member_name);
+        let member_id = self
+            .context
+            .symbol_table
+            .lookup_symbol(owner_scope, member_name)
+            .map(|member| member.id)
+            .or_else(|| {
+                self.context
+                    .scope_tree
+                    .get_scope(owner_scope)?
+                    .get_symbol(member_name)
+            })?;
+        let member = self.context.symbol_table.get_symbol(member_id)?;
+        if !member.is_static() && member.kind != crate::tast::SymbolKind::EnumVariant {
+            return None;
+        }
+        let binding = self.context.intern_string(binding_name);
+        let scope = self.context.current_scope;
+        self.context
+            .symbol_table
+            .remap_symbol_in_scope(scope, binding, member_id);
+        self.context
+            .scope_tree
+            .get_scope_mut(scope)?
+            .add_symbol(member_id, binding);
+        Some(TypedImport {
+            module_path: self.context.intern_string(&import.path.join(".")),
+            imported_symbols: Some(vec![binding]),
+            alias: alias.map(|name| self.context.intern_string(name)),
             source_location: self.context.create_location_from_span(import.span),
         })
     }

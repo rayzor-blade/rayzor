@@ -1320,9 +1320,7 @@ impl CompilationUnit {
                 (Vec::new(), Vec::new()),
                 |(mut imports, mut usings), ast| {
                     for import in &ast.imports {
-                        if !import.path.is_empty() {
-                            imports.push(import.path.join("."));
-                        }
+                        imports.extend(Self::import_dependencies(import));
                     }
                     for using in &ast.using {
                         if !using.path.is_empty() {

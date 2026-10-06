@@ -3,6 +3,27 @@
 use super::*;
 
 impl CompilationUnit {
+    pub(crate) fn import_dependencies(import: &parser::Import) -> Vec<String> {
+        if import.path.is_empty() {
+            return Vec::new();
+        }
+        let mut paths = vec![import.path.join(".")];
+        if matches!(
+            import.mode,
+            parser::ImportMode::Normal | parser::ImportMode::Alias(_)
+        ) {
+            let owner = &import.path[..import.path.len() - 1];
+            if owner
+                .last()
+                .is_some_and(|name| name.chars().next().is_some_and(char::is_uppercase))
+            {
+                // A member import depends on its owner; a module subtype shares that file.
+                paths.push(owner.join("."));
+            }
+        }
+        paths
+    }
+
     /// Extract all class references from a Haxe AST file.
     /// This includes explicit imports, using statements, new expressions, and type annotations.
     pub(crate) fn extract_all_dependencies(ast: &parser::HaxeFile) -> Vec<String> {
@@ -12,9 +33,7 @@ impl CompilationUnit {
 
         // 1. Explicit imports
         for import in &ast.imports {
-            if !import.path.is_empty() {
-                deps.insert(import.path.join("."));
-            }
+            deps.extend(Self::import_dependencies(import));
         }
 
         // 2. Using statements
@@ -1980,9 +1999,7 @@ impl CompilationUnit {
                 continue;
             };
             for import in &file.imports {
-                if !import.path.is_empty() {
-                    names.push(import.path.join("."));
-                }
+                names.extend(Self::import_dependencies(import));
             }
             for using in &file.using {
                 if !using.path.is_empty() {

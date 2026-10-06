@@ -4030,8 +4030,11 @@ pub fn build_import_map(imports: &[parser::Import]) -> BTreeMap<String, String> 
                 }
                 slot.push_str(&qualified);
             }
-            parser::ImportMode::Field(_) => {
-                // Field imports are not class resolution.
+            parser::ImportMode::Field(field) => {
+                map.insert(
+                    field.clone(),
+                    format!("{}.{}", import.path.join("."), field),
+                );
             }
         }
     }

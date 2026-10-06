@@ -1,0 +1,5 @@
+[project]
+name = "static-member-imports"
+entry = "./StaticMemberImports.hx"
+[build]
+class-paths = ["."]

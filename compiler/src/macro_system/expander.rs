@@ -515,6 +515,15 @@ impl MacroExpander {
                 if let Some(macro_name) = extract_macro_call_name(callee)
                     .filter(|name| name.contains('.') || !self.own_methods.contains(name))
                 {
+                    let (head, tail) = macro_name
+                        .split_once('.')
+                        .map_or((macro_name.as_str(), None), |(head, tail)| {
+                            (head, Some(tail))
+                        });
+                    let macro_name = self.import_map.get(head).map_or_else(
+                        || macro_name.clone(),
+                        |path| tail.map_or_else(|| path.clone(), |tail| format!("{path}.{tail}")),
+                    );
                     if self.registry.is_macro(&macro_name) {
                         let class = self
                             .registry
