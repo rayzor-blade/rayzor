@@ -146,6 +146,28 @@ impl<'a> HirToMirContext<'a> {
         let resolved_field_ty = self.resolve_type_param_from_receiver(field_ty, receiver_ty);
         let field_ty = resolved_field_ty.unwrap_or(field_ty);
 
+        // A constrained parameter has no fixed class or anonymous-object layout.
+        if matches!(
+            self.type_table.get(receiver_ty).map(|t| &t.kind),
+            Some(TypeKind::TypeParameter { .. })
+        ) {
+            let ptr_ty = IrType::Ptr(Box::new(IrType::U8));
+            let obj = self.coerce_reg_to(obj, &ptr_ty)?;
+            let value = self.raw_anon_reflect_field_read(obj, field, field_ty)?;
+            if matches!(
+                self.type_table.get(field_ty).map(|t| &t.kind),
+                Some(TypeKind::Class { .. } | TypeKind::Function { .. })
+            ) {
+                let unbox = self.get_or_register_extern_function(
+                    "haxe_unbox_reference_ptr",
+                    vec![ptr_ty.clone()],
+                    ptr_ty.clone(),
+                );
+                return self.builder.build_call_direct(unbox, vec![value], ptr_ty);
+            }
+            return Some(value);
+        }
+
         let receiver_is_interface = self.get_interface_symbol(receiver_ty).is_some();
         let interface_receiver = obj;
         let obj = if receiver_is_interface {
@@ -1101,17 +1123,6 @@ impl<'a> HirToMirContext<'a> {
                                 self.read_abstract_property(obj, field, receiver_ty, field_ty)
                             {
                                 return Some(result);
-                            }
-
-                            // A type parameter's value is read by name, as
-                            // a structural field of whatever it was bound to.
-                            if matches!(
-                                self.type_table
-                                    .get(self.resolve_through_aliases(receiver_ty))
-                                    .map(|t| &t.kind),
-                                Some(TypeKind::TypeParameter { .. })
-                            ) {
-                                return self.dynamic_reflect_field_read(obj, field, field_ty);
                             }
 
                             if std::env::var_os("RAYZOR_E0100_DEBUG").is_some() {

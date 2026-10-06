@@ -109,8 +109,10 @@ impl<'a> HirToMirContext<'a> {
                     vec![ptr_u8.clone()],
                     ptr_u8.clone(),
                 );
-                self.builder
-                    .build_call_direct(unbox_id, vec![dynamic_result], ptr_u8)?
+                let raw = self
+                    .builder
+                    .build_call_direct(unbox_id, vec![dynamic_result], ptr_u8)?;
+                self.builder.build_bitcast(raw, IrType::String)?
             }
             // A structural or class-typed field (`Dynamic<T>` gives its
             // fields the type T) hands its readers the object, not the box.
@@ -129,7 +131,7 @@ impl<'a> HirToMirContext<'a> {
                 self.builder
                     .build_call_direct(unbox_id, vec![dynamic_result, tag_reg], ptr_u8)?
             }
-            Some(TypeKind::Class { .. }) => {
+            Some(TypeKind::Class { .. }) | Some(TypeKind::Function { .. }) => {
                 let unbox_id = self.get_or_register_extern_function(
                     "haxe_unbox_reference_ptr",
                     vec![ptr_u8.clone()],
@@ -214,8 +216,10 @@ impl<'a> HirToMirContext<'a> {
                     vec![ptr_u8.clone()],
                     ptr_u8.clone(),
                 );
-                self.builder
-                    .build_call_direct(unbox_id, vec![dynamic_result], ptr_u8)?
+                let raw = self
+                    .builder
+                    .build_call_direct(unbox_id, vec![dynamic_result], ptr_u8)?;
+                self.builder.build_bitcast(raw, IrType::String)?
             }
             _ => {
                 // Dynamic or unknown: return DynamicValue* as-is

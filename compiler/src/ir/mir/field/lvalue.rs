@@ -221,11 +221,15 @@ impl<'a> HirToMirContext<'a> {
                 .map(str::to_owned)?;
             self.dynamic_member_names.insert(name.clone());
             let name_reg = self.builder.build_const(IrValue::String(name))?;
-            let boxed = self
-                .builder
-                .get_register_type(value)
-                .and_then(|ty| self.box_primitive_to_dynamic(value, ty))
-                .unwrap_or(value);
+            let value_ty = self.builder.get_register_type(value);
+            let boxed = if matches!(&value_ty, Some(IrType::String))
+                || matches!(&value_ty, Some(IrType::Ptr(inner)) if matches!(inner.as_ref(), IrType::String))
+            {
+                self.box_value_for_dynamic(value, self.type_table.string_type())
+            } else {
+                value_ty.and_then(|ty| self.box_primitive_to_dynamic(value, ty))
+            }
+            .unwrap_or(value);
             let object_ptr = self.coerce_reg_to(obj_reg, &ptr_ty)?;
             let setter = self.get_or_register_extern_function(
                 "haxe_reflect_set_field",

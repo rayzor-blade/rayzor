@@ -553,27 +553,29 @@ impl<'a> AstLowering<'a> {
                     .get_symbol(*field_symbol)
                     .map(|s| s.name);
                 if let Some(name) = want_name {
-                    // Walk through TypeAlias chains so typedef-wrapped
-                    // anons (`typedef Inner = {x:Int}`) participate in
-                    // this lookup too.
-                    let mut current = object.expr_type;
-                    let mut hops = 0;
-                    while hops < 8 {
+                    // Alias targets and parameter constraints retain their declared fields.
+                    let mut pending = vec![(object.expr_type, false)];
+                    let mut visited = std::collections::BTreeSet::new();
+                    while let Some((current, through_constraint)) = pending.pop() {
+                        if !visited.insert(current) || visited.len() > 32 {
+                            continue;
+                        }
                         let kind = {
                             let type_table = self.context.type_table.borrow();
                             type_table.get(current).map(|t| t.kind.clone())
                         };
-                        let Some(kind) = kind else { break };
+                        let Some(kind) = kind else { continue };
                         match &kind {
                             crate::tast::core::TypeKind::Anonymous { fields } => {
                                 if let Some(field) = fields.iter().find(|f| f.name == name) {
                                     return Ok(field.type_id);
                                 }
-                                break;
                             }
                             crate::tast::core::TypeKind::TypeAlias { target_type, .. } => {
-                                current = *target_type;
-                                hops += 1;
+                                pending.push((*target_type, through_constraint));
+                            }
+                            crate::tast::core::TypeKind::TypeParameter { constraints, .. } => {
+                                pending.extend(constraints.iter().rev().map(|ty| (*ty, true)));
                             }
                             // `Null<{p:String}>` from an erased `first()` still
                             // has the fields of the anon inside it. Without this
@@ -581,10 +583,22 @@ impl<'a> AstLowering<'a> {
                             // holding it took the Dynamic path once captured --
                             // `.length` read as an object slot -- and faulted.
                             crate::tast::core::TypeKind::Optional { inner_type } => {
-                                current = *inner_type;
-                                hops += 1;
+                                pending.push((*inner_type, through_constraint));
                             }
                             crate::tast::core::TypeKind::Class { symbol_id, .. } => {
+                                if through_constraint {
+                                    let member =
+                                        self.lookup_data_field(*symbol_id, name).or_else(|| {
+                                            self.resolve_class_method_symbol(*symbol_id, name)
+                                        });
+                                    if let Some(ty) = member
+                                        .and_then(|s| self.context.symbol_table.get_symbol(s))
+                                        .map(|s| s.type_id)
+                                        .filter(|ty| ty.is_valid())
+                                    {
+                                        return Ok(self.substitute_receiver_type(ty, current));
+                                    }
+                                }
                                 // Cross-module decay: this Class may actually be a
                                 // structural typedef whose real Anonymous target
                                 // lives elsewhere in the shared type table (see
@@ -603,14 +617,11 @@ impl<'a> AstLowering<'a> {
                                     if let Some(anon_ty) =
                                         self.find_typedef_anonymous_target_by_qname(&qname)
                                     {
-                                        current = anon_ty;
-                                        hops += 1;
-                                        continue;
+                                        pending.push((anon_ty, through_constraint));
                                     }
                                 }
-                                break;
                             }
-                            _ => break,
+                            _ => {}
                         }
                     }
                 }
