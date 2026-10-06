@@ -1244,7 +1244,6 @@ impl<'a> AstLowering<'a> {
         arg: TypedExpression,
         formal: Option<TypeId>,
     ) -> TypedExpression {
-        use crate::tast::core::TypeKind;
         let Some(formal_ty) = formal else {
             return arg;
         };
@@ -1254,17 +1253,7 @@ impl<'a> AstLowering<'a> {
         let converts = {
             let tt = self.context.type_table.borrow();
             let formal_kind = tt.get(formal_ty).map(|ti| &ti.kind);
-            matches!(
-                formal_kind,
-                Some(
-                    TypeKind::Int
-                        | TypeKind::Float
-                        | TypeKind::Bool
-                        | TypeKind::String
-                        | TypeKind::Dynamic
-                )
-            ) && self
-                .abstract_casts
+            self.abstract_casts
                 .get(&abstract_symbol)
                 .is_some_and(|(_, to_types)| {
                     to_types

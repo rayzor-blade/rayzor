@@ -138,6 +138,44 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// The declared entry types of a Map literal, including concrete map classes.
+    pub(crate) fn map_literal_entry_types(&self, mut ty: TypeId) -> Option<(TypeId, TypeId)> {
+        let tt = self.context.type_table.borrow();
+        let mut remaining = tt.len();
+        let (symbol, args) = loop {
+            remaining = remaining.checked_sub(1)?;
+            match &tt.get(ty)?.kind {
+                TypeKind::TypeAlias { target_type, .. } => ty = *target_type,
+                TypeKind::Map {
+                    key_type,
+                    value_type,
+                } => return Some((*key_type, *value_type)),
+                TypeKind::Class {
+                    symbol_id,
+                    type_args,
+                }
+                | TypeKind::Abstract {
+                    symbol_id,
+                    type_args,
+                    ..
+                } => break (*symbol_id, type_args),
+                TypeKind::GenericInstance {
+                    base_type,
+                    type_args,
+                    ..
+                } => break (tt.get(*base_type)?.symbol_id()?, type_args),
+                _ => return None,
+            }
+        };
+        let name = self.context.symbol_table.get_symbol(symbol)?.name;
+        match self.context.string_interner.get(name)?.rsplit('.').next()? {
+            "StringMap" => Some((tt.string_type(), *args.first()?)),
+            "IntMap" => Some((tt.int_type(), *args.first()?)),
+            "Map" | "ObjectMap" | "EnumValueMap" => Some((*args.first()?, *args.get(1)?)),
+            _ => None,
+        }
+    }
+
     /// Desugar f.bind(a, _, c) → function(b) { return f(a, b, c); }
     /// Handles partial application where `_` marks unbound parameters.
     pub(crate) fn lower_bind_expression(

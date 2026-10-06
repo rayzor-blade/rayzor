@@ -581,8 +581,7 @@ impl<'a> HirToMirContext<'a> {
 
     /// The source abstract's `@:to` conversion to `target_type`, when it
     /// declares one (`var f:Float = u` with `u:UInt` runs `toFloat`).
-    /// Whether `source_type` is an abstract with an `@:to` method returning
-    /// `target_type`'s kind (Int, Float, Bool or String).
+    /// Whether `source_type` has an `@:to` method for the target type.
     pub(crate) fn has_abstract_to_function(
         &self,
         source_type: TypeId,
@@ -594,12 +593,6 @@ impl<'a> HirToMirContext<'a> {
         let Some(target_kind) = self.type_table.get(target_type).map(|t| t.kind.clone()) else {
             return false;
         };
-        if !matches!(
-            target_kind,
-            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String | TypeKind::Dynamic
-        ) {
-            return false;
-        }
         self.abstract_to_rules.get(&abs_name).is_some_and(|rules| {
             rules.iter().any(|r| {
                 r.cast_function.is_some()
@@ -619,12 +612,6 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<IrId> {
         let abs_name = self.resolve_abstract_name(source_type)?;
         let target_kind = self.type_table.get(target_type).map(|t| t.kind.clone())?;
-        if !matches!(
-            target_kind,
-            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String | TypeKind::Dynamic
-        ) {
-            return None;
-        }
         let rule = self
             .abstract_to_rules
             .get(&abs_name)?

@@ -1044,6 +1044,7 @@ impl<'a> AstLowering<'a> {
                         .into_iter()
                         .enumerate()
                         .map(|(i, a)| {
+                            let a = self.coerce_arg_via_abstract_to(a, params.get(i).copied());
                             let a = self.coerce_arg_via_abstract_from(a, params.get(i).copied());
                             self.string_as_any(a, params.get(i).copied())
                         })
@@ -1868,10 +1869,23 @@ impl<'a> AstLowering<'a> {
             }
             ExprKind::Map(entries) => {
                 // Map literal: ["key1" => value1, "key2" => value2]
+                let expected = self
+                    .expected_arg_type_stack
+                    .last()
+                    .copied()
+                    .flatten()
+                    .or(self.context.expected_new_type_hint);
+                let expected_types = expected.and_then(|ty| self.map_literal_entry_types(ty));
                 let mut typed_entries = Vec::with_capacity(entries.len());
                 for (key_expr, value_expr) in entries {
                     let key = self.lower_expression(key_expr)?;
                     let value = self.lower_expression(value_expr)?;
+                    let key_target = expected_types.map(|(key, _)| key);
+                    let value_target = expected_types.map(|(_, value)| value);
+                    let key = self.coerce_arg_via_abstract_to(key, key_target);
+                    let key = self.coerce_arg_via_abstract_from(key, key_target);
+                    let value = self.coerce_arg_via_abstract_to(value, value_target);
+                    let value = self.coerce_arg_via_abstract_from(value, value_target);
                     typed_entries.push(TypedMapEntry {
                         key,
                         value,

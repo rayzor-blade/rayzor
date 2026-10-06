@@ -73,6 +73,7 @@ pub struct TastToHirContext<'a> {
     /// `Tensor` works from user code.
     class_operator_methods: BTreeMap<(SymbolId, String), SymbolId>,
     commutative_operator_methods: std::collections::BTreeSet<SymbolId>,
+    native_abstract_operators: std::collections::BTreeSet<SymbolId>,
 }
 
 #[derive(Debug)]
@@ -192,6 +193,7 @@ impl<'a> TastToHirContext<'a> {
             inline_var_values: BTreeMap::new(),
             class_operator_methods: BTreeMap::new(),
             commutative_operator_methods: std::collections::BTreeSet::new(),
+            native_abstract_operators: std::collections::BTreeSet::new(),
         }
     }
 
@@ -244,16 +246,23 @@ impl<'a> TastToHirContext<'a> {
                     if method.metadata.is_commutative {
                         self.commutative_operator_methods.insert(method.symbol_id);
                     }
-                    if method.body.is_empty() {
-                        continue;
-                    }
                     for (op_str, _params) in &method.metadata.operator_metadata {
-                        if let Some(op) = Self::parse_unary_operator_from_metadata(op_str) {
+                        if let Some(op) = Self::parse_unary_operator_from_metadata(op_str)
+                            .filter(|_| !method.body.is_empty())
+                        {
                             self.class_operator_methods
                                 .entry((abstract_def.symbol_id, format!("{op:?}")))
                                 .or_insert(method.symbol_id);
                         }
                         if let Some(op) = Self::parse_operator_from_metadata(op_str) {
+                            if method.body.is_empty()
+                                && Self::compound_assignment_operator(&op).is_some()
+                            {
+                                continue;
+                            }
+                            if method.body.is_empty() {
+                                self.native_abstract_operators.insert(method.symbol_id);
+                            }
                             let key = Self::op_key_for_binary(&op);
                             self.class_operator_methods
                                 .entry((abstract_def.symbol_id, key))
@@ -2611,6 +2620,49 @@ impl<'a> TastToHirContext<'a> {
                             result
                         }
                     };
+                    if self.native_abstract_operators.contains(&method_symbol) {
+                        let params = method_info
+                            .and_then(|m| {
+                                self.type_table.borrow().get(m.type_id).and_then(|t| {
+                                    if let TypeKind::Function { params, .. } = &t.kind {
+                                        Some(params.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                            .unwrap_or_default();
+                        let mut lhs = self.lower_expression(&receiver);
+                        let mut rhs = self.lower_expression(&argument);
+                        if is_static {
+                            if let Some(ty) = params.first() {
+                                lhs = self.coerce_parameter_argument(
+                                    lhs,
+                                    *ty,
+                                    expr.source_location,
+                                    false,
+                                );
+                            }
+                        }
+                        if let Some(ty) = params.get(usize::from(is_static)) {
+                            rhs = self.coerce_parameter_argument(
+                                rhs,
+                                *ty,
+                                expr.source_location,
+                                false,
+                            );
+                        }
+                        return wrap_result(HirExpr::new(
+                            HirExprKind::Binary {
+                                op: self.convert_binary_op(operator),
+                                lhs: Box::new(lhs),
+                                rhs: Box::new(rhs),
+                            },
+                            result_type,
+                            lifetime,
+                            expr.source_location,
+                        ));
+                    }
                     if is_static {
                         let synthesized = TypedExpression {
                             expr_type: result_type,
@@ -4200,6 +4252,35 @@ impl<'a> TastToHirContext<'a> {
             );
             (target_needs_wrapper, arg_class)
         };
+        let abstract_conversion = {
+            let table = self.type_table.borrow();
+            matches!(
+                table.get(source_type).map(|t| &t.kind),
+                Some(TypeKind::Abstract { .. })
+            ) && table.get(source_type).map(|t| &t.kind)
+                != table.get(target_iface_type).map(|t| &t.kind)
+                && !matches!(
+                    table.get(target_iface_type).map(|t| &t.kind),
+                    None | Some(
+                        TypeKind::Dynamic
+                            | TypeKind::Optional { .. }
+                            | TypeKind::TypeParameter { .. }
+                            | TypeKind::Unknown
+                    )
+                )
+        };
+        if abstract_conversion {
+            return HirExpr::new(
+                HirExprKind::Cast {
+                    expr: Box::new(arg),
+                    target: target_iface_type,
+                    is_safe: true,
+                },
+                target_iface_type,
+                self.current_lifetime,
+                source_location,
+            );
+        }
         if !target_needs_wrapper || !arg_is_class {
             return arg;
         }
@@ -6134,7 +6215,13 @@ impl<'a> TastToHirContext<'a> {
         let mut param_map: BTreeMap<SymbolId, HirExpr> = BTreeMap::new();
         if method.parameters.len() == arguments.len() {
             for (param, lowered_arg) in method.parameters.iter().zip(lowered_arguments) {
-                param_map.insert(param.symbol_id, lowered_arg);
+                let arg = self.coerce_parameter_argument(
+                    lowered_arg,
+                    param.param_type,
+                    source_location,
+                    false,
+                );
+                param_map.insert(param.symbol_id, arg);
             }
         }
 
@@ -6472,7 +6559,18 @@ impl<'a> TastToHirContext<'a> {
             lifetime: crate::tast::LifetimeId::invalid(),
             source_location: SourceLocation::unknown(),
         };
-        Some(self.inline_expression_deep(value, &placeholder, &param_map, underlying))
+        let computed = self.inline_expression_deep(value, &placeholder, &param_map, underlying);
+        // Compute with the underlying type, then expose the constructed abstract.
+        Some(HirExpr::new(
+            HirExprKind::Block(HirBlock::with_expr(
+                Vec::new(),
+                computed,
+                self.current_scope,
+            )),
+            result_type,
+            self.current_lifetime,
+            value.source_location,
+        ))
     }
 
     /// A call to a mutating abstract method, rewritten as an assignment to the
@@ -6718,7 +6816,13 @@ impl<'a> TastToHirContext<'a> {
         // Map parameters to arguments
         if method.parameters.len() == arguments.len() {
             for (param, lowered_arg) in method.parameters.iter().zip(lowered_arguments) {
-                param_map.insert(param.symbol_id, lowered_arg);
+                let arg = self.coerce_parameter_argument(
+                    lowered_arg,
+                    param.param_type,
+                    source_location,
+                    false,
+                );
+                param_map.insert(param.symbol_id, arg);
             }
         } else {
             // println!("DEBUG: Parameter count mismatch: method has {} params, call has {} args",

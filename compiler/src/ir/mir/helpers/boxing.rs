@@ -1132,8 +1132,7 @@ impl<'a> HirToMirContext<'a> {
         false
     }
 
-    /// A `Null<Bool>` read where a Bool is needed (`if (q)`, `!q`, `a && q`):
-    /// the box is opened, null reading as false. Anything else passes through.
+    /// Convert a condition to Bool, opening nullable boxes and abstract casts.
     pub(crate) fn truth_of(&mut self, reg: IrId, hir_ty: TypeId) -> Option<IrId> {
         use crate::tast::TypeKind;
         let mut ty = hir_ty;
@@ -1142,6 +1141,11 @@ impl<'a> HirToMirContext<'a> {
                 Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
                 _ => break,
             }
+        }
+        if let Some(converted) =
+            self.maybe_abstract_to_convert(reg, ty, self.type_table.bool_type())
+        {
+            return Some(converted);
         }
         let unbox_fn = match self.type_table.get(ty).map(|t| &t.kind) {
             Some(TypeKind::Optional { inner_type })
