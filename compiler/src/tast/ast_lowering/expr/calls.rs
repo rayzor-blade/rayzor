@@ -1205,13 +1205,32 @@ impl<'a> AstLowering<'a> {
             return arg;
         };
         let location = arg.source_location.clone();
+        let arguments = vec![arg];
+        let type_arguments = self.infer_call_type_arguments(method_symbol, &arguments);
+        let declared_return = self
+            .context
+            .symbol_table
+            .get_symbol(method_symbol)
+            .and_then(|symbol| {
+                let table = self.context.type_table.borrow();
+                match &table.get(symbol.type_id)?.kind {
+                    TypeKind::Function { return_type, .. } => Some(*return_type),
+                    _ => None,
+                }
+            });
+        // Infer the conversion's result from its argument before binding the
+        // caller's generic formal to that resulting abstract instantiation.
+        let expr_type = declared_return
+            .map(|ret| self.bind_return_type_params(ret, method_symbol, &arguments))
+            .filter(|ty| self.abstract_symbol_of(*ty) == Some(abstract_symbol))
+            .unwrap_or(formal_ty);
         TypedExpression {
-            expr_type: formal_ty,
+            expr_type,
             kind: crate::tast::node::TypedExpressionKind::StaticMethodCall {
                 class_symbol: abstract_symbol,
                 method_symbol,
-                arguments: vec![arg],
-                type_arguments: Vec::new(),
+                arguments,
+                type_arguments,
             },
             usage: crate::tast::node::VariableUsage::Copy,
             lifetime_id: crate::tast::LifetimeId::first(),
