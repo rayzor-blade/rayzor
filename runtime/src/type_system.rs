@@ -1683,19 +1683,7 @@ pub extern "C" fn haxe_enum_get_parameters(
                     .get(i)
                     .copied()
                     .unwrap_or(ParamType::Dynamic);
-                // Box the field value as Dynamic based on its type
-                let boxed = match param_type {
-                    ParamType::Int => haxe_box_int_ptr(raw_val),
-                    ParamType::Float => haxe_box_float_ptr(f64::from_bits(raw_val as u64)),
-                    ParamType::Bool => haxe_box_bool_ptr(raw_val != 0),
-                    // String and Object fields are already pointers, pass through
-                    ParamType::String
-                    | ParamType::Object
-                    | ParamType::Dynamic
-                    | ParamType::Array
-                    | ParamType::Anon
-                    | ParamType::Boxed => haxe_box_int_ptr(raw_val),
-                };
+                let boxed = box_class_field_as_dynamic(raw_val as u64, param_type);
                 crate::haxe_array::haxe_array_push_i64(arr, boxed as i64);
             }
         }

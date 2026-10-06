@@ -675,8 +675,6 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
                 }
-                let rhs_value = self.lower_expression(rhs);
-                self.object_literal_target_ty = prev_anon_target;
                 let slot_ty = match lhs {
                     HirLValue::Variable(symbol) | HirLValue::Field { field: symbol, .. } => self
                         .symbol_table
@@ -685,6 +683,15 @@ impl<'a> HirToMirContext<'a> {
                         .filter(|t| *t != TypeId::invalid()),
                     HirLValue::Index { .. } => None,
                 };
+                let prev_call_target = self.let_target_type_hint.take();
+                if matches!(&rhs.kind, HirExprKind::Call { .. })
+                    && slot_ty.is_some_and(|ty| self.resolve_enum_symbol(ty).is_some())
+                {
+                    self.let_target_type_hint = slot_ty;
+                }
+                let rhs_value = self.lower_expression(rhs);
+                self.object_literal_target_ty = prev_anon_target;
+                self.let_target_type_hint = prev_call_target;
                 let rhs_value = match (rhs_value, slot_ty) {
                     (Some(v), Some(slot_ty)) if op.is_none() => Some(
                         self.maybe_unbox_function_for_target(v, rhs.ty, slot_ty)
@@ -1134,8 +1141,17 @@ impl<'a> HirToMirContext<'a> {
                     if matches!(&e.kind, HirExprKind::ObjectLiteral { .. }) {
                         self.object_literal_target_ty = self.current_function_return_type;
                     }
+                    let prev_call_target = self.let_target_type_hint.take();
+                    if matches!(&e.kind, HirExprKind::Call { .. })
+                        && self
+                            .current_function_return_type
+                            .is_some_and(|ty| self.resolve_enum_symbol(ty).is_some())
+                    {
+                        self.let_target_type_hint = self.current_function_return_type;
+                    }
                     let result = self.lower_expression(e);
                     self.object_literal_target_ty = prev_target;
+                    self.let_target_type_hint = prev_call_target;
                     debug!("[Return]: Return expression lowered to: {:?}", result);
                     if result.is_none() {
                         warn!("ERROR [Return]: Failed to lower return expression!");

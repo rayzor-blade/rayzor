@@ -108,6 +108,7 @@ impl<'a> HirToMirContext<'a> {
         tag_idx: i32,
         field_count: usize,
         constructor_args: &[HirExpr],
+        field_types: &[(IrType, TypeId)],
     ) -> Option<IrId> {
         let struct_size = 8 + 8 * field_count;
         let size_const = self.builder.build_const(IrValue::I64(struct_size as i64))?;
@@ -133,7 +134,25 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_store(tag_ptr_i32, tag_val)?;
 
         for (i, arg) in constructor_args.iter().take(field_count).enumerate() {
-            let arg_reg = self.lower_expression(arg)?;
+            let prev_target = self.let_target_type_hint.take();
+            if matches!(&arg.kind, HirExprKind::Call { .. }) {
+                self.let_target_type_hint = field_types.get(i).map(|(_, ty)| *ty);
+            }
+            let arg_result = self.lower_expression(arg);
+            self.let_target_type_hint = prev_target;
+            let mut arg_reg = arg_result?;
+            if let Some((target_ir, target_ty)) = field_types.get(i) {
+                // Concrete fields unbox Dynamic inputs; erased fields keep raw slots.
+                arg_reg = self
+                    .maybe_box_for_optional(arg_reg, arg.ty, *target_ty)
+                    .unwrap_or(arg_reg);
+                arg_reg = self.maybe_unbox_value(arg_reg, arg.ty, *target_ty)?;
+                let source_ir = self.builder.get_register_type(arg_reg)?;
+                if *target_ir == IrType::F64 && source_ir.is_integer() {
+                    arg_reg = self.builder.build_cast(arg_reg, source_ir, IrType::F64)?;
+                }
+            }
+            arg_reg = self.coerce_reg_to(arg_reg, &IrType::I64)?;
             let field_offset = self.builder.build_const(IrValue::I64((8 + i * 8) as i64))?;
             let field_ptr = self.builder.build_gep(
                 ptr,

@@ -79,10 +79,16 @@ impl<'a> HirToMirContext<'a> {
                                     } else {
                                         args
                                     };
+                                    let field_types = self.enum_constructor_field_types(
+                                        expr.ty,
+                                        *enum_symbol,
+                                        variant_sym?.name,
+                                    );
                                     return self.build_boxed_enum_with_fields(
                                         idx as i32,
                                         field_count,
                                         constructor_args,
+                                        &field_types,
                                     );
                                 }
                             }
@@ -141,40 +147,6 @@ impl<'a> HirToMirContext<'a> {
                                         return self.builder.build_const(IrValue::I64(idx as i64));
                                     }
 
-                                    // Has parameters - allocate boxed enum struct
-                                    // Layout: [tag:i32][pad:i32][field0:i64][field1:i64]...
-                                    let struct_size = 8 + 8 * field_count; // 8 for tag+pad, 8 per field
-
-                                    let size_const = self
-                                        .builder
-                                        .build_const(IrValue::I64(struct_size as i64))?;
-                                    let alloc_func = self.get_or_register_extern_function(
-                                        "malloc",
-                                        vec![IrType::I64],
-                                        IrType::Ptr(Box::new(IrType::I8)),
-                                    );
-                                    let ptr = self.builder.build_call_direct(
-                                        alloc_func,
-                                        vec![size_const],
-                                        IrType::Ptr(Box::new(IrType::I8)),
-                                    )?;
-
-                                    // Store the tag at offset 0 as i32. GEP multiplies the index by
-                                    // element size, so address in I8 elements and bitcast after.
-                                    let zero_offset = self.builder.build_const(IrValue::I64(0))?;
-                                    let tag_ptr = self.builder.build_gep(
-                                        ptr,
-                                        vec![zero_offset],
-                                        IrType::Ptr(Box::new(IrType::I8)), // Byte-based
-                                    )?;
-                                    let tag_ptr_i32 = self.builder.build_bitcast(
-                                        tag_ptr,
-                                        IrType::Ptr(Box::new(IrType::I32)),
-                                    )?;
-                                    let tag_val =
-                                        self.builder.build_const(IrValue::I32(idx as i32))?;
-                                    self.builder.build_store(tag_ptr_i32, tag_val)?;
-
                                     // Store each parameter at byte offset 8 + i*8
                                     // When is_method=true, args[0] is the enum class reference
                                     // (receiver), not a constructor field. Skip it.
@@ -183,26 +155,17 @@ impl<'a> HirToMirContext<'a> {
                                     } else {
                                         args
                                     };
-                                    for (i, arg) in constructor_args.iter().enumerate() {
-                                        let arg_reg = self.lower_expression(arg)?;
-                                        let field_offset = self
-                                            .builder
-                                            .build_const(IrValue::I64((8 + i * 8) as i64))?;
-                                        // Use I8 element type for byte-based addressing
-                                        let field_ptr = self.builder.build_gep(
-                                            ptr,
-                                            vec![field_offset],
-                                            IrType::Ptr(Box::new(IrType::I8)),
-                                        )?;
-                                        let field_ptr_i64 = self.builder.build_bitcast(
-                                            field_ptr,
-                                            IrType::Ptr(Box::new(IrType::I64)),
-                                        )?;
-                                        self.builder.build_store(field_ptr_i64, arg_reg)?;
-                                    }
-
-                                    // Return the pointer as i64 for uniform handling.
-                                    return self.builder.build_bitcast(ptr, IrType::I64);
+                                    let field_types = self.enum_constructor_field_types(
+                                        expr.ty,
+                                        parent_enum_id,
+                                        sym.name,
+                                    );
+                                    return self.build_boxed_enum_with_fields(
+                                        idx as i32,
+                                        field_count,
+                                        constructor_args,
+                                        &field_types,
+                                    );
                                 }
                             }
                         }
@@ -212,5 +175,22 @@ impl<'a> HirToMirContext<'a> {
         }
         *fell_through = true;
         None
+    }
+
+    fn enum_constructor_field_types(
+        &self,
+        result_ty: TypeId,
+        enum_symbol: SymbolId,
+        variant_name: InternedString,
+    ) -> Vec<(IrType, TypeId)> {
+        let enum_id = self.enum_runtime_id(enum_symbol);
+        let concrete_ty = self
+            .let_target_type_hint
+            .filter(|ty| {
+                self.resolve_enum_symbol(*ty)
+                    .is_some_and(|sym| self.enum_runtime_id(sym) == enum_id)
+            })
+            .unwrap_or(result_ty);
+        self.get_enum_variant_field_types(concrete_ty, variant_name)
     }
 }
