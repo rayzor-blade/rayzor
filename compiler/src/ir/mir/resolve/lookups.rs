@@ -1935,10 +1935,29 @@ impl<'a> HirToMirContext<'a> {
         while seen.insert(current) {
             match self.type_table.get(current).map(|t| &t.kind) {
                 Some(TypeKind::Abstract {
-                    underlying: Some(inner),
+                    symbol_id,
+                    underlying,
                     ..
                 }) => {
-                    current = self.resolve_through_aliases(*inner);
+                    let Some(inner) = underlying
+                        .or_else(|| self.type_table.resolve_abstract_underlying(*symbol_id))
+                    else {
+                        break;
+                    };
+                    current = self.resolve_through_aliases(inner);
+                }
+                Some(TypeKind::Class { symbol_id, .. })
+                    if self
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .is_some_and(|s| s.kind == crate::tast::symbols::SymbolKind::Abstract) =>
+                {
+                    // A forward declaration keeps its Class handle after the abstract lowers.
+                    let Some(inner) = self.type_table.resolve_abstract_underlying(*symbol_id)
+                    else {
+                        break;
+                    };
+                    current = self.resolve_through_aliases(inner);
                 }
                 _ => break,
             }
