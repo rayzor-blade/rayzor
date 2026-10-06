@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1791312598,"nonce":"iKdKTzLEYmFlQVjTp50qpkZ8D10=","message":"Landed in 7234e809dafb873bd2cdb2e2cecf943dcabdffc6. Both scored rows and source/import/cache-restoration regressions pass; the inherited generic argument scope is complete.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1791312603,"nonce":"hlc9+fXqPODqzmFRJyNzVRnTwWI=","status":2}]}
