@@ -44,11 +44,7 @@ enum SlotKind {
 }
 
 impl<'a> HirToMirContext<'a> {
-    /// A mapped static method taken as a value: a function shaped like the
-    /// reference's own type that boxes its arguments for the runtime's
-    /// `Dynamic` formals and calls the mapping, so `a.sort(Reflect.compare)`
-    /// gets the comparator a user static would be. `None` when the symbol
-    /// names no such mapping.
+    /// Adapt a mapped static method's native signature to its Haxe function type.
     pub(crate) fn mapped_static_function_ref(
         &mut self,
         symbol: SymbolId,
@@ -73,6 +69,17 @@ impl<'a> HirToMirContext<'a> {
         };
         let (param_tys, ret_ty) = self.resolve_function_type_signature(ref_ty)?;
         if param_tys.len() != param_count {
+            return None;
+        }
+        let (native_params, native_ret) = self
+            .get_extern_function_signature(runtime_name)
+            .unwrap_or_else(|| {
+                (
+                    param_tys.iter().map(|ty| self.convert_type(*ty)).collect(),
+                    self.convert_type(ret_ty),
+                )
+            });
+        if native_params.len() != param_count {
             return None;
         }
         let thunk_name = format!("__mapped_static_ref__{}__{}", runtime_name, ref_ty.as_raw());
@@ -131,34 +138,38 @@ impl<'a> HirToMirContext<'a> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let dynamic = self.type_table.dynamic_type();
         let mut args = Vec::with_capacity(param_count);
-        for (reg, ty) in params.into_iter().zip(param_tys.iter()) {
-            let boxed = self.maybe_box_value(reg, *ty, dynamic).unwrap_or(reg);
-            // A parameter still erased here carries raw bits; the callee's
-            // `Dynamic` formal reads a box, so box them as an int.
-            let boxed = if boxed == reg
-                && !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_)))
+        for ((reg, ty), expected) in params
+            .into_iter()
+            .zip(param_tys.iter())
+            .zip(native_params.iter())
+        {
+            let actual = self.convert_type(*ty);
+            let arg = if matches!(expected, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void))
             {
-                let v64 = match self.builder.get_register_type(reg) {
-                    Some(IrType::I32) => self.builder.build_cast(reg, IrType::I32, IrType::I64)?,
-                    _ => reg,
-                };
-                let box_fn = self.get_or_register_extern_function(
-                    "haxe_box_int_ptr",
-                    vec![IrType::I64],
-                    ptr_u8.clone(),
-                );
-                self.builder
-                    .build_call_direct(box_fn, vec![v64], ptr_u8.clone())?
+                let boxed = self.maybe_box_value(reg, *ty, dynamic).unwrap_or(reg);
+                // Erased scalar slots still need a Dynamic box for pointer formals.
+                if boxed == reg && !matches!(actual, IrType::Ptr(_)) {
+                    let v64 = match actual {
+                        IrType::I32 => self.builder.build_cast(reg, IrType::I32, IrType::I64)?,
+                        _ => reg,
+                    };
+                    let box_fn = self.get_or_register_extern_function(
+                        "haxe_box_int_ptr",
+                        vec![IrType::I64],
+                        ptr_u8.clone(),
+                    );
+                    self.builder
+                        .build_call_direct(box_fn, vec![v64], ptr_u8.clone())?
+                } else {
+                    boxed
+                }
             } else {
-                boxed
+                self.maybe_box_for_extern_call(reg, &actual, expected)?
             };
-            args.push(boxed);
+            args.push(arg);
         }
-        let extern_id = self.get_or_register_extern_function(
-            runtime_name,
-            vec![ptr_u8; param_count],
-            IrType::I64,
-        );
+        let extern_id =
+            self.get_or_register_extern_function(runtime_name, native_params, native_ret.clone());
         let native_ret = self
             .builder
             .module
@@ -167,14 +178,20 @@ impl<'a> HirToMirContext<'a> {
             .map(|f| f.signature.return_type.clone())
             .unwrap_or(IrType::I64);
         if matches!(ret_ir, IrType::Void) {
-            self.builder
-                .build_call_direct(extern_id, args, IrType::Void);
+            self.builder.build_call_direct(extern_id, args, native_ret);
             self.builder.build_return(None);
         } else {
             let result = self
                 .builder
                 .build_call_direct(extern_id, args, native_ret.clone())
-                .map(|r| self.reconcile_extern_return(r, &native_ret, &ret_ir));
+                .and_then(|r| self.maybe_unbox_for_extern_return(r, &native_ret, &ret_ir))
+                .map(|r| {
+                    let actual = self
+                        .builder
+                        .get_register_type(r)
+                        .unwrap_or(native_ret.clone());
+                    self.reconcile_extern_return(r, &actual, &ret_ir)
+                });
             self.builder.build_return(result);
         }
         restore(self);
