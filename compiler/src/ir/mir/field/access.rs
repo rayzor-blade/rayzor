@@ -552,7 +552,8 @@ impl<'a> HirToMirContext<'a> {
                 // backing slot, where calling the getter would re-enter the
                 // function being lowered.
                 crate::tast::PropertyAccessor::Method(getter_method_name)
-                    if !self.is_inside_own_accessor(obj, *getter_method_name) =>
+                    if receiver_is_super
+                        || !self.is_inside_own_accessor(obj, *getter_method_name) =>
                 {
                     if receiver_is_interface {
                         return self.call_interface_accessor(

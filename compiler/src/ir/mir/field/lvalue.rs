@@ -314,7 +314,8 @@ impl<'a> HirToMirContext<'a> {
                 // backing slot, where calling the setter would re-enter the
                 // function being lowered.
                 crate::tast::PropertyAccessor::Method(setter_method_name)
-                    if !self.is_inside_own_accessor(obj_reg, *setter_method_name) =>
+                    if matches!(object.kind, HirExprKind::Super)
+                        || !self.is_inside_own_accessor(obj_reg, *setter_method_name) =>
                 {
                     let setter_func_id = self
                         .resolve_method_function_id(object.ty, *setter_method_name)
