@@ -115,10 +115,26 @@ impl<'a> HirToMirContext<'a> {
                 Some("Iterable") => return Some(IterProtocol::Iterable),
                 _ => {}
             }
-            // A typedef names the protocol at its own symbol; keep walking only
-            // through the alias chain, since anything else is a different type.
+            // Follow aliases and transparent abstract wrappers to the protocol.
             match &ty.kind {
                 TypeKind::TypeAlias { target_type, .. } => tid = *target_type,
+                TypeKind::Abstract {
+                    symbol_id,
+                    underlying,
+                    ..
+                } => {
+                    // An abstract with its own protocol uses those methods;
+                    // a transparent wrapper keeps the underlying handle.
+                    if ["iterator", "hasNext", "next"].iter().any(|name| {
+                        let name = self.string_interner.intern(name);
+                        self.class_method_symbols.contains_key(&(*symbol_id, name))
+                            || self.class_method_by_name.contains_key(&(*symbol_id, name))
+                    }) {
+                        return None;
+                    }
+                    tid = underlying
+                        .or_else(|| type_table.resolve_abstract_underlying(*symbol_id))?;
+                }
                 _ => return None,
             }
         }

@@ -37,11 +37,44 @@ impl<'a> AstLowering<'a> {
             .is_some()
     }
 
-    /// `iter.iterator()` for an abstract iterable that declares `iterator()`.
-    fn abstract_iterator_call(&self, iterable_ty: TypeId, iter: &Expr) -> Option<Expr> {
-        let abstract_symbol = self.iterable_abstract(iterable_ty)?;
-        if !self.abstract_has_method(abstract_symbol, "iterator") {
-            return None;
+    /// An explicit iterator on an abstract, or a compatible `using` extension.
+    fn iterable_iterator_call(&self, iterable_ty: TypeId, iter: &Expr) -> Option<Expr> {
+        let iterator = self.context.string_interner.intern("iterator");
+        let abstract_iterator = self
+            .iterable_abstract(iterable_ty)
+            .is_some_and(|symbol| self.abstract_has_method(symbol, "iterator"));
+        if !abstract_iterator {
+            let has_method = |name: &str| {
+                let name = self.context.string_interner.intern(name);
+                self.structural_method_return_type(iterable_ty, name)
+                    .is_some()
+                    || self
+                        .resolve_type_to_class_symbol(iterable_ty)
+                        .and_then(|symbol| self.resolve_class_method_symbol(symbol, name))
+                        .and_then(|method| self.context.symbol_table.get_symbol(method))
+                        .is_some_and(|method| {
+                            matches!(
+                                self.context
+                                    .type_table
+                                    .borrow()
+                                    .get(method.type_id)
+                                    .map(|t| &t.kind),
+                                Some(TypeKind::Function { .. })
+                            )
+                        })
+            };
+            let builtin = matches!(
+                self.context
+                    .type_table
+                    .borrow()
+                    .get(iterable_ty)
+                    .map(|t| &t.kind),
+                Some(TypeKind::Array { .. } | TypeKind::Map { .. })
+            );
+            if builtin || has_method("iterator") || has_method("hasNext") && has_method("next") {
+                return None;
+            }
+            self.find_static_extension_method(iterator, iterable_ty)?;
         }
         let span = iter.span;
         Some(Expr {
@@ -60,9 +93,8 @@ impl<'a> AstLowering<'a> {
         })
     }
 
-    /// A loop over an abstract that declares `iterator()` iterates what it
-    /// answers. (One with its own hasNext()/next() is not rewritten: a next()
-    /// that assigns `this` only advances when inlined.)
+    /// Iterate the result of an abstract's iterator or a static extension.
+    /// Receivers with their own hasNext()/next() keep that direct protocol.
     fn abstract_iteration(
         &self,
         iterable_ty: TypeId,
@@ -71,7 +103,7 @@ impl<'a> AstLowering<'a> {
         iter: &Expr,
         body: &Expr,
     ) -> Option<Expr> {
-        let call = self.abstract_iterator_call(iterable_ty, iter)?;
+        let call = self.iterable_iterator_call(iterable_ty, iter)?;
         Some(Expr {
             kind: ExprKind::For {
                 var: var.to_string(),
@@ -710,7 +742,7 @@ impl<'a> AstLowering<'a> {
             // Lower the iterator expression first
             let mut typed_iterator = self.lower_expression(&for_part.iter)?;
             if let Some(call) =
-                self.abstract_iterator_call(typed_iterator.expr_type, &for_part.iter)
+                self.iterable_iterator_call(typed_iterator.expr_type, &for_part.iter)
             {
                 typed_iterator = self.lower_expression(&call)?;
             }
@@ -808,7 +840,7 @@ impl<'a> AstLowering<'a> {
             // Lower the iterator expression first
             let mut typed_iterator = self.lower_expression(&for_part.iter)?;
             if let Some(call) =
-                self.abstract_iterator_call(typed_iterator.expr_type, &for_part.iter)
+                self.iterable_iterator_call(typed_iterator.expr_type, &for_part.iter)
             {
                 typed_iterator = self.lower_expression(&call)?;
             }
@@ -1177,34 +1209,75 @@ impl<'a> AstLowering<'a> {
 
     /// Infer the element type from an iterable expression (array, map, etc.)
     fn infer_element_type_from_iterable(&self, iterable: &TypedExpression) -> TypeId {
-        let (kind, dynamic) = {
-            let type_table = self.context.type_table.borrow();
-            (
-                type_table.get(iterable.expr_type).map(|t| t.kind.clone()),
-                type_table.dynamic_type(),
-            )
-        };
         if let Some(elem) = self.element_type_from_iterator_call(iterable) {
             if !self.is_bare_type_param(elem) {
                 return elem;
             }
         }
-        match kind {
-            Some(TypeKind::Array { element_type }) => element_type,
-            Some(TypeKind::Map { value_type, .. }) => value_type,
-            // A structure declaring `next()` is an iterator and one declaring
-            // `iterator()` yields one; either way the element is what `next()`
-            // answers, whether declared structurally or by a class.
-            // A bare parameter is kept Dynamic, as it was: a local typed by it
-            // makes the enclosing template a stub until instantiated.
-            Some(TypeKind::TypeAlias { .. })
-            | Some(TypeKind::Class { .. })
-            | Some(TypeKind::Anonymous { .. }) => self
-                .structural_element_type(iterable.expr_type)
-                .filter(|t| !self.is_bare_type_param(*t))
-                .unwrap_or(dynamic),
-            _ => dynamic,
+        let dynamic = self.context.type_table.borrow().dynamic_type();
+        let mut ty = iterable.expr_type;
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..32 {
+            if !seen.insert(ty) {
+                break;
+            }
+            let kind = self
+                .context
+                .type_table
+                .borrow()
+                .get(ty)
+                .map(|t| t.kind.clone());
+            match kind {
+                Some(TypeKind::Array { element_type }) => return element_type,
+                Some(TypeKind::Map { value_type, .. }) => return value_type,
+                Some(TypeKind::Abstract {
+                    symbol_id,
+                    underlying,
+                    ..
+                }) => {
+                    if let Some(element) = self
+                        .structural_element_type(ty)
+                        .filter(|t| !self.is_bare_type_param(*t))
+                    {
+                        return element;
+                    }
+                    let Some(underlying) = underlying.or_else(|| {
+                        self.context
+                            .type_table
+                            .borrow()
+                            .resolve_abstract_underlying(symbol_id)
+                    }) else {
+                        break;
+                    };
+                    ty = self.substitute_receiver_type(underlying, ty);
+                }
+                Some(TypeKind::TypeAlias {
+                    symbol_id,
+                    target_type,
+                    type_args,
+                }) => {
+                    if let Some(element) = self
+                        .structural_element_type(ty)
+                        .filter(|t| !self.is_bare_type_param(*t))
+                    {
+                        return element;
+                    }
+                    ty = self.substitute_alias_args(
+                        target_type,
+                        &self.alias_bindings(symbol_id, &type_args),
+                    );
+                }
+                // A bare parameter stays Dynamic until its template is instantiated.
+                Some(TypeKind::Class { .. } | TypeKind::Anonymous { .. }) => {
+                    return self
+                        .structural_element_type(ty)
+                        .filter(|t| !self.is_bare_type_param(*t))
+                        .unwrap_or(dynamic);
+                }
+                _ => break,
+            }
         }
+        dynamic
     }
 
     fn is_bare_type_param(&self, ty: TypeId) -> bool {
@@ -1255,15 +1328,16 @@ impl<'a> AstLowering<'a> {
             .or_else(|| self.class_method_return_type(it, next))
     }
 
-    /// The declared return type of a class's own method, for a receiver that
-    /// is a class rather than a structure.
+    /// A class or abstract method's return type, bound to the receiver.
     fn class_method_return_type(
         &self,
         ty: TypeId,
         method: crate::tast::InternedString,
     ) -> Option<TypeId> {
         let class_symbol = match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
-            Some(TypeKind::Class { symbol_id, .. }) => *symbol_id,
+            Some(TypeKind::Class { symbol_id, .. } | TypeKind::Abstract { symbol_id, .. }) => {
+                *symbol_id
+            }
             _ => return None,
         };
         let method_symbol = self.resolve_class_method_symbol(class_symbol, method)?;

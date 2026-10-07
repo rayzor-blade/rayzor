@@ -880,8 +880,30 @@ impl<'a> AstLowering<'a> {
                 .map(|t| &t.kind),
             Some(crate::tast::core::TypeKind::Dynamic)
         );
+        let iteration_method = matches!(
+            self.context.string_interner.get(method_name),
+            Some("iterator" | "keyValueIterator")
+        );
+        if iteration_method
+            && self
+                .resolve_type_to_class_symbol(receiver_type)
+                .and_then(|symbol| self.resolve_class_method_symbol(symbol, method_name))
+                .and_then(|method| self.context.symbol_table.get_symbol(method))
+                .is_some_and(|method| {
+                    matches!(
+                        self.context
+                            .type_table
+                            .borrow()
+                            .get(method.type_id)
+                            .map(|t| &t.kind),
+                        Some(TypeKind::Function { .. })
+                    )
+                })
+        {
+            return None;
+        }
         let applies = |lowering: &Self, method: SymbolId| -> bool {
-            if !receiver_is_dynamic {
+            if !receiver_is_dynamic && !iteration_method {
                 return true;
             }
             let Some(fn_ty) = lowering
@@ -892,18 +914,43 @@ impl<'a> AstLowering<'a> {
             else {
                 return false;
             };
-            let tt = lowering.context.type_table.borrow();
-            match tt.get(fn_ty).map(|t| &t.kind) {
-                Some(crate::tast::core::TypeKind::Function { params, .. }) => {
-                    params.first().is_some_and(|p| {
-                        matches!(
-                            tt.get(*p).map(|t| &t.kind),
-                            Some(crate::tast::core::TypeKind::Dynamic)
-                        )
-                    })
+            let formal = {
+                let tt = lowering.context.type_table.borrow();
+                match tt.get(fn_ty).map(|t| &t.kind) {
+                    Some(TypeKind::Function { params, .. }) => params.first().copied(),
+                    _ => None,
                 }
-                _ => false,
+            };
+            let Some(formal) = formal else {
+                return false;
+            };
+            if receiver_is_dynamic {
+                return matches!(
+                    lowering
+                        .context
+                        .type_table
+                        .borrow()
+                        .get(formal)
+                        .map(|t| &t.kind),
+                    Some(TypeKind::Dynamic)
+                );
             }
+            let receiver_symbol = lowering.resolve_type_to_class_symbol(receiver_type);
+            if receiver_symbol.is_some()
+                && receiver_symbol == lowering.resolve_type_to_class_symbol(formal)
+            {
+                return true;
+            }
+            let mut checker = crate::tast::type_checker::TypeChecker::new(
+                &lowering.context.type_table,
+                &lowering.context.symbol_table,
+                &lowering.context.scope_tree,
+                &lowering.context.string_interner,
+            );
+            !matches!(
+                checker.check_compatibility(receiver_type, formal),
+                crate::tast::type_checker::TypeCompatibility::Incompatible
+            )
         };
         // Check each using module for a static method with this name
         // `@:using` on the receiver's class or one of its ancestors.
