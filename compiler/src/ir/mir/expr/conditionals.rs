@@ -22,6 +22,42 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// Give each conditional arm the result's raw or boxed representation.
+    pub(crate) fn convert_dynamic_if_result(
+        &mut self,
+        value: IrId,
+        source: TypeId,
+        target: TypeId,
+    ) -> Option<IrId> {
+        let source = self.resolve_through_aliases(source);
+        let source_kind = self.type_table.get(source).map(|ty| &ty.kind);
+        let target_kind = self
+            .type_table
+            .get(self.resolve_through_aliases(target))
+            .map(|ty| &ty.kind);
+        let concrete = |kind: Option<&TypeKind>| {
+            matches!(
+                kind,
+                Some(
+                    TypeKind::Int
+                        | TypeKind::Float
+                        | TypeKind::Bool
+                        | TypeKind::String
+                        | TypeKind::Array { .. }
+                        | TypeKind::Anonymous { .. }
+                        | TypeKind::Function { .. }
+                )
+            )
+        };
+        if matches!(source_kind, Some(TypeKind::Dynamic)) && concrete(target_kind) {
+            self.maybe_unbox_value(value, source, target)
+        } else if matches!(target_kind, Some(TypeKind::Dynamic)) && concrete(source_kind) {
+            self.maybe_box_value(value, source, target)
+        } else {
+            Some(value)
+        }
+    }
+
     pub(crate) fn lower_logical_and(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
         // Short-circuit AND: if lhs is false, don't evaluate rhs.
         let eval_rhs = self.builder.create_block()?;
@@ -544,6 +580,8 @@ impl<'a> HirToMirContext<'a> {
         // Box primitive values for Optional<primitive> result types
         if !then_terminated {
             if let (Some(val), Some(rty)) = (then_val, result_ty) {
+                let val = self.convert_dynamic_if_result(val, then_expr.ty, rty)?;
+                then_val = Some(val);
                 if let Some(boxed) = self.maybe_box_for_optional(val, then_expr.ty, rty) {
                     then_val = Some(boxed);
                 }
@@ -565,6 +603,8 @@ impl<'a> HirToMirContext<'a> {
         // Box primitive values for Optional<primitive> result types
         if !else_terminated {
             if let (Some(val), Some(rty)) = (else_val, result_ty) {
+                let val = self.convert_dynamic_if_result(val, else_expr.ty, rty)?;
+                else_val = Some(val);
                 if let Some(boxed) = self.maybe_box_for_optional(val, else_expr.ty, rty) {
                     else_val = Some(boxed);
                 }
@@ -836,6 +876,20 @@ impl<'a> HirToMirContext<'a> {
             // (Let/return/call-arg) doesn't class-wrap it a second time.
             if branch_iface_wrapped {
                 self.interface_wrapped_args.insert(result);
+            }
+            if result_ty.is_some_and(|ty| {
+                matches!(
+                    self.type_table
+                        .get(self.resolve_through_aliases(ty))
+                        .map(|ty| &ty.kind),
+                    Some(TypeKind::Dynamic)
+                )
+            }) && then_val
+                .into_iter()
+                .chain(else_val)
+                .any(|reg| self.boxed_value_regs.contains(&reg))
+            {
+                self.boxed_value_regs.insert(result);
             }
 
             if !then_terminated {

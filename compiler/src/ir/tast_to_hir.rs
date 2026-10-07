@@ -3372,7 +3372,7 @@ impl<'a> TastToHirContext<'a> {
                                 then_expr: Box::new(case_body),
                                 else_expr: Box::new(current_expr),
                             },
-                            self.get_dynamic_type(),
+                            expr.expr_type,
                             self.current_lifetime,
                             SourceLocation::unknown(),
                         );
@@ -3398,7 +3398,7 @@ impl<'a> TastToHirContext<'a> {
                                     expr: Some(Box::new(if_expr)),
                                     scope: self.current_scope,
                                 }),
-                                self.get_dynamic_type(),
+                                expr.expr_type,
                                 self.current_lifetime,
                                 SourceLocation::unknown(),
                             );

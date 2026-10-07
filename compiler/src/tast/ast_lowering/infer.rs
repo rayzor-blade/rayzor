@@ -1549,6 +1549,15 @@ impl<'a> AstLowering<'a> {
             else {
                 continue;
             };
+            if matches!(
+                tt.get(unalias(inferred)).map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            ) && matches!(
+                tt.get(unalias(*return_type)).map(|t| &t.kind),
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
+            ) {
+                return *return_type;
+            }
             if !matches!(
                 tt.get(unalias(*return_type)).map(|t| &t.kind),
                 Some(TypeKind::Dynamic | TypeKind::Void)

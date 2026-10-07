@@ -422,7 +422,14 @@ impl<'a> HirToMirContext<'a> {
                     _ => body.ty,
                 };
                 self.maybe_abstract_to_convert(reg, value_ty, ret_ty)
-                    .or_else(|| self.maybe_box_value(reg, value_ty, ret_ty))
+                    .or_else(|| {
+                        let converted = self.convert_dynamic_if_result(reg, value_ty, ret_ty)?;
+                        if converted != reg {
+                            Some(converted)
+                        } else {
+                            self.maybe_box_value(reg, value_ty, ret_ty)
+                        }
+                    })
                     .or(Some(reg))
             }
             (r, _) => r,
