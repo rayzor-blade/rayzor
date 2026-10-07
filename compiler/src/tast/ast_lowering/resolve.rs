@@ -130,7 +130,13 @@ impl<'a> AstLowering<'a> {
         if let Some(class_symbol) = self.context.class_context_stack.last() {
             if let Some(field_list) = self.class_fields.get(class_symbol) {
                 for (field_name, field_symbol, _is_static) in field_list {
-                    if *field_name == name {
+                    if *field_name == name
+                        && self
+                            .context
+                            .symbol_table
+                            .get_symbol(*field_symbol)
+                            .is_some_and(|s| s.kind != crate::tast::SymbolKind::Function)
+                    {
                         return Some(*field_symbol);
                     }
                 }
