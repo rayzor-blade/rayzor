@@ -29,15 +29,28 @@ impl<'a> HirToMirContext<'a> {
     /// must be `this`: the same accessor reaching the property on another
     /// instance still goes through that instance's accessor.
     pub(crate) fn is_inside_own_accessor(&self, obj: IrId, accessor: InternedString) -> bool {
-        // `this` is parameter 0, mapped under SymbolId(0) for instance methods
-        // only, and symbol_map is cleared at every function entry.
-        if self.symbol_map.get(&SymbolId::from_raw(0)).copied() != Some(obj) {
+        // Captured `this` has its own symbol and is reloaded on each access.
+        if !self.symbol_map.iter().any(|(symbol, reg)| {
+            *reg == obj
+                && (*symbol == SymbolId::from_raw(0)
+                    || self
+                        .symbol_table
+                        .get_symbol(*symbol)
+                        .is_some_and(|s| self.string_interner.get(s.name) == Some("this")))
+        }) {
             return false;
         }
         let Some(accessor_name) = self.string_interner.get(accessor) else {
             return false;
         };
-        self.builder.current_function().is_some_and(|f| {
+        [
+            self.builder.current_function(),
+            self.enclosing_function
+                .and_then(|id| self.builder.module.functions.get(&id)),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|f| {
             f.name == accessor_name
                 || f.qualified_name
                     .as_deref()

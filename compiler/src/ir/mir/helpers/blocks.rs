@@ -126,6 +126,7 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn save_state(&self) -> SavedLoweringState {
         SavedLoweringState {
             current_function: self.builder.current_function,
+            enclosing_function: self.enclosing_function,
             current_block: self.builder.current_block,
             symbol_map: self.symbol_map.clone(),
             capture_cells: self.capture_cells.clone(),
@@ -155,6 +156,7 @@ impl<'a> HirToMirContext<'a> {
 
     pub(crate) fn restore_state(&mut self, state: SavedLoweringState) {
         self.builder.current_function = state.current_function;
+        self.enclosing_function = state.enclosing_function;
         self.builder.current_block = state.current_block;
         self.symbol_map = state.symbol_map;
         self.capture_cells = state.capture_cells;

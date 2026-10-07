@@ -67,7 +67,14 @@ impl<'a> HirToMirContext<'a> {
             .and_then(|qn| self.string_interner.get(qn))
             .zip(self.field_class_names.get(&symbol))
             .is_some_and(|(current, owner)| current == owner);
-        if self.builder.current_function().is_some_and(|f| {
+        if [
+            self.builder.current_function(),
+            self.enclosing_function
+                .and_then(|id| self.builder.module.functions.get(&id)),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|f| {
             f.id == function
                 || (same_owner && self.string_interner.get(*name) == Some(f.name.as_str()))
         }) {

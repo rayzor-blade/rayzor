@@ -367,6 +367,9 @@ pub struct HirToMirContext<'a> {
     /// Current function's SymbolId (for function-level metadata like @:frameworks)
     current_function_symbol: Option<SymbolId>,
 
+    /// The enclosing method of a lifted lambda, including nested lambdas.
+    enclosing_function: Option<IrFunctionId>,
+
     /// Accessor info for the properties of abstracts, keyed by the property
     /// symbol: a write consults it before the slot path, a read after
     /// (see decl/module.rs).
@@ -759,6 +762,7 @@ pub(crate) struct LambdaContext {
 /// Saved state for restoring after lambda generation
 pub(crate) struct SavedLoweringState {
     current_function: Option<IrFunctionId>,
+    enclosing_function: Option<IrFunctionId>,
     current_block: Option<IrBlockId>,
     symbol_map: BTreeMap<SymbolId, IrId>,
     capture_cells: BTreeMap<SymbolId, IrId>,
@@ -1449,6 +1453,7 @@ impl<'a> HirToMirContext<'a> {
             gpu_struct_layouts: BTreeMap::new(),
             tcc_func_ids: None,
             current_function_symbol: None,
+            enclosing_function: None,
             try_depth: 0,
             pending_store_value_ty: None,
             bypass_accessors: false,

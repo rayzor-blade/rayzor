@@ -284,6 +284,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Switch to lambda context
+        self.enclosing_function = self.enclosing_function.or(self.builder.current_function);
         self.builder.current_function = Some(func_id);
         self.builder.current_block = Some(entry_block);
         self.symbol_map.clear();
