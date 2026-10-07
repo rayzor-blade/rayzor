@@ -470,6 +470,79 @@ struct CommonTypesCache {
 }
 
 impl TypeTable {
+    /// Rank operator operands by exact type, underlying type, then widening.
+    pub(crate) fn operator_operand_score(&self, formal: TypeId, actual: TypeId) -> Option<u32> {
+        self.operator_operand_score_inner(formal, actual, 0)
+    }
+
+    fn operator_operand_score_inner(
+        &self,
+        formal: TypeId,
+        actual: TypeId,
+        depth: usize,
+    ) -> Option<u32> {
+        if depth > 16 {
+            return None;
+        }
+        let unalias = |mut ty| {
+            for _ in 0..16 {
+                match self.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            ty
+        };
+        let (formal, actual) = (unalias(formal), unalias(actual));
+        if formal == actual {
+            return Some(6);
+        }
+        if let Some(TypeKind::TypeParameter { constraints, .. }) = self.get(formal).map(|t| &t.kind)
+        {
+            let mut score = 0;
+            for constraint in constraints {
+                score =
+                    score.max(self.operator_operand_score_inner(*constraint, actual, depth + 1)?);
+            }
+            return Some(score.saturating_sub(1));
+        }
+        let primitive = |mut ty| {
+            for _ in 0..16 {
+                match self.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    Some(TypeKind::Abstract {
+                        underlying: Some(inner),
+                        ..
+                    }) => ty = *inner,
+                    _ => break,
+                }
+            }
+            self.get(ty).map(|t| &t.kind)
+        };
+        let (formal, actual) = (primitive(formal), primitive(actual));
+        if formal == actual && formal.is_some() {
+            return Some(3);
+        }
+        if matches!(
+            (formal, actual),
+            (Some(TypeKind::Float), Some(TypeKind::Int))
+        ) {
+            return Some(1);
+        }
+        if matches!(actual, Some(TypeKind::Float)) && matches!(formal, Some(TypeKind::Int)) {
+            return None;
+        }
+        if matches!(actual, Some(TypeKind::String))
+            && !matches!(
+                formal,
+                Some(TypeKind::String | TypeKind::Dynamic | TypeKind::TypeParameter { .. })
+            )
+        {
+            return None;
+        }
+        Some(0)
+    }
+
     /// Create a new type table with common types pre-allocated
     pub fn new() -> Self {
         let arena = TypedArena::new();

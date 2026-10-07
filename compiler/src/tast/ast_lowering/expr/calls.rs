@@ -367,7 +367,7 @@ impl<'a> AstLowering<'a> {
     /// Lower a declared signature's AST type hints into a function type
     /// (unannotated positions become Dynamic, mirroring the per-class
     /// pre-registration loop) and stamp it on `method_symbol`.
-    fn apply_declared_sig(
+    pub(crate) fn apply_declared_sig(
         &mut self,
         method_symbol: SymbolId,
         sig: &crate::tast::sig_index::StaticMethodSig,

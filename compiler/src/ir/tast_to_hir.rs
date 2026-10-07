@@ -71,10 +71,10 @@ pub struct TastToHirContext<'a> {
     /// Key: `(class_or_abstract_symbol, operator_name)` where operator_name is
     /// "Add", "Sub", "Mul", "Div", etc. (BinaryOperator) or "Neg", "Not"
     /// (UnaryOperator) — see `op_key_for_binary` / `op_key_for_unary`.
-    /// Value: the method's `SymbolId`.
+    /// Value: the overloads in declaration order.
     /// Seeded from imported/loaded files so `a + b` on a stdlib type like
     /// `Tensor` works from user code.
-    class_operator_methods: BTreeMap<(SymbolId, String), SymbolId>,
+    class_operator_methods: BTreeMap<(SymbolId, String), Vec<SymbolId>>,
     commutative_operator_methods: std::collections::BTreeSet<SymbolId>,
     native_abstract_operators: std::collections::BTreeSet<SymbolId>,
 }
@@ -238,7 +238,8 @@ impl<'a> TastToHirContext<'a> {
                             let key = Self::op_key_for_binary(&op);
                             self.class_operator_methods
                                 .entry((class_def.symbol_id, key))
-                                .or_insert(method.symbol_id);
+                                .or_default()
+                                .push(method.symbol_id);
                         }
                     }
                 }
@@ -256,7 +257,8 @@ impl<'a> TastToHirContext<'a> {
                         {
                             self.class_operator_methods
                                 .entry((abstract_def.symbol_id, format!("{op:?}")))
-                                .or_insert(method.symbol_id);
+                                .or_default()
+                                .push(method.symbol_id);
                         }
                         if let Some(op) = Self::parse_operator_from_metadata(op_str) {
                             if method.body.is_empty()
@@ -270,7 +272,8 @@ impl<'a> TastToHirContext<'a> {
                             let key = Self::op_key_for_binary(&op);
                             self.class_operator_methods
                                 .entry((abstract_def.symbol_id, key))
-                                .or_insert(method.symbol_id);
+                                .or_default()
+                                .push(method.symbol_id);
                         }
                     }
                 }
@@ -2558,22 +2561,11 @@ impl<'a> TastToHirContext<'a> {
                 // A field read through `@:op(a.b)` has the resolver's type.
                 let left_type = self.resolved_type(left);
                 let op_method = self
-                    .find_binary_operator_method(left_type, operator)
-                    .filter(|(method, _, _)| {
-                        self.operator_method_accepts(*method, left_type, right.expr_type)
-                    })
+                    .find_binary_operator_method(left_type, right.expr_type, operator, false)
                     .map(|(method, owner, is_class)| (method, owner, is_class, false))
                     .or_else(|| {
                         let right_type = self.resolved_type(right);
-                        self.find_binary_operator_method(right_type, operator)
-                            .filter(|(method, _, _)| {
-                                self.commutative_operator_methods.contains(method)
-                                    && self.operator_method_accepts(
-                                        *method,
-                                        right_type,
-                                        left.expr_type,
-                                    )
-                            })
+                        self.find_binary_operator_method(right_type, left.expr_type, operator, true)
                             .map(|(method, owner, is_class)| (method, owner, is_class, true))
                     });
                 let owner_name_id = op_method.as_ref().and_then(|(_, owner, _, _)| {
@@ -2677,6 +2669,17 @@ impl<'a> TastToHirContext<'a> {
                         ));
                     }
                     if is_static {
+                        if !is_class {
+                            if let Some(inlined) = self.try_inline_generic_static_operator(
+                                _owner_symbol,
+                                method_symbol,
+                                &[receiver.clone(), argument.clone()],
+                                result_type,
+                                expr.source_location,
+                            ) {
+                                return wrap_result(inlined);
+                            }
+                        }
                         let synthesized = TypedExpression {
                             expr_type: result_type,
                             kind: TypedExpressionKind::StaticMethodCall {
@@ -5591,13 +5594,15 @@ impl<'a> TastToHirContext<'a> {
         self.get_dynamic_type() // Fallback to dynamic
     }
 
-    /// Whether an `@:op` method's parameters take these operands. Only the
-    /// case Haxe decides differently is checked: a String operand against a
-    /// parameter that is not a String (nor Dynamic, nor a type parameter)
-    /// leaves `+` as string concatenation.
-    fn operator_method_accepts(&self, method: SymbolId, left_ty: TypeId, right_ty: TypeId) -> bool {
+    /// Rank the overload's parameters against the operands it receives.
+    fn operator_method_score(
+        &self,
+        method: SymbolId,
+        left_ty: TypeId,
+        right_ty: TypeId,
+    ) -> Option<u32> {
         let Some(info) = self.symbol_table.get_symbol(method) else {
-            return true;
+            return Some(0);
         };
         let is_static = info
             .flags
@@ -5605,49 +5610,19 @@ impl<'a> TastToHirContext<'a> {
         let table = self.type_table.borrow();
         let Some(TypeKind::Function { params, .. }) = table.get(info.type_id).map(|t| &t.kind)
         else {
-            return true;
+            return Some(0);
         };
-        let operands: Vec<TypeId> = if is_static {
+        let operands = if is_static {
             vec![left_ty, right_ty]
         } else {
             vec![right_ty]
         };
-        // The primitive behind a type: an abstract over Int (Int32) is an Int
-        // formal, which a Float never fits.
-        let primitive_of = |mut t: TypeId| {
-            for _ in 0..4 {
-                match table.get(t).map(|x| &x.kind) {
-                    Some(TypeKind::Abstract {
-                        underlying: Some(u),
-                        ..
-                    }) => t = *u,
-                    Some(TypeKind::TypeAlias { target_type, .. }) => t = *target_type,
-                    _ => break,
-                }
-            }
-            table.get(t).map(|x| x.kind.clone())
-        };
-        for (formal, actual) in params.iter().zip(operands) {
-            let actual_kind = table.get(actual).map(|t| &t.kind);
-            if matches!(actual_kind, Some(TypeKind::Float)) {
-                if matches!(primitive_of(*formal), Some(TypeKind::Int)) {
-                    return false;
-                }
-                continue;
-            }
-            let actual_is_string = matches!(actual_kind, Some(TypeKind::String));
-            if !actual_is_string {
-                continue;
-            }
-            let formal_takes_string = matches!(
-                table.get(*formal).map(|t| &t.kind),
-                Some(TypeKind::String | TypeKind::Dynamic | TypeKind::TypeParameter { .. })
-            ) || matches!(primitive_of(*formal), Some(TypeKind::String));
-            if !formal_takes_string {
-                return false;
-            }
-        }
-        true
+        params
+            .iter()
+            .zip(operands)
+            .try_fold(0, |score, (formal, actual)| {
+                Some(score + table.operator_operand_score(*formal, actual)?)
+            })
     }
 
     /// Find a method with matching @:op metadata for a binary operator.
@@ -5656,10 +5631,19 @@ impl<'a> TastToHirContext<'a> {
     fn find_binary_operator_method(
         &self,
         operand_type: TypeId,
+        other_type: TypeId,
         operator: &BinaryOperator,
+        commutative_only: bool,
     ) -> Option<(SymbolId, SymbolId, bool)> {
         let type_table = self.type_table.borrow();
-        let type_info = type_table.get(operand_type)?;
+        let mut operand = operand_type;
+        for _ in 0..16 {
+            match type_table.get(operand).map(|t| &t.kind) {
+                Some(TypeKind::TypeAlias { target_type, .. }) => operand = *target_type,
+                _ => break,
+            }
+        }
+        let type_info = type_table.get(operand)?;
         let (owner_symbol, is_class) = match &type_info.kind {
             TypeKind::Abstract { symbol_id, .. } => (*symbol_id, false),
             TypeKind::Class { symbol_id, .. } => (*symbol_id, true),
@@ -5670,11 +5654,22 @@ impl<'a> TastToHirContext<'a> {
         // Cross-file index: covers stdlib classes/abstracts (Tensor, SIMD4f, etc.)
         // that are declared in a different file from the one being lowered.
         let key = Self::op_key_for_binary(operator);
-        if let Some(method_symbol) = self
+        if let Some(methods) = self
             .class_operator_methods
             .get(&(owner_symbol, key.clone()))
         {
-            return Some((*method_symbol, owner_symbol, is_class));
+            let mut best = None;
+            for method in methods {
+                if commutative_only && !self.commutative_operator_methods.contains(method) {
+                    continue;
+                }
+                if let Some(score) = self.operator_method_score(*method, operand_type, other_type) {
+                    if best.is_none_or(|(_, prev)| score > prev) {
+                        best = Some((*method, score));
+                    }
+                }
+            }
+            return best.map(|(method, _)| (method, owner_symbol, is_class));
         }
 
         // Same-file fallback (kept for safety; the index above already covers
@@ -5818,11 +5813,12 @@ impl<'a> TastToHirContext<'a> {
         {
             return None;
         }
-        if let Some(&method) = self
+        if let Some(method) = self
             .class_operator_methods
             .get(&(abstract_symbol, format!("{operator:?}")))
+            .and_then(|methods| methods.first())
         {
-            return Some((method, abstract_symbol));
+            return Some((*method, abstract_symbol));
         }
         let current_file = self.current_file?;
 
@@ -6797,6 +6793,77 @@ impl<'a> TastToHirContext<'a> {
         None
     }
 
+    /// Inline generic static operators at their concrete operand types.
+    fn try_inline_generic_static_operator(
+        &mut self,
+        owner: SymbolId,
+        method: SymbolId,
+        arguments: &[TypedExpression],
+        result_type: TypeId,
+        source_location: SourceLocation,
+    ) -> Option<HirExpr> {
+        let declaration = self
+            .current_file?
+            .abstracts
+            .iter()
+            .find(|a| a.symbol_id == owner)
+            .or_else(|| self.imported_abstracts.get(&owner).copied())?;
+        let method = declaration.methods.iter().find(|m| m.symbol_id == method)?;
+        if method.type_parameters.is_empty()
+            || !self.symbol_table.get_symbol(method.symbol_id)?.is_inline()
+            || method.parameters.len() != arguments.len()
+        {
+            return None;
+        }
+        let mut body = method.body.as_slice();
+        while let [TypedStatement::Expression { expression, .. }] = body {
+            if let TypedExpressionKind::Block { statements, .. } = &expression.kind {
+                body = statements;
+            } else {
+                break;
+            }
+        }
+        let result = match body {
+            [
+                TypedStatement::Return {
+                    value: Some(value), ..
+                },
+            ] => value,
+            [TypedStatement::Expression { expression, .. }] => {
+                if let TypedExpressionKind::Return { value: Some(value) } = &expression.kind {
+                    value
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+        let mut bindings: BTreeMap<_, _> = method
+            .parameters
+            .iter()
+            .map(|p| (p.symbol_id, self.make_null_literal()))
+            .collect();
+        if !self.inline_safe(result, &bindings) {
+            return None;
+        }
+        let mut statements = Vec::new();
+        for (parameter, argument) in method.parameters.iter().zip(arguments) {
+            let value = self.lower_expression(argument);
+            let value =
+                self.coerce_parameter_argument(value, parameter.param_type, source_location, false);
+            let value = self.bind_hir_operand(value, &mut statements);
+            bindings.insert(parameter.symbol_id, value);
+        }
+        let this = self.make_null_literal();
+        let result = self.inline_expression_deep(result, &this, &bindings, result_type);
+        Some(HirExpr::new(
+            HirExprKind::Block(HirBlock::with_expr(statements, result, self.current_scope)),
+            result_type,
+            self.current_lifetime,
+            source_location,
+        ))
+    }
+
     /// Expand a straight-line inline body with fresh locals and a trailing value.
     /// Substituting the receiver keeps writes to `this` on the caller's lvalue.
     fn inline_abstract_statements(
@@ -7286,7 +7353,26 @@ impl<'a> TastToHirContext<'a> {
                             if let Some(method_name_str) = self.string_interner.get(symbol.name) {
                                 // println!("DEBUG inline_expression_deep: Method name is {}", method_name_str);
                                 if method_name_str == "toInt"
-                                    || method_name_str == "toFloat"
+                                    || (method_name_str == "toFloat" && {
+                                        let table = self.type_table.borrow();
+                                        let mut ty = replacement.ty;
+                                        for _ in 0..16 {
+                                            match table.get(ty).map(|t| &t.kind) {
+                                                Some(TypeKind::TypeAlias {
+                                                    target_type, ..
+                                                }) => ty = *target_type,
+                                                Some(TypeKind::Abstract {
+                                                    underlying: Some(inner),
+                                                    ..
+                                                }) => ty = *inner,
+                                                _ => break,
+                                            }
+                                        }
+                                        matches!(
+                                            table.get(ty).map(|t| &t.kind),
+                                            Some(TypeKind::Float)
+                                        )
+                                    })
                                     || method_name_str == "toString"
                                 {
                                     // println!("DEBUG inline_expression_deep: Optimizing identity method - returning receiver");

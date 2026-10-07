@@ -15,6 +15,102 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// Recover an operator's declared result before callers infer generic bindings.
+    fn infer_declared_operator_return(
+        &mut self,
+        left: TypeId,
+        right: TypeId,
+        operator: BinaryOperator,
+    ) -> Option<TypeId> {
+        let index = self.static_sig_index.as_ref()?.clone();
+        for (operand, other, swapped) in [(left, right, false), (right, left, true)] {
+            let owner = {
+                let table = self.context.type_table.borrow();
+                let mut ty = operand;
+                for _ in 0..16 {
+                    match table.get(ty).map(|t| &t.kind) {
+                        Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                        _ => break,
+                    }
+                }
+                match table.get(ty).map(|t| &t.kind) {
+                    Some(
+                        TypeKind::Abstract { symbol_id, .. } | TypeKind::Class { symbol_id, .. },
+                    ) => *symbol_id,
+                    _ => continue,
+                }
+            };
+            let symbol = self.context.symbol_table.get_symbol(owner)?;
+            let name = self
+                .context
+                .string_interner
+                .get(symbol.qualified_name.unwrap_or(symbol.name))?
+                .to_string();
+            let methods = index.borrow_mut().binary_operator_methods(&name, operator);
+            let mut best = None;
+            for (name, is_static, commutative) in methods {
+                if swapped && !commutative {
+                    continue;
+                }
+                let name = self.context.intern_string(&name);
+                let Some(method) = self.resolve_class_method_symbol(owner, name) else {
+                    continue;
+                };
+                let mut method_type = self.context.symbol_table.get_symbol(method)?.type_id;
+                if !matches!(
+                    self.context
+                        .type_table
+                        .borrow()
+                        .get(method_type)
+                        .map(|t| &t.kind),
+                    Some(TypeKind::Function { .. })
+                ) {
+                    let Some(sig) = self.resolve_declared_method_sig(owner, name, is_static) else {
+                        continue;
+                    };
+                    method_type = self.apply_declared_sig(method, &sig);
+                }
+                let table = self.context.type_table.borrow();
+                let Some(TypeKind::Function {
+                    params,
+                    return_type,
+                    ..
+                }) = table.get(method_type).map(|t| &t.kind)
+                else {
+                    continue;
+                };
+                if matches!(
+                    table.get(*return_type).map(|t| &t.kind),
+                    None | Some(
+                        TypeKind::Dynamic | TypeKind::Unknown | TypeKind::TypeParameter { .. }
+                    )
+                ) {
+                    continue;
+                }
+                let operands = if is_static {
+                    vec![operand, other]
+                } else {
+                    vec![other]
+                };
+                let score = params
+                    .iter()
+                    .zip(operands)
+                    .try_fold(0, |score, (formal, actual)| {
+                        Some(score + table.operator_operand_score(*formal, actual)?)
+                    });
+                if let Some(score) = score {
+                    if best.is_none_or(|(_, previous)| score > previous) {
+                        best = Some((*return_type, score));
+                    }
+                }
+            }
+            if let Some((ret, _)) = best {
+                return Some(self.substitute_receiver_type(ret, operand));
+            }
+        }
+        None
+    }
+
     /// Infer the element and optional key types from an iterator expression
     pub(crate) fn infer_iterator_types(
         &mut self,
@@ -206,15 +302,29 @@ impl<'a> AstLowering<'a> {
                 operator,
                 right,
             } => {
+                let string = self.context.type_table.borrow().string_type();
+                if matches!(
+                    operator,
+                    BinaryOperator::Add
+                        | BinaryOperator::Sub
+                        | BinaryOperator::Mul
+                        | BinaryOperator::Div
+                        | BinaryOperator::Mod
+                ) && !(matches!(operator, BinaryOperator::Add)
+                    && (left.expr_type == string || right.expr_type == string))
+                {
+                    if let Some(result) = self.infer_declared_operator_return(
+                        left.expr_type,
+                        right.expr_type,
+                        *operator,
+                    ) {
+                        return Ok(result);
+                    }
+                }
                 let type_table = self.context.type_table.borrow();
 
-                // OPERATOR OVERLOADING: when the LHS is a user-defined class or abstract
-                // type and the operator is one of the arithmetic/comparison ones, the
-                // result type is the LHS type (per @:op semantics on Tensor, SIMD4f, …).
-                // Without this we'd default to Float below and silently miscompile —
-                // `var t = a + b` would type `t` as Float, then `t.sum()` dispatches on
-                // the wrong type. This handles the symmetric-typed ops; asymmetric ops
-                // are a future extension if needed.
+                // Without a recoverable operator declaration, keep the user type
+                // so arithmetic on wrapped values preserves their methods.
                 // String concatenation wins over the @:op rules below: `"x" + v`
                 // is a String no matter what `v` is. Without this the abstract
                 // arms claim it — `"s=" + aSingle` typed as Single, so the MIR

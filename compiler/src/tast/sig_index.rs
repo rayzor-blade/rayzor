@@ -37,6 +37,8 @@ pub struct StaticMethodSig {
 struct ClassSigs {
     statics: BTreeMap<String, StaticMethodSig>,
     instances: BTreeMap<String, StaticMethodSig>,
+    /// Binary operator overloads: method name, static, commutative.
+    operators: BTreeMap<String, Vec<(String, bool, bool)>>,
     /// Declared non-static `var`/`final`/`property` count — the object's
     /// OWN field-slot count. Inherited slots are added by walking `extends`;
     /// see `instance_field_count`.
@@ -313,6 +315,25 @@ impl StaticSigIndex {
         self.indexed_static_owner(class_name, method).is_some()
     }
 
+    pub(crate) fn binary_operator_methods(
+        &mut self,
+        owner: &str,
+        operator: super::node::BinaryOperator,
+    ) -> Vec<(String, bool, bool)> {
+        self.ensure_indexed_from_known_files(owner);
+        let class = self.classes.get(owner).or_else(|| {
+            let names = self.bare_to_qualified.get(owner)?;
+            if names.len() != 1 {
+                return None;
+            }
+            self.classes.get(names.first()?)
+        });
+        class
+            .and_then(|c| c.operators.get(&format!("{operator:?}")))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Whether the static `method` of an already-indexed class has a body,
     /// so a forward reference to `owner.method` will bind once its module
     /// lowers.
@@ -497,6 +518,29 @@ impl StaticSigIndex {
                     .any(|m| matches!(m, parser::Modifier::Override))
             {
                 entry.overrides.insert(func.name.clone());
+            }
+            for metadata in &field.meta {
+                if metadata.name != "op" {
+                    continue;
+                }
+                if let Some(parser::Expr {
+                    kind: parser::ExprKind::Binary { op, .. },
+                    ..
+                }) = metadata.params.first()
+                {
+                    let key = match op {
+                        parser::BinaryOp::NotEq => "Ne".to_string(),
+                        op => format!("{op:?}"),
+                    };
+                    let methods = entry.operators.entry(key).or_default();
+                    if !methods.iter().any(|(name, _, _)| name == &func.name) {
+                        methods.push((
+                            func.name.clone(),
+                            is_static,
+                            field.meta.iter().any(|m| m.name == "commutative"),
+                        ));
+                    }
+                }
             }
             let table = if is_static {
                 &mut entry.statics
