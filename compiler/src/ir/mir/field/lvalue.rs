@@ -985,6 +985,14 @@ impl<'a> HirToMirContext<'a> {
         idx_reg: IrId,
         object_ty: TypeId,
     ) -> Option<IrId> {
+        if matches!(
+            self.type_table
+                .get(self.resolve_storage_type(object_ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            return self.load_erased_array_index(obj_reg, idx_reg, self.type_table.dynamic_type());
+        }
         if self.map_index_info(object_ty).is_some() {
             return self.load_map_index_with_regs(obj_reg, idx_reg, object_ty);
         }
@@ -1067,6 +1075,46 @@ impl<'a> HirToMirContext<'a> {
                 None => idx_reg,
             }
         };
+
+        if matches!(
+            self.type_table
+                .get(self.resolve_storage_type(object_ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            let ptr = IrType::Ptr(Box::new(IrType::U8));
+            let typed = self
+                .pending_store_value_ty
+                .filter(|_| !self.boxed_value_regs.contains(&value))
+                .and_then(|ty| self.maybe_box_value(value, ty, self.type_table.dynamic_type()))
+                .filter(|boxed| *boxed != value);
+            let boxed = typed
+                .or_else(|| {
+                    let ty = self.builder.get_register_type(value)?;
+                    if matches!(&ty, IrType::String)
+                        || matches!(&ty, IrType::Ptr(inner) if **inner == IrType::String)
+                    {
+                        let func = self.get_or_register_extern_function(
+                            "haxe_box_haxestring_ptr",
+                            vec![ptr.clone()],
+                            ptr.clone(),
+                        );
+                        self.builder
+                            .build_call_direct(func, vec![value], ptr.clone())
+                    } else {
+                        self.box_primitive_to_dynamic(value, ty)
+                    }
+                })
+                .unwrap_or(value);
+            let setter = self.get_or_register_extern_function(
+                "haxe_array_set_erased",
+                vec![ptr.clone(), IrType::I64, ptr],
+                IrType::Bool,
+            );
+            self.builder
+                .build_call_direct(setter, vec![obj_reg, idx_i64, boxed], IrType::Bool);
+            return;
+        }
 
         let dynamic_elements = matches!(
             self.type_table.get(object_ty).map(|t| &t.kind),

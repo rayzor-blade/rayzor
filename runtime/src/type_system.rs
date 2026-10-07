@@ -57,7 +57,7 @@ pub const TYPE_ENUM_TOKEN: TypeId = TypeId(u32::MAX - 4);
 // Compound type IDs (6 = anon object defined in anon_object.rs, 7 = array)
 pub const TYPE_ARRAY: TypeId = TypeId(7);
 
-static ARRAY_BOXES: RwLock<Option<HashMap<usize, usize>>> = RwLock::new(None);
+static ARRAY_BOXES: RwLock<Option<HashMap<usize, (usize, u64)>>> = RwLock::new(None);
 static ENUM_ARRAY_TYPES: RwLock<Option<HashMap<usize, (u32, bool)>>> = RwLock::new(None);
 static ENUM_VALUE_TYPES: RwLock<Option<HashMap<usize, u32>>> = RwLock::new(None);
 
@@ -93,7 +93,15 @@ pub(crate) fn boxed_array_points_to(boxed: usize, raw: usize) -> bool {
         .unwrap()
         .as_ref()
         .and_then(|boxes| boxes.get(&boxed))
-        .is_some_and(|value| *value == raw)
+        .is_some_and(|(value, _)| *value == raw)
+}
+
+pub(crate) fn boxed_array_slot_layout(boxed: *mut u8) -> Option<u64> {
+    ARRAY_BOXES
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|boxes| boxes.get(&(boxed as usize)).map(|(_, layout)| *layout))
 }
 
 // Starting ID for user-defined types (classes, enums, etc.)
@@ -2366,6 +2374,10 @@ unsafe extern "C" fn anon_object_to_string(value_ptr: *const u8) -> StringPtr {
 }
 
 unsafe extern "C" fn array_to_string(value_ptr: *const u8) -> StringPtr {
+    array_to_string_with_layout(value_ptr, 0)
+}
+
+fn array_to_string_with_layout(value_ptr: *const u8, layout: u64) -> StringPtr {
     unsafe {
         // value_ptr is a HaxeArray pointer — format as [e0, e1, ...]
         if value_ptr.is_null() {
@@ -2381,15 +2393,15 @@ unsafe extern "C" fn array_to_string(value_ptr: *const u8) -> StringPtr {
             if i > 0 {
                 buf.push(',');
             }
-            // Elements are DynamicValue* pointers stored as i64
-            let elem = *(arr.ptr.add(i * 8) as *const *mut u8);
+            let slot = *(arr.ptr.add(i * 8) as *const u64);
+            let elem = crate::haxe_array::box_erased_array_slot(slot, layout);
             if elem.is_null() {
                 buf.push_str("null");
             } else {
                 let hs = haxe_std_string_ptr(elem);
                 if !hs.is_null() {
                     let h = &*hs;
-                    if !h.ptr.is_null() && h.len > 0 {
+                    if !h.ptr.is_null() {
                         if let Ok(s) = std::str::from_utf8(std::slice::from_raw_parts(h.ptr, h.len))
                         {
                             buf.push_str(s);
@@ -2630,7 +2642,14 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
             if type_info.class_info.is_some() {
                 return class_instance_to_string(dynamic.type_id.0, dynamic.value_ptr);
             }
-            let str_ptr = (type_info.to_string)(dynamic.value_ptr);
+            let str_ptr = if dynamic.type_id == TYPE_ARRAY {
+                array_to_string_with_layout(
+                    dynamic.value_ptr,
+                    boxed_array_slot_layout(dynamic_ptr).unwrap_or(0),
+                )
+            } else {
+                (type_info.to_string)(dynamic.value_ptr)
+            };
             // Convert StringPtr to HaxeString (adding cap=0)
             Box::into_raw(Box::new(HaxeString {
                 ptr: str_ptr.ptr as *mut u8,
@@ -3607,9 +3626,23 @@ pub extern "C" fn haxe_box_reference_ptr(value_ptr: *mut u8, type_id: u32) -> *m
             .write()
             .unwrap()
             .get_or_insert_with(HashMap::new)
-            .insert(boxed_ptr as usize, value_ptr as usize);
+            .insert(boxed_ptr as usize, (value_ptr as usize, 0));
     }
     boxed_ptr
+}
+
+/// Box an array without changing its shared storage. The low byte names the
+/// slot kind; reference IDs and nested array layouts occupy the upper bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_box_array_ptr(value_ptr: *mut u8, slot_layout: u64) -> *mut u8 {
+    let boxed = haxe_box_reference_ptr(value_ptr, TYPE_ARRAY.0);
+    ARRAY_BOXES
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .insert(boxed as usize, (value_ptr as usize, slot_layout));
+    boxed
 }
 
 /// Unbox a reference type - just extract the pointer

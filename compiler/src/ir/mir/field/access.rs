@@ -1734,38 +1734,45 @@ impl<'a> HirToMirContext<'a> {
                 .map(|t| &t.kind),
             Some(TypeKind::Dynamic)
         ) {
-            let result_ty = self.convert_type(expr.ty);
-            let tag = match &result_ty {
-                IrType::I32 | IrType::I64 => 1,
-                IrType::F32 | IrType::F64 => 2,
-                IrType::Bool => 3,
-                IrType::String => 5,
-                _ => 0,
-            };
-            let tag_reg = self.builder.build_const(IrValue::I32(tag))?;
-            let index = self.builder.build_cast(
-                idx_reg,
-                self.builder.get_register_type(idx_reg)?,
-                IrType::I64,
-            )?;
-            let function = self.get_or_register_extern_function(
-                "haxe_array_get_erased",
-                vec![
-                    IrType::Ptr(Box::new(IrType::Void)),
-                    IrType::I64,
-                    IrType::I32,
-                ],
-                IrType::I64,
-            );
-            let value = self.builder.build_call_direct(
-                function,
-                vec![obj_reg, index, tag_reg],
-                IrType::I64,
-            )?;
-            return self.coerce_from_i64(value, expr.ty);
+            return self.load_erased_array_index(obj_reg, idx_reg, expr.ty);
         }
 
         self.lower_index_access(obj_reg, idx_reg, expr.ty)
+    }
+
+    pub(crate) fn load_erased_array_index(
+        &mut self,
+        obj_reg: IrId,
+        idx_reg: IrId,
+        element_ty: TypeId,
+    ) -> Option<IrId> {
+        let result_ty = self.convert_type(element_ty);
+        let tag = match &result_ty {
+            IrType::I32 | IrType::I64 => 1,
+            IrType::F32 | IrType::F64 => 2,
+            IrType::Bool => 3,
+            IrType::String => 5,
+            _ => 0,
+        };
+        let tag_reg = self.builder.build_const(IrValue::I32(tag))?;
+        let index = self.builder.build_cast(
+            idx_reg,
+            self.builder.get_register_type(idx_reg)?,
+            IrType::I64,
+        )?;
+        let function = self.get_or_register_extern_function(
+            "haxe_array_get_erased",
+            vec![
+                IrType::Ptr(Box::new(IrType::Void)),
+                IrType::I64,
+                IrType::I32,
+            ],
+            IrType::I64,
+        );
+        let value =
+            self.builder
+                .build_call_direct(function, vec![obj_reg, index, tag_reg], IrType::I64)?;
+        self.coerce_from_i64(value, element_ty)
     }
 
     /// The monomorph (`VecI32`, `VecF64`, `VecPtr`, …) a `rayzor.Vec<T>`

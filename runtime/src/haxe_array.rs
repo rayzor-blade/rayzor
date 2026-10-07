@@ -1834,9 +1834,8 @@ pub unsafe extern "C" fn haxe_array_string_index_of(
     }
 }
 
-/// Index an erased array. JSON/runtime metadata boxes both the array and its
-/// elements; ordinary Haxe arrays carry raw slots. The array tag distinguishes
-/// these representations before any data-buffer load.
+/// Index an erased array, boxing raw slots according to the layout retained
+/// when the array was boxed. JSON arrays already contain boxed slots.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_get_erased(array: *mut u8, index: i64, target: i32) -> u64 {
     use crate::type_system::*;
@@ -1845,6 +1844,11 @@ pub extern "C" fn haxe_array_get_erased(array: *mut u8, index: i64, target: i32)
     }
     unsafe {
         let boxed = std::ptr::read_unaligned(array as *const u32) == TYPE_ARRAY.0;
+        let slot_layout = if boxed {
+            boxed_array_slot_layout(array).unwrap_or(0)
+        } else {
+            0
+        };
         let array = if boxed {
             (*(array as *const DynamicValue)).value_ptr
         } else {
@@ -1865,16 +1869,64 @@ pub extern "C" fn haxe_array_get_erased(array: *mut u8, index: i64, target: i32)
             };
         }
         let value = std::ptr::read_unaligned(array.ptr.add(index as usize * 8) as *const u64);
-        if !boxed || value == 0 {
+        if !boxed {
             return value;
         }
-        let value = value as *mut u8;
+        let value = box_erased_array_slot(value, slot_layout);
+        if value.is_null() {
+            return 0;
+        }
         match target {
             1 => haxe_unbox_int_ptr(value) as u64,
             2 => haxe_unbox_float_ptr(value).to_bits(),
             3 => haxe_unbox_bool_ptr(value) as u64,
             5 => haxe_unbox_reference_ptr(value) as u64,
             _ => value as u64,
+        }
+    }
+}
+
+/// Convert one raw slot to the Dynamic representation described by its array box.
+pub(crate) fn box_erased_array_slot(value: u64, layout: u64) -> *mut u8 {
+    use crate::type_system::*;
+    match layout & 0xff {
+        2 => haxe_box_bool_ptr(value != 0),
+        3 => haxe_box_int_ptr(value as i64),
+        4 => haxe_box_float_ptr(f64::from_bits(value)),
+        5 if value != 0 => haxe_box_reference_ptr(value as *mut u8, TYPE_STRING.0),
+        6 if value != 0 => haxe_box_reference_ptr(value as *mut u8, (layout >> 8) as u32),
+        7 if value != 0 => haxe_box_array_ptr(value as *mut u8, layout >> 8),
+        _ => value as *mut u8,
+    }
+}
+
+/// Store through an erased array while preserving its shared raw-slot representation.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_set_erased(array: *mut u8, index: i64, value: *mut u8) -> bool {
+    use crate::type_system::*;
+    if array.is_null() || index < 0 {
+        return false;
+    }
+    unsafe {
+        let boxed = std::ptr::read_unaligned(array as *const u32) == TYPE_ARRAY.0;
+        let layout = if boxed {
+            boxed_array_slot_layout(array).unwrap_or(0)
+        } else {
+            0
+        };
+        let raw = if boxed {
+            (*(array as *const DynamicValue)).value_ptr
+        } else {
+            array
+        };
+        let array = raw as *mut HaxeArray;
+        let index = index as usize;
+        match layout & 0xff {
+            2 => haxe_array_set_i64(array, index, i64::from(haxe_unbox_bool_ptr(value))),
+            3 => haxe_array_set_i64(array, index, haxe_coerce_dynamic_to_int(value)),
+            4 => haxe_array_set_f64(array, index, haxe_unbox_float_ptr(value)),
+            5..=7 => haxe_array_set_i64(array, index, haxe_unbox_reference_ptr(value) as i64),
+            _ => haxe_array_set_i64(array, index, value as i64),
         }
     }
 }

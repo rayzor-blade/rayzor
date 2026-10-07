@@ -2733,7 +2733,7 @@ impl<'a> AstLowering<'a> {
                         self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
                         let type_arguments =
                             self.infer_call_type_arguments(method_symbol, &arg_exprs);
-                        self.widen_int_literals_for_type_args(
+                        self.coerce_inferred_call_arguments(
                             method_symbol,
                             &type_arguments,
                             &mut arg_exprs,
@@ -2751,7 +2751,7 @@ impl<'a> AstLowering<'a> {
                     let mut arg_exprs = arg_exprs;
                     self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
                     let type_arguments = self.infer_call_type_arguments(method_symbol, &arg_exprs);
-                    self.widen_int_literals_for_type_args(
+                    self.coerce_inferred_call_arguments(
                         method_symbol,
                         &type_arguments,
                         &mut arg_exprs,
@@ -3117,7 +3117,7 @@ impl<'a> AstLowering<'a> {
                             self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
                             let type_arguments =
                                 self.infer_call_type_arguments(method_symbol, &arg_exprs);
-                            self.widen_int_literals_for_type_args(
+                            self.coerce_inferred_call_arguments(
                                 method_symbol,
                                 &type_arguments,
                                 &mut arg_exprs,
@@ -3181,7 +3181,7 @@ impl<'a> AstLowering<'a> {
                     _ => Vec::new(),
                 };
                 if let Some(callee) = callee_symbol {
-                    self.widen_int_literals_for_type_args(callee, &type_arguments, &mut arg_exprs);
+                    self.coerce_inferred_call_arguments(callee, &type_arguments, &mut arg_exprs);
                 }
                 TypedExpressionKind::FunctionCall {
                     function: Box::new(func_expr),
@@ -3914,11 +3914,16 @@ impl<'a> AstLowering<'a> {
             return Vec::new();
         };
         let table = self.context.type_table.borrow();
-        let Some(TypeKind::Function { params, .. }) = table.get(fn_type).map(|i| i.kind.clone())
+        let Some(TypeKind::Function {
+            params,
+            return_type,
+            ..
+        }) = table.get(fn_type).map(|i| i.kind.clone())
         else {
             return Vec::new();
         };
 
+        let result_depends_on_parameters = self.type_mentions_type_param(&table, return_type);
         drop(table);
         // Values bind first; a function literal's own types were read off
         // these same formals, so it only fills what the values left open.
@@ -3975,11 +3980,26 @@ impl<'a> AstLowering<'a> {
             }
             return Vec::new();
         }
-        // A variable only Dynamic arguments reach is Dynamic, as in Haxe.
+        // Mixed Float/Dynamic arguments use boxes to preserve value tags.
+        // A result involving T retains the type inferred by its caller.
         let dynamic = self.context.type_table.borrow().dynamic_type();
         for (declared, argument) in params.iter().zip(arguments.iter()) {
             if let Some(var) = self.dynamic_bound_var(*declared, argument.expr_type, 0) {
-                resolved.entry(var).or_insert(dynamic);
+                if !result_depends_on_parameters
+                    && resolved.get(&var) == Some(&self.context.type_table.borrow().float_type())
+                    && matches!(
+                        self.context
+                            .type_table
+                            .borrow()
+                            .get(*declared)
+                            .map(|t| &t.kind),
+                        Some(TypeKind::TypeParameter { .. })
+                    )
+                {
+                    resolved.insert(var, dynamic);
+                } else {
+                    resolved.entry(var).or_insert(dynamic);
+                }
             }
         }
         if resolved.is_empty() || mentioned.iter().any(|v| !resolved.contains_key(v)) {
@@ -3988,9 +4008,9 @@ impl<'a> AstLowering<'a> {
         mentioned.iter().map(|v| resolved[v]).collect()
     }
 
-    /// `eq(1.0, 1)`: an Int passed for a type variable bound to Float is a
-    /// Float, as the erased slot is read by that binding.
-    fn widen_int_literals_for_type_args(
+    /// Arguments use the inferred specialization's representation: Float
+    /// widens Int, and Dynamic boxes concrete values.
+    fn coerce_inferred_call_arguments(
         &self,
         callee_symbol: SymbolId,
         type_arguments: &[TypeId],
@@ -4034,7 +4054,20 @@ impl<'a> AstLowering<'a> {
             else {
                 continue;
             };
-            if bound.get(symbol_id) != Some(&float) {
+            let Some(&target) = bound.get(symbol_id) else {
+                continue;
+            };
+            if target == tt.dynamic_type() && argument.expr_type != target {
+                let inner = argument.clone();
+                argument.kind = TypedExpressionKind::Cast {
+                    expression: Box::new(inner),
+                    target_type: target,
+                    cast_kind: CastKind::Implicit,
+                };
+                argument.expr_type = target;
+                continue;
+            }
+            if target != float {
                 continue;
             }
             if let TypedExpressionKind::Literal {
@@ -4091,7 +4124,7 @@ impl<'a> AstLowering<'a> {
     ) -> Vec<TypeId> {
         use crate::tast::core::TypeKind;
         let inferred = self.infer_call_type_arguments(callee_symbol, arguments);
-        self.widen_int_literals_for_type_args(callee_symbol, &inferred, arguments);
+        self.coerce_inferred_call_arguments(callee_symbol, &inferred, arguments);
         let Some(fn_type) = self
             .context
             .symbol_table

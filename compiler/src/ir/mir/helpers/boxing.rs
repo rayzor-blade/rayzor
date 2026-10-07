@@ -22,6 +22,37 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// Array slot kinds: zero is boxed, builtins use their runtime tag, and
+    /// references carry their type ID above kind 6. Kind 7 nests an array layout.
+    fn erased_array_slot_layout(&self, ty: TypeId, depth: usize) -> u64 {
+        if depth >= 8 {
+            return 0;
+        }
+        let ty = self.resolve_storage_type(ty);
+        match self.type_table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Int) => 3,
+            Some(TypeKind::Float) => 4,
+            Some(TypeKind::Bool) => 2,
+            Some(TypeKind::String) => 5,
+            Some(TypeKind::Array { element_type }) => {
+                let inner = self.erased_array_slot_layout(*element_type, depth + 1);
+                if inner >> 56 != 0 {
+                    0
+                } else {
+                    7 | (inner << 8)
+                }
+            }
+            Some(
+                TypeKind::Class { .. }
+                | TypeKind::Enum { .. }
+                | TypeKind::Interface { .. }
+                | TypeKind::Anonymous { .. }
+                | TypeKind::Function { .. },
+            ) => 6 | (u64::from(self.runtime_type_id(ty)) << 8),
+            _ => 0,
+        }
+    }
+
     pub(crate) fn maybe_box_value(
         &mut self,
         value: IrId,
@@ -163,12 +194,24 @@ impl<'a> HirToMirContext<'a> {
                 )
             }
 
+            Some(TypeKind::Array { element_type }) => {
+                let layout = self.erased_array_slot_layout(*element_type, 0);
+                let layout = self.builder.build_const(IrValue::U64(layout))?;
+                let ptr = IrType::Ptr(Box::new(IrType::U8));
+                let function = self.get_or_register_extern_function(
+                    "haxe_box_array_ptr",
+                    vec![ptr.clone(), IrType::U64],
+                    ptr.clone(),
+                );
+                self.builder
+                    .build_call_direct(function, vec![value, layout], ptr)
+            }
+
             // Reference types (already pointers, just wrap with type_id)
             Some(TypeKind::Class { .. })
             | Some(TypeKind::Enum { .. })
             | Some(TypeKind::Interface { .. })
-            | Some(TypeKind::Anonymous { .. })
-            | Some(TypeKind::Array { .. }) => {
+            | Some(TypeKind::Anonymous { .. }) => {
                 debug!(
                     "[BOXING] Auto-boxing reference type {:?} to Dynamic using box_reference",
                     value_kind_cloned

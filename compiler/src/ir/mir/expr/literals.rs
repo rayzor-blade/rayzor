@@ -236,11 +236,11 @@ impl<'a> HirToMirContext<'a> {
                     .map(|elem| {
                         // A nested literal is only ever read dynamically from
                         // here, so its own elements are boxes too.
-                        let v = match &elem.kind {
+                        let (v, storage_ty) = match &elem.kind {
                             HirExprKind::Array { elements: inner } if dynamic_elements => {
-                                self.lower_array_literal(inner, array_type)?
+                                (self.lower_array_literal(inner, array_type)?, array_type)
                             }
-                            _ => self.lower_expression(elem)?,
+                            _ => (self.lower_expression(elem)?, elem.ty),
                         };
                         let v = if let Some(iface_sym) = elem_iface_sym {
                             let class_sym = self.get_class_symbol(elem.ty);
@@ -307,7 +307,7 @@ impl<'a> HirToMirContext<'a> {
                             )
                         {
                             let dynamic = self.type_table.dynamic_type();
-                            self.maybe_box_value(v, elem.ty, dynamic).unwrap_or(v)
+                            self.maybe_box_value(v, storage_ty, dynamic).unwrap_or(v)
                         } else {
                             v
                         };

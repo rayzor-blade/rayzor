@@ -195,6 +195,10 @@ register_symbol!(
     crate::haxe_array::haxe_array_get_erased
 );
 register_symbol!(
+    "haxe_array_set_erased",
+    crate::haxe_array::haxe_array_set_erased
+);
+register_symbol!(
     "haxe_array_string_index_of",
     crate::haxe_array::haxe_array_string_index_of
 );
@@ -1068,6 +1072,7 @@ register_symbol!(
     "haxe_box_reference_ptr",
     crate::type_system::haxe_box_reference_ptr
 );
+register_symbol!("haxe_box_array_ptr", crate::type_system::haxe_box_array_ptr);
 register_symbol!(
     "haxe_box_class_instance",
     crate::type_system::haxe_box_class_instance
