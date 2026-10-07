@@ -2756,7 +2756,28 @@ impl<'a> AstLowering<'a> {
                     .map(|s| s.kind == crate::tast::symbols::SymbolKind::Function)
                     .unwrap_or(false);
 
-                if is_placeholder {
+                let static_owner = self
+                    .context
+                    .symbol_table
+                    .get_symbol(method_symbol)
+                    .filter(|method| method.is_static())
+                    .and_then(|_| self.class_value_owner(&receiver_expr));
+                if let Some(class_symbol) = static_owner {
+                    let mut arg_exprs = arg_exprs;
+                    self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
+                    let type_arguments = self.infer_call_type_arguments(method_symbol, &arg_exprs);
+                    self.coerce_inferred_call_arguments(
+                        method_symbol,
+                        &type_arguments,
+                        &mut arg_exprs,
+                    );
+                    TypedExpressionKind::StaticMethodCall {
+                        class_symbol,
+                        method_symbol,
+                        arguments: arg_exprs,
+                        type_arguments,
+                    }
+                } else if is_placeholder {
                     // Try to find a static extension method
                     if let Some((class_symbol, static_method_symbol)) =
                         self.find_static_extension_method(method_name, receiver_expr.expr_type)

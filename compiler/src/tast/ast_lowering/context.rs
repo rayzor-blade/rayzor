@@ -74,6 +74,11 @@ impl<'a> AstLowering<'a> {
             suppress_callee_hint: false,
             deferred_macro_expander: None,
             deferred_macro_registry: None,
+            generic_build_results: BTreeMap::new(),
+            generic_build_active: std::collections::BTreeSet::new(),
+            generic_build_engine: None,
+            generic_build_resolving: std::collections::BTreeSet::new(),
+            class_value_bindings: BTreeMap::new(),
             deferred_macro_calls: BTreeMap::new(),
             abstract_casts: BTreeMap::new(),
             abstract_from_methods: BTreeMap::new(),
@@ -94,6 +99,7 @@ impl<'a> AstLowering<'a> {
     ) {
         self.deferred_macro_expander = Some(expander);
         self.deferred_macro_registry = Some(expander.borrow().registry().clone());
+        self.generic_build_engine = expander.borrow().generic_build_engine().map(Rc::new);
         for call in deferred {
             self.deferred_macro_calls
                 .insert((call.span.start, call.span.end), call.name);

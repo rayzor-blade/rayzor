@@ -55,6 +55,16 @@ fn keyword_as_identifier(input: &str) -> PResult<String> {
 pub fn macro_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
     let start = position(full, input);
     let (input, _) = keyword("macro").parse(input)?;
+    if let Ok((rest, _)) = symbol(":").parse(input) {
+        let (rest, ty) = crate::haxe_parser_types::type_expr(full, rest)?;
+        return Ok((
+            rest,
+            Expr {
+                kind: ExprKind::MacroType(ty),
+                span: Span::new(start, position(full, rest)),
+            },
+        ));
+    }
     // Parse at unary expression level to get proper precedence
     let (input, expr) = crate::haxe_parser_expr::unary_expr(full, input)?;
     let end = position(full, input);

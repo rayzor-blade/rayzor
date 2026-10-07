@@ -827,6 +827,8 @@ pub enum ExprKind {
 
     /// Macro expression: `macro expr`
     Macro(Box<Expr>),
+    /// A quoted type: `macro : Type`.
+    MacroType(Type),
 
     /// Inline expression: `inline expr` - forces inlining at call site
     Inline(Box<Expr>),

@@ -197,6 +197,18 @@ impl MacroExpander {
         &mut self.registry
     }
 
+    pub(crate) fn has_generic_builds(&self) -> bool {
+        self.class_registry.has_generic_builds()
+    }
+
+    pub(crate) fn generic_build_engine(&self) -> Option<super::generic_build::GenericBuildEngine> {
+        self.has_generic_builds()
+            .then(|| super::generic_build::GenericBuildEngine {
+                registry: self.registry.clone(),
+                class_registry: self.class_registry.clone(),
+            })
+    }
+
     /// Expand all macros in a parsed file.
     ///
     /// This is the main entry point for the expander. It:

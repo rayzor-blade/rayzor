@@ -65,6 +65,7 @@ pub mod environment;
 pub mod errors;
 pub mod expander;
 pub mod expr_adt;
+pub(crate) mod generic_build;
 pub mod interpreter;
 pub mod printer;
 pub mod registry;

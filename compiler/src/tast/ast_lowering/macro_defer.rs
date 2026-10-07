@@ -22,6 +22,78 @@ pub(crate) struct DeferredMacroTyper<'l, 'a> {
 }
 
 impl AstLowering<'_> {
+    pub(crate) fn generic_build_type(
+        &mut self,
+        symbol: crate::tast::SymbolId,
+        params: &[parser::Type],
+        args: Option<&[parser::Expr]>,
+        span: parser::Span,
+    ) -> super::LoweringResult<Option<parser::Type>> {
+        let Some(engine) = self.generic_build_engine.clone() else {
+            return Ok(None);
+        };
+        let Some(sym) = self
+            .context
+            .symbol_table
+            .get_symbol(symbol)
+            .filter(|s| s.kind == crate::tast::SymbolKind::Class)
+        else {
+            return Ok(None);
+        };
+        let name = self
+            .context
+            .string_interner
+            .get(sym.qualified_name.unwrap_or(sym.name))
+            .unwrap_or("")
+            .to_string();
+        let Some(info) = engine.definition(&name) else {
+            return Ok(None);
+        };
+        if self.generic_build_resolving.contains(&symbol) {
+            return Err(super::LoweringError::SemanticError {
+                message: format!("recursive generic build result for '{name}'"),
+                location: self.context.create_location_from_span(span),
+            });
+        }
+        let type_args = params
+            .iter()
+            .map(|p| self.lower_type(p))
+            .collect::<super::LoweringResult<Vec<_>>>()?;
+        let key = (symbol, type_args.clone());
+        if args.is_none() || !params.is_empty() {
+            if let Some(result) = self.generic_build_results.get(&key) {
+                return Ok(Some(result.clone()));
+            }
+        }
+        if !self.generic_build_active.insert(key.clone()) {
+            return Err(super::LoweringError::SemanticError {
+                message: format!("recursive generic build for '{name}'"),
+                location: self.context.create_location_from_span(span),
+            });
+        }
+        let local_type = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_class_type(symbol, type_args);
+        let result = {
+            let mut typer = DeferredMacroTyper {
+                lowering: self,
+                receiver: None,
+            };
+            engine.evaluate(&info, local_type, args, span, &mut typer)
+        };
+        self.generic_build_active.remove(&key);
+        let result = result.map_err(|e| super::LoweringError::SemanticError {
+            message: format!("generic build for '{name}' failed: {e}"),
+            location: self.context.create_location_from_span(span),
+        })?;
+        if args.is_none() || !params.is_empty() {
+            self.generic_build_results.insert(key, result.clone());
+        }
+        Ok(Some(result))
+    }
+
     /// Resolve compile-time members against the typed receiver before ordinary arguments lower.
     pub(crate) fn lower_receiver_macro_call(
         &mut self,

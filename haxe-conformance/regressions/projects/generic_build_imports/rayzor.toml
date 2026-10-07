@@ -1,0 +1,6 @@
+[project]
+name = "generic-build-imports"
+entry = "ImportedGenericBuild.hx"
+
+[build]
+class-paths = ["."]

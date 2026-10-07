@@ -152,6 +152,9 @@ pub struct MacroContext {
     /// Current class name (if macro is called from within a class)
     pub current_class: Option<String>,
 
+    pub(crate) local_type: Option<TypeId>,
+    pub(crate) call_arguments: Option<Vec<parser::Expr>>,
+
     // --- Conditional compilation ---
     /// Conditional compilation defines (-D flags)
     pub defines: BTreeMap<String, String>,
@@ -314,6 +317,8 @@ impl MacroContext {
             current_module: None,
             current_method: None,
             current_class: None,
+            local_type: None,
+            call_arguments: None,
             defines: BTreeMap::new(),
             typer: None,
             monomorphs: std::collections::BTreeSet::new(),
@@ -342,6 +347,8 @@ impl MacroContext {
                 current_module: None,
                 current_method: None,
                 current_class: None,
+                local_type: None,
+                call_arguments: None,
                 defines: BTreeMap::new(),
                 typer: None,
                 monomorphs: std::collections::BTreeSet::new(),
@@ -889,6 +896,22 @@ impl MacroContext {
             }
             "currentPos" => Ok(self.current_pos()),
             "getLocalClass" => Ok(self.get_local_class()),
+            "getLocalType" => Ok(self
+                .local_type
+                .map(MacroValue::Type)
+                .unwrap_or(MacroValue::Null)),
+            "getCallArguments" => Ok(self
+                .call_arguments
+                .as_ref()
+                .map(|args| {
+                    MacroValue::Array(Arc::new(
+                        args.iter()
+                            .cloned()
+                            .map(|e| MacroValue::Expr(Arc::new(e)))
+                            .collect(),
+                    ))
+                })
+                .unwrap_or(MacroValue::Null)),
             "getLocalModule" => Ok(self.get_local_module()),
             "getLocalMethod" => Ok(self.get_local_method()),
             "defined" => {

@@ -161,10 +161,25 @@ impl CompilationUnit {
                     .unwrap_or_else(|| f.clone())
             };
             let current_view = self.macro_context_view(ast_file, None);
+            let generic_build_modules: Vec<HaxeFile> = ast_file
+                .imports
+                .iter()
+                .filter_map(|import| {
+                    let file = self
+                        .namespace_resolver
+                        .resolve_qualified_path_to_file_force(&import.path.join("."))?;
+                    let source = std::fs::read_to_string(&file).ok()?;
+                    if !source.contains("@:genericBuild") {
+                        return None;
+                    }
+                    self.parse_file(&file.to_string_lossy(), &source).ok()
+                })
+                .collect();
             // A module named only in `@:build(pkg.Mod.f())` is never imported,
             // so its macros would be unknown when the build runs.
-            let build_modules: Vec<HaxeFile> = build_macro_module_paths(ast_file)
-                .into_iter()
+            let build_modules: Vec<HaxeFile> = std::iter::once(ast_file)
+                .chain(generic_build_modules.iter())
+                .flat_map(build_macro_module_paths)
                 .filter_map(|path| {
                     let file = self
                         .namespace_resolver
@@ -177,6 +192,11 @@ impl CompilationUnit {
                 .collect();
             let mut class_registry = crate::macro_system::ClassRegistry::new();
             class_registry.use_statics(self.macro_statics.clone());
+            class_registry.register_files(&self.user_files);
+            class_registry.register_files(&self.loaded_import_haxe_files);
+            class_registry.register_files(&generic_build_modules);
+            class_registry
+                .register_files(&generic_build_modules.iter().map(view).collect::<Vec<_>>());
             class_registry.register_files(&build_modules);
             class_registry.register_files(&self.stdlib_files);
             class_registry
@@ -188,13 +208,17 @@ impl CompilationUnit {
                     .map(view)
                     .collect::<Vec<_>>(),
             );
-            class_registry.register_file(current_view.as_ref().unwrap_or(ast_file));
+            class_registry.register_file(ast_file);
+            if let Some(view) = &current_view {
+                class_registry.register_file(view);
+            }
             // Phase 2 fix: pass user files AND macro-bearing import files as
             // "dependency" files so cross-file macros (e.g.
             // `import tink.Json` + `tink.Json.parse(...)`) are discovered.
             // Without this, only the current file's macros are in the registry
             // and cross-file calls silently fall through.
             let mut dep_files: Vec<HaxeFile> = build_modules;
+            dep_files.extend(generic_build_modules.iter().map(view));
             dep_files.extend(self.user_files.iter().map(view));
             dep_files.extend(self.loaded_import_haxe_files.iter().map(view));
             if let Some(v) = current_view {
@@ -236,7 +260,7 @@ impl CompilationUnit {
                 }
             }
             deferred_macro_calls = expansion.deferred.clone();
-            if kept_expander.registry().macro_count() != 0 {
+            if kept_expander.registry().macro_count() != 0 || kept_expander.has_generic_builds() {
                 deferred_macro_expander = Some(std::cell::RefCell::new(kept_expander));
             }
             // Surface macro expansion diagnostics to the user, not just to
@@ -1540,7 +1564,10 @@ fn build_macro_module_paths(file: &HaxeFile) -> Vec<String> {
     });
     let mut paths = Vec::new();
     for meta in metas {
-        if !matches!(meta.name.trim_start_matches(':'), "build" | "autoBuild") {
+        if !matches!(
+            meta.name.trim_start_matches(':'),
+            "build" | "autoBuild" | "genericBuild"
+        ) {
             continue;
         }
         let Some(parser::ExprKind::Call { expr, .. }) = meta.params.first().map(|p| &p.kind) else {

@@ -34,6 +34,14 @@ pub struct ClassInfo {
     pub instance_methods: BTreeMap<String, MethodInfo>,
     pub instance_vars: Vec<FieldVarInfo>,
     pub static_vars: Vec<FieldVarInfo>,
+    pub imports: Arc<BTreeMap<String, String>>,
+}
+
+pub(crate) struct GenericBuildInfo {
+    pub class: parser::ClassDecl,
+    pub pack: Vec<String>,
+    pub module: String,
+    pub imports: BTreeMap<String, String>,
 }
 
 struct TypeDefinition {
@@ -65,6 +73,7 @@ pub struct ClassRegistry {
     /// short_name → qualified_name (for unambiguous lookups)
     short_name_index: BTreeMap<String, String>,
     type_definitions: BTreeMap<String, Arc<TypeDefinition>>,
+    generic_builds: BTreeMap<String, Arc<GenericBuildInfo>>,
     /// Static variables' current values, `Class.field` → value. Shared by
     /// every macro call of the compile, as macro-time statics are.
     statics: MacroStatics,
@@ -76,6 +85,7 @@ impl ClassRegistry {
             classes: BTreeMap::new(),
             short_name_index: BTreeMap::new(),
             type_definitions: BTreeMap::new(),
+            generic_builds: BTreeMap::new(),
             statics: MacroStatics::default(),
         }
     }
@@ -124,6 +134,7 @@ impl ClassRegistry {
 
     /// Register all classes from a single HaxeFile.
     pub fn register_file(&mut self, file: &HaxeFile) {
+        let file_imports = Arc::new(super::interpreter::build_import_map(&file.imports));
         let package_prefix = match &file.package {
             Some(pkg) if !pkg.path.is_empty() => format!("{}.", pkg.path.join(".")),
             _ => String::new(),
@@ -202,6 +213,25 @@ impl ClassRegistry {
         for decl in &file.declarations {
             if let TypeDeclaration::Class(class) = decl {
                 let qualified_name = format!("{}{}", package_prefix, class.name);
+                if class
+                    .meta
+                    .iter()
+                    .any(|m| m.name.trim_start_matches(':') == "genericBuild")
+                {
+                    self.generic_builds.insert(
+                        qualified_name.clone(),
+                        Arc::new(GenericBuildInfo {
+                            class: class.clone(),
+                            pack: file
+                                .package
+                                .as_ref()
+                                .map(|p| p.path.clone())
+                                .unwrap_or_default(),
+                            module: module_name.to_string(),
+                            imports: super::interpreter::build_import_map(&file.imports),
+                        }),
+                    );
+                }
                 let mut info = ClassInfo {
                     name: class.name.clone(),
                     qualified_name: qualified_name.clone(),
@@ -210,6 +240,7 @@ impl ClassRegistry {
                     instance_methods: BTreeMap::new(),
                     instance_vars: Vec::new(),
                     static_vars: Vec::new(),
+                    imports: file_imports.clone(),
                 };
 
                 for field in &class.fields {
@@ -284,6 +315,15 @@ impl ClassRegistry {
                 self.classes.insert(qualified_name, info);
             }
         }
+    }
+
+    pub(crate) fn generic_build(&self, name: &str) -> Option<Arc<GenericBuildInfo>> {
+        let class = self.find_class(name)?;
+        self.generic_builds.get(&class.qualified_name).cloned()
+    }
+
+    pub(crate) fn has_generic_builds(&self) -> bool {
+        !self.generic_builds.is_empty()
     }
 
     pub fn enrich_type_view(&self, view: super::value::MacroValue) -> super::value::MacroValue {
@@ -420,7 +460,13 @@ impl ClassRegistry {
         if let Some(qualified) = self.short_name_index.get(name) {
             return self.classes.get(qualified);
         }
-        None
+        let definition = self.type_definitions.get(name)?;
+        let short_name = name.rsplit('.').next()?;
+        let package = definition.module.rsplit_once('.').map(|(pack, _)| pack);
+        let qualified = package
+            .map(|pack| format!("{pack}.{short_name}"))
+            .unwrap_or_else(|| short_name.to_string());
+        self.classes.get(&qualified)
     }
 
     /// Find a static method on a class.

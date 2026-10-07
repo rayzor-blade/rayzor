@@ -408,7 +408,7 @@ fn class_implements_in(file_decls: &[TypeDeclaration], class: &ClassDecl, ancest
 // ==========================================================
 
 /// Convert parser ClassField list to BuildField representations
-fn class_fields_to_build_fields(fields: &[ClassField]) -> Vec<BuildField> {
+pub(crate) fn class_fields_to_build_fields(fields: &[ClassField]) -> Vec<BuildField> {
     fields.iter().map(class_field_to_build_field).collect()
 }
 

@@ -1636,6 +1636,11 @@ pub struct AstLowering<'a> {
     deferred_macro_expander: Option<&'a std::cell::RefCell<crate::macro_system::MacroExpander>>,
     /// Definitions remain available after compile-time methods are stripped from the AST.
     deferred_macro_registry: Option<crate::macro_system::MacroRegistry>,
+    generic_build_results: BTreeMap<(SymbolId, Vec<TypeId>), parser::Type>,
+    generic_build_active: std::collections::BTreeSet<(SymbolId, Vec<TypeId>)>,
+    generic_build_engine: Option<Rc<crate::macro_system::generic_build::GenericBuildEngine>>,
+    generic_build_resolving: std::collections::BTreeSet<SymbolId>,
+    class_value_bindings: BTreeMap<SymbolId, SymbolId>,
     /// Deferred call sites by (span.start, span.end), mapped to the registry
     /// name the expander resolved at expansion time.
     deferred_macro_calls: BTreeMap<(usize, usize), String>,

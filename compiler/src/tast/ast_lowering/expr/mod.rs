@@ -393,6 +393,39 @@ impl<'a> AstLowering<'a> {
                         });
                     }
                 };
+                if let Some(built) =
+                    self.generic_build_type(symbol_id, &[], None, expression.span)?
+                {
+                    if let Type::Path { path, .. } = built {
+                        let mut parts = path.package;
+                        parts.push(path.name);
+                        if let Some(sub) = path.sub {
+                            parts.push(sub);
+                        }
+                        let mut target = Expr {
+                            kind: ExprKind::Ident(parts.remove(0)),
+                            span: expression.span,
+                        };
+                        for field in parts {
+                            target = Expr {
+                                kind: ExprKind::Field {
+                                    expr: Box::new(target),
+                                    field,
+                                    is_optional: false,
+                                },
+                                span: expression.span,
+                            };
+                        }
+                        self.generic_build_resolving.insert(symbol_id);
+                        let result = self.lower_expression(&target);
+                        self.generic_build_resolving.remove(&symbol_id);
+                        return result;
+                    }
+                    return Err(LoweringError::SemanticError {
+                        message: "generic build result cannot be used as a class value".to_string(),
+                        location: self.context.create_location_from_span(expression.span),
+                    });
+                }
                 // A dynamic method read as a value takes its current binding;
                 // called, it is the method, which forwards.
                 if (!self.lowering_callee || self.slot_return_known(name))
@@ -1013,6 +1046,29 @@ impl<'a> AstLowering<'a> {
                 // `var m:Map<String,V>` annotation, base `Map` from
                 // `new Map()` call site).
                 let mut base_class_type_id = self.resolve_type_path(type_path)?;
+                if let Some(symbol) = self.resolve_type_to_class_symbol(base_class_type_id) {
+                    if let Some(built) =
+                        self.generic_build_type(symbol, params, Some(args), expression.span)?
+                    {
+                        if let Type::Path { path, params, .. } = built {
+                            self.generic_build_resolving.insert(symbol);
+                            let result = self.lower_expression(&Expr {
+                                kind: ExprKind::New {
+                                    type_path: path,
+                                    params,
+                                    args: args.clone(),
+                                },
+                                span: expression.span,
+                            });
+                            self.generic_build_resolving.remove(&symbol);
+                            return result;
+                        }
+                        return Err(LoweringError::SemanticError {
+                            message: "generic build result is not constructible".to_string(),
+                            location: self.context.create_location_from_span(expression.span),
+                        });
+                    }
+                }
                 // `new Alias(...)` over a plain class alias constructs that class.
                 let mut aliased_class_name: Option<String> = None;
                 {
@@ -2629,6 +2685,9 @@ impl<'a> AstLowering<'a> {
                     self.null_decl_depth.insert(var_symbol, self.closure_depth);
                 }
 
+                if let Some(owner) = self.class_value_owner(&initializer) {
+                    self.class_value_bindings.insert(var_symbol, owner);
+                }
                 TypedExpressionKind::VarDeclarationExpr {
                     symbol_id: var_symbol,
                     var_type,
@@ -2796,6 +2855,9 @@ impl<'a> AstLowering<'a> {
                     self.empty_array_inferred.insert(var_symbol, loc);
                 }
 
+                if let Some(owner) = self.class_value_owner(&initializer) {
+                    self.class_value_bindings.insert(var_symbol, owner);
+                }
                 TypedExpressionKind::FinalDeclarationExpr {
                     symbol_id: var_symbol,
                     var_type,

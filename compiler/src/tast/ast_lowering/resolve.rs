@@ -15,6 +15,28 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    pub(crate) fn class_value_owner(&self, expression: &TypedExpression) -> Option<SymbolId> {
+        match &expression.kind {
+            TypedExpressionKind::Variable { symbol_id } => {
+                let symbol = self.context.symbol_table.get_symbol(*symbol_id)?;
+                if matches!(
+                    symbol.kind,
+                    SymbolKind::Class | SymbolKind::Abstract | SymbolKind::TypeAlias
+                ) {
+                    Some(
+                        self.resolve_type_to_class_symbol(expression.expr_type)
+                            .unwrap_or(*symbol_id),
+                    )
+                } else {
+                    self.class_value_bindings.get(symbol_id).copied()
+                }
+            }
+            TypedExpressionKind::Cast { expression, .. }
+            | TypedExpressionKind::Meta { expression, .. } => self.class_value_owner(expression),
+            _ => None,
+        }
+    }
+
     /// Resolve a TypeId through TypeAlias chains to find the underlying type.
     pub(crate) fn resolve_alias_chain(type_table: &TypeTable, type_id: TypeId) -> TypeId {
         let mut current = type_id;

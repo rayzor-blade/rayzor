@@ -24,6 +24,59 @@ use std::sync::Arc;
 pub struct ReificationEngine;
 
 impl ReificationEngine {
+    pub(crate) fn reify_type(
+        ty: &parser::Type,
+        env: &Environment,
+    ) -> Result<MacroValue, MacroError> {
+        fn splice(ty: &parser::Type, env: &Environment) -> Result<parser::Type, MacroError> {
+            use parser::Type;
+            let mut ty = ty.clone();
+            match &mut ty {
+                Type::Path { path, params, span } => {
+                    if path.package.is_empty() && path.sub.is_none() && params.is_empty() {
+                        if let Some(name) = path.name.strip_prefix('$') {
+                            return env
+                                .get(name)
+                                .and_then(|v| super::expr_adt::type_of_value(&v, *span))
+                                .ok_or_else(|| MacroError::ReificationError {
+                                    message: format!(
+                                        "type splice '${name}' requires a ComplexType"
+                                    ),
+                                    location: span_to_location(*span),
+                                });
+                        }
+                    }
+                    *params = params
+                        .iter()
+                        .map(|p| splice(p, env))
+                        .collect::<Result<_, _>>()?;
+                }
+                Type::Function { params, ret, .. } => {
+                    *params = params
+                        .iter()
+                        .map(|p| splice(p, env))
+                        .collect::<Result<_, _>>()?;
+                    **ret = splice(ret, env)?;
+                }
+                Type::Anonymous { fields, .. } => {
+                    for field in fields {
+                        field.type_hint = splice(&field.type_hint, env)?;
+                    }
+                }
+                Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => {
+                    **inner = splice(inner, env)?;
+                }
+                Type::Intersection { left, right, .. } => {
+                    **left = splice(left, env)?;
+                    **right = splice(right, env)?;
+                }
+                Type::Const { .. } | Type::Wildcard { .. } => {}
+            }
+            Ok(ty)
+        }
+        Ok(super::expr_adt::complex_type_of(&splice(ty, env)?))
+    }
+
     fn process_name(name: &str, env: &Environment, span: Span) -> Result<String, MacroError> {
         let Some(var) = name.strip_prefix('$') else {
             return Ok(name.to_string());

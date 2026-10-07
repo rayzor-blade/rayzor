@@ -34,7 +34,7 @@ impl<'a> AstLowering<'a> {
                 };
                 self.lower_type(&normal)
             }
-            Type::Path { path, params, .. } => {
+            Type::Path { path, params, span } => {
                 let name = if path.package.is_empty() {
                     path.name.clone()
                 } else {
@@ -207,6 +207,17 @@ impl<'a> AstLowering<'a> {
                     eprintln!("[sym] type-path {name} -> {symbol_info:?}");
                 }
                 if let Some((symbol_id, symbol_kind)) = symbol_info {
+                    if let Some(built) = self.generic_build_type(symbol_id, params, None, *span)? {
+                        if !self.generic_build_resolving.insert(symbol_id) {
+                            return Err(LoweringError::SemanticError {
+                                message: format!("recursive generic build result for '{name}'"),
+                                location: self.context.create_location_from_span(*span),
+                            });
+                        }
+                        let result = self.lower_type(&built);
+                        self.generic_build_resolving.remove(&symbol_id);
+                        return result;
+                    }
                     // Process type arguments if present (now the symbol borrow is dropped)
                     let type_arg_ids = if !params.is_empty() {
                         let mut result = Vec::new();

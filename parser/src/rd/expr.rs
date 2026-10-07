@@ -712,21 +712,13 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 // Examples: `macro null`, `macro $v{x}`, `macro return $v{x}`,
                 //           `macro [$a{arr}]`, `macro :Int` (type reification).
                 self.stream.advance();
-                // Type reification: `macro :Type` — uncommon but legal.
-                // Represented as a special Macro-wrapped type expression. We
-                // parse the type and wrap it as a Macro-wrapped Ident for now,
-                // since the reification engine only needs the token span.
+                // Type quotes retain their syntax for macro-time splicing.
                 if self.stream.at(TokenKind::Colon) {
                     self.stream.advance();
-                    let _ty = self.parse_type()?;
+                    let ty = self.parse_type()?;
                     let end = self.stream.current_offset();
-                    // Emit a placeholder that the reification engine can
-                    // recognize. The original source span preserves the info.
                     return Ok(Expr {
-                        kind: ExprKind::Macro(Box::new(Expr {
-                            kind: ExprKind::Ident("__macro_type__".to_string()),
-                            span: Span::new(start, end),
-                        })),
+                        kind: ExprKind::MacroType(ty),
                         span: Span::new(start, end),
                     });
                 }

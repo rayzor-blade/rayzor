@@ -861,6 +861,7 @@ impl MacroInterpreter {
             }
 
             // --- Macro expression ---
+            ExprKind::MacroType(ty) => ReificationEngine::reify_type(ty, &self.env),
             ExprKind::Macro(inner) if matches!(inner.kind, ExprKind::TypeDecl(_)) => {
                 let ExprKind::TypeDecl(decl) = &inner.kind else {
                     unreachable!()
@@ -1515,7 +1516,7 @@ impl MacroInterpreter {
     /// Uses morsel-parallelism-inspired tiered execution:
     /// 1. If already compiled → execute via bytecode VM (fast path)
     /// 2. Otherwise → tree-walker, then profile and maybe promote
-    fn call_macro_def(
+    pub(crate) fn call_macro_def(
         &mut self,
         def: &super::registry::MacroDefinition,
         args: Vec<MacroValue>,
@@ -2078,12 +2079,17 @@ impl MacroInterpreter {
             _ => {
                 // Fallback: check ClassRegistry for user/stdlib class
                 let resolved_owned = resolved.clone();
-                let maybe_method = self
-                    .class_registry
-                    .as_ref()
-                    .and_then(|cr| cr.find_static_method(&resolved_owned, method))
-                    .map(|m| (m.body.clone(), m.params.clone()));
-                if let Some((body, params)) = maybe_method {
+                let maybe_method = self.class_registry.as_ref().and_then(|cr| {
+                    let class = cr.find_class(&resolved_owned)?;
+                    let method = class.static_methods.get(method)?;
+                    Some((
+                        method.body.clone(),
+                        method.params.clone(),
+                        class.imports.clone(),
+                        class.qualified_name.clone(),
+                    ))
+                });
+                if let Some((body, params, imports, owner)) = maybe_method {
                     // Depth tracking — prevents runaway recursion from
                     // crashing the compiler when a macro body has a bug
                     // (stack overflow aborts the process; we'd rather
@@ -2103,7 +2109,12 @@ impl MacroInterpreter {
                         let val = args.get(i).cloned().unwrap_or(MacroValue::Null);
                         self.env.define(&param.name, val);
                     }
+                    let caller_imports = self.take_import_map();
+                    self.set_import_map((*imports).clone());
+                    self.macro_class_stack.push(owner);
                     let result = self.eval_expr(&body);
+                    self.macro_class_stack.pop();
+                    self.set_import_map(caller_imports);
                     self.env.pop_scope();
                     self.call_depth -= 1;
                     return match result {
