@@ -57,6 +57,9 @@ pub struct TastToHirContext<'a> {
     /// Current file being processed (for validation)
     current_file: Option<&'a TypedFile>,
 
+    /// Imported inline abstract bodies, indexed by their declaring symbol.
+    imported_abstracts: BTreeMap<SymbolId, &'a TypedAbstract>,
+
     /// Standard library runtime function mapping
     stdlib_mapping: &'static StdlibMapping,
 
@@ -189,6 +192,7 @@ impl<'a> TastToHirContext<'a> {
             temp_var_counter: 0,
             call_callee: None,
             current_file: None,
+            imported_abstracts: BTreeMap::new(),
             stdlib_mapping: StdlibMapping::builtin(),
             inline_var_values: BTreeMap::new(),
             class_operator_methods: BTreeMap::new(),
@@ -1369,18 +1373,6 @@ impl<'a> TastToHirContext<'a> {
                 source_location,
                 ..
             } => {
-                // An abstract method that writes `this` has to write through to
-                // the receiver. `this` lowers to HirLValue::Variable(SymbolId(0)),
-                // which MIR answers with an SSA rebind that dies when the method
-                // returns, so `a.incr()` computed the new value and dropped it.
-                //
-                // Expanded at the STATEMENT because HIR has no expression that
-                // sequences statements, and at THIS layer because the receiver is
-                // still an lvalue here -- by the time the MIR inliner runs it is an
-                // SSA register with no address to store through.
-                if let Some(stmt) = self.try_expand_abstract_mutation(expression) {
-                    return stmt;
-                }
                 let mut hir_expr = self.lower_expression(expression);
                 // Propagate statement source_location to the HIR expression when the
                 // expression itself has no valid location (e.g., calls inside try blocks).
@@ -1571,12 +1563,16 @@ impl<'a> TastToHirContext<'a> {
                     }
                 };
 
-                let hir_stmt = HirStatement::ForIn {
-                    label: None,
-                    pattern,
-                    iterator: self.lower_expression(iterable),
-                    body: self.lower_block(std::slice::from_ref(body)),
-                };
+                let iterator = self.lower_expression(iterable);
+                let body = self.lower_block(std::slice::from_ref(body));
+                let hir_stmt = self
+                    .inline_abstract_for_in(&pattern, iterable, body.clone())
+                    .unwrap_or(HirStatement::ForIn {
+                        label: None,
+                        pattern,
+                        iterator,
+                        body,
+                    });
                 self.loop_labels.pop();
                 hir_stmt
             }
@@ -4438,12 +4434,15 @@ impl<'a> TastToHirContext<'a> {
             };
 
             // Create for-in loop
-            let for_stmt = HirStatement::ForIn {
-                label: None,
-                pattern,
-                iterator: self.lower_expression(&for_part.iterator),
-                body: current_body,
-            };
+            let iterator = self.lower_expression(&for_part.iterator);
+            let for_stmt = self
+                .inline_abstract_for_in(&pattern, &for_part.iterator, current_body.clone())
+                .unwrap_or(HirStatement::ForIn {
+                    label: None,
+                    pattern,
+                    iterator,
+                    body: current_body,
+                });
 
             current_body = HirBlock::new(vec![for_stmt], self.current_scope);
         }
@@ -6594,165 +6593,6 @@ impl<'a> TastToHirContext<'a> {
         ))
     }
 
-    /// A call to a mutating abstract method, rewritten as an assignment to the
-    /// receiver.
-    ///
-    /// Only a body that is a single write to `this` is expanded; anything else
-    /// returns None and takes the ordinary call path, exactly as before. That
-    /// covers the shape the language actually uses for these -- `this = x`,
-    /// `this++`, `this = this + 1` -- without pulling control flow into the
-    /// caller.
-    ///
-    /// Non-inline methods are rejected earlier, at the declaration, so reaching
-    /// here means the method is inline and the expansion is what Haxe specifies.
-    fn try_expand_abstract_mutation(&mut self, expr: &TypedExpression) -> Option<HirStatement> {
-        let TypedExpressionKind::MethodCall {
-            receiver,
-            method_symbol,
-            arguments,
-            ..
-        } = &expr.kind
-        else {
-            return None;
-        };
-        let current_file = self.current_file?;
-        let method_name = self.symbol_table.get_symbol(*method_symbol)?.name;
-
-        let mut found: Option<&crate::tast::node::TypedFunction> = None;
-        for abstract_def in &current_file.abstracts {
-            if let Some(m) = abstract_def
-                .methods
-                .iter()
-                .find(|m| m.symbol_id == *method_symbol)
-            {
-                found = Some(m);
-                break;
-            }
-            if let Some(m) = abstract_def.methods.iter().find(|m| m.name == method_name) {
-                found = Some(m);
-                break;
-            }
-        }
-        let method = found?;
-
-        // The single write, through one level of Block wrapping -- the parser
-        // wraps a braced body, and `function f() this++;` does not.
-        let mut body: &[TypedStatement] = &method.body;
-        if body.len() == 1 {
-            if let TypedStatement::Expression { expression, .. } = &body[0] {
-                if let TypedExpressionKind::Block { statements, .. } = &expression.kind {
-                    body = statements;
-                }
-            }
-        }
-        if body.len() != 1 {
-            return None;
-        }
-        let is_this = |e: &TypedExpression| matches!(&e.kind, TypedExpressionKind::This { .. });
-
-        enum Write<'a> {
-            Set(&'a TypedExpression),
-            Step(HirBinaryOp),
-        }
-        let write = match &body[0] {
-            TypedStatement::Assignment { target, value, .. } if is_this(target) => {
-                Write::Set(value)
-            }
-            TypedStatement::Expression { expression, .. } => match &expression.kind {
-                // `this = x` reaches TAST as a binary Assign, not as the
-                // Assignment statement -- that one is for ordinary targets.
-                TypedExpressionKind::BinaryOp {
-                    left,
-                    operator: crate::tast::node::BinaryOperator::Assign,
-                    right,
-                } if is_this(left) => Write::Set(right),
-                TypedExpressionKind::UnaryOp { operator, operand } if is_this(operand) => {
-                    match operator {
-                        crate::tast::node::UnaryOperator::PreInc
-                        | crate::tast::node::UnaryOperator::PostInc => {
-                            Write::Step(HirBinaryOp::Add)
-                        }
-                        crate::tast::node::UnaryOperator::PreDec
-                        | crate::tast::node::UnaryOperator::PostDec => {
-                            Write::Step(HirBinaryOp::Sub)
-                        }
-                        _ => return None,
-                    }
-                }
-                _ => return None,
-            },
-            _ => return None,
-        };
-
-        // The receiver serves twice: as the destination, and as the value of
-        // `this` anywhere the body reads it.
-        let recv_hir = self.lower_expression(receiver);
-        let lhs = self.lower_lvalue(receiver);
-
-        let mut param_map: BTreeMap<SymbolId, HirExpr> = BTreeMap::new();
-        if method.parameters.len() == arguments.len() {
-            for (param, arg) in method.parameters.iter().zip(arguments.iter()) {
-                let lowered = self.lower_expression(arg);
-                param_map.insert(param.symbol_id, lowered);
-            }
-        }
-
-        // Through the abstract to what it actually wraps: the receiver's own type
-        // is the abstract, so testing it directly never sees the Float and the
-        // step literal comes out as an integer 1 laid over an f64.
-        let recv_is_float = {
-            use crate::tast::core::TypeKind;
-            let table = self.type_table.borrow();
-            let mut ty = recv_hir.ty;
-            let mut is_float = false;
-            for _ in 0..8 {
-                match table.get(ty).map(|t| &t.kind) {
-                    Some(TypeKind::Float) => {
-                        is_float = true;
-                        break;
-                    }
-                    Some(TypeKind::Abstract {
-                        underlying: Some(u),
-                        ..
-                    }) => ty = *u,
-                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
-                    _ => break,
-                }
-            }
-            is_float
-        };
-        let rhs = match write {
-            Write::Set(value) => {
-                self.inline_expression_deep(value, &recv_hir, &param_map, recv_hir.ty)
-            }
-            Write::Step(op) => HirExpr {
-                bypass_accessors: false,
-                kind: HirExprKind::Binary {
-                    op,
-                    lhs: Box::new(recv_hir.clone()),
-                    rhs: Box::new(HirExpr {
-                        bypass_accessors: false,
-                        // Typed to match the receiver: an Int 1 added to an f64
-                        // is read back as a bit pattern, not as one.
-                        kind: HirExprKind::Literal(if recv_is_float {
-                            HirLiteral::Float(1.0)
-                        } else {
-                            HirLiteral::Int(1)
-                        }),
-                        ty: recv_hir.ty,
-                        lifetime: recv_hir.lifetime,
-                        source_location: expr.source_location,
-                    }),
-                },
-                ty: recv_hir.ty,
-                lifetime: recv_hir.lifetime,
-                source_location: expr.source_location,
-            },
-        };
-
-        Some(HirStatement::Assign { lhs, rhs, op: None })
-    }
-
     fn try_inline_abstract_method(
         &mut self,
         receiver: &TypedExpression,
@@ -6784,7 +6624,14 @@ impl<'a> TastToHirContext<'a> {
         // whose type decayed (an operator result read as its underlying) may.
         let (receiver_abstract, receiver_is_named) = {
             let table = self.type_table.borrow();
-            match table.get(receiver.expr_type).map(|t| &t.kind) {
+            let mut ty = receiver.expr_type;
+            for _ in 0..16 {
+                match table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            match table.get(ty).map(|t| &t.kind) {
                 Some(TypeKind::Abstract { symbol_id, .. }) => (Some(*symbol_id), true),
                 Some(
                     TypeKind::Class { .. }
@@ -6816,12 +6663,50 @@ impl<'a> TastToHirContext<'a> {
             }
         }
 
+        let mut imported = false;
+        if found_method.is_none() {
+            if let Some(declaration) =
+                receiver_abstract.and_then(|s| self.imported_abstracts.get(&s))
+            {
+                if let Some(method) = declaration.methods.iter().find(|m| {
+                    m.symbol_id == method_symbol
+                        && self
+                            .symbol_table
+                            .get_symbol(m.symbol_id)
+                            .is_some_and(|s| s.is_inline())
+                }) {
+                    found_abstract = Some(declaration);
+                    found_method = Some(method);
+                    imported = true;
+                }
+            }
+        }
+
         if found_abstract.is_none() || found_method.is_none() {
             return None; // Not an abstract method
         }
 
         let abstract_def = found_abstract.unwrap();
         let method = found_method.unwrap();
+
+        if let Some(inlined) = self.inline_abstract_statements(
+            method,
+            receiver,
+            arguments,
+            result_type,
+            source_location,
+            imported,
+        ) {
+            return Some(inlined);
+        }
+        if imported
+            && !matches!(
+                self.string_interner.get(method.name),
+                Some("hasNext" | "next")
+            )
+        {
+            return None;
+        }
 
         // Found the abstract method — try to inline it
 
@@ -6912,6 +6797,310 @@ impl<'a> TastToHirContext<'a> {
         None
     }
 
+    /// Expand a straight-line inline body with fresh locals and a trailing value.
+    /// Substituting the receiver keeps writes to `this` on the caller's lvalue.
+    fn inline_abstract_statements(
+        &mut self,
+        method: &TypedFunction,
+        receiver: &TypedExpression,
+        arguments: &[TypedExpression],
+        result_type: TypeId,
+        source_location: SourceLocation,
+        require_receiver_write: bool,
+    ) -> Option<HirExpr> {
+        if !self.symbol_table.get_symbol(method.symbol_id)?.is_inline()
+            || method.parameters.len() != arguments.len()
+        {
+            return None;
+        }
+        let mut body = method.body.as_slice();
+        while let [TypedStatement::Expression { expression, .. }] = body {
+            if let TypedExpressionKind::Block { statements, .. } = &expression.kind {
+                body = statements;
+            } else {
+                break;
+            }
+        }
+        if body.is_empty() {
+            return None;
+        }
+        if require_receiver_write
+            && !body.iter().any(|statement| {
+                let is_this =
+                    |e: &TypedExpression| matches!(e.kind, TypedExpressionKind::This { .. });
+                match statement {
+                    TypedStatement::Assignment { target, .. } => is_this(target),
+                    TypedStatement::Expression { expression, .. } => match &expression.kind {
+                        TypedExpressionKind::BinaryOp { left, operator, .. } => {
+                            is_this(left)
+                                && (*operator == BinaryOperator::Assign
+                                    || Self::compound_assignment_operator(operator).is_some())
+                        }
+                        TypedExpressionKind::UnaryOp { operand, operator } => {
+                            is_this(operand)
+                                && matches!(
+                                    operator,
+                                    UnaryOperator::PreInc
+                                        | UnaryOperator::PostInc
+                                        | UnaryOperator::PreDec
+                                        | UnaryOperator::PostDec
+                                )
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                }
+            })
+        {
+            return None;
+        }
+        // Single value returns retain the expression inliner's type handling.
+        if matches!(body, [TypedStatement::Return { value: Some(_), .. }])
+            || matches!(body, [TypedStatement::Expression { expression, .. }]
+                if matches!(expression.kind, TypedExpressionKind::Return { value: Some(_) }))
+        {
+            return None;
+        }
+        let returns_value = matches!(
+            body.last(),
+            Some(TypedStatement::Return { value: Some(_), .. })
+        ) || matches!(body.last(), Some(TypedStatement::Expression { expression, .. })
+                if matches!(expression.kind, TypedExpressionKind::Return { value: Some(_) }));
+        if !returns_value && method.return_type != self.get_void_type() {
+            return None;
+        }
+        let mut bindings = BTreeMap::new();
+        for parameter in &method.parameters {
+            bindings.insert(parameter.symbol_id, self.make_null_literal());
+        }
+        for statement in body {
+            if let TypedStatement::VarDeclaration { symbol_id, .. } = statement {
+                bindings.insert(*symbol_id, self.make_null_literal());
+            }
+        }
+        for (index, statement) in body.iter().enumerate() {
+            let last = index + 1 == body.len();
+            let safe = match statement {
+                TypedStatement::VarDeclaration { initializer, .. } => initializer
+                    .as_ref()
+                    .is_none_or(|e| self.inline_safe(e, &bindings)),
+                TypedStatement::Assignment { target, value, .. } => {
+                    self.inline_safe(target, &bindings) && self.inline_safe(value, &bindings)
+                }
+                TypedStatement::Expression { expression, .. } => match &expression.kind {
+                    TypedExpressionKind::Return { value } => {
+                        last && value
+                            .as_ref()
+                            .is_none_or(|e| self.inline_safe(e, &bindings))
+                    }
+                    _ => self.inline_safe(expression, &bindings),
+                },
+                TypedStatement::Return { value, .. } => {
+                    last && value
+                        .as_ref()
+                        .is_none_or(|e| self.inline_safe(e, &bindings))
+                }
+                _ => false,
+            };
+            if !safe {
+                return None;
+            }
+        }
+        let mut statements = Vec::new();
+        let lowered_receiver = self.lower_expression(receiver);
+        let this = if matches!(
+            lowered_receiver.kind,
+            HirExprKind::Variable { .. } | HirExprKind::Field { .. } | HirExprKind::Index { .. }
+        ) {
+            lowered_receiver
+        } else {
+            self.bind_hir_operand(lowered_receiver, &mut statements)
+        };
+        bindings.clear();
+        for (parameter, argument) in method.parameters.iter().zip(arguments) {
+            let value = self.lower_expression(argument);
+            let value =
+                self.coerce_parameter_argument(value, parameter.param_type, source_location, false);
+            let value = self.bind_hir_operand(value, &mut statements);
+            bindings.insert(parameter.symbol_id, value);
+        }
+        let mut result = None;
+        for statement in body {
+            match statement {
+                TypedStatement::VarDeclaration {
+                    symbol_id,
+                    var_type,
+                    initializer,
+                    mutability,
+                    ..
+                } => {
+                    let init = initializer
+                        .as_ref()
+                        .map(|e| self.inline_expression_deep(e, &this, &bindings, *var_type));
+                    let (name, symbol) = self.gen_temp_var();
+                    statements.push(HirStatement::Let {
+                        pattern: HirPattern::Variable { name, symbol },
+                        type_hint: Some(*var_type),
+                        init,
+                        is_mutable: matches!(mutability, crate::tast::Mutability::Mutable),
+                    });
+                    bindings.insert(
+                        *symbol_id,
+                        HirExpr::new(
+                            HirExprKind::Variable {
+                                symbol,
+                                capture_mode: None,
+                            },
+                            *var_type,
+                            self.current_lifetime,
+                            source_location,
+                        ),
+                    );
+                }
+                TypedStatement::Assignment { target, value, .. } => {
+                    let target =
+                        self.inline_expression_deep(target, &this, &bindings, target.expr_type);
+                    let lhs = match target.kind {
+                        HirExprKind::Variable { symbol, .. } => HirLValue::Variable(symbol),
+                        HirExprKind::Field { object, field } => HirLValue::Field { object, field },
+                        HirExprKind::Index { object, index } => HirLValue::Index { object, index },
+                        _ => return None,
+                    };
+                    let rhs = self.inline_expression_deep(value, &this, &bindings, value.expr_type);
+                    statements.push(HirStatement::Assign { lhs, rhs, op: None });
+                }
+                TypedStatement::Return { value, .. } => {
+                    result = value
+                        .as_ref()
+                        .map(|e| self.inline_expression_deep(e, &this, &bindings, result_type));
+                }
+                TypedStatement::Expression { expression, .. } => {
+                    if let TypedExpressionKind::Return { value } = &expression.kind {
+                        result = value
+                            .as_ref()
+                            .map(|e| self.inline_expression_deep(e, &this, &bindings, result_type));
+                    } else {
+                        let expression = self.inline_expression_deep(
+                            expression,
+                            &this,
+                            &bindings,
+                            expression.expr_type,
+                        );
+                        statements.push(HirStatement::Expr(expression));
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        Some(HirExpr::new(
+            HirExprKind::Block(HirBlock {
+                statements,
+                expr: result.map(Box::new),
+                scope: self.current_scope,
+            }),
+            result_type,
+            self.current_lifetime,
+            source_location,
+        ))
+    }
+
+    /// Keep an abstract iterator in a local so inlined `next()` can update it.
+    /// Both protocol methods must inline before the loop can take this path.
+    fn inline_abstract_for_in(
+        &mut self,
+        pattern: &HirPattern,
+        iterable: &TypedExpression,
+        mut body: HirBlock,
+    ) -> Option<HirStatement> {
+        if !matches!(pattern, HirPattern::Variable { .. }) {
+            return None;
+        }
+        let abstract_symbol = {
+            let table = self.type_table.borrow();
+            let mut ty = iterable.expr_type;
+            let mut symbol = None;
+            for _ in 0..16 {
+                match table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    Some(TypeKind::Abstract { symbol_id, .. }) => {
+                        symbol = Some(*symbol_id);
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            symbol?
+        };
+        let declaration = self
+            .current_file?
+            .abstracts
+            .iter()
+            .find(|a| a.symbol_id == abstract_symbol)
+            .or_else(|| self.imported_abstracts.get(&abstract_symbol).copied())?;
+        let method = |name| {
+            declaration.methods.iter().find(|m| {
+                self.string_interner.get(m.name) == Some(name)
+                    && self
+                        .symbol_table
+                        .get_symbol(m.symbol_id)
+                        .is_some_and(|s| s.is_inline())
+            })
+        };
+        let has_next = method("hasNext")?;
+        let next = method("next")?;
+        let (name, symbol) = self.gen_temp_var();
+        let receiver = TypedExpression {
+            kind: TypedExpressionKind::Variable { symbol_id: symbol },
+            ..iterable.clone()
+        };
+        let condition = self.try_inline_abstract_method(
+            &receiver,
+            has_next.symbol_id,
+            &[],
+            self.get_bool_type(),
+            iterable.source_location,
+        )?;
+        let value = self.try_inline_abstract_method(
+            &receiver,
+            next.symbol_id,
+            &[],
+            next.return_type,
+            iterable.source_location,
+        )?;
+        body.statements.insert(
+            0,
+            HirStatement::Let {
+                pattern: pattern.clone(),
+                type_hint: Some(value.ty),
+                init: Some(value),
+                is_mutable: false,
+            },
+        );
+        let init = self.lower_expression(iterable);
+        Some(HirStatement::Expr(HirExpr::new(
+            HirExprKind::Block(HirBlock::new(
+                vec![
+                    HirStatement::Let {
+                        pattern: HirPattern::Variable { name, symbol },
+                        type_hint: Some(iterable.expr_type),
+                        init: Some(init),
+                        is_mutable: true,
+                    },
+                    HirStatement::While {
+                        label: None,
+                        condition,
+                        body,
+                        continue_update: None,
+                    },
+                ],
+                self.current_scope,
+            )),
+            self.get_void_type(),
+            self.current_lifetime,
+            iterable.source_location,
+        )))
+    }
+
     /// Whether `inline_expression_deep` substitutes `this` and every parameter
     /// in `expr`: a kind it lowers as-is must not mention them, or they are
     /// left unbound in the caller.
@@ -6930,6 +7119,16 @@ impl<'a> TastToHirContext<'a> {
         };
         let all = |es: &[TypedExpression]| es.iter().all(|e| self.inline_safe(e, params));
         match &expr.kind {
+            TypedExpressionKind::Return { .. }
+            | TypedExpressionKind::Block { .. }
+            | TypedExpressionKind::While { .. }
+            | TypedExpressionKind::For { .. }
+            | TypedExpressionKind::ForIn { .. }
+            | TypedExpressionKind::Try { .. }
+            | TypedExpressionKind::Break
+            | TypedExpressionKind::Continue
+            | TypedExpressionKind::VarDeclarationExpr { .. }
+            | TypedExpressionKind::FinalDeclarationExpr { .. } => false,
             TypedExpressionKind::This { .. }
             | TypedExpressionKind::Literal { .. }
             | TypedExpressionKind::Variable { .. } => true,
@@ -7009,6 +7208,7 @@ impl<'a> TastToHirContext<'a> {
                                 .as_ref()
                                 .is_none_or(|g| self.inline_safe(g, params))
                             && match &case.body {
+                                TypedStatement::Return { .. } => false,
                                 TypedStatement::Expression { expression, .. } => {
                                     self.inline_safe(expression, params)
                                 }
@@ -8726,6 +8926,11 @@ pub fn lower_tast_to_hir_with_imports(
     // stdlib classes/abstracts (Tensor, SIMD4f, …) when the user's file
     // imports them.
     context.seed_class_operator_methods(imported_files, Some(file));
+    context.imported_abstracts = imported_files
+        .iter()
+        .flat_map(|file| &file.abstracts)
+        .map(|declaration| (declaration.symbol_id, declaration))
+        .collect();
 
     // Seed from global inline vars (includes BLADE cache-restored constants)
     context.seed_inline_vars_from_global(global_inline_vars);

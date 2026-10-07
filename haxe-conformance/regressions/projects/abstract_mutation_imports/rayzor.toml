@@ -1,0 +1,6 @@
+[project]
+name = "abstract-mutation-imports"
+entry = "ImportedAbstractMutation.hx"
+
+[build]
+class-paths = ["."]
