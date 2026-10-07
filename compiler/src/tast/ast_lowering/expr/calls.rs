@@ -4014,7 +4014,62 @@ impl<'a> AstLowering<'a> {
         let float_element = arguments.iter().any(|a| {
             a.expr_type == float_t && matches!(a.kind, TypedExpressionKind::ArrayAccess { .. })
         });
+        let mut direct_vars = std::collections::BTreeSet::new();
+        let mut nested_vars = std::collections::BTreeSet::new();
+        for param in &params {
+            if let Some(TypeKind::TypeParameter { symbol_id, .. }) = self
+                .context
+                .type_table
+                .borrow()
+                .get(*param)
+                .map(|t| &t.kind)
+            {
+                direct_vars.insert(*symbol_id);
+            } else {
+                self.collect_type_param_symbols(*param, 0, &mut nested_vars);
+            }
+        }
+        direct_vars.retain(|var| !nested_vars.contains(var));
+        let nullable_numeric = |ty| {
+            let tt = self.context.type_table.borrow();
+            let mut ty = ty;
+            let mut nullable = false;
+            for _ in 0..16 {
+                match tt.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    Some(TypeKind::Optional { inner_type }) => {
+                        nullable = true;
+                        ty = *inner_type;
+                    }
+                    Some(TypeKind::Int) => return Some((nullable, false)),
+                    Some(TypeKind::Float) => return Some((nullable, true)),
+                    _ => return None,
+                }
+            }
+            None
+        };
+        let dynamic = self.context.type_table.borrow().dynamic_type();
+        // A direct erased T retains nullable floating-point boxes. Container element
+        // representations and a result depending on T keep their own inference.
+        let boxed_nullable_vars: std::collections::BTreeSet<_> = bindings
+            .iter()
+            .filter(|(var, ty)| {
+                !result_depends_on_parameters
+                    && direct_vars.contains(var)
+                    && nullable_numeric(*ty).is_some_and(|(nullable, _)| nullable)
+                    && bindings.iter().any(|(other_var, other_ty)| {
+                        other_var == var
+                            && nullable_numeric(*other_ty).is_some_and(|(_, float)| float)
+                    })
+            })
+            .map(|(var, _)| *var)
+            .collect();
         for (var, ty) in bindings {
+            let ty = if boxed_nullable_vars.contains(&var) && nullable_numeric(ty).is_some() {
+                dynamic
+            } else {
+                ty
+            };
             let prev = *resolved.entry(var).or_insert(ty);
             if prev == ty {
                 continue;
@@ -4029,7 +4084,6 @@ impl<'a> AstLowering<'a> {
         }
         // Mixed Float/Dynamic arguments use boxes to preserve value tags.
         // A result involving T retains the type inferred by its caller.
-        let dynamic = self.context.type_table.borrow().dynamic_type();
         for (declared, argument) in params.iter().zip(arguments.iter()) {
             if let Some(var) = self.dynamic_bound_var(*declared, argument.expr_type, 0) {
                 if !result_depends_on_parameters

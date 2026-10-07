@@ -1348,16 +1348,59 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    /// A function literal's result type: the inferred one, unless the
-    /// enclosing function is declared to return a function returning
-    /// Dynamic -- a Dynamic result is a box, so the literal must be typed to
-    /// build one. A formal's function type is not consulted: an unresolved
-    /// type parameter there also reads as Dynamic.
+    /// Nullable scalar function slots require boxed results. Dynamic results
+    /// use the enclosing return declaration, since generic formals can also
+    /// appear as Dynamic before their arguments have been inferred.
     pub(crate) fn expected_lambda_return(&self, inferred: TypeId) -> TypeId {
+        let tt = self.context.type_table.borrow();
+        let unalias = |mut ty| {
+            for _ in 0..16 {
+                match tt.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            ty
+        };
+        for expected in [
+            self.expected_arg_type_stack.last().copied().flatten(),
+            self.context.expected_return_type,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let Some(TypeKind::Function { return_type, .. }) =
+                tt.get(unalias(expected)).map(|t| &t.kind)
+            else {
+                continue;
+            };
+            let Some(TypeKind::Optional { inner_type }) =
+                tt.get(unalias(*return_type)).map(|t| &t.kind)
+            else {
+                continue;
+            };
+            let inner = tt.get(unalias(*inner_type)).map(|t| &t.kind);
+            if !matches!(
+                inner,
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+            ) {
+                continue;
+            }
+            let mut value = unalias(inferred);
+            if let Some(TypeKind::Optional { inner_type }) = tt.get(value).map(|t| &t.kind) {
+                value = unalias(*inner_type);
+            }
+            let value = tt.get(value).map(|t| &t.kind);
+            if value == inner
+                || matches!(value, Some(TypeKind::Dynamic))
+                || matches!((value, inner), (Some(TypeKind::Int), Some(TypeKind::Float)))
+            {
+                return *return_type;
+            }
+        }
         let Some(expected) = self.context.expected_return_type else {
             return inferred;
         };
-        let tt = self.context.type_table.borrow();
         let Some(TypeKind::Function { return_type, .. }) = tt.get(expected).map(|t| &t.kind) else {
             return inferred;
         };
