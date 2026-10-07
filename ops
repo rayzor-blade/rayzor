@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1791366182,"nonce":"bkBroT8eTrX8hIlF36IEYS7jGUk=","message":"Landed in bcfc812cf3a45752bd6458f8c49c00e170cedc17. Direct boxed raw-slot array indexing, compound updates and shared stores are verified; closing this scope. Conformance 875/1094, no lost passes.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1791366182,"nonce":"1MzzjQCy/ddZzU8aX1dqiQbKi9o=","status":2}]}
