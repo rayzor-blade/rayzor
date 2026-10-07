@@ -460,8 +460,10 @@ impl<'a> HirToMirContext<'a> {
                     if let Some(func_id) = parent_method_func_id {
                         let obj_reg = self.lower_expression(object)?;
                         let mut call_args = vec![obj_reg];
-                        for arg in args {
+                        for (param_idx, arg) in args.iter().enumerate() {
                             if let Some(reg) = self.lower_expression(arg) {
+                                let reg = self
+                                    .unbox_dynamic_numeric_call_arg(arg, reg, func_id, param_idx);
                                 call_args.push(reg);
                             }
                         }
@@ -558,7 +560,7 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or(false);
 
             let mut method_arg_regs = vec![obj_reg]; // 'this' as first arg
-            for arg in args.iter() {
+            for (param_idx, arg) in args.iter().enumerate() {
                 if let Some(reg) = self.lower_expression(arg) {
                     if callee_is_user_defined {
                         let is_heap_intermediate = matches!(
@@ -571,6 +573,7 @@ impl<'a> HirToMirContext<'a> {
                             self.temp_heap_values.push(reg);
                         }
                     }
+                    let reg = self.unbox_dynamic_numeric_call_arg(arg, reg, func_id, param_idx);
                     method_arg_regs.push(reg);
                 }
             }

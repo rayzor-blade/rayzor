@@ -397,7 +397,6 @@ impl<'a> AstLowering<'a> {
                     | BinaryOperator::Ushr => {
                         let left_type = left.expr_type;
                         let right_type = right.expr_type;
-                        let dynamic_type = type_table.dynamic_type();
                         // A user Class/Abstract operand carries an @:op
                         // overload whose result is that type (e.g. masking a
                         // Usize address), so it wins over the Int default.
@@ -417,9 +416,6 @@ impl<'a> AstLowering<'a> {
                             Ok(left_type)
                         } else if is_user_type(right_type) {
                             Ok(right_type)
-                        } else if left_type == dynamic_type || right_type == dynamic_type {
-                            // Same convention as the arithmetic arm above.
-                            Ok(dynamic_type)
                         } else {
                             Ok(type_table.int_type())
                         }
@@ -778,7 +774,31 @@ impl<'a> AstLowering<'a> {
                 let type_table = self.context.type_table.borrow();
                 match operator {
                     UnaryOperator::Not => Ok(type_table.bool_type()),
-                    UnaryOperator::Neg | UnaryOperator::BitNot => Ok(operand.expr_type),
+                    UnaryOperator::Neg | UnaryOperator::BitNot => {
+                        let mut ty = operand.expr_type;
+                        let mut seen = std::collections::BTreeSet::new();
+                        while seen.insert(ty) {
+                            match type_table.get(ty).map(|t| &t.kind) {
+                                Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                                _ => break,
+                            }
+                        }
+                        match type_table.get(ty).map(|t| &t.kind) {
+                            Some(TypeKind::Optional { inner_type })
+                                if matches!(
+                                    type_table.get(*inner_type).map(|t| &t.kind),
+                                    Some(TypeKind::Int | TypeKind::Float)
+                                ) =>
+                            {
+                                Ok(*inner_type)
+                            }
+                            Some(TypeKind::Dynamic) => Ok(match operator {
+                                UnaryOperator::BitNot => type_table.int_type(),
+                                _ => type_table.float_type(),
+                            }),
+                            _ => Ok(operand.expr_type),
+                        }
+                    }
                     UnaryOperator::PreInc
                     | UnaryOperator::PostInc
                     | UnaryOperator::PreDec

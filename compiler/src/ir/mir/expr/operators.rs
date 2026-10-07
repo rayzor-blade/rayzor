@@ -308,6 +308,33 @@ impl<'a> HirToMirContext<'a> {
             }
             _ => {
                 let mut operand_reg = self.lower_expression(operand)?;
+                if matches!(op, HirUnaryOp::Neg | HirUnaryOp::BitNot) {
+                    operand_reg = self
+                        .open_nullable_scalar(operand_reg, self.resolve_through_aliases(operand.ty))
+                        .unwrap_or(operand_reg);
+                }
+                if matches!(op, HirUnaryOp::BitNot)
+                    && matches!(
+                        self.builder.get_register_type(operand_reg),
+                        Some(IrType::Ptr(_))
+                    )
+                    && matches!(
+                        self.type_table
+                            .get(self.resolve_through_aliases(operand.ty))
+                            .map(|t| &t.kind),
+                        Some(TypeKind::Dynamic)
+                    )
+                {
+                    let unbox = self.get_or_register_extern_function(
+                        "haxe_coerce_dynamic_to_int",
+                        vec![IrType::Ptr(Box::new(IrType::U8))],
+                        IrType::I64,
+                    );
+                    let raw =
+                        self.builder
+                            .build_call_direct(unbox, vec![operand_reg], IrType::I64)?;
+                    operand_reg = self.builder.build_cast(raw, IrType::I64, IrType::I32)?;
+                }
                 if matches!(op, HirUnaryOp::Not) {
                     operand_reg = self.truth_of(operand_reg, operand.ty)?;
                 }
@@ -390,6 +417,53 @@ impl<'a> HirToMirContext<'a> {
             HirBinaryOp::Or => return self.lower_logical_or(lhs, rhs),
             HirBinaryOp::NullCoalesce => return self.lower_null_coalesce(lhs, rhs),
             _ => {}
+        }
+
+        if matches!(
+            op,
+            HirBinaryOp::BitAnd
+                | HirBinaryOp::BitOr
+                | HirBinaryOp::BitXor
+                | HirBinaryOp::Shl
+                | HirBinaryOp::Shr
+                | HirBinaryOp::Ushr
+        ) && self.convert_type(expr.ty) == IrType::I32
+            && [lhs, rhs].iter().any(|operand| {
+                matches!(
+                    self.type_table
+                        .get(self.resolve_through_aliases(operand.ty))
+                        .map(|t| &t.kind),
+                    Some(TypeKind::Dynamic)
+                )
+            })
+        {
+            let mut integer_operand = |operand: &HirExpr| {
+                let reg = self.lower_expression(operand)?;
+                let ty = self.resolve_through_aliases(operand.ty);
+                let reg =
+                    if matches!(
+                        self.type_table.get(ty).map(|t| &t.kind),
+                        Some(TypeKind::Dynamic)
+                    ) && matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_)))
+                    {
+                        let unbox = self.get_or_register_extern_function(
+                            "haxe_coerce_dynamic_to_int",
+                            vec![IrType::Ptr(Box::new(IrType::U8))],
+                            IrType::I64,
+                        );
+                        self.builder
+                            .build_call_direct(unbox, vec![reg], IrType::I64)?
+                    } else {
+                        self.open_nullable_scalar(reg, ty).unwrap_or(reg)
+                    };
+                self.coerce_reg_to(reg, &IrType::I32)
+            };
+            let lhs = integer_operand(lhs)?;
+            let rhs = integer_operand(rhs)?;
+            let MirBinaryOp::Binary(op) = self.convert_binary_op_to_mir(*op) else {
+                unreachable!()
+            };
+            return self.builder.build_binop(op, lhs, rhs);
         }
 
         // Special handling for string concatenation with +
@@ -1059,7 +1133,11 @@ impl<'a> HirToMirContext<'a> {
                                 self.builder
                                     .build_call_direct(f, vec![code, l, r], ptr_u8)?;
                             self.boxed_value_regs.insert(out);
-                            return Some(out);
+                            return self.maybe_unbox_value(
+                                out,
+                                self.type_table.dynamic_type(),
+                                expr.ty,
+                            );
                         }
                         let cmp_op = match op {
                             HirBinaryOp::Lt => CompareOp::Lt,
@@ -1533,7 +1611,6 @@ impl<'a> HirToMirContext<'a> {
                     } else {
                         rhs_reg = coerce_dyn(self, rhs_reg)?;
                     }
-
                     let mir_op = self.convert_binary_op_to_mir(*op);
                     let result_reg = match mir_op {
                         MirBinaryOp::Binary(arith_op) => {
@@ -1586,6 +1663,30 @@ impl<'a> HirToMirContext<'a> {
                 | HirBinaryOp::Ne
         ) && scalar_side(self, lhs)
             && scalar_side(self, rhs);
+        let nullable_comparison = if is_scalar_cmp
+            && (self.is_optional_primitive(lhs.ty) || self.is_optional_primitive(rhs.ty))
+        {
+            let mut nulls = Vec::with_capacity(2);
+            for (reg, ty) in [(lhs_reg, lhs.ty), (rhs_reg, rhs.ty)] {
+                let is_null = if self.is_optional_primitive(ty)
+                    && matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_)))
+                {
+                    let check = self.get_or_register_extern_function(
+                        "haxe_dynamic_is_null",
+                        vec![IrType::Ptr(Box::new(IrType::U8))],
+                        IrType::Bool,
+                    );
+                    self.builder
+                        .build_call_direct(check, vec![reg], IrType::Bool)?
+                } else {
+                    self.builder.build_bool(false)?
+                };
+                nulls.push(is_null);
+            }
+            Some((nulls[0], nulls[1]))
+        } else {
+            None
+        };
         // An unboxed operand is typed by its inner primitive from here on.
         let mut lhs_ty = lhs.ty;
         let mut rhs_ty = rhs.ty;
@@ -1720,7 +1821,7 @@ impl<'a> HirToMirContext<'a> {
         } else {
             self.convert_type(expr.ty)
         };
-        let result_reg = if result_type.is_vector() {
+        let mut result_reg = if result_type.is_vector() {
             let bin_op = match op {
                 HirBinaryOp::Add => BinaryOp::Add,
                 HirBinaryOp::Sub => BinaryOp::Sub,
@@ -1741,6 +1842,29 @@ impl<'a> HirToMirContext<'a> {
                 MirBinaryOp::Compare(cmp_op) => self.builder.build_cmp(cmp_op, lhs_reg, rhs_reg)?,
             }
         };
+        // Null equals only null and is unordered; opening its numeric box
+        // must not make it compare as zero.
+        if let Some((lhs_null, rhs_null)) = nullable_comparison {
+            let either_null = self.builder.build_binop(BinaryOp::Or, lhs_null, rhs_null)?;
+            let neither_null = self.builder.build_unop(UnaryOp::Not, either_null)?;
+            result_reg = self
+                .builder
+                .build_binop(BinaryOp::And, neither_null, result_reg)?;
+            if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
+                let null_result = self.builder.build_binop(
+                    if matches!(op, HirBinaryOp::Eq) {
+                        BinaryOp::And
+                    } else {
+                        BinaryOp::Xor
+                    },
+                    lhs_null,
+                    rhs_null,
+                )?;
+                result_reg = self
+                    .builder
+                    .build_binop(BinaryOp::Or, null_result, result_reg)?;
+            }
+        }
         let src_loc = self.convert_source_location(&expr.source_location);
         if let Some(func) = self.builder.current_function_mut() {
             func.locals.insert(

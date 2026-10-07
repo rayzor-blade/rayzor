@@ -61,8 +61,10 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(func_id) = super_func_id {
                     let obj_reg = self.lower_expression(&args[0])?;
                     let mut call_args = vec![obj_reg];
-                    for arg in args.iter().skip(1) {
+                    for (param_idx, arg) in args.iter().skip(1).enumerate() {
                         if let Some(reg) = self.lower_expression(arg) {
+                            let reg =
+                                self.unbox_dynamic_numeric_call_arg(arg, reg, func_id, param_idx);
                             call_args.push(reg);
                         }
                     }

@@ -59,7 +59,11 @@ impl<'a> HirToMirContext<'a> {
         value_ty: TypeId,
         target_ty: TypeId,
     ) -> Option<IrId> {
-        let out = self.maybe_box_value_inner(value, value_ty, target_ty);
+        let out = self.maybe_box_value_inner(
+            value,
+            self.resolve_through_aliases(value_ty),
+            self.resolve_through_aliases(target_ty),
+        );
         if let Some(reg) = out {
             if reg != value {
                 // A box was emitted: remember the resulting register so

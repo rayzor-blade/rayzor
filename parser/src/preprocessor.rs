@@ -41,6 +41,7 @@ impl Default for PreprocessorConfig {
         // Statically typed native target: basic types are not nullable, an
         // Int slot reads 0 where a dynamic target reads null.
         defines.insert("static".to_string());
+        defines.insert("target.static".to_string());
 
         // Add debug in debug builds
         #[cfg(debug_assertions)]

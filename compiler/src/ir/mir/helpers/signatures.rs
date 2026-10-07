@@ -540,6 +540,36 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    pub(crate) fn unbox_dynamic_numeric_call_arg(
+        &mut self,
+        arg: &HirExpr,
+        reg: IrId,
+        func_id: IrFunctionId,
+        param_index: usize,
+    ) -> IrId {
+        let Some(param_ty) = self
+            .function_param_hir_types
+            .get(&func_id)
+            .and_then(|params| params.get(param_index))
+            .copied()
+        else {
+            return reg;
+        };
+        let param_ty = self.resolve_through_aliases(param_ty);
+        let arg_ty = self.resolve_through_aliases(arg.ty);
+        if matches!(
+            self.type_table.get(param_ty).map(|t| &t.kind),
+            Some(TypeKind::Int | TypeKind::Float)
+        ) && matches!(
+            self.type_table.get(arg_ty).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            self.maybe_unbox_value(reg, arg_ty, param_ty).unwrap_or(reg)
+        } else {
+            reg
+        }
+    }
+
     /// Also handles direct class→anon or wider-anon→anon conversion at call boundaries
     /// when the callee expects an anonymous-typed parameter.
     /// The declared parameter types of imported functions, so a call into
