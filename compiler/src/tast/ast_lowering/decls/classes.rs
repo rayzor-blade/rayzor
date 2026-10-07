@@ -152,7 +152,8 @@ impl<'a> AstLowering<'a> {
         // below will find them and skip re-creating symbols.
         if !reusing_scope {
             self.class_methods.insert(class_symbol, Vec::new());
-            self.class_fields.insert(class_symbol, Vec::new());
+            // Earlier declarations may already refer to these field symbols.
+            self.class_fields.entry(class_symbol).or_default();
         } else {
             self.class_methods
                 .entry(class_symbol)

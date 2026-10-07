@@ -28,6 +28,10 @@ impl<'a> HirToMirContext<'a> {
         field: SymbolId,
         field_ty: TypeId,
     ) -> Option<IrId> {
+        // A typed producer can leave a raw class pointer under a Dynamic HIR type.
+        if self.register_class_hints.contains_key(&obj) && !self.boxed_value_regs.contains(&obj) {
+            return self.raw_anon_reflect_field_read(obj, field, field_ty);
+        }
         let field_name_str = self
             .symbol_table
             .get_symbol(field)

@@ -1040,12 +1040,91 @@ impl<'a> AstLowering<'a> {
                     }
                 }
 
-                // Lower constructor arguments
-                let arg_exprs = args
+                let mut type_args = params
                     .iter()
-                    .map(|arg| self.lower_expression(arg))
+                    .map(|param| self.lower_type(param))
                     .collect::<Result<Vec<_>, _>>()?;
-                let ctor_params = self.constructor_param_types(base_class_type_id);
+                let constructor_receiver = if !type_args.is_empty() {
+                    let class = self.resolve_type_to_class_symbol(base_class_type_id);
+                    class
+                        .map(|symbol| {
+                            self.context
+                                .type_table
+                                .borrow_mut()
+                                .create_class_type(symbol, type_args.clone())
+                        })
+                        .unwrap_or(base_class_type_id)
+                } else {
+                    self.context
+                        .expected_new_type_hint
+                        .filter(|hint| {
+                            self.resolve_type_to_class_symbol(*hint)
+                                == self.resolve_type_to_class_symbol(base_class_type_id)
+                        })
+                        .unwrap_or(base_class_type_id)
+                };
+                let ctor_params = self.constructor_param_types(constructor_receiver);
+                let constructor_has_unbound_params = {
+                    let table = self.context.type_table.borrow();
+                    match table.get(constructor_receiver).map(|t| &t.kind) {
+                        Some(
+                            TypeKind::Class {
+                                symbol_id,
+                                type_args,
+                            }
+                            | TypeKind::Abstract {
+                                symbol_id,
+                                type_args,
+                                ..
+                            },
+                        ) => {
+                            type_args.is_empty()
+                                && self
+                                    .context
+                                    .symbol_table
+                                    .get_class_type_params(*symbol_id)
+                                    .is_some_and(|params| !params.is_empty())
+                        }
+                        _ => false,
+                    }
+                };
+                // A constructor's callback slots provide the same contextual
+                // parameter types as ordinary calls. Unbound class parameters
+                // are inferred from the argument instead.
+                let mut arg_exprs = Vec::with_capacity(args.len());
+                for (index, arg) in args.iter().enumerate() {
+                    let expected = ctor_params
+                        .as_ref()
+                        .and_then(|ps| ps.get(index))
+                        .copied()
+                        .filter(|_| !constructor_has_unbound_params)
+                        .filter(|ty| {
+                            !matches!(
+                                self.context.type_table.borrow().get(*ty).map(|t| &t.kind),
+                                Some(
+                                    TypeKind::Dynamic
+                                        | TypeKind::Unknown
+                                        | TypeKind::Placeholder { .. }
+                                )
+                            )
+                        });
+                    let lambda_hint = expected.and_then(|ty| {
+                        let table = self.context.type_table.borrow();
+                        match table
+                            .get(Self::resolve_alias_chain(&table, ty))
+                            .map(|t| &t.kind)
+                        {
+                            Some(TypeKind::Function { params, .. }) => Some(params.clone()),
+                            _ => None,
+                        }
+                    });
+                    self.expected_arg_type_stack.push(expected);
+                    self.expected_lambda_params_stack.push(lambda_hint);
+                    let lowered = self.lower_expression(arg);
+                    self.expected_lambda_params_stack.pop();
+                    self.expected_arg_type_stack.pop();
+                    arg_exprs.push(lowered?);
+                }
                 let arg_exprs = self.pack_rest_args(arg_exprs, ctor_params.as_deref(), expression);
                 // An argument for an abstract-typed parameter goes through its `@:from`.
                 let arg_exprs: Vec<TypedExpression> = match &ctor_params {
@@ -1060,12 +1139,6 @@ impl<'a> AstLowering<'a> {
                         .collect(),
                     None => arg_exprs,
                 };
-
-                // Lower type arguments from params
-                let mut type_args = params
-                    .iter()
-                    .map(|param| self.lower_type(param))
-                    .collect::<Result<Vec<_>, _>>()?;
 
                 // If the call site omitted explicit `<...>` params (e.g.
                 // `var m:Map<String,Int> = new Map();`), borrow them from

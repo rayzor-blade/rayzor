@@ -43,7 +43,14 @@ impl<'a> HirToMirContext<'a> {
         let lambda_name = format!("<lambda_{}__{}>", module_prefix, self.lambda_counter);
         self.lambda_counter += 1;
 
-        // Build environment layout if we have captures
+        let type_params = self
+            .builder
+            .current_function
+            .and_then(|id| self.builder.module.functions.get(&id))
+            .map(|function| function.signature.type_params.clone())
+            .unwrap_or_default();
+        let type_param_names: Vec<_> = type_params.iter().map(|param| param.name.clone()).collect();
+        // A closure created by a generic body specializes with that body.
         let env_layout = if !captures.is_empty() {
             Some(EnvironmentLayout::new(captures, |ty| self.convert_type(ty)))
         } else {
@@ -66,7 +73,7 @@ impl<'a> HirToMirContext<'a> {
         next_reg_id += 1;
 
         for param in params {
-            let param_type = self.convert_type(param.ty);
+            let param_type = self.convert_type_or_type_var(param.ty, &type_param_names);
             let param_name = self
                 .string_interner
                 .get(param.name)
@@ -87,7 +94,7 @@ impl<'a> HirToMirContext<'a> {
             return_type: IrType::Any, // PLACEHOLDER - will be inferred
             calling_convention: CallingConvention::Haxe,
             can_throw: false,
-            type_params: vec![],
+            type_params,
             uses_sret: false,
         };
 

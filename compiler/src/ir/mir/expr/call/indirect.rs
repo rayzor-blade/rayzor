@@ -158,6 +158,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Signature from the callee's function type, else from the arguments.
+        let type_param_names = self.current_type_param_names();
         let param_types: Vec<IrType> = {
             let type_table = self.type_table;
             let callee_type = type_table.get(callee.ty);
@@ -169,7 +170,7 @@ impl<'a> HirToMirContext<'a> {
                     // parameter, and Cranelift asserts on the argument count.
                     params
                         .iter()
-                        .map(|p| self.convert_type(*p))
+                        .map(|p| self.convert_type_or_type_var(*p, &type_param_names))
                         .filter(|t| !matches!(t, IrType::Void))
                         .collect()
                 } else {

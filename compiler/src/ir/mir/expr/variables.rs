@@ -223,7 +223,16 @@ impl<'a> HirToMirContext<'a> {
 
         if let Some(&gid) = self.global_symbol_map.get(&lookup_symbol) {
             let global_type = self.global_type_of(gid);
-            return self.builder.build_load_global(gid, global_type);
+            let value = self.builder.build_load_global(gid, global_type)?;
+            // An initializer's callback can precede the field's inferred type.
+            if let Some(declared_type) = self
+                .symbol_table
+                .get_symbol(lookup_symbol)
+                .map(|s| s.type_id)
+            {
+                self.set_class_hint_for_return(value, declared_type);
+            }
+            return Some(value);
         }
 
         if let Some(&reg) = self.symbol_map.get(&lookup_symbol) {
@@ -287,9 +296,10 @@ impl<'a> HirToMirContext<'a> {
                     // may have resolved the concrete type (String, F64, F32) from the
                     // GenericInstance return type. Casting back to I64 destroys that info,
                     // which is needed by trace dispatch and other type-aware operations.
-                    let actual_loses_info_to_i64 =
-                        matches!(&actual_type, IrType::String | IrType::F64 | IrType::F32)
-                            && expected_type == IrType::I64;
+                    let actual_loses_info_to_i64 = matches!(
+                        &actual_type,
+                        IrType::String | IrType::F64 | IrType::F32 | IrType::TypeVar(_)
+                    ) && expected_type == IrType::I64;
 
                     // I64→I32 narrowing would truncate high bits (e.g., function pointers
                     // from CC.getSymbol on 64-bit platforms). Extern functions return I64

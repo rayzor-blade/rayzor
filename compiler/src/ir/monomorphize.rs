@@ -620,6 +620,9 @@ impl Monomorphizer {
                     *arg = self.substitute_type(arg);
                 }
             }
+            IrInstruction::CallIndirect { signature, .. } => {
+                *signature = self.substitute_type(signature);
+            }
             IrInstruction::GetElementPtr { ty, .. } => {
                 *ty = self.substitute_type(ty);
             }
@@ -686,10 +689,6 @@ impl Monomorphizer {
             .filter(|(_, f)| !f.type_param_tag_fixups.is_empty())
             .map(|(id, _)| *id)
             .collect();
-
-        if direct_fixups.is_empty() {
-            return;
-        }
 
         // Compute transitive closure: include functions that call (transitively)
         // any function with fixups. E.g., if compare() has fixups and setLoop()
@@ -804,6 +803,23 @@ impl Monomorphizer {
                                 }
                             }
                         }
+                    } else if let IrInstruction::MakeClosure {
+                        func_id: target, ..
+                    } = inst
+                    {
+                        if let Some(closure) = module.functions.get(target).cloned()
+                            && !closure.signature.type_params.is_empty()
+                        {
+                            let (new_id, is_new) =
+                                self.instantiate_with_sub_map(&closure, &sub_map);
+                            rewrites.push((*block_id, inst_idx, new_id));
+                            if is_new {
+                                for function in std::mem::take(&mut self.pending_transitive_funcs) {
+                                    module.functions.insert(function.id, function);
+                                }
+                                worklist.push(new_id);
+                            }
+                        }
                     }
                 }
             }
@@ -820,6 +836,9 @@ impl Monomorphizer {
                                 {
                                     *func_id = *new_callee_id;
                                     type_args.clear(); // Clear stale erased type_args
+                                    self.stats.call_sites_rewritten += 1;
+                                } else if let IrInstruction::MakeClosure { func_id, .. } = inst {
+                                    *func_id = *new_callee_id;
                                     self.stats.call_sites_rewritten += 1;
                                 }
                             }

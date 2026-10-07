@@ -382,12 +382,14 @@ impl<'a> HirToMirContext<'a> {
         };
         let mut sig_builder = FunctionSignatureBuilder::new().param("this".to_string(), this_type);
 
+        let mut type_param_names = Vec::new();
         for type_param in class_type_params {
             let param_name = self
                 .string_interner
                 .get(type_param.name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("T{}", type_param.name.as_raw()));
+            type_param_names.push(param_name.clone());
             sig_builder = sig_builder.type_param(param_name);
         }
 
@@ -397,7 +399,14 @@ impl<'a> HirToMirContext<'a> {
                 .get(param.name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("param_{}", param.symbol_id.as_raw()));
-            let ir_ty = self.convert_type(param.ty);
+            let ir_ty = if matches!(
+                self.type_table.get(param.ty).map(|t| &t.kind),
+                Some(TypeKind::Function { .. })
+            ) {
+                self.convert_type_or_type_var(param.ty, &type_param_names)
+            } else {
+                self.convert_type(param.ty)
+            };
             let kind = self
                 .type_table
                 .get(param.ty)

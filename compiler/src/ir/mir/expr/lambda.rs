@@ -326,7 +326,16 @@ impl<'a> HirToMirContext<'a> {
             let _ = self.box_capture_binding(param.symbol_id, param_reg);
 
             // Also register parameter as a local so type inference can find it
-            let param_type = self.convert_type(param.ty);
+            let param_type = self
+                .builder
+                .module
+                .functions
+                .get(&func_id)?
+                .signature
+                .parameters
+                .get(i + param_offset as usize)?
+                .ty
+                .clone();
             let param_name = self
                 .string_interner
                 .get(param.name)

@@ -821,19 +821,53 @@ impl<'a> AstLowering<'a> {
         let class_name = self.context.intern_string(&class_decl.name);
 
         // Look up the pre-registered class symbol
-        let class_symbol = match self
-            .context
-            .symbol_table
-            .lookup_symbol(ScopeId::first(), class_name)
-        {
-            Some(entry) => entry.id,
-            None => return Ok(()), // Not pre-registered, skip
+        let class_symbol = if self.root_slot_is_foreign_type(class_name) {
+            match self.package_type_symbol(class_name, crate::tast::SymbolKind::Class) {
+                Some(symbol) => symbol,
+                None => return Ok(()),
+            }
+        } else {
+            match self
+                .context
+                .symbol_table
+                .lookup_symbol(ScopeId::first(), class_name)
+            {
+                Some(entry) => entry.id,
+                None => return Ok(()), // Not pre-registered, skip
+            }
         };
 
         // If class_fields already has entries for this class, skip (already registered)
         if self.class_fields.contains_key(&class_symbol) {
             return Ok(());
         }
+
+        // Field annotations and parent arguments use the class's parameters,
+        // including when a caller precedes this declaration.
+        let type_param_map = self.function_type_parameter_map(&class_decl.type_params)?;
+        let has_type_params = !type_param_map.is_empty();
+        if has_type_params {
+            let ordered = class_decl
+                .type_params
+                .iter()
+                .filter_map(|p| {
+                    let name = self.context.string_interner.get_id(&p.name)?;
+                    type_param_map.get(&name).copied()
+                })
+                .collect::<Vec<_>>();
+            self.context
+                .symbol_table
+                .set_class_type_params(class_symbol, ordered.clone());
+            self.class_type_params.insert(class_symbol, ordered);
+            self.context.push_type_parameters(type_param_map);
+        }
+        let parent = class_decl
+            .extends
+            .as_ref()
+            .and_then(|parent| self.lower_type(parent).ok());
+        self.context
+            .symbol_table
+            .set_class_super_type(class_symbol, parent);
 
         // Initialize the field list
         self.class_fields.insert(class_symbol, Vec::new());
@@ -888,6 +922,9 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        if has_type_params {
+            self.context.pop_type_parameters();
+        }
         Ok(())
     }
 

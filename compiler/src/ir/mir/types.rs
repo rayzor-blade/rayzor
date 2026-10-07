@@ -872,8 +872,40 @@ impl<'a> HirToMirContext<'a> {
                     return IrType::TypeVar(name);
                 }
             }
+            if let Some(TypeKind::Function {
+                params,
+                return_type,
+                ..
+            }) = self.type_table.get(type_id).map(|t| &t.kind)
+            {
+                return IrType::Function {
+                    params: params
+                        .iter()
+                        .map(|ty| self.convert_type_or_type_var(*ty, type_param_names))
+                        .collect(),
+                    return_type: Box::new(
+                        self.convert_type_or_type_var(*return_type, type_param_names),
+                    ),
+                    varargs: false,
+                };
+            }
         }
         self.convert_type(type_id)
+    }
+
+    pub(crate) fn current_type_param_names(&self) -> Vec<String> {
+        self.builder
+            .current_function
+            .and_then(|id| self.builder.module.functions.get(&id))
+            .map(|function| {
+                function
+                    .signature
+                    .type_params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Convert a value to a string pointer

@@ -5422,7 +5422,7 @@ impl<'a> AstLowering<'a> {
     }
 
     /// The declared parameter types of a class's constructor.
-    pub(crate) fn constructor_param_types(&self, class_type: TypeId) -> Option<Vec<TypeId>> {
+    pub(crate) fn constructor_param_types(&mut self, class_type: TypeId) -> Option<Vec<TypeId>> {
         let class_symbol = self.resolve_type_to_class_symbol(class_type)?;
         let ctor = self
             .class_constructor_symbols
@@ -5445,8 +5445,51 @@ impl<'a> AstLowering<'a> {
                     .lookup_symbol(sym.scope_id, new_name)
                     .filter(|s| s.kind == crate::tast::symbols::SymbolKind::Function)
                     .map(|s| s.id)
-            })?;
-        self.function_param_types_from_symbol(ctor)
+            });
+        let params = if let Some(ctor) = ctor {
+            self.function_param_types_from_symbol(ctor)?
+        } else {
+            let new_name = self.context.intern_string("new");
+            let sig = self.resolve_declared_method_sig(class_symbol, new_name, false)?;
+            let type_params = self
+                .context
+                .symbol_table
+                .get_class_type_params(class_symbol)
+                .into_iter()
+                .flatten()
+                .filter_map(|ty| {
+                    let table = self.context.type_table.borrow();
+                    let TypeKind::TypeParameter { symbol_id, .. } = &table.get(*ty)?.kind else {
+                        return None;
+                    };
+                    Some((self.context.symbol_table.get_symbol(*symbol_id)?.name, *ty))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let has_type_params = !type_params.is_empty();
+            if has_type_params {
+                self.context.push_type_parameters(type_params);
+            }
+            let dynamic = self.context.type_table.borrow().dynamic_type();
+            let params = sig
+                .params
+                .iter()
+                .map(|hint| {
+                    hint.as_ref()
+                        .and_then(|hint| self.lower_type(hint).ok())
+                        .unwrap_or(dynamic)
+                })
+                .collect::<Vec<_>>();
+            if has_type_params {
+                self.context.pop_type_parameters();
+            }
+            params
+        };
+        Some(
+            params
+                .into_iter()
+                .map(|param| self.substitute_receiver_type(param, class_type))
+                .collect(),
+        )
     }
 
     pub(crate) fn function_param_types_from_symbol(&self, sym_id: SymbolId) -> Option<Vec<TypeId>> {
