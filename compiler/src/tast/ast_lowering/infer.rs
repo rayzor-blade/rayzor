@@ -754,73 +754,138 @@ impl<'a> AstLowering<'a> {
                 // all downstream arithmetic typing.
                 // A typedef of the receiver's type (`V<T> = Vector<T>`) is
                 // its target, arguments included.
-                let receiver_ty = {
-                    let type_table = self.context.type_table.borrow();
-                    let mut t = array.expr_type;
-                    for _ in 0..4 {
-                        match type_table.get(t).map(|i| &i.kind) {
-                            Some(crate::tast::core::TypeKind::TypeAlias {
-                                target_type, ..
-                            }) => t = *target_type,
-                            _ => break,
+                let mut receiver_ty = array.expr_type;
+                let mut visited = std::collections::BTreeSet::new();
+                while visited.len() < 32 && visited.insert(receiver_ty) {
+                    let accessor_sym = {
+                        let type_table = self.context.type_table.borrow();
+                        match type_table.get(receiver_ty).map(|t| &t.kind) {
+                            Some(TypeKind::TypeAlias { target_type, .. }) => {
+                                receiver_ty = *target_type;
+                                continue;
+                            }
+                            Some(crate::tast::core::TypeKind::Array { element_type }) => {
+                                return Ok(*element_type);
+                            }
+                            Some(crate::tast::core::TypeKind::Map { value_type, .. }) => {
+                                // `m[k]` on a Map literal resolves to the value type.
+                                return Ok(*value_type);
+                            }
+                            Some(crate::tast::core::TypeKind::Class {
+                                symbol_id,
+                                type_args,
+                                ..
+                            }) => {
+                                // haxe.ds.IntMap/StringMap/ObjectMap are extern classes
+                                // whose `get` yields the value type argument. Match on the
+                                // qualified name so a user class named `IntMap` cannot collide.
+                                let class_name = self
+                                    .context
+                                    .symbol_table
+                                    .get_symbol(*symbol_id)
+                                    .and_then(|s| s.qualified_name)
+                                    .and_then(|n| self.context.string_interner.get(n));
+                                match class_name {
+                                    Some("haxe.ds.IntMap") | Some("haxe.ds.StringMap") => {
+                                        return Ok(type_args
+                                            .first()
+                                            .copied()
+                                            .unwrap_or_else(|| type_table.dynamic_type()));
+                                    }
+                                    Some("haxe.ds.ObjectMap") => {
+                                        return Ok(type_args
+                                            .get(1)
+                                            .copied()
+                                            .unwrap_or_else(|| type_table.dynamic_type()));
+                                    }
+                                    _ => Some(*symbol_id),
+                                }
+                            }
+                            Some(crate::tast::core::TypeKind::Abstract { symbol_id, .. }) => {
+                                Some(*symbol_id)
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(class_sym) = accessor_sym {
+                        let get_sym = {
+                            let table = self.context.type_table.borrow();
+                            let is_abstract = matches!(
+                                table.get(receiver_ty).map(|t| &t.kind),
+                                Some(TypeKind::Abstract { .. })
+                            );
+                            let is_accessor = |symbol: SymbolId| {
+                                self.context.symbol_table.get_symbol(symbol).is_some_and(|s| {
+                                    s.flags.contains(crate::tast::symbols::SymbolFlags::ARRAY_ACCESS)
+                                        && !s.is_static()
+                                        && matches!(table.get(s.type_id).map(|t| &t.kind), Some(TypeKind::Function { params, .. }) if params.len() == 1)
+                                })
+                            };
+                            let named = self.find_wrapper_get_method(class_sym);
+                            if is_abstract {
+                                named
+                                    .filter(|s| is_accessor(*s))
+                                    .or_else(|| {
+                                        self.class_methods
+                                            .get(&class_sym)?
+                                            .iter()
+                                            .map(|(_, symbol, _)| *symbol)
+                                            .find(|s| is_accessor(*s))
+                                    })
+                                    .or_else(|| {
+                                        let scope = self
+                                            .context
+                                            .symbol_table
+                                            .get_symbol(class_sym)?
+                                            .scope_id;
+                                        self.context
+                                            .symbol_table
+                                            .symbols_in_scope(scope)
+                                            .into_iter()
+                                            .map(|s| s.id)
+                                            .find(|s| is_accessor(*s))
+                                    })
+                            } else {
+                                named
+                            }
+                        };
+                        if let Some(get_sym) = get_sym {
+                            if let Ok(ret) =
+                                self.infer_method_call_return_type(get_sym, receiver_ty)
+                            {
+                                if ret.is_valid() {
+                                    return Ok(ret);
+                                }
+                            }
                         }
                     }
-                    t
-                };
-                let accessor_sym = {
-                    let type_table = self.context.type_table.borrow();
-                    match type_table.get(receiver_ty).map(|t| &t.kind) {
-                        Some(crate::tast::core::TypeKind::Array { element_type }) => {
-                            return Ok(*element_type);
-                        }
-                        Some(crate::tast::core::TypeKind::Map { value_type, .. }) => {
-                            // `m[k]` on a Map literal resolves to the value type.
-                            return Ok(*value_type);
-                        }
-                        Some(crate::tast::core::TypeKind::Class {
+                    // Explicit accessors take priority over the instantiated storage type.
+                    let underlying = match self
+                        .context
+                        .type_table
+                        .borrow()
+                        .get(receiver_ty)
+                        .map(|t| &t.kind)
+                    {
+                        Some(TypeKind::Abstract {
                             symbol_id,
-                            type_args,
+                            underlying,
                             ..
-                        }) => {
-                            // haxe.ds.IntMap/StringMap/ObjectMap are extern classes
-                            // whose `get` yields the value type argument. Match on the
-                            // qualified name so a user class named `IntMap` cannot collide.
-                            let class_name = self
-                                .context
-                                .symbol_table
-                                .get_symbol(*symbol_id)
-                                .and_then(|s| s.qualified_name)
-                                .and_then(|n| self.context.string_interner.get(n));
-                            match class_name {
-                                Some("haxe.ds.IntMap") | Some("haxe.ds.StringMap") => {
-                                    return Ok(type_args
-                                        .first()
-                                        .copied()
-                                        .unwrap_or_else(|| type_table.dynamic_type()));
-                                }
-                                Some("haxe.ds.ObjectMap") => {
-                                    return Ok(type_args
-                                        .get(1)
-                                        .copied()
-                                        .unwrap_or_else(|| type_table.dynamic_type()));
-                                }
-                                _ => Some(*symbol_id),
+                        }) => underlying.or_else(|| {
+                            // Instantiated abstract annotations may only retain
+                            // their symbol and arguments. Resolve the storage
+                            // type from the declaration before substituting them.
+                            let declared = self.context.symbol_table.get_symbol(*symbol_id)?;
+                            let table = self.context.type_table.borrow();
+                            match table.get(declared.type_id).map(|t| &t.kind) {
+                                Some(TypeKind::Abstract { underlying, .. }) => *underlying,
+                                _ => None,
                             }
-                        }
-                        Some(crate::tast::core::TypeKind::Abstract { symbol_id, .. }) => {
-                            Some(*symbol_id)
-                        }
+                        }),
                         _ => None,
-                    }
-                };
-                if let Some(class_sym) = accessor_sym {
-                    if let Some(get_sym) = self.find_wrapper_get_method(class_sym) {
-                        if let Ok(ret) = self.infer_method_call_return_type(get_sym, receiver_ty) {
-                            if ret.is_valid() {
-                                return Ok(ret);
-                            }
-                        }
-                    }
+                    };
+                    let Some(underlying) = underlying else { break };
+                    receiver_ty = self.substitute_receiver_type(underlying, receiver_ty);
                 }
                 Ok(self.context.type_table.borrow().dynamic_type())
             }
