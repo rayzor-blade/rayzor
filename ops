@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1791392068,"nonce":"uktrIqErI7SuWqAj8ox1xqdowlE=","message":"Landed as d9d6d56f1474c1bfdc7d3fe28874a0c66c85408c; original Issue12028 now passes all four assertions.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1791392072,"nonce":"O9Dl8POkQRxOWDq7Trdy21Jk5CI=","status":2}]}
