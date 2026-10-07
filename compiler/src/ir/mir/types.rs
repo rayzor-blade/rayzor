@@ -90,23 +90,32 @@ impl<'a> HirToMirContext<'a> {
     /// the instantiation's. `Val<Float>` carries Float in its type_args; this
     /// hands it back so the conversion sees an f64.
     ///
-    /// Deliberately narrow: only a bare type parameter as the whole underlying,
-    /// and only when the instantiation supplies exactly one argument. With more
-    /// than one, matching a parameter to its argument needs the declaration's
-    /// parameter ORDER, which is not recorded on the type. Returning None then
-    /// keeps the previous behaviour rather than guessing a position.
+    /// Bind a bare storage parameter using the declaration's parameter order.
     fn substitute_abstract_type_arg(
         &self,
+        abstract_symbol: SymbolId,
         underlying: TypeId,
         type_args: &[TypeId],
     ) -> Option<TypeId> {
-        if type_args.len() != 1 {
+        let Some(TypeKind::TypeParameter { symbol_id, .. }) =
+            self.type_table.get(underlying).map(|t| &t.kind)
+        else {
             return None;
-        }
-        match self.type_table.get(underlying).map(|t| &t.kind) {
-            Some(TypeKind::TypeParameter { .. }) => Some(type_args[0]),
-            _ => None,
-        }
+        };
+        let params = self.symbol_table.get_class_type_params(abstract_symbol)?;
+        let position = params.iter().position(|param| {
+            matches!(self.type_table.get(*param).map(|t| &t.kind),
+                Some(TypeKind::TypeParameter { symbol_id: param_symbol, .. }) if param_symbol == symbol_id)
+        }).or_else(|| {
+            // Imported declarations can retain another symbol for the same parameter.
+            let name = self.symbol_table.get_symbol(*symbol_id)?.name;
+            params.iter().position(|param| {
+                matches!(self.type_table.get(*param).map(|t| &t.kind),
+                    Some(TypeKind::TypeParameter { symbol_id: param_symbol, .. })
+                    if self.symbol_table.get_symbol(*param_symbol).is_some_and(|s| s.name == name))
+            })
+        })?;
+        type_args.get(position).copied()
     }
 
     /// The reference kind of a field slot, for reflection; the IrType of
@@ -359,33 +368,15 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
-                // A pre-registered abstract's TypeId can predate its declaration
-                // lowering and carry no underlying (`abstract Lazy<T>(()->T)`
-                // reached signatures as underlying-less, fell through to the
-                // i32 default below, and every Lazy VALUE -- a closure pointer
-                // -- was truncated to 32 bits and later jumped through). The
-                // symbol's own type is updated when the declaration lowers, so
-                // when THIS id is the stale view, defer to the symbol's.
-                if underlying.is_none() {
-                    if let Some(sym_ty) = self
-                        .symbol_table
-                        .get_symbol(*symbol_id)
-                        .map(|sym| sym.type_id)
-                        .filter(|t| t.is_valid() && *t != type_id)
-                    {
-                        let has_underlying = matches!(
-                            self.type_table.get(sym_ty).map(|ti| &ti.kind),
-                            Some(TypeKind::Abstract {
-                                underlying: Some(_),
-                                ..
-                            })
-                        );
-                        if has_underlying {
-                            return self.convert_type(sym_ty);
-                        }
+                // Recover storage from the declaration while retaining this
+                // instantiation's arguments for representation selection.
+                let underlying = underlying.or_else(|| {
+                    let declared = self.symbol_table.get_symbol(*symbol_id)?;
+                    match self.type_table.get(declared.type_id).map(|t| &t.kind) {
+                        Some(TypeKind::Abstract { underlying, .. }) => *underlying,
+                        _ => None,
                     }
-                }
-
+                });
                 if let Some(underlying_type) = underlying {
                     // A generic abstract's underlying is written in terms of its
                     // own type parameter -- `abstract Val<T>(T)` -- so converting
@@ -394,8 +385,8 @@ impl<'a> HirToMirContext<'a> {
                     // type_args: substitute before converting, or `Val<Float>`
                     // reports the erasure rather than an f64.
                     let resolved = self
-                        .substitute_abstract_type_arg(*underlying_type, type_args)
-                        .unwrap_or(*underlying_type);
+                        .substitute_abstract_type_arg(*symbol_id, underlying_type, type_args)
+                        .unwrap_or(underlying_type);
                     self.convert_type(resolved)
                 } else {
                     // Systems types (Ptr, Ref, Box, Usize) are pointer-sized abstracts.
