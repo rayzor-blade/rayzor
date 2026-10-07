@@ -590,7 +590,11 @@ impl<'a> HirToMirContext<'a> {
         let Some(abs_name) = self.resolve_abstract_name(source_type) else {
             return false;
         };
-        let Some(target_kind) = self.type_table.get(target_type).map(|t| t.kind.clone()) else {
+        let Some(target_kind) = self
+            .type_table
+            .get(self.resolve_through_aliases(target_type))
+            .map(|t| t.kind.clone())
+        else {
             return false;
         };
         self.abstract_to_rules.get(&abs_name).is_some_and(|rules| {
@@ -598,7 +602,7 @@ impl<'a> HirToMirContext<'a> {
                 r.cast_function.is_some()
                     && self
                         .type_table
-                        .get(r.to_type)
+                        .get(self.resolve_through_aliases(r.to_type))
                         .is_some_and(|t| t.kind == target_kind)
             })
         })
@@ -611,7 +615,10 @@ impl<'a> HirToMirContext<'a> {
         target_type: TypeId,
     ) -> Option<IrId> {
         let abs_name = self.resolve_abstract_name(source_type)?;
-        let target_kind = self.type_table.get(target_type).map(|t| t.kind.clone())?;
+        let target_kind = self
+            .type_table
+            .get(self.resolve_through_aliases(target_type))
+            .map(|t| t.kind.clone())?;
         let rule = self
             .abstract_to_rules
             .get(&abs_name)?
@@ -620,7 +627,7 @@ impl<'a> HirToMirContext<'a> {
                 r.cast_function.is_some()
                     && self
                         .type_table
-                        .get(r.to_type)
+                        .get(self.resolve_through_aliases(r.to_type))
                         .is_some_and(|t| t.kind == target_kind)
             })
             .cloned()?;

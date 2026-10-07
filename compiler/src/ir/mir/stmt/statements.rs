@@ -1162,6 +1162,11 @@ impl<'a> HirToMirContext<'a> {
                     if let (Some(val), Some(fn_ret_ty)) =
                         (result, self.current_function_return_type)
                     {
+                        if let Some(converted) =
+                            self.maybe_abstract_to_convert(val, e.ty, fn_ret_ty)
+                        {
+                            return Some(converted);
+                        }
                         if let Some(boxed) = self.maybe_box_for_optional(val, e.ty, fn_ret_ty) {
                             return Some(boxed);
                         }

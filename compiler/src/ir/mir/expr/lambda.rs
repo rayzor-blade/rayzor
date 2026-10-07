@@ -276,6 +276,8 @@ impl<'a> HirToMirContext<'a> {
                         | TypeKind::Bool
                         | TypeKind::String
                         | TypeKind::Void
+                        | TypeKind::Class { .. }
+                        | TypeKind::Interface { .. }
                 )
             ) || self.is_optional_primitive(ret)
         });
@@ -419,7 +421,9 @@ impl<'a> HirToMirContext<'a> {
                     },
                     _ => body.ty,
                 };
-                self.maybe_box_value(reg, value_ty, ret_ty).or(Some(reg))
+                self.maybe_abstract_to_convert(reg, value_ty, ret_ty)
+                    .or_else(|| self.maybe_box_value(reg, value_ty, ret_ty))
+                    .or(Some(reg))
             }
             (r, _) => r,
         };

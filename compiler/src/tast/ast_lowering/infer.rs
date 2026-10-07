@@ -1523,9 +1523,9 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    /// Nullable scalar function slots require boxed results. Dynamic results
-    /// use the enclosing return declaration, since generic formals can also
-    /// appear as Dynamic before their arguments have been inferred.
+    /// Nullable results and abstract conversions use the expected callback
+    /// result. Dynamic results use the enclosing return declaration because
+    /// generic formals can appear as Dynamic before inference.
     pub(crate) fn expected_lambda_return(&self, inferred: TypeId) -> TypeId {
         let tt = self.context.type_table.borrow();
         let unalias = |mut ty| {
@@ -1549,6 +1549,22 @@ impl<'a> AstLowering<'a> {
             else {
                 continue;
             };
+            if !matches!(
+                tt.get(unalias(*return_type)).map(|t| &t.kind),
+                Some(TypeKind::Dynamic | TypeKind::Void)
+            ) && self.abstract_symbol_of(inferred).is_some_and(|symbol| {
+                self.abstract_casts
+                    .get(&symbol)
+                    .is_some_and(|(_, targets)| {
+                        targets.iter().any(|target| {
+                            unalias(*target) == unalias(*return_type)
+                                || tt.get(unalias(*target)).map(|t| &t.kind)
+                                    == tt.get(unalias(*return_type)).map(|t| &t.kind)
+                        })
+                    })
+            }) {
+                return *return_type;
+            }
             let Some(TypeKind::Optional { inner_type }) =
                 tt.get(unalias(*return_type)).map(|t| &t.kind)
             else {
