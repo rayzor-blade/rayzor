@@ -145,31 +145,92 @@ pub extern "C" fn haxe_closure_dynamic_view(closure: *mut u8) -> *mut u8 {
     }
 }
 
+extern "C" fn varargs_marker(_env: usize) -> *mut u8 {
+    eprintln!("varargs closure called without packing its arguments");
+    std::process::abort();
+}
+
+/// A function box whose closure environment holds the Array<Dynamic> callback.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_reflect_make_var_args(func: *mut u8) -> *mut u8 {
+    let closure = crate::type_system::haxe_unbox_if_tag(func, crate::type_system::TYPE_FUNCTION.0);
+    let record = Box::into_raw(Box::new([
+        varargs_marker as *const () as usize,
+        closure as usize,
+    ])) as *mut u8;
+    crate::type_system::haxe_box_function_ptr(record)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_closure_is_varargs(closure: *const u8) -> bool {
+    unsafe { record_code(closure) == varargs_marker as *const () as usize }
+}
+
+/// Select a typed packing adapter when a varargs function crosses a function cast.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_closure_typed_view(closure: *mut u8, adapter: *const u8) -> *mut u8 {
+    if haxe_closure_is_varargs(closure) {
+        bound_method_record(unsafe { record_code(adapter) }, closure)
+    } else {
+        closure
+    }
+}
+
+/// Copy boxed argument slots into an escaping Array<Dynamic>.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_from_dynamic_args(slots: *const u8, count: usize) -> *mut u8 {
+    let array = Box::into_raw(Box::new(crate::haxe_array::HaxeArray {
+        ptr: std::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+        elem_size: 8,
+        flags: 0,
+    }));
+    crate::haxe_array::haxe_array_from_elements(array, slots, count, 8);
+    array as *mut u8
+}
+
 /// `Reflect.callMethod` on a function held as Dynamic: its box-shaped entry
 /// called with the array's elements. Missing trailing arguments arrive as
 /// null; the C ABI lets a callee ignore the extra registers.
 #[unsafe(no_mangle)]
-pub extern "C" fn haxe_call_method_dynamic(
-    func: *mut u8,
-    args: *const crate::haxe_array::HaxeArray,
-) -> *mut u8 {
+pub extern "C" fn haxe_call_method_dynamic(func: *mut u8, args: *mut u8) -> *mut u8 {
     let closure = crate::type_system::haxe_unbox_if_tag(func, crate::type_system::TYPE_FUNCTION.0);
     if closure.is_null() {
         return std::ptr::null_mut();
+    }
+    let layout = crate::type_system::boxed_array_slot_layout(args).unwrap_or(0);
+    let args = crate::type_system::haxe_unbox_if_tag(args, crate::type_system::TYPE_ARRAY.0)
+        as *const crate::haxe_array::HaxeArray;
+    let len = if args.is_null() {
+        0
+    } else {
+        crate::haxe_array::haxe_array_length(args)
+    };
+    let argument = |i| {
+        crate::haxe_array::box_erased_array_slot(
+            crate::haxe_array::haxe_array_get_i64(args, i) as u64,
+            layout,
+        )
+    };
+    if haxe_closure_is_varargs(closure) {
+        let slots: Vec<*mut u8> = (0..len).map(argument).collect();
+        let array = haxe_array_from_dynamic_args(slots.as_ptr() as *const u8, len);
+        let boxed = crate::type_system::haxe_box_array_ptr(array, 0);
+        let callback = unsafe { *(closure as *const *mut u8).add(1) };
+        let view = haxe_closure_dynamic_view(callback);
+        let (code, env) = unsafe { (*(view as *const usize), *(view as *const usize).add(1)) };
+        let f: extern "C" fn(usize, *mut u8) -> *mut u8 = unsafe { std::mem::transmute(code) };
+        return f(env, boxed);
     }
     let view = haxe_closure_dynamic_view(closure);
     let (code, env) = unsafe { (*(view as *const usize), *(view as *const usize).add(1)) };
     if code == 0 {
         return std::ptr::null_mut();
     }
-    let len = if args.is_null() {
-        0
-    } else {
-        crate::haxe_array::haxe_array_length(args)
-    };
     let mut a = [0i64; 7];
     for (i, slot) in a.iter_mut().enumerate().take(len) {
-        *slot = crate::haxe_array::haxe_array_get_i64(args, i);
+        *slot = argument(i) as i64;
     }
     let f: extern "C" fn(usize, i64, i64, i64, i64, i64, i64, i64) -> *mut u8 =
         unsafe { std::mem::transmute(code) };

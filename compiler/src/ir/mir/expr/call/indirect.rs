@@ -446,19 +446,7 @@ impl<'a> HirToMirContext<'a> {
         arg_regs: &[IrId],
     ) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-        let dynamic_ty = self.type_table.dynamic_type();
-        let mut boxed_args = Vec::with_capacity(arg_regs.len());
-        for (a, reg) in args.iter().zip(arg_regs) {
-            let boxed = self.maybe_box_value(*reg, a.ty, dynamic_ty).unwrap_or(*reg);
-            let boxed = match self.builder.get_register_type(boxed) {
-                Some(IrType::Ptr(_)) | None => boxed,
-                Some(other) => self
-                    .builder
-                    .build_cast(boxed, other, ptr_u8.clone())
-                    .unwrap_or(boxed),
-            };
-            boxed_args.push(boxed);
-        }
+        let boxed_args = self.box_dynamic_call_args(args, arg_regs)?;
         let closure = match self.builder.get_register_type(closure) {
             Some(IrType::Ptr(_)) => closure,
             Some(other) => self
@@ -467,6 +455,33 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or(closure),
             None => closure,
         };
+        let is_varargs = self.get_or_register_extern_function(
+            "haxe_closure_is_varargs",
+            vec![ptr_u8.clone()],
+            IrType::Bool,
+        );
+        let packed = self.builder.create_block()?;
+        let direct = self.builder.create_block()?;
+        let merge = self.builder.create_block()?;
+        let flag = self
+            .builder
+            .build_call_direct(is_varargs, vec![closure], IrType::Bool)?;
+        self.builder.build_cond_branch(flag, packed, direct)?;
+
+        self.builder.switch_to_block(packed);
+        let array = self.pack_dynamic_call_args(&boxed_args)?;
+        let call = self.get_or_register_extern_function(
+            "haxe_call_method_dynamic",
+            vec![ptr_u8.clone(), ptr_u8.clone()],
+            ptr_u8.clone(),
+        );
+        let packed_result =
+            self.builder
+                .build_call_direct(call, vec![closure, array], ptr_u8.clone())?;
+        let packed_exit = self.builder.current_block()?;
+        self.builder.build_branch(merge)?;
+
+        self.builder.switch_to_block(direct);
         let view_fn = self.get_or_register_extern_function(
             "haxe_closure_dynamic_view",
             vec![ptr_u8.clone()],
@@ -477,13 +492,74 @@ impl<'a> HirToMirContext<'a> {
             .build_call_direct(view_fn, vec![closure], ptr_u8.clone())?;
         let signature = IrType::Function {
             params: vec![ptr_u8.clone(); boxed_args.len()],
-            return_type: Box::new(ptr_u8),
+            return_type: Box::new(ptr_u8.clone()),
             varargs: false,
         };
-        let result = self
+        let direct_result = self
             .builder
             .build_call_indirect(view, boxed_args, signature)?;
+        let direct_exit = self.builder.current_block()?;
+        self.builder.build_branch(merge)?;
+
+        self.builder.switch_to_block(merge);
+        let result = self.builder.build_phi(merge, ptr_u8)?;
+        self.builder
+            .add_phi_incoming(merge, result, packed_exit, packed_result)?;
+        self.builder
+            .add_phi_incoming(merge, result, direct_exit, direct_result)?;
         self.boxed_value_regs.insert(result);
         Some(result)
+    }
+
+    fn box_dynamic_call_args(&mut self, args: &[HirExpr], arg_regs: &[IrId]) -> Option<Vec<IrId>> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let dynamic_ty = self.type_table.dynamic_type();
+        let mut boxed_args = Vec::with_capacity(arg_regs.len());
+        for (a, reg) in args.iter().zip(arg_regs) {
+            let boxed = if self.boxed_value_regs.contains(reg) {
+                *reg
+            } else {
+                self.maybe_box_value(*reg, a.ty, dynamic_ty)?
+            };
+            let boxed = match self.builder.get_register_type(boxed) {
+                Some(IrType::Ptr(_)) | None => boxed,
+                Some(other) => self
+                    .builder
+                    .build_cast(boxed, other, ptr_u8.clone())
+                    .unwrap_or(boxed),
+            };
+            boxed_args.push(boxed);
+        }
+        Some(boxed_args)
+    }
+
+    pub(crate) fn lower_dynamic_argument_array(
+        &mut self,
+        args: &[HirExpr],
+        arg_regs: &[IrId],
+    ) -> Option<IrId> {
+        let boxed = self.box_dynamic_call_args(args, arg_regs)?;
+        self.pack_dynamic_call_args(&boxed)
+    }
+
+    pub(crate) fn pack_dynamic_call_args(&mut self, args: &[IrId]) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let slots = self.builder.build_alloc(
+            IrType::Array(Box::new(ptr_u8.clone()), args.len().max(1)),
+            None,
+        )?;
+        for (i, value) in args.iter().enumerate() {
+            let index = self.builder.build_const(IrValue::I64(i as i64))?;
+            let slot = self.builder.build_gep(slots, vec![index], ptr_u8.clone())?;
+            self.builder.build_store(slot, *value)?;
+        }
+        let count = self.builder.build_const(IrValue::U64(args.len() as u64))?;
+        let array = self.get_or_register_extern_function(
+            "haxe_array_from_dynamic_args",
+            vec![ptr_u8.clone(), IrType::U64],
+            ptr_u8.clone(),
+        );
+        self.builder
+            .build_call_direct(array, vec![slots, count], ptr_u8)
     }
 }

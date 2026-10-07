@@ -52,6 +52,7 @@ impl<'a> HirToMirContext<'a> {
             | Some(TypeKind::Class { .. })
             | Some(TypeKind::Array { .. })
             | Some(TypeKind::Anonymous { .. })
+            | Some(TypeKind::Function { .. })
             | Some(TypeKind::Enum { .. }) => self.maybe_unbox_value(value, source, target),
             _ => None,
         }

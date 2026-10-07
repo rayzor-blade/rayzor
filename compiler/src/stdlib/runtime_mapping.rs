@@ -4272,7 +4272,7 @@ impl StdlibMapping {
             map_method!(static "Reflect", "isEnumValue" => "haxe_reflect_is_enum_value", params: 1, returns: primitive,
                 types: &[PtrU8] => Bool),
             // Reflect.makeVarArgs(f:Array<Dynamic>->Dynamic):Dynamic
-            // Lowered directly in HIR->MIR as a bridge for callMethod(args-array) dispatch.
+            // Lowered in HIR->MIR to wrap the callback and retain its closure entries.
             map_method!(static "Reflect", "makeVarArgs" => "haxe_reflect_make_var_args", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
             // Reflect.getProperty(o:Dynamic, field:String):Dynamic — maps to field access

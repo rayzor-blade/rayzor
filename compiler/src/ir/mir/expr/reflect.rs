@@ -22,9 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
-    /// Lower a synthetic Reflect.makeVarArgs bridge.
-    /// Current parity path preserves the original function value so it can
-    /// still be invoked via Reflect.callMethod(args-array form).
+    /// Wrap an Array<Dynamic> callback in a function that packs its arguments.
     pub(crate) fn lower_reflect_make_var_args(
         &mut self,
         args: &[HirExpr],
@@ -37,10 +35,16 @@ impl<'a> HirToMirContext<'a> {
         };
 
         let func_val = self.lower_expression(func_expr)?;
-        // Reflect.makeVarArgs returns Dynamic in stdlib API.
-        // Box function/closure values as TYPE_FUNCTION for Reflect.isFunction parity.
-        self.box_value_for_dynamic(func_val, func_expr.ty)
-            .or(Some(func_val))
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let func = self.maybe_box_value(func_val, func_expr.ty, self.type_table.dynamic_type())?;
+        let wrap = self.get_or_register_extern_function(
+            "haxe_reflect_make_var_args",
+            vec![ptr.clone()],
+            ptr.clone(),
+        );
+        let result = self.builder.build_call_direct(wrap, vec![func], ptr)?;
+        self.boxed_value_regs.insert(result);
+        Some(result)
     }
 
     /// Element `idx` of callMethod's arguments array as raw slot bits: a box
@@ -186,7 +190,16 @@ impl<'a> HirToMirContext<'a> {
         // A function whose type is erased (held as Dynamic) is called through
         // its box-shaped entry with the array's elements.
         let fallback_single_array_call = |this: &mut Self| -> Option<IrId> {
-            let arr_arg = this.lower_expression(args_array_expr)?;
+            let arr_arg = if let HirExprKind::Array { elements } = &args_array_expr.kind {
+                let regs = elements
+                    .iter()
+                    .map(|arg| this.lower_expression(arg))
+                    .collect::<Option<Vec<_>>>()?;
+                this.lower_dynamic_argument_array(elements, &regs)?
+            } else {
+                let array = this.lower_expression(args_array_expr)?;
+                this.maybe_box_value(array, args_array_expr.ty, this.type_table.dynamic_type())?
+            };
             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
             let as_ptr = |this: &mut Self, reg: IrId| match this.builder.get_register_type(reg) {
                 Some(IrType::Ptr(_)) | None => reg,
@@ -209,16 +222,6 @@ impl<'a> HirToMirContext<'a> {
             this.maybe_unbox_for_extern_return(result, &ptr_u8, &result_type)
         };
 
-        // One parameter takes the arguments array itself only when it is an
-        // Array (makeVarArgs); a known scalar parameter gets the first element.
-        let single_param_takes_array = match self.resolve_function_type_signature(func_expr.ty) {
-            Some((params, _)) if params.len() == 1 => self
-                .type_table
-                .get(params[0])
-                .is_some_and(|ti| matches!(ti.kind, crate::tast::TypeKind::Array { .. })),
-            Some(_) => false,
-            None => true,
-        };
         let lower_with_ir_signature = |this: &mut Self,
                                        param_ir_types: Vec<IrType>,
                                        return_ir: IrType|
@@ -241,23 +244,7 @@ impl<'a> HirToMirContext<'a> {
                     args_array_reg
                 };
 
-            let call_args: Vec<IrId> = if param_ir_types.len() == 1 && single_param_takes_array {
-                // makeVarArgs-style callback: pass args array directly.
-                let target_ty = param_ir_types[0].clone();
-                let arr_arg =
-                    if let Some(actual_ty) = this.builder.get_register_type(args_array_ptr) {
-                        if actual_ty == target_ty {
-                            args_array_ptr
-                        } else {
-                            this.builder
-                                .build_cast(args_array_ptr, actual_ty, target_ty.clone())
-                                .unwrap_or(args_array_ptr)
-                        }
-                    } else {
-                        args_array_ptr
-                    };
-                vec![arr_arg]
-            } else {
+            let call_args: Vec<IrId> = {
                 let mut unpacked = Vec::with_capacity(param_ir_types.len());
                 for (idx, target_ty) in param_ir_types.iter().enumerate() {
                     let default = defaults.get(idx).cloned().flatten();
@@ -336,43 +323,6 @@ impl<'a> HirToMirContext<'a> {
         else {
             return fallback_single_array_call(self);
         };
-
-        // Special-case Array<Dynamic> callback shape (used by makeVarArgs): pass args array directly.
-        if param_type_ids.len() == 1 {
-            let type_table = self.type_table;
-            let takes_array = type_table
-                .get(param_type_ids[0])
-                .map(|ti| matches!(ti.kind, crate::tast::TypeKind::Array { .. }))
-                .unwrap_or(false);
-            if takes_array {
-                let arr_arg = self.lower_expression(args_array_expr)?;
-                let call_sig = IrType::Function {
-                    params: vec![self.convert_type(param_type_ids[0])],
-                    return_type: Box::new(self.convert_type(return_type_id)),
-                    varargs: false,
-                };
-                let result = self
-                    .builder
-                    .build_call_indirect(func_ptr, vec![arr_arg], call_sig)?;
-                if self.convert_type(return_type_id) == result_type {
-                    return Some(result);
-                }
-                if matches!(result_type, IrType::Ptr(ref inner) if matches!(inner.as_ref(), IrType::Void))
-                {
-                    if let Some(boxed) = self.box_value_for_dynamic(result, return_type_id) {
-                        return Some(boxed);
-                    }
-                }
-                if let Some(casted) = self.builder.build_cast(
-                    result,
-                    self.convert_type(return_type_id),
-                    result_type.clone(),
-                ) {
-                    return Some(casted);
-                }
-                return Some(result);
-            }
-        }
 
         // General typed path: unpack argsArray[i] as raw i64 slots then coerce into parameter types.
         let mut call_args: Vec<IrId> = Vec::new();

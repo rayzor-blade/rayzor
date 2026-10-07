@@ -563,6 +563,93 @@ impl<'a> HirToMirContext<'a> {
         Some(adapter_id)
     }
 
+    /// A typed function view that packs arguments for a varargs callback.
+    pub(crate) fn ensure_varargs_typed_adapter(&mut self, fn_type: TypeId) -> Option<IrFunctionId> {
+        let fn_type = self.resolve_through_aliases(fn_type);
+        let name = format!("__varargs_typed_adapter__{}", fn_type.as_raw());
+        if let Some(id) = self.builder.get_function_by_name(&name) {
+            return Some(id);
+        }
+        let (params, result_ty) = self.resolve_function_type_signature(fn_type)?;
+        let params: Vec<_> = params
+            .into_iter()
+            .filter(|ty| {
+                !matches!(
+                    self.type_table.get(*ty).map(|t| &t.kind),
+                    Some(TypeKind::Void)
+                )
+            })
+            .collect();
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let return_ir = self.convert_type(result_ty);
+        let mut sig = FunctionSignatureBuilder::new()
+            .param("env".to_string(), ptr.clone())
+            .returns(return_ir.clone())
+            .calling_convention(CallingConvention::Haxe);
+        for (i, ty) in params.iter().enumerate() {
+            sig = sig.param(format!("a{i}"), self.convert_type(*ty));
+        }
+        let saved = self.save_state();
+        let saved_boxes = std::mem::take(&mut self.boxed_value_regs);
+        let saved_results = std::mem::take(&mut self.interface_call_result_types);
+        self.symbol_map.clear();
+        self.strict_move_locals.clear();
+        self.reset_move_recorder();
+        let symbol = SymbolId::from_raw(u32::MAX - 8000 - self.next_wrapper_id);
+        self.next_wrapper_id += 1;
+        let id = self.builder.start_function(symbol, name, sig.build());
+        let body = (|| {
+            let env = self.builder.current_function()?.get_param_reg(0)?;
+            let closure = self.builder.build_load(env, ptr.clone())?;
+            let mut boxed_args = Vec::with_capacity(params.len());
+            for (i, ty) in params.iter().enumerate() {
+                let reg = self.builder.current_function()?.get_param_reg(i + 1)?;
+                let ir = self.convert_type(*ty);
+                let kind = self.slot_kind(Some(*ty), &ir);
+                boxed_args.push(self.closure_entry_result(
+                    Some(reg),
+                    &ir,
+                    &kind,
+                    EntryShape::Dynamic,
+                )?);
+            }
+            let array = self.pack_dynamic_call_args(&boxed_args)?;
+            let call = self.get_or_register_extern_function(
+                "haxe_call_method_dynamic",
+                vec![ptr.clone(), ptr.clone()],
+                ptr.clone(),
+            );
+            let boxed = self
+                .builder
+                .build_call_direct(call, vec![closure, array], ptr.clone())?;
+            if matches!(return_ir, IrType::Void) {
+                self.builder.build_return(None)?;
+            } else {
+                let result =
+                    self.maybe_unbox_value(boxed, self.type_table.dynamic_type(), result_ty)?;
+                let actual = self
+                    .builder
+                    .get_register_type(result)
+                    .unwrap_or(ptr.clone());
+                let result = if actual == return_ir {
+                    result
+                } else {
+                    self.builder.build_cast(result, actual, return_ir.clone())?
+                };
+                self.builder.build_return(Some(result))?;
+            }
+            Some(())
+        })();
+        self.check_move_flow();
+        self.builder.finish_function();
+        self.restore_state(saved);
+        self.boxed_value_regs = saved_boxes;
+        self.interface_call_result_types = saved_results;
+        body?;
+        self.closure_targets.insert(id, Some(fn_type));
+        Some(id)
+    }
+
     /// The slot-shaped entry of a closure target, `(env, i64..) -> i64`:
     /// what the runtime's array helpers call. None when the declared shape
     /// already is one (every parameter and the result a 64-bit slot).

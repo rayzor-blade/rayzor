@@ -928,6 +928,32 @@ impl<'a> HirToMirContext<'a> {
             return Some(value);
         }
 
+        if matches!(&target_kind_cloned, Some(TypeKind::Function { .. })) {
+            let ptr = IrType::Ptr(Box::new(IrType::U8));
+            let unbox = self.get_or_register_extern_function(
+                "haxe_unbox_if_tag",
+                vec![ptr.clone(), IrType::U32],
+                ptr.clone(),
+            );
+            let tag = self.builder.build_const(IrValue::U32(u32::MAX - 1))?;
+            let closure = self
+                .builder
+                .build_call_direct(unbox, vec![value, tag], ptr.clone())?;
+            let adapter = self.ensure_varargs_typed_adapter(target_ty)?;
+            let adapter = self.builder.build_function_ref(adapter)?;
+            let view = self.get_or_register_extern_function(
+                "haxe_closure_typed_view",
+                vec![ptr.clone(), ptr.clone()],
+                ptr.clone(),
+            );
+            let result = self
+                .builder
+                .build_call_direct(view, vec![closure, adapter], ptr)?;
+            return self
+                .builder
+                .build_bitcast(result, self.convert_type(target_ty));
+        }
+
         // `Iterator<T>`/`Iterable<T>` are structural, and a value crossing into
         // one is a raw collection or iterator, never a boxed DynamicValue.
         // Unboxing would read its first word as the box's payload, and the fresh
