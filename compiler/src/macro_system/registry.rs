@@ -66,6 +66,8 @@ pub struct MacroDefinition {
     pub body: Arc<Expr>,
     /// Whether this is a @:build macro
     pub is_build_macro: bool,
+    /// Static macros take only explicit arguments; instance macros take `ethis` first.
+    pub is_static: bool,
     /// Source file where defined
     pub source_file: String,
     /// The DEFINING file's imports, resolved once here.
@@ -278,6 +280,7 @@ impl MacroRegistry {
                 value_params,
                 body,
                 is_build_macro: false,
+                is_static: field.modifiers.contains(&Modifier::Static),
                 source_file: source_file.to_string(),
                 imports: file_imports.clone(),
                 location: SourceLocation::new(0, 0, 0, field.span.start as u32),

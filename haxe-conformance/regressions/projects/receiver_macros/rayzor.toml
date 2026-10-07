@@ -1,0 +1,5 @@
+[project]
+name = "receiver-macros"
+entry = "ReceiverMacros.hx"
+[build]
+class-paths = ["."]

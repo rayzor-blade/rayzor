@@ -1461,8 +1461,10 @@ impl<'a> AstLowering<'a> {
                     .deferred_macro_expander
                     .expect("deferred call recorded without its expander");
                 let expanded = {
-                    let mut typer =
-                        super::super::macro_defer::DeferredMacroTyper { lowering: self };
+                    let mut typer = super::super::macro_defer::DeferredMacroTyper {
+                        lowering: self,
+                        receiver: None,
+                    };
                     cell.borrow_mut()
                         .expand_deferred_call(&name, expression, &mut typer)
                 };
@@ -1476,6 +1478,10 @@ impl<'a> AstLowering<'a> {
                     }
                 }
             }
+        }
+
+        if let Some(expanded) = self.lower_receiver_macro_call(expression, expr, args)? {
+            return Ok(expanded);
         }
 
         // `e.match(pattern)` is sugar for `switch (e) { case pattern: true;

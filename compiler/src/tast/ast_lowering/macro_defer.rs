@@ -18,6 +18,189 @@ use crate::tast::TypeId;
 /// handed to the expander is visibly scoped.
 pub(crate) struct DeferredMacroTyper<'l, 'a> {
     pub lowering: &'l mut AstLowering<'a>,
+    pub receiver: Option<(&'l parser::Expr, TypeId)>,
+}
+
+impl AstLowering<'_> {
+    /// Resolve compile-time members against the typed receiver before ordinary arguments lower.
+    pub(crate) fn lower_receiver_macro_call(
+        &mut self,
+        call: &parser::Expr,
+        callee: &parser::Expr,
+        args: &[parser::Expr],
+    ) -> Result<Option<crate::tast::TypedExpression>, super::LoweringError> {
+        use crate::tast::{SymbolKind, TypedExpressionKind};
+        use parser::ExprKind;
+
+        let ExprKind::Field {
+            expr: receiver_ast,
+            field,
+            ..
+        } = &callee.kind
+        else {
+            return Ok(None);
+        };
+        let Some(registry) = self.deferred_macro_registry.as_ref() else {
+            return Ok(None);
+        };
+        if !registry.all_macros().any(|def| def.name == *field) {
+            return Ok(None);
+        }
+        fn type_path(expr: &parser::Expr) -> Option<String> {
+            match &expr.kind {
+                ExprKind::Ident(name) => Some(name.clone()),
+                ExprKind::Field { expr, field, .. } => {
+                    Some(format!("{}.{field}", type_path(expr)?))
+                }
+                _ => None,
+            }
+        }
+        if let Some(path) = type_path(receiver_ast) {
+            let first = self.context.intern_string(path.split('.').next().unwrap());
+            let bound = self.resolve_symbol_in_scope_hierarchy(first);
+            if bound
+                .and_then(|s| self.context.symbol_table.get_symbol(s))
+                .is_some_and(|s| {
+                    matches!(
+                        s.kind,
+                        SymbolKind::Class
+                            | SymbolKind::Abstract
+                            | SymbolKind::Enum
+                            | SymbolKind::TypeAlias
+                    )
+                })
+            {
+                return Ok(None);
+            }
+            if bound.is_none() && path.contains('.') {
+                let path = self.context.intern_string(&path);
+                if self.resolve_class_like_symbol_by_name(path).is_some() {
+                    return Ok(None);
+                }
+            }
+        }
+        let receiver = self.lower_expression(receiver_ast)?;
+        if matches!(receiver.kind, TypedExpressionKind::Variable { symbol_id }
+            if self.context.symbol_table.get_symbol(symbol_id).is_some_and(|s|
+                matches!(s.kind, SymbolKind::Class | SymbolKind::Abstract | SymbolKind::Enum)))
+        {
+            return Ok(None);
+        }
+        let method = self.context.intern_string(field);
+        let builtin = {
+            let tt = self.context.type_table.borrow();
+            let mut ty = receiver.expr_type;
+            for _ in 0..8 {
+                match tt.get(ty).map(|t| &t.kind) {
+                    Some(crate::tast::TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    Some(crate::tast::TypeKind::Optional { inner_type }) => ty = *inner_type,
+                    _ => break,
+                }
+            }
+            match tt.get(ty).map(|t| &t.kind) {
+                Some(crate::tast::TypeKind::Array { .. }) => Some("Array"),
+                Some(crate::tast::TypeKind::String) => Some("String"),
+                _ => None,
+            }
+        };
+        if let (Some(class), Some(index)) = (builtin, &self.static_sig_index) {
+            let resolve_file = |q: &str| {
+                self.context
+                    .namespace_resolver
+                    .resolve_qualified_path_to_file_force(q)
+            };
+            if index
+                .borrow_mut()
+                .resolve(class, field, false, &resolve_file)
+                .is_some()
+            {
+                return Ok(None);
+            }
+        }
+        let registry = self.deferred_macro_registry.as_ref().unwrap();
+        let find = |owner| {
+            let sym = self.context.symbol_table.get_symbol(owner)?;
+            let owner_name = self
+                .context
+                .string_interner
+                .get(sym.qualified_name.unwrap_or(sym.name))?;
+            registry.get_macro(&format!("{owner_name}.{field}"))
+        };
+
+        let mut class = self.resolve_type_to_class_symbol(receiver.expr_type);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut name = None;
+        let mut type_usings = Vec::new();
+        while let Some(owner) = class {
+            if !seen.insert(owner) {
+                break;
+            }
+            if let Some(def) = find(owner).filter(|def| !def.is_static) {
+                name = Some(def.qualified_name.clone());
+                break;
+            }
+            let has_field = self.class_fields.get(&owner).is_some_and(|fields| {
+                fields.iter().any(|(n, s, _)| {
+                    *n == method
+                        && self
+                            .context
+                            .symbol_table
+                            .get_symbol(*s)
+                            .is_some_and(|s| s.kind != SymbolKind::Function)
+                })
+            });
+            if has_field || self.resolve_class_method_symbol(owner, method).is_some() {
+                return Ok(None);
+            }
+            if let Some(sym) = self.context.symbol_table.get_symbol(owner) {
+                if let Some(usings) = self.type_usings.get(&sym.name) {
+                    type_usings.extend(usings.iter().copied());
+                }
+            }
+            class = self.parent_class_symbol(owner);
+        }
+        if name.is_none() {
+            let late = self
+                .unresolved_usings
+                .iter()
+                .chain(type_usings.iter())
+                .filter_map(|n| self.resolve_class_like_symbol_by_name(*n));
+            for owner in self.using_modules.iter().map(|(_, s)| *s).chain(late) {
+                if let Some(def) = find(owner).filter(|def| def.is_static) {
+                    name = Some(def.qualified_name.clone());
+                    break;
+                }
+                if self.resolve_class_method_symbol(owner, method).is_some() {
+                    return Ok(None);
+                }
+            }
+        }
+        let Some(name) = name else { return Ok(None) };
+        let mut macro_args = Vec::with_capacity(args.len() + 1);
+        macro_args.push((**receiver_ast).clone());
+        macro_args.extend_from_slice(args);
+        let macro_call = parser::Expr {
+            kind: ExprKind::Call {
+                expr: Box::new(callee.clone()),
+                args: macro_args,
+            },
+            span: call.span,
+        };
+        let cell = self.deferred_macro_expander.unwrap();
+        let expanded = {
+            let mut typer = DeferredMacroTyper {
+                lowering: self,
+                receiver: Some((receiver_ast, receiver.expr_type)),
+            };
+            cell.borrow_mut()
+                .expand_deferred_call(&name, &macro_call, &mut typer)
+        }
+        .map_err(|e| super::LoweringError::SemanticError {
+            message: format!("macro '{}' failed during typing: {}", name, e),
+            location: self.context.create_location_from_span(call.span),
+        })?;
+        self.lower_expression(&expanded).map(Some)
+    }
 }
 
 impl DeferredMacroTyper<'_, '_> {
@@ -60,6 +243,11 @@ impl DeferredMacroTyper<'_, '_> {
 
 impl MacroTyper for DeferredMacroTyper<'_, '_> {
     fn type_expr_in_scope(&mut self, expr: &parser::Expr) -> Result<TypeId, String> {
+        if let Some((receiver, ty)) = self.receiver {
+            if expr == receiver {
+                return Ok(ty);
+            }
+        }
         // A typing PROBE: lower the expression for its type and discard the
         // result. Errors raised by the probe belong to the macro (typeError
         // catches them); they must not surface as user diagnostics, so both

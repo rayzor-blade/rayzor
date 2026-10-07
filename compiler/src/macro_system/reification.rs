@@ -24,6 +24,19 @@ use std::sync::Arc;
 pub struct ReificationEngine;
 
 impl ReificationEngine {
+    fn process_name(name: &str, env: &Environment, span: Span) -> Result<String, MacroError> {
+        let Some(var) = name.strip_prefix('$') else {
+            return Ok(name.to_string());
+        };
+        match env.get(var) {
+            Some(MacroValue::String(value)) => Ok(value.to_string()),
+            _ => Err(MacroError::ReificationError {
+                message: format!("name splice '${var}' requires a String"),
+                location: span_to_location(span),
+            }),
+        }
+    }
+
     /// Reify an expression from a `macro { ... }` block.
     ///
     /// This takes the AST inside a macro block and converts it into a
@@ -119,19 +132,7 @@ impl ReificationEngine {
                 is_optional,
             } => {
                 let new_base = Self::process_expr(base, env)?;
-                let field = if let Some(name) = field.strip_prefix('$') {
-                    match env.get(name) {
-                        Some(MacroValue::String(value)) => value.to_string(),
-                        _ => {
-                            return Err(MacroError::ReificationError {
-                                message: format!("field splice '${name}' requires a String"),
-                                location: ast_bridge::span_to_location(expr.span),
-                            });
-                        }
-                    }
-                } else {
-                    field.clone()
-                };
+                let field = Self::process_name(field, env, expr.span)?;
                 Ok(Expr {
                     kind: ExprKind::Field {
                         expr: Box::new(new_base),
@@ -209,7 +210,7 @@ impl ReificationEngine {
                     .transpose()?;
                 Ok(Expr {
                     kind: ExprKind::Var {
-                        name: name.clone(),
+                        name: Self::process_name(name, env, expr.span)?,
                         type_hint: type_hint.clone(),
                         expr: new_init.map(Box::new),
                     },
@@ -219,6 +220,52 @@ impl ReificationEngine {
 
             ExprKind::Array(elements) => Ok(Expr {
                 kind: ExprKind::Array(Self::process_list(elements, env)?),
+                span: expr.span,
+            }),
+
+            ExprKind::Function(func) => {
+                let mut func = func.clone();
+                func.name = Self::process_name(&func.name, env, expr.span)?;
+                func.body = func
+                    .body
+                    .as_ref()
+                    .map(|body| Self::process_expr(body, env).map(Box::new))
+                    .transpose()?;
+                for param in &mut func.params {
+                    param.name = Self::process_name(&param.name, env, param.span)?;
+                    param.default_value = param
+                        .default_value
+                        .as_ref()
+                        .map(|e| Self::process_expr(e, env).map(Box::new))
+                        .transpose()?;
+                }
+                Ok(Expr {
+                    kind: ExprKind::Function(func),
+                    span: expr.span,
+                })
+            }
+
+            ExprKind::Arrow { params, expr: body } => Ok(Expr {
+                kind: ExprKind::Arrow {
+                    params: params.clone(),
+                    expr: Box::new(Self::process_expr(body, env)?),
+                },
+                span: expr.span,
+            }),
+
+            ExprKind::Final {
+                name,
+                type_hint,
+                expr: init,
+            } => Ok(Expr {
+                kind: ExprKind::Final {
+                    name: Self::process_name(name, env, expr.span)?,
+                    type_hint: type_hint.clone(),
+                    expr: init
+                        .as_ref()
+                        .map(|e| Self::process_expr(e, env).map(Box::new))
+                        .transpose()?,
+                },
                 span: expr.span,
             }),
 

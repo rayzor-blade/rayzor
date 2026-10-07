@@ -236,7 +236,7 @@ impl CompilationUnit {
                 }
             }
             deferred_macro_calls = expansion.deferred.clone();
-            if !deferred_macro_calls.is_empty() {
+            if kept_expander.registry().macro_count() != 0 {
                 deferred_macro_expander = Some(std::cell::RefCell::new(kept_expander));
             }
             // Surface macro expansion diagnostics to the user, not just to
@@ -378,10 +378,7 @@ impl CompilationUnit {
 
         // Re-expansion of typer-dependent macro calls at their sites.
         if let Some(ref expander_cell) = deferred_macro_expander {
-            if !deferred_macro_calls.is_empty() {
-                lowering
-                    .set_deferred_macros(expander_cell, std::mem::take(&mut deferred_macro_calls));
-            }
+            lowering.set_deferred_macros(expander_cell, std::mem::take(&mut deferred_macro_calls));
         }
 
         // Seed class_fields from previously compiled files.

@@ -3233,6 +3233,51 @@ impl MacroInterpreter {
                 return Ok(e);
             }
             e.kind = match e.kind {
+                ExprKind::Function(mut func) => {
+                    func.body = func
+                        .body
+                        .map(|body| walk(interp, *body, counter).map(Box::new))
+                        .transpose()?;
+                    for param in &mut func.params {
+                        param.default_value = param
+                            .default_value
+                            .take()
+                            .map(|e| walk(interp, *e, counter).map(Box::new))
+                            .transpose()?;
+                    }
+                    ExprKind::Function(func)
+                }
+                ExprKind::Arrow { params, expr } => ExprKind::Arrow {
+                    params,
+                    expr: Box::new(walk(interp, *expr, counter)?),
+                },
+                ExprKind::Return(inner) => ExprKind::Return(
+                    inner
+                        .map(|e| walk(interp, *e, counter).map(Box::new))
+                        .transpose()?,
+                ),
+                ExprKind::Var {
+                    name,
+                    type_hint,
+                    expr,
+                } => ExprKind::Var {
+                    name,
+                    type_hint,
+                    expr: expr
+                        .map(|e| walk(interp, *e, counter).map(Box::new))
+                        .transpose()?,
+                },
+                ExprKind::Final {
+                    name,
+                    type_hint,
+                    expr,
+                } => ExprKind::Final {
+                    name,
+                    type_hint,
+                    expr: expr
+                        .map(|e| walk(interp, *e, counter).map(Box::new))
+                        .transpose()?,
+                },
                 ExprKind::Call { expr, args } => ExprKind::Call {
                     expr: Box::new(walk(interp, *expr, counter)?),
                     args: args
