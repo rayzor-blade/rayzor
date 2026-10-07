@@ -37,7 +37,7 @@ enum SlotKind {
     Float(IrType),
     Bool,
     String(IrType),
-    Reference(IrType),
+    Reference(Option<TypeId>),
     /// An erased type parameter: raw bits.
     Erased,
     Void,
@@ -641,10 +641,11 @@ impl<'a> HirToMirContext<'a> {
                     ..
                 }) => cur = Some(*u),
                 Some(TypeKind::Class { .. })
+                | Some(TypeKind::Enum { .. })
                 | Some(TypeKind::Interface { .. })
                 | Some(TypeKind::Anonymous { .. })
                 | Some(TypeKind::Array { .. })
-                | Some(TypeKind::Function { .. }) => return SlotKind::Reference(ir_ty.clone()),
+                | Some(TypeKind::Function { .. }) => return SlotKind::Reference(Some(ty)),
                 _ => break,
             }
         }
@@ -654,7 +655,7 @@ impl<'a> HirToMirContext<'a> {
                 SlotKind::String(ir_ty.clone())
             }
             IrType::String => SlotKind::String(ir_ty.clone()),
-            IrType::Ptr(_) => SlotKind::Reference(ir_ty.clone()),
+            IrType::Ptr(_) => SlotKind::Reference(None),
             IrType::I64 => SlotKind::Erased,
             IrType::F64 | IrType::F32 => SlotKind::Float(ir_ty.clone()),
             IrType::Bool => SlotKind::Bool,
@@ -901,7 +902,10 @@ impl<'a> HirToMirContext<'a> {
                         ptr_u8.clone(),
                         self.builder.build_bitcast(r, ptr_u8.clone()),
                     ),
-                    SlotKind::Reference(_) => {
+                    SlotKind::Reference(Some(ty)) => {
+                        return self.maybe_box_value(r, *ty, self.type_table.dynamic_type());
+                    }
+                    SlotKind::Reference(None) => {
                         let bits = self.builder.build_cast(r, ret_ty.clone(), IrType::I64)?;
                         let tag = self.builder.build_const(IrValue::I32(6))?;
                         let f = self.get_or_register_extern_function(
