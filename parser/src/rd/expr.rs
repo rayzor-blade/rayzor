@@ -3,7 +3,7 @@
 use super::RdParser;
 use super::error::ParseError;
 use crate::haxe_ast::*;
-use crate::haxe_parser_expr::unescape_string;
+use crate::haxe_parser_expr::{assignment_with_metadata, unescape_string};
 use crate::token::TokenKind;
 
 /// A numeric literal's digits, without the group separators and the type
@@ -95,14 +95,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 },
                 span,
             };
-            return Ok(Expr {
-                kind: ExprKind::Assign {
-                    left: Box::new(left),
-                    op: AssignOp::Assign,
-                    right: Box::new(coalesced),
-                },
-                span,
-            });
+            return Ok(assignment_with_metadata(left, AssignOp::Assign, coalesced));
         }
 
         if self.stream.at_any(&[
@@ -135,15 +128,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 _ => unreachable!(),
             };
             let right = self.parse_assignment()?;
-            let span = left.span.merge(right.span);
-            return Ok(Expr {
-                kind: ExprKind::Assign {
-                    left: Box::new(left),
-                    op,
-                    right: Box::new(right),
-                },
-                span,
-            });
+            return Ok(assignment_with_metadata(left, op, right));
         }
 
         Ok(left)
@@ -259,20 +244,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
     pub(crate) fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         let start = self.stream.current_offset();
 
-        // Expression-level metadata: `@:privateAccess obj.field`. Haxe allows
-        // metadata on any expression, and the rest of the pipeline already
-        // carries it -- ExprKind::Meta lowers to TypedExpressionKind::Meta,
-        // which survives type checking and effect analysis and is unwrapped at
-        // HIR. Dropping it here was the only reason `@:move x` or `@:await f`
-        // could not mean anything.
-        //
-        // `@:a @:b e` nests outermost-first, so the innermost metadata sits
-        // closest to the expression it annotates. As in Haxe, `e` is a whole
-        // expression: `@:m x = 1` annotates the assignment.
+        // Metadata binds to a unary operand, outermost-first when nested.
+        // Assignment parsing lifts a target's metadata over the assignment.
         if matches!(self.stream.peek().kind, TokenKind::At | TokenKind::AtColon) {
             let metas = self.parse_metadata_list_expr();
             if !metas.is_empty() {
-                let inner = self.parse_expression()?;
+                let inner = self.parse_unary()?;
                 let mut expr = inner;
                 for meta in metas.into_iter().rev() {
                     expr = Expr {

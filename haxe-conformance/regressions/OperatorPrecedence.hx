@@ -16,6 +16,15 @@ class OperatorPrecedence {
         var range = [for (i in 1 + 1...2 * 2) i];
         check("... below arithmetic", range.length == 2 && range[0] == 2);
         check("% above *", 7 % 4 * 2 == 6);
+        check("metadata before addition", 5 * @foo 3 + 4 == 19);
+        check("nested metadata", 5 * @foo @bar 3 + @baz 4 == 19);
+        check("metadata keeps parentheses", 5 * @foo (3 + 4) == 35);
+        check("metadata with unary", -@foo 3 + 4 == 1);
+        check("metadata on ternary condition", (@foo true ? 3 : 4) == 3);
+        var assigned = 0;
+        @foo assigned = 3;
+        @foo @bar assigned += 4;
+        check("annotated assignment", assigned == 7);
         Sys.println("CONFORMANCE_OK");
     }
 }

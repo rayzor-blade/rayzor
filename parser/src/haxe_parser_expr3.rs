@@ -16,7 +16,7 @@ use crate::custom_error::ContextualError;
 use crate::haxe_ast::*;
 use crate::haxe_parser::{PResult, identifier, keyword, position, symbol, ws};
 use crate::haxe_parser_decls::function_param;
-use crate::haxe_parser_expr::expression;
+use crate::haxe_parser_expr::{expression, unary_expr};
 use crate::haxe_parser_expr2::block_expr;
 use crate::haxe_parser_types::{type_expr, type_params};
 
@@ -370,7 +370,7 @@ pub fn paren_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
 pub fn metadata_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
     let start = position(full, input);
     let (input, meta) = single_metadata_for_expr(full, input)?;
-    let (input, expr) = expression(full, input)?;
+    let (input, expr) = unary_expr(full, input)?;
     let end = position(full, input);
 
     Ok((

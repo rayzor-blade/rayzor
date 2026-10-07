@@ -117,24 +117,34 @@ pub fn assignment_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
                 continue;
             }
             let (rest, right) = assignment_expr(full, rest)?; // Right-associative
-            let end = position(full, rest);
-
-            return Ok((
-                rest,
-                Expr {
-                    kind: ExprKind::Assign {
-                        left: Box::new(left),
-                        op: *assign_op,
-                        right: Box::new(right),
-                    },
-                    span: Span::new(start, end),
-                },
-            ));
+            return Ok((rest, assignment_with_metadata(left, *assign_op, right)));
         }
     }
 
     // No assignment, return the null coalescing expression
     Ok((input, left))
+}
+
+/// Metadata on an assignment target annotates the complete assignment.
+pub(crate) fn assignment_with_metadata(left: Expr, op: AssignOp, right: Expr) -> Expr {
+    let span = left.span.merge(right.span);
+    match left.kind {
+        ExprKind::Meta { meta, expr } => Expr {
+            kind: ExprKind::Meta {
+                meta,
+                expr: Box::new(assignment_with_metadata(*expr, op, right)),
+            },
+            span,
+        },
+        _ => Expr {
+            kind: ExprKind::Assign {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            },
+            span,
+        },
+    }
 }
 
 /// Parse null coalescing expression: `a ?? b`
