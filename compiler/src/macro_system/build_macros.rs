@@ -738,7 +738,12 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
 
             ClassFieldKind::Var {
                 name: name.clone(),
-                type_hint: None,
+                type_hint: kind_obj.and_then(|kind| match kind {
+                    MacroValue::Object(fields) => fields
+                        .get("type")
+                        .and_then(|ty| super::expr_adt::type_of_value(ty, parser::Span::default())),
+                    _ => None,
+                }),
                 expr: expr.map(|e| *e),
             }
         }

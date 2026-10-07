@@ -28,7 +28,7 @@ impl AstLowering<'_> {
         params: &[parser::Type],
         args: Option<&[parser::Expr]>,
         span: parser::Span,
-    ) -> super::LoweringResult<Option<parser::Type>> {
+    ) -> super::LoweringResult<Option<Option<parser::Type>>> {
         let Some(engine) = self.generic_build_engine.clone() else {
             return Ok(None);
         };
@@ -62,7 +62,7 @@ impl AstLowering<'_> {
         let key = (symbol, type_args.clone());
         if args.is_none() || !params.is_empty() {
             if let Some(result) = self.generic_build_results.get(&key) {
-                return Ok(Some(result.clone()));
+                return Ok(Some(Some(result.clone())));
             }
         }
         if !self.generic_build_active.insert(key.clone()) {
@@ -88,10 +88,79 @@ impl AstLowering<'_> {
             message: format!("generic build for '{name}' failed: {e}"),
             location: self.context.create_location_from_span(span),
         })?;
-        if args.is_none() || !params.is_empty() {
-            self.generic_build_results.insert(key, result.clone());
+        for defined in result.defined_types {
+            self.lower_generated_type(&defined)?;
         }
-        Ok(Some(result))
+        if (args.is_none() || !params.is_empty())
+            && let Some(ty) = &result.type_hint
+        {
+            self.generic_build_results.insert(key, ty.clone());
+        }
+        Ok(Some(result.type_hint))
+    }
+
+    fn lower_generated_type(
+        &mut self,
+        defined: &crate::macro_system::context_api::DefinedType,
+    ) -> super::LoweringResult<()> {
+        let name = defined
+            .pack
+            .iter()
+            .cloned()
+            .chain(std::iter::once(defined.name.clone()))
+            .collect::<Vec<_>>()
+            .join(".");
+        if !self.generated_type_names.insert(name.clone()) {
+            return Err(super::LoweringError::SemanticError {
+                message: format!("type '{name}' is already defined"),
+                location: self
+                    .context
+                    .create_location_from_span(parser::Span::default()),
+            });
+        }
+        let declaration = crate::macro_system::expander::defined_declaration(defined);
+        // A generated declaration belongs to its package, outside the calling function.
+        let scope = self.context.current_scope;
+        let package = self.context.current_package;
+        let classes = std::mem::take(&mut self.context.class_context_stack);
+        let type_params = std::mem::take(&mut self.context.type_parameter_stack);
+        let return_type = self.context.expected_return_type.take();
+        let new_hint = self.context.expected_new_type_hint.take();
+        let switch_type = self.context.switch_discriminant_type.take();
+        let static_method = self.in_static_method;
+        let callee = self.lowering_callee;
+        let closure_depth = self.closure_depth;
+        let lambda_params = std::mem::take(&mut self.expected_lambda_params_stack);
+        let arg_types = std::mem::take(&mut self.expected_arg_type_stack);
+        let map_uses = std::mem::take(&mut self.map_first_uses);
+        self.context.current_scope = crate::tast::ScopeId::first();
+        self.context.current_package = None;
+        self.set_package_from_parts(&defined.pack);
+        self.in_static_method = false;
+        self.lowering_callee = false;
+        self.closure_depth = 0;
+        let result = (|| {
+            self.pre_register_declaration(&declaration)?;
+            if let parser::TypeDeclaration::Class(class) = &declaration {
+                self.pre_register_class_fields(class)?;
+            }
+            self.lower_declaration(&declaration)
+        })();
+        self.context.current_scope = scope;
+        self.context.current_package = package;
+        self.context.class_context_stack = classes;
+        self.context.type_parameter_stack = type_params;
+        self.context.expected_return_type = return_type;
+        self.context.expected_new_type_hint = new_hint;
+        self.context.switch_discriminant_type = switch_type;
+        self.in_static_method = static_method;
+        self.lowering_callee = callee;
+        self.closure_depth = closure_depth;
+        self.expected_lambda_params_stack = lambda_params;
+        self.expected_arg_type_stack = arg_types;
+        self.map_first_uses = map_uses;
+        self.generated_declarations.push(result?);
+        Ok(())
     }
 
     /// Resolve compile-time members against the typed receiver before ordinary arguments lower.

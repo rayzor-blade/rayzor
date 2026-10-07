@@ -13,6 +13,11 @@ pub(crate) struct GenericBuildEngine {
     pub class_registry: Arc<ClassRegistry>,
 }
 
+pub(crate) struct GenericBuildResult {
+    pub type_hint: Option<parser::Type>,
+    pub defined_types: Vec<super::context_api::DefinedType>,
+}
+
 impl GenericBuildEngine {
     pub(crate) fn definition(
         &self,
@@ -28,7 +33,7 @@ impl GenericBuildEngine {
         args: Option<&[Expr]>,
         span: parser::Span,
         typer: &mut dyn super::context_api::MacroTyper,
-    ) -> Result<parser::Type, MacroError> {
+    ) -> Result<GenericBuildResult, MacroError> {
         let location = super::errors::span_to_location(span);
         let call = info
             .class
@@ -88,7 +93,13 @@ impl GenericBuildEngine {
                 .find(|m| m.name.trim_start_matches(':') == "genericBuild")
                 .unwrap(),
         );
-        let result = if let Some(def) = self.registry.find_macro_by_name(&macro_name) {
+        let definition = self.registry.find_macro_by_name(&macro_name).or_else(|| {
+            let (owner, method) = macro_name.rsplit_once('.')?;
+            let class = self.class_registry.find_class(owner)?;
+            self.registry
+                .find_macro_by_name(&format!("{}.{method}", class.qualified_name))
+        });
+        let result = if let Some(def) = definition {
             let args = match &call.kind {
                 parser::ExprKind::Call { args, .. } => args
                     .iter()
@@ -108,17 +119,20 @@ impl GenericBuildEngine {
             Err(MacroError::Return { value: Some(v) }) => *v,
             Err(e) => return Err(e),
         };
-        if !interp.defined_types.is_empty() {
-            return Err(MacroError::ContextError {
-                method: "genericBuild".to_string(),
-                message: "types defined during generic building are not registered yet".to_string(),
-                location,
-            });
-        }
-        super::expr_adt::type_of_value(&value, span).ok_or_else(|| MacroError::ContextError {
-            method: "genericBuild".to_string(),
-            message: "expected a ComplexType result".to_string(),
-            location,
+        let type_hint = if matches!(value, super::value::MacroValue::Null) {
+            None
+        } else {
+            Some(super::expr_adt::type_of_value(&value, span).ok_or_else(|| {
+                MacroError::ContextError {
+                    method: "genericBuild".to_string(),
+                    message: "expected a ComplexType result".to_string(),
+                    location,
+                }
+            })?)
+        };
+        Ok(GenericBuildResult {
+            type_hint,
+            defined_types: interp.defined_types,
         })
     }
 }

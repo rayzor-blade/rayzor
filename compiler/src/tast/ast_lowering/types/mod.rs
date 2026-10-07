@@ -208,6 +208,16 @@ impl<'a> AstLowering<'a> {
                 }
                 if let Some((symbol_id, symbol_kind)) = symbol_info {
                     if let Some(built) = self.generic_build_type(symbol_id, params, None, *span)? {
+                        let Some(built) = built else {
+                            use crate::macro_system::context_api::MacroTyper;
+                            let id = super::macro_defer::DeferredMacroTyper {
+                                lowering: self,
+                                receiver: None,
+                            }
+                            .fresh_monomorph();
+                            self.generic_build_monomorphs.insert(id);
+                            return Ok(id);
+                        };
                         if !self.generic_build_resolving.insert(symbol_id) {
                             return Err(LoweringError::SemanticError {
                                 message: format!("recursive generic build result for '{name}'"),

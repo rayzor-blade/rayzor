@@ -1101,6 +1101,7 @@ fn test_context_defined_types() {
         kind: DefinedTypeKind::Class,
         fields: vec![],
         field_values: vec![],
+        type_params: vec![],
         pos: unknown_loc(),
     });
 

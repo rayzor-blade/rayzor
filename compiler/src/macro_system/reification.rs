@@ -77,7 +77,11 @@ impl ReificationEngine {
         Ok(super::expr_adt::complex_type_of(&splice(ty, env)?))
     }
 
-    fn process_name(name: &str, env: &Environment, span: Span) -> Result<String, MacroError> {
+    pub(crate) fn process_name(
+        name: &str,
+        env: &Environment,
+        span: Span,
+    ) -> Result<String, MacroError> {
         let Some(var) = name.strip_prefix('$') else {
             return Ok(name.to_string());
         };

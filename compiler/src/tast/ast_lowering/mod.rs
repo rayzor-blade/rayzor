@@ -1640,6 +1640,9 @@ pub struct AstLowering<'a> {
     generic_build_active: std::collections::BTreeSet<(SymbolId, Vec<TypeId>)>,
     generic_build_engine: Option<Rc<crate::macro_system::generic_build::GenericBuildEngine>>,
     generic_build_resolving: std::collections::BTreeSet<SymbolId>,
+    generic_build_monomorphs: std::collections::BTreeSet<TypeId>,
+    generated_declarations: Vec<TypedDeclaration>,
+    generated_type_names: std::collections::BTreeSet<String>,
     class_value_bindings: BTreeMap<SymbolId, SymbolId>,
     /// Deferred call sites by (span.start, span.end), mapped to the registry
     /// name the expander resolved at expansion time.

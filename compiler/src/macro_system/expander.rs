@@ -1341,7 +1341,9 @@ fn module_types(file: &HaxeFile) -> Vec<MacroValue> {
 
 /// A type `Context.defineType` defined, as a declaration of the module whose
 /// macro defined it.
-fn defined_declaration(defined: &super::context_api::DefinedType) -> parser::TypeDeclaration {
+pub(crate) fn defined_declaration(
+    defined: &super::context_api::DefinedType,
+) -> parser::TypeDeclaration {
     let fields = defined
         .field_values
         .iter()
@@ -1352,7 +1354,7 @@ fn defined_declaration(defined: &super::context_api::DefinedType) -> parser::Typ
         access: None,
         modifiers: Vec::new(),
         name: defined.name.clone(),
-        type_params: Vec::new(),
+        type_params: defined.type_params.clone(),
         extends: None,
         implements: Vec::new(),
         fields,

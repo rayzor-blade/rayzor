@@ -396,7 +396,7 @@ impl<'a> AstLowering<'a> {
                 if let Some(built) =
                     self.generic_build_type(symbol_id, &[], None, expression.span)?
                 {
-                    if let Type::Path { path, .. } = built {
+                    if let Some(Type::Path { path, .. }) = built {
                         let mut parts = path.package;
                         parts.push(path.name);
                         if let Some(sub) = path.sub {
@@ -1050,7 +1050,7 @@ impl<'a> AstLowering<'a> {
                     if let Some(built) =
                         self.generic_build_type(symbol, params, Some(args), expression.span)?
                     {
-                        if let Type::Path { path, params, .. } = built {
+                        if let Some(Type::Path { path, params, .. }) = built {
                             self.generic_build_resolving.insert(symbol);
                             let result = self.lower_expression(&Expr {
                                 kind: ExprKind::New {
@@ -2640,7 +2640,11 @@ impl<'a> AstLowering<'a> {
 
                 // Determine variable type (use already-resolved declared_type if available)
                 let var_type = if let Some(dt) = declared_type {
-                    dt
+                    if self.generic_build_monomorphs.contains(&dt) {
+                        initializer.expr_type
+                    } else {
+                        dt
+                    }
                 } else {
                     initializer.expr_type
                 };
@@ -2822,7 +2826,11 @@ impl<'a> AstLowering<'a> {
 
                 // Determine variable type
                 let var_type = if let Some(dt) = declared_type {
-                    dt
+                    if self.generic_build_monomorphs.contains(&dt) {
+                        initializer.expr_type
+                    } else {
+                        dt
+                    }
                 } else {
                     // Infer type from initializer
                     initializer.expr_type

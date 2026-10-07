@@ -291,6 +291,7 @@ pub struct DefinedType {
     /// The fields as the macro built them, for lowering the type into the
     /// module.
     pub field_values: Vec<MacroValue>,
+    pub type_params: Vec<parser::TypeParam>,
     /// Position where defineType was called
     pub pos: SourceLocation,
 }
@@ -395,7 +396,32 @@ impl MacroContext {
         if let Some(&bound) = self.mono_bindings.get(&id) {
             return Some(MacroValue::Type(bound));
         }
-        self.typer.as_mut()?.get().type_ref_view(id)
+        let mut view = self.typer.as_mut()?.get().type_ref_view(id)?;
+        if self.local_type == Some(id)
+            && let Some(class) = &self.build_class
+            && let MacroValue::Object(fields) = &mut view
+        {
+            let fields = Arc::make_mut(fields);
+            fields.insert(
+                "pack".to_string(),
+                MacroValue::Array(Arc::new(
+                    class
+                        .pack
+                        .iter()
+                        .map(|p| MacroValue::String(Arc::from(p.as_str())))
+                        .collect(),
+                )),
+            );
+            fields.insert(
+                "module".to_string(),
+                self.current_module
+                    .as_deref()
+                    .map(|m| MacroValue::String(Arc::from(m)))
+                    .unwrap_or(MacroValue::Null),
+            );
+            fields.insert("pos".to_string(), MacroValue::Position(self.call_position));
+        }
+        Some(view)
     }
 
     pub fn type_children(&mut self, id: TypeId) -> Option<Vec<TypeId>> {
@@ -1469,12 +1495,41 @@ fn value_to_defined_type(
         .filter_map(value_to_build_field)
         .collect();
 
+    let type_params = match obj.get("params") {
+        Some(MacroValue::Array(params)) => params
+            .iter()
+            .filter_map(|param| {
+                let MacroValue::Object(param) = param else {
+                    return None;
+                };
+                let constraints = match param.get("constraints") {
+                    Some(MacroValue::Array(types)) => types
+                        .iter()
+                        .filter_map(|ty| {
+                            super::expr_adt::type_of_value(ty, parser::Span::default())
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                Some(parser::TypeParam {
+                    name: param.get("name")?.as_string()?.to_string(),
+                    constraints,
+                    variance: parser::Variance::Invariant,
+                    meta: Vec::new(),
+                    default_type: None,
+                    span: parser::Span::default(),
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     Ok(DefinedType {
         pack,
         name,
         kind,
         fields,
         field_values,
+        type_params,
         pos: location,
     })
 }
@@ -1641,6 +1696,7 @@ mod tests {
             kind: DefinedTypeKind::Class,
             fields: Vec::new(),
             field_values: Vec::new(),
+            type_params: Vec::new(),
             pos: SourceLocation::unknown(),
         };
         let result = ctx.define_type(td, SourceLocation::unknown());
@@ -1657,6 +1713,7 @@ mod tests {
             kind: DefinedTypeKind::Class,
             fields: Vec::new(),
             field_values: Vec::new(),
+            type_params: Vec::new(),
             pos: SourceLocation::unknown(),
         };
         ctx.define_type(td.clone(), SourceLocation::unknown())

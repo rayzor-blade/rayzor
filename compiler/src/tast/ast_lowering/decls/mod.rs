@@ -176,6 +176,18 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        for declaration in std::mem::take(&mut self.generated_declarations) {
+            match declaration {
+                TypedDeclaration::Function(function) => typed_file.functions.push(function),
+                TypedDeclaration::Class(class) => typed_file.classes.push(class),
+                TypedDeclaration::Interface(interface) => typed_file.interfaces.push(interface),
+                TypedDeclaration::Enum(enumeration) => typed_file.enums.push(enumeration),
+                TypedDeclaration::TypeAlias(alias) => typed_file.type_aliases.push(alias),
+                TypedDeclaration::Abstract(abstract_decl) => {
+                    typed_file.abstracts.push(abstract_decl)
+                }
+            }
+        }
         // Resolve any deferred type references (second pass)
         if let Err(e) = self.resolve_deferred_types() {
             self.collected_errors.push(e);
@@ -317,7 +329,7 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Lower a declaration
-    fn lower_declaration(
+    pub(crate) fn lower_declaration(
         &mut self,
         declaration: &TypeDeclaration,
     ) -> LoweringResult<TypedDeclaration> {

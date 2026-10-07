@@ -1072,7 +1072,9 @@ impl MacroInterpreter {
     fn assign_base(&mut self, base: &Expr, value: MacroValue) -> Result<(), MacroError> {
         match &base.kind {
             ExprKind::Ident(name) => {
-                self.env.set(name, value);
+                if !self.env.set(name, value.clone()) {
+                    self.write_class_static(name, value);
+                }
                 Ok(())
             }
             ExprKind::This => {
@@ -1295,6 +1297,16 @@ impl MacroInterpreter {
                     (func.name.clone(), "FFun", func.body.as_deref().cloned())
                 }
             };
+            let field_name = ReificationEngine::process_name(&field_name, &self.env, field.span)?;
+            let type_hint = match &field.kind {
+                parser::ClassFieldKind::Var { type_hint, .. }
+                | parser::ClassFieldKind::Final { type_hint, .. }
+                | parser::ClassFieldKind::Property { type_hint, .. } => type_hint.as_ref(),
+                _ => None,
+            };
+            let field_type = type_hint
+                .map(|ty| ReificationEngine::reify_type(ty, &self.env))
+                .transpose()?;
             // A function's parameters and declared return type ride along.
             let signature = match &field.kind {
                 parser::ClassFieldKind::Function(func) => Some((
@@ -1319,6 +1331,9 @@ impl MacroInterpreter {
             let mut kind = BTreeMap::new();
             kind.insert("kind".to_string(), string(kind_tag));
             kind.insert("expr".to_string(), expr);
+            if let Some(ty) = field_type {
+                kind.insert("type".to_string(), ty);
+            }
             if let Some((args, ret)) = signature {
                 kind.insert("args".to_string(), MacroValue::Array(Arc::new(args)));
                 kind.insert("ret".to_string(), ret);
