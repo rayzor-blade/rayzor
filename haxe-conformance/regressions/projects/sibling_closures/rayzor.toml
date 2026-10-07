@@ -1,0 +1,6 @@
+[project]
+name = "sibling-closures-regression"
+entry = "unit/SiblingClosures.hx"
+
+[build]
+class-paths = ["."]

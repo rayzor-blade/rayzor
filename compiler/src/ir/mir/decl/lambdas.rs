@@ -29,16 +29,23 @@ impl<'a> HirToMirContext<'a> {
         captures: &[HirCapture],
     ) -> LambdaContext {
         let func_id = self.builder.module.alloc_function_id();
-        // The lambda name carries a sanitized module prefix: `lambda_counter`
-        // resets per lowering instance, so a bare `<lambda_N>` is unique within
-        // a file but not across them, and the backend binds functions by name —
-        // two same-named closures from different modules would collapse into one.
-        let module_prefix: String = self
-            .builder
-            .module
-            .name
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        // A MIR module's name is its package; sibling files need distinct
+        // closure identities too. Escape punctuation so package separators
+        // cannot collide with underscores in identifiers.
+        let source_name = std::path::Path::new(&self.builder.module.source_file)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("module");
+        let module_name = format!("{}.{}", self.builder.module.name, source_name);
+        let module_prefix: String = module_name
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() {
+                    char::from(byte).to_string()
+                } else {
+                    format!("_{byte:02x}")
+                }
+            })
             .collect();
         let lambda_name = format!("<lambda_{}__{}>", module_prefix, self.lambda_counter);
         self.lambda_counter += 1;
