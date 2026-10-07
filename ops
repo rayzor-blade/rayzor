@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1791384487,"nonce":"iUH0Xroey+wn9wCzHlTHWCjfS2M=","message":"Landed as e67d0109b9735f592e2e5e68395f70631c879b3d. Verified 886/1094 with no lost passes and all 144 regressions passing; closing the forward-member and generic-callback scope described here.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1791384496,"nonce":"1FyjUrx40JMkDnEvdi6nhU7jC94=","status":2}]}
