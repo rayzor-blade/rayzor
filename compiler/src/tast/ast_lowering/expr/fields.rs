@@ -15,6 +15,131 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    pub(crate) fn forwarded_static_expression(&mut self, expression: &Expr) -> Option<Expr> {
+        fn path(expression: &Expr) -> Option<Vec<String>> {
+            match &expression.kind {
+                ExprKind::Ident(name) => Some(vec![name.clone()]),
+                ExprKind::Field {
+                    expr,
+                    field,
+                    is_optional: false,
+                } => {
+                    let mut parts = path(expr)?;
+                    parts.push(field.clone());
+                    Some(parts)
+                }
+                _ => None,
+            }
+        }
+        let ExprKind::Field {
+            expr,
+            field,
+            is_optional,
+        } = &expression.kind
+        else {
+            return None;
+        };
+        let parts = path(expr)?;
+        let first = self.context.intern_string(parts.first()?);
+        let base = self.resolve_symbol_in_scope_hierarchy(first);
+        if base
+            .and_then(|id| self.context.symbol_table.get_symbol(id))
+            .is_some_and(|symbol| {
+                matches!(
+                    symbol.kind,
+                    SymbolKind::Variable | SymbolKind::Parameter | SymbolKind::Field
+                )
+            })
+        {
+            return None;
+        }
+        let name = self.context.intern_string(parts.last()?);
+        let symbol = if parts.len() == 1 {
+            base.or_else(|| self.resolve_class_like_symbol_by_name(name))?
+        } else {
+            let package = parts[..parts.len() - 1]
+                .iter()
+                .map(|part| self.context.intern_string(part))
+                .collect();
+            let qualified = crate::tast::namespace::QualifiedPath::new(package, name);
+            self.context.namespace_resolver.lookup_symbol(&qualified)?
+        };
+        let declared = self.context.symbol_table.get_symbol(symbol)?;
+        if !matches!(declared.kind, SymbolKind::Abstract | SymbolKind::TypeAlias) {
+            return None;
+        }
+        let original = self
+            .resolve_type_to_class_symbol(declared.type_id)
+            .unwrap_or(symbol);
+        let member = self.context.intern_string(field);
+        let index = self.static_sig_index.as_ref()?.clone();
+        let mut owner = original;
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            if !seen.insert(owner) {
+                return None;
+            }
+            let symbol = self.context.symbol_table.get_symbol(owner)?;
+            let owner_type = symbol.type_id;
+            let owner_name = self
+                .context
+                .string_interner
+                .get(symbol.qualified_name.unwrap_or(symbol.name))?;
+            if !index.borrow_mut().forwards_static(owner_name, field) {
+                break;
+            }
+            if self.lookup_data_field(owner, member).is_some()
+                || self
+                    .resolve_declared_method_sig(owner, member, true)
+                    .is_some()
+            {
+                break;
+            }
+            let underlying = {
+                let table = self.context.type_table.borrow();
+                match table.get(owner_type).map(|ty| &ty.kind) {
+                    Some(TypeKind::Abstract {
+                        underlying: Some(underlying),
+                        ..
+                    }) => *underlying,
+                    _ => table.resolve_abstract_underlying(owner)?,
+                }
+            };
+            owner = self.resolve_type_to_class_symbol(underlying)?;
+        }
+        if owner == original {
+            return None;
+        }
+        let target = self.context.symbol_table.get_symbol(owner)?;
+        let target = self
+            .context
+            .string_interner
+            .get(target.qualified_name.unwrap_or(target.name))?;
+        let mut parts = target.split('.');
+        let mut object = Expr {
+            kind: ExprKind::Ident(parts.next()?.to_string()),
+            span: expr.span,
+        };
+        for part in parts {
+            object = Expr {
+                kind: ExprKind::Field {
+                    expr: Box::new(object),
+                    field: part.to_string(),
+                    is_optional: false,
+                },
+                span: expr.span,
+            };
+        }
+        Some(Expr {
+            kind: ExprKind::Field {
+                expr: Box::new(object),
+                field: field.clone(),
+                is_optional: *is_optional,
+            },
+            span: expression.span,
+        })
+    }
+
     /// Convert parser PropertyAccess to TAST PropertyAccessor
     ///
     /// For "get" or "set", we derive the method name as "get_fieldname" or "set_fieldname"
@@ -123,6 +248,9 @@ impl<'a> AstLowering<'a> {
         field: &str,
         is_optional: bool,
     ) -> LoweringResult<TypedExpression> {
+        if let Some(forwarded) = self.forwarded_static_expression(expression) {
+            return self.lower_expression(&forwarded);
+        }
         if field == "new" {
             if let Some(value) = self.lower_constructor_value(expression, expr)? {
                 return Ok(value);

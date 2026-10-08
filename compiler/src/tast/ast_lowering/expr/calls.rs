@@ -1503,6 +1503,16 @@ impl<'a> AstLowering<'a> {
         expr: &Expr,
         args: &[Expr],
     ) -> LoweringResult<TypedExpression> {
+        if let Some(forwarded) = self.forwarded_static_expression(expr) {
+            let call = Expr {
+                kind: ExprKind::Call {
+                    expr: Box::new(forwarded),
+                    args: args.to_vec(),
+                },
+                span: expression.span,
+            };
+            return self.lower_expression(&call);
+        }
         // Haxe reads a callee before its arguments: a dynamic method whose
         // arguments may rebind it is called through the binding read first.
         if let ExprKind::Ident(name) = &expr.kind {

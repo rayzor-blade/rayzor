@@ -64,6 +64,8 @@ struct ClassSigs {
     interface: Option<(Vec<String>, Vec<String>)>,
     /// Interfaces named by a class's `implements` clauses.
     implements: Vec<String>,
+    /// None without metadata, an empty list forwards every static member.
+    forward_statics: Option<Vec<String>>,
 }
 
 impl ClassSigs {
@@ -195,6 +197,14 @@ impl StaticSigIndex {
             .into_iter()
             .map(|parent| self.qualify_parent(parent, &package))
             .collect()
+    }
+
+    pub fn forwards_static(&mut self, name: &str, member: &str) -> bool {
+        self.ensure_indexed_from_known_files(name);
+        self.classes
+            .get(name)
+            .and_then(|class| class.forward_statics.as_ref())
+            .is_some_and(|names| names.is_empty() || names.iter().any(|name| name == member))
     }
 
     /// Whether any indexed class below `class_name` (qualified, or bare when
@@ -501,6 +511,24 @@ impl StaticSigIndex {
                 // cross-module `new SomeAbstract(x)` that reaches the fallback
                 // in `lower_new` is lowered correctly by that wrap today.
                 self.index_fields(package, &a.name, &a.fields, None, false);
+                if let Some(metadata) = a.meta.iter().find(|metadata| {
+                    metadata.name.strip_prefix(':').unwrap_or(&metadata.name) == "forwardStatics"
+                }) {
+                    let names = metadata
+                        .params
+                        .iter()
+                        .filter_map(|parameter| match &parameter.kind {
+                            parser::ExprKind::Ident(name) | parser::ExprKind::String(name) => {
+                                Some(name.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    self.classes
+                        .get_mut(&Self::qualify(package, &a.name))
+                        .unwrap()
+                        .forward_statics = Some(names);
+                }
             }
             TypeDeclaration::Interface(interface) => {
                 self.index_fields(package, &interface.name, &interface.fields, None, false);
