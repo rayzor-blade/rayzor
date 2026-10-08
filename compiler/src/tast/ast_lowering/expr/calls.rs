@@ -362,6 +362,11 @@ impl<'a> AstLowering<'a> {
         self.context
             .symbol_table
             .update_symbol_type(method_symbol, fn_ty);
+        if let Some(symbol) = self.context.symbol_table.get_symbol_mut(method_symbol) {
+            symbol
+                .flags
+                .remove(crate::tast::SymbolFlags::METHOD_PLACEHOLDER);
+        }
     }
 
     /// Lower a declared signature's AST type hints into a function type
@@ -403,6 +408,11 @@ impl<'a> AstLowering<'a> {
         self.context
             .symbol_table
             .update_symbol_type(method_symbol, fn_ty);
+        if let Some(symbol) = self.context.symbol_table.get_symbol_mut(method_symbol) {
+            symbol
+                .flags
+                .remove(crate::tast::SymbolFlags::METHOD_PLACEHOLDER);
+        }
         fn_ty
     }
 
@@ -496,19 +506,10 @@ impl<'a> AstLowering<'a> {
                                 return *method_symbol;
                             }
                         }
-                        // Fallback: check shared symbol table's class scope
-                        // (for classes compiled in a different compilation unit / package)
-                        if let Some(class_sym) = self.context.symbol_table.get_symbol(class_symbol)
+                        if let Some(method) =
+                            self.resolve_class_method_symbol(class_symbol, method_name)
                         {
-                            if let Some(method_sym) = self
-                                .context
-                                .symbol_table
-                                .lookup_symbol(class_sym.scope_id, method_name)
-                            {
-                                if method_sym.kind == crate::tast::symbols::SymbolKind::Function {
-                                    return method_sym.id;
-                                }
-                            }
+                            return method;
                         }
                     }
                 }
@@ -523,17 +524,10 @@ impl<'a> AstLowering<'a> {
                             return *method_symbol;
                         }
                     }
-                    // Fallback: shared symbol table (cross-package classes)
-                    if let Some(class_sym) = self.context.symbol_table.get_symbol(class_symbol) {
-                        if let Some(method_sym) = self
-                            .context
-                            .symbol_table
-                            .lookup_symbol(class_sym.scope_id, method_name)
-                        {
-                            if method_sym.kind == crate::tast::symbols::SymbolKind::Function {
-                                return method_sym.id;
-                            }
-                        }
+                    if let Some(method) =
+                        self.resolve_class_method_symbol(class_symbol, method_name)
+                    {
+                        return method;
                     }
                 }
             }
@@ -548,18 +542,10 @@ impl<'a> AstLowering<'a> {
                                 return *method_symbol;
                             }
                         }
-                        // Fallback: shared symbol table (cross-package classes)
-                        if let Some(class_sym) = self.context.symbol_table.get_symbol(class_symbol)
+                        if let Some(method) =
+                            self.resolve_class_method_symbol(class_symbol, method_name)
                         {
-                            if let Some(method_sym) = self
-                                .context
-                                .symbol_table
-                                .lookup_symbol(class_sym.scope_id, method_name)
-                            {
-                                if method_sym.kind == crate::tast::symbols::SymbolKind::Function {
-                                    return method_sym.id;
-                                }
-                            }
+                            return method;
                         }
                     }
                 }
@@ -718,6 +704,11 @@ impl<'a> AstLowering<'a> {
             }
         }
         let new_symbol = self.context.symbol_table.create_function(method_name);
+        if let Some(symbol) = self.context.symbol_table.get_symbol_mut(new_symbol) {
+            symbol
+                .flags
+                .insert(crate::tast::SymbolFlags::METHOD_PLACEHOLDER);
+        }
         if let Some(class_name) = self.get_class_name_for_type(receiver.expr_type) {
             let method_name_str = self.context.string_interner.get(method_name).unwrap_or("");
             let qname = format!("{}.{}", class_name, method_name_str);
@@ -819,7 +810,7 @@ impl<'a> AstLowering<'a> {
                 let class_qn = self
                     .context
                     .string_interner
-                    .get(class_sym.qualified_name?)?;
+                    .get(class_sym.qualified_name.unwrap_or(class_sym.name))?;
                 let (owner, _) = sym_qn.rsplit_once('.')?;
                 let class_bare = class_qn.rsplit('.').next().unwrap_or(class_qn);
                 let owner_bare = owner.rsplit('.').next().unwrap_or(owner);
@@ -864,7 +855,7 @@ impl<'a> AstLowering<'a> {
     /// Try to find a static extension method in using modules
     /// Returns (class_symbol, method_symbol) if found
     pub(crate) fn find_static_extension_method(
-        &self,
+        &mut self,
         method_name: InternedString,
         receiver_type: TypeId,
     ) -> Option<(SymbolId, SymbolId)> {
@@ -952,51 +943,100 @@ impl<'a> AstLowering<'a> {
                 crate::tast::type_checker::TypeCompatibility::Incompatible
             )
         };
-        // Check each using module for a static method with this name
-        // `@:using` on the receiver's class or one of its ancestors.
+        // Type-specific extensions include inherited class and interface metadata.
         let mut type_using_names: Vec<InternedString> = Vec::new();
-        let mut class = self.resolve_type_to_class_symbol(receiver_type);
-        for _ in 0..16 {
-            let Some(c) = class else { break };
-            if let Some(name) = self.context.symbol_table.get_symbol(c).map(|s| s.name) {
-                if let Some(names) = self.type_usings.get(&name) {
+        let mut queue: std::collections::VecDeque<_> = self
+            .resolve_type_to_class_symbol(receiver_type)
+            .into_iter()
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(class) = queue.pop_front() {
+            if !seen.insert(class) {
+                continue;
+            }
+            if let Some(symbol) = self.context.symbol_table.get_symbol(class) {
+                if let Some(names) = self.type_usings.get(&symbol.name) {
                     type_using_names.extend(names.iter().copied());
                 }
+                if let Some(index) = &self.static_sig_index {
+                    let name = self
+                        .context
+                        .string_interner
+                        .get(symbol.qualified_name.unwrap_or(symbol.name))
+                        .unwrap_or("");
+                    for interface in index.borrow_mut().interfaces_of(name) {
+                        if let Some(symbol) =
+                            self.context.symbol_table.all_symbols().find(|symbol| {
+                                symbol.kind == crate::tast::SymbolKind::Interface
+                                    && self
+                                        .context
+                                        .string_interner
+                                        .get(symbol.qualified_name.unwrap_or(symbol.name))
+                                        == Some(interface.as_str())
+                            })
+                        {
+                            queue.push_back(symbol.id);
+                        }
+                    }
+                }
             }
-            class = self.parent_class_symbol(c);
+            if let Some(parent) = self.parent_class_symbol(class) {
+                queue.push_back(parent);
+            }
         }
-        let late: Vec<(InternedString, SymbolId)> = self
-            .unresolved_usings
+        let late: Vec<(InternedString, SymbolId)> = type_using_names
             .iter()
-            .chain(type_using_names.iter())
+            .chain(self.unresolved_usings.iter())
             .filter_map(|name| Some((*name, self.resolve_class_like_symbol_by_name(*name)?)))
             .collect();
-        for (_class_name, class_symbol) in self.using_modules.iter().chain(late.iter()) {
+        let candidates: Vec<_> = late
+            .into_iter()
+            .chain(self.using_modules.iter().copied())
+            .collect();
+        for (_class_name, class_symbol) in candidates {
             // First, check local class_methods (for classes lowered in this instance)
-            if let Some(methods) = self.class_methods.get(class_symbol) {
+            if let Some(methods) = self.class_methods.get(&class_symbol) {
                 for (meth_name, meth_symbol, is_static) in methods {
                     if *meth_name == method_name && *is_static && applies(self, *meth_symbol) {
-                        return Some((*class_symbol, *meth_symbol));
+                        return Some((class_symbol, *meth_symbol));
                     }
                 }
             }
 
-            // Then, check the shared symbol table for methods registered by other lowering passes
-            // Look up the class symbol to get its scope, then search for the method
-            if let Some(class_sym) = self.context.symbol_table.get_symbol(*class_symbol) {
-                // The class should have a scope ID where its members are registered
-                // Try to find a method with the given name in that scope
-                if let Some(method_sym) = self
+            if let Some(method) = self.resolve_class_method_symbol(class_symbol, method_name) {
+                if self
                     .context
                     .symbol_table
-                    .lookup_symbol(class_sym.scope_id, method_name)
+                    .get_symbol(method)
+                    .is_some_and(|symbol| symbol.is_static())
+                    && applies(self, method)
                 {
-                    // Check if it's a static method by looking at its modifiers or kind
-                    if method_sym.kind == crate::tast::symbols::SymbolKind::Function
-                        && applies(self, method_sym.id)
-                    {
-                        return Some((*class_symbol, method_sym.id));
-                    }
+                    return Some((class_symbol, method));
+                }
+            }
+
+            // An extension's declaration can follow the receiver's method body.
+            if let Some(signature) =
+                self.resolve_declared_method_sig(class_symbol, method_name, true)
+            {
+                if signature.is_macro {
+                    continue;
+                }
+                let owner = self.context.symbol_table.get_symbol(class_symbol)?;
+                let owner_name = self
+                    .context
+                    .string_interner
+                    .get(owner.qualified_name.unwrap_or(owner.name))?;
+                let name = self.context.string_interner.get(method_name)?;
+                let qualified = self.context.intern_string(&format!("{owner_name}.{name}"));
+                let method = self.context.symbol_table.create_function(method_name);
+                if let Some(symbol) = self.context.symbol_table.get_symbol_mut(method) {
+                    symbol.qualified_name = Some(qualified);
+                    symbol.flags.insert(crate::tast::SymbolFlags::STATIC);
+                }
+                self.apply_declared_sig(method, &signature);
+                if applies(self, method) {
+                    return Some((class_symbol, method));
                 }
             }
         }
@@ -2806,13 +2846,24 @@ impl<'a> AstLowering<'a> {
                 let method_symbol = self.resolve_method_symbol(&receiver_expr, method_name);
                 self.refine_generic_receiver_from_call(&receiver_expr, method_symbol, &arg_exprs);
 
-                // Check if the resolved symbol is a placeholder (newly created function)
-                // If so, try to find a static extension method from 'using' modules
+                // A declaration's typed signature takes precedence over extensions.
                 let is_placeholder = self
                     .context
                     .symbol_table
                     .get_symbol(method_symbol)
-                    .map(|s| s.kind == crate::tast::symbols::SymbolKind::Function)
+                    .map(|s| {
+                        s.is_static()
+                            || s.flags
+                                .contains(crate::tast::SymbolFlags::METHOD_PLACEHOLDER)
+                            || !matches!(
+                                self.context
+                                    .type_table
+                                    .borrow()
+                                    .get(s.type_id)
+                                    .map(|ty| &ty.kind),
+                                Some(TypeKind::Function { .. })
+                            )
+                    })
                     .unwrap_or(false);
 
                 let static_owner = self

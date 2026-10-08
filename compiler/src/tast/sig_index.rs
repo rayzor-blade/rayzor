@@ -25,6 +25,8 @@ pub struct StaticMethodSig {
     /// A declaration with a definition: an `extern` method has none, and a
     /// forward reference to it would never bind.
     pub has_body: bool,
+    /// Compile-time methods have no runtime extension target.
+    pub is_macro: bool,
     /// Each parameter's type as a bare name (`Int`, `Bool`, `String`): the
     /// annotation's, else the default value's literal kind, else None.
     pub param_kinds: Vec<Option<String>>,
@@ -60,6 +62,8 @@ struct ClassSigs {
     ctor_params: Option<usize>,
     /// Interface slots: inherited declarations first, then own methods and accessors.
     interface: Option<(Vec<String>, Vec<String>)>,
+    /// Interfaces named by a class's `implements` clauses.
+    implements: Vec<String>,
 }
 
 impl ClassSigs {
@@ -173,6 +177,24 @@ impl StaticSigIndex {
             self.ensure_indexed_from_known_files(class_name);
         }
         self.classes.get(class_name)?.extends_type.clone()
+    }
+
+    /// Direct implemented or extended interfaces, qualified in the declaring package.
+    pub fn interfaces_of(&mut self, name: &str) -> Vec<String> {
+        self.ensure_indexed_from_known_files(name);
+        let Some(class) = self.classes.get(name) else {
+            return Vec::new();
+        };
+        let parents = class
+            .interface
+            .as_ref()
+            .map(|(parents, _)| parents.clone())
+            .unwrap_or_else(|| class.implements.clone());
+        let package = class.package.clone();
+        parents
+            .into_iter()
+            .map(|parent| self.qualify_parent(parent, &package))
+            .collect()
     }
 
     /// Whether any indexed class below `class_name` (qualified, or bare when
@@ -466,6 +488,11 @@ impl StaticSigIndex {
                 let qname = Self::qualify(package, &c.name);
                 if let Some(class) = self.classes.get_mut(&qname) {
                     class.extends_type = c.extends.clone();
+                    class.implements = c
+                        .implements
+                        .iter()
+                        .filter_map(Self::type_path_name)
+                        .collect();
                 }
             }
             TypeDeclaration::Abstract(a) => {
@@ -643,21 +670,26 @@ impl StaticSigIndex {
                 .or_insert_with(|| StaticMethodSig {
                     param_names: func.params.iter().map(|param| param.name.clone()).collect(),
                     params: func.params.iter().map(|p| p.type_hint.clone()).collect(),
-                    return_type: func.return_type.clone().or_else(|| {
-                        // Read from other files, so the class's own name is qualified.
-                        let mut hint = returned_field_hint(func, fields)?.clone();
-                        if let parser::Type::Path { path, .. } = &mut hint {
-                            if path.package.is_empty() && path.name == class_name {
-                                path.package = package
-                                    .split('.')
-                                    .filter(|p| !p.is_empty())
-                                    .map(str::to_string)
-                                    .collect();
+                    return_type: func
+                        .return_type
+                        .clone()
+                        .or_else(|| returned_literal_type(func))
+                        .or_else(|| {
+                            // Read from other files, so the class's own name is qualified.
+                            let mut hint = returned_field_hint(func, fields)?.clone();
+                            if let parser::Type::Path { path, .. } = &mut hint {
+                                if path.package.is_empty() && path.name == class_name {
+                                    path.package = package
+                                        .split('.')
+                                        .filter(|p| !p.is_empty())
+                                        .map(str::to_string)
+                                        .collect();
+                                }
                             }
-                        }
-                        Some(hint)
-                    }),
+                            Some(hint)
+                        }),
                     has_body: func.body.is_some(),
+                    is_macro: field.modifiers.contains(&parser::Modifier::Macro),
                     param_kinds: func.params.iter().map(Self::param_kind).collect(),
                     type_params: func.type_params.clone(),
                     optional: func
@@ -865,12 +897,8 @@ impl StaticSigIndex {
     }
 }
 
-/// The declared type of the class field a method returns (`return x;`,
-/// `return this.x;`), unless a parameter shadows it.
-pub(crate) fn returned_field_hint<'f>(
-    func: &parser::haxe_ast::Function,
-    fields: &'f [parser::ClassField],
-) -> Option<&'f parser::Type> {
+/// The sole explicit return expression of a method body.
+fn returned_expression(func: &parser::haxe_ast::Function) -> Option<&parser::Expr> {
     use parser::haxe_ast::{BlockElement, ExprKind};
     let mut returned = func.body.as_deref()?;
     let mut saw_return = false;
@@ -890,6 +918,36 @@ pub(crate) fn returned_field_hint<'f>(
     if !saw_return {
         return None;
     }
+    Some(returned)
+}
+
+fn returned_literal_type(func: &parser::haxe_ast::Function) -> Option<parser::Type> {
+    let returned = returned_expression(func)?;
+    let name = match returned.kind {
+        parser::ExprKind::Int(_) => "Int",
+        parser::ExprKind::Float(_) => "Float",
+        parser::ExprKind::Bool(_) => "Bool",
+        parser::ExprKind::String(_) => "String",
+        _ => return None,
+    };
+    Some(parser::Type::Path {
+        path: parser::TypePath {
+            package: Vec::new(),
+            name: name.to_string(),
+            sub: None,
+        },
+        params: Vec::new(),
+        span: returned.span,
+    })
+}
+
+/// The declared type of a returned field, unless a parameter shadows it.
+pub(crate) fn returned_field_hint<'f>(
+    func: &parser::haxe_ast::Function,
+    fields: &'f [parser::ClassField],
+) -> Option<&'f parser::Type> {
+    use parser::haxe_ast::ExprKind;
+    let returned = returned_expression(func)?;
     let name = match &returned.kind {
         ExprKind::Ident(n) => n,
         ExprKind::Field { expr, field, .. } if matches!(expr.kind, ExprKind::This) => field,

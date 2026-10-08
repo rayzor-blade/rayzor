@@ -358,6 +358,8 @@ impl SymbolFlags {
     pub const QUALIFIED_ONLY: Self = Self(1 << 25);
     /// `@:arrayAccess` — an abstract method that `a[i]` / `a[i] = v` calls.
     pub const ARRAY_ACCESS: Self = Self(1 << 26);
+    /// A receiver method with no declaration, retained for later resolution.
+    pub const METHOD_PLACEHOLDER: Self = Self(1 << 27);
 
     pub const fn is_wasm_export(self) -> bool {
         self.contains(Self::WASM_EXPORT)

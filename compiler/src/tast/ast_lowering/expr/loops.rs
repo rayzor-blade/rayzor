@@ -38,7 +38,7 @@ impl<'a> AstLowering<'a> {
     }
 
     /// An explicit iterator on an abstract, or a compatible `using` extension.
-    fn iterable_iterator_call(&self, iterable_ty: TypeId, iter: &Expr) -> Option<Expr> {
+    fn iterable_iterator_call(&mut self, iterable_ty: TypeId, iter: &Expr) -> Option<Expr> {
         let iterator = self.context.string_interner.intern("iterator");
         let abstract_iterator = self
             .iterable_abstract(iterable_ty)
@@ -96,7 +96,7 @@ impl<'a> AstLowering<'a> {
     /// Iterate the result of an abstract's iterator or a static extension.
     /// Receivers with their own hasNext()/next() keep that direct protocol.
     fn abstract_iteration(
-        &self,
+        &mut self,
         iterable_ty: TypeId,
         expression: &Expr,
         var: &str,
