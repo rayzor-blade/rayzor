@@ -248,7 +248,30 @@ impl<'a> AstLowering<'a> {
             ExprKind::Function(_) | ExprKind::Arrow { .. }
         );
         self.closure_depth += usize::from(closure);
-        let result = self.lower_expression_unnested(expression);
+        let private_access = self.macro_private_access;
+        if self.macro_probe_depth > 0
+            && let ExprKind::Meta { meta, .. } = &expression.kind
+        {
+            match meta.name.trim_start_matches(':') {
+                "privateAccess" => self.macro_private_access = true,
+                "noPrivateAccess" => self.macro_private_access = false,
+                _ => {}
+            }
+        }
+        let result = self
+            .lower_expression_unnested(expression)
+            .and_then(|typed| {
+                if self.macro_probe_depth > 0 {
+                    self.validate_macro_probe_expression(&typed)?;
+                }
+                Ok(typed)
+            });
+        let result = if self.macro_probe_depth > 0 {
+            result.map_err(|error| self.macro_probe_argument_error(expression, error))
+        } else {
+            result
+        };
+        self.macro_private_access = private_access;
         self.closure_depth -= usize::from(closure);
         result
     }

@@ -909,7 +909,15 @@ impl<'a> AstLowering<'a> {
                 .update_symbol_type(field_symbol, field_type);
 
             // Mark as field
+            let visibility = if field.access.is_none()
+                && class_decl.modifiers.contains(&parser::Modifier::Extern)
+            {
+                crate::tast::Visibility::Public
+            } else {
+                self.lower_access(&field.access)
+            };
             if let Some(sym) = self.context.symbol_table.get_symbol_mut(field_symbol) {
+                sym.visibility = visibility;
                 sym.kind = crate::tast::SymbolKind::Field;
                 if is_static {
                     sym.flags = sym.flags.union(crate::tast::SymbolFlags::STATIC);

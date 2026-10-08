@@ -396,7 +396,9 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         let outer_before = self.lowering.collected_errors.len();
         let ctx_before = self.lowering.context.errors.len();
 
+        self.lowering.macro_probe_depth += 1;
         let result = self.lowering.lower_expression(expr);
+        self.lowering.macro_probe_depth -= 1;
 
         let mut probe_errors: Vec<String> = self
             .lowering
@@ -1357,7 +1359,7 @@ fn unify(
 /// The general error formatter is not reused here because it spells `Null<T>`
 /// as `T?` and Debug-dumps named types — both visible to tests that compare
 /// the string against a literal.
-fn render_type(
+pub(super) fn render_type(
     id: TypeId,
     type_table: &std::cell::RefCell<crate::tast::TypeTable>,
     symbol_table: &crate::tast::SymbolTable,

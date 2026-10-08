@@ -91,7 +91,12 @@ impl<'a> HirToMirContext<'a> {
                     .map(|t| matches!(t.kind, TypeKind::Abstract { .. }))
                     .unwrap_or(false)
             };
-            if inner_target_is_dynamic && inner_source_is_abstract {
+            let inner_source_storage = self.resolve_storage_type(inner_expr.ty);
+            let inner_source_stores_dynamic = matches!(
+                self.type_table.get(inner_source_storage).map(|ty| &ty.kind),
+                Some(TypeKind::Dynamic)
+            );
+            if inner_target_is_dynamic && inner_source_is_abstract && !inner_source_stores_dynamic {
                 // abstract → dynamic → underlying is an identity.
                 return self.lower_expression(inner_expr);
             }
@@ -131,6 +136,15 @@ impl<'a> HirToMirContext<'a> {
         if target_stores_dynamic && target_storage != *target {
             let value = self.lower_expression(expr)?;
             return self.maybe_box_value(value, source_storage, target_storage);
+        }
+        if source_storage != expr.ty
+            && matches!(
+                self.type_table.get(source_storage).map(|ty| &ty.kind),
+                Some(TypeKind::Dynamic)
+            )
+        {
+            let value = self.lower_expression(expr)?;
+            return self.maybe_unbox_value(value, expr.ty, target_storage);
         }
 
         let from_type = self.convert_type(expr.ty);

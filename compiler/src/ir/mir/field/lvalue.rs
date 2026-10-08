@@ -767,7 +767,11 @@ impl<'a> HirToMirContext<'a> {
                 let field_ty = self.symbol_table.get_symbol(*field)
                     .and_then(|s| {
                         let converted = self.convert_type(s.type_id);
-                        if matches!(&converted, IrType::Ptr(inner) if matches!(**inner, IrType::Void)) {
+                        let dynamic_storage = matches!(
+                            self.type_table.get(self.resolve_storage_type(s.type_id)).map(|ty| &ty.kind),
+                            Some(TypeKind::Dynamic)
+                        );
+                        if !dynamic_storage && matches!(&converted, IrType::Ptr(inner) if matches!(**inner, IrType::Void)) {
                             None
                         } else {
                             Some(converted)

@@ -360,6 +360,16 @@ impl<'a> AstLowering<'a> {
                     sym
                 };
 
+                let visibility = if field.access.is_none()
+                    && class_decl.modifiers.contains(&parser::Modifier::Extern)
+                {
+                    crate::tast::Visibility::Public
+                } else {
+                    self.lower_access(&field.access)
+                };
+                if let Some(symbol) = self.context.symbol_table.get_symbol_mut(method_symbol) {
+                    symbol.visibility = visibility;
+                }
                 // Pre-compute function type from AST signature for forward reference resolution
                 let generic = !func.type_params.is_empty();
                 if generic {

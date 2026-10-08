@@ -1643,6 +1643,8 @@ pub struct AstLowering<'a> {
     generic_build_monomorphs: std::collections::BTreeSet<TypeId>,
     generated_declarations: Vec<TypedDeclaration>,
     generated_type_names: std::collections::BTreeSet<String>,
+    macro_probe_depth: usize,
+    macro_private_access: bool,
     class_value_bindings: BTreeMap<SymbolId, SymbolId>,
     /// Deferred call sites by (span.start, span.end), mapped to the registry
     /// name the expander resolved at expansion time.
@@ -1702,6 +1704,7 @@ mod fn_variance;
 mod imports;
 mod infer;
 mod macro_defer;
+mod macro_probe;
 mod metadata;
 mod resolve;
 mod stdlib;

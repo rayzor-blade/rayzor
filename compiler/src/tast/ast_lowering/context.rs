@@ -81,6 +81,8 @@ impl<'a> AstLowering<'a> {
             generic_build_monomorphs: std::collections::BTreeSet::new(),
             generated_declarations: Vec::new(),
             generated_type_names: std::collections::BTreeSet::new(),
+            macro_probe_depth: 0,
+            macro_private_access: false,
             class_value_bindings: BTreeMap::new(),
             deferred_macro_calls: BTreeMap::new(),
             abstract_casts: BTreeMap::new(),

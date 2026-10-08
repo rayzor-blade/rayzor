@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone)]
 pub struct StaticMethodSig {
     pub params: Vec<Option<parser::Type>>,
+    pub param_names: Vec<String>,
     pub return_type: Option<parser::Type>,
     /// A declaration with a definition: an `extern` method has none, and a
     /// forward reference to it would never bind.
@@ -356,6 +357,15 @@ impl StaticSigIndex {
         Some(&sig.param_kinds)
     }
 
+    pub(crate) fn parameter_name(&self, owner: &str, method: &str, index: usize) -> Option<&str> {
+        let class = self.classes.get(owner)?;
+        let signature = class
+            .statics
+            .get(method)
+            .or_else(|| class.instances.get(method))?;
+        signature.param_names.get(index).map(String::as_str)
+    }
+
     fn param_kind(p: &parser::FunctionParam) -> Option<String> {
         let mut t = p.type_hint.as_ref();
         while let Some(ty) = t {
@@ -550,6 +560,7 @@ impl StaticSigIndex {
             table
                 .entry(func.name.clone())
                 .or_insert_with(|| StaticMethodSig {
+                    param_names: func.params.iter().map(|param| param.name.clone()).collect(),
                     params: func.params.iter().map(|p| p.type_hint.clone()).collect(),
                     return_type: func.return_type.clone().or_else(|| {
                         // Read from other files, so the class's own name is qualified.

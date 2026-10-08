@@ -59,11 +59,27 @@ impl<'a> HirToMirContext<'a> {
         value_ty: TypeId,
         target_ty: TypeId,
     ) -> Option<IrId> {
-        let out = self.maybe_box_value_inner(
-            value,
-            self.resolve_through_aliases(value_ty),
-            self.resolve_through_aliases(target_ty),
-        );
+        let mut value_ty = self.resolve_through_aliases(value_ty);
+        let mut target_ty = self.resolve_through_aliases(target_ty);
+        let value_storage = self.resolve_storage_type(value_ty);
+        let target_storage = self.resolve_storage_type(target_ty);
+        let stores_dynamic = |ty| {
+            matches!(
+                self.type_table.get(ty).map(|ty| &ty.kind),
+                Some(TypeKind::Dynamic)
+            )
+        };
+        // Dynamic-backed abstracts use boxes at assignments, arguments and returns.
+        if stores_dynamic(value_storage) {
+            value_ty = value_storage;
+        }
+        if stores_dynamic(target_storage) && target_storage != target_ty {
+            target_ty = target_storage;
+            if !self.is_int64_type(value_ty) {
+                value_ty = value_storage;
+            }
+        }
+        let out = self.maybe_box_value_inner(value, value_ty, target_ty);
         if let Some(reg) = out {
             if reg != value {
                 // A box was emitted: remember the resulting register so
@@ -872,11 +888,37 @@ impl<'a> HirToMirContext<'a> {
     /// Returns the (potentially unboxed) value
     pub(crate) fn maybe_unbox_value(
         &mut self,
-        value: IrId,
+        mut value: IrId,
         value_ty: TypeId,
         target_ty: TypeId,
     ) -> Option<IrId> {
         use crate::tast::TypeKind;
+
+        let storage = self.resolve_storage_type(value_ty);
+        let value_ty = if storage != value_ty
+            && matches!(
+                self.type_table.get(storage).map(|ty| &ty.kind),
+                Some(TypeKind::Dynamic)
+            ) {
+            // Erased array slots carry a Dynamic-backed abstract's box as bits.
+            if matches!(self.builder.get_register_type(value), Some(IrType::I64)) {
+                value = self
+                    .builder
+                    .build_bitcast(value, IrType::Ptr(Box::new(IrType::U8)))?;
+            }
+            storage
+        } else {
+            value_ty
+        };
+        let storage = self.resolve_storage_type(target_ty);
+        let target_ty = if matches!(
+            self.type_table.get(storage).map(|ty| &ty.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            storage
+        } else {
+            target_ty
+        };
 
         // Clone TypeKind to avoid borrow checker issues
         let (value_is_dynamic, target_kind_cloned, value_is_optional_scalar) = {
@@ -1532,7 +1574,7 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn maybe_unbox_optional_for_target(
         &mut self,
         value: IrId,
-        _value_ty: TypeId,
+        value_ty: TypeId,
         target_ty: TypeId,
     ) -> Option<IrId> {
         // Driven by the MIR register type, not the HIR type: a ternary like
@@ -1565,7 +1607,13 @@ impl<'a> HirToMirContext<'a> {
         // an enum's `{tag, payload}` struct, surfaced as untyped `*void`
         // because the variant's type was lost. Unboxing it would dereference
         // the payload as a pointer, so recover the raw bits and cast instead.
-        let mut is_known_box = self.boxed_value_regs.contains(&value);
+        let storage = self.resolve_storage_type(value_ty);
+        let mut is_known_box = self.boxed_value_regs.contains(&value)
+            || (storage != value_ty
+                && matches!(
+                    self.type_table.get(storage).map(|ty| &ty.kind),
+                    Some(TypeKind::Dynamic)
+                ));
         if !is_known_box {
             // Casts re-wrap a box without changing what it is (e.g. the Let
             // binding casts the *u8 box to the Dynamic slot's *void). Follow

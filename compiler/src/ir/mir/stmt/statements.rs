@@ -1194,6 +1194,17 @@ impl<'a> HirToMirContext<'a> {
                         {
                             return Some(unboxed);
                         }
+                        let storage = self.resolve_storage_type(e.ty);
+                        if storage != e.ty
+                            && matches!(
+                                self.type_table.get(storage).map(|ty| &ty.kind),
+                                Some(TypeKind::Dynamic)
+                            )
+                        {
+                            if let Some(unboxed) = self.maybe_unbox_value(val, e.ty, fn_ret_ty) {
+                                return Some(unboxed);
+                            }
+                        }
                         // A register known to hold a box, returned as a
                         // concrete type, comes out of it. Only a KNOWN box:
                         // a Dynamic by decay may be the raw value already.
