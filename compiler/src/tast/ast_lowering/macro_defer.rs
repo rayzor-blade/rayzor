@@ -29,6 +29,9 @@ impl AstLowering<'_> {
         args: Option<&[parser::Expr]>,
         span: parser::Span,
     ) -> super::LoweringResult<Option<Option<parser::Type>>> {
+        if let Some(ty) = self.const_generic_type(symbol, params, args.is_some(), span)? {
+            return Ok(Some(Some(ty)));
+        }
         let Some(engine) = self.generic_build_engine.clone() else {
             return Ok(None);
         };
@@ -119,6 +122,14 @@ impl AstLowering<'_> {
             });
         }
         let declaration = crate::macro_system::expander::defined_declaration(defined);
+        self.lower_generated_declaration(&declaration, &defined.pack)
+    }
+
+    pub(crate) fn lower_generated_declaration(
+        &mut self,
+        declaration: &parser::TypeDeclaration,
+        pack: &[String],
+    ) -> super::LoweringResult<()> {
         // A generated declaration belongs to its package, outside the calling function.
         let scope = self.context.current_scope;
         let package = self.context.current_package;
@@ -135,16 +146,16 @@ impl AstLowering<'_> {
         let map_uses = std::mem::take(&mut self.map_first_uses);
         self.context.current_scope = crate::tast::ScopeId::first();
         self.context.current_package = None;
-        self.set_package_from_parts(&defined.pack);
+        self.set_package_from_parts(pack);
         self.in_static_method = false;
         self.lowering_callee = false;
         self.closure_depth = 0;
         let result = (|| {
-            self.pre_register_declaration(&declaration)?;
-            if let parser::TypeDeclaration::Class(class) = &declaration {
+            self.pre_register_declaration(declaration)?;
+            if let parser::TypeDeclaration::Class(class) = declaration {
                 self.pre_register_class_fields(class)?;
             }
-            self.lower_declaration(&declaration)
+            self.lower_declaration(declaration)
         })();
         self.context.current_scope = scope;
         self.context.current_package = package;

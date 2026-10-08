@@ -22,6 +22,7 @@ impl<'a> AstLowering<'a> {
             .map(|(_, unknown)| unknown.iter().cloned().collect())
             .unwrap_or_default();
         let file = desugared.as_ref().map_or(file, |(file, _)| file);
+        self.seed_const_generics(std::iter::once(file));
         // Optimizer barrier
 
         // Create TypedFile with the shared interner from the pipeline
@@ -161,6 +162,11 @@ impl<'a> AstLowering<'a> {
 
         // Second pass: Process declarations with full type resolution
         for declaration in &file.declarations {
+            if matches!(declaration, TypeDeclaration::Class(class)
+                if super::const_generics::is_template(class))
+            {
+                continue;
+            }
             match self.lower_declaration(declaration) {
                 Ok(typed_decl) => match typed_decl {
                     TypedDeclaration::Function(func) => typed_file.functions.push(func),

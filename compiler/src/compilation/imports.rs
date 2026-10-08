@@ -1128,7 +1128,8 @@ impl CompilationUnit {
         // by a cheap substring check to avoid parsing every stdlib file; only
         // files containing macro definitions need to be kept around for the
         // expander's dependency scan.
-        if source.contains("macro ") || source.contains("@:build") {
+        // Constant generic classes also need their bodies at each use site.
+        if source.contains("macro ") || source.contains("@:build") || source.contains("@:const") {
             if let Ok(raw_ast) = self.parse_file(&filename, source) {
                 self.loaded_import_haxe_files.push(raw_ast);
             }

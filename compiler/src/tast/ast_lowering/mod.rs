@@ -1670,6 +1670,9 @@ pub struct AstLowering<'a> {
     generic_build_engine: Option<Rc<crate::macro_system::generic_build::GenericBuildEngine>>,
     generic_build_resolving: std::collections::BTreeSet<SymbolId>,
     generic_build_monomorphs: std::collections::BTreeSet<TypeId>,
+    const_generic_templates: BTreeMap<String, const_generics::Template>,
+    const_generic_instances: BTreeMap<(String, Vec<String>), parser::Type>,
+    const_generic_origins: BTreeMap<String, String>,
     generated_declarations: Vec<TypedDeclaration>,
     generated_type_names: std::collections::BTreeSet<String>,
     macro_probe_depth: usize,
@@ -1725,6 +1728,7 @@ pub(crate) enum TypeSubstitutionResult {
     },
 }
 
+mod const_generics;
 mod context;
 mod decls;
 mod dynamic_methods;

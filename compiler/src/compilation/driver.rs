@@ -399,6 +399,11 @@ impl CompilationUnit {
         // Declared-static-signature index: lets call sites type statics whose
         // declaring file lowers later (no untyped-placeholder decay).
         lowering.set_static_sig_index(Rc::clone(&self.static_sig_index));
+        lowering.seed_const_generics(
+            self.user_files
+                .iter()
+                .chain(self.loaded_import_haxe_files.iter()),
+        );
 
         // Re-expansion of typer-dependent macro calls at their sites.
         if let Some(ref expander_cell) = deferred_macro_expander {
