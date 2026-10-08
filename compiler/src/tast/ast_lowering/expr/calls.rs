@@ -1248,6 +1248,22 @@ impl<'a> AstLowering<'a> {
                             return true;
                         }
                         (Some(TypeKind::Function { .. }), Some(TypeKind::Function { .. })) => {}
+                        (
+                            Some(TypeKind::Anonymous { fields: source }),
+                            Some(TypeKind::Anonymous { fields: actual }),
+                        ) => {
+                            if source.len() != actual.len()
+                                || !source.iter().all(|field| {
+                                    actual.iter().any(|other| other.name == field.name)
+                                })
+                            {
+                                return false;
+                            }
+                            let mut bindings = Vec::new();
+                            self.unify_type_args(*param_ty, arg.expr_type, 0, &mut bindings);
+                            let source = self.substitute_alias_args(*param_ty, &bindings);
+                            return self.abstract_source_accepts(source, arg.expr_type, 0);
+                        }
                         (Some(source), Some(actual)) => {
                             return std::mem::discriminant(&source)
                                 == std::mem::discriminant(&actual)

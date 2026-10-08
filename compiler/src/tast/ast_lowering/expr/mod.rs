@@ -2642,6 +2642,11 @@ impl<'a> AstLowering<'a> {
                     if needs_cast {
                         // Lower the initializer, then wrap in an implicit cast to the abstract type
                         let array_expr = self.lower_expression(init_expr)?;
+                        let array_expr = if matches!(init_expr.kind, ExprKind::Object(_)) {
+                            self.coerce_arg_via_abstract_from(array_expr, Some(target_ty))
+                        } else {
+                            array_expr
+                        };
                         let cast_expr = TypedExpression {
                             kind: TypedExpressionKind::Cast {
                                 expression: Box::new(array_expr),
@@ -2722,14 +2727,15 @@ impl<'a> AstLowering<'a> {
                     self.expected_lambda_params_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;
                     let result = result?;
-                    let result = if matches!(
-                        self.context
-                            .type_table
-                            .borrow()
-                            .get(result.expr_type)
-                            .map(|ty| &ty.kind),
-                        Some(TypeKind::Function { .. })
-                    ) {
+                    let convertible = {
+                        let table = self.context.type_table.borrow();
+                        let ty = Self::resolve_alias_chain(&table, result.expr_type);
+                        matches!(
+                            table.get(ty).map(|ty| &ty.kind),
+                            Some(TypeKind::Function { .. } | TypeKind::Anonymous { .. })
+                        )
+                    };
+                    let result = if convertible {
                         self.coerce_arg_via_abstract_from(result, declared_type)
                     } else {
                         result
