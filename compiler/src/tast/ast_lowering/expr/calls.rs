@@ -4004,7 +4004,10 @@ impl<'a> AstLowering<'a> {
         let mut bindings: Vec<(SymbolId, TypeId)> = Vec::new();
         for (declared, argument) in params.iter().zip(arguments.iter()) {
             if !is_function(self, argument.expr_type) {
-                self.unify_type_args(*declared, argument.expr_type, 0, &mut bindings);
+                let declared = self
+                    .class_literal_parameter(*declared, argument)
+                    .unwrap_or(*declared);
+                self.unify_type_args(declared, argument.expr_type, 0, &mut bindings);
             }
         }
         for (declared, argument) in params.iter().zip(arguments.iter()) {
@@ -4404,6 +4407,51 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// A class literal carries its instance type; `Class<T>` binds T to that type.
+    fn class_literal_parameter(
+        &self,
+        declared: TypeId,
+        argument: &TypedExpression,
+    ) -> Option<TypeId> {
+        let TypedExpressionKind::Variable { symbol_id } = argument.kind else {
+            return None;
+        };
+        let symbol = self.context.symbol_table.get_symbol(symbol_id)?;
+        if !matches!(symbol.kind, SymbolKind::Class | SymbolKind::TypeAlias) {
+            return None;
+        }
+        let table = self.context.type_table.borrow();
+        let actual = Self::resolve_alias_chain(&table, argument.expr_type);
+        if !matches!(
+            table.get(actual).map(|ty| &ty.kind),
+            Some(TypeKind::Class { .. } | TypeKind::String | TypeKind::Array { .. })
+        ) {
+            return None;
+        }
+        let declared = Self::resolve_alias_chain(&table, declared);
+        let (owner, arguments) = match table.get(declared).map(|ty| &ty.kind) {
+            Some(TypeKind::Class {
+                symbol_id,
+                type_args,
+            })
+            | Some(TypeKind::Abstract {
+                symbol_id,
+                type_args,
+                ..
+            }) => (*symbol_id, type_args),
+            _ => return None,
+        };
+        let owner = self.context.symbol_table.get_symbol(owner)?;
+        let name = owner.qualified_name.unwrap_or(owner.name);
+        if self.context.string_interner.get(name) != Some("Class") {
+            return None;
+        }
+        match arguments.as_slice() {
+            [parameter] => Some(*parameter),
+            _ => None,
+        }
+    }
+
     /// Infer concrete argument bindings without binding another generic parameter.
     pub(crate) fn unify_type_args(
         &self,
@@ -4736,7 +4784,8 @@ impl<'a> AstLowering<'a> {
         };
         let mut bindings = Vec::new();
         for (p, a) in params.iter().zip(arguments.iter()) {
-            self.unify_type_args(*p, a.expr_type, 0, &mut bindings);
+            let declared = self.class_literal_parameter(*p, a).unwrap_or(*p);
+            self.unify_type_args(declared, a.expr_type, 0, &mut bindings);
         }
         // RAYZOR_BIND_TRACE=1 prints each call's parameter bindings.
         if std::env::var_os("RAYZOR_BIND_TRACE").is_some() {
