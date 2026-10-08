@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1791434533,"nonce":"lqjtNqZbvYQKE15ywDQm9porQnY=","status":2}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":2,"timestamp":1791434635,"nonce":"hunTexdi8u5kl7knCdt8s3WztkQ=","title":"Empty object values lose array elements","was":"Empty object values lose array elements and Dynamic-backed abstract initializers"}]}
