@@ -1768,10 +1768,23 @@ impl<'a> AstLowering<'a> {
                 return self.lower_for_expression(expression, var, key_var.as_deref(), iter, body);
             }
             ExprKind::Array(elements) => {
-                let mut element_exprs = elements
+                let previous_hint = self.context.expected_new_type_hint;
+                let element_hint = self
+                    .expected_arg_type_stack
+                    .last()
+                    .copied()
+                    .flatten()
+                    .or(previous_hint)
+                    .and_then(|ty| self.array_element_of(ty));
+                self.context.expected_new_type_hint = element_hint;
+                self.expected_arg_type_stack.push(element_hint);
+                let lowered = elements
                     .iter()
-                    .map(|elem| self.lower_expression(elem))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .map(|elem| self.lower_value_expression(elem))
+                    .collect::<Result<Vec<_>, _>>();
+                self.expected_arg_type_stack.pop();
+                self.context.expected_new_type_hint = previous_hint;
+                let mut element_exprs = lowered?;
                 // `[1, 2.5]` is Array<Float>: its Int elements widen.
                 let (int_t, float_t) = {
                     let tt = self.context.type_table.borrow();
@@ -2179,8 +2192,8 @@ impl<'a> AstLowering<'a> {
                     // that, and every later use of the binding then takes the
                     // Dynamic path: a field read would unbox a value that was
                     // never boxed and dereference the result.
-                    // A class, interface or type-parameter target is adopted
-                    // as is; an abstract as its underlying type, since `cast`
+                    // Scalar, class, interface and type-parameter targets are
+                    // adopted as is; an abstract as its underlying type, since `cast`
                     // reinterprets and never runs the abstract's @:from.
                     let from_context = self
                         .expected_arg_type_stack
@@ -2191,7 +2204,13 @@ impl<'a> AstLowering<'a> {
                         .and_then(|ty| {
                             let tt = self.context.type_table.borrow();
                             match tt.get(ty).map(|t| &t.kind) {
-                                Some(TypeKind::Class { .. })
+                                Some(
+                                    TypeKind::Int
+                                    | TypeKind::Float
+                                    | TypeKind::Bool
+                                    | TypeKind::String,
+                                )
+                                | Some(TypeKind::Class { .. })
                                 | Some(TypeKind::Interface { .. })
                                 | Some(TypeKind::TypeParameter { .. }) => Some(ty),
                                 Some(TypeKind::Abstract {
