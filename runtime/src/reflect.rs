@@ -11,9 +11,10 @@
 use crate::anon_object;
 use crate::haxe_string::HaxeString;
 use crate::type_system::{
-    DynamicValue, ParamType, TYPE_ARRAY, TYPE_BOOL, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_NULL,
-    TYPE_STRING, TYPE_VOID, TypeId, box_class_field_as_dynamic, dynamic_box_at, get_type_info,
-    haxe_box_int_ptr, is_class_type, lookup_class_field,
+    DynamicValue, ParamType, TYPE_ARRAY, TYPE_BOOL, TYPE_CLASS_TOKEN, TYPE_DYNAMIC_TOKEN,
+    TYPE_ENUM_TOKEN, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_NULL, TYPE_STRING, TYPE_VOID,
+    TypeId, box_class_field_as_dynamic, dynamic_box_at, get_type_info, haxe_box_int_ptr,
+    is_class_type, lookup_class_field, reflected_class_token,
 };
 
 /// Haxe ValueType constructor ordinals (matches Type.hx ValueType order)
@@ -979,10 +980,20 @@ pub extern "C" fn haxe_type_typeof(v: *mut u8) -> i32 {
     if v.is_null() {
         return TVALUETYPE_TNULL;
     }
+    // Class and enum values are type tokens rather than heap pointers.
+    if (v as usize) >> 32 == 0 {
+        return TVALUETYPE_TOBJECT;
+    }
     unsafe {
         let dv = *(v as *const DynamicValue);
         if dv.type_id == TYPE_NULL {
             return TVALUETYPE_TNULL;
+        }
+        if matches!(
+            dv.type_id,
+            TYPE_CLASS_TOKEN | TYPE_ENUM_TOKEN | TYPE_DYNAMIC_TOKEN
+        ) {
+            return TVALUETYPE_TOBJECT;
         }
         if dv.type_id == TYPE_INT {
             return TVALUETYPE_TINT;
@@ -1005,6 +1016,9 @@ pub extern "C" fn haxe_type_typeof(v: *mut u8) -> i32 {
         }
 
         if let Some(type_info) = get_type_info(dv.type_id) {
+            if dv.value_ptr as usize == dv.type_id.0 as usize {
+                return TVALUETYPE_TOBJECT;
+            }
             if type_info.enum_info.is_some() {
                 return TVALUETYPE_TENUM;
             }
@@ -1044,7 +1058,7 @@ pub extern "C" fn haxe_type_typeof_value(v: *mut u8) -> i64 {
                     -1
                 } else {
                     let dv = *(v as *const DynamicValue);
-                    dv.type_id.0 as i64
+                    reflected_class_token(dv.type_id.0) as i64
                 }
             };
             valuetype_tclass(type_id)

@@ -29,24 +29,7 @@ impl<'a> HirToMirContext<'a> {
         enum_type: TypeId,
         variant_name: InternedString,
     ) -> Option<i64> {
-        let enum_symbol = self
-            .symbol_table
-            .get_symbol_from_type(enum_type)
-            .or_else(|| {
-                let type_table = self.type_table;
-                if let Some(type_info) = type_table.get(enum_type) {
-                    match &type_info.kind {
-                        crate::tast::TypeKind::GenericInstance { base_type, .. } => {
-                            return self.symbol_table.get_symbol_from_type(*base_type);
-                        }
-                        crate::tast::TypeKind::Enum { symbol_id, .. } => {
-                            return Some(*symbol_id);
-                        }
-                        _ => {}
-                    }
-                }
-                None
-            });
+        let enum_symbol = self.resolve_enum_symbol(enum_type);
 
         if let Some(enum_sym) = enum_symbol {
             if let Some(variants) = self.symbol_table.get_enum_variants(enum_sym) {
@@ -87,23 +70,29 @@ impl<'a> HirToMirContext<'a> {
 
     /// Resolve an enum TypeId to its SymbolId
     pub(crate) fn resolve_enum_symbol(&self, enum_type: TypeId) -> Option<SymbolId> {
-        self.symbol_table
-            .get_symbol_from_type(enum_type)
-            .or_else(|| {
-                let type_table = self.type_table;
-                if let Some(type_info) = type_table.get(enum_type) {
-                    match &type_info.kind {
-                        crate::tast::TypeKind::GenericInstance { base_type, .. } => {
-                            return self.symbol_table.get_symbol_from_type(*base_type);
-                        }
-                        crate::tast::TypeKind::Enum { symbol_id, .. } => {
-                            return Some(*symbol_id);
-                        }
-                        _ => {}
-                    }
+        let mut current = self.resolve_through_aliases(enum_type);
+        for _ in 0..32 {
+            match self.type_table.get(current).map(|ty| &ty.kind) {
+                Some(TypeKind::Enum { symbol_id, .. }) => return Some(*symbol_id),
+                Some(TypeKind::GenericInstance { base_type, .. }) => {
+                    current = self.resolve_through_aliases(*base_type);
                 }
-                None
-            })
+                Some(TypeKind::Optional { inner_type }) => {
+                    current = self.resolve_through_aliases(*inner_type);
+                }
+                Some(TypeKind::Class { symbol_id, .. })
+                    if self
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .is_some_and(|symbol| symbol.kind == crate::tast::SymbolKind::Enum) =>
+                {
+                    return Some(*symbol_id);
+                }
+                // Dynamic and primitive types cannot identify an enum.
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// Resolve the concrete IrTypes and TypeIds for an enum variant's fields.

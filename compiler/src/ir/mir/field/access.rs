@@ -151,6 +151,24 @@ impl<'a> HirToMirContext<'a> {
         // `Null<String>` is the same pointer as `String`, so its members resolve
         // through the inner type (an alias likewise through its target).
         let receiver_ty = self.resolve_through_aliases(receiver_ty);
+        // String and Array constraints retain the reference's native layout.
+        let constrained_reference = match self.type_table.get(receiver_ty).map(|t| &t.kind) {
+            Some(TypeKind::TypeParameter { constraints, .. }) => constraints
+                .iter()
+                .map(|ty| self.resolve_through_aliases(*ty))
+                .find(|ty| {
+                    matches!(
+                        self.type_table.get(*ty).map(|t| &t.kind),
+                        Some(TypeKind::String | TypeKind::Array { .. })
+                    )
+                }),
+            _ => None,
+        };
+        let (obj, receiver_ty) = if let Some(ty) = constrained_reference {
+            (self.coerce_reg_to(obj, &self.convert_type(ty))?, ty)
+        } else {
+            (obj, receiver_ty)
+        };
         // `___Int64.high` / `.low` are the words of the native i64.
         if let Some(word) = self.int64_word_read(obj, field, receiver_ty) {
             return Some(word);

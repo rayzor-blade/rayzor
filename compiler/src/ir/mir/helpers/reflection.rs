@@ -444,7 +444,7 @@ impl<'a> HirToMirContext<'a> {
         };
 
         let name = self.string_interner.get(sym.name);
-        if name == Some("haxe_type_typeof") {
+        if matches!(name, Some("haxe_type_typeof" | "Type.typeof")) {
             return true;
         }
 
@@ -452,10 +452,6 @@ impl<'a> HirToMirContext<'a> {
             if native == "haxe_type_typeof" {
                 return true;
             }
-        }
-
-        if name != Some("typeof") {
-            return false;
         }
 
         if let Some(qn) = sym
@@ -468,15 +464,19 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Some lowering paths keep only the bare method name.
-        true
+        name == Some("typeof")
     }
 
     pub(crate) fn trace_typeof_inner_arg<'b>(&self, expr: &'b HirExpr) -> Option<&'b HirExpr> {
         match &expr.kind {
             HirExprKind::Cast { expr: inner, .. } => self.trace_typeof_inner_arg(inner),
             HirExprKind::Call { callee, args, .. } => {
-                if args.len() == 1 && self.is_type_typeof_callee_expr(callee) {
-                    return args.first();
+                if self.is_type_typeof_callee_expr(callee) {
+                    return match args.as_slice() {
+                        [value] => Some(value),
+                        [receiver, value] if self.is_class_symbol_expr(receiver) => Some(value),
+                        _ => None,
+                    };
                 }
                 None
             }

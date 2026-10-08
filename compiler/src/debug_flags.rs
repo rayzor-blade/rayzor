@@ -17,6 +17,11 @@ macro_rules! cached_flag {
 }
 
 cached_flag!(
+    /// `RAYZOR_ENUM_LOOKUP_DEBUG`: trace enum helper arguments and their type identities.
+    enum_lookup_debug,
+    "RAYZOR_ENUM_LOOKUP_DEBUG"
+);
+cached_flag!(
     /// `RAYZOR_WILDCARD_LOG`: trace wildcard static-import resolution.
     wildcard_log,
     "RAYZOR_WILDCARD_LOG"

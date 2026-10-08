@@ -418,6 +418,13 @@ impl<'a> AstLowering<'a> {
                 // Add to root scope so it can be resolved
                 // Note: If symbol was pre-registered, it should already be in the scope,
                 // but adding it again is idempotent
+                if matches!(import.mode, parser::ImportMode::Alias(_)) {
+                    self.context.symbol_table.remap_symbol_in_scope(
+                        self.context.current_scope,
+                        symbol_name,
+                        imported_symbol,
+                    );
+                }
                 self.context
                     .scope_tree
                     .get_scope_mut(ScopeId::first())
@@ -561,7 +568,7 @@ impl<'a> AstLowering<'a> {
     /// `pkg.Module.Name` names a sub-type of `Module`; the sub-type registers
     /// under `pkg` alone, so retry the lookup with the module segment dropped.
     fn lookup_module_subtype(&self, path: &[String]) -> Option<crate::tast::SymbolId> {
-        if path.len() < 3 {
+        if path.len() < 2 {
             return None;
         }
         let module = &path[path.len() - 2];

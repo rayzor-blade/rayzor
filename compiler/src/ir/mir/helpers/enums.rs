@@ -169,7 +169,7 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Try to resolve enum type id from call arguments for runtime enum helpers.
-    /// For `enumEq(a, b)`, prefer the first arg then second arg.
+    /// Type receivers do not identify the enum of the value arguments.
     pub(crate) fn extract_enum_type_id_from_args(
         &self,
         runtime_func: &str,
@@ -178,32 +178,40 @@ impl<'a> HirToMirContext<'a> {
         if args.is_empty() {
             return None;
         }
-
-        let preferred_indices: &[usize] = if runtime_func == "haxe_type_enum_eq" {
-            &[0, 1]
-        } else {
-            &[0]
-        };
-
-        for &idx in preferred_indices {
-            if let Some(arg) = args.get(idx) {
-                if let Some(type_id) = self.extract_enum_type_id_from_expr(arg) {
-                    return Some(type_id);
+        if crate::debug_flags::enum_lookup_debug() {
+            for arg in args {
+                eprintln!(
+                    "[enum lookup] {runtime_func}: kind={:?}, type={:?}, ValueType={}",
+                    std::mem::discriminant(&arg.kind),
+                    self.type_table.get(arg.ty).map(|ty| &ty.kind),
+                    self.expr_is_value_type_expr(arg)
+                );
+                if let HirExprKind::Call { callee, .. } = &arg.kind {
+                    eprintln!("[enum lookup] callee={:?}", callee.kind);
                 }
             }
         }
-
-        for arg in args {
-            if let Some(type_id) = self.extract_enum_type_id_from_expr(arg) {
-                return Some(type_id);
-            }
-        }
-
-        None
+        args.iter()
+            .filter(|arg| !self.is_class_symbol_expr(arg))
+            .find_map(|arg| self.extract_enum_type_id_from_expr(arg))
     }
 
     /// Inspects the expression to find the enum variant symbol, then looks up the parent enum.
     pub(crate) fn extract_enum_type_id_from_expr(&self, expr: &HirExpr) -> Option<u32> {
+        if self.expr_is_value_type_expr(expr) {
+            if let Some(symbol) = self.symbol_table.all_symbols().find(|symbol| {
+                symbol.kind == crate::tast::SymbolKind::Enum
+                    && self.string_interner.get(symbol.name) == Some("ValueType")
+                    && matches!(
+                        symbol
+                            .qualified_name
+                            .and_then(|name| self.string_interner.get(name)),
+                        Some("ValueType" | "Type.ValueType")
+                    )
+            }) {
+                return Some(self.enum_runtime_id(symbol.id));
+            }
+        }
         // First, try to resolve from the expression's type
         let enum_sym = self.resolve_enum_symbol(expr.ty);
         if let Some(sym_id) = enum_sym {

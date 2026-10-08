@@ -327,6 +327,14 @@ fn stable_class_type_id(name: &str) -> u32 {
     0x1000_0000 | (hash & 0x0fff_ffff)
 }
 
+pub(crate) fn reflected_class_token(type_id: u32) -> u32 {
+    match TypeId(type_id) {
+        TYPE_STRING => stable_class_type_id("String"),
+        TYPE_ARRAY => stable_class_type_id("Array"),
+        _ => type_id,
+    }
+}
+
 static STRING_CLASS_INFO: ClassInfo = ClassInfo {
     name: "String",
     super_type_id: None,
@@ -3907,6 +3915,14 @@ pub extern "C" fn haxe_type_get_class(obj_ptr: *const u8) -> i64 {
     }
     let header = unsafe { *(obj_ptr as *const i64) };
     match u32::try_from(header) {
+        Ok(id) if matches!(TypeId(id), TYPE_STRING | TYPE_ARRAY) => {
+            let value = unsafe { &*(obj_ptr as *const DynamicValue) };
+            if value.value_ptr.is_null() {
+                0
+            } else {
+                reflected_class_token(id) as i64
+            }
+        }
         Ok(id) if is_class_type(id) => header,
         _ => 0,
     }

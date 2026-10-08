@@ -695,6 +695,29 @@ impl<'a> HirToMirContext<'a> {
             "haxe_type_typeof" | "Type.typeof" => {
                 Some(self.lower_type_typeof_call(args, result_type))
             }
+            "haxe_type_get_class" if args.len() == 1 => {
+                let mut ty = self.resolve_storage_type(args[0].ty);
+                if let Some(TypeKind::Optional { inner_type }) =
+                    self.type_table.get(ty).map(|ty| &ty.kind)
+                {
+                    ty = self.resolve_storage_type(*inner_type);
+                }
+                if !matches!(
+                    self.type_table.get(ty).map(|ty| &ty.kind),
+                    Some(TypeKind::String | TypeKind::Array { .. })
+                ) {
+                    return None;
+                }
+                let value = self.lower_expression(&args[0])?;
+                let boxed = self.maybe_box_value(value, ty, self.type_table.dynamic_type())?;
+                let ptr = IrType::Ptr(Box::new(IrType::U8));
+                let function =
+                    self.get_or_register_extern_function(runtime_func, vec![ptr], IrType::I64);
+                Some(
+                    self.builder
+                        .build_call_direct(function, vec![boxed], IrType::I64),
+                )
+            }
             // `Std.string(x)` converts using the best known type, which is what
             // `convert_to_string_with_hint` does: String is the identity, a type parameter
             // dispatches on its fixed-up tag, and only a genuinely Dynamic value reaches

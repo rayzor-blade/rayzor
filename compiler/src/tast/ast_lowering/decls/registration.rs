@@ -198,11 +198,10 @@ impl<'a> AstLowering<'a> {
                 crate::tast::SymbolKind::Enum | crate::tast::SymbolKind::Abstract => {
                     named_package(s.package_id) != pkg
                 }
-                // A class of another named package: `sys.thread.Thread`
-                // beside the default-imported `rayzor.concurrent.Thread`.
+                // Declarations have package identities; unresolved placeholders do not.
                 crate::tast::SymbolKind::Class => {
                     let owner = named_package(s.package_id);
-                    owner.is_some() && owner != pkg
+                    s.package_id.is_some() && owner != pkg
                 }
                 _ => false,
             })
@@ -229,7 +228,10 @@ impl<'a> AstLowering<'a> {
         name: InternedString,
         kind: crate::tast::SymbolKind,
     ) -> Option<SymbolId> {
-        let pkg = self.context.current_package?;
+        let pkg = self
+            .context
+            .current_package
+            .unwrap_or(crate::tast::namespace::PackageId::root());
         let id = *self
             .context
             .namespace_resolver
@@ -244,41 +246,38 @@ impl<'a> AstLowering<'a> {
     }
 
     pub(crate) fn register_symbol_with_package(&mut self, symbol_id: SymbolId, name: &str) {
-        if let Some(package_id) = self.context.current_package {
-            let interned_name = self.context.string_interner.intern(name);
+        let package_id = self
+            .context
+            .current_package
+            .unwrap_or(crate::tast::namespace::PackageId::root());
+        let interned_name = self.context.string_interner.intern(name);
 
-            // Register symbol in namespace
-            self.context
-                .namespace_resolver
-                .register_symbol(package_id, interned_name, symbol_id);
+        // Register symbol in namespace
+        self.context
+            .namespace_resolver
+            .register_symbol(package_id, interned_name, symbol_id);
 
-            // Update symbol with package info and qualified name
-            if let Some(symbol) = self.context.symbol_table.get_symbol_mut(symbol_id) {
-                symbol.package_id = Some(package_id);
+        // Update symbol with package info and qualified name
+        if let Some(symbol) = self.context.symbol_table.get_symbol_mut(symbol_id) {
+            symbol.package_id = Some(package_id);
 
-                // Create qualified name
-                if let Some(package) = self.context.namespace_resolver.get_package(package_id) {
-                    let qualified_name = if package.full_path.is_empty() {
-                        name.to_string()
-                    } else {
-                        format!(
-                            "{}.{}",
-                            package
-                                .full_path
-                                .iter()
-                                .map(|&s| self
-                                    .context
-                                    .string_interner
-                                    .get(s)
-                                    .unwrap_or("<unknown>"))
-                                .collect::<Vec<_>>()
-                                .join("."),
-                            name
-                        )
-                    };
-                    symbol.qualified_name =
-                        Some(self.context.string_interner.intern(&qualified_name));
-                }
+            // Create qualified name
+            if let Some(package) = self.context.namespace_resolver.get_package(package_id) {
+                let qualified_name = if package.full_path.is_empty() {
+                    name.to_string()
+                } else {
+                    format!(
+                        "{}.{}",
+                        package
+                            .full_path
+                            .iter()
+                            .map(|&s| self.context.string_interner.get(s).unwrap_or("<unknown>"))
+                            .collect::<Vec<_>>()
+                            .join("."),
+                        name
+                    )
+                };
+                symbol.qualified_name = Some(self.context.string_interner.intern(&qualified_name));
             }
         }
     }

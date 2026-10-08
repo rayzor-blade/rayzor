@@ -265,14 +265,12 @@ impl<'a> AstLowering<'a> {
                     | SymbolKind::TypeAlias
             )
         };
-        let Some(pkg) = self.context.current_package else {
-            return found;
-        };
+        let pkg = self.context.current_package.unwrap_or(PackageId::root());
         let foreign_type = self
             .context
             .symbol_table
             .get_symbol(found)
-            .is_some_and(|s| is_type(s.kind) && s.package_id != Some(pkg));
+            .is_some_and(|s| is_type(s.kind) && s.package_id.unwrap_or(PackageId::root()) != pkg);
         let declared_here = self
             .context
             .string_interner
@@ -281,6 +279,17 @@ impl<'a> AstLowering<'a> {
         if !foreign_type {
             return found;
         }
+        let lookup_type = |path: &QualifiedPath| {
+            self.context
+                .namespace_resolver
+                .lookup_symbol(path)
+                .filter(|id| {
+                    self.context
+                        .symbol_table
+                        .get_symbol(*id)
+                        .is_some_and(|s| is_type(s.kind))
+                })
+        };
         if !declared_here {
             let mut scope = Some(self.context.current_scope);
             while let Some(current) = scope {
@@ -294,11 +303,7 @@ impl<'a> AstLowering<'a> {
                     if !import.is_wildcard
                         && import.alias.unwrap_or(import.package_path.name) == name
                     {
-                        return self
-                            .context
-                            .namespace_resolver
-                            .lookup_symbol(&import.package_path)
-                            .unwrap_or(found);
+                        return lookup_type(&import.package_path).unwrap_or(found);
                     }
                 }
                 scope = self
@@ -320,6 +325,7 @@ impl<'a> AstLowering<'a> {
                     .get_symbol(*id)
                     .is_some_and(|s| is_type(s.kind))
             })
+            .or_else(|| lookup_type(&QualifiedPath::simple(name)))
             .unwrap_or(found)
     }
 
