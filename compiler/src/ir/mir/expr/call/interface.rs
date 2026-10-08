@@ -92,17 +92,17 @@ impl<'a> HirToMirContext<'a> {
                         call_args.extend(arg_regs);
 
                         // Build signature: (self: Ptr, args...) -> return_type
-                        let param_types = {
-                            let mut types = vec![IrType::Ptr(Box::new(IrType::Void))]; // self
-                            for arg in args[1..].iter() {
-                                types.push(self.convert_type(arg.ty));
-                            }
-                            types
-                        };
+                        let types: Vec<_> = args[1..].iter().map(|arg| arg.ty).collect();
+                        let param_types = self.prepare_interface_slot_args(
+                            iface_sym,
+                            method_name_i,
+                            &mut call_args,
+                            &types,
+                        )?;
                         // The return type comes from the method symbol: expr.ty
                         // can carry the interface type rather than the return type.
-                        let (return_ir_type, resolved_ret_type_id) =
-                            self.resolve_interface_method_return_type_full(*symbol, expr.ty);
+                        let (return_ir_type, resolved_ret_type_id) = self
+                            .interface_slot_return_type(iface_sym, method_name_i, *symbol, expr.ty);
                         self.emit_iface_return_diagnostic(
                             *symbol,
                             expr.ty,
@@ -208,17 +208,17 @@ impl<'a> HirToMirContext<'a> {
                     call_args.extend(arg_regs);
 
                     // Build signature: (self: Ptr, args...) -> return_type
-                    let param_types = {
-                        let mut types = vec![IrType::Ptr(Box::new(IrType::Void))]; // self
-                        for arg in args {
-                            types.push(self.convert_type(arg.ty));
-                        }
-                        types
-                    };
+                    let types: Vec<_> = args.iter().map(|arg| arg.ty).collect();
+                    let param_types = self.prepare_interface_slot_args(
+                        iface_sym,
+                        method_name_i,
+                        &mut call_args,
+                        &types,
+                    )?;
                     // The return type comes from the method symbol: expr.ty can
                     // carry the interface type rather than the return type.
                     let (return_ir_type, resolved_ret_type_id) =
-                        self.resolve_interface_method_return_type_full(*field, expr.ty);
+                        self.interface_slot_return_type(iface_sym, method_name_i, *field, expr.ty);
                     self.emit_iface_return_diagnostic(
                         *field,
                         expr.ty,

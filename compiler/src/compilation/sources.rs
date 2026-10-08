@@ -141,11 +141,18 @@ impl CompilationUnit {
         filename: &str,
         source: &str,
     ) -> Result<(), String> {
-        use crate::tast::ast_lowering::AstLowering;
-
         let ast_file = self
             .parse_file(filename, source)
             .map_err(|e| format!("Parse error in {}: {}", filename, e))?;
+
+        self.pre_register_ast_file_types(&ast_file)
+    }
+
+    pub(crate) fn pre_register_ast_file_types(
+        &mut self,
+        ast_file: &parser::HaxeFile,
+    ) -> Result<(), String> {
+        use crate::tast::ast_lowering::AstLowering;
 
         // Create a temporary AstLowering instance just for pre-registration
         let dummy_interner_rc = Rc::new(RefCell::new(StringInterner::new()));
@@ -162,10 +169,32 @@ impl CompilationUnit {
 
         // Pre-register only - call the pre_register_file method
         lowering
-            .pre_register_file(&ast_file)
-            .map_err(|e| format!("Pre-registration error in {}: {:?}", filename, e))?;
+            .pre_register_file(ast_file)
+            .map_err(|e| format!("Pre-registration error in {}: {:?}", ast_file.filename, e))?;
 
         Ok(())
+    }
+
+    pub(crate) fn predeclare_interface_signatures(
+        &mut self,
+        file: &parser::HaxeFile,
+    ) -> Result<(), String> {
+        use crate::tast::ast_lowering::AstLowering;
+        let mut lowering = AstLowering::new(
+            &mut self.string_interner,
+            Rc::new(RefCell::new(StringInterner::new())),
+            &mut self.symbol_table,
+            &self.type_table,
+            &mut self.scope_tree,
+            &mut self.namespace_resolver,
+            &mut self.import_resolver,
+        );
+        lowering.set_skip_stdlib_loading(true);
+        lowering.set_static_sig_index(Rc::clone(&self.static_sig_index));
+        lowering
+            .lower_file(file)
+            .map(|_| ())
+            .map_err(|e| format!("Interface signature error in {}: {:?}", file.filename, e))
     }
 
     /// Register only enum declarations from source into the symbol table.

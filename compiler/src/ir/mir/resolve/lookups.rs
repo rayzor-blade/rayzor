@@ -320,6 +320,14 @@ impl<'a> HirToMirContext<'a> {
         let type_ref = type_table.get(type_id)?;
         match &type_ref.kind {
             TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
+            TypeKind::Class { symbol_id, .. }
+                if self
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .is_some_and(|s| s.kind == crate::tast::SymbolKind::Interface) =>
+            {
+                Some(*symbol_id)
+            }
             TypeKind::TypeParameter { constraints, .. } => {
                 for constraint_id in constraints {
                     if let Some(constraint_type) = type_table.get(*constraint_id) {
@@ -336,10 +344,13 @@ impl<'a> HirToMirContext<'a> {
             // walk covers contexts where `I`'s declaring file has not yet run
             // register_interface_metadata (see `wrap_in_interface_fat_ptr`).
             TypeKind::Placeholder { name } => {
+                let matches_name = |symbol: &crate::tast::Symbol| {
+                    symbol.name == *name || symbol.qualified_name == Some(*name)
+                };
                 if let Some(&sym) = self.interface_method_names.keys().find(|sym_id| {
                     self.symbol_table
                         .get_symbol(**sym_id)
-                        .map(|s| s.name == *name)
+                        .map(matches_name)
                         .unwrap_or(false)
                 }) {
                     return Some(sym);
@@ -347,7 +358,7 @@ impl<'a> HirToMirContext<'a> {
                 use crate::tast::SymbolKind;
                 self.symbol_table
                     .all_symbols()
-                    .find(|s| s.name == *name && matches!(s.kind, SymbolKind::Interface))
+                    .find(|s| matches_name(s) && matches!(s.kind, SymbolKind::Interface))
                     .map(|s| s.id)
             }
             _ => None,
@@ -1816,16 +1827,27 @@ impl<'a> HirToMirContext<'a> {
         if let Some(v) = self.interface_method_names.get(&interface_symbol) {
             return Some(v.clone());
         }
-        let name = self.symbol_table.get_symbol(interface_symbol)?.name;
+        let symbol = self.symbol_table.get_symbol(interface_symbol)?;
+        let owner = symbol.qualified_name.unwrap_or(symbol.name);
         self.interface_method_names
             .iter()
             .find(|(k, _)| {
                 self.symbol_table
                     .get_symbol(**k)
-                    .map(|s| s.name == name)
+                    .map(|s| s.qualified_name.unwrap_or(s.name) == owner)
                     .unwrap_or(false)
             })
             .map(|(_, v)| v.clone())
+            .or_else(|| {
+                let owner = self.class_qualified_name(interface_symbol)?;
+                let index = self.static_sig_index.as_ref()?;
+                index
+                    .borrow_mut()
+                    .interface_methods_of(&owner)?
+                    .iter()
+                    .map(|name| self.string_interner.get_id(name))
+                    .collect()
+            })
     }
 
     /// Resolve the return type for an interface method call.

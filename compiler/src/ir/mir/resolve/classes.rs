@@ -44,6 +44,7 @@ impl<'a> HirToMirContext<'a> {
                     // Array's id can name some other class.
                     Some(
                         TypeKind::Array { .. }
+                        | TypeKind::Interface { .. }
                         | TypeKind::String
                         | TypeKind::Int
                         | TypeKind::Float

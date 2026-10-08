@@ -23,6 +23,7 @@ use std::rc::Rc;
 
 mod anon;
 mod init;
+mod interface_thunks;
 mod lambdas;
 mod metadata;
 mod module;

@@ -1701,15 +1701,34 @@ impl<'a> HirToMirContext<'a> {
             }
             if let (Some(class_tid), Some(iface_tid)) = (class_tid, iface_tid) {
                 for (slot_idx, method_sym) in methods.iter().enumerate() {
-                    // Only locally-compiled methods: imported ones get their slot
-                    // from their own file's `__vtable_init__`. An id out of
-                    // `external_function_map` is renumbered and unresolvable by
-                    // `build_function_ref`, which trap-stubs the whole init.
-                    let func_id = self.function_map.get(method_sym).copied();
+                    // Imported methods get local slot adapters, whose references
+                    // can be registered even when the implementing file lowered
+                    // before this interface's metadata became available.
+                    let func_id = self
+                        .function_map
+                        .get(method_sym)
+                        .or_else(|| self.external_function_map.get(method_sym))
+                        .copied();
                     if let Some(func_id) = func_id {
-                        let dispatch_func_id = self
-                            .ensure_vtable_dispatch_thunk(func_id)
-                            .unwrap_or(func_id);
+                        let name = self
+                            .resolve_interface_method_names(*iface_sym)
+                            .and_then(|names| names.get(slot_idx).copied());
+                        let dispatch_func_id = name
+                            .and_then(|name| {
+                                self.ensure_interface_slot_thunk(
+                                    func_id,
+                                    Some(*method_sym),
+                                    *iface_sym,
+                                    name,
+                                )
+                            })
+                            .or_else(|| self.ensure_vtable_dispatch_thunk(func_id))
+                            .or_else(|| {
+                                self.ensure_cross_module_dispatch_thunk(*method_sym, func_id)
+                            });
+                        let Some(dispatch_func_id) = dispatch_func_id else {
+                            continue;
+                        };
                         let closure_ptr = self.builder.build_function_ref(dispatch_func_id);
                         let class_tid_reg =
                             self.builder.build_const(IrValue::I32(class_tid as i32));

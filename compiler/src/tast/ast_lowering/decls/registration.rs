@@ -392,15 +392,24 @@ impl<'a> AstLowering<'a> {
                 let type_name = self.context.intern_string(&interface_decl.name);
                 self.record_type_usings(type_name, &interface_decl.meta);
                 let interface_name = self.context.intern_string(&interface_decl.name);
+                let root_binding = self
+                    .context
+                    .symbol_table
+                    .lookup_symbol(ScopeId::first(), interface_name)
+                    .map(|s| s.id);
 
                 // A same-named root symbol is this interface only when it is one
                 // (an import placeholder minted as Interface). A typedef alias to
                 // it, like root `IMap` for `haxe.Constraints.IMap`, keeps the root
                 // slot and the interface registers under its package alone.
                 let existing = self
-                    .context
-                    .symbol_table
-                    .lookup_symbol(ScopeId::first(), interface_name)
+                    .packaged_symbol(interface_name)
+                    .and_then(|id| self.context.symbol_table.get_symbol(id))
+                    .or_else(|| {
+                        self.context
+                            .symbol_table
+                            .lookup_symbol(ScopeId::first(), interface_name)
+                    })
                     .map(|s| (s.id, s.kind.clone(), s.package_id.is_none()));
                 if std::env::var_os("RAYZOR_SYM_DEBUG").is_some() {
                     eprintln!(
@@ -408,21 +417,36 @@ impl<'a> AstLowering<'a> {
                         interface_decl.name
                     );
                 }
-                let root_taken = match existing {
-                    Some((id, crate::tast::SymbolKind::Interface, unpackaged)) => {
-                        if unpackaged {
-                            self.register_symbol_with_package(id, &interface_decl.name);
+                let root_taken =
+                    match existing {
+                        Some((id, crate::tast::SymbolKind::Interface, unpackaged))
+                            if unpackaged
+                                || self.context.symbol_table.get_symbol(id).is_some_and(|s| {
+                                    s.package_id == self.context.current_package
+                                }) =>
+                        {
+                            if unpackaged {
+                                self.register_symbol_with_package(id, &interface_decl.name);
+                            }
+                            return Ok(());
                         }
-                        return Ok(());
-                    }
-                    Some(_) => true,
-                    None => false,
-                };
+                        Some(_) => true,
+                        None => false,
+                    };
 
                 let interface_symbol = self
                     .context
                     .symbol_table
                     .create_interface_in_scope(interface_name, ScopeId::first());
+                if root_taken {
+                    if let Some(root) = root_binding {
+                        self.context.symbol_table.remap_symbol_in_scope(
+                            ScopeId::first(),
+                            interface_name,
+                            root,
+                        );
+                    }
+                }
 
                 // Register symbol with package information (also sets qualified name)
                 self.register_symbol_with_package(interface_symbol, &interface_decl.name);

@@ -58,6 +58,8 @@ struct ClassSigs {
     /// extern, bodyless `new`, inherited ctor) is absent, because a `<C>.new`
     /// stub for those would dangle and SIGILL at the call.
     ctor_params: Option<usize>,
+    /// Interface slots: inherited declarations first, then own methods and accessors.
+    interface: Option<(Vec<String>, Vec<String>)>,
 }
 
 impl ClassSigs {
@@ -227,6 +229,42 @@ impl StaticSigIndex {
             .into_iter()
             .filter(|m| self.is_overridden_below(class_name, m))
             .collect()
+    }
+
+    /// Interface layout before the declaring module has lowered, including
+    /// interfaces reached through a circular import.
+    pub fn interface_methods_of(&mut self, name: &str) -> Option<Vec<String>> {
+        self.interface_methods_inner(name, &mut BTreeSet::new())
+    }
+
+    fn interface_methods_inner(
+        &mut self,
+        name: &str,
+        visiting: &mut BTreeSet<String>,
+    ) -> Option<Vec<String>> {
+        self.ensure_indexed_from_known_files(name);
+        if !visiting.insert(name.to_owned()) {
+            return None;
+        }
+        let class = self.classes.get(name)?;
+        let (parents, own) = class.interface.clone()?;
+        let package = class.package.clone();
+        let mut names = Vec::new();
+        for parent in parents {
+            let parent = self.qualify_parent(parent, &package);
+            for method in self.interface_methods_inner(&parent, visiting)? {
+                if !names.contains(&method) {
+                    names.push(method);
+                }
+            }
+        }
+        for method in own {
+            if !names.contains(&method) {
+                names.push(method);
+            }
+        }
+        visiting.remove(name);
+        Some(names)
     }
 
     /// A bare `extends Base` names a type in the subclass's own package, then
@@ -436,6 +474,49 @@ impl StaticSigIndex {
                 // cross-module `new SomeAbstract(x)` that reaches the fallback
                 // in `lower_new` is lowered correctly by that wrap today.
                 self.index_fields(package, &a.name, &a.fields, None, false);
+            }
+            TypeDeclaration::Interface(interface) => {
+                self.index_fields(package, &interface.name, &interface.fields, None, false);
+                let mut names: Vec<_> = interface
+                    .fields
+                    .iter()
+                    .filter_map(|field| {
+                        if let parser::ClassFieldKind::Function(function) = &field.kind {
+                            Some(function.name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for field in &interface.fields {
+                    if let parser::ClassFieldKind::Property {
+                        name,
+                        getter,
+                        setter,
+                        ..
+                    } = &field.kind
+                    {
+                        for accessor in [getter, setter] {
+                            if let parser::PropertyAccess::Custom(accessor) = accessor {
+                                let method = if accessor == "get" || accessor == "set" {
+                                    format!("{accessor}_{name}")
+                                } else {
+                                    accessor.clone()
+                                };
+                                if !names.contains(&method) {
+                                    names.push(method);
+                                }
+                            }
+                        }
+                    }
+                }
+                let parents = interface
+                    .extends
+                    .iter()
+                    .filter_map(Self::type_path_name)
+                    .collect();
+                let qname = Self::qualify(package, &interface.name);
+                self.classes.get_mut(&qname).unwrap().interface = Some((parents, names));
             }
             TypeDeclaration::Typedef(t) => {
                 // Only straight `typedef A = pkg.B` renames participate in

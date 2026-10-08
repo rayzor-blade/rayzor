@@ -128,6 +128,8 @@ pub enum ValueTag {
     String = 5,
     /// Any pointer: class instance, enum, anon object, array.
     Reference = 6,
+    /// Interface wrapper or its raw class instance, compared by object identity.
+    Interface = 8,
 }
 
 impl ValueTag {
@@ -139,6 +141,7 @@ impl ValueTag {
             4 => Some(ValueTag::Float),
             5 => Some(ValueTag::String),
             6 => Some(ValueTag::Reference),
+            8 => Some(ValueTag::Interface),
             _ => None,
         }
     }
@@ -3506,6 +3509,14 @@ pub extern "C" fn haxe_dynamic_order(a: *mut u8, b: *mut u8) -> i32 {
 /// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Dynamic, 0=unresolved.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_equals_typed(raw: i64, type_tag: i32, other: *mut u8) -> bool {
+    if type_tag == ValueTag::Interface as i32 {
+        let object = haxe_iface_identity(raw as *mut u8);
+        return if object.is_null() {
+            haxe_dynamic_equals(object, other)
+        } else {
+            haxe_dynamic_ref_equals(other, object)
+        };
+    }
     // Reference/Dynamic, and the placeholder a monomorphisation never filled
     // in, both leave `raw` pointer-shaped: neither side is a described value.
     if type_tag == 6 || type_tag == 0 {
@@ -3573,6 +3584,10 @@ pub extern "C" fn haxe_unbox_bool_ptr(ptr: *mut u8) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
     match ValueTag::from_i32(type_tag) {
+        Some(ValueTag::Interface) => {
+            let object = haxe_iface_identity(value as *mut u8);
+            haxe_box_typed_ptr(object as i64, ValueTag::Reference as i32)
+        }
         Some(ValueTag::Int) => {
             // Int: allocate and store value, same as haxe_box_int_ptr
             haxe_box_int_ptr(value)

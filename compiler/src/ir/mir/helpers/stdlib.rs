@@ -665,6 +665,47 @@ impl<'a> HirToMirContext<'a> {
                 if source_is_array && target_is_array {
                     return Some(self.lower_expression(&args[0]));
                 }
+                let source_interface = self.get_interface_symbol(args[0].ty);
+                if source_interface.is_some() || self.get_class_symbol(args[0].ty).is_some() {
+                    let target_class = match &args[1].kind {
+                        HirExprKind::Variable { symbol, .. } => self
+                            .symbol_table
+                            .get_symbol(*symbol)
+                            .filter(|s| s.kind == crate::tast::symbols::SymbolKind::Class)
+                            .filter(|s| {
+                                !self.class_is_named(s.id, "Array")
+                                    && !self.class_is_named(s.id, "String")
+                            }),
+                        _ => None,
+                    };
+                    if target_class.is_some() {
+                        let mut value = self.lower_expression(&args[0])?;
+                        let target = self.lower_expression(&args[1])?;
+                        let ptr = IrType::Ptr(Box::new(IrType::U8));
+                        // Interface wrappers carry the raw object in word zero.
+                        if source_interface.is_some() {
+                            let identity = self.get_or_register_extern_function(
+                                "haxe_iface_identity",
+                                vec![ptr.clone()],
+                                ptr.clone(),
+                            );
+                            value = self.builder.build_call_direct(
+                                identity,
+                                vec![value],
+                                ptr.clone(),
+                            )?;
+                        }
+                        let downcast = self.get_or_register_extern_function(
+                            "haxe_safe_downcast_class",
+                            vec![ptr.clone(), IrType::I64],
+                            ptr.clone(),
+                        );
+                        let result =
+                            self.builder
+                                .build_call_direct(downcast, vec![value, target], ptr)?;
+                        return Some(self.coerce_reg_to(result, &result_type));
+                    }
+                }
                 None
             }
             "haxe_reflect_call_method" | "Reflect.callMethod" => {

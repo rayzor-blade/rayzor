@@ -334,16 +334,7 @@ impl<'a> HirToMirContext<'a> {
         // Collect all interface symbols (direct + transitive parents)
         let mut all_iface_symbols: Vec<SymbolId> = Vec::new();
         for &iface_type_id in &class.implements {
-            let iface_symbol = {
-                let type_table = self.type_table;
-                type_table.get(iface_type_id).and_then(|t| {
-                    if let TypeKind::Interface { symbol_id, .. } = &t.kind {
-                        Some(*symbol_id)
-                    } else {
-                        None
-                    }
-                })
-            };
+            let iface_symbol = self.get_interface_symbol(iface_type_id);
             if let Some(iface_sym) = iface_symbol {
                 if !all_iface_symbols.contains(&iface_sym) {
                     all_iface_symbols.push(iface_sym);

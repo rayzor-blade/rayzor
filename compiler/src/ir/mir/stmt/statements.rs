@@ -382,7 +382,7 @@ impl<'a> HirToMirContext<'a> {
                             if init_is_safe_cast {
                                 (final_value, false)
                             } else {
-                                self.maybe_wrap_for_interface(final_value, init_expr.ty, target_ty)
+                                self.maybe_wrap_for_interface(final_value, init_ty, target_ty)
                             }
                         } else {
                             (final_value, false)
@@ -933,7 +933,7 @@ impl<'a> HirToMirContext<'a> {
                         {
                             if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
                                 if sym_info.type_id != TypeId::invalid() {
-                                    self.maybe_wrap_for_interface(value, rhs.ty, sym_info.type_id)
+                                    self.maybe_wrap_for_interface(value, rhs_ty, sym_info.type_id)
                                 } else {
                                     (value, false)
                                 }

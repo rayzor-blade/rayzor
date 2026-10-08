@@ -749,6 +749,11 @@ pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i
         // that lowers to a pointer, and cannot tell a boxed DynamicValue from a
         // class instance -- both are Ptr in MIR.
         6 => compare_reference_slot(a, b),
+        8 => {
+            let a = crate::type_system::haxe_iface_identity(a as *mut u8) as i64;
+            let b = crate::type_system::haxe_iface_identity(b as *mut u8) as i64;
+            compare_reference_slot(a, b)
+        }
         _ => {
             // A generic slot can hold the same array as a raw pointer or a box.
             if same_array_reference(a, b) {

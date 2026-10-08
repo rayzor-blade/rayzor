@@ -662,6 +662,7 @@ impl CompilationUnit {
         // and causes non-deterministic import base offsets, leading to different function
         // IDs, different inlining decisions, and ultimately wrong optimized MIR.
         let mut all_files: BTreeMap<String, (PathBuf, String, Vec<String>)> = BTreeMap::new();
+        let mut interface_headers = Vec::new();
         // Which files each file CONSTRUCTS, split off from its dependencies:
         // a cycle is broken by emitting the constructed class first.
         let mut constructs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -749,6 +750,17 @@ impl CompilationUnit {
                     // Indexed here, before anything lowers: a base class needs
                     // to know which of its methods a later file overrides.
                     self.static_sig_index.borrow_mut().index_file(&ast);
+                    // Interface identity must exist before bodies in an import
+                    // cycle resolve their annotated receivers.
+                    let mut headers = ast.clone();
+                    headers
+                        .declarations
+                        .retain(|decl| matches!(decl, parser::TypeDeclaration::Interface(_)));
+                    headers.module_fields.clear();
+                    if !headers.declarations.is_empty() {
+                        self.pre_register_ast_file_types(&headers)?;
+                        interface_headers.push(headers);
+                    }
                     let mut deps = Self::extract_all_dependencies(&ast);
                     deps.extend(Self::enclosing_package_candidates(&ast, &[]));
                     deps
@@ -797,6 +809,12 @@ impl CompilationUnit {
         }
 
         add_profile_ms(&mut self.typecheck_timings.import_discover_ms, t_discover);
+
+        // Method declarations supply the slot ABI to implementations that
+        // compile before the interface's module in a circular import.
+        for headers in &interface_headers {
+            self.predeclare_interface_signatures(headers)?;
+        }
 
         // Step 2: Topological sort using Kahn's algorithm
         let t_toposort = profile_timer(self.config.profile_typecheck);

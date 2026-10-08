@@ -106,6 +106,16 @@ pub enum IrType {
 }
 
 impl IrType {
+    /// Retain interface provenance through generic substitution without
+    /// changing the machine pointer representation.
+    pub fn interface_ptr() -> Self {
+        Self::Ptr(Box::new(Self::Opaque {
+            name: "__haxe_interface".to_owned(),
+            size: 0,
+            align: 8,
+        }))
+    }
+
     /// Create a new type parameter (alias for TypeVar)
     pub fn type_param(name: impl Into<String>) -> Self {
         IrType::TypeVar(name.into())
@@ -177,6 +187,9 @@ impl IrType {
             IrType::F32 | IrType::F64 => ValueTag::Float,
             IrType::String => ValueTag::String,
             IrType::Ptr(inner) if matches!(**inner, IrType::String) => ValueTag::String,
+            IrType::Ptr(inner) if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_interface") => {
+                ValueTag::Interface
+            }
             IrType::Ptr(_) => ValueTag::Reference,
             _ => ValueTag::Int,
         }

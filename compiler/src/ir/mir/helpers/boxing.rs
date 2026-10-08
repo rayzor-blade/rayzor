@@ -232,6 +232,32 @@ impl<'a> HirToMirContext<'a> {
             | Some(TypeKind::Enum { .. })
             | Some(TypeKind::Interface { .. })
             | Some(TypeKind::Anonymous { .. }) => {
+                // Type tokens lower to integer IDs, not interface instances.
+                if self.get_interface_symbol(value_ty).is_some()
+                    && matches!(self.builder.get_register_type(value), Some(IrType::Ptr(_)))
+                {
+                    let ptr = IrType::Ptr(Box::new(IrType::U8));
+                    let identity = self.get_or_register_extern_function(
+                        "haxe_iface_identity",
+                        vec![ptr.clone()],
+                        ptr.clone(),
+                    );
+                    let object =
+                        self.builder
+                            .build_call_direct(identity, vec![value], ptr.clone())?;
+                    let object = self.builder.build_bitcast(object, IrType::I64)?;
+                    let tag = self.builder.build_const(IrValue::I32(
+                        rayzor_runtime::type_system::ValueTag::Reference as i32,
+                    ))?;
+                    let boxed = self.get_or_register_extern_function(
+                        "haxe_box_typed_ptr",
+                        vec![IrType::I64, IrType::I32],
+                        ptr.clone(),
+                    );
+                    return self
+                        .builder
+                        .build_call_direct(boxed, vec![object, tag], ptr);
+                }
                 debug!(
                     "[BOXING] Auto-boxing reference type {:?} to Dynamic using box_reference",
                     value_kind_cloned

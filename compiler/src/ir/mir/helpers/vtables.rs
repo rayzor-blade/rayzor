@@ -446,6 +446,19 @@ impl<'a> HirToMirContext<'a> {
             .map(|c| if c.is_alphanumeric() { c } else { '_' })
             .collect();
         let thunk_name = format!("__vtable_dispatch_thunk__{}", sanitized);
+        self.forward_ref_dispatch_thunk_named(thunk_name)
+    }
+
+    pub(crate) fn forward_ref_interface_slot_thunk_by_name(
+        &mut self,
+        method_fqn: &str,
+        interface: SymbolId,
+    ) -> Option<IrFunctionId> {
+        let name = self.interface_slot_thunk_name(method_fqn, interface)?;
+        self.forward_ref_dispatch_thunk_named(name)
+    }
+
+    fn forward_ref_dispatch_thunk_named(&mut self, thunk_name: String) -> Option<IrFunctionId> {
         // Reuse if this context already has the (real or stub) thunk by name.
         if let Some(&existing) = self.external_function_name_map.get(&thunk_name) {
             return Some(existing);

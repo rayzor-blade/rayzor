@@ -342,8 +342,19 @@ impl<'a> HirToMirContext<'a> {
                 // lowering uses the closure ABI (env prepended) on every
                 // backend, so a raw `(this, args)` method in a slot would
                 // receive `(this=env, args=this, …)`.
-                Some(func_id) => self
-                    .ensure_vtable_dispatch_thunk(func_id)
+                Some(func_id) => iface_method_names
+                    .get(i)
+                    .and_then(|name| name.as_ref())
+                    .and_then(|name| self.string_interner.get_id(name))
+                    .and_then(|name| {
+                        self.ensure_interface_slot_thunk(
+                            func_id,
+                            *method_sym_opt,
+                            interface_symbol,
+                            name,
+                        )
+                    })
+                    .or_else(|| self.ensure_vtable_dispatch_thunk(func_id))
                     .or_else(|| {
                         method_sym_opt
                             .and_then(|ms| self.ensure_cross_module_dispatch_thunk(ms, func_id))
@@ -359,7 +370,7 @@ impl<'a> HirToMirContext<'a> {
                         // Refuse the wrapper rather than booby-trap the slot.
                         _ => return None,
                     };
-                    self.forward_ref_dispatch_thunk_by_name(&key)?
+                    self.forward_ref_interface_slot_thunk_by_name(&key, interface_symbol)?
                 }
             };
             let fn_ref = self.builder.build_function_ref(dispatch_func_id)?;
@@ -639,17 +650,8 @@ impl<'a> HirToMirContext<'a> {
             let method_fqn = format!("{}.{}", class_fqn, mname);
             // Prefer a real thunk/function already present by name; else a
             // name-keyed forward-ref stub that dedupes at merge.
-            let thunk_id = self
-                .external_function_name_map
-                .get(&format!(
-                    "__vtable_dispatch_thunk__{}",
-                    method_fqn
-                        .chars()
-                        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-                        .collect::<String>()
-                ))
-                .copied()
-                .or_else(|| self.forward_ref_dispatch_thunk_by_name(&method_fqn))?;
+            let thunk_id =
+                self.forward_ref_interface_slot_thunk_by_name(&method_fqn, interface_symbol)?;
             let fn_ref = self.builder.build_function_ref(thunk_id)?;
             let offset_val = self
                 .builder

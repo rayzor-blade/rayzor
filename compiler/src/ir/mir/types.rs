@@ -242,6 +242,9 @@ impl<'a> HirToMirContext<'a> {
             }
 
             Some(TypeKind::Class { symbol_id, .. }) => {
+                if self.get_interface_symbol(type_id).is_some() {
+                    return IrType::interface_ptr();
+                }
                 // Int64's underlying two-word class is the native i64 as well:
                 // the abstract's own methods read `this.high`/`this.low` on it.
                 if self.is_int64_underlying_class(*symbol_id) {
@@ -249,7 +252,7 @@ impl<'a> HirToMirContext<'a> {
                 }
                 IrType::Ptr(Box::new(IrType::Void))
             }
-            Some(TypeKind::Interface { .. }) => IrType::Ptr(Box::new(IrType::Void)),
+            Some(TypeKind::Interface { .. }) => IrType::interface_ptr(),
             Some(TypeKind::Enum { .. }) => IrType::I64, // Enums as discriminant values (i64 to match Haxe Int)
             Some(TypeKind::Array { element_type, .. }) => {
                 // HaxeArray is an opaque runtime structure, represented as Ptr(Void)
@@ -309,6 +312,12 @@ impl<'a> HirToMirContext<'a> {
                         self.string_interner,
                         &["Int64", "__Int64", "___Int64"],
                     )
+                }) {
+                    return IrType::I64;
+                }
+                // EnumValue carries any enum's pointer or discriminant bits.
+                if sym.is_some_and(|s| {
+                    crate::tast::core::is_haxe_std_type(s, self.string_interner, &["EnumValue"])
                 }) {
                     return IrType::I64;
                 }
@@ -462,7 +471,13 @@ impl<'a> HirToMirContext<'a> {
 
             Some(TypeKind::TypeAlias { target_type, .. }) => self.convert_type(*target_type),
 
-            Some(TypeKind::Placeholder { .. }) => IrType::Ptr(Box::new(IrType::Void)),
+            Some(TypeKind::Placeholder { .. }) => {
+                if self.get_interface_symbol(type_id).is_some() {
+                    IrType::interface_ptr()
+                } else {
+                    IrType::Ptr(Box::new(IrType::Void))
+                }
+            }
 
             Some(TypeKind::Char) => IrType::I32,
 

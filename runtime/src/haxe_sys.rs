@@ -241,6 +241,7 @@ pub extern "C" fn haxe_trace_typed(value: i64, type_tag: i32) {
                 haxe_trace_string_struct(value as *const HaxeString);
             }
         }
+        8 => haxe_trace_string_struct(haxe_value_to_string_by_tag(value, type_tag)),
         _ => haxe_trace_int(value), // fallback
     }
 }
@@ -621,6 +622,10 @@ pub extern "C" fn haxe_value_to_string_by_tag(value: i64, type_tag: i32) -> *mut
         // reinterpret i64 bits as f64
         Some(ValueTag::Float) => haxe_string_from_float(f64::from_bits(value as u64)),
         Some(ValueTag::Reference) => crate::type_system::haxe_std_string_ptr(value as *mut u8),
+        Some(ValueTag::Interface) => {
+            let object = crate::type_system::haxe_iface_identity(value as *mut u8);
+            crate::type_system::haxe_std_string_ptr(object)
+        }
         // An unresolved generic may carry a boxed Dynamic, an erased scalar,
         // or a raw static HaxeString. The latter has a small byte length in
         // the box's value-pointer slot and zero capacity in the next slot.
