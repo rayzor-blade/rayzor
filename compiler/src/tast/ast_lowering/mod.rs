@@ -297,8 +297,8 @@ enum ParamUse<'a> {
     Bool,
     String,
     Hint(&'a Type),
-    /// Stored into an element of this class's array field: its element type.
-    ElementOf(&'a str),
+    /// Stored into a field or indexed element with a declared type.
+    StoredIn(&'a Expr),
     /// Matched against an enum constructor pattern: that constructor's enum.
     EnumOf(&'a str),
 }
@@ -485,20 +485,8 @@ fn collect_param_operator_uses<'a>(
                     if let Some(u) = operand_use(right, strings) {
                         note(left, u, uses);
                     }
-                    // `field[i] = p` / `this.field[i] = p`
-                    if let ExprKind::Index { expr: base, .. } = &left.kind {
-                        let field = match &base.kind {
-                            ExprKind::Ident(f) if !params.contains_key(f.as_str()) => {
-                                Some(f.as_str())
-                            }
-                            ExprKind::Field {
-                                expr: recv, field, ..
-                            } if matches!(recv.kind, ExprKind::This) => Some(field.as_str()),
-                            _ => None,
-                        };
-                        if let Some(f) = field {
-                            note(right, ParamUse::ElementOf(f), uses);
-                        }
+                    if matches!(left.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
+                        note(right, ParamUse::StoredIn(left), uses);
                     }
                 }
                 A::AddAssign => {

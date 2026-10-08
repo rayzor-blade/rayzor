@@ -1282,20 +1282,52 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    /// The element type of this class's `Array<T>` field named `field`.
-    fn class_array_field_element(&self, field: &str) -> Option<TypeId> {
-        let class_symbol = *self.context.class_context_stack.last()?;
-        let key = self.context.string_interner.get_id(field)?;
-        let field_symbol = self.class_fields.get(&class_symbol).and_then(|fields| {
-            fields
+    /// Resolve a store rooted in a class field without lowering its receiver.
+    fn parameter_store_target_type(
+        &self,
+        target: &Expr,
+        locals: &std::collections::BTreeSet<String>,
+        depth: usize,
+    ) -> Option<TypeId> {
+        if depth > 32 {
+            return None;
+        }
+        let own_field = |name: &str| {
+            let class = *self.context.class_context_stack.last()?;
+            let key = self.context.string_interner.get_id(name)?;
+            let symbol = self
+                .class_fields
+                .get(&class)?
                 .iter()
-                .find(|(name, _, _)| *name == key)
-                .map(|(_, sym, _)| *sym)
-        })?;
-        let field_ty = self.context.symbol_table.get_symbol(field_symbol)?.type_id;
-        let tt = self.context.type_table.borrow();
-        match tt.get(field_ty).map(|t| &t.kind) {
-            Some(TypeKind::Array { element_type }) => Some(*element_type),
+                .find(|(name, _, _)| *name == key)?
+                .1;
+            Some(self.context.symbol_table.get_symbol(symbol)?.type_id)
+        };
+        match &target.kind {
+            ExprKind::Ident(name) if !locals.contains(name) => own_field(name),
+            ExprKind::Field { expr, field, .. } if matches!(expr.kind, ExprKind::This) => {
+                own_field(field)
+            }
+            ExprKind::Field { expr, field, .. } => {
+                let receiver = self.parameter_store_target_type(expr, locals, depth + 1)?;
+                let table = self.context.type_table.borrow();
+                let receiver = Self::resolve_alias_chain(&table, receiver);
+                let TypeKind::Anonymous { fields } = &table.get(receiver)?.kind else {
+                    return None;
+                };
+                let name = self.context.string_interner.get_id(field)?;
+                Some(fields.iter().find(|field| field.name == name)?.type_id)
+            }
+            ExprKind::Index { expr, .. } => {
+                let receiver = self.parameter_store_target_type(expr, locals, depth + 1)?;
+                let table = self.context.type_table.borrow();
+                let receiver = Self::resolve_alias_chain(&table, receiver);
+                match table.get(receiver).map(|ty| &ty.kind) {
+                    Some(TypeKind::Array { element_type }) => Some(*element_type),
+                    _ => None,
+                }
+            }
+            ExprKind::Paren(expr) => self.parameter_store_target_type(expr, locals, depth + 1),
             _ => None,
         }
     }
@@ -1314,14 +1346,32 @@ impl<'a> AstLowering<'a> {
     ) {
         let mut names: BTreeMap<&str, &str> = params.iter().map(|p| (*p, *p)).collect();
         while collect_param_copies(body, &mut names) {}
+        let parameter_hints: Vec<_> = parameter_hints.into_iter().collect();
+        let mut locals: std::collections::BTreeSet<String> = parameter_hints
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        walk_expr(body, &mut |expr| match &expr.kind {
+            ExprKind::Var { name, .. } | ExprKind::Final { name, .. } => {
+                locals.insert(name.clone());
+            }
+            ExprKind::For { var, key_var, .. } => {
+                locals.insert(var.clone());
+                locals.extend(key_var.iter().cloned());
+            }
+            ExprKind::Try { catches, .. } => {
+                locals.extend(catches.iter().map(|catch| catch.var.clone()))
+            }
+            _ => {}
+        });
         let strings: std::collections::BTreeSet<_> = parameter_hints
-            .into_iter()
+            .iter()
             .filter_map(|(name, hint)| {
-                let ty = self.lower_type(hint?).ok()?;
+                let ty = self.lower_type((*hint)?).ok()?;
                 let table = self.context.type_table.borrow();
                 let ty = Self::resolve_alias_chain(&table, ty);
                 matches!(table.get(ty).map(|ty| &ty.kind), Some(TypeKind::String))
-                    .then(|| name.to_owned())
+                    .then(|| (*name).to_owned())
             })
             .collect();
         let mut op_uses: BTreeMap<&str, Vec<ParamUse>> = BTreeMap::new();
@@ -1344,10 +1394,12 @@ impl<'a> AstLowering<'a> {
                         Ok(ty) => ty,
                         Err(_) => continue,
                     },
-                    ParamUse::ElementOf(field) => match self.class_array_field_element(field) {
-                        Some(ty) => ty,
-                        None => continue,
-                    },
+                    ParamUse::StoredIn(target) => {
+                        match self.parameter_store_target_type(target, &locals, 0) {
+                            Some(ty) => ty,
+                            None => continue,
+                        }
+                    }
                     ParamUse::EnumOf(ctor) => match self.enum_of_constructor(ctor) {
                         Some(ty) => ty,
                         None => continue,
