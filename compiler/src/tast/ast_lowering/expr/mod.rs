@@ -1142,7 +1142,10 @@ impl<'a> AstLowering<'a> {
                         })
                         .unwrap_or(base_class_type_id)
                 };
-                let ctor_params = self.constructor_param_types(constructor_receiver);
+                let constructor_target = self
+                    .forwarded_constructor_type(constructor_receiver)
+                    .unwrap_or(constructor_receiver);
+                let ctor_params = self.constructor_param_types(constructor_target);
                 let constructor_has_unbound_params = {
                     let table = self.context.type_table.borrow();
                     match table.get(constructor_receiver).map(|t| &t.kind) {
@@ -1500,6 +1503,45 @@ impl<'a> AstLowering<'a> {
                 // memory/feedback_no_silent_dispatch_fallthrough.md.
                 let (final_class_type, final_type_args, final_class_name) =
                     self.maybe_resolve_multitype_map(actual_class_type, type_args, type_path);
+
+                if let Some(underlying) = self.forwarded_constructor_type(final_class_type) {
+                    let (type_arguments, builtin_name) = {
+                        let table = self.context.type_table.borrow();
+                        match table.get(underlying).map(|ty| &ty.kind) {
+                            Some(
+                                TypeKind::Class { type_args, .. }
+                                | TypeKind::Abstract { type_args, .. }
+                                | TypeKind::GenericInstance { type_args, .. },
+                            ) => (type_args.clone(), None),
+                            Some(TypeKind::Array { element_type }) => {
+                                (vec![*element_type], Some("Array"))
+                            }
+                            Some(TypeKind::String) => (Vec::new(), Some("String")),
+                            _ => (Vec::new(), None),
+                        }
+                    };
+                    let class_name = self
+                        .get_class_name_for_type(underlying)
+                        .or_else(|| builtin_name.map(str::to_string))
+                        .map(|name| self.context.intern_string(&name));
+                    let kind = TypedExpressionKind::New {
+                        class_type: underlying,
+                        arguments: arg_exprs,
+                        type_arguments,
+                        class_name,
+                    };
+                    let usage = self.determine_variable_usage(&kind);
+                    let lifetime_id = self.assign_lifetime(&kind, &final_class_type);
+                    let metadata = self.analyze_expression_metadata(&kind);
+                    return Ok(TypedExpression {
+                        expr_type: final_class_type,
+                        kind,
+                        usage,
+                        lifetime_id,
+                        source_location: self.context.span_to_location(&expression.span),
+                        metadata,
+                    });
+                }
 
                 let class_name_str = match final_class_name.or(aliased_class_name) {
                     Some(name) => name,

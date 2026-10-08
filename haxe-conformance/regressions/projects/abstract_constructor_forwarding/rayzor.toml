@@ -1,0 +1,5 @@
+[project]
+name = "abstract-constructor-forwarding"
+entry = "./ImportedConstructorForwarding.hx"
+[build]
+class-paths = ["."]

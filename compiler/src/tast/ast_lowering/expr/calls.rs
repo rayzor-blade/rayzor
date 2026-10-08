@@ -5779,6 +5779,69 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// Follow constructor forwarding while binding each abstract's own parameters.
+    pub(crate) fn forwarded_constructor_type(&self, class_type: TypeId) -> Option<TypeId> {
+        let index = self.static_sig_index.as_ref()?.clone();
+        let mut current = class_type;
+        let mut forwarded = false;
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            if !seen.insert(current) {
+                return None;
+            }
+            let (symbol, underlying, arguments) = {
+                let table = self.context.type_table.borrow();
+                match table.get(current).map(|ty| &ty.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => {
+                        current = *target_type;
+                        continue;
+                    }
+                    Some(TypeKind::Abstract {
+                        symbol_id,
+                        underlying,
+                        type_args,
+                    }) => (*symbol_id, *underlying, type_args.clone()),
+                    Some(TypeKind::Class {
+                        symbol_id,
+                        type_args,
+                    }) => (*symbol_id, None, type_args.clone()),
+                    _ => break,
+                }
+            };
+            let declaration = self.context.symbol_table.get_symbol(symbol)?;
+            if declaration.kind != SymbolKind::Abstract {
+                break;
+            }
+            let name = self
+                .context
+                .string_interner
+                .get(declaration.qualified_name.unwrap_or(declaration.name))?;
+            let Some(parameters) = index.borrow_mut().forwarding_constructor_params(name) else {
+                break;
+            };
+            let underlying = underlying.or_else(|| {
+                self.context
+                    .type_table
+                    .borrow()
+                    .resolve_abstract_underlying(symbol)
+            })?;
+            let mut mentioned = std::collections::BTreeSet::new();
+            self.collect_type_param_symbols(underlying, 0, &mut mentioned);
+            let bindings = mentioned
+                .into_iter()
+                .filter_map(|symbol| {
+                    let name = self.context.symbol_table.get_symbol(symbol)?.name;
+                    let name = self.context.string_interner.get(name)?;
+                    let position = parameters.iter().position(|parameter| parameter == name)?;
+                    Some((symbol, *arguments.get(position)?))
+                })
+                .collect::<Vec<_>>();
+            current = self.substitute_type_bindings(underlying, &bindings, false);
+            forwarded = true;
+        }
+        forwarded.then_some(current)
+    }
+
     /// The declared parameter types of a class's constructor.
     pub(crate) fn constructor_param_types(&mut self, class_type: TypeId) -> Option<Vec<TypeId>> {
         let class_symbol = self.resolve_type_to_class_symbol(class_type)?;

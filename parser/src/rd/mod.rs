@@ -172,6 +172,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     {
                         i += 1;
                     }
+                    while self.stream.peek_at(i).kind == TokenKind::Dot
+                        && (self.stream.peek_at(i + 1).kind == TokenKind::Ident
+                            || self.stream.peek_at(i + 1).kind.is_keyword())
+                    {
+                        i += 2;
+                    }
                     // Skip params if present
                     if self.stream.peek_at(i).kind == TokenKind::LParen {
                         let mut depth = 1;
@@ -220,6 +226,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
                         || self.stream.peek_at(i).kind.is_keyword()
                     {
                         i += 1;
+                    }
+                    while self.stream.peek_at(i).kind == TokenKind::Dot
+                        && (self.stream.peek_at(i + 1).kind == TokenKind::Ident
+                            || self.stream.peek_at(i + 1).kind.is_keyword())
+                    {
+                        i += 2;
                     }
                     if self.stream.peek_at(i).kind == TokenKind::LParen {
                         let mut depth = 1;
@@ -486,6 +498,24 @@ impl<'a, 'b> RdParser<'a, 'b> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dotted_metadata_survives_declaration_lookahead() {
+        let file = rd_parse(
+            "@:forward.new abstract Wrapper<T>(T) {}\n@:custom.namespace(1) macro function build() return macro 1;",
+            "test.hx",
+            false,
+            false,
+        )
+        .unwrap();
+        let TypeDeclaration::Abstract(wrapper) = &file.declarations[0] else {
+            panic!("expected abstract declaration");
+        };
+        assert_eq!(wrapper.meta[0].name, "forward.new");
+        assert_eq!(file.module_fields[0].meta[0].name, "custom.namespace");
+        assert_eq!(file.module_fields[0].meta[0].params.len(), 1);
+        assert!(file.module_fields[0].modifiers.contains(&Modifier::Macro));
+    }
 
     #[test]
     fn test_parse_empty_file() {

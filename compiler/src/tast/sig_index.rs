@@ -66,6 +66,8 @@ struct ClassSigs {
     implements: Vec<String>,
     /// None without metadata, an empty list forwards every static member.
     forward_statics: Option<Vec<String>>,
+    /// Declared parameters of an abstract that forwards its constructor.
+    forward_constructor: Option<Vec<String>>,
 }
 
 impl ClassSigs {
@@ -205,6 +207,11 @@ impl StaticSigIndex {
             .get(name)
             .and_then(|class| class.forward_statics.as_ref())
             .is_some_and(|names| names.is_empty() || names.iter().any(|name| name == member))
+    }
+
+    pub fn forwarding_constructor_params(&mut self, name: &str) -> Option<Vec<String>> {
+        self.ensure_indexed_from_known_files(name);
+        self.classes.get(name)?.forward_constructor.clone()
     }
 
     /// Whether any indexed class below `class_name` (qualified, or bare when
@@ -506,11 +513,21 @@ impl StaticSigIndex {
                 }
             }
             TypeDeclaration::Abstract(a) => {
-                // `false`: an abstract must never record a constructor. Its
-                // `new` is a value wrap over the underlying value, and a
-                // cross-module `new SomeAbstract(x)` that reaches the fallback
-                // in `lower_new` is lowered correctly by that wrap today.
+                // Abstract constructors use their own lowering path rather
+                // than the class allocation path recorded by this index.
                 self.index_fields(package, &a.name, &a.fields, None, false);
+                if a.meta.iter().any(|metadata| {
+                    metadata.name.strip_prefix(':').unwrap_or(&metadata.name) == "forward.new"
+                }) && !a.fields.iter().any(|field| {
+                    matches!(&field.kind, parser::ClassFieldKind::Function(function) if function.name == "new")
+                })
+                {
+                    self.classes
+                        .get_mut(&Self::qualify(package, &a.name))
+                        .unwrap()
+                        .forward_constructor =
+                        Some(a.type_params.iter().map(|param| param.name.clone()).collect());
+                }
                 if let Some(metadata) = a.meta.iter().find(|metadata| {
                     metadata.name.strip_prefix(':').unwrap_or(&metadata.name) == "forwardStatics"
                 }) {
