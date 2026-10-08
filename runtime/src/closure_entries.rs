@@ -125,6 +125,26 @@ pub(crate) fn closure_slot_code(code: usize) -> usize {
     }
 }
 
+/// A view of `closure` using raw 64-bit arguments and result slots.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_closure_slot_view(closure: *mut u8) -> *mut u8 {
+    if closure.is_null() {
+        return closure;
+    }
+    let (code, env) = unsafe {
+        (
+            *(closure as *const usize),
+            *(closure as *const usize).add(1),
+        )
+    };
+    let entry = closure_slot_code(code);
+    if entry == code {
+        closure
+    } else {
+        Box::into_raw(Box::new([entry, env])) as *mut u8
+    }
+}
+
 /// A view of `closure` whose code is its dynamic entry, for a call whose
 /// argument and result types are all `Dynamic`. The closure itself when no
 /// entry is registered.

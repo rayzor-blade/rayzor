@@ -2376,6 +2376,10 @@ register_symbol!(
     crate::closure_entries::haxe_register_method
 );
 register_symbol!(
+    "haxe_closure_slot_view",
+    crate::closure_entries::haxe_closure_slot_view
+);
+register_symbol!(
     "haxe_closure_dynamic_view",
     crate::closure_entries::haxe_closure_dynamic_view
 );

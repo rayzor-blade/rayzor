@@ -157,6 +157,33 @@ impl<'a> HirToMirContext<'a> {
             return self.lower_dynamic_closure_call(func_ptr, args, &arg_regs);
         }
 
+        // Generic slots carry bits; the registered entry adapts the concrete closure ABI.
+        let uses_generic_slots = self.type_table.get(callee.ty).is_some_and(|ty| {
+            let TypeKind::Function {
+                params,
+                return_type,
+                ..
+            } = &ty.kind
+            else {
+                return false;
+            };
+            params.iter().chain(std::iter::once(return_type)).any(|ty| {
+                matches!(
+                    self.type_table.get(*ty).map(|ty| &ty.kind),
+                    Some(TypeKind::TypeParameter { .. })
+                )
+            })
+        });
+        if uses_generic_slots {
+            return self.lower_generic_slot_call(
+                expr,
+                func_ptr,
+                &arg_regs,
+                formal_tys.as_deref(),
+                &arg_formals,
+            );
+        }
+
         // Signature from the callee's function type, else from the arguments.
         let type_param_names = self.current_type_param_names();
         let param_types: Vec<IrType> = {
@@ -220,6 +247,72 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder
             .build_call_indirect(func_ptr, arg_regs, func_signature)
+    }
+
+    fn lower_generic_slot_call(
+        &mut self,
+        expr: &HirExpr,
+        closure: IrId,
+        arg_regs: &[IrId],
+        formal_tys: Option<&[TypeId]>,
+        assigned: &[usize],
+    ) -> Option<IrId> {
+        let mut supplied = Vec::with_capacity(arg_regs.len());
+        for reg in arg_regs {
+            let ty = self.builder.get_register_type(*reg)?;
+            let slot = match ty {
+                IrType::I64 => *reg,
+                IrType::F32 => {
+                    let widened = self.builder.build_cast(*reg, IrType::F32, IrType::F64)?;
+                    self.builder.build_bitcast(widened, IrType::I64)?
+                }
+                ty if ty.is_integer() => self.builder.build_cast(*reg, ty, IrType::I64)?,
+                _ => self.builder.build_bitcast(*reg, IrType::I64)?,
+            };
+            supplied.push(slot);
+        }
+        let count = formal_tys
+            .map_or(arg_regs.len(), |params| params.len())
+            .max(assigned.last().map_or(0, |slot| slot + 1));
+        let null = self.builder.build_const(IrValue::I64(0))?;
+        let slots = (0..count)
+            .map(|formal| {
+                assigned
+                    .iter()
+                    .position(|slot| *slot == formal)
+                    .map(|arg| supplied[arg])
+                    .unwrap_or(null)
+            })
+            .collect::<Vec<_>>();
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let view = self.get_or_register_extern_function(
+            "haxe_closure_slot_view",
+            vec![ptr.clone()],
+            ptr.clone(),
+        );
+        let closure = self.builder.build_call_direct(view, vec![closure], ptr)?;
+        let expected = self.convert_type(expr.ty);
+        let signature = IrType::Function {
+            params: vec![IrType::I64; slots.len()],
+            return_type: Box::new(if expected == IrType::Void {
+                IrType::Void
+            } else {
+                IrType::I64
+            }),
+            varargs: false,
+        };
+        let result = self
+            .builder
+            .build_call_indirect(closure, slots, signature)?;
+        match expected {
+            IrType::I64 | IrType::Void => Some(result),
+            IrType::F32 => {
+                let value = self.builder.build_bitcast(result, IrType::F64)?;
+                self.builder.build_cast(value, IrType::F64, IrType::F32)
+            }
+            ty if ty.is_integer() => self.builder.build_cast(result, IrType::I64, ty),
+            ty => self.builder.build_bitcast(result, ty),
+        }
     }
 
     /// `recv.m(args)` on a Dynamic or structurally typed receiver whose method

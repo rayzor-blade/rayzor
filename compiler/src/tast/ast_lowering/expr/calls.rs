@@ -4340,7 +4340,23 @@ impl<'a> AstLowering<'a> {
                 )
             })
         };
-        if mentioned.is_subset(&direct) && primitive_directs {
+        let generic_callback = params.iter().any(|param| {
+            let functional = {
+                let tt = self.context.type_table.borrow();
+                matches!(
+                    tt.get(Self::resolve_alias_chain(&tt, *param))
+                        .map(|ty| &ty.kind),
+                    Some(TypeKind::Function { .. })
+                )
+            };
+            if !functional {
+                return false;
+            }
+            let mut callback_params = std::collections::BTreeSet::new();
+            self.collect_type_param_symbols(*param, 0, &mut callback_params);
+            !callback_params.is_empty()
+        });
+        if mentioned.is_subset(&direct) && primitive_directs && !generic_callback {
             return Vec::new();
         }
         // A structure argument (`{iterator: ..}`) is iterated through the
