@@ -217,11 +217,17 @@ impl<'a> HirToMirContext<'a> {
             IrType::I64,
         );
 
-        let ctor_entries: Vec<(TypeId, IrFunctionId)> = self
-            .constructor_map
-            .iter()
-            .map(|(class_type_id, ctor_func_id)| (*class_type_id, *ctor_func_id))
-            .collect();
+        let mut ctor_entries = self.constructor_map.clone();
+        // Reflection also reaches subclasses that never appear in a direct `new`.
+        for (&class_type, &class_symbol) in &self.class_type_to_symbol {
+            if !ctor_entries.contains_key(&class_type) {
+                if let Some((constructor, _)) =
+                    self.inherited_constructor(class_type, Some(class_symbol))
+                {
+                    ctor_entries.insert(class_type, constructor);
+                }
+            }
+        }
 
         let saved_symbol_map = self.symbol_map.clone();
         // Per-function isolation: each reflect wrapper has its own SSA namespace;

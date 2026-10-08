@@ -809,6 +809,71 @@ impl<'a> AstLowering<'a> {
         Ok(())
     }
 
+    /// Recover function field signatures before callers in earlier classes are lowered.
+    fn function_field_signature(&mut self, initializer: &parser::Expr) -> Option<TypeId> {
+        let parser::ExprKind::Function(function) = &initializer.kind else {
+            return None;
+        };
+        if !function.type_params.is_empty() {
+            return None;
+        }
+        fn returned_constant(expr: &parser::Expr) -> Option<&parser::Expr> {
+            match &expr.kind {
+                parser::ExprKind::Return(Some(value)) => Some(value),
+                parser::ExprKind::Paren(inner) => returned_constant(inner),
+                parser::ExprKind::Block(elements) => match elements.as_slice() {
+                    [parser::BlockElement::Expr(expr)] => returned_constant(expr),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        let constant = function
+            .body
+            .as_deref()
+            .and_then(returned_constant)
+            .and_then(|value| self.literal_type(value))
+            .filter(|ty| {
+                matches!(
+                    self.context.type_table.borrow().get(*ty).map(|ty| &ty.kind),
+                    Some(
+                        crate::tast::TypeKind::Int
+                            | crate::tast::TypeKind::Float
+                            | crate::tast::TypeKind::Bool
+                            | crate::tast::TypeKind::String
+                    )
+                )
+            });
+        let result = if let Some(annotation) = &function.return_type {
+            self.lower_type(annotation).ok()?
+        } else {
+            constant?
+        };
+        let mut params = Vec::with_capacity(function.params.len());
+        for parameter in &function.params {
+            let ty = if let Some(annotation) = &parameter.type_hint {
+                let ty = self.lower_type(annotation).ok()?;
+                self.optional_param_type(parameter, ty)
+            } else {
+                let default = parameter
+                    .default_value
+                    .as_deref()
+                    .and_then(|value| self.literal_type(value));
+                if default.is_none() && constant.is_none() {
+                    return None;
+                }
+                default.unwrap_or_else(|| self.context.type_table.borrow().dynamic_type())
+            };
+            params.push(ty);
+        }
+        Some(
+            self.context
+                .type_table
+                .borrow_mut()
+                .create_function_type(params, result),
+        )
+    }
+
     /// Pre-register class fields for forward reference resolution.
     /// This runs after pre_register_declaration (which creates class type entries)
     /// but before full lowering, so that field access on forward-referenced classes
@@ -873,16 +938,23 @@ impl<'a> AstLowering<'a> {
 
         // Register each var/final/property field
         for field in &class_decl.fields {
-            let (field_name, type_hint) = match &field.kind {
+            let (field_name, type_hint, initializer) = match &field.kind {
                 parser::ClassFieldKind::Var {
-                    name, type_hint, ..
-                } => (name.clone(), type_hint.as_ref()),
+                    name,
+                    type_hint,
+                    expr,
+                } => (name.clone(), type_hint.as_ref(), expr.as_ref()),
                 parser::ClassFieldKind::Final {
-                    name, type_hint, ..
-                } => (name.clone(), type_hint.as_ref()),
+                    name,
+                    type_hint,
+                    expr,
+                } => (name.clone(), type_hint.as_ref(), expr.as_ref()),
                 parser::ClassFieldKind::Property {
-                    name, type_hint, ..
-                } => (name.clone(), type_hint.as_ref()),
+                    name,
+                    type_hint,
+                    expr,
+                    ..
+                } => (name.clone(), type_hint.as_ref(), expr.as_ref()),
                 parser::ClassFieldKind::Function(_) => continue, // Skip methods
             };
 
@@ -896,7 +968,9 @@ impl<'a> AstLowering<'a> {
                 self.lower_type(th)
                     .unwrap_or_else(|_| self.context.type_table.borrow().dynamic_type())
             } else {
-                self.context.type_table.borrow().dynamic_type()
+                initializer
+                    .and_then(|expr| self.function_field_signature(expr))
+                    .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type())
             };
 
             let interned_name = self.context.intern_string(&field_name);
