@@ -575,14 +575,13 @@ impl MacroVm {
                 }
                 Op::MakeMap => {
                     let count = self.read_u16(frame_idx);
-                    let mut map = BTreeMap::new();
+                    let mut map = Vec::with_capacity(count as usize);
                     let start = self.stack.len() - (count as usize * 2);
                     let items: Vec<MacroValue> = self.stack.drain(start..).collect();
                     for pair in items.chunks(2) {
-                        let key = pair[0].to_display_string();
-                        map.insert(key, pair[1].clone());
+                        MacroValue::insert_map_entry(&mut map, pair[0].clone(), pair[1].clone());
                     }
-                    self.stack.push(MacroValue::Object(Arc::new(map)));
+                    self.stack.push(MacroValue::Map(Arc::new(map)));
                 }
                 Op::MakeClosure => {
                     let chunk_idx = self.read_u16(frame_idx);
@@ -849,6 +848,7 @@ impl MacroVm {
             (MacroValue::Object(obj), MacroValue::String(key)) => {
                 Ok(obj.get(key.as_ref()).cloned().unwrap_or(MacroValue::Null))
             }
+            (MacroValue::Map(entries), key) => Ok(MacroValue::map_get(entries, key)),
             (MacroValue::String(s), MacroValue::Int(i)) => {
                 let idx = *i as usize;
                 Ok(s.chars()
@@ -885,6 +885,10 @@ impl MacroVm {
                 Arc::make_mut(obj).insert(key.to_string(), value);
                 Ok(())
             }
+            (MacroValue::Map(entries), key) => {
+                MacroValue::insert_map_entry(Arc::make_mut(entries), key.clone(), value);
+                Ok(())
+            }
             (base_val, _) => Err(VmError::new(format!(
                 "cannot set index on {}",
                 base_val.type_name()
@@ -912,6 +916,9 @@ impl MacroVm {
     ) -> Result<MacroValue, VmError> {
         match &base {
             MacroValue::Array(arr) => self.call_array_method(arr, method, args),
+            MacroValue::Map(_) => base
+                .map_method(method, &args)
+                .ok_or_else(|| VmError::new(format!("unsupported Map method: {method}"))),
             MacroValue::String(s) => self.call_string_method(s, method, args),
             MacroValue::Object(obj) => {
                 // Check if the object has a function field with this name
@@ -1626,6 +1633,33 @@ mod tests {
             }
             _ => panic!("expected Array, got {:?}", result),
         }
+    }
+
+    #[test]
+    fn test_vm_map_object_keys_retain_identity() {
+        let key = || {
+            make_expr(parser::ExprKind::Object(vec![parser::ObjectField {
+                name: "x".to_owned(),
+                expr: make_expr(parser::ExprKind::Int(1)),
+                span: Span::default(),
+            }]))
+        };
+        let expr = make_expr(parser::ExprKind::Map(vec![
+            (key(), make_expr(parser::ExprKind::Int(2))),
+            (key(), make_expr(parser::ExprKind::Int(3))),
+        ]));
+        let MacroValue::Map(entries) = compile_and_run(&expr).unwrap() else {
+            panic!("expected Map");
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            MacroValue::map_get(&entries, &entries[0].0),
+            MacroValue::Int(2)
+        );
+        assert_eq!(
+            MacroValue::map_get(&entries, &entries[1].0),
+            MacroValue::Int(3)
+        );
     }
 
     #[test]

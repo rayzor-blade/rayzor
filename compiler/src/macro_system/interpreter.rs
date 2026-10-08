@@ -445,23 +445,44 @@ impl MacroInterpreter {
                 key,
                 value,
             } => {
-                let mut out = BTreeMap::new();
+                let mut out = Vec::new();
                 self.eval_comprehension(for_parts, &mut |slf| {
-                    let k = slf.eval_expr(key)?.to_display_string();
+                    let k = slf.eval_expr(key)?;
                     let v = slf.eval_expr(value)?;
-                    out.insert(k, v);
+                    MacroValue::insert_map_entry(&mut out, k, v);
                     Ok(())
                 })?;
-                Ok(MacroValue::Object(Arc::new(out)))
+                Ok(MacroValue::Map(Arc::new(out)))
             }
             ExprKind::For {
-                var, iter, body, ..
+                var,
+                key_var,
+                iter,
+                body,
             } => {
                 let iter_val = self.eval_expr(iter)?;
-                let items = self.get_iterable(&iter_val, location)?;
+                let items = if key_var.is_some() {
+                    match &iter_val {
+                        MacroValue::Map(entries) => entries.as_ref().clone(),
+                        _ => self
+                            .get_iterable(&iter_val, location)?
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, value)| (MacroValue::Int(index as i64), value))
+                            .collect(),
+                    }
+                } else {
+                    self.get_iterable(&iter_val, location)?
+                        .into_iter()
+                        .map(|value| (MacroValue::Null, value))
+                        .collect()
+                };
 
                 self.env.push_scope();
-                for item in items {
+                for (key, item) in items {
+                    if let Some(key_var) = key_var {
+                        self.env.define(key_var, key);
+                    }
                     self.env.define(var, item);
                     match self.eval_expr(body) {
                         Err(MacroError::Break) => break,
@@ -685,14 +706,13 @@ impl MacroInterpreter {
 
             // --- Map literal ---
             ExprKind::Map(entries) => {
-                let mut map = std::collections::BTreeMap::new();
+                let mut map = Vec::with_capacity(entries.len());
                 for (key, value) in entries {
                     let k = self.eval_expr(key)?;
                     let v = self.eval_expr(value)?;
-                    let key_str = k.to_display_string();
-                    map.insert(key_str, v);
+                    MacroValue::insert_map_entry(&mut map, k, v);
                 }
-                Ok(MacroValue::Object(Arc::new(map)))
+                Ok(MacroValue::Map(Arc::new(map)))
             }
 
             // --- Function literal ---
@@ -1051,6 +1071,15 @@ impl MacroInterpreter {
                     }
                     (MacroValue::Object(arc_map), _) => {
                         Arc::make_mut(arc_map).insert(idx.to_display_string(), new_val.clone());
+                        self.assign_base(base, base_val)?;
+                        Ok(new_val)
+                    }
+                    (MacroValue::Map(entries), key) => {
+                        MacroValue::insert_map_entry(
+                            Arc::make_mut(entries),
+                            key.clone(),
+                            new_val.clone(),
+                        );
                         self.assign_base(base, base_val)?;
                         Ok(new_val)
                     }
@@ -2342,6 +2371,13 @@ impl MacroInterpreter {
                     })
             }
             MacroValue::Array(arr) => self.array_method(arr.as_ref(), method, args, location),
+            MacroValue::Map(_) => {
+                base.map_method(method, &args)
+                    .ok_or_else(|| MacroError::UnsupportedOperation {
+                        operation: format!("Map.{method}"),
+                        location,
+                    })
+            }
             MacroValue::Object(obj) => {
                 // Check if the field is a function
                 if let Some(MacroValue::Function(func)) = obj.get(method) {
@@ -3009,6 +3045,7 @@ impl MacroInterpreter {
                 let key = other.to_display_string();
                 Ok(map.get(&key).cloned().unwrap_or(MacroValue::Null))
             }
+            (MacroValue::Map(entries), key) => Ok(MacroValue::map_get(entries, key)),
             (MacroValue::String(s), MacroValue::Int(i)) => {
                 let idx = *i as usize;
                 Ok(MacroValue::String(Arc::from(
@@ -3207,6 +3244,9 @@ impl MacroInterpreter {
     ) -> Result<Vec<MacroValue>, MacroError> {
         match value {
             MacroValue::Array(arr) => Ok(arr.as_ref().clone()),
+            MacroValue::Map(entries) => {
+                Ok(entries.iter().map(|(_, value)| value.clone()).collect())
+            }
             MacroValue::Object(map) => {
                 // Iterate over keys
                 Ok(map
@@ -3571,6 +3611,10 @@ impl MacroInterpreter {
         let iterable = self.eval_expr(&first.iter)?;
         let location = span_to_location(first.span);
         let pairs: Vec<(Option<MacroValue>, MacroValue)> = match (&first.key_var, &iterable) {
+            (Some(_), MacroValue::Map(entries)) => entries
+                .iter()
+                .map(|(key, value)| (Some(key.clone()), value.clone()))
+                .collect(),
             (Some(_), MacroValue::Object(map)) => map
                 .iter()
                 .map(|(k, v)| (Some(MacroValue::String(Arc::from(k.as_str()))), v.clone()))

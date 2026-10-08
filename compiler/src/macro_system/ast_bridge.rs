@@ -43,24 +43,11 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
         }
 
         ExprKind::Map(entries) => {
-            let mut map = BTreeMap::new();
+            let mut map = Vec::with_capacity(entries.len());
             for (key, value) in entries {
-                let key_str = match &key.kind {
-                    ExprKind::String(s) => s.clone(),
-                    ExprKind::Int(i) => i.to_string(),
-                    _ => {
-                        return Err(MacroError::TypeError {
-                            message: format!(
-                                "map key must be a string or int literal, found {:?}",
-                                key.kind
-                            ),
-                            location: span_to_location(key.span),
-                        });
-                    }
-                };
-                map.insert(key_str, expr_to_value(value)?);
+                MacroValue::insert_map_entry(&mut map, expr_to_value(key)?, expr_to_value(value)?);
             }
-            Ok(MacroValue::Object(Arc::new(map)))
+            Ok(MacroValue::Map(Arc::new(map)))
         }
 
         // Unary negation of a literal
@@ -143,6 +130,15 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
                 span,
             }
         }
+        MacroValue::Map(entries) => Expr {
+            kind: ExprKind::Map(
+                entries
+                    .iter()
+                    .map(|(key, value)| (value_to_expr(key), value_to_expr(value)))
+                    .collect(),
+            ),
+            span,
+        },
         // A macro that RETURNS an Expr it built by hand hands back
         // `{pos: ..., expr: <ExprDef>}` -- the shape haxe.macro.Expr has. Without
         // this it became an object LITERAL in the expansion, so the macro's

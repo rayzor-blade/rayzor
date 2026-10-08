@@ -69,6 +69,9 @@ pub enum MacroValue {
     /// Array of values (Arc for O(1) clone, COW on mutation)
     Array(Arc<Vec<MacroValue>>),
 
+    /// Map entries retain typed keys, including object identity.
+    Map(Arc<Vec<(MacroValue, MacroValue)>>),
+
     /// Anonymous object / struct (Arc for O(1) clone, COW on mutation)
     Object(Arc<BTreeMap<String, MacroValue>>),
 
@@ -89,6 +92,59 @@ pub enum MacroValue {
 }
 
 impl MacroValue {
+    pub(crate) fn map_key_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Object(a), Self::Object(b)) => Arc::ptr_eq(a, b),
+            (Self::Array(a), Self::Array(b)) => Arc::ptr_eq(a, b),
+            (Self::Map(a), Self::Map(b)) => Arc::ptr_eq(a, b),
+            (Self::Expr(a), Self::Expr(b)) => Arc::ptr_eq(a, b),
+            (Self::Function(a), Self::Function(b)) => Arc::ptr_eq(a, b),
+            _ => self == other,
+        }
+    }
+
+    pub(crate) fn insert_map_entry(entries: &mut Vec<(Self, Self)>, key: Self, value: Self) {
+        if let Some((_, stored)) = entries
+            .iter_mut()
+            .find(|(stored, _)| stored.map_key_eq(&key))
+        {
+            *stored = value;
+        } else {
+            entries.push((key, value));
+        }
+    }
+
+    pub(crate) fn map_get(entries: &[(Self, Self)], key: &Self) -> Self {
+        entries
+            .iter()
+            .find(|(stored, _)| stored.map_key_eq(key))
+            .map(|(_, value)| value.clone())
+            .unwrap_or(Self::Null)
+    }
+
+    pub(crate) fn map_method(&self, method: &str, args: &[Self]) -> Option<Self> {
+        let Self::Map(entries) = self else {
+            return None;
+        };
+        Some(match method {
+            "get" => Self::map_get(entries, args.first()?),
+            "exists" => Self::Bool(
+                entries
+                    .iter()
+                    .any(|(key, _)| key.map_key_eq(args.first().unwrap_or(&Self::Null))),
+            ),
+            "keys" => Self::Array(Arc::new(
+                entries.iter().map(|(key, _)| key.clone()).collect(),
+            )),
+            "iterator" => Self::Array(Arc::new(
+                entries.iter().map(|(_, value)| value.clone()).collect(),
+            )),
+            "copy" => self.clone(),
+            "toString" => Self::from_string(self.to_display_string()),
+            _ => return None,
+        })
+    }
+
     /// Mutate the fields presented by objects and reified expressions.
     pub(crate) fn set_field(&mut self, field: &str, value: Self) -> bool {
         match self {
@@ -129,6 +185,7 @@ impl MacroValue {
             MacroValue::Float(_) => "Float",
             MacroValue::String(_) => "String",
             MacroValue::Array(_) => "Array",
+            MacroValue::Map(_) => "Map",
             MacroValue::Object(_) => "Object",
             MacroValue::Enum(_, _, _) => "Enum",
             MacroValue::Expr(_) => "Expr",
@@ -147,6 +204,7 @@ impl MacroValue {
             MacroValue::Float(f) => *f != 0.0,
             MacroValue::String(s) => !s.is_empty(),
             MacroValue::Array(a) => !a.is_empty(),
+            MacroValue::Map(_) => true,
             MacroValue::Object(_) => true,
             MacroValue::Enum(_, _, _) => true,
             MacroValue::Expr(_expr) => {
@@ -276,6 +334,19 @@ impl MacroValue {
             MacroValue::Array(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
                 format!("[{}]", parts.join(","))
+            }
+            MacroValue::Map(entries) => {
+                let parts: Vec<_> = entries
+                    .iter()
+                    .map(|(key, value)| {
+                        format!(
+                            "{} => {}",
+                            key.to_display_string(),
+                            value.to_display_string()
+                        )
+                    })
+                    .collect();
+                format!("[{}]", parts.join(", "))
             }
             // A caught compiler error prints as its message, as haxe.macro.Error does.
             MacroValue::Object(fields) if matches!(fields.get("__type__"), Some(MacroValue::String(t)) if &**t == "haxe.macro.Error") => {
