@@ -1523,6 +1523,25 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    pub(crate) fn lambda_body_return_hint(&self) -> Option<TypeId> {
+        let tt = self.context.type_table.borrow();
+        [
+            self.expected_arg_type_stack.last().copied().flatten(),
+            self.context.expected_return_type,
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|expected| {
+            match tt
+                .get(Self::resolve_alias_chain(&tt, expected))
+                .map(|t| &t.kind)
+            {
+                Some(TypeKind::Function { return_type, .. }) => Some(*return_type),
+                _ => None,
+            }
+        })
+    }
+
     /// Nullable results and abstract conversions use the expected callback
     /// result. Dynamic results use the enclosing return declaration because
     /// generic formals can appear as Dynamic before inference.

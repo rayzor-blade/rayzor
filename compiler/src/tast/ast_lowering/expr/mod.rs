@@ -2202,8 +2202,13 @@ impl<'a> AstLowering<'a> {
                         .flatten()
                         .or(self.context.expected_return_type)
                         .and_then(|ty| {
-                            let tt = self.context.type_table.borrow();
-                            match tt.get(ty).map(|t| &t.kind) {
+                            let kind = self
+                                .context
+                                .type_table
+                                .borrow()
+                                .get(ty)
+                                .map(|t| t.kind.clone());
+                            match kind {
                                 Some(
                                     TypeKind::Int
                                     | TypeKind::Float
@@ -2212,11 +2217,36 @@ impl<'a> AstLowering<'a> {
                                 )
                                 | Some(TypeKind::Class { .. })
                                 | Some(TypeKind::Interface { .. })
+                                | Some(TypeKind::Function { .. })
                                 | Some(TypeKind::TypeParameter { .. }) => Some(ty),
                                 Some(TypeKind::Abstract {
                                     underlying: Some(underlying),
                                     ..
-                                }) => Some(*underlying),
+                                }) => Some(underlying),
+                                Some(TypeKind::Abstract {
+                                    symbol_id,
+                                    underlying: None,
+                                    ..
+                                }) => {
+                                    let underlying = {
+                                        let tt = self.context.type_table.borrow();
+                                        let declaration =
+                                            self.context.symbol_table.get_symbol(symbol_id)?;
+                                        let TypeKind::Abstract {
+                                            underlying: Some(underlying),
+                                            ..
+                                        } = &tt.get(declaration.type_id)?.kind
+                                        else {
+                                            return None;
+                                        };
+                                        matches!(
+                                            tt.get(*underlying).map(|t| &t.kind),
+                                            Some(TypeKind::Function { .. })
+                                        )
+                                        .then_some(*underlying)?
+                                    };
+                                    Some(self.substitute_receiver_type(underlying, ty))
+                                }
                                 _ => None,
                             }
                         });
@@ -2321,12 +2351,22 @@ impl<'a> AstLowering<'a> {
                     parameters.push(param_result);
                 }
 
-                // Lower function body in the new scope
-                let body = if let Some(body_expr) = &func.body {
-                    self.lower_function_body(body_expr)?
-                } else {
-                    Vec::new()
+                let body_return_hint = match &func.return_type {
+                    Some(annotation) => Some(self.lower_type(annotation)?),
+                    None => self.lambda_body_return_hint(),
                 };
+                // A lambda body uses its own result context, not the enclosing function type.
+                let previous_return = self.context.expected_return_type;
+                self.context.expected_return_type = body_return_hint;
+                self.expected_arg_type_stack.push(body_return_hint);
+                let body = if let Some(body_expr) = &func.body {
+                    self.lower_function_body(body_expr)
+                } else {
+                    Ok(Vec::new())
+                };
+                self.expected_arg_type_stack.pop();
+                self.context.expected_return_type = previous_return;
+                let body = body?;
 
                 // Determine return type: explicit annotation > infer from body > void
                 let return_type = if let Some(ret_type) = &func.return_type {
@@ -2431,28 +2471,39 @@ impl<'a> AstLowering<'a> {
                 // For simple expressions like () -> x * 2, lower as expression directly.
                 // A block body without `return` yields its last expression.
                 let mut tail_is_value = false;
-                let (mut body, return_type) = if matches!(&expr.kind, ExprKind::Block(_)) {
-                    let body = self.lower_function_body(expr)?;
-                    let mut return_type = self.infer_return_type_from_body(&body);
-                    let void = self.context.type_table.borrow().void_type();
-                    if return_type == void && !crate::tast::ast_lowering::has_bare_return(expr) {
-                        if let Some(TypedStatement::Expression { expression, .. }) = body.last() {
-                            if expression.expr_type != void && expression.expr_type.is_valid() {
-                                return_type = expression.expr_type;
-                                tail_is_value = true;
+                let body_return_hint = self.lambda_body_return_hint();
+                let previous_return = self.context.expected_return_type;
+                self.context.expected_return_type = body_return_hint;
+                self.expected_arg_type_stack.push(body_return_hint);
+                let lowered: Result<_, LoweringError> = (|| {
+                    if matches!(&expr.kind, ExprKind::Block(_)) {
+                        let body = self.lower_function_body(expr)?;
+                        let mut return_type = self.infer_return_type_from_body(&body);
+                        let void = self.context.type_table.borrow().void_type();
+                        if return_type == void && !crate::tast::ast_lowering::has_bare_return(expr)
+                        {
+                            if let Some(TypedStatement::Expression { expression, .. }) = body.last()
+                            {
+                                if expression.expr_type != void && expression.expr_type.is_valid() {
+                                    return_type = expression.expr_type;
+                                    tail_is_value = true;
+                                }
                             }
                         }
+                        Ok((body, return_type))
+                    } else {
+                        let body_expr = self.lower_expression(expr)?;
+                        let return_type = body_expr.expr_type;
+                        let body = vec![TypedStatement::Expression {
+                            expression: body_expr.clone(),
+                            source_location: body_expr.source_location,
+                        }];
+                        Ok((body, return_type))
                     }
-                    (body, return_type)
-                } else {
-                    let body_expr = self.lower_expression(expr)?;
-                    let return_type = body_expr.expr_type;
-                    let body = vec![TypedStatement::Expression {
-                        expression: body_expr.clone(),
-                        source_location: body_expr.source_location,
-                    }];
-                    (body, return_type)
-                };
+                })();
+                self.expected_arg_type_stack.pop();
+                self.context.expected_return_type = previous_return;
+                let (mut body, return_type) = lowered?;
                 let return_type = if crate::tast::ast_lowering::has_bare_return(expr) {
                     self.context.type_table.borrow().void_type()
                 } else {
@@ -2670,9 +2721,22 @@ impl<'a> AstLowering<'a> {
                     self.expected_arg_type_stack.pop();
                     self.expected_lambda_params_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;
+                    let result = result?;
+                    let result = if matches!(
+                        self.context
+                            .type_table
+                            .borrow()
+                            .get(result.expr_type)
+                            .map(|ty| &ty.kind),
+                        Some(TypeKind::Function { .. })
+                    ) {
+                        self.coerce_arg_via_abstract_from(result, declared_type)
+                    } else {
+                        result
+                    };
                     match declared_type {
-                        Some(dt) => self.retype_literal_to(result?, dt),
-                        None => result?,
+                        Some(dt) => self.retype_literal_to(result, dt),
+                        None => result,
                     }
                 } else {
                     // Default to null if no initializer

@@ -1226,30 +1226,73 @@ impl<'a> AstLowering<'a> {
         let Some(candidates) = self.abstract_from_methods.get(&abstract_symbol) else {
             return arg;
         };
-        // First method whose parameter accepts the argument's type: an exact
-        // type, a matching primitive kind, or the abstract's own type
-        // parameter (which accepts anything).
+        // Bind generic source parameters before checking the conversion's source.
         let pick = {
-            let tt = self.context.type_table.borrow();
-            let arg_kind = tt.get(arg.expr_type).map(|ti| ti.kind.clone());
             candidates
                 .iter()
                 .find(|(_, param_ty)| {
                     if *param_ty == arg.expr_type {
                         return true;
                     }
-                    match (tt.get(*param_ty).map(|ti| &ti.kind), arg_kind.as_ref()) {
-                        (Some(TypeKind::TypeParameter { .. }), _) => true,
-                        (Some(TypeKind::Dynamic), _) => true,
-                        (Some(a), Some(b)) => {
-                            std::mem::discriminant(a) == std::mem::discriminant(b)
+                    let (source_kind, actual_kind) = {
+                        let table = self.context.type_table.borrow();
+                        let source = Self::resolve_alias_chain(&table, *param_ty);
+                        let actual = Self::resolve_alias_chain(&table, arg.expr_type);
+                        (
+                            table.get(source).map(|ty| ty.kind.clone()),
+                            table.get(actual).map(|ty| ty.kind.clone()),
+                        )
+                    };
+                    match (source_kind, actual_kind) {
+                        (Some(TypeKind::TypeParameter { .. } | TypeKind::Dynamic), _) => {
+                            return true;
+                        }
+                        (Some(TypeKind::Function { .. }), Some(TypeKind::Function { .. })) => {}
+                        (Some(source), Some(actual)) => {
+                            return std::mem::discriminant(&source)
+                                == std::mem::discriminant(&actual)
                                 && matches!(
-                                    a,
+                                    source,
                                     TypeKind::Int
                                         | TypeKind::Float
                                         | TypeKind::Bool
                                         | TypeKind::String
-                                )
+                                );
+                        }
+                        _ => return false,
+                    }
+                    let mut bindings = Vec::new();
+                    self.unify_type_args(*param_ty, arg.expr_type, 0, &mut bindings);
+                    let source = self.substitute_alias_args(*param_ty, &bindings);
+                    let table = self.context.type_table.borrow();
+                    let source = Self::resolve_alias_chain(&table, source);
+                    let actual = Self::resolve_alias_chain(&table, arg.expr_type);
+                    match (
+                        table.get(source).map(|ty| &ty.kind),
+                        table.get(actual).map(|ty| &ty.kind),
+                    ) {
+                        (
+                            Some(TypeKind::Function {
+                                params: source,
+                                return_type: sr,
+                                ..
+                            }),
+                            Some(TypeKind::Function {
+                                params: actual,
+                                return_type: ar,
+                                ..
+                            }),
+                        ) => {
+                            let same = |source, actual| {
+                                let source = Self::resolve_alias_chain(&table, source);
+                                let actual = Self::resolve_alias_chain(&table, actual);
+                                source == actual
+                                    || table.get(source).map(|ty| &ty.kind)
+                                        == table.get(actual).map(|ty| &ty.kind)
+                            };
+                            source.len() == actual.len()
+                                && source.iter().zip(actual).all(|(s, a)| same(*s, *a))
+                                && same(*sr, *ar)
                         }
                         _ => false,
                     }
