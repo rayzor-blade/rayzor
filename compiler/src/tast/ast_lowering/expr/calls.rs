@@ -4463,6 +4463,103 @@ impl<'a> AstLowering<'a> {
         self.unify_type_args_inner(declared, actual, depth, out, false);
     }
 
+    /// Validate fixed cast-source arguments and fields after generic substitution.
+    fn abstract_source_accepts(&self, source: TypeId, actual: TypeId, depth: u32) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        let (source, actual, expected, supplied) = {
+            let table = self.context.type_table.borrow();
+            let source = Self::resolve_alias_chain(&table, source);
+            let actual = Self::resolve_alias_chain(&table, actual);
+            if source == actual {
+                return true;
+            }
+            let (Some(expected), Some(supplied)) = (table.get(source), table.get(actual)) else {
+                return false;
+            };
+            (source, actual, expected.kind.clone(), supplied.kind.clone())
+        };
+        let accepts =
+            |expected, supplied| self.abstract_source_accepts(expected, supplied, depth + 1);
+        match (&expected, &supplied) {
+            (TypeKind::Array { element_type: e }, TypeKind::Array { element_type: a })
+            | (TypeKind::Optional { inner_type: e }, TypeKind::Optional { inner_type: a }) => {
+                accepts(*e, *a)
+            }
+            (
+                TypeKind::Class {
+                    symbol_id: e,
+                    type_args: ep,
+                },
+                TypeKind::Class {
+                    symbol_id: a,
+                    type_args: ap,
+                },
+            )
+            | (
+                TypeKind::Enum {
+                    symbol_id: e,
+                    type_args: ep,
+                },
+                TypeKind::Enum {
+                    symbol_id: a,
+                    type_args: ap,
+                },
+            )
+            | (
+                TypeKind::Abstract {
+                    symbol_id: e,
+                    type_args: ep,
+                    ..
+                },
+                TypeKind::Abstract {
+                    symbol_id: a,
+                    type_args: ap,
+                    ..
+                },
+            ) if e == a => ep.len() == ap.len() && ep.iter().zip(ap).all(|(e, a)| accepts(*e, *a)),
+            (
+                TypeKind::Anonymous { fields: expected },
+                TypeKind::Anonymous { fields: supplied },
+            ) => expected.iter().all(|field| {
+                supplied
+                    .iter()
+                    .find(|actual| actual.name == field.name)
+                    .map(|actual| accepts(field.type_id, actual.type_id))
+                    .unwrap_or(field.optional)
+            }),
+            (
+                TypeKind::Function {
+                    params: ep,
+                    return_type: er,
+                    ..
+                },
+                TypeKind::Function {
+                    params: ap,
+                    return_type: ar,
+                    ..
+                },
+            ) => {
+                ep.len() == ap.len()
+                    && ep.iter().zip(ap).all(|(e, a)| accepts(*a, *e))
+                    && accepts(*er, *ar)
+            }
+            _ => {
+                let mut checker = crate::tast::type_checker::TypeChecker::new(
+                    &self.context.type_table,
+                    &self.context.symbol_table,
+                    &self.context.scope_tree,
+                    &self.context.string_interner,
+                );
+                !matches!(
+                    checker.check_compatibility(actual, source),
+                    crate::tast::type_checker::TypeCompatibility::Incompatible
+                )
+            }
+        }
+    }
+
     /// What `iterator()` returning `iter` yields, bound against `element`.
     fn unify_iterator_element(
         &self,
@@ -4699,6 +4796,61 @@ impl<'a> AstLowering<'a> {
             ) if ds == as_ => {
                 for (x, y) in da.iter().zip(aa.iter()) {
                     self.unify_type_args_inner(*x, *y, depth + 1, out, bind_parameters);
+                }
+            }
+            // A from clause binds the formal's parameters through its accepted source.
+            (
+                TypeKind::Abstract {
+                    symbol_id,
+                    type_args,
+                    ..
+                },
+                _,
+            ) => {
+                let Some((sources, _)) = self.abstract_casts.get(symbol_id) else {
+                    return;
+                };
+                let Some(parameters) = self.context.symbol_table.get_class_type_params(*symbol_id)
+                else {
+                    return;
+                };
+                let substitutions: Vec<_> = {
+                    let table = self.context.type_table.borrow();
+                    parameters
+                        .iter()
+                        .zip(type_args)
+                        .filter_map(|(parameter, argument)| {
+                            match table.get(*parameter).map(|ty| &ty.kind) {
+                                Some(TypeKind::TypeParameter { symbol_id, .. }) => {
+                                    Some((*symbol_id, *argument))
+                                }
+                                _ => None,
+                            }
+                        })
+                        .collect()
+                };
+                let mut mentioned = std::collections::BTreeSet::new();
+                self.collect_type_param_symbols(declared, 0, &mut mentioned);
+                for source in sources {
+                    let source = self.substitute_alias_args(*source, &substitutions);
+                    let mut bindings = Vec::new();
+                    self.unify_type_args_inner(
+                        source,
+                        actual,
+                        depth + 1,
+                        &mut bindings,
+                        bind_parameters,
+                    );
+                    bindings.retain(|(parameter, _)| mentioned.contains(parameter));
+                    if bindings.is_empty() {
+                        continue;
+                    }
+                    // Check fixed parts before accepting a partially bound source.
+                    let concrete = self.substitute_alias_args(source, &bindings);
+                    if self.abstract_source_accepts(concrete, actual, 0) {
+                        out.extend(bindings);
+                        break;
+                    }
                 }
             }
             // An alias against anything else: its structure, with the alias's
