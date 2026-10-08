@@ -1255,6 +1255,9 @@ impl<'a> AstLowering<'a> {
         self.apply_param_operator_uses(
             body,
             &unannotated,
+            func.params
+                .iter()
+                .map(|p| (p.name.as_str(), p.type_hint.as_ref())),
             func.return_type.as_ref(),
             &shadowed,
             &mut out,
@@ -1300,18 +1303,29 @@ impl<'a> AstLowering<'a> {
     /// Merge what the operator uses of `params` in `body` say into `out`:
     /// a parameter whose uses disagree, or disagree with an answer already
     /// there, is removed. `"" + p` only counts on its own.
-    pub(crate) fn apply_param_operator_uses(
+    pub(crate) fn apply_param_operator_uses<'p>(
         &mut self,
         body: &Expr,
         params: &[&str],
+        parameter_hints: impl IntoIterator<Item = (&'p str, Option<&'p Type>)>,
         return_hint: Option<&Type>,
         shadowed: &std::collections::BTreeSet<&str>,
         out: &mut BTreeMap<InternedString, TypeId>,
     ) {
         let mut names: BTreeMap<&str, &str> = params.iter().map(|p| (*p, *p)).collect();
         while collect_param_copies(body, &mut names) {}
+        let strings: std::collections::BTreeSet<_> = parameter_hints
+            .into_iter()
+            .filter_map(|(name, hint)| {
+                let ty = self.lower_type(hint?).ok()?;
+                let table = self.context.type_table.borrow();
+                let ty = Self::resolve_alias_chain(&table, ty);
+                matches!(table.get(ty).map(|ty| &ty.kind), Some(TypeKind::String))
+                    .then(|| name.to_owned())
+            })
+            .collect();
         let mut op_uses: BTreeMap<&str, Vec<ParamUse>> = BTreeMap::new();
-        collect_param_operator_uses(body, &names, return_hint, &mut op_uses);
+        collect_param_operator_uses(body, &names, &strings, return_hint, &mut op_uses);
         for (param, sites) in op_uses {
             if shadowed.contains(param) {
                 continue;

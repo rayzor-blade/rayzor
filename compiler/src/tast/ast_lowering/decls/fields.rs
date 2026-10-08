@@ -964,12 +964,17 @@ impl<'a> AstLowering<'a> {
             None
         };
 
-        // Unannotated, a parameter takes its default's type when that is a
-        // primitive (`v = CONST` with `inline static var CONST:Float`).
-        let default_primitive = default_value.as_ref().map(|d| d.expr_type).filter(|t| {
+        // Scalar and enum defaults keep their value type in the parameter signature.
+        let default_type = default_value.as_ref().map(|d| d.expr_type).filter(|t| {
             matches!(
                 self.context.type_table.borrow().get(*t).map(|ti| &ti.kind),
-                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
+                Some(
+                    TypeKind::Int
+                        | TypeKind::Float
+                        | TypeKind::Bool
+                        | TypeKind::String
+                        | TypeKind::Enum { .. }
+                )
             )
         });
         let param_type = if let Some(type_annotation) = &parameter.type_hint {
@@ -981,7 +986,7 @@ impl<'a> AstLowering<'a> {
             .default_value
             .as_deref()
             .and_then(|d| self.literal_type(d))
-            .or(default_primitive)
+            .or(default_type)
         {
             ty
         } else {
@@ -1005,7 +1010,7 @@ impl<'a> AstLowering<'a> {
         })
     }
 
-    /// The type of a literal default value; None for anything else.
+    /// The type of a scalar literal or a resolved enum constant default.
     pub(crate) fn literal_type(&self, expr: &Expr) -> Option<TypeId> {
         let tt = self.context.type_table.borrow();
         match &expr.kind {
@@ -1013,6 +1018,16 @@ impl<'a> AstLowering<'a> {
             ExprKind::Float(_) => Some(tt.float_type()),
             ExprKind::Bool(_) => Some(tt.bool_type()),
             ExprKind::String(_) => Some(tt.string_type()),
+            ExprKind::Ident(name) => {
+                let name = self.context.string_interner.get_id(name)?;
+                let symbol = self.resolve_symbol_in_scope_hierarchy(name)?;
+                let symbol = self.context.symbol_table.get_symbol(symbol)?;
+                matches!(
+                    tt.get(symbol.type_id).map(|ty| &ty.kind),
+                    Some(TypeKind::Enum { .. })
+                )
+                .then_some(symbol.type_id)
+            }
             ExprKind::Unary {
                 op: UnaryOp::Neg,
                 expr: inner,
@@ -1066,43 +1081,7 @@ impl<'a> AstLowering<'a> {
         &mut self,
         param: &parser::FunctionParam,
     ) -> Result<TypedParameter, LoweringError> {
-        // Create symbol for parameter in the current scope
-        let param_name = self.context.string_interner.intern(&param.name);
-        let param_symbol = self
-            .context
-            .symbol_table
-            .create_variable_in_scope(param_name, self.context.current_scope);
-
-        // Resolve parameter type
-        let param_type = if let Some(type_hint) = &param.type_hint {
-            let ty = self.lower_type(type_hint)?;
-            self.optional_param_type(param, ty)
-        } else {
-            self.context.type_table.borrow().dynamic_type()
-        };
-
-        // Update the symbol with its type
-        self.context
-            .symbol_table
-            .update_symbol_type(param_symbol, param_type);
-
-        // Lower default value if present
-        let default_value = if let Some(default_expr) = &param.default_value {
-            Some(self.lower_expression(default_expr)?)
-        } else {
-            None
-        };
-
-        Ok(TypedParameter {
-            symbol_id: param_symbol,
-            name: self.context.string_interner.intern(&param.name),
-            param_type,
-            is_optional: param.optional,
-            default_value,
-            mutability: crate::tast::symbols::Mutability::Immutable, // Function parameters are immutable by default in Haxe
-            ownership: crate::tast::ParamOwnership::from_metadata(&param.meta),
-            source_location: self.context.span_to_location(&param.span),
-        })
+        self.lower_parameter_with_hint(param, None)
     }
 
     /// Lower a function body

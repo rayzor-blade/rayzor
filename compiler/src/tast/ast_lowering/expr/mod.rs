@@ -2291,6 +2291,9 @@ impl<'a> AstLowering<'a> {
                         self.apply_param_operator_uses(
                             body,
                             &names,
+                            func.params
+                                .iter()
+                                .map(|p| (p.name.as_str(), p.type_hint.as_ref())),
                             func.return_type.as_ref(),
                             &std::collections::BTreeSet::new(),
                             &mut out,
@@ -2372,6 +2375,9 @@ impl<'a> AstLowering<'a> {
                     self.apply_param_operator_uses(
                         expr,
                         &names,
+                        params
+                            .iter()
+                            .map(|p| (p.name.as_str(), p.type_hint.as_ref())),
                         None,
                         &std::collections::BTreeSet::new(),
                         &mut out,

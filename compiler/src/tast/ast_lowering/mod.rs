@@ -396,13 +396,26 @@ fn collect_param_copies<'a>(expr: &'a Expr, names: &mut BTreeMap<&'a str, &'a st
     changed
 }
 
-fn literal_use(expr: &Expr) -> Option<ParamUse<'static>> {
+fn operand_use(
+    expr: &Expr,
+    strings: &std::collections::BTreeSet<String>,
+) -> Option<ParamUse<'static>> {
     match &expr.kind {
         ExprKind::Int(_) => Some(ParamUse::Int),
         ExprKind::Float(_) => Some(ParamUse::Float),
         ExprKind::String(_) | ExprKind::StringInterpolation(_) => Some(ParamUse::String),
         ExprKind::Bool(_) => Some(ParamUse::Bool),
-        ExprKind::Paren(inner) => literal_use(inner),
+        ExprKind::Ident(name) if strings.contains(name.as_str()) => Some(ParamUse::String),
+        ExprKind::Paren(inner) => operand_use(inner, strings),
+        ExprKind::Binary {
+            left,
+            op: parser::BinaryOp::Add,
+            right,
+        } if matches!(operand_use(left, strings), Some(ParamUse::String))
+            || matches!(operand_use(right, strings), Some(ParamUse::String)) =>
+        {
+            Some(ParamUse::String)
+        }
         _ => None,
     }
 }
@@ -412,6 +425,7 @@ fn literal_use(expr: &Expr) -> Option<ParamUse<'static>> {
 fn collect_param_operator_uses<'a>(
     expr: &'a Expr,
     params: &BTreeMap<&'a str, &'a str>,
+    strings: &std::collections::BTreeSet<String>,
     return_hint: Option<&'a Type>,
     uses: &mut BTreeMap<&'a str, Vec<ParamUse<'a>>>,
 ) {
@@ -422,14 +436,14 @@ fn collect_param_operator_uses<'a>(
             }
         };
     let mut visit = |e: &'a Expr, uses: &mut BTreeMap<&'a str, Vec<ParamUse<'a>>>| {
-        collect_param_operator_uses(e, params, return_hint, uses)
+        collect_param_operator_uses(e, params, strings, return_hint, uses)
     };
     match &expr.kind {
         ExprKind::Binary { left, op, right } => {
             use parser::BinaryOp as B;
             let side = |e: &'a Expr, other: &'a Expr| -> Option<ParamUse<'a>> {
                 match op {
-                    B::Add => match literal_use(other) {
+                    B::Add => match operand_use(other, strings) {
                         Some(ParamUse::String) => Some(ParamUse::String),
                         _ => Some(ParamUse::Int),
                     },
@@ -439,7 +453,7 @@ fn collect_param_operator_uses<'a>(
                         Some(ParamUse::Int)
                     }
                     B::And | B::Or => Some(ParamUse::Bool),
-                    B::Eq | B::NotEq => literal_use(other),
+                    B::Eq | B::NotEq => operand_use(other, strings),
                     _ => None,
                 }
                 .filter(|_| param_ident(e, params).is_some())
@@ -468,7 +482,7 @@ fn collect_param_operator_uses<'a>(
             use parser::AssignOp as A;
             match op {
                 A::Assign => {
-                    if let Some(u) = literal_use(right) {
+                    if let Some(u) = operand_use(right, strings) {
                         note(left, u, uses);
                     }
                     // `field[i] = p` / `this.field[i] = p`
@@ -488,7 +502,7 @@ fn collect_param_operator_uses<'a>(
                     }
                 }
                 A::AddAssign => {
-                    let u = match literal_use(right) {
+                    let u = match operand_use(right, strings) {
                         Some(ParamUse::String) => ParamUse::String,
                         _ => ParamUse::Int,
                     };
@@ -606,9 +620,24 @@ fn collect_param_operator_uses<'a>(
             }
         }
         ExprKind::Block(elements) => {
+            let mut local_strings = strings.clone();
             for element in elements {
                 if let BlockElement::Expr(e) = element {
-                    visit(e, uses);
+                    collect_param_operator_uses(e, params, &local_strings, return_hint, uses);
+                    if let ExprKind::Var { name, expr, .. } | ExprKind::Final { name, expr, .. } =
+                        &e.kind
+                    {
+                        let is_string = expr.as_ref().is_some_and(|initializer| {
+                            matches!(
+                                operand_use(initializer, &local_strings),
+                                Some(ParamUse::String)
+                            )
+                        });
+                        local_strings.remove(name);
+                        if is_string {
+                            local_strings.insert(name.clone());
+                        }
+                    }
                 }
             }
         }
