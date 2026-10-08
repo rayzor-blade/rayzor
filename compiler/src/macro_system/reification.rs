@@ -28,53 +28,54 @@ impl ReificationEngine {
         ty: &parser::Type,
         env: &Environment,
     ) -> Result<MacroValue, MacroError> {
-        fn splice(ty: &parser::Type, env: &Environment) -> Result<parser::Type, MacroError> {
-            use parser::Type;
-            let mut ty = ty.clone();
-            match &mut ty {
-                Type::Path { path, params, span } => {
-                    if path.package.is_empty() && path.sub.is_none() && params.is_empty() {
-                        if let Some(name) = path.name.strip_prefix('$') {
-                            return env
-                                .get(name)
-                                .and_then(|v| super::expr_adt::type_of_value(&v, *span))
-                                .ok_or_else(|| MacroError::ReificationError {
-                                    message: format!(
-                                        "type splice '${name}' requires a ComplexType"
-                                    ),
-                                    location: span_to_location(*span),
-                                });
-                        }
-                    }
-                    *params = params
-                        .iter()
-                        .map(|p| splice(p, env))
-                        .collect::<Result<_, _>>()?;
-                }
-                Type::Function { params, ret, .. } => {
-                    *params = params
-                        .iter()
-                        .map(|p| splice(p, env))
-                        .collect::<Result<_, _>>()?;
-                    **ret = splice(ret, env)?;
-                }
-                Type::Anonymous { fields, .. } => {
-                    for field in fields {
-                        field.type_hint = splice(&field.type_hint, env)?;
+        Ok(super::expr_adt::complex_type_of(&Self::process_type(
+            ty, env,
+        )?))
+    }
+
+    fn process_type(ty: &parser::Type, env: &Environment) -> Result<parser::Type, MacroError> {
+        use parser::Type;
+        let mut ty = ty.clone();
+        match &mut ty {
+            Type::Path { path, params, span } => {
+                if path.package.is_empty() && path.sub.is_none() && params.is_empty() {
+                    if let Some(name) = path.name.strip_prefix('$') {
+                        return env
+                            .get(name)
+                            .and_then(|v| super::expr_adt::type_of_value(&v, *span))
+                            .ok_or_else(|| MacroError::ReificationError {
+                                message: format!("type splice '${name}' requires a ComplexType"),
+                                location: span_to_location(*span),
+                            });
                     }
                 }
-                Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => {
-                    **inner = splice(inner, env)?;
-                }
-                Type::Intersection { left, right, .. } => {
-                    **left = splice(left, env)?;
-                    **right = splice(right, env)?;
-                }
-                Type::Const { .. } | Type::Wildcard { .. } => {}
+                *params = params
+                    .iter()
+                    .map(|p| Self::process_type(p, env))
+                    .collect::<Result<_, _>>()?;
             }
-            Ok(ty)
+            Type::Function { params, ret, .. } => {
+                *params = params
+                    .iter()
+                    .map(|p| Self::process_type(p, env))
+                    .collect::<Result<_, _>>()?;
+                **ret = Self::process_type(ret, env)?;
+            }
+            Type::Anonymous { fields, .. } => {
+                for field in fields {
+                    field.type_hint = Self::process_type(&field.type_hint, env)?;
+                }
+            }
+            Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => {
+                **inner = Self::process_type(inner, env)?;
+            }
+            Type::Intersection { left, right, .. } => {
+                **left = Self::process_type(left, env)?;
+                **right = Self::process_type(right, env)?;
+            }
+            Type::Const { .. } | Type::Wildcard { .. } => {}
         }
-        Ok(super::expr_adt::complex_type_of(&splice(ty, env)?))
+        Ok(ty)
     }
 
     pub(crate) fn process_name(
@@ -268,7 +269,10 @@ impl ReificationEngine {
                 Ok(Expr {
                     kind: ExprKind::Var {
                         name: Self::process_name(name, env, expr.span)?,
-                        type_hint: type_hint.clone(),
+                        type_hint: type_hint
+                            .as_ref()
+                            .map(|ty| Self::process_type(ty, env))
+                            .transpose()?,
                         expr: new_init.map(Box::new),
                     },
                     span: expr.span,
@@ -283,6 +287,11 @@ impl ReificationEngine {
             ExprKind::Function(func) => {
                 let mut func = func.clone();
                 func.name = Self::process_name(&func.name, env, expr.span)?;
+                func.return_type = func
+                    .return_type
+                    .as_ref()
+                    .map(|ty| Self::process_type(ty, env))
+                    .transpose()?;
                 func.body = func
                     .body
                     .as_ref()
@@ -290,6 +299,11 @@ impl ReificationEngine {
                     .transpose()?;
                 for param in &mut func.params {
                     param.name = Self::process_name(&param.name, env, param.span)?;
+                    param.type_hint = param
+                        .type_hint
+                        .as_ref()
+                        .map(|ty| Self::process_type(ty, env))
+                        .transpose()?;
                     param.default_value = param
                         .default_value
                         .as_ref()
@@ -317,7 +331,10 @@ impl ReificationEngine {
             } => Ok(Expr {
                 kind: ExprKind::Final {
                     name: Self::process_name(name, env, expr.span)?,
-                    type_hint: type_hint.clone(),
+                    type_hint: type_hint
+                        .as_ref()
+                        .map(|ty| Self::process_type(ty, env))
+                        .transpose()?,
                     expr: init
                         .as_ref()
                         .map(|e| Self::process_expr(e, env).map(Box::new))
@@ -374,14 +391,33 @@ impl ReificationEngine {
                 type_path,
                 params,
                 args,
-            } => Ok(Expr {
-                kind: ExprKind::New {
-                    type_path: type_path.clone(),
-                    params: params.clone(),
-                    args: Self::process_list(args, env)?,
-                },
-                span: expr.span,
-            }),
+            } => {
+                let (type_path, params) = if type_path.package.is_empty()
+                    && type_path.sub.is_none()
+                    && type_path.name.starts_with('$')
+                {
+                    let name = &type_path.name[1..];
+                    env.get(name)
+                        .and_then(|value| super::expr_adt::type_path_of(&value, expr.span))
+                        .ok_or_else(|| MacroError::ReificationError {
+                            message: format!("constructor splice '${name}' requires a TypePath"),
+                            location: span_to_location(expr.span),
+                        })?
+                } else {
+                    (type_path.clone(), params.clone())
+                };
+                Ok(Expr {
+                    kind: ExprKind::New {
+                        type_path,
+                        params: params
+                            .iter()
+                            .map(|ty| Self::process_type(ty, env))
+                            .collect::<Result<_, _>>()?,
+                        args: Self::process_list(args, env)?,
+                    },
+                    span: expr.span,
+                })
+            }
 
             ExprKind::Object(fields) => {
                 let fields = fields
@@ -431,7 +467,10 @@ impl ReificationEngine {
             } => Ok(Expr {
                 kind: ExprKind::Cast {
                     expr: Box::new(Self::process_expr(inner, env)?),
-                    type_hint: type_hint.clone(),
+                    type_hint: type_hint
+                        .as_ref()
+                        .map(|ty| Self::process_type(ty, env))
+                        .transpose()?,
                 },
                 span: expr.span,
             }),
@@ -442,7 +481,7 @@ impl ReificationEngine {
             } => Ok(Expr {
                 kind: ExprKind::TypeCheck {
                     expr: Box::new(Self::process_expr(inner, env)?),
-                    type_hint: type_hint.clone(),
+                    type_hint: Self::process_type(type_hint, env)?,
                 },
                 span: expr.span,
             }),

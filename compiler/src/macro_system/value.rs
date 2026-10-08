@@ -89,6 +89,37 @@ pub enum MacroValue {
 }
 
 impl MacroValue {
+    /// Mutate the fields presented by objects and reified expressions.
+    pub(crate) fn set_field(&mut self, field: &str, value: Self) -> bool {
+        match self {
+            Self::Object(fields) => {
+                Arc::make_mut(fields).insert(field.to_owned(), value);
+                true
+            }
+            Self::Expr(expression) => match (field, value) {
+                ("expr", value) => {
+                    let Some(replacement) = super::expr_adt::try_expr_of(&value, expression.span)
+                    else {
+                        return false;
+                    };
+                    *Arc::make_mut(expression) = replacement;
+                    true
+                }
+                ("pos", Self::Position(position)) => {
+                    let expression = Arc::make_mut(expression);
+                    let length = expression.span.end.saturating_sub(expression.span.start);
+                    expression.span = parser::Span::new(
+                        position.byte_offset as usize,
+                        position.byte_offset as usize + length,
+                    );
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     /// Returns the type name of this value for error messages
     pub fn type_name(&self) -> &'static str {
         match self {

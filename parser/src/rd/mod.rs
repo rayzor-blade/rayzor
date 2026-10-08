@@ -240,7 +240,8 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 | TokenKind::KwStatic
                 | TokenKind::KwInline
                 | TokenKind::KwExtern
-                | TokenKind::KwOverride => {
+                | TokenKind::KwOverride
+                | TokenKind::KwMacro => {
                     i += 1;
                 }
                 TokenKind::KwFinal => {

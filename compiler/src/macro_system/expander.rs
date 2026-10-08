@@ -223,7 +223,7 @@ impl MacroExpander {
         self.file_imports = file.imports.clone();
 
         // Phase 1: Scan and register macro definitions from this file
-        if let Err(e) = self.registry.scan_and_register(&file, &file.filename) {
+        if let Err(e) = self.registry.scan_and_register_missing(&file) {
             self.context.diagnostics.push(MacroDiagnostic::error(
                 format!("failed to scan macros: {}", e),
                 SourceLocation::unknown(),
@@ -286,6 +286,9 @@ impl MacroExpander {
                 hooks: Vec::new(),
             };
         }
+
+        file.module_fields
+            .retain(|field| !field.modifiers.contains(&parser::Modifier::Macro));
 
         // Phase 3: Walk and expand expressions in all declarations
         // Uses dirty-set tracking: after iteration 1, only re-expand declarations
@@ -1138,7 +1141,7 @@ impl MacroExpander {
         for (i, param) in macro_def.params.iter().enumerate() {
             let value = if param.rest {
                 // Rest parameter: collect remaining args into an array
-                MacroValue::Array(Arc::new(arg_values[i..].to_vec()))
+                MacroValue::Array(Arc::new(arg_values.get(i..).unwrap_or_default().to_vec()))
             } else if let Some(val) = arg_values.get(i) {
                 macro_def.bind_argument(i, val.clone())
             } else if param.optional {

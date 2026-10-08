@@ -1021,8 +1021,7 @@ impl MacroInterpreter {
                 }
                 // Fallback: complex base expressions (e.g. a.b.field = value)
                 let mut base_val = self.eval_expr(base)?;
-                if let MacroValue::Object(ref mut arc_map) = base_val {
-                    Arc::make_mut(arc_map).insert(field.clone(), new_val.clone());
+                if base_val.set_field(field, new_val.clone()) {
                     // Re-assign the modified object back
                     self.assign_base(base, base_val)?;
                     Ok(new_val)
@@ -1490,7 +1489,9 @@ impl MacroInterpreter {
         // before pop_scope, or we'd leak the function scope.
         let mut bind_err: Option<MacroError> = None;
         for (i, param) in func.params.iter().enumerate() {
-            let value = if let Some(arg) = args.get(i) {
+            let value = if param.rest {
+                MacroValue::Array(Arc::new(args.get(i..).unwrap_or_default().to_vec()))
+            } else if let Some(arg) = args.get(i) {
                 arg.clone()
             } else if param.optional {
                 MacroValue::Null
@@ -1963,6 +1964,20 @@ impl MacroInterpreter {
                 }
                 _ => Ok(None),
             },
+            "haxe.macro.MacroStringTools" | "MacroStringTools" if method == "isFormatExpr" => {
+                let definition = args
+                    .first()
+                    .map(|value| self.field_access(value, "expr", location))
+                    .transpose()?;
+                let formatted = matches!(definition,
+                    Some(MacroValue::Enum(_, constructor, arguments))
+                    if &*constructor == "EConst"
+                        && matches!(arguments.first(), Some(MacroValue::Enum(_, constant, values))
+                            if &**constant == "CString"
+                                && matches!(values.get(1), Some(MacroValue::Enum(_, quotes, _))
+                                    if &**quotes == "SingleQuotes")));
+                Ok(Some(MacroValue::Bool(formatted)))
+            }
             // `formatString(s, pos)`: `s` read as a single-quoted string,
             // its `$` interpolations and all.
             "haxe.macro.MacroStringTools" | "MacroStringTools" if method == "formatString" => {

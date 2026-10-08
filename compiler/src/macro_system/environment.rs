@@ -62,20 +62,15 @@ impl Environment {
         false
     }
 
-    /// Mutate a single field on an Object variable in-place.
+    /// Mutate a single field on an object or reified expression variable in-place.
     ///
     /// Avoids the clone→COW→reassign cycle for `this.field = value` patterns.
-    /// Finds the variable by name, checks it is an Object, and inserts the field
-    /// directly. Returns true if the variable was found and is an Object.
+    /// Returns whether the variable and field support mutation.
     pub fn mutate_object_field(&mut self, var_name: &str, field: &str, value: MacroValue) -> bool {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(binding) = scope.get(var_name) {
                 let mut value_guard = binding.lock().expect("macro variable lock poisoned");
-                if let MacroValue::Object(arc_map) = &mut *value_guard {
-                    Arc::make_mut(arc_map).insert(field.to_string(), value);
-                    return true;
-                }
-                return false;
+                return value_guard.set_field(field, value);
             }
         }
         false

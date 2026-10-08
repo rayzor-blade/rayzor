@@ -276,7 +276,7 @@ fn list_of(v: Option<&MacroValue>) -> Vec<MacroValue> {
     }
 }
 
-fn type_path_of(v: &MacroValue, span: Span) -> Option<(TypePath, Vec<Type>)> {
+pub(crate) fn type_path_of(v: &MacroValue, span: Span) -> Option<(TypePath, Vec<Type>)> {
     let path = TypePath {
         package: list_of(field(v, "pack"))
             .iter()

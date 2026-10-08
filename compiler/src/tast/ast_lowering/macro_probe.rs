@@ -18,6 +18,12 @@ impl AstLowering<'_> {
             location: expression.source_location,
         };
         match &expression.kind {
+            TypedExpressionKind::VarDeclarationExpr { var_type, .. }
+            | TypedExpressionKind::FinalDeclarationExpr { var_type, .. }
+                if *var_type == self.context.type_table.borrow().void_type() =>
+            {
+                return Err(error("Variables of type Void are not allowed".to_string()));
+            }
             TypedExpressionKind::FieldAccess {
                 object,
                 field_symbol,

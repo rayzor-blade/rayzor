@@ -164,6 +164,33 @@ impl MacroRegistry {
             .map(|p| p.path.join("."))
             .unwrap_or_default();
 
+        let module = std::path::Path::new(source_file)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let owner = if package_prefix.is_empty() {
+            module.to_owned()
+        } else {
+            format!("{package_prefix}.{module}")
+        };
+        for field in &file.module_fields {
+            if !field.modifiers.contains(&Modifier::Macro) {
+                continue;
+            }
+            if let parser::ModuleFieldKind::Function(function) = &field.kind {
+                let mut modifiers = field.modifiers.clone();
+                modifiers.push(Modifier::Static);
+                let field = ClassField {
+                    meta: field.meta.clone(),
+                    access: field.access.clone(),
+                    modifiers,
+                    kind: ClassFieldKind::Function(function.clone()),
+                    span: field.span,
+                };
+                self.register_macro_field(&field, &owner, source_file, &file_imports)?;
+            }
+        }
+
         for decl in &file.declarations {
             match decl {
                 TypeDeclaration::Class(class) => {
@@ -201,6 +228,17 @@ impl MacroRegistry {
             }
         }
 
+        Ok(())
+    }
+
+    /// Register runtime-view declarations without replacing macro-context bodies or imports.
+    pub(crate) fn scan_and_register_missing(&mut self, file: &HaxeFile) -> Result<(), MacroError> {
+        let mut declarations = Self::new();
+        declarations.scan_and_register(file, &file.filename)?;
+        for (name, definition) in declarations.macros {
+            self.macros.entry(name).or_insert(definition);
+        }
+        self.build_macros.extend(declarations.build_macros);
         Ok(())
     }
 
@@ -251,11 +289,20 @@ impl MacroRegistry {
         if let ClassFieldKind::Function(func) = &field.kind {
             let qualified_name = format!("{}.{}", class_qualified, func.name);
 
-            let params: Vec<MacroParam> = func
+            let mut params: Vec<MacroParam> = func
                 .params
                 .iter()
                 .map(|p| MacroParam::from_function_param(p))
                 .collect();
+            // A trailing Array<Expr> collects the macro call's remaining expressions.
+            if let (Some(param), Some(source)) = (params.last_mut(), func.params.last()) {
+                if matches!(source.type_hint.as_ref(),
+                    Some(parser::Type::Path { path, params, .. })
+                    if path.name == "Array" && params.first().is_some_and(super::expr_adt::is_expr_type))
+                {
+                    param.rest = true;
+                }
+            }
 
             // A bodyless declaration (the non-macro side of `#if macro`)
             // names a macro whose body the macro-context view registers.
