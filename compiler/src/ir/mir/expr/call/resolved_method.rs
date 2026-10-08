@@ -373,7 +373,13 @@ impl<'a> HirToMirContext<'a> {
                     None
                 })
             };
-            if let Some((slot_index, _)) = vtable_lookup {
+            let vtable_slot = vtable_lookup.map(|info| info.0).or_else(|| {
+                if object_is_super {
+                    return None;
+                }
+                self.indexed_virtual_method_slot(object.ty, method_name_interned?)
+            });
+            if let Some(slot_index) = vtable_slot {
                 let obj_reg = self.lower_expression(object)?;
 
                 // If Dynamic-typed, unbox to get raw object pointer
@@ -419,20 +425,23 @@ impl<'a> HirToMirContext<'a> {
                     IrType::I64,
                 )?;
 
-                let mut param_types = vec![IrType::Ptr(Box::new(IrType::Void))]; // self
-                for arg in args {
-                    param_types.push(self.convert_type(arg.ty));
+                let formals = self
+                    .symbol_table
+                    .get_symbol(*field)
+                    .and_then(|symbol| self.resolve_function_type_signature(symbol.type_id))
+                    .map(|(params, _)| params)
+                    .unwrap_or_default();
+                let mut param_types = vec![IrType::Ptr(Box::new(IrType::Void))];
+                for (i, arg) in args.iter().enumerate() {
+                    param_types.push(self.convert_type(formals.get(i).copied().unwrap_or(arg.ty)));
                 }
-                let return_type = Box::new(self.convert_type(expr.ty));
-                let func_signature = IrType::Function {
-                    params: param_types,
+                let return_type = self.convert_type(expr.ty);
+                return self.build_class_slot_call(
+                    closure_ptr,
+                    call_args,
+                    param_types,
                     return_type,
-                    varargs: false,
-                };
-
-                return self
-                    .builder
-                    .build_call_indirect(closure_ptr, call_args, func_signature);
+                );
             }
 
             // super.method() — resolve to parent class method directly

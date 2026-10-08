@@ -1029,7 +1029,23 @@ impl<'a> HirToMirContext<'a> {
         &mut self,
         method_func_id: IrFunctionId,
     ) -> Option<IrFunctionId> {
-        if let Some(cached) = self.vtable_dispatch_thunks.get(&method_func_id) {
+        self.ensure_dispatch_thunk(method_func_id, false)
+    }
+
+    pub(crate) fn ensure_class_vtable_dispatch_thunk(
+        &mut self,
+        method_func_id: IrFunctionId,
+    ) -> Option<IrFunctionId> {
+        self.ensure_dispatch_thunk(method_func_id, true)
+    }
+
+    fn ensure_dispatch_thunk(
+        &mut self,
+        method_func_id: IrFunctionId,
+        class_slot: bool,
+    ) -> Option<IrFunctionId> {
+        let cache_key = (method_func_id, class_slot);
+        if let Some(cached) = self.vtable_dispatch_thunks.get(&cache_key) {
             return Some(*cached);
         }
 
@@ -1046,12 +1062,20 @@ impl<'a> HirToMirContext<'a> {
             return None;
         }
 
+        let slot_type = |ty: &IrType| {
+            if class_slot {
+                Self::class_slot_type(ty)
+            } else {
+                ty.clone()
+            }
+        };
+        let slot_return = slot_type(&method_sig.return_type);
         let mut sig_builder = FunctionSignatureBuilder::new()
             .param("env".to_string(), ptr_u8.clone())
-            .returns(method_sig.return_type.clone())
+            .returns(slot_return.clone())
             .calling_convention(CallingConvention::Haxe);
         for param in &method_sig.parameters {
-            sig_builder = sig_builder.param(param.name.clone(), param.ty.clone());
+            sig_builder = sig_builder.param(param.name.clone(), slot_type(&param.ty));
         }
         let thunk_sig = sig_builder.build();
 
@@ -1066,7 +1090,12 @@ impl<'a> HirToMirContext<'a> {
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { '_' })
             .collect();
-        let thunk_name = format!("__vtable_dispatch_thunk__{}", sanitized_qname);
+        let prefix = if class_slot {
+            "__class_vtable_dispatch_thunk__"
+        } else {
+            "__vtable_dispatch_thunk__"
+        };
+        let thunk_name = format!("{}{}", prefix, sanitized_qname);
 
         let saved_current_function = self.builder.current_function;
         let saved_current_block = self.builder.current_block;
@@ -1084,7 +1113,7 @@ impl<'a> HirToMirContext<'a> {
             .builder
             .start_function(thunk_symbol, thunk_name, thunk_sig);
 
-        let call_args = {
+        let mut call_args = {
             let Some(func) = self.builder.current_function() else {
                 self.check_move_flow();
                 self.builder.finish_function();
@@ -1111,6 +1140,9 @@ impl<'a> HirToMirContext<'a> {
             args
         };
 
+        for (arg, param) in call_args.iter_mut().zip(&method_sig.parameters) {
+            *arg = self.reconcile_extern_return(*arg, &slot_type(&param.ty), &param.ty);
+        }
         let ret_ty = method_sig.return_type.clone();
         if matches!(ret_ty, IrType::Void) {
             self.builder
@@ -1120,6 +1152,7 @@ impl<'a> HirToMirContext<'a> {
             let result = self
                 .builder
                 .build_call_direct(method_func_id, call_args, ret_ty.clone());
+            let result = result.map(|reg| self.reconcile_extern_return(reg, &ret_ty, &slot_return));
             self.builder.build_return(result);
         }
 
@@ -1130,7 +1163,7 @@ impl<'a> HirToMirContext<'a> {
         self.symbol_map = saved_symbol_map;
         self.strict_move_locals = saved_strict_move_locals;
 
-        self.vtable_dispatch_thunks.insert(method_func_id, thunk_id);
+        self.vtable_dispatch_thunks.insert(cache_key, thunk_id);
         Some(thunk_id)
     }
 
@@ -1146,7 +1179,7 @@ impl<'a> HirToMirContext<'a> {
         method_sym: SymbolId,
         method_func_id: IrFunctionId,
     ) -> Option<IrFunctionId> {
-        if let Some(cached) = self.vtable_dispatch_thunks.get(&method_func_id) {
+        if let Some(cached) = self.vtable_dispatch_thunks.get(&(method_func_id, false)) {
             return Some(*cached);
         }
 
@@ -1164,7 +1197,8 @@ impl<'a> HirToMirContext<'a> {
 
         // Reuse the thunk another module already emitted for this method.
         if let Some(&existing) = self.external_function_name_map.get(&thunk_name) {
-            self.vtable_dispatch_thunks.insert(method_func_id, existing);
+            self.vtable_dispatch_thunks
+                .insert((method_func_id, false), existing);
             return Some(existing);
         }
 
@@ -1252,7 +1286,8 @@ impl<'a> HirToMirContext<'a> {
         self.symbol_map = saved_symbol_map;
         self.strict_move_locals = saved_strict_move_locals;
 
-        self.vtable_dispatch_thunks.insert(method_func_id, thunk_id);
+        self.vtable_dispatch_thunks
+            .insert((method_func_id, false), thunk_id);
         Some(thunk_id)
     }
 
@@ -1614,7 +1649,7 @@ impl<'a> HirToMirContext<'a> {
                 };
                 if let Some(&func_id) = self.function_map.get(method_sym) {
                     let dispatch_func_id = self
-                        .ensure_vtable_dispatch_thunk(func_id)
+                        .ensure_class_vtable_dispatch_thunk(func_id)
                         .unwrap_or(func_id);
                     let closure_ptr = self.builder.build_function_ref(dispatch_func_id);
                     let slot_reg = self.builder.build_const(IrValue::I32(slot_idx as i32));

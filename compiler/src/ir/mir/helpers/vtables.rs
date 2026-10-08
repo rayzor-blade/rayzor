@@ -52,11 +52,54 @@ fn index_slot_layout(
 }
 
 impl<'a> HirToMirContext<'a> {
+    /// Class slots share a numeric ABI even when an override widens an Int
+    /// parameter or narrows a Float result. F64 represents every Haxe Int
+    /// exactly and preserves fractional arguments made through a child type.
+    /// Erased I64 values, nullable scalars, and references retain their ABI.
+    pub(crate) fn class_slot_type(ty: &IrType) -> IrType {
+        match ty {
+            IrType::I32 | IrType::F32 | IrType::F64 => IrType::F64,
+            _ => ty.clone(),
+        }
+    }
+
+    pub(crate) fn build_class_slot_call(
+        &mut self,
+        function: IrId,
+        mut args: Vec<IrId>,
+        params: Vec<IrType>,
+        result_type: IrType,
+    ) -> Option<IrId> {
+        let params: Vec<_> = params.iter().map(Self::class_slot_type).collect();
+        for (arg, parameter) in args.iter_mut().zip(&params) {
+            if let Some(actual) = self.builder.get_register_type(*arg) {
+                *arg = self.reconcile_extern_return(*arg, &actual, parameter);
+            }
+        }
+        let slot_result = Self::class_slot_type(&result_type);
+        let value = self.builder.build_call_indirect(
+            function,
+            args,
+            IrType::Function {
+                params,
+                return_type: Box::new(slot_result.clone()),
+                varargs: false,
+            },
+        )?;
+        Some(self.reconcile_extern_return(value, &slot_result, &result_type))
+    }
+
     pub(crate) fn indexed_virtual_method_slot(
         &self,
         receiver_ty: TypeId,
         method_name: InternedString,
     ) -> Option<u32> {
+        // Generic classes dispatch through their monomorphized direct entries.
+        if matches!(self.type_table.get(self.resolve_through_aliases(receiver_ty)).map(|t| &t.kind),
+            Some(TypeKind::Class { type_args, .. }) if !type_args.is_empty())
+        {
+            return None;
+        }
         let class_name = self.class_qualified_name_of_type(receiver_ty)?;
         let method_name = self.string_interner.get(method_name)?;
         let index = self.static_sig_index.as_ref()?;

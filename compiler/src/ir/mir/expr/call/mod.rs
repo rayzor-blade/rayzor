@@ -926,16 +926,11 @@ impl<'a> HirToMirContext<'a> {
                                     for arg in args.iter().skip(1) {
                                         param_types.push(self.convert_type(arg.ty));
                                     }
-                                    let return_type = Box::new(actual_return_type.clone());
-                                    let func_signature = IrType::Function {
-                                        params: param_types,
-                                        return_type,
-                                        varargs: false,
-                                    };
-                                    return self.builder.build_call_indirect(
+                                    return self.build_class_slot_call(
                                         closure_ptr,
                                         arg_regs,
-                                        func_signature,
+                                        param_types,
+                                        actual_return_type.clone(),
                                     );
                                 }
                             }

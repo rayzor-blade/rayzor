@@ -42,27 +42,33 @@ impl<'a> HirToMirContext<'a> {
             return None;
         };
         if *is_method && !args.is_empty() && !receiver_is_super {
-            let vtable_slot = self.virtual_dispatch_info.get(symbol).copied().or_else(|| {
-                let method_name = self.symbol_table.get_symbol(*symbol).map(|s| s.name)?;
-                let receiver_type = self.resolve_through_aliases(args[0].ty);
-                let type_table = self.type_table;
-                let class_sym = match &type_table.get(receiver_type)?.kind {
-                    TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                    _ => None,
-                }?;
-                let mut current = Some(class_sym);
-                while let Some(cls) = current {
-                    if let Some(&method_sym) = self.class_method_by_name.get(&(cls, method_name)) {
-                        if let Some(info) = self.virtual_dispatch_info.get(&method_sym) {
-                            return Some(*info);
+            let vtable_slot = self
+                .virtual_dispatch_info
+                .get(symbol)
+                .map(|info| info.0)
+                .or_else(|| {
+                    let method_name = self.symbol_table.get_symbol(*symbol).map(|s| s.name)?;
+                    let receiver_type = self.resolve_through_aliases(args[0].ty);
+                    let type_table = self.type_table;
+                    let class_sym = match &type_table.get(receiver_type)?.kind {
+                        TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                        _ => None,
+                    }?;
+                    let mut current = Some(class_sym);
+                    while let Some(cls) = current {
+                        if let Some(&method_sym) =
+                            self.class_method_by_name.get(&(cls, method_name))
+                        {
+                            if let Some(info) = self.virtual_dispatch_info.get(&method_sym) {
+                                return Some(info.0);
+                            }
                         }
+                        current = self.class_parent_map.get(&cls).copied();
                     }
-                    current = self.class_parent_map.get(&cls).copied();
-                }
-                None
-            });
+                    self.indexed_virtual_method_slot(receiver_type, method_name)
+                });
 
-            if let Some((slot_index, _defining_class)) = vtable_slot {
+            if let Some(slot_index) = vtable_slot {
                 let obj_reg = self.lower_expression(&args[0])?;
                 // The method's own formals: a `Null<scalar>` bound for an erased
                 // `T` hands over the scalar's bits, as at a direct call.
@@ -99,23 +105,16 @@ impl<'a> HirToMirContext<'a> {
                     vec![obj_reg, slot_reg],
                     IrType::I64,
                 )?;
-                // Parameter types follow the registers actually passed, so a
-                // coerced argument is not declared as the type it arrived with.
+                // Declared formals distinguish numeric slots from erased values;
+                // omitted defaults use their register type as a fallback.
                 let mut param_types = vec![IrType::Ptr(Box::new(IrType::Void))];
                 for (i, reg) in call_args.iter().enumerate().skip(1) {
-                    let declared = args.get(i).map(|a| self.convert_type(a.ty));
-                    let passed = self.builder.get_register_type(*reg).or(declared);
+                    let declared = formals.get(i - 1).map(|ty| self.convert_type(*ty));
+                    let passed = declared.or_else(|| self.builder.get_register_type(*reg));
                     param_types.push(passed.unwrap_or(IrType::I64));
                 }
-                let return_type = Box::new(self.convert_type(expr.ty));
-                let func_signature = IrType::Function {
-                    params: param_types,
-                    return_type,
-                    varargs: false,
-                };
-                return self
-                    .builder
-                    .build_call_indirect(fn_ptr, call_args, func_signature);
+                let return_type = self.convert_type(expr.ty);
+                return self.build_class_slot_call(fn_ptr, call_args, param_types, return_type);
             }
         }
         *fell_through = true;

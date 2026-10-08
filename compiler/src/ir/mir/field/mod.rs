@@ -65,15 +65,7 @@ impl<'a> HirToMirContext<'a> {
                 .iter()
                 .map(|arg| self.builder.get_register_type(*arg).unwrap_or(IrType::I64))
                 .collect();
-            self.builder.build_call_indirect(
-                pointer,
-                args,
-                IrType::Function {
-                    params,
-                    return_type: Box::new(return_type),
-                    varargs: false,
-                },
-            )
+            self.build_class_slot_call(pointer, args, params, return_type)
         } else {
             self.builder.build_call_direct(func_id, args, return_type)
         }

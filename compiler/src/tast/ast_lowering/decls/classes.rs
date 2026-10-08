@@ -1005,7 +1005,7 @@ impl<'a> AstLowering<'a> {
     /// resolves on a later round, so this runs to a fixpoint.
     fn infer_unannotated_param_types(&mut self, class_decl: &ClassDecl, class_symbol: SymbolId) {
         let class_scope = self.context.current_scope;
-        let mut methods: Vec<(&Function, SymbolId)> = Vec::new();
+        let mut methods = Vec::new();
         for field in &class_decl.fields {
             let ClassFieldKind::Function(func) = &field.kind else {
                 continue;
@@ -1023,12 +1023,18 @@ impl<'a> AstLowering<'a> {
                     .map(|entry| entry.id)
             };
             if let Some(symbol) = symbol {
-                methods.push((func, symbol));
+                let inherited = if field.modifiers.contains(&Modifier::Override) {
+                    self.inherited_parameter_types(class_symbol, name)
+                } else {
+                    Vec::new()
+                };
+                methods.push((func, symbol, inherited));
             }
         }
         for _round in 0..4 {
             let mut changed = false;
-            for &(func, symbol) in &methods {
+            for (func, symbol, inherited) in &methods {
+                let symbol = *symbol;
                 let mut inferred = self.param_types_from_uses(func, class_symbol);
                 if let [param] = func.params.as_slice() {
                     if param.type_hint.is_none() {
@@ -1065,6 +1071,15 @@ impl<'a> AstLowering<'a> {
                         }
                     }
                 }
+                // An omitted override annotation takes the parent's type;
+                // body uses cannot change the inherited method contract.
+                for (param, inherited) in func.params.iter().zip(inherited) {
+                    if param.type_hint.is_none() {
+                        if let Some(ty) = inherited {
+                            inferred.insert(self.context.intern_string(&param.name), *ty);
+                        }
+                    }
+                }
                 if self.inferred_param_types.get(&symbol) == Some(&inferred) {
                     continue;
                 }
@@ -1076,6 +1091,86 @@ impl<'a> AstLowering<'a> {
                 break;
             }
         }
+    }
+
+    fn inherited_parameter_types(
+        &mut self,
+        class: SymbolId,
+        name: InternedString,
+    ) -> Vec<Option<TypeId>> {
+        let mut current = class;
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..32 {
+            let parent = self.class_parents.get(&current).copied().or_else(|| {
+                let ty = self.context.symbol_table.get_class_super_type(current)?;
+                self.resolve_type_to_class_symbol(ty)
+            });
+            let Some(parent) = parent else { break };
+            if !seen.insert(parent) {
+                break;
+            }
+            // Generic parent formals need substitution into the child's type
+            // environment before they can serve as annotation hints.
+            if self
+                .context
+                .symbol_table
+                .get_class_type_params(parent)
+                .is_some_and(|p| !p.is_empty())
+            {
+                return Vec::new();
+            }
+            let method = self
+                .class_methods
+                .get(&parent)
+                .and_then(|methods| {
+                    methods
+                        .iter()
+                        .find(|(method, _, is_static)| *method == name && !is_static)
+                })
+                .map(|(_, symbol, _)| *symbol)
+                .or_else(|| {
+                    let scope = self.context.symbol_table.get_symbol(parent)?.scope_id;
+                    self.context
+                        .symbol_table
+                        .lookup_symbol(scope, name)
+                        .map(|symbol| symbol.id)
+                });
+            if let Some(params) = method.and_then(|method| {
+                let ty = self.context.symbol_table.get_symbol(method)?.type_id;
+                let tt = self.context.type_table.borrow();
+                let TypeKind::Function { params, .. } = &tt.get(ty)?.kind else {
+                    return None;
+                };
+                Some(
+                    params
+                        .iter()
+                        .map(|ty| {
+                            (!matches!(
+                                tt.get(*ty).map(|t| &t.kind),
+                                None | Some(
+                                    TypeKind::Dynamic
+                                        | TypeKind::Unknown
+                                        | TypeKind::Placeholder { .. }
+                                        | TypeKind::TypeParameter { .. }
+                                )
+                            ))
+                            .then_some(*ty)
+                        })
+                        .collect(),
+                )
+            }) {
+                return params;
+            }
+            if let Some(sig) = self.resolve_declared_method_sig(parent, name, false) {
+                return sig
+                    .param_kinds
+                    .iter()
+                    .map(|kind| self.resolve_builtin_type(kind.as_deref()?))
+                    .collect();
+            }
+            current = parent;
+        }
+        Vec::new()
     }
 
     /// Replace the registered signature's Dynamic slots for unannotated

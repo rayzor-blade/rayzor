@@ -244,8 +244,9 @@ pub struct HirToMirContext<'a> {
     /// Thunks for virtual/interface dispatch slots. The generic indirect-call
     /// ABI prepends a closure env pointer, while class methods are declared as
     /// `(this, ...args)`. These thunks use `(env, this, ...args)` and forward to
-    /// the real method, ignoring `env`.
-    vtable_dispatch_thunks: BTreeMap<IrFunctionId, IrFunctionId>,
+    /// the real method, ignoring `env`. The bool selects the class numeric ABI;
+    /// interface and iteration entries keep the method's native signature.
+    vtable_dispatch_thunks: BTreeMap<(IrFunctionId, bool), IrFunctionId>,
     /// Adapters giving a plain function used as a closure value a lambda's shape.
     closure_value_adapters: BTreeMap<IrFunctionId, IrFunctionId>,
     /// Every function a closure record of this module points at, with its
