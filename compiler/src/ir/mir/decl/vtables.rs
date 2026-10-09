@@ -21,11 +21,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-/// The two shapes a closure's alternate entry can have.
+/// The argument representation of a closure's alternate entry.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EntryShape {
     Slot,
     Dynamic,
+    Packed,
 }
 
 /// What a closure's declared parameter or result holds.
@@ -563,10 +564,10 @@ impl<'a> HirToMirContext<'a> {
         Some(adapter_id)
     }
 
-    /// A typed function view that packs arguments for a varargs callback.
-    pub(crate) fn ensure_varargs_typed_adapter(&mut self, fn_type: TypeId) -> Option<IrFunctionId> {
+    /// A typed function view that boxes arguments for the dynamic entry.
+    pub(crate) fn ensure_dynamic_typed_adapter(&mut self, fn_type: TypeId) -> Option<IrFunctionId> {
         let fn_type = self.resolve_through_aliases(fn_type);
-        let name = format!("__varargs_typed_adapter__{}", fn_type.as_raw());
+        let name = format!("__dynamic_typed_adapter__{}", fn_type.as_raw());
         if let Some(id) = self.builder.get_function_by_name(&name) {
             return Some(id);
         }
@@ -762,6 +763,7 @@ impl<'a> HirToMirContext<'a> {
         let (slot_ty, suffix) = match shape {
             EntryShape::Slot => (IrType::I64, "slot"),
             EntryShape::Dynamic => (ptr_u8.clone(), "dyn"),
+            EntryShape::Packed => (ptr_u8.clone(), "packed"),
         };
         // Every closure target takes its env first.
         let env_ty = target_sig.parameters.first()?.ty.clone();
@@ -801,8 +803,12 @@ impl<'a> HirToMirContext<'a> {
             .param("env".to_string(), ptr_u8.clone())
             .returns(slot_ty.clone())
             .calling_convention(CallingConvention::Haxe);
-        for i in 0..declared.len() {
-            sig_builder = sig_builder.param(format!("a{i}"), slot_ty.clone());
+        if shape == EntryShape::Packed {
+            sig_builder = sig_builder.param("args".to_string(), ptr_u8.clone());
+        } else {
+            for i in 0..declared.len() {
+                sig_builder = sig_builder.param(format!("a{i}"), slot_ty.clone());
+            }
         }
         let entry_sig = sig_builder.build();
 
@@ -828,10 +834,38 @@ impl<'a> HirToMirContext<'a> {
             .builder
             .start_function(entry_symbol, entry_name, entry_sig);
 
+        let param_count = if shape == EntryShape::Packed {
+            1
+        } else {
+            declared.len()
+        };
         let param_regs: Option<Vec<IrId>> = self
             .builder
             .current_function()
-            .and_then(|f| (0..=declared.len()).map(|i| f.get_param_reg(i)).collect());
+            .and_then(|f| (0..=param_count).map(|i| f.get_param_reg(i)).collect());
+        let param_regs = if shape == EntryShape::Packed {
+            param_regs.and_then(|regs| {
+                let get = self.get_or_register_extern_function(
+                    "haxe_array_get_erased",
+                    vec![ptr_u8.clone(), IrType::I64, IrType::I32],
+                    IrType::U64,
+                );
+                let mut unpacked = vec![regs[0]];
+                for i in 0..declared.len() {
+                    let index = self.builder.build_const(IrValue::I64(i as i64))?;
+                    let dynamic = self.builder.build_const(IrValue::I32(0))?;
+                    let slot = self.builder.build_call_direct(
+                        get,
+                        vec![regs[1], index, dynamic],
+                        IrType::U64,
+                    )?;
+                    unpacked.push(self.builder.build_bitcast(slot, ptr_u8.clone())?);
+                }
+                Some(unpacked)
+            })
+        } else {
+            param_regs
+        };
         let mut ok = param_regs.is_some();
         if let Some(param_regs) = param_regs {
             let mut call_args = Vec::with_capacity(declared.len() + 1);
@@ -897,7 +931,7 @@ impl<'a> HirToMirContext<'a> {
                 _ if matches!(want, IrType::I64) => Some(reg),
                 _ => self.builder.build_cast(reg, IrType::I64, want.clone()),
             },
-            EntryShape::Dynamic => match kind {
+            EntryShape::Dynamic | EntryShape::Packed => match kind {
                 SlotKind::Dynamic => {
                     if *want == ptr_u8 {
                         Some(reg)
@@ -964,7 +998,7 @@ impl<'a> HirToMirContext<'a> {
                 (Some(r), _) if matches!(ret_ty, IrType::I64) => Some(r),
                 (Some(r), _) => self.builder.build_cast(r, ret_ty.clone(), IrType::I64),
             },
-            EntryShape::Dynamic => {
+            EntryShape::Dynamic | EntryShape::Packed => {
                 let Some(r) = result else {
                     return self.builder.build_const(IrValue::Null);
                 };
@@ -1573,6 +1607,23 @@ impl<'a> HirToMirContext<'a> {
             })
             .filter(|(_, slot, dynamic)| slot.is_some() || dynamic.is_some())
             .collect();
+        let packed_entries: Vec<_> = self
+            .closure_targets
+            .clone()
+            .into_iter()
+            .filter_map(|(target, fn_type)| {
+                let sig = self
+                    .builder
+                    .module
+                    .functions
+                    .get(&target)?
+                    .signature
+                    .clone();
+                (sig.parameters.len() > 8)
+                    .then(|| self.build_closure_entry(target, &sig, fn_type, EntryShape::Packed))?
+                    .map(|entry| (target, entry))
+            })
+            .collect();
 
         // __vtable_init__ registers class vtables at startup; the backend calls
         // it before main(), same as __init__.
@@ -1911,6 +1962,21 @@ impl<'a> HirToMirContext<'a> {
             if let (Some(t), Some(s), Some(d)) = (target_rec, slot_rec, dynamic_rec) {
                 self.builder
                     .build_call_direct(register_entries_fn, vec![t, s, d], IrType::Void);
+            }
+        }
+
+        let register_packed = self.get_or_register_extern_function(
+            "haxe_closure_register_packed_entry",
+            vec![ptr_u8.clone(), ptr_u8],
+            IrType::Void,
+        );
+        for (target, packed) in packed_entries {
+            if let (Some(target), Some(packed)) = (
+                self.builder.build_function_ref(target),
+                self.builder.build_function_ref(packed),
+            ) {
+                self.builder
+                    .build_call_direct(register_packed, vec![target, packed], IrType::Void);
             }
         }
 

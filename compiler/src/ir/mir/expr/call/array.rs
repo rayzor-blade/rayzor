@@ -50,13 +50,34 @@ impl<'a> HirToMirContext<'a> {
             && *is_method
             && args.len() >= 2
         {
-            let string_elements = self.type_table.get(args[0].ty).is_some_and(|t| {
-                matches!(&t.kind, TypeKind::Array { element_type }
-                    if self.convert_type(*element_type) == IrType::String)
+            let element_type = self
+                .type_table
+                .get(self.resolve_through_aliases(args[0].ty))
+                .and_then(|t| match &t.kind {
+                    TypeKind::Array { element_type } => Some(*element_type),
+                    _ => None,
+                });
+            let search = element_type.and_then(|ty| {
+                if self.convert_type(ty) == IrType::String {
+                    Some(("haxe_array_string_index_of", IrType::String))
+                } else if matches!(
+                    self.type_table
+                        .get(self.resolve_through_aliases(ty))
+                        .map(|t| &t.kind),
+                    Some(TypeKind::Function { .. })
+                ) {
+                    Some((
+                        "haxe_array_function_index_of",
+                        IrType::Ptr(Box::new(IrType::U8)),
+                    ))
+                } else {
+                    None
+                }
             });
-            if string_elements {
+            if let Some((name, value_type)) = search {
                 let arr = self.lower_expression(&args[0])?;
                 let value = self.lower_expression(&args[1])?;
+                let value = self.coerce_reg_to(value, &value_type)?;
                 let from = if let Some(arg) = args.get(2) {
                     self.lower_expression(arg)?
                 } else {
@@ -67,10 +88,10 @@ impl<'a> HirToMirContext<'a> {
                     .builder
                     .build_const(IrValue::I32(i32::from(vname == "lastIndexOf")))?;
                 let function = self.get_or_register_extern_function(
-                    "haxe_array_string_index_of",
+                    name,
                     vec![
                         IrType::Ptr(Box::new(IrType::U8)),
-                        IrType::String,
+                        value_type,
                         IrType::I64,
                         IrType::I32,
                     ],
@@ -86,7 +107,7 @@ impl<'a> HirToMirContext<'a> {
                         let zero = self.builder.build_const(IrValue::I64(0))?;
                         self.builder.build_cmp(CompareOp::Ge, index, zero)
                     }
-                    // `remove(s)` drops the first equal string; false when none.
+                    // Remove the first matching element; false when none.
                     "remove" => {
                         let zero = self.builder.build_const(IrValue::I64(0))?;
                         let found = self.builder.build_cmp(CompareOp::Ge, index, zero)?;

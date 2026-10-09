@@ -1007,7 +1007,7 @@ impl<'a> HirToMirContext<'a> {
             let closure = self
                 .builder
                 .build_call_direct(unbox, vec![value, tag], ptr.clone())?;
-            let adapter = self.ensure_varargs_typed_adapter(target_ty)?;
+            let adapter = self.ensure_dynamic_typed_adapter(target_ty)?;
             let adapter = self.builder.build_function_ref(adapter)?;
             let view = self.get_or_register_extern_function(
                 "haxe_closure_typed_view",

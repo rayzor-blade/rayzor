@@ -608,18 +608,14 @@ impl CompilationUnit {
         // into load_imports_efficiently where they become failed path guesses.
         deps.retain(|d| !Self::is_bare_stdtypes_prelude_dependency(d));
 
-        // Qualify bare type names with the file's package.
-        // e.g., if File.hx has `package sys.io;` and references `FileInput`,
-        // also add `sys.io.FileInput` so the import loader can find it.
+        // A leading type name is package-relative, including module subtypes
+        // such as `Helpers.Worker`; lowercase package paths are absolute.
         if let Some(package) = &ast.package {
             if !package.path.is_empty() {
                 let package_prefix = package.path.join(".");
                 let qualified: Vec<String> = deps
                     .iter()
-                    .filter(|d| {
-                        !d.contains('.')
-                            && d.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-                    })
+                    .filter(|d| d.chars().next().is_some_and(char::is_uppercase))
                     .map(|d| format!("{}.{}", package_prefix, d))
                     .collect();
                 for q in qualified {

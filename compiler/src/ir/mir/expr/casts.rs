@@ -63,10 +63,21 @@ impl<'a> HirToMirContext<'a> {
             expr,
             target,
             is_safe,
+            is_checked,
         } = &expr.kind
         else {
             unreachable!("lower_cast on a non-Cast expression")
         };
+        let target_type = self.resolve_through_aliases(*target);
+        if *is_checked
+            && self.runtime_type_id(target_type) >= rayzor_runtime::type_system::TYPE_USER_START
+            && matches!(
+                self.type_table.get(target_type).map(|t| &t.kind),
+                Some(TypeKind::Class { .. } | TypeKind::Interface { .. })
+            )
+        {
+            return self.lower_checked_object_cast(expr, target_type);
+        }
         // `(cast this : Int)` in an abstract method lowers to
         // Cast(safe, Int) { Cast(unsafe, Dynamic) { This/Variable } }. The inner
         // cast is a no-op for abstract types and the outer one extracts the
@@ -75,6 +86,7 @@ impl<'a> HirToMirContext<'a> {
             expr: inner_expr,
             target: inner_target,
             is_safe: false,
+            ..
         } = &expr.kind
         {
             let inner_target_is_dynamic = {
@@ -653,6 +665,67 @@ impl<'a> HirToMirContext<'a> {
                 let value_reg = self.lower_expression(expr)?;
                 self.builder.build_cast(value_reg, from_type, to_type)
             }
+        }
+    }
+
+    fn lower_checked_object_cast(&mut self, expr: &HirExpr, target: TypeId) -> Option<IrId> {
+        let value = self.lower_expression(expr)?;
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let mut object = self.coerce_reg_to(value, &ptr)?;
+        let source = self.resolve_storage_type(expr.ty);
+        let source = match self.type_table.get(source).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => self.resolve_storage_type(*inner_type),
+            _ => source,
+        };
+        let source_is_dynamic = matches!(
+            self.type_table.get(source).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        );
+        match self.type_table.get(source).map(|t| &t.kind) {
+            Some(TypeKind::Interface { .. }) => {
+                let identity = self.get_or_register_extern_function(
+                    "haxe_iface_identity",
+                    vec![ptr.clone()],
+                    ptr.clone(),
+                );
+                object = self
+                    .builder
+                    .build_call_direct(identity, vec![object], ptr.clone())?;
+            }
+            _ => {}
+        }
+        let type_id = self.runtime_type_id(target);
+        let expected = self.builder.build_const(IrValue::I64(type_id as i64))?;
+        let check = self.get_or_register_extern_function(
+            if source_is_dynamic {
+                "haxe_checked_cast_dynamic"
+            } else {
+                "haxe_checked_cast_object"
+            },
+            vec![ptr.clone(), IrType::I64],
+            ptr.clone(),
+        );
+        let object = self
+            .builder
+            .build_call_direct(check, vec![object, expected], ptr.clone())?;
+        if matches!(
+            self.type_table.get(target).map(|t| &t.kind),
+            Some(TypeKind::Interface { .. })
+        ) {
+            let expected = self.builder.build_const(IrValue::I32(type_id as i32))?;
+            let wrap = self.get_or_register_extern_function(
+                "haxe_iface_fat_ptr_build",
+                vec![ptr.clone(), IrType::I32],
+                ptr.clone(),
+            );
+            let result = self
+                .builder
+                .build_call_direct(wrap, vec![object, expected], ptr)?;
+            self.interface_wrapped_args.insert(result);
+            Some(result)
+        } else {
+            self.builder
+                .build_bitcast(object, self.convert_type(target))
         }
     }
 

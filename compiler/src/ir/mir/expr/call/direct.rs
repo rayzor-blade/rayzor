@@ -143,7 +143,9 @@ impl<'a> HirToMirContext<'a> {
             };
             let route_as_generic_method = *is_method
                 && !callee_is_externish
-                && (callee_has_type_params || receiver_is_generic_instance);
+                && (callee_has_type_params
+                    || receiver_is_generic_instance
+                    || !converted_hir_type_args.is_empty());
 
             if (is_user_defined || route_as_generic_method) && !receiver_needs_special_dispatch {
                 // Instance calls get call-boundary materialization (class→iface
@@ -234,7 +236,8 @@ impl<'a> HirToMirContext<'a> {
                     .get(&func_id)
                     .map(|f| !f.signature.type_params.is_empty())
                     .unwrap_or(false)
-                    || (receiver_is_generic_instance && !callee_is_externish);
+                    || ((receiver_is_generic_instance || !converted_hir_type_args.is_empty())
+                        && !callee_is_externish);
 
                 // Gather type_args: first from HIR call-site type_args, then from receiver's
                 // generic instance type_args, then from the converted HIR type_args computed
@@ -324,6 +327,7 @@ impl<'a> HirToMirContext<'a> {
             callee,
             args,
             is_method,
+            type_args,
             ..
         } = &expr.kind
         else {
@@ -383,9 +387,21 @@ impl<'a> HirToMirContext<'a> {
                             &hir_types,
                             false,
                         );
-                        let result =
+                        let converted_hir_type_args = type_args
+                            .iter()
+                            .map(|ty| self.convert_type(*ty))
+                            .collect::<Vec<_>>();
+                        let result = if converted_hir_type_args.is_empty() {
                             self.builder
-                                .build_call_direct(func_id, arg_regs, result_type)?;
+                                .build_call_direct(func_id, arg_regs, result_type)?
+                        } else {
+                            self.builder.build_call_direct_with_type_args(
+                                func_id,
+                                arg_regs,
+                                result_type,
+                                converted_hir_type_args,
+                            )?
+                        };
                         // An import's return type is not recorded here; the
                         // declaration says whether it is erased, and the
                         // unboxer validates at runtime.

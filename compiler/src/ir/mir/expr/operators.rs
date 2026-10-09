@@ -881,6 +881,38 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
+            let function = |ctx: &Self, ty| {
+                matches!(
+                    ctx.type_table
+                        .get(ctx.resolve_through_aliases(ty))
+                        .map(|t| &t.kind),
+                    Some(TypeKind::Function { .. })
+                )
+            };
+            if function(self, lhs.ty) && function(self, rhs.ty) {
+                let ptr = IrType::Ptr(Box::new(IrType::U8));
+                let lhs = self.lower_expression(lhs)?;
+                let rhs = self.lower_expression(rhs)?;
+                let lhs = self.coerce_reg_to(lhs, &ptr)?;
+                let rhs = self.coerce_reg_to(rhs, &ptr)?;
+                let compare = self.get_or_register_extern_function(
+                    "haxe_closure_equals",
+                    vec![ptr.clone(), ptr],
+                    IrType::Bool,
+                );
+                let equal =
+                    self.builder
+                        .build_call_direct(compare, vec![lhs, rhs], IrType::Bool)?;
+                return if matches!(op, HirBinaryOp::Eq) {
+                    Some(equal)
+                } else {
+                    let no = self.builder.build_const(IrValue::Bool(false))?;
+                    self.builder.build_cmp(CompareOp::Eq, equal, no)
+                };
+            }
+        }
+
         // @:derive(PartialEq) field-by-field equality for class instances
         if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
             let class_sym = {
@@ -1448,6 +1480,7 @@ impl<'a> HirToMirContext<'a> {
                             | TypeKind::Interface { .. }
                             | TypeKind::Anonymous { .. }
                             | TypeKind::Array { .. }
+                            | TypeKind::Function { .. }
                     )
                 );
                 if is_reference {

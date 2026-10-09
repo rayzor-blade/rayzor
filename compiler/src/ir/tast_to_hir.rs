@@ -2869,6 +2869,7 @@ impl<'a> TastToHirContext<'a> {
                     expr: Box::new(self.lower_expression(expression)),
                     target: *target_type,
                     is_safe: !matches!(cast_kind, CastKind::Unsafe),
+                    is_checked: matches!(cast_kind, CastKind::Explicit),
                 }
             }
             TypedExpressionKind::Conditional {
@@ -4306,6 +4307,7 @@ impl<'a> TastToHirContext<'a> {
                     expr: Box::new(arg),
                     target: target_iface_type,
                     is_safe: true,
+                    is_checked: false,
                 },
                 target_iface_type,
                 self.current_lifetime,
@@ -4324,6 +4326,7 @@ impl<'a> TastToHirContext<'a> {
                 expr: Box::new(arg),
                 target: target_iface_type,
                 is_safe: true,
+                is_checked: false,
             },
             target_iface_type,
             self.current_lifetime,
@@ -7806,6 +7809,7 @@ impl<'a> TastToHirContext<'a> {
                         expr: Box::new(lowered_inner),
                         target: *target_type,
                         is_safe,
+                        is_checked: matches!(cast_kind, CastKind::Explicit),
                     },
                     expr.expr_type,
                     self.current_lifetime,

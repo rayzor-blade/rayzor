@@ -1,0 +1,6 @@
+[project]
+name = "relative-module-subtypes-regression"
+entry = "unit/RelativeModuleSubtypes.hx"
+
+[build]
+class-paths = ["."]

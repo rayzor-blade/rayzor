@@ -2372,6 +2372,10 @@ register_symbol!(
     crate::closure_entries::haxe_closure_register_entries
 );
 register_symbol!(
+    "haxe_closure_register_packed_entry",
+    crate::closure_entries::haxe_closure_register_packed_entry
+);
+register_symbol!(
     "haxe_register_method",
     crate::closure_entries::haxe_register_method
 );
@@ -2398,6 +2402,22 @@ register_symbol!(
 register_symbol!(
     "haxe_closure_typed_view",
     crate::closure_entries::haxe_closure_typed_view
+);
+register_symbol!(
+    "haxe_closure_equals",
+    crate::closure_entries::haxe_closure_equals
+);
+register_symbol!(
+    "haxe_array_function_index_of",
+    crate::haxe_array::haxe_array_function_index_of
+);
+register_symbol!(
+    "haxe_checked_cast_object",
+    crate::type_system::haxe_checked_cast_object
+);
+register_symbol!(
+    "haxe_checked_cast_dynamic",
+    crate::type_system::haxe_checked_cast_dynamic
 );
 register_symbol!(
     "haxe_array_from_dynamic_args",

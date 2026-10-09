@@ -33,6 +33,7 @@ impl<'a> HirToMirContext<'a> {
             callee,
             args,
             is_method,
+            type_args,
             ..
         } = &expr.kind
         else {
@@ -80,11 +81,24 @@ impl<'a> HirToMirContext<'a> {
                                 .filter_map(|a| self.lower_expression(a))
                                 .collect();
 
-                            return self.builder.build_call_direct(
-                                existing_func_id,
-                                arg_regs,
-                                result_type,
-                            );
+                            let type_args = type_args
+                                .iter()
+                                .map(|ty| self.convert_type(*ty))
+                                .collect::<Vec<_>>();
+                            return if type_args.is_empty() {
+                                self.builder.build_call_direct(
+                                    existing_func_id,
+                                    arg_regs,
+                                    result_type,
+                                )
+                            } else {
+                                self.builder.build_call_direct_with_type_args(
+                                    existing_func_id,
+                                    arg_regs,
+                                    result_type,
+                                    type_args,
+                                )
+                            };
                         }
 
                         self.builder.call_label = Some(format!("FORWARD_REF:{}", qual_name_str));
@@ -114,11 +128,21 @@ impl<'a> HirToMirContext<'a> {
                             qual_name_str, forward_func_id
                         );
 
-                        return self.builder.build_call_direct(
-                            forward_func_id,
-                            arg_regs,
-                            result_type,
-                        );
+                        let type_args = type_args
+                            .iter()
+                            .map(|ty| self.convert_type(*ty))
+                            .collect::<Vec<_>>();
+                        return if type_args.is_empty() {
+                            self.builder
+                                .build_call_direct(forward_func_id, arg_regs, result_type)
+                        } else {
+                            self.builder.build_call_direct_with_type_args(
+                                forward_func_id,
+                                arg_regs,
+                                result_type,
+                                type_args,
+                            )
+                        };
                     }
                 }
             }

@@ -372,6 +372,7 @@ pub enum HirExprKind {
         expr: Box<HirExpr>,
         target: TypeId,
         is_safe: bool,
+        is_checked: bool,
     },
 
     TypeCheck {

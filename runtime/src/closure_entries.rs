@@ -24,6 +24,7 @@ use std::sync::RwLock;
 struct Entries {
     slot: usize,
     dynamic: usize,
+    packed: usize,
 }
 
 static ENTRIES: RwLock<Option<HashMap<usize, Entries>>> = RwLock::new(None);
@@ -58,6 +59,21 @@ pub extern "C" fn haxe_closure_register_entries(
     }
     if dynamic != 0 {
         entry.dynamic = dynamic;
+    }
+}
+
+/// Register an Array<Dynamic> entry for a closure with stack arguments.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_closure_register_packed_entry(target: *const u8, packed: *const u8) {
+    let (code, packed) = unsafe { (record_code(target), record_code(packed)) };
+    if code != 0 && packed != 0 {
+        ENTRIES
+            .write()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .entry(code)
+            .or_default()
+            .packed = packed;
     }
 }
 
@@ -186,14 +202,52 @@ pub extern "C" fn haxe_closure_is_varargs(closure: *const u8) -> bool {
     unsafe { record_code(closure) == varargs_marker as *const () as usize }
 }
 
-/// Select a typed packing adapter when a varargs function crosses a function cast.
+#[derive(Default)]
+struct TypedViews {
+    records: HashMap<(usize, usize), usize>,
+    originals: HashMap<usize, usize>,
+}
+
+static TYPED_VIEWS: RwLock<Option<TypedViews>> = RwLock::new(None);
+
+/// The original function behind a typed call adapter.
+pub(crate) fn closure_identity(closure: *mut u8) -> *mut u8 {
+    let guard = TYPED_VIEWS.read().unwrap();
+    guard
+        .as_ref()
+        .and_then(|views| views.originals.get(&(closure as usize)).copied())
+        .map_or(closure, |original| original as *mut u8)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_closure_equals(left: *mut u8, right: *mut u8) -> bool {
+    closure_identity(left) == closure_identity(right)
+}
+
+/// Select the caller's typed adapter for a function crossing Dynamic.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_closure_typed_view(closure: *mut u8, adapter: *const u8) -> *mut u8 {
-    if haxe_closure_is_varargs(closure) {
-        bound_method_record(unsafe { record_code(adapter) }, closure)
-    } else {
-        closure
+    if closure.is_null() {
+        return closure;
     }
+    let code = unsafe { record_code(adapter) };
+    let mut guard = TYPED_VIEWS.write().unwrap();
+    let views = guard.get_or_insert_with(TypedViews::default);
+    let original = views
+        .originals
+        .get(&(closure as usize))
+        .copied()
+        .unwrap_or(closure as usize);
+    let key = (original, code);
+    if let Some(record) = views.records.get(&key) {
+        return *record as *mut u8;
+    }
+    let record = bound_method_record(code, original as *mut u8);
+    if !record.is_null() {
+        views.records.insert(key, record as usize);
+        views.originals.insert(record as usize, original);
+    }
+    record
 }
 
 /// Copy boxed argument slots into an escaping Array<Dynamic>.
@@ -219,6 +273,7 @@ pub extern "C" fn haxe_call_method_dynamic(func: *mut u8, args: *mut u8) -> *mut
     if closure.is_null() {
         return std::ptr::null_mut();
     }
+    let boxed_args = args;
     let layout = crate::type_system::boxed_array_slot_layout(args).unwrap_or(0);
     let args = crate::type_system::haxe_unbox_if_tag(args, crate::type_system::TYPE_ARRAY.0)
         as *const crate::haxe_array::HaxeArray;
@@ -242,6 +297,12 @@ pub extern "C" fn haxe_call_method_dynamic(func: *mut u8, args: *mut u8) -> *mut
         let (code, env) = unsafe { (*(view as *const usize), *(view as *const usize).add(1)) };
         let f: extern "C" fn(usize, *mut u8) -> *mut u8 = unsafe { std::mem::transmute(code) };
         return f(env, boxed);
+    }
+    let packed = lookup(unsafe { record_code(closure) }).packed;
+    if packed != 0 {
+        let env = unsafe { *(closure as *const usize).add(1) };
+        let f: extern "C" fn(usize, *mut u8) -> *mut u8 = unsafe { std::mem::transmute(packed) };
+        return f(env, boxed_args);
     }
     let view = haxe_closure_dynamic_view(closure);
     let (code, env) = unsafe { (*(view as *const usize), *(view as *const usize).add(1)) };

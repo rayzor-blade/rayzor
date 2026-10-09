@@ -1076,7 +1076,8 @@ impl CraneliftBackend {
     ) -> Result<Value, String> {
         let size = type_size(ty)?;
         let alloc_size = if let Some(c) = count {
-            size * c
+            size.checked_mul(c)
+                .ok_or("Stack allocation size overflow")?
         } else {
             // WORKAROUND: For complex types (Any, Ptr, etc.) that might be dynamic arrays,
             // allocate extra space to avoid stack corruption.
@@ -1135,6 +1136,12 @@ fn type_size(ty: &IrType) -> Result<u32, String> {
         IrType::I32 | IrType::U32 | IrType::F32 => 4,
         IrType::I64 | IrType::U64 | IrType::F64 => 8,
         IrType::Ptr(_) | IrType::Ref(_) | IrType::Any | IrType::Function { .. } => 8,
+        IrType::Array(element, count) => {
+            let count = u32::try_from(*count).map_err(|_| "Stack array size overflow")?;
+            type_size(element)?
+                .checked_mul(count)
+                .ok_or("Stack array size overflow")?
+        }
         _ => 8, // Default to pointer size for complex types
     })
 }

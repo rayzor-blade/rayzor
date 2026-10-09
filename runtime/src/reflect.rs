@@ -560,8 +560,8 @@ pub extern "C" fn haxe_reflect_compare_methods(f1: *mut u8, f2: *mut u8) -> bool
         }
     };
 
-    let p1 = unwrap(f1);
-    let p2 = unwrap(f2);
+    let p1 = crate::closure_entries::closure_identity(unwrap(f1));
+    let p2 = crate::closure_entries::closure_identity(unwrap(f2));
 
     // Same closure pointer after unwrapping
     if p1 == p2 {

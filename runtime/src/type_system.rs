@@ -1791,6 +1791,14 @@ pub extern "C" fn haxe_register_interface_impl(class_type_id: i64, interface_typ
     let registry = guard.get_or_insert_with(HashMap::new);
     let set = registry.entry(class_id).or_default();
     set.insert(iface_id);
+    drop(guard);
+    // Empty interfaces still need a table so a cast can build their value.
+    IFACE_VTABLE_REGISTRY
+        .write()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .entry((class_id, iface_id))
+        .or_default();
 }
 
 /// Per class, which instance fields hold a value this object OWNS: bit `i` set
@@ -3320,7 +3328,13 @@ pub extern "C" fn haxe_dynamic_ref_equals(dynamic: *mut u8, raw: *mut u8) -> boo
     dynamic == raw
         || (!dynamic.is_null()
             && !raw.is_null()
-            && dynamic_value_if_boxed(dynamic).is_some_and(|d| d.value_ptr == raw))
+            && dynamic_value_if_boxed(dynamic).is_some_and(|d| {
+                if d.type_id == TYPE_FUNCTION {
+                    crate::closure_entries::haxe_closure_equals(d.value_ptr, raw)
+                } else {
+                    d.value_ptr == raw
+                }
+            }))
 }
 
 pub(crate) fn dynamic_value_if_boxed(p: *mut u8) -> Option<DynamicValue> {
@@ -3408,7 +3422,11 @@ pub extern "C" fn haxe_dynamic_equals(a: *mut u8, b: *mut u8) -> bool {
         ) == 0;
     }
 
-    // Objects, arrays, enums, functions: reference identity.
+    if da.type_id == TYPE_FUNCTION {
+        return crate::closure_entries::haxe_closure_equals(da.value_ptr, db.value_ptr);
+    }
+
+    // Objects, arrays, enums: reference identity.
     da.value_ptr == db.value_ptr
 }
 
@@ -3978,6 +3996,30 @@ pub extern "C" fn haxe_safe_downcast_class(obj_ptr: *mut u8, target_type_id: i64
         obj_ptr
     } else {
         std::ptr::null_mut()
+    }
+}
+
+/// A checked object cast preserves null and throws on an incompatible type.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_checked_cast_object(obj: *mut u8, target: i64) -> *mut u8 {
+    if obj.is_null() || haxe_object_is_instance(obj, target) != 0 {
+        obj
+    } else {
+        crate::exception::throw_with_message("Invalid cast".to_string())
+    }
+}
+
+/// A checked cast from a Dynamic box validates its type before unboxing.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_checked_cast_dynamic(value: *mut u8, target: i64) -> *mut u8 {
+    if haxe_dynamic_is_null(value) {
+        return std::ptr::null_mut();
+    }
+    let object = haxe_std_downcast(value, target);
+    if object.is_null() {
+        crate::exception::throw_with_message("Invalid cast".to_string())
+    } else {
+        object
     }
 }
 

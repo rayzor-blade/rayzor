@@ -4091,6 +4091,43 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    fn type_declares_interface(&self, class: SymbolId, interface: SymbolId) -> bool {
+        if self
+            .context
+            .symbol_table
+            .implements_interface(class, interface)
+        {
+            return true;
+        }
+        let Some(index) = &self.static_sig_index else {
+            return false;
+        };
+        let name = |id| {
+            let symbol = self.context.symbol_table.get_symbol(id)?;
+            self.context
+                .string_interner
+                .get(symbol.qualified_name.unwrap_or(symbol.name))
+                .map(str::to_owned)
+        };
+        let (Some(class), Some(interface)) = (name(class), name(interface)) else {
+            return false;
+        };
+        let mut queue = std::collections::VecDeque::from([class]);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut index = index.borrow_mut();
+        while let Some(name) = queue.pop_front() {
+            if name == interface {
+                return true;
+            }
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            queue.extend(index.interfaces_of(&name));
+            queue.extend(index.parent_of(&name));
+        }
+        false
+    }
+
     /// Type arguments for a call to a generic method, recovered by matching the
     /// declared parameter types against the actual argument types.
     ///
@@ -4242,6 +4279,33 @@ impl<'a> AstLowering<'a> {
                 resolved.insert(var, float_t);
                 continue;
             }
+            if direct_vars.contains(&var) {
+                let table = self.context.type_table.borrow();
+                let common_interface = match (
+                    table.get(prev).map(|t| &t.kind),
+                    table.get(ty).map(|t| &t.kind),
+                ) {
+                    (
+                        Some(TypeKind::Interface {
+                            symbol_id: interface,
+                            ..
+                        }),
+                        Some(
+                            TypeKind::Class {
+                                symbol_id: source, ..
+                            }
+                            | TypeKind::Interface {
+                                symbol_id: source, ..
+                            },
+                        ),
+                    ) if self.type_declares_interface(*source, *interface) => Some(prev),
+                    _ => None,
+                };
+                if let Some(common) = common_interface {
+                    resolved.insert(var, common);
+                    continue;
+                }
+            }
             return Vec::new();
         }
         // Mixed Float/Dynamic arguments use boxes to preserve value tags.
@@ -4320,6 +4384,25 @@ impl<'a> AstLowering<'a> {
             let Some(&target) = bound.get(symbol_id) else {
                 continue;
             };
+            if target != argument.expr_type
+                && matches!(
+                    tt.get(target).map(|t| &t.kind),
+                    Some(TypeKind::Interface { .. })
+                )
+                && matches!(
+                    tt.get(argument.expr_type).map(|t| &t.kind),
+                    Some(TypeKind::Class { .. } | TypeKind::Interface { .. })
+                )
+            {
+                let inner = argument.clone();
+                argument.kind = TypedExpressionKind::Cast {
+                    expression: Box::new(inner),
+                    target_type: target,
+                    cast_kind: CastKind::Implicit,
+                };
+                argument.expr_type = target;
+                continue;
+            }
             if target == tt.dynamic_type() && argument.expr_type != target {
                 let inner = argument.clone();
                 argument.kind = TypedExpressionKind::Cast {

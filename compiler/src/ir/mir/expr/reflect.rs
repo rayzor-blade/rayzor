@@ -145,6 +145,9 @@ impl<'a> HirToMirContext<'a> {
 
         let func_expr = &args[1];
         let args_array_expr = &args[2];
+        let packed_call = self
+            .resolve_function_type_signature(func_expr.ty)
+            .is_some_and(|(params, _)| params.len() > 7);
         let callee = match &func_expr.kind {
             HirExprKind::Variable { symbol, .. } => self.get_function_id(symbol),
             HirExprKind::MethodReference { method_symbol, .. } => {
@@ -155,7 +158,9 @@ impl<'a> HirToMirContext<'a> {
         let defaults: Vec<Option<HirExpr>> = callee
             .and_then(|id| self.function_param_defaults.get(&id).cloned())
             .unwrap_or_default();
-        let func_ptr = if let HirExprKind::Variable { symbol, .. } = &func_expr.kind {
+        let func_ptr = if packed_call {
+            self.lower_expression(func_expr)?
+        } else if let HirExprKind::Variable { symbol, .. } = &func_expr.kind {
             // A local or parameter holding a function is a value, whatever its name.
             let resolved_func = self.get_function_id(symbol).or_else(|| {
                 self.symbol_table
@@ -221,6 +226,10 @@ impl<'a> HirToMirContext<'a> {
             this.boxed_value_regs.insert(result);
             this.maybe_unbox_for_extern_return(result, &ptr_u8, &result_type)
         };
+
+        if packed_call {
+            return fallback_single_array_call(self);
+        }
 
         let lower_with_ir_signature = |this: &mut Self,
                                        param_ir_types: Vec<IrType>,
