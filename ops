@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1791570452,"nonce":"gNtTqWzNGYx5T5nxBa4lDj3Tq7g=","message":"Fixed in 66981dca (nuc gates nbatch1-4 vs HEAD cdef530c: conformance 934 -\u003e 948, nothing lost; fixtures OverloadCalls, SmallSemantics, StructInitDefaults, AbstractStringConversion).","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1791570452,"nonce":"7ERu022wyFCc9aBKhgdiWa+s/V8=","status":2}]}
