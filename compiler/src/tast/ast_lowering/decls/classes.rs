@@ -1031,11 +1031,27 @@ impl<'a> AstLowering<'a> {
                 methods.push((func, symbol, inherited));
             }
         }
+        // Which parameters of each method take a default: Haxe types those
+        // nullable, so a value forwarded into one may be null.
+        let defaulted: BTreeMap<&str, Vec<bool>> = class_decl
+            .fields
+            .iter()
+            .filter_map(|field| match &field.kind {
+                ClassFieldKind::Function(func) => Some((
+                    func.name.as_str(),
+                    func.params
+                        .iter()
+                        .map(|p| p.optional || p.default_value.is_some())
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .collect();
         for _round in 0..4 {
             let mut changed = false;
             for (func, symbol, inherited) in &methods {
                 let symbol = *symbol;
-                let mut inferred = self.param_types_from_uses(func, class_symbol);
+                let mut inferred = self.param_types_from_uses(func, class_symbol, &defaulted);
                 if let [param] = func.params.as_slice() {
                     if param.type_hint.is_none() {
                         for field in &class_decl.fields {
@@ -1231,6 +1247,7 @@ impl<'a> AstLowering<'a> {
         &mut self,
         func: &Function,
         class_symbol: SymbolId,
+        defaulted: &BTreeMap<&str, Vec<bool>>,
     ) -> BTreeMap<InternedString, TypeId> {
         let mut out = self.param_types_from_field_stores(func);
         for param in &func.params {
@@ -1322,6 +1339,24 @@ impl<'a> AstLowering<'a> {
                         }
                         _ => formal,
                     }
+                };
+                // A defaulted scalar slot is nullable: `def(p) return def2(p)`
+                // with `def2(?p = 10)` gives `p:Null<Int>`.
+                let formal = if defaulted
+                    .get(method)
+                    .and_then(|flags| flags.get(index))
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    let mut tt = self.context.type_table.borrow_mut();
+                    match tt.get(formal).map(|t| &t.kind) {
+                        Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool) => {
+                            tt.create_optional_type(formal)
+                        }
+                        _ => formal,
+                    }
+                } else {
+                    formal
                 };
                 match agreed {
                     Some(seen) if seen != formal => {

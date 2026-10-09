@@ -268,9 +268,16 @@ impl<'a> HirToMirContext<'a> {
                 .map(|f| f.kind == crate::ir::functions::FunctionKind::UserDefined)
                 .unwrap_or(false);
 
+            let call_arg_types: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
+            let param_of = self.arg_param_indices(func_id, &call_arg_types);
             let mut arg_regs = Vec::new();
-            for (param_idx, arg) in args.iter().enumerate() {
+            for (arg_idx, arg) in args.iter().enumerate() {
                 if let Some(reg) = self.lower_expression(arg) {
+                    let param_idx = param_of[arg_idx];
+                    if let Some(filled) = self.default_for_null_arg(func_id, param_idx, arg, reg) {
+                        arg_regs.push(filled);
+                        continue;
+                    }
                     // Materialize anon-backed variables at call boundary
                     let reg = self.maybe_materialize_for_call(arg, reg, Some(func_id), param_idx);
                     // @:derive(Copy): copy variable args at call boundary
@@ -299,7 +306,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            let call_arg_types: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
             self.bind_skipped_optional_args(func_id, &mut arg_regs, &call_arg_types, false);
             self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, false);
             let hir_types: Vec<Option<TypeId>> = call_arg_types.iter().map(|t| Some(*t)).collect();

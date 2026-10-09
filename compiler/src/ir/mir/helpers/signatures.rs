@@ -165,12 +165,7 @@ impl<'a> HirToMirContext<'a> {
     /// a caller omit an optional and supply what follows. Binding positionally
     /// put the String in the Int slot, which reads back as a raw pointer and,
     /// when the parameter is a Bool the body branches on, reaches the backend as
-    /// a pointer where a condition belongs.
-    ///
-    /// Only a mismatch that could not possibly be a conversion moves anything:
-    /// a reference offered to a scalar parameter, or a scalar to a reference.
-    /// Anything the existing coercions handle is left alone, so calls that
-    /// already bind correctly are untouched.
+    /// a pointer where a condition belongs. `optional_binding_plan` decides.
     pub(crate) fn bind_skipped_optional_args(
         &mut self,
         func_id: IrFunctionId,
@@ -178,9 +173,6 @@ impl<'a> HirToMirContext<'a> {
         arg_types: &[TypeId],
         has_implicit_this: bool,
     ) {
-        let Some(optional) = self.function_param_optional.get(&func_id).cloned() else {
-            return;
-        };
         let Some(param_types) = self.function_param_hir_types.get(&func_id).cloned() else {
             return;
         };
@@ -194,59 +186,11 @@ impl<'a> HirToMirContext<'a> {
 
         let offset = usize::from(has_implicit_this);
         let supplied = arg_regs.len().saturating_sub(offset);
-        // Only a caller that left something out can have skipped anything.
-        if supplied == 0 || supplied >= param_types.len() {
+        let Some(plan) =
+            self.optional_binding_plan(func_id, &arg_types[..supplied.min(arg_types.len())])
+        else {
             return;
-        }
-
-        // Whether an argument of one type may fill a parameter of another,
-        // read from the Haxe types: a `Null<Int>` slot takes an Int, never a
-        // String, whatever both look like as registers.
-        let shape = |ty: TypeId| -> u8 {
-            let mut ty = ty;
-            for _ in 0..4 {
-                match self.type_table.get(ty).map(|t| &t.kind) {
-                    Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
-                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
-                    _ => break,
-                }
-            }
-            match self.type_table.get(ty).map(|t| &t.kind) {
-                Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool) => 1,
-                Some(TypeKind::String) => 2,
-                Some(TypeKind::Dynamic) | Some(TypeKind::TypeParameter { .. }) | None => 0,
-                _ => 3,
-            }
         };
-        let bindable = |a: TypeId, p: TypeId| -> bool {
-            let (a, p) = (shape(a), shape(p));
-            a == 0 || p == 0 || a == p
-        };
-
-        let mut plan: Vec<Option<usize>> = Vec::with_capacity(param_types.len());
-        let mut next_arg = 0usize;
-        for (p_idx, p_ty) in param_types.iter().enumerate() {
-            if next_arg >= supplied {
-                plan.push(None);
-                continue;
-            }
-            let can_skip = optional.get(p_idx).copied().unwrap_or(false);
-            if !bindable(arg_types[next_arg], *p_ty) && can_skip {
-                plan.push(None);
-            } else {
-                plan.push(Some(next_arg));
-                next_arg += 1;
-            }
-        }
-
-        // Nothing was skipped, or an argument found no home -- leave the call as
-        // it was rather than guessing at a shape this cannot describe. Trailing
-        // parameters left out are not skips; `fill_default_args` owns those.
-        let last_supplied = plan.iter().rposition(|slot| slot.is_some());
-        let skipped = last_supplied.is_some_and(|last| plan[..last].iter().any(|s| s.is_none()));
-        if next_arg != supplied || !skipped {
-            return;
-        }
         let symbols = self
             .function_param_symbols
             .get(&func_id)
@@ -290,6 +234,170 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         *arg_regs = rebound;
+    }
+
+    /// Which supplied argument each parameter takes when the caller skipped
+    /// a leading optional: `plan[p] = Some(arg)`. None when nothing was
+    /// skipped or an argument finds no home -- the call then binds as written.
+    ///
+    /// Only a mismatch that could not possibly be a conversion moves anything:
+    /// a reference offered to a scalar, a scalar to a reference, or a Float or
+    /// Bool to an Int (an Int may still fill a Float).
+    pub(crate) fn optional_binding_plan(
+        &self,
+        func_id: IrFunctionId,
+        arg_types: &[TypeId],
+    ) -> Option<Vec<Option<usize>>> {
+        let optional = self.function_param_optional.get(&func_id)?;
+        let param_types = self.function_param_hir_types.get(&func_id)?;
+        let supplied = arg_types.len();
+        // Only a caller that left something out can have skipped anything.
+        if supplied == 0 || supplied >= param_types.len() {
+            return None;
+        }
+        // Read from the Haxe types: a `Null<Int>` slot takes an Int, never a
+        // String, whatever both look like as registers.
+        #[derive(PartialEq)]
+        enum Shape {
+            Open,
+            Int,
+            Float,
+            Bool,
+            Str,
+            Ref,
+        }
+        let shape = |ty: TypeId| -> Shape {
+            let mut ty = ty;
+            for _ in 0..4 {
+                match self.type_table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            match self.type_table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Int) => Shape::Int,
+                Some(TypeKind::Float) => Shape::Float,
+                Some(TypeKind::Bool) => Shape::Bool,
+                Some(TypeKind::String) => Shape::Str,
+                Some(TypeKind::Dynamic) | Some(TypeKind::TypeParameter { .. }) | None => {
+                    Shape::Open
+                }
+                _ => Shape::Ref,
+            }
+        };
+        let bindable = |a: TypeId, p: TypeId| -> bool {
+            let (a, p) = (shape(a), shape(p));
+            a == Shape::Open || p == Shape::Open || a == p || (a == Shape::Int && p == Shape::Float)
+        };
+
+        let mut plan: Vec<Option<usize>> = Vec::with_capacity(param_types.len());
+        let mut next_arg = 0usize;
+        for (p_idx, p_ty) in param_types.iter().enumerate() {
+            if next_arg >= supplied {
+                plan.push(None);
+                continue;
+            }
+            let can_skip = optional.get(p_idx).copied().unwrap_or(false);
+            if !bindable(arg_types[next_arg], *p_ty) && can_skip {
+                plan.push(None);
+            } else {
+                plan.push(Some(next_arg));
+                next_arg += 1;
+            }
+        }
+        // Trailing parameters left out are not skips; `fill_default_args`
+        // owns those.
+        let last_supplied = plan.iter().rposition(|slot| slot.is_some());
+        let skipped = last_supplied.is_some_and(|last| plan[..last].iter().any(|s| s.is_none()));
+        (next_arg == supplied && skipped).then_some(plan)
+    }
+
+    /// The parameter each supplied argument fills, after any skip.
+    pub(crate) fn arg_param_indices(
+        &self,
+        func_id: IrFunctionId,
+        arg_types: &[TypeId],
+    ) -> Vec<usize> {
+        let mut out: Vec<usize> = (0..arg_types.len()).collect();
+        if let Some(plan) = self.optional_binding_plan(func_id, arg_types) {
+            for (p_idx, slot) in plan.iter().enumerate() {
+                if let Some(a_idx) = slot {
+                    out[*a_idx] = p_idx;
+                }
+            }
+        }
+        out
+    }
+
+    /// A nullable argument for a defaulted scalar parameter: Haxe applies the
+    /// default when the value is null (`get(inull)` on `get(a = 2)`). Only a
+    /// literal default is substituted here, so evaluating it is free of
+    /// effects. None when the rule does not apply.
+    pub(crate) fn default_for_null_arg(
+        &mut self,
+        func_id: IrFunctionId,
+        param_index: usize,
+        arg_expr: &HirExpr,
+        arg_reg: IrId,
+    ) -> Option<IrId> {
+        let default_expr = self
+            .function_param_defaults
+            .get(&func_id)?
+            .get(param_index)?
+            .clone()?;
+        if !matches!(default_expr.kind, HirExprKind::Literal(_)) {
+            return None;
+        }
+        let param_ty = *self
+            .function_param_hir_types
+            .get(&func_id)?
+            .get(param_index)?;
+        let formal = self.convert_type(param_ty);
+        let (unbox_fn, unboxed_ty) = match formal {
+            IrType::I32 => ("haxe_unbox_int_ptr", IrType::I64),
+            IrType::F64 => ("haxe_unbox_float_ptr", IrType::F64),
+            IrType::Bool => ("haxe_unbox_bool_ptr", IrType::Bool),
+            _ => return None,
+        };
+        if matches!(arg_expr.kind, HirExprKind::Null) {
+            return self.lower_expression(&default_expr);
+        }
+        let nullable = matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(arg_expr.ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::Optional { .. }) | Some(TypeKind::Dynamic)
+        );
+        if !nullable
+            || !matches!(
+                self.builder.get_register_type(arg_reg),
+                Some(IrType::Ptr(_))
+            )
+        {
+            return None;
+        }
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let f = self.get_or_register_extern_function(
+            unbox_fn,
+            vec![ptr_u8.clone()],
+            unboxed_ty.clone(),
+        );
+        let raw = self
+            .builder
+            .build_call_direct(f, vec![arg_reg], unboxed_ty.clone())?;
+        let value = if unboxed_ty == IrType::I64 {
+            self.builder.build_cast(raw, IrType::I64, IrType::I32)?
+        } else {
+            raw
+        };
+        let null = self.builder.build_const(IrValue::Null)?;
+        let null = self
+            .builder
+            .build_cast(null, IrType::Ptr(Box::new(IrType::Void)), ptr_u8)?;
+        let is_null = self.builder.build_cmp(CompareOp::Eq, arg_reg, null)?;
+        let default = self.lower_expression(&default_expr)?;
+        self.builder.build_select(is_null, default, value)
     }
 
     /// Lower a parameter's default at the call site. A default reads the

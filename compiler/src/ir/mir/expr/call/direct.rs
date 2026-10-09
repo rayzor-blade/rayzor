@@ -181,16 +181,27 @@ impl<'a> HirToMirContext<'a> {
                 // are left untouched: they take the static-call path earlier in
                 // this handler, and materializing them clashes with the stdlib
                 // MIR wrappers.
+                // Each argument is coerced for the parameter it will fill, which
+                // differs from its position when the caller skipped an optional.
+                let user_arg_types: Vec<TypeId> = args
+                    .iter()
+                    .skip(usize::from(*is_method))
+                    .map(|a| a.ty)
+                    .collect();
+                let param_of = self.arg_param_indices(func_id, &user_arg_types);
                 let arg_regs: Vec<_> = if *is_method {
                     args.iter()
                         .enumerate()
                         .filter_map(|(i, a)| {
                             let reg = self.lower_expression(a)?;
                             if i == 0 {
-                                Some(reg)
-                            } else {
-                                Some(self.maybe_materialize_for_call(a, reg, Some(func_id), i - 1))
+                                return Some(reg);
                             }
+                            let p = param_of[i - 1];
+                            Some(match self.default_for_null_arg(func_id, p, a, reg) {
+                                Some(filled) => filled,
+                                None => self.maybe_materialize_for_call(a, reg, Some(func_id), p),
+                            })
                         })
                         .collect()
                 } else {
@@ -212,6 +223,10 @@ impl<'a> HirToMirContext<'a> {
                         .enumerate()
                         .filter_map(|(i, a)| {
                             let reg = self.lower_expression(a)?;
+                            let i = param_of[i];
+                            if let Some(filled) = self.default_for_null_arg(func_id, i, a, reg) {
+                                return Some(filled);
+                            }
                             let scalar_formal = matches!(
                                 formals.get(i),
                                 Some(IrType::I32 | IrType::F64 | IrType::F32 | IrType::Bool)
