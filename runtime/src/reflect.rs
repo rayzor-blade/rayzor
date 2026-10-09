@@ -17,6 +17,8 @@ use crate::type_system::{
     is_class_type, lookup_class_field, reflected_class_token,
 };
 
+mod strings;
+
 /// Haxe ValueType constructor ordinals (matches Type.hx ValueType order)
 pub const TVALUETYPE_TNULL: i32 = 0;
 pub const TVALUETYPE_TINT: i32 = 1;
@@ -93,6 +95,18 @@ fn builtin_length(b: &BuiltinBox) -> Option<i64> {
             Some(crate::haxe_string::haxe_string_length(*p as *const HaxeString) as i64)
         }
         _ => None,
+    }
+}
+
+fn builtin_field(b: &BuiltinBox, name: &str) -> *mut u8 {
+    if name == "length" {
+        return builtin_length(b)
+            .map(|length| haxe_box_int_ptr(length))
+            .unwrap_or(std::ptr::null_mut());
+    }
+    match b {
+        BuiltinBox::String(receiver) => strings::field(*receiver as *const HaxeString, name),
+        _ => std::ptr::null_mut(),
     }
 }
 
@@ -197,10 +211,7 @@ pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
                 name_ptr,
                 name_len as usize,
             ));
-            return match builtin_length(&b) {
-                Some(len) if name == "length" => haxe_box_int_ptr(len),
-                _ => std::ptr::null_mut(),
-            };
+            return builtin_field(&b, name);
         }
         let actual = unwrap_anon_dynamic(obj);
         let type_id_lo = read_class_type_id(actual);
@@ -280,7 +291,7 @@ fn class_declares_method(start_type_id: u32, name: &str) -> bool {
 /// `d.field` for a Dynamic `d`: read through the box's tag.
 ///
 /// A Dynamic is a `DynamicValue` box, and only its tag says what the
-/// payload is -- an array or a string answers `length` and nothing else, a
+/// payload is -- an array or string exposes its builtin fields, a
 /// scalar has no fields, an anonymous object or class instance goes to
 /// `haxe_reflect_field` on the payload. A slot that is not a box at all is
 /// taken as the object itself.
@@ -308,10 +319,7 @@ pub extern "C" fn haxe_dynamic_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
         }
     };
     match builtin_box(obj) {
-        Some(b) => match builtin_length(&b) {
-            Some(len) if name == "length" => haxe_box_int_ptr(len),
-            _ => std::ptr::null_mut(),
-        },
+        Some(b) => builtin_field(&b, name),
         // An anonymous object reflects on its handle. A class instance is
         // read by the class the box names: a runtime-implemented class (an
         // iterator, a map) carries no header of its own to name it.
@@ -567,6 +575,9 @@ pub extern "C" fn haxe_reflect_compare_methods(f1: *mut u8, f2: *mut u8) -> bool
         && (p1 as usize).is_multiple_of(8)
         && (p2 as usize).is_multiple_of(8)
     {
+        if let Some(equal) = strings::compare_methods(p1, p2) {
+            return equal;
+        }
         unsafe {
             let fn1 = std::ptr::read(p1 as *const [i64; 2]);
             let fn2 = std::ptr::read(p2 as *const [i64; 2]);

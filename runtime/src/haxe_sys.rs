@@ -1183,7 +1183,10 @@ pub extern "C" fn haxe_string_split_ptr(
             while start <= s_ref.len {
                 // Find next occurrence of delimiter
                 let mut found_at = None;
-                for i in start..=(s_ref.len.saturating_sub(delim_ref.len)) {
+                for i in start..=s_ref.len.saturating_sub(delim_ref.len) {
+                    if delim_ref.len > s_ref.len - i {
+                        break;
+                    }
                     if &haystack[i..i + delim_ref.len] == delim_bytes {
                         found_at = Some(i);
                         break;

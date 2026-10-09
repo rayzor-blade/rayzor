@@ -2902,8 +2902,26 @@ impl<'a> AstLowering<'a> {
                     if let Some((class_symbol, static_method_symbol)) =
                         self.find_static_extension_method(method_name, receiver_expr.expr_type)
                     {
-                        // Found a static extension! Convert to static method call
-                        // with receiver as first argument
+                        let formal = self
+                            .function_param_types_from_symbol(static_method_symbol)
+                            .and_then(|params| params.first().copied());
+                        let reflect_receiver = self
+                            .context
+                            .symbol_table
+                            .get_symbol(class_symbol)
+                            .is_some_and(|symbol| {
+                                crate::tast::core::is_haxe_std_type(
+                                    symbol,
+                                    self.context.string_interner,
+                                    &["Reflect"],
+                                )
+                            });
+                        // An extension's receiver is its first declared argument.
+                        let receiver_expr = self.coerce_arg_to_dynamic_param(
+                            receiver_expr,
+                            formal,
+                            reflect_receiver,
+                        );
                         let mut new_args = vec![receiver_expr];
                         new_args.extend(arg_exprs);
                         let type_arguments = self
