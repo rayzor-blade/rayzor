@@ -2580,6 +2580,18 @@ impl<'a> TastToHirContext<'a> {
                         self.find_binary_operator_method(right_type, left.expr_type, operator, true)
                             .map(|(method, owner, is_class)| (method, owner, is_class, true))
                     })
+                    // A right operand's static operator applies in source order
+                    // when the left operand converts to its first parameter.
+                    .or_else(|| {
+                        let right_type = self.resolved_type(right);
+                        self.find_source_order_operator_method(
+                            right_type,
+                            left.expr_type,
+                            right.expr_type,
+                            operator,
+                        )
+                        .map(|(method, owner, is_class)| (method, owner, is_class, false))
+                    })
                     // `a in b` is declared on the container, the right operand,
                     // and takes its operands in source order.
                     .or_else(|| {
@@ -5674,6 +5686,55 @@ impl<'a> TastToHirContext<'a> {
             .try_fold(0, |score, (formal, actual)| {
                 Some(score + table.operator_operand_score(*formal, actual)?)
             })
+    }
+
+    /// A static @:op method of the right operand's abstract that takes the
+    /// operands in source order: `int + a` through `f(a:A, b:A)`.
+    fn find_source_order_operator_method(
+        &self,
+        right_type: TypeId,
+        left_ty: TypeId,
+        right_ty: TypeId,
+        operator: &BinaryOperator,
+    ) -> Option<(SymbolId, SymbolId, bool)> {
+        let owner = {
+            let table = self.type_table.borrow();
+            let mut ty = right_type;
+            for _ in 0..16 {
+                match table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            match table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Abstract { symbol_id, .. }) => *symbol_id,
+                _ => return None,
+            }
+        };
+        let methods = self
+            .class_operator_methods
+            .get(&(owner, Self::op_key_for_binary(operator)))?;
+        methods
+            .iter()
+            .filter(|method| {
+                self.symbol_table
+                    .get_symbol(**method)
+                    .is_some_and(|m| m.flags.contains(crate::tast::symbols::SymbolFlags::STATIC))
+            })
+            .filter_map(|method| {
+                Some((
+                    *method,
+                    self.operator_method_score(*method, left_ty, right_ty)?,
+                ))
+            })
+            .fold(None, |best: Option<(SymbolId, u32)>, (method, score)| {
+                if best.is_none_or(|(_, prev)| score > prev) {
+                    Some((method, score))
+                } else {
+                    best
+                }
+            })
+            .map(|(method, _)| (method, owner, false))
     }
 
     /// Find a method with matching @:op metadata for a binary operator.

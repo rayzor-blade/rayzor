@@ -910,6 +910,10 @@ impl<'a> HirToMirContext<'a> {
                                 self.builder
                                     .build_call_direct(box_id, vec![value], ptr_u8.clone())
                             }
+                            (None, Some(IrType::String)) => {
+                                let string_ty = self.type_table.string_type();
+                                self.box_value_for_dynamic(value, string_ty)
+                            }
                             (None, Some(IrType::Ptr(_))) => {
                                 // Already a pointer — pass through as-is
                                 Some(value)

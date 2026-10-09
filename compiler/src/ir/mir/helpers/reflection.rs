@@ -75,9 +75,11 @@ impl<'a> HirToMirContext<'a> {
             ptr_u8.clone(),
         )?;
 
-        // Unbox based on field_ty
+        // Unbox based on field_ty; an abstract by the type it stores.
         let type_table = self.type_table;
-        let field_type_kind = type_table.get(field_ty).map(|t| t.kind.clone());
+        let field_type_kind = type_table
+            .get(self.resolve_storage_type(field_ty))
+            .map(|t| t.kind.clone());
 
         let result = match field_type_kind.as_ref() {
             Some(TypeKind::Int) => {
@@ -182,9 +184,11 @@ impl<'a> HirToMirContext<'a> {
             ptr_u8.clone(),
         )?;
 
-        // Unbox based on field_ty
+        // Unbox based on field_ty; an abstract by the type it stores.
         let type_table = self.type_table;
-        let field_type_kind = type_table.get(field_ty).map(|t| t.kind.clone());
+        let field_type_kind = type_table
+            .get(self.resolve_storage_type(field_ty))
+            .map(|t| t.kind.clone());
 
         let result = match field_type_kind.as_ref() {
             Some(TypeKind::Int) => {

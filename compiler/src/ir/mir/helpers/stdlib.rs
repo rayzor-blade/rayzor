@@ -533,15 +533,12 @@ impl<'a> HirToMirContext<'a> {
         let source_type = expr.ty;
         let abs_name = self.resolve_abstract_name(target)?;
 
-        let matching_rule = self
-            .abstract_from_rules
-            .get(&abs_name)
-            .and_then(|rules| rules.iter().find(|r| r.from_type == source_type))
-            .cloned();
+        let matching_rule = self.abstract_from_rule(abs_name, source_type);
 
         if let Some(rule) = matching_rule {
             if let Some(cast_func_sym) = rule.cast_function {
                 let value_reg = self.lower_expression(expr)?;
+                let value_reg = self.from_rule_argument(value_reg, source_type, &rule);
                 let func_id = self.resolve_abstract_conversion_function(cast_func_sym, target)?;
                 let result_type = self.convert_type(target);
                 self.builder
@@ -561,6 +558,109 @@ impl<'a> HirToMirContext<'a> {
             // Fallback: for extern/imported abstracts (e.g., SIMD4f) whose @:from rules
             // weren't populated (not in file.abstracts), try stdlib mapping directly.
             self.try_stdlib_from_cast(expr, target, &abs_name)
+        }
+    }
+
+    /// The abstract's `@:from` rule for `source_type`: one declared for that
+    /// type, else a constrained generic conversion (`fromT<T:C>(t:T)`) whose
+    /// constraints the source meets. A value already of the abstract is not
+    /// converted again.
+    fn abstract_from_rule(
+        &self,
+        abs_name: InternedString,
+        source_type: TypeId,
+    ) -> Option<HirCastRule> {
+        let rules = self.abstract_from_rules.get(&abs_name)?;
+        if let Some(rule) = rules.iter().find(|r| r.from_type == source_type) {
+            return Some(rule.clone());
+        }
+        if self.abstract_name_of(source_type) == Some(abs_name) {
+            return None;
+        }
+        rules
+            .iter()
+            .find(|r| {
+                r.cast_function.is_some()
+                    && match self.type_table.get(r.from_type).map(|t| &t.kind) {
+                        Some(TypeKind::TypeParameter { constraints, .. }) => {
+                            !constraints.is_empty()
+                                && constraints
+                                    .iter()
+                                    .all(|c| self.meets_from_constraint(source_type, *c))
+                        }
+                        _ => false,
+                    }
+            })
+            .cloned()
+    }
+
+    /// A generic conversion reads a structural constraint's fields by name,
+    /// which needs a String in its box: the raw string has no header.
+    fn from_rule_argument(&mut self, value: IrId, source_type: TypeId, rule: &HirCastRule) -> IrId {
+        let generic = matches!(
+            self.type_table.get(rule.from_type).map(|t| &t.kind),
+            Some(TypeKind::TypeParameter { .. })
+        );
+        let is_string = matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(source_type))
+                .map(|t| &t.kind),
+            Some(TypeKind::String)
+        );
+        if generic && is_string {
+            self.box_value_for_dynamic(value, source_type)
+                .unwrap_or(value)
+        } else {
+            value
+        }
+    }
+
+    /// The abstract a type names, through aliases and instantiations.
+    fn abstract_name_of(&self, ty: TypeId) -> Option<InternedString> {
+        let mut ty = self.resolve_through_aliases(ty);
+        for _ in 0..8 {
+            match self.type_table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::GenericInstance { base_type, .. }) => {
+                    ty = self.resolve_through_aliases(*base_type)
+                }
+                _ => break,
+            }
+        }
+        self.resolve_abstract_name(ty)
+    }
+
+    /// Whether `source` satisfies a generic `@:from` parameter's constraint:
+    /// `EnumValue` takes enums, a structure takes any object.
+    fn meets_from_constraint(&self, source: TypeId, constraint: TypeId) -> bool {
+        let source_kind = self
+            .type_table
+            .get(self.resolve_through_aliases(source))
+            .map(|t| t.kind.clone());
+        let constraint = self.resolve_through_aliases(constraint);
+        let is_enum_value = self
+            .abstract_name_of(constraint)
+            .or_else(|| match self.type_table.get(constraint).map(|t| &t.kind) {
+                Some(TypeKind::Class { symbol_id, .. }) => {
+                    self.symbol_table.get_symbol(*symbol_id).map(|s| s.name)
+                }
+                _ => None,
+            })
+            .and_then(|name| self.string_interner.get(name))
+            .is_some_and(|name| name == "EnumValue" || name.ends_with(".EnumValue"));
+        if is_enum_value {
+            return matches!(source_kind, Some(TypeKind::Enum { .. }));
+        }
+        match self.type_table.get(constraint).map(|t| &t.kind) {
+            Some(TypeKind::Anonymous { .. }) => matches!(
+                source_kind,
+                Some(
+                    TypeKind::String
+                        | TypeKind::Class { .. }
+                        | TypeKind::Anonymous { .. }
+                        | TypeKind::Interface { .. }
+                )
+            ),
+            _ => false,
         }
     }
 
@@ -586,13 +686,10 @@ impl<'a> HirToMirContext<'a> {
         }
         let abs_name = self.resolve_abstract_name(target_type)?;
 
-        let rule = self
-            .abstract_from_rules
-            .get(&abs_name)
-            .and_then(|rules| rules.iter().find(|r| r.from_type == source_type))
-            .cloned()?;
+        let rule = self.abstract_from_rule(abs_name, source_type)?;
 
         if let Some(cast_func_sym) = rule.cast_function {
+            let value = self.from_rule_argument(value, source_type, &rule);
             let func_id = self.resolve_abstract_conversion_function(cast_func_sym, target_type)?;
             let result_type = self.convert_type(target_type);
             self.builder
@@ -867,6 +964,39 @@ impl<'a> HirToMirContext<'a> {
                 Some(
                     self.builder
                         .build_call_direct(func_id, vec![value_dyn], IrType::Bool),
+                )
+            }
+            // A function reflects through its box, which says it has no fields;
+            // the raw closure would be read as an object.
+            "haxe_reflect_has_field" | "haxe_reflect_field"
+                if args.len() == 2
+                    && matches!(
+                        self.type_table
+                            .get(self.resolve_through_aliases(args[0].ty))
+                            .map(|t| &t.kind),
+                        Some(TypeKind::Function { .. })
+                    ) =>
+            {
+                let value_reg = self.lower_expression(&args[0])?;
+                let value_dyn = self
+                    .box_value_for_dynamic(value_reg, args[0].ty)
+                    .unwrap_or(value_reg);
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let field = self.lower_expression(&args[1])?;
+                let field = self.builder.build_bitcast(field, ptr_u8.clone())?;
+                let ret = if runtime_func == "haxe_reflect_has_field" {
+                    IrType::Bool
+                } else {
+                    ptr_u8.clone()
+                };
+                let func_id = self.get_or_register_extern_function(
+                    runtime_func,
+                    vec![ptr_u8.clone(), ptr_u8],
+                    ret.clone(),
+                );
+                Some(
+                    self.builder
+                        .build_call_direct(func_id, vec![value_dyn, field], ret),
                 )
             }
             // Reflect.compare: use haxe_reflect_compare_typed with a type tag

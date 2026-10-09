@@ -2180,9 +2180,16 @@ pub extern "C" fn haxe_trace_enum_boxed_typed(
         let tag = *(ptr as *const i32);
 
         // Look up variant name from RTTI (we still need the name)
-        let variant_name = get_enum_variant_info(TypeId(type_id), tag as i64)
+        let variant_info = get_enum_variant_info(TypeId(type_id), tag as i64);
+        let variant_name = variant_info
+            .as_ref()
             .map(|info| info.name.to_string())
             .unwrap_or_else(|| format!("variant{}", tag));
+        // The caller describes the enum's widest constructor; this one may
+        // carry fewer parameters.
+        let param_count = variant_info
+            .as_ref()
+            .map_or(param_count, |info| param_count.min(info.param_count));
 
         // Build param types from the caller-provided array
         let caller_types: Vec<ParamType> = if param_types_ptr.is_null() || param_count == 0 {
@@ -2335,7 +2342,9 @@ unsafe extern "C" fn anon_object_to_string(value_ptr: *const u8) -> StringPtr {
         let fields_arr = crate::anon_object::rayzor_anon_fields(value_ptr as *mut u8);
         if !fields_arr.is_null() {
             let arr = &*(fields_arr as *const crate::haxe_array::HaxeArray);
-            if arr.len > 0 {
+            if arr.len == 0 {
+                buf = String::from("{}");
+            } else {
                 buf.clear();
                 buf.push('{');
                 for i in 0..arr.len {

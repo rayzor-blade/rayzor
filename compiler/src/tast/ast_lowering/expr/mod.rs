@@ -2170,7 +2170,14 @@ impl<'a> AstLowering<'a> {
                 TypedExpressionKind::StringInterpolation { parts: typed_parts }
             }
             ExprKind::Paren(expr) => {
-                // Parentheses just pass through the inner expression
+                // A parenthesised expression is a value: `({})` is an empty object.
+                if matches!(&expr.kind, ExprKind::Block(elements) if elements.is_empty()) {
+                    let empty_object = Expr {
+                        kind: ExprKind::Object(Vec::new()),
+                        span: expr.span,
+                    };
+                    return self.lower_expression(&empty_object);
+                }
                 return self.lower_expression(expr);
             }
             ExprKind::Tuple(elements) => {

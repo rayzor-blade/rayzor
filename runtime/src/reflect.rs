@@ -67,8 +67,8 @@ unsafe fn extract_field_name(field_ptr: *mut u8) -> Option<(*const u8, u32)> {
 /// are the low bits of a heap pointer — always a large number, never 6.
 /// So the `type_id == 6` check reliably distinguishes the two cases.
 /// What a builtin-tagged box holds, for the entries that expect an object:
-/// an array or string (which answer `length`), or a scalar (which has no
-/// fields). An anonymous object's box is unwrapped by the caller; a class
+/// an array or string (which answer `length`), or a scalar or function
+/// (which has no fields). An anonymous object's box is unwrapped by the caller; a class
 /// box shares its first word with a raw instance and is read as one.
 enum BuiltinBox {
     Array(*mut u8),
@@ -81,7 +81,9 @@ fn builtin_box(ptr: *mut u8) -> Option<BuiltinBox> {
     match d.type_id {
         TYPE_ARRAY => Some(BuiltinBox::Array(d.value_ptr)),
         TYPE_STRING => Some(BuiltinBox::String(d.value_ptr)),
-        TYPE_VOID | TYPE_NULL | TYPE_BOOL | TYPE_INT | TYPE_FLOAT => Some(BuiltinBox::Scalar),
+        TYPE_VOID | TYPE_NULL | TYPE_BOOL | TYPE_INT | TYPE_FLOAT | TYPE_FUNCTION => {
+            Some(BuiltinBox::Scalar)
+        }
         _ => None,
     }
 }
