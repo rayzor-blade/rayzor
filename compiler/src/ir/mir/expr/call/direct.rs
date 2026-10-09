@@ -216,7 +216,21 @@ impl<'a> HirToMirContext<'a> {
                                 formals.get(i),
                                 Some(IrType::I32 | IrType::F64 | IrType::F32 | IrType::Bool)
                             );
-                            Some(if scalar_formal {
+                            let optional_formal = self
+                                .function_param_hir_types
+                                .get(&func_id)
+                                .and_then(|types| types.get(i))
+                                .is_some_and(|ty| {
+                                    matches!(
+                                        self.type_table
+                                            .get(self.resolve_through_aliases(*ty))
+                                            .map(|t| &t.kind),
+                                        Some(TypeKind::Optional { .. })
+                                    )
+                                });
+                            Some(if optional_formal {
+                                self.maybe_materialize_for_call(a, reg, Some(func_id), i)
+                            } else if scalar_formal {
                                 self.open_nullable_scalar(reg, a.ty).unwrap_or(reg)
                             } else {
                                 reg

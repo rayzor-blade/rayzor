@@ -744,10 +744,7 @@ impl<'a> HirToMirContext<'a> {
                         // Ptr(U8) slot the callee then unboxes.
                         // `Null<T>` takes a box too when the argument is a
                         // concrete scalar: raw 0 would read as null.
-                        let arg_is_scalar = matches!(
-                            type_table.get(resolved_arg).map(|t| &t.kind),
-                            Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
-                        );
+                        let arg_is_scalar = self.optional_inner_is_boxable_primitive(resolved_arg);
                         let param_is_optional_scalar =
                             match type_table.get(resolved_param).map(|t| &t.kind) {
                                 Some(TypeKind::Optional { inner_type }) => {
