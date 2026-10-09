@@ -1236,7 +1236,11 @@ mod tests {
         })) as *mut u8;
         let vt = haxe_type_typeof_value(dv);
         assert_eq!(decode_valuetype_tag(vt), TVALUETYPE_TCLASS);
-        assert_eq!(decode_valuetype_payload(vt), TYPE_STRING.0 as i64);
+        // The payload is the String class token, as `Type.getClass` reports it.
+        assert_eq!(
+            decode_valuetype_payload(vt),
+            crate::type_system::reflected_class_token(TYPE_STRING.0) as i64
+        );
     }
 
     #[test]
