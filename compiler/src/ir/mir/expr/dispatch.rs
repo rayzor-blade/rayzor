@@ -1004,7 +1004,7 @@ impl<'a> HirToMirContext<'a> {
 
             HirExprKind::Array { elements } => self.lower_array_literal(elements, expr.ty),
 
-            HirExprKind::Map { entries } => self.lower_map_literal(entries),
+            HirExprKind::Map { entries } => self.lower_map_literal(entries, expr.ty),
 
             HirExprKind::ObjectLiteral { fields } => self.lower_object_literal(fields, expr.ty),
 

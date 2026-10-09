@@ -405,6 +405,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 | TokenKind::RegexLit
                 | TokenKind::KwTrue
                 | TokenKind::KwFalse
+                | TokenKind::LBracket
         ) || (token.kind == TokenKind::Minus
             && matches!(
                 self.stream.peek_at(1).kind,

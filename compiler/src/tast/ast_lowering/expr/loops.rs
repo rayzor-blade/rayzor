@@ -890,7 +890,16 @@ impl<'a> AstLowering<'a> {
         let typed_key = self.lower_expression(key)?;
         let typed_value = self.lower_expression(value)?;
 
-        let key_type = typed_key.expr_type;
+        let mut key_value = &typed_key;
+        while let TypedExpressionKind::Conditional {
+            then_expr,
+            else_expr: None,
+            ..
+        } = &key_value.kind
+        {
+            key_value = then_expr;
+        }
+        let key_type = key_value.expr_type;
         let value_type = typed_value.expr_type;
 
         // Restore the previous scope

@@ -2108,6 +2108,17 @@ impl<'a> TastToHirContext<'a> {
                 }
             }
             TypedExpressionKind::ArrayAccess { array, index } => {
+                if let Some(method) = self.erased_map_get(array.expr_type) {
+                    let mut call = expr.clone();
+                    call.kind = TypedExpressionKind::MethodCall {
+                        receiver: array.clone(),
+                        method_symbol: method,
+                        type_arguments: Vec::new(),
+                        arguments: vec![(**index).clone()],
+                        is_optional: false,
+                    };
+                    return self.lower_expression(&call);
+                }
                 // ARRAY ACCESS OVERLOADING: Check if array type has @:arrayAccess get method
                 if let Some((get_method, _abstract_symbol)) =
                     self.find_array_access_method(array.expr_type, "get")
@@ -4517,15 +4528,36 @@ impl<'a> TastToHirContext<'a> {
             )
         };
 
+        let mut key = key_expr;
+        let mut filters = Vec::new();
+        while let TypedExpressionKind::Conditional {
+            condition,
+            then_expr,
+            else_expr: None,
+        } = &key.kind
+        {
+            filters.push(condition.as_ref());
+            key = then_expr;
+        }
         let set_entry = HirStatement::Assign {
             lhs: HirLValue::Index {
                 object: Box::new(map_ref(self)),
-                index: Box::new(self.lower_expression(key_expr)),
+                index: Box::new(self.lower_expression(key)),
             },
             rhs: self.lower_expression(value_expr),
             op: None,
         };
         let mut current_body = HirBlock::new(vec![set_entry], self.current_scope);
+        for filter in filters.into_iter().rev() {
+            current_body = HirBlock::new(
+                vec![HirStatement::If {
+                    condition: self.lower_expression(filter),
+                    then_branch: current_body,
+                    else_branch: None,
+                }],
+                self.current_scope,
+            );
+        }
 
         for for_part in for_parts.iter().rev() {
             let pattern = if let Some(key_var) = for_part.key_var_symbol {
@@ -6021,6 +6053,39 @@ impl<'a> TastToHirContext<'a> {
                         .any(|(op, _)| op == "a.b")
             })
             .map(|m| (m.symbol_id, m.return_type))
+    }
+
+    /// Generic Map slots hold IMap fat pointers and read through its get slot.
+    fn erased_map_get(&self, mut ty: TypeId) -> Option<SymbolId> {
+        let table = self.type_table.borrow();
+        for _ in 0..8 {
+            match &table.get(ty)?.kind {
+                TypeKind::TypeAlias { target_type, .. } => ty = *target_type,
+                _ => break,
+            }
+        }
+        let TypeKind::Interface { symbol_id, .. } = &table.get(ty)?.kind else {
+            return None;
+        };
+        let owner = self.symbol_table.get_symbol(*symbol_id)?;
+        let name = self
+            .string_interner
+            .get(owner.qualified_name.unwrap_or(owner.name))?;
+        if !matches!(name, "haxe.IMap" | "haxe.Constraints.IMap") {
+            return None;
+        }
+        let method_name = self.intern_str(&format!("{name}.get"));
+        self.symbol_table
+            .resolve_qualified_name(method_name)
+            .or_else(|| {
+                self.symbol_table
+                    .all_symbols()
+                    .find(|symbol| {
+                        symbol.kind == crate::tast::SymbolKind::Function
+                            && symbol.qualified_name == Some(method_name)
+                    })
+                    .map(|symbol| symbol.id)
+            })
     }
 
     fn find_array_access_method(

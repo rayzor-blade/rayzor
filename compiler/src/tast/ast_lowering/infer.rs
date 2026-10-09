@@ -116,6 +116,9 @@ impl<'a> AstLowering<'a> {
         &mut self,
         iterator: &TypedExpression,
     ) -> LoweringResult<(TypeId, Option<TypeId>)> {
+        if let Some((key, value)) = self.map_literal_entry_types(iterator.expr_type) {
+            return Ok((value, Some(key)));
+        }
         let type_table = self.context.type_table.borrow();
 
         match type_table.get(iterator.expr_type) {
@@ -770,6 +773,30 @@ impl<'a> AstLowering<'a> {
                             Some(crate::tast::core::TypeKind::Map { value_type, .. }) => {
                                 // `m[k]` on a Map literal resolves to the value type.
                                 return Ok(*value_type);
+                            }
+                            Some(TypeKind::Interface {
+                                symbol_id,
+                                type_args,
+                            }) if self
+                                .context
+                                .symbol_table
+                                .get_symbol(*symbol_id)
+                                .and_then(|symbol| symbol.qualified_name)
+                                .and_then(|name| self.context.string_interner.get(name))
+                                .is_some_and(|name| {
+                                    matches!(name, "haxe.IMap" | "haxe.Constraints.IMap")
+                                }) =>
+                            {
+                                let value_type = type_args
+                                    .get(1)
+                                    .copied()
+                                    .unwrap_or_else(|| type_table.dynamic_type());
+                                drop(type_table);
+                                return Ok(self
+                                    .context
+                                    .type_table
+                                    .borrow_mut()
+                                    .create_optional_type(value_type));
                             }
                             Some(crate::tast::core::TypeKind::Class {
                                 symbol_id,

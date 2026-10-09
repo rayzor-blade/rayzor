@@ -17,6 +17,44 @@ fn strip_numeric_noise(text: &str) -> String {
     body.replace('_', "")
 }
 
+fn map_entry(expression: &Expr) -> Option<(Expr, Expr)> {
+    match &expression.kind {
+        ExprKind::Binary {
+            left,
+            op: BinaryOp::Arrow,
+            right,
+        } => Some(((**left).clone(), (**right).clone())),
+        ExprKind::Paren(inner) => map_entry(inner),
+        _ => None,
+    }
+}
+
+fn map_comprehension_entry(expression: &Expr) -> Option<(Expr, Expr)> {
+    match &expression.kind {
+        ExprKind::Paren(inner) => map_comprehension_entry(inner),
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch: None,
+        } => {
+            let (key, value) = map_comprehension_entry(then_branch)?;
+            // The key carries the filter so key and value run only when it passes.
+            Some((
+                Expr {
+                    kind: ExprKind::If {
+                        cond: cond.clone(),
+                        then_branch: Box::new(key),
+                        else_branch: None,
+                    },
+                    span: expression.span,
+                },
+                value,
+            ))
+        }
+        _ => map_entry(expression),
+    }
+}
+
 /// An integer literal as Haxe reads it: a hex, binary or octal literal that
 /// fits 32 bits is an `Int` with those bits (`0xFFFFFFFF` is -1); a decimal
 /// literal past `Int`, or any literal past 32 bits, is a `Float`. An `i32`
@@ -71,9 +109,18 @@ impl<'a, 'b> RdParser<'a, 'b> {
     /// Parse an expression.
     pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {
         let expr = self.parse_assignment()?;
-        // Check for inline type check: `expr : Type` (inside parens, switch, etc.)
-        // Only consume if we're inside parens (next after type would be `)`)
-        // This is a heuristic — the : might be a ternary else or object field
+        if self.stream.eat(TokenKind::FatArrow).is_some() {
+            let right = self.parse_expression()?;
+            let span = expr.span.merge(right.span);
+            return Ok(Expr {
+                kind: ExprKind::Binary {
+                    left: Box::new(expr),
+                    op: BinaryOp::Arrow,
+                    right: Box::new(right),
+                },
+                span,
+            });
+        }
         Ok(expr)
     }
 
@@ -791,21 +838,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                         span: Span::new(start, end),
                     });
                 }
-                let mut inner = self.parse_expression()?;
-                // `macro a => b`: OpArrow, the loosest operator. Only read here,
-                // where no map literal or extractor pattern claims the `=>`.
-                if self.stream.eat(TokenKind::FatArrow).is_some() {
-                    let right = self.parse_expression()?;
-                    let span = inner.span.merge(right.span);
-                    inner = Expr {
-                        kind: ExprKind::Binary {
-                            left: Box::new(inner),
-                            op: BinaryOp::Arrow,
-                            right: Box::new(right),
-                        },
-                        span,
-                    };
-                }
+                let inner = self.parse_expression()?;
                 let end = inner.span.end;
                 Ok(Expr {
                     kind: ExprKind::Macro(Box::new(inner)),
@@ -1586,7 +1619,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         // into the legacy parser, and with it every macro it defines.
         if self.case_pattern_is_extractor() {
             let start = self.stream.save();
-            if let Ok(expr) = self.parse_expression()
+            if let Ok(expr) = self.parse_assignment()
                 && self.stream.eat(TokenKind::FatArrow).is_some()
             {
                 // The right side is itself a pattern, and may be another
@@ -1771,7 +1804,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
             TokenKind::LBrace => {
                 let saved = self.stream.save();
                 if let Ok(expr) = self.parse_expression()
-                    && !object_literal_has_binder(&expr)
+                    && !object_literal_has_pattern_fields(&expr)
                 {
                     return Ok(Pattern::Const(expr));
                 }
@@ -1853,33 +1886,13 @@ impl<'a, 'b> RdParser<'a, 'b> {
             while self.stream.at(TokenKind::KwFor) {
                 for_parts.push(self.parse_comprehension_for()?);
             }
-            // Body expression that yields each element (or `k => v` for map).
             let body = self.parse_expression()?;
-            // `=>` binds as a binary operator, so the body already swallowed it
-            // and the `eat` below never fires. Split the pair back out.
-            if let ExprKind::Binary {
-                op: BinaryOp::Arrow,
-                left,
-                right,
-            } = body.kind
-            {
+            if let Some((key, value)) = map_comprehension_entry(&body) {
                 let end = self.stream.expect(TokenKind::RBracket)?;
                 return Ok(Expr {
                     kind: ExprKind::MapComprehension {
                         for_parts,
-                        key: left,
-                        value: right,
-                    },
-                    span: Span::new(start, end.end),
-                });
-            }
-            if self.stream.eat(TokenKind::FatArrow).is_some() {
-                let value = self.parse_expression()?;
-                let end = self.stream.expect(TokenKind::RBracket)?;
-                return Ok(Expr {
-                    kind: ExprKind::MapComprehension {
-                        for_parts,
-                        key: Box::new(body),
+                        key: Box::new(key),
                         value: Box::new(value),
                     },
                     span: Span::new(start, end.end),
@@ -1898,17 +1911,15 @@ impl<'a, 'b> RdParser<'a, 'b> {
         // Parse first element to check for `=>`
         let first = self.parse_expression()?;
 
-        if self.stream.eat(TokenKind::FatArrow).is_some() {
-            // Map literal: [key => value, ...]
-            let first_val = self.parse_expression()?;
-            let mut pairs = vec![(first, first_val)];
+        if let Some(pair) = map_entry(&first) {
+            let mut pairs = vec![pair];
             while self.stream.eat(TokenKind::Comma).is_some()
                 && !self.stream.at(TokenKind::RBracket)
             {
-                let key = self.parse_expression()?;
-                self.stream.expect(TokenKind::FatArrow)?;
-                let val = self.parse_expression()?;
-                pairs.push((key, val));
+                let entry = self.parse_expression()?;
+                pairs.push(map_entry(&entry).ok_or_else(|| {
+                    ParseError::new("expected map entry 'key => value'", entry.span)
+                })?);
             }
             let end = self.stream.expect(TokenKind::RBracket)?;
             Ok(Expr {
@@ -2101,14 +2112,19 @@ fn takes_postfix(expr: &Expr) -> bool {
     )
 }
 
-/// Whether an object literal read in pattern position assigns in a field,
-/// `{x: x = "foo"}`, which in a pattern is a binder, not an assignment.
-fn object_literal_has_binder(expr: &Expr) -> bool {
+/// Binders and extractors in an object field require pattern parsing.
+fn object_literal_has_pattern_fields(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::Object(fields) => fields.iter().any(|f| match &f.expr.kind {
-            ExprKind::Assign { .. } => true,
-            _ => object_literal_has_binder(&f.expr),
-        }),
+        ExprKind::Assign { .. }
+        | ExprKind::Binary {
+            op: BinaryOp::Arrow,
+            ..
+        } => true,
+        ExprKind::Object(fields) => fields
+            .iter()
+            .any(|field| object_literal_has_pattern_fields(&field.expr)),
+        ExprKind::Array(elements) => elements.iter().any(object_literal_has_pattern_fields),
+        ExprKind::Paren(inner) => object_literal_has_pattern_fields(inner),
         _ => false,
     }
 }

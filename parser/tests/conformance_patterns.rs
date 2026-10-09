@@ -15,6 +15,42 @@ fn grouped_typed_pattern_remains_a_type_pattern() {
 }
 
 #[test]
+fn object_fields_keep_nested_extractors() {
+    let source = "class Main { static function main() { switch (null) { case {value: _.length => 3, nested: {value: (_.length => 2)}}: } } }";
+    let file = parser::rd::rd_parse(source, "Main.hx", false, false).unwrap();
+    let text = format!("{file:?}");
+    assert_eq!(text.matches("Extractor {").count(), 2, "{text}");
+    assert_eq!(text.matches("Object { fields:").count(), 2, "{text}");
+}
+
+#[test]
+fn parenthesized_map_entries_preserve_arrow_precedence() {
+    use parser::{BinaryOp, ClassFieldKind, ExprKind, TypeDeclaration};
+    let source = "class Main { static var map = [for (i in 0...3) ((i == 0 ? 10 : i) => i + 1)]; }";
+    let file = parser::rd::rd_parse(source, "Main.hx", false, false).unwrap();
+    let TypeDeclaration::Class(class) = &file.declarations[0] else {
+        panic!("expected class")
+    };
+    let ClassFieldKind::Var {
+        expr: Some(expr), ..
+    } = &class.fields[0].kind
+    else {
+        panic!("expected initializer")
+    };
+    let ExprKind::MapComprehension { key, value, .. } = &expr.kind else {
+        panic!("expected map comprehension")
+    };
+    assert!(matches!(key.kind, ExprKind::Paren(_)));
+    assert!(matches!(
+        value.kind,
+        ExprKind::Binary {
+            op: BinaryOp::Add,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn initialized_properties_keep_accessors_in_both_parsers() {
     use parser::{ClassFieldKind, ExprKind, PropertyAccess, TypeDeclaration};
     let source = "class Main { var value(get, set):Int = 7; }";

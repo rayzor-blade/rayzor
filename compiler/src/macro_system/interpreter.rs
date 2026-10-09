@@ -447,6 +447,18 @@ impl MacroInterpreter {
             } => {
                 let mut out = Vec::new();
                 self.eval_comprehension(for_parts, &mut |slf| {
+                    let mut key = key.as_ref();
+                    while let ExprKind::If {
+                        cond,
+                        then_branch,
+                        else_branch: None,
+                    } = &key.kind
+                    {
+                        if !slf.eval_expr(cond)?.is_truthy() {
+                            return Ok(());
+                        }
+                        key = then_branch;
+                    }
                     let k = slf.eval_expr(key)?;
                     let v = slf.eval_expr(value)?;
                     MacroValue::insert_map_entry(&mut out, k, v);

@@ -14,6 +14,32 @@ use std::fmt;
 use std::rc::Rc;
 use tracing::warn;
 
+fn constant_argument_spelling(value: &Expr) -> Option<String> {
+    Some(match &value.kind {
+        ExprKind::Int(value) => value.to_string(),
+        ExprKind::Float(value) => value.to_string(),
+        ExprKind::String(value) => format!("{value:?}"),
+        ExprKind::Bool(value) => value.to_string(),
+        ExprKind::Null => "null".to_string(),
+        ExprKind::Paren(inner) => return constant_argument_spelling(inner),
+        ExprKind::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } => {
+            format!("-{}", constant_argument_spelling(expr)?)
+        }
+        ExprKind::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(constant_argument_spelling)
+                .collect::<Option<Vec<_>>>()?
+                .join(", ")
+        ),
+        _ => return None,
+    })
+}
+
 impl<'a> AstLowering<'a> {
     /// Lower a type annotation
     pub(crate) fn lower_type(&mut self, type_annotation: &Type) -> LoweringResult<TypeId> {
@@ -636,12 +662,8 @@ impl<'a> AstLowering<'a> {
             }
             // A `@:const` argument: the constant, kept by its spelling.
             Type::Const { value, .. } => {
-                let spelling = match &value.kind {
-                    parser::ExprKind::Int(i) => i.to_string(),
-                    parser::ExprKind::Float(f) => f.to_string(),
-                    parser::ExprKind::String(text) => format!("\"{}\"", text),
-                    parser::ExprKind::Bool(b) => b.to_string(),
-                    _ => return Ok(self.context.type_table.borrow().unknown_type()),
+                let Some(spelling) = constant_argument_spelling(value) else {
+                    return Ok(self.context.type_table.borrow().unknown_type());
                 };
                 let value = self.context.intern_string(&spelling);
                 Ok(self

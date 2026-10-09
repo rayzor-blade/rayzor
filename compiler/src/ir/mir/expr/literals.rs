@@ -487,7 +487,11 @@ impl<'a> HirToMirContext<'a> {
         Some(array_ptr)
     }
 
-    pub(crate) fn lower_map_literal(&mut self, entries: &[(HirExpr, HirExpr)]) -> Option<IrId> {
+    pub(crate) fn lower_map_literal(
+        &mut self,
+        entries: &[(HirExpr, HirExpr)],
+        map_type: TypeId,
+    ) -> Option<IrId> {
         // Map literal: [key1 => val1, key2 => val2, ...]
         //
         // Determine key type from first entry and use appropriate runtime:
@@ -496,9 +500,13 @@ impl<'a> HirToMirContext<'a> {
         // - Object keys → ObjectMap (haxe_objectmap_new/set, pointer identity)
 
         if entries.is_empty() {
-            // Default to StringMap for empty map literals
+            let constructor = match self.map_index_info(map_type).map(|(get, _, _)| get) {
+                Some("haxe_intmap_get") => "haxe_intmap_new",
+                Some("haxe_objectmap_get") => "haxe_objectmap_new",
+                _ => "haxe_stringmap_new",
+            };
             let new_fn = self.get_or_register_extern_function(
-                "haxe_stringmap_new",
+                constructor,
                 vec![],
                 IrType::Ptr(Box::new(IrType::Void)),
             );
