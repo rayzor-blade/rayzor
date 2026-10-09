@@ -818,11 +818,7 @@ impl<'a> HirToMirContext<'a> {
                         // targets (`obj.v = 60` where v:Dynamic) alike: a primitive written
                         // raw into a Dynamic field reads back as a bogus Dynamic pointer.
                         let lhs_target_ty: Option<TypeId> = match lhs {
-                            HirLValue::Variable(sym) => self
-                                .symbol_table
-                                .get_symbol(*sym)
-                                .map(|s| s.type_id)
-                                .filter(|t| *t != TypeId::invalid()),
+                            HirLValue::Variable(sym) => self.declared_symbol_type(*sym),
                             HirLValue::Field { field, .. } => self
                                 .symbol_table
                                 .get_symbol(*field)
@@ -906,11 +902,9 @@ impl<'a> HirToMirContext<'a> {
                         // A local or a field typed as an abstract takes the value
                         // through its `@:from`/`@:to` conversions.
                         let abstract_target = match lhs {
-                            HirLValue::Variable(sym) | HirLValue::Field { field: sym, .. } => self
-                                .symbol_table
-                                .get_symbol(*sym)
-                                .map(|s| s.type_id)
-                                .filter(|t| *t != TypeId::invalid()),
+                            HirLValue::Variable(sym) | HirLValue::Field { field: sym, .. } => {
+                                self.declared_symbol_type(*sym)
+                            }
                             _ => None,
                         };
                         let value = if let Some(target_ty) = abstract_target {
@@ -925,24 +919,19 @@ impl<'a> HirToMirContext<'a> {
 
                         // Wrap class instance in interface fat pointer if assigning to an
                         // interface-typed variable or field
-                        let (value, wrapped_for_interface) = if let HirLValue::Variable(sym)
-                        | HirLValue::Field {
-                            field: sym,
-                            ..
-                        } = lhs
-                        {
-                            if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
-                                if sym_info.type_id != TypeId::invalid() {
-                                    self.maybe_wrap_for_interface(value, rhs_ty, sym_info.type_id)
-                                } else {
-                                    (value, false)
+                        let (value, wrapped_for_interface) =
+                            if let HirLValue::Variable(sym) | HirLValue::Field { field: sym, .. } =
+                                lhs
+                            {
+                                match self.declared_symbol_type(*sym) {
+                                    Some(declared) => {
+                                        self.maybe_wrap_for_interface(value, rhs_ty, declared)
+                                    }
+                                    None => (value, false),
                                 }
                             } else {
                                 (value, false)
-                            }
-                        } else {
-                            (value, false)
-                        };
+                            };
 
                         // Numeric promotion: `var f:Float = i` must sitofp the int bits, not
                         // reinterpret them as f64. Synthetic temps from desugars have no

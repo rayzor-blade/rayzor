@@ -179,6 +179,19 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// A symbol's declared type, for an assignment target. None for `this`:
+    /// MIR binds it as SymbolId(0), which can also be a real symbol (whichever
+    /// the context created first), and its type is not `this`'s.
+    pub(crate) fn declared_symbol_type(&self, symbol: SymbolId) -> Option<TypeId> {
+        if symbol == SymbolId::from_raw(0) {
+            return None;
+        }
+        self.symbol_table
+            .get_symbol(symbol)
+            .map(|s| s.type_id)
+            .filter(|t| *t != TypeId::invalid())
+    }
+
     pub(crate) fn find_loop_context(&self, label: Option<&SymbolId>) -> Option<&LoopContext> {
         if let Some(label) = label {
             self.loop_stack
