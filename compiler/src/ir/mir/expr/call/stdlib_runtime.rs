@@ -244,7 +244,13 @@ impl<'a> HirToMirContext<'a> {
 
                         // Unbox when the wrapper returns Ptr(U8) but the caller expects a
                         // primitive.
-                        let final_result = if mir_func_name == "Channel_receive"
+                        let final_result = if mir_func_name == "ArrayIterator_next" {
+                            self.array_iterator_next_result(
+                                call_result,
+                                expr.ty,
+                                &resolved_result_type,
+                            )
+                        } else if mir_func_name == "Channel_receive"
                             || mir_func_name == "Channel_tryReceive"
                         {
                             self.unbox_channel_return(
@@ -1673,7 +1679,9 @@ impl<'a> HirToMirContext<'a> {
             // MIR wrappers return their declared type directly, not a boxed
             // DynamicValue*, so skip unboxing for them or Host.localhost()'s raw
             // string pointer gets dereferenced.
-            let final_result = if is_mir_wrapper {
+            let final_result = if is_mir_wrapper && runtime_func == "ArrayIterator_next" {
+                self.array_iterator_next_result(call_result, expr.ty, &resolved_expected)
+            } else if is_mir_wrapper {
                 // array_pop returns raw I64 — cast to Ptr(Void) for class types.
                 let expects_class_ptr = matches!(&resolved_expected, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void));
                 if actual_return_type == IrType::I64 && expects_class_ptr {

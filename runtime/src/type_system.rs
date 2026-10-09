@@ -3225,7 +3225,11 @@ pub extern "C" fn haxe_iter_handle_from_dynamic(
     };
     let words: Box<[i64; 5]> = Box::new([
         handle_tag,
-        d.value_ptr as i64,
+        if d.type_id == TYPE_ARRAY {
+            ptr as i64
+        } else {
+            d.value_ptr as i64
+        },
         iterator_slot,
         has_next_fn,
         next_fn,

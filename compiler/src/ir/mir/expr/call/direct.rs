@@ -42,6 +42,32 @@ impl<'a> HirToMirContext<'a> {
             *fell_through = true;
             return None;
         };
+        if *is_method && args.len() == 1 {
+            if let Some((_, _, runtime)) =
+                self.get_stdlib_runtime_info(*symbol, args[0].ty, Some(0), None)
+            {
+                let name = runtime.runtime_name;
+                if matches!(name, "ArrayIterator_next" | "ArrayIterator_hasNext") {
+                    let receiver = self.lower_expression(&args[0])?;
+                    let ptr = IrType::Ptr(Box::new(IrType::Void));
+                    let ret = if name == "ArrayIterator_next" {
+                        IrType::I64
+                    } else {
+                        IrType::I32
+                    };
+                    let function =
+                        self.register_stdlib_mir_forward_ref(name, vec![ptr], ret.clone());
+                    let value = self
+                        .builder
+                        .build_call_direct(function, vec![receiver], ret)?;
+                    return if name == "ArrayIterator_next" {
+                        self.array_iterator_next_result(value, expr.ty, &result_type)
+                    } else {
+                        self.builder.build_cast(value, IrType::I32, result_type)
+                    };
+                }
+            }
+        }
         if let Some(func_id) = self.resolve_function_id_with_qualified_fallback(*symbol) {
             let is_user_defined = self
                 .builder

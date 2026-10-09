@@ -935,14 +935,10 @@ impl<'a> HirToMirContext<'a> {
         let descriptor = {
             let mut parts = Vec::with_capacity(named_fields.len());
             for (name, source) in &named_fields {
-                let runtime_type_id = match source {
-                    Some(orig_idx) => {
-                        let field_type = fields[*orig_idx].1.ty;
-                        self.runtime_type_id(field_type)
-                    }
-                    None => 1, // null for optional defaults
-                };
-                parts.push(format!("{}:{}", name, runtime_type_id));
+                parts.push(match source {
+                    Some(orig_idx) => self.anon_field_descriptor(name, fields[*orig_idx].1.ty),
+                    None => format!("{name}:1"),
+                });
             }
             parts.join(",")
         };

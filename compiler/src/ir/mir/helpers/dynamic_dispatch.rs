@@ -237,10 +237,14 @@ impl<'a> HirToMirContext<'a> {
             self.builder.build_cond_branch(is, hit, miss)?;
 
             self.builder.switch_to_block(hit);
-            let unboxed = self
-                .builder
-                .build_call_direct(unbox_fn, vec![recv], ptr_u8.clone())?;
-            let value = self.call_candidate(class, method_name, call, unboxed, &rest);
+            let receiver = if class == "Array" && method_name == "iterator" {
+                // The iterator keeps the array's element layout through erasure.
+                recv
+            } else {
+                self.builder
+                    .build_call_direct(unbox_fn, vec![recv], ptr_u8.clone())?
+            };
+            let value = self.call_candidate(class, method_name, call, receiver, &rest);
             let boxed = match value {
                 Some(v) => self.box_dispatch_result(v, class, method_name, call)?,
                 None => self.builder.build_const(IrValue::Null)?,

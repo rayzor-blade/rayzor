@@ -94,6 +94,25 @@ fn declare_array_externs(builder: &mut MirBuilder) {
         .build();
     builder.mark_as_extern(func_id);
 
+    let func_id = builder
+        .begin_function("haxe_unbox_if_tag")
+        .param("value", ptr_void.clone())
+        .param("tag", IrType::U32)
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    let func_id = builder
+        .begin_function("haxe_array_get_erased")
+        .param("arr", ptr_void.clone())
+        .param("index", IrType::I64)
+        .param("target", IrType::I32)
+        .returns(IrType::U64)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
     // haxe_array_slice(out: *mut HaxeArray, arr: *const HaxeArray, start: usize, end: usize)
     let func_id = builder
         .begin_function("haxe_array_slice")
@@ -1219,6 +1238,15 @@ fn build_array_iterator_has_next(builder: &mut MirBuilder) {
     let off8 = builder.const_i64(8);
     let array_slot = builder.ptr_add(iter, off8, ptr_u8.clone());
     let array_ptr = builder.load(array_slot, ptr_void.clone());
+    let unbox = builder
+        .get_function_by_name("haxe_unbox_if_tag")
+        .expect("haxe_unbox_if_tag extern not found");
+    let tag = builder.const_value(crate::ir::IrValue::U32(
+        rayzor_runtime::type_system::TYPE_ARRAY.0,
+    ));
+    let array_ptr = builder
+        .call(unbox, vec![array_ptr, tag])
+        .expect("haxe_unbox_if_tag should return");
 
     // Load current from offset 16
     let off16 = builder.const_i64(16);
@@ -1271,13 +1299,15 @@ fn build_array_iterator_next(builder: &mut MirBuilder) {
     let current_slot = builder.ptr_add(iter, off16, ptr_u8.clone());
     let current = builder.load(current_slot, IrType::I64);
 
-    // Call haxe_array_get_i64(array, current) -> I64
+    // A boxed array yields Dynamic boxes; a typed array yields raw slots.
     let get_func = builder
-        .get_function_by_name("haxe_array_get_i64")
-        .expect("haxe_array_get_i64 extern not found");
+        .get_function_by_name("haxe_array_get_erased")
+        .expect("haxe_array_get_erased extern not found");
+    let target = builder.const_i32(0);
     let value = builder
-        .call(get_func, vec![array_ptr, current])
-        .expect("haxe_array_get_i64 should return");
+        .call(get_func, vec![array_ptr, current, target])
+        .expect("haxe_array_get_erased should return");
+    let value = builder.cast(value, IrType::U64, IrType::I64);
 
     // Increment current: current + 1
     let one = builder.const_i64(1);

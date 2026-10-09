@@ -22,6 +22,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    pub(crate) fn anon_field_descriptor(&self, name: &str, ty: TypeId) -> String {
+        let tag = self.runtime_type_id(ty);
+        match self
+            .type_table
+            .get(self.resolve_storage_type(ty))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Array { element_type }) => {
+                let layout = self.erased_array_slot_layout(*element_type, 0);
+                format!("{name}:{tag}:{layout}")
+            }
+            _ => format!("{name}:{tag}"),
+        }
+    }
+
     /// Materialize an anon-backed variable into a real AnonObject handle.
     /// Called at escape points (function call args, return) where the callee
     /// expects a real `rayzor_anon_*`-compatible handle.
@@ -63,8 +78,7 @@ impl<'a> HirToMirContext<'a> {
         let descriptor = {
             let mut parts = Vec::with_capacity(target_fields.len());
             for (name, type_id) in &target_fields {
-                let runtime_tid = self.runtime_type_id(*type_id);
-                parts.push(format!("{}:{}", name, runtime_tid));
+                parts.push(self.anon_field_descriptor(name, *type_id));
             }
             parts.join(",")
         };
@@ -255,8 +269,7 @@ impl<'a> HirToMirContext<'a> {
         let descriptor = {
             let mut parts = Vec::with_capacity(target_fields.len());
             for (name, type_id) in &target_fields {
-                let runtime_tid = self.runtime_type_id(*type_id);
-                parts.push(format!("{}:{}", name, runtime_tid));
+                parts.push(self.anon_field_descriptor(name, *type_id));
             }
             parts.join(",")
         };
@@ -389,8 +402,7 @@ impl<'a> HirToMirContext<'a> {
         let descriptor = {
             let mut parts = Vec::with_capacity(target_fields.len());
             for (name, type_id) in &target_fields {
-                let runtime_tid = self.runtime_type_id(*type_id);
-                parts.push(format!("{}:{}", name, runtime_tid));
+                parts.push(self.anon_field_descriptor(name, *type_id));
             }
             parts.join(",")
         };

@@ -530,7 +530,14 @@ impl<'a> HirToMirContext<'a> {
                                                 .or(from_optional)
                                                 .unwrap_or_else(|| result_type.clone())
                                         };
-                                        let final_result = if mir_func_name == "Channel_receive"
+                                        let final_result = if mir_func_name == "ArrayIterator_next"
+                                        {
+                                            self.array_iterator_next_result(
+                                                call_result,
+                                                expr.ty,
+                                                &resolved_expected,
+                                            )
+                                        } else if mir_func_name == "Channel_receive"
                                             || mir_func_name == "Channel_tryReceive"
                                         {
                                             self.unbox_channel_return(

@@ -443,6 +443,14 @@ impl<'a> HirToMirContext<'a> {
                             }
                         };
 
+                        if runtime_func == "ArrayIterator_next" {
+                            return self.array_iterator_next_result(
+                                call_result,
+                                expr.ty,
+                                &resolved_expected,
+                            );
+                        }
+
                         // Thread<T>.join() boxes its result, so for a concrete heap
                         // T the boxed i64 payload is the object pointer. maybe_unbox's
                         // raw passthrough arm is shared with methods returning an

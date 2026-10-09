@@ -316,6 +316,19 @@ impl<'a> HirToMirContext<'a> {
     /// closure ABI on every backend, so a bare `(this, args)` method placed in a
     /// slot would read its receiver as the environment.
     fn iter_thunk_for_class(&mut self, class_sym: SymbolId, method: &str) -> Option<IrFunctionId> {
+        let class = self.symbol_table.get_symbol(class_sym)?;
+        if class
+            .qualified_name
+            .and_then(|name| self.string_interner.get(name))
+            == Some("haxe.iterators.ArrayIterator")
+        {
+            let (name, ret) = match method {
+                "hasNext" => ("ArrayIterator_hasNext", IrType::I32),
+                "next" => ("ArrayIterator_next", IrType::I64),
+                _ => return None,
+            };
+            return self.iter_thunk_for_runtime(name, true, ret);
+        }
         let interned = self.string_interner.intern(method);
         let method_sym = self
             .class_method_symbols
@@ -1187,6 +1200,30 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    pub(crate) fn array_iterator_next_result(
+        &mut self,
+        value: IrId,
+        ty: TypeId,
+        target: &IrType,
+    ) -> Option<IrId> {
+        let generic_target = self.convert_type_or_type_var(ty, &self.current_type_param_names());
+        let target = if matches!(generic_target, IrType::TypeVar(_)) {
+            &generic_target
+        } else {
+            target
+        };
+        let value = self.iter_elem_from_i64(value, target)?;
+        if matches!(
+            self.type_table
+                .get(self.resolve_storage_type(ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            self.boxed_value_regs.insert(value);
+        }
+        Some(value)
+    }
+
     pub(crate) fn try_iter_handle_method_call(
         &mut self,
         expr: &HirExpr,
@@ -1385,6 +1422,16 @@ impl<'a> HirToMirContext<'a> {
         if matches!(protocol, IterProtocol::Iterator) && method == "next" {
             if let Some(elem_ty) = self.iter_elem_ir_type(receiver.ty) {
                 return self.iter_elem_from_i64(result, &elem_ty);
+            }
+            if matches!(
+                self.type_table
+                    .get(self.resolve_storage_type(expr.ty))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            ) {
+                let boxed = self.builder.build_bitcast(result, ptr_u8)?;
+                self.boxed_value_regs.insert(boxed);
+                return Some(boxed);
             }
         }
         // `iterator()` yields a handle, and what it is bound to is this register,

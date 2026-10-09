@@ -4892,6 +4892,45 @@ impl<'a> AstLowering<'a> {
             };
             (d.kind.clone(), a.kind.clone())
         };
+        // A concrete ArrayIterator<Dynamic> explicitly carries boxed elements.
+        // This binds Iterator<T>'s T even though a bare Dynamic says nothing.
+        if let (
+            TypeKind::Class {
+                symbol_id,
+                type_args,
+            }
+            | TypeKind::TypeAlias {
+                symbol_id,
+                type_args,
+                ..
+            },
+            TypeKind::Class {
+                symbol_id: actual_symbol,
+                type_args: actual_args,
+            },
+        ) = (&d, &a)
+        {
+            let name = |symbol| {
+                self.context
+                    .symbol_table
+                    .get_symbol(symbol)
+                    .and_then(|s| self.context.string_interner.get(s.name))
+            };
+            if name(*symbol_id) == Some("Iterator")
+                && name(*actual_symbol) == Some("ArrayIterator")
+                && type_args.len() == 1
+                && actual_args.len() == 1
+            {
+                let table = self.context.type_table.borrow();
+                if let (Some(TypeKind::TypeParameter { symbol_id, .. }), Some(TypeKind::Dynamic)) = (
+                    table.get(type_args[0]).map(|t| &t.kind),
+                    table.get(actual_args[0]).map(|t| &t.kind),
+                ) {
+                    out.push((*symbol_id, actual_args[0]));
+                    return;
+                }
+            }
+        }
         match (&d, &a) {
             // An actual that is a variable, or that carries no type of its
             // own, says nothing about T -- skip it rather than count it as
@@ -4979,6 +5018,7 @@ impl<'a> AstLowering<'a> {
                     else {
                         continue;
                     };
+                    let mt = self.substitute_receiver_type(mt, actual);
                     self.unify_type_args_inner(f.type_id, mt, depth + 1, out, bind_parameters);
                 }
             }

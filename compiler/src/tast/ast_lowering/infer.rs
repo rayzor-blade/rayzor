@@ -1402,7 +1402,39 @@ impl<'a> AstLowering<'a> {
                             Ok(type_table.void_type())
                         }
                         "toString" => Ok(type_table.string_type()),
-                        "iterator" | "keyValueIterator" => Ok(type_table.dynamic_type()),
+                        "iterator" | "keyValueIterator" => {
+                            let element = *element_type;
+                            drop(type_table);
+                            let name = if field_name == "iterator" {
+                                "ArrayIterator"
+                            } else {
+                                "ArrayKeyValueIterator"
+                            };
+                            let base = self.lower_type(&Type::Path {
+                                path: parser::TypePath {
+                                    package: vec!["haxe".into(), "iterators".into()],
+                                    name: name.into(),
+                                    sub: None,
+                                },
+                                params: Vec::new(),
+                                span: parser::Span::new(0, 0),
+                            })?;
+                            let iterator = {
+                                let mut table = self.context.type_table.borrow_mut();
+                                match table.get(base).map(|t| &t.kind) {
+                                    Some(TypeKind::Class { symbol_id, .. }) => {
+                                        let symbol = *symbol_id;
+                                        table.create_class_type(symbol, vec![element])
+                                    }
+                                    _ => table.create_generic_instance(base, vec![element]),
+                                }
+                            };
+                            Ok(self
+                                .context
+                                .type_table
+                                .borrow_mut()
+                                .create_function_type(Vec::new(), iterator))
+                        }
                         _ => Ok(type_table.dynamic_type()),
                     }
                 }

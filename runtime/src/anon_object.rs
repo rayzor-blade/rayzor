@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::type_system::{
-    DynamicValue, TYPE_BOOL, TYPE_DYNAMIC_TOKEN, TYPE_FLOAT, TYPE_INT, TYPE_NULL, TYPE_STRING,
-    TypeId,
+    DynamicValue, TYPE_ARRAY, TYPE_BOOL, TYPE_DYNAMIC_TOKEN, TYPE_FLOAT, TYPE_INT, TYPE_NULL,
+    TYPE_STRING, TypeId,
 };
 
 /// Type ID for anonymous objects in the DynamicValue type system
@@ -37,8 +37,8 @@ pub struct AnonObject {
 pub enum AnonData {
     /// Fixed-layout: fields stored by index (sorted by field name)
     Inline(Vec<u64>),
-    /// Dynamic: runtime-flexible field set (type_id, raw_value)
-    Map(HashMap<String, (u32, u64)>),
+    /// Dynamic: runtime-flexible fields (type_id, raw_value, array_slot_layout)
+    Map(HashMap<String, (u32, u64, u64)>),
 }
 
 /// Describes the field layout of an optimized anonymous object shape
@@ -46,6 +46,7 @@ pub enum AnonData {
 pub struct ShapeDescriptor {
     pub field_names: Vec<String>,
     pub field_types: Vec<u32>,
+    pub array_slot_layouts: Vec<u64>,
 }
 
 /// Global shape table
@@ -82,6 +83,7 @@ pub fn register_builtin_shapes() {
         ShapeDescriptor {
             field_names: vec!["key".to_string(), "value".to_string()],
             field_types: vec![3, 3], // 3 = Int, 3 = Int
+            array_slot_layouts: vec![0, 0],
         },
     );
 }
@@ -111,6 +113,7 @@ pub extern "C" fn rayzor_register_shape(
     }
 
     let shape = ShapeDescriptor {
+        array_slot_layouts: vec![0; field_names.len()],
         field_names,
         field_types,
     };
@@ -122,18 +125,25 @@ pub extern "C" fn rayzor_register_shape(
     shape_id
 }
 
-/// `(shape, slot, type) -> shape id` of each retyped variant.
-type RetypedShapes = HashMap<(u32, usize, u32), u32>;
+/// `(shape, slot, type, array layout) -> shape id` of each retyped variant.
+type RetypedShapes = HashMap<(u32, usize, u32, u64), u32>;
 
 /// `shape` with slot `idx` typed `type_id`, registered once per variant.
-fn retyped_shape(shape_id: u32, shape: &ShapeDescriptor, idx: usize, type_id: u32) -> u32 {
+fn retyped_shape(
+    shape_id: u32,
+    shape: &ShapeDescriptor,
+    idx: usize,
+    type_id: u32,
+    layout: u64,
+) -> u32 {
     static RETYPED: RwLock<Option<RetypedShapes>> = RwLock::new(None);
-    let key = (shape_id, idx, type_id);
+    let key = (shape_id, idx, type_id, layout);
     if let Some(&id) = RETYPED.read().unwrap().as_ref().and_then(|m| m.get(&key)) {
         return id;
     }
     let mut retyped = shape.clone();
     retyped.field_types[idx] = type_id;
+    retyped.array_slot_layouts[idx] = layout;
     ensure_shape_table();
     let id = NEXT_DYNAMIC_SHAPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     SHAPE_TABLE
@@ -152,8 +162,8 @@ fn retyped_shape(shape_id: u32, shape: &ShapeDescriptor, idx: usize, type_id: u3
 
 /// Ensure a shape is registered at the given shape_id.
 ///
-/// descriptor_hs: HaxeString pointer containing "name1:type1,name2:type2,..."
-/// (sorted alphabetically by name)
+/// descriptor_hs: HaxeString pointer with comma-separated `name:type[:array_layout]`
+/// fields, sorted alphabetically by name.
 /// Type IDs: 0=Void, 1=Null, 2=Bool, 3=Int, 4=Float, 5=String
 ///
 /// Idempotent: if shape_id is already registered, this is a no-op.
@@ -185,23 +195,28 @@ pub extern "C" fn rayzor_ensure_shape(shape_id: u32, descriptor_hs: *mut u8) {
 
     let mut field_names = Vec::new();
     let mut field_types = Vec::new();
+    let mut array_slot_layouts = Vec::new();
 
     for part in desc_str.split(',') {
         if part.is_empty() {
             continue;
         }
         if let Some((name, type_str)) = part.split_once(':') {
+            let (type_str, layout) = type_str.split_once(':').unwrap_or((type_str, "0"));
             field_names.push(name.to_string());
             field_types.push(type_str.parse::<u32>().unwrap_or(0));
+            array_slot_layouts.push(layout.parse::<u64>().unwrap_or(0));
         } else {
             field_names.push(part.to_string());
             field_types.push(0);
+            array_slot_layouts.push(0);
         }
     }
 
     let shape = ShapeDescriptor {
         field_names,
         field_types,
+        array_slot_layouts,
     };
 
     // Write lock to register
@@ -348,7 +363,7 @@ pub(crate) fn anon_raw_field(ptr: *mut u8, name: &str) -> Option<u64> {
             let idx = shape.field_names.iter().position(|n| n == name)?;
             fields.get(idx).copied()
         }
-        AnonData::Map(map) => map.get(name).map(|&(_, v)| v),
+        AnonData::Map(map) => map.get(name).map(|&(_, v, _)| v),
     }
 }
 
@@ -373,7 +388,7 @@ pub extern "C" fn rayzor_anon_get_field(
                     if let Some(idx) = shape.field_names.iter().position(|n| n == name) {
                         let value = fields[idx];
                         let type_id = shape.field_types[idx];
-                        box_value_as_dynamic(type_id, value)
+                        box_value_with_layout(type_id, value, shape.array_slot_layouts[idx])
                     } else {
                         std::ptr::null_mut()
                     }
@@ -382,8 +397,8 @@ pub extern "C" fn rayzor_anon_get_field(
                 }
             }
             AnonData::Map(map) => {
-                if let Some(&(type_id, value)) = map.get(name) {
-                    box_value_as_dynamic(type_id, value)
+                if let Some(&(type_id, value, layout)) = map.get(name) {
+                    box_value_with_layout(type_id, value, layout)
                 } else {
                     std::ptr::null_mut()
                 }
@@ -429,6 +444,8 @@ pub extern "C" fn rayzor_anon_set_field(
         }
     };
 
+    let layout = crate::type_system::boxed_array_slot_layout(value_ptr).unwrap_or(0);
+
     unsafe {
         let arc = borrow_arc_mut(ptr);
         let obj = Arc::make_mut(arc);
@@ -446,8 +463,11 @@ pub extern "C" fn rayzor_anon_set_field(
                     fields[idx] = raw_value;
                     // A slot that held `null` (or another type) now reads as
                     // what was stored; the layout and indices stay the same.
-                    if shape.field_types[idx] != type_id && type_id != TYPE_NULL.0 {
-                        obj.shape_id = retyped_shape(obj.shape_id, &shape, idx, type_id);
+                    if type_id != TYPE_NULL.0
+                        && (shape.field_types[idx] != type_id
+                            || shape.array_slot_layouts[idx] != layout)
+                    {
+                        obj.shape_id = retyped_shape(obj.shape_id, &shape, idx, type_id, layout);
                     }
                     return;
                 }
@@ -455,21 +475,24 @@ pub extern "C" fn rayzor_anon_set_field(
                 let mut map = HashMap::new();
                 if let Some(shape) = get_shape(obj.shape_id) {
                     for (i, field_name) in shape.field_names.iter().enumerate() {
-                        map.insert(field_name.clone(), (shape.field_types[i], fields[i]));
+                        map.insert(
+                            field_name.clone(),
+                            (shape.field_types[i], fields[i], shape.array_slot_layouts[i]),
+                        );
                     }
                 }
-                map.insert(name, (type_id, raw_value));
+                map.insert(name, (type_id, raw_value, layout));
                 obj.shape_id = DYNAMIC_SHAPE;
                 obj.data = AnonData::Map(map);
             }
             AnonData::Map(map) => {
                 let value = if map
                     .get(&name)
-                    .is_some_and(|(ty, _)| *ty == TYPE_DYNAMIC_TOKEN.0)
+                    .is_some_and(|(ty, _, _)| *ty == TYPE_DYNAMIC_TOKEN.0)
                 {
-                    (TYPE_DYNAMIC_TOKEN.0, value_ptr as u64)
+                    (TYPE_DYNAMIC_TOKEN.0, value_ptr as u64, 0)
                 } else {
-                    (type_id, raw_value)
+                    (type_id, raw_value, layout)
                 };
                 map.insert(name, value);
             }
@@ -506,7 +529,10 @@ pub extern "C" fn rayzor_anon_delete_field(
                             found = true;
                             continue;
                         }
-                        map.insert(field_name.clone(), (shape.field_types[i], fields[i]));
+                        map.insert(
+                            field_name.clone(),
+                            (shape.field_types[i], fields[i], shape.array_slot_layouts[i]),
+                        );
                     }
                     obj.shape_id = DYNAMIC_SHAPE;
                     obj.data = AnonData::Map(map);
@@ -592,6 +618,14 @@ pub extern "C" fn rayzor_anon_copy(ptr: *mut u8) -> *mut u8 {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+fn box_value_with_layout(type_id: u32, value: u64, layout: u64) -> *mut u8 {
+    if type_id == TYPE_ARRAY.0 && value != 0 {
+        crate::type_system::haxe_box_array_ptr(value as *mut u8, layout)
+    } else {
+        box_value_as_dynamic(type_id, value)
+    }
+}
 
 /// Box a raw u64 value as a DynamicValue pointer based on type_id
 fn box_value_as_dynamic(type_id: u32, value: u64) -> *mut u8 {

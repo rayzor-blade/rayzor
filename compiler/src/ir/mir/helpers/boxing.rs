@@ -24,7 +24,7 @@ use std::rc::Rc;
 impl<'a> HirToMirContext<'a> {
     /// Array slot kinds: zero is boxed, builtins use their runtime tag, and
     /// references carry their type ID above kind 6. Kind 7 nests an array layout.
-    fn erased_array_slot_layout(&self, ty: TypeId, depth: usize) -> u64 {
+    pub(crate) fn erased_array_slot_layout(&self, ty: TypeId, depth: usize) -> u64 {
         if depth >= 8 {
             return 0;
         }

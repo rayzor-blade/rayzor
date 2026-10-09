@@ -438,17 +438,21 @@ unsafe fn raw_value_to_slot(value: *mut u8, ty: ParamType) -> u64 {
 
 /// Reflect.deleteField(obj, field) -> Bool
 ///
-/// obj: anonymous object handle pointer
+/// obj: anonymous object handle or DynamicValue wrapping one
 /// field: HaxeString pointer
 /// Returns: true if field existed and was deleted
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_delete_field(obj: *mut u8, field: *mut u8) -> bool {
-    if obj.is_null() {
+    if obj.is_null() || (obj as usize) >> 32 == 0 || builtin_box(obj).is_some() {
         return false;
     }
     unsafe {
+        let actual = unwrap_anon_dynamic(obj);
+        if is_class_type(read_class_type_id(actual)) {
+            return false;
+        }
         if let Some((name_ptr, name_len)) = extract_field_name(field) {
-            anon_object::rayzor_anon_delete_field(obj, name_ptr, name_len)
+            anon_object::rayzor_anon_delete_field(actual, name_ptr, name_len)
         } else {
             false
         }
