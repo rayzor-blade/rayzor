@@ -2787,7 +2787,8 @@ impl<'a> AstLowering<'a> {
                 let should_deref_method = self
                     .resolve_type_to_class_symbol(receiver_expr.expr_type)
                     .map(|class_sym| {
-                        if !self.is_auto_deref_wrapper_class(class_sym) {
+                        // `get` is the deref itself: rewriting it would recurse.
+                        if field == "get" || !self.is_auto_deref_wrapper_class(class_sym) {
                             return false;
                         }
                         let on_wrapper = self

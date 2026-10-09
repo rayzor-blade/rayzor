@@ -34,8 +34,7 @@ cargo build --release -p rayzor 2>&1 | tail -3
 # Clear both BLADE and MIR caches. Stale MIR caches from a previous
 # compiler revision can mask a fix (the test re-runs against the old
 # MIR and shows the pre-fix failure), so we wipe both here.
-rm -f .rayzor/blade/cache/*.blade 2>/dev/null || true
-rm -f .rayzor/cache/*.mir.cache 2>/dev/null || true
+rm -rf .rayzor/blade/cache .rayzor/cache 2>/dev/null || true
 
 # The build above can change the compiler's build id, which is one of the BLADE
 # cache's invalidation keys. Whoever runs first then compiles the whole stdlib

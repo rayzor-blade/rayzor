@@ -819,6 +819,25 @@ impl SymbolTable {
         self.symbol_cache.invalidate_scope(scope_id);
     }
 
+    /// Index an existing symbol as a member of `scope_id` under `name`, as
+    /// creating it there would have.
+    pub fn place_symbol_in_scope(
+        &mut self,
+        scope_id: ScopeId,
+        name: InternedString,
+        symbol_id: SymbolId,
+    ) {
+        if self.symbols_by_name.get(&(scope_id, name)) == Some(&symbol_id) {
+            return;
+        }
+        self.symbols_by_name.insert((scope_id, name), symbol_id);
+        let members = self.symbols_by_scope.entry(scope_id).or_default();
+        if !members.contains(&symbol_id) {
+            members.push(symbol_id);
+        }
+        self.symbol_cache.invalidate_scope(scope_id);
+    }
+
     /// Get all symbols in a scope (with caching)
     pub fn symbols_in_scope(&self, scope_id: ScopeId) -> Vec<&Symbol> {
         use super::symbol_cache::SymbolCacheKey;

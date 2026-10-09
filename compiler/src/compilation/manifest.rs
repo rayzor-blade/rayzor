@@ -499,10 +499,13 @@ impl CompilationUnit {
             }
         }
 
-        // Add to scope, updating both symbol list and name lookup cache.
+        // Add to scope, updating both symbol list and name lookup cache. A
+        // reused symbol was created in another scope and is not yet a member.
         if let Some(scope) = self.scope_tree.get_scope_mut(class_scope) {
             scope.add_symbol(method_symbol, method_name);
         }
+        self.symbol_table
+            .place_symbol_in_scope(class_scope, method_name, method_symbol);
 
         method_symbol
     }
