@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1790970227,"nonce":"WYAUwtSNVVToHGge5keN2WHmjYI=","added":["bug","area:compiler"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1791570454,"nonce":"m1kaOLVhfk5TVU78b1o4eaNboMI=","message":"66981dca: case null is now a guard on the subject (Issue9200 passes). Issue3338 still fails: a payload-free enum is a raw index and null is 0, the first constructor (4b5a733).","files":null}]}
