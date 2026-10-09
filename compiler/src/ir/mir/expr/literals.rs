@@ -728,6 +728,55 @@ impl<'a> HirToMirContext<'a> {
         class_type: TypeId,
         class_symbol: SymbolId,
     ) -> Option<IrId> {
+        // By symbol: the literal's class TypeId need not be the declaration's.
+        let hir_class = self.current_hir_types.values().find_map(|decl| match decl {
+            HirTypeDecl::Class(class) if class.symbol_id == class_symbol => Some(class.clone()),
+            _ => None,
+        });
+        // A declared constructor builds the object: the literal's fields are
+        // its arguments by parameter name, and an omitted one its default.
+        // A parameterless constructor with fields to set is the synthesized one.
+        if let Some(ctor) = hir_class
+            .as_ref()
+            .and_then(|c| c.constructor.as_ref())
+            .filter(|ctor| !ctor.params.is_empty() || fields.is_empty())
+        {
+            let named = |name: InternedString| {
+                fields
+                    .iter()
+                    .find(|(field, _)| *field == name)
+                    .map(|(_, e)| e.clone())
+            };
+            let last = ctor.params.iter().rposition(|p| named(p.name).is_some());
+            let (lifetime, location) = fields
+                .first()
+                .map(|(_, e)| (e.lifetime, e.source_location))
+                .unwrap_or((
+                    crate::tast::LifetimeId::from_raw(0),
+                    SourceLocation::unknown(),
+                ));
+            let mut args = Vec::new();
+            for param in ctor.params.iter().take(last.map_or(0, |l| l + 1)) {
+                let arg = named(param.name)
+                    .or_else(|| param.default.clone())
+                    .unwrap_or_else(|| {
+                        HirExpr::new(HirExprKind::Null, param.ty, lifetime, location)
+                    });
+                args.push(arg);
+            }
+            let new = HirExpr::new(
+                HirExprKind::New {
+                    class_type,
+                    type_args: Vec::new(),
+                    args,
+                    class_name: None,
+                },
+                class_type,
+                lifetime,
+                location,
+            );
+            return self.lower_expression(&new);
+        }
         let storage_fields = self.struct_init_storage_fields(class_symbol)?;
         let class_name = self
             .symbol_table
@@ -767,10 +816,32 @@ impl<'a> HirToMirContext<'a> {
         // malloc leaves every field after the header uninitialized. Initialize
         // the complete storage shape before applying the literal so omitted
         // optional/default fields have deterministic Haxe defaults.
-        for &(_, field_type, index) in &storage_fields {
-            let value = self.build_type_default(field_type)?;
-            let index = self.builder.build_const(IrValue::I64(index as i64))?;
+        // An omitted field takes its initializer when that is a literal;
+        // anything else could read `this` before it exists.
+        for &(field_symbol, field_type, index) in &storage_fields {
+            let literal_init = hir_class
+                .as_ref()
+                .and_then(|c| c.fields.iter().find(|f| f.symbol_id == field_symbol))
+                .and_then(|f| f.init.clone())
+                .filter(|init| matches!(init.kind, HirExprKind::Literal(_)));
             let field_ir_type = self.convert_type(field_type);
+            let value = match literal_init {
+                Some(init) => {
+                    let value = self.lower_expression(&init)?;
+                    match self.builder.get_register_type(value) {
+                        Some(have @ (IrType::I32 | IrType::I64))
+                            if field_ir_type == IrType::F64 =>
+                        {
+                            self.builder
+                                .build_cast(value, have, IrType::F64)
+                                .unwrap_or(value)
+                        }
+                        _ => value,
+                    }
+                }
+                None => self.build_type_default(field_type)?,
+            };
+            let index = self.builder.build_const(IrValue::I64(index as i64))?;
             let field_ptr = self.builder.build_gep(object, vec![index], field_ir_type)?;
             self.builder.build_store(field_ptr, value);
         }

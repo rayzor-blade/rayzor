@@ -397,6 +397,40 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
+    /// An abstract's own `toString`, called with the value as its `this`.
+    pub(crate) fn try_call_abstract_tostring(
+        &mut self,
+        value: IrId,
+        type_id: TypeId,
+    ) -> Option<IrId> {
+        let abstract_symbol = match self
+            .type_table
+            .get(self.resolve_through_aliases(type_id))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Abstract { symbol_id, .. }) => *symbol_id,
+            _ => return None,
+        };
+        let method = self
+            .current_hir_types
+            .values()
+            .find_map(|decl| match decl {
+                HirTypeDecl::Abstract(a) if a.symbol_id == abstract_symbol => a
+                    .methods
+                    .iter()
+                    .find(|m| {
+                        !m.is_static
+                            && self.string_interner.get(m.function.name) == Some("toString")
+                    })
+                    .map(|m| m.function.symbol_id),
+                _ => None,
+            })?;
+        let function = self.function_map.get(&method).copied()?;
+        let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+        self.builder
+            .build_call_direct(function, vec![value], string_ptr_ty)
+    }
+
     pub(crate) fn try_call_tostring(
         &mut self,
         obj_reg: IrId,
@@ -415,7 +449,7 @@ impl<'a> HirToMirContext<'a> {
 
         let class_symbol = match class_symbol {
             Some(s) => s,
-            None => return Some(None), // Not a class type
+            None => return Some(self.try_call_abstract_tostring(obj_reg, type_id)),
         };
 
         // toString must be the one declared on THIS class, so scan the HIR declarations.

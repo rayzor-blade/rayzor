@@ -1634,6 +1634,35 @@ impl<'a, 'b> RdParser<'a, 'b> {
             // let the ordinary pattern parser have them.
             self.stream.restore(start);
         }
+        // Predicate pattern: an expression over `_` matches when it is true --
+        // `CInt(_ > 0 && _ < 12)` is the extractor `(_ > 0 && _ < 12) => true`.
+        if self.stream.peek().kind == TokenKind::Ident
+            && self.stream.current_text() == "_"
+            && !matches!(
+                self.stream.peek_at(1).kind,
+                TokenKind::Comma
+                    | TokenKind::RParen
+                    | TokenKind::RBracket
+                    | TokenKind::Colon
+                    | TokenKind::Pipe
+                    | TokenKind::FatArrow
+                    | TokenKind::KwIf
+                    | TokenKind::Eof
+            )
+        {
+            let start = self.stream.save();
+            if let Ok(expr) = self.parse_assignment() {
+                let span = expr.span;
+                return Ok(Pattern::Extractor {
+                    expr: Box::new(expr),
+                    value: Box::new(Pattern::Const(Expr {
+                        kind: ExprKind::Bool(true),
+                        span,
+                    })),
+                });
+            }
+            self.stream.restore(start);
+        }
         let first = self.parse_case_pattern_atom()?;
         if !self.stream.at(TokenKind::Pipe) {
             return Ok(first);
@@ -2125,6 +2154,8 @@ fn object_literal_has_pattern_fields(expr: &Expr) -> bool {
             .any(|field| object_literal_has_pattern_fields(&field.expr)),
         ExprKind::Array(elements) => elements.iter().any(object_literal_has_pattern_fields),
         ExprKind::Paren(inner) => object_literal_has_pattern_fields(inner),
+        // An enum constructor's argument: `{expr: EConst(c = CInt(_))}`.
+        ExprKind::Call { args, .. } => args.iter().any(object_literal_has_pattern_fields),
         _ => false,
     }
 }

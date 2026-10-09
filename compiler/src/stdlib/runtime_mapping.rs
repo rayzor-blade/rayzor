@@ -2148,8 +2148,8 @@ impl StdlibMapping {
             map_method!(static "Std", "int" => "haxe_std_int", params: 1, returns: primitive,
                 types: &[F64] => I64),
             // Std.parseInt(x: String) -> Null<Int>
-            map_method!(static "Std", "parseInt" => "haxe_std_parse_int", params: 1, returns: primitive,
-                types: &[PtrVoid] => I64),
+            map_method!(static "Std", "parseInt" => "haxe_std_parse_int_box", params: 1, returns: complex,
+                types: &[PtrVoid] => PtrVoid),
             // Std.parseFloat(x: String) -> Float
             map_method!(static "Std", "parseFloat" => "haxe_std_parse_float", params: 1, returns: primitive,
                 types: &[PtrVoid] => F64),

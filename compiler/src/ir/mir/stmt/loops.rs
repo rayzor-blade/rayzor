@@ -79,6 +79,8 @@ impl<'a> HirToMirContext<'a> {
         if let Some(update) = continue_update {
             assigned_in_body.extend(self.find_modified_variables_in_block(update));
         }
+        // The condition can assign too: `while ((n >>>= 1) != 0)`.
+        self.find_modified_variables_in_expression(condition, &mut assigned_in_body);
 
         // Anything already in symbol_map is a candidate. There is deliberately
         // no parameter exclusion: Haxe parameters are assignable, and the
@@ -459,7 +461,8 @@ impl<'a> HirToMirContext<'a> {
 
         // See lower_while_loop: no parameter exclusion, and the body's own
         // assignments decide what is loop-carried.
-        let assigned_in_body = self.find_modified_variables_in_block(body);
+        let mut assigned_in_body = self.find_modified_variables_in_block(body);
+        self.find_modified_variables_in_expression(condition, &mut assigned_in_body);
 
         let modified_vars: std::collections::BTreeSet<SymbolId> = referenced_vars
             .into_iter()

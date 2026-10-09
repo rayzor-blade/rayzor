@@ -1091,6 +1091,14 @@ register_symbol!(
 register_symbol!("haxe_std_int", crate::type_system::haxe_std_int);
 register_symbol!("haxe_std_parse_int", crate::type_system::haxe_std_parse_int);
 register_symbol!(
+    "haxe_checked_cast_basic",
+    crate::type_system::haxe_checked_cast_basic
+);
+register_symbol!(
+    "haxe_std_parse_int_box",
+    crate::type_system::haxe_std_parse_int_box
+);
+register_symbol!(
     "haxe_std_parse_float",
     crate::type_system::haxe_std_parse_float
 );

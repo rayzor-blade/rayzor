@@ -1547,6 +1547,8 @@ pub struct AstLowering<'a> {
     pub(crate) current_module_types: std::collections::BTreeSet<String>,
     /// Slots of this file's dynamic methods whose return type is unknown.
     pub(crate) unknown_return_slots: std::collections::BTreeSet<String>,
+    /// The current file's `overload` groups, keyed by owner and name.
+    pub(crate) overload_groups: overloads::OverloadGroups,
     /// Child class symbol -> parent class symbol, for resolving inherited
     /// members. `class_methods`/`class_fields` only ever hold what THIS
     /// compilation context lowered, so a parent from another module contributes
@@ -1716,6 +1718,7 @@ pub(crate) enum TypeSubstitutionResult {
     },
 }
 
+mod call_overload;
 mod const_generics;
 mod context;
 mod decls;
@@ -1727,6 +1730,7 @@ mod infer;
 mod macro_defer;
 mod macro_probe;
 mod metadata;
+mod overloads;
 mod resolve;
 mod stdlib;
 mod stmt;

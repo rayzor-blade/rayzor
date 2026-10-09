@@ -1325,6 +1325,7 @@ impl MacroInterpreter {
                     parser::Modifier::Override => "Override",
                     parser::Modifier::Final => "Final",
                     parser::Modifier::Extern => "Extern",
+                    parser::Modifier::Overload => "Overload",
                 }));
             }
             let (field_name, kind_tag, expr) = match &field.kind {

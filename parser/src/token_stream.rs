@@ -158,6 +158,11 @@ impl<'a> TokenStream<'a> {
         self.peek().text(self.source)
     }
 
+    /// The text of the token `n` ahead.
+    pub fn text_at(&self, n: usize) -> &'a str {
+        self.peek_at(n).text(self.source)
+    }
+
     /// Get the byte offset of the current position.
     pub fn current_offset(&self) -> usize {
         self.peek().span.start

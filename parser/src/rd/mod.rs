@@ -256,6 +256,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 | TokenKind::KwMacro => {
                     i += 1;
                 }
+                // `overload` is an identifier used as a modifier.
+                TokenKind::Ident if self.stream.text_at(i) == "overload" => {
+                    i += 1;
+                }
                 TokenKind::KwFinal => {
                     // `final` can be a modifier (before var/function) or a
                     // standalone declaration (`final x: Int = 42`). If the

@@ -78,6 +78,11 @@ impl<'a> HirToMirContext<'a> {
         {
             return self.lower_checked_object_cast(expr, target_type);
         }
+        if *is_checked {
+            if let Some(result) = self.lower_checked_basic_cast(expr, target_type) {
+                return Some(result);
+            }
+        }
         // `(cast this : Int)` in an abstract method lowers to
         // Cast(safe, Int) { Cast(unsafe, Dynamic) { This/Variable } }. The inner
         // cast is a no-op for abstract types and the outer one extracts the
@@ -666,6 +671,66 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.build_cast(value_reg, from_type, to_type)
             }
         }
+    }
+
+    /// An abstract operand of a String concatenation through its `@:to String`
+    /// conversion, as Haxe unifies it with String.
+    pub(crate) fn abstract_to_string(&mut self, value: IrId, ty: TypeId) -> Option<IrId> {
+        let string = self.type_table.string_type();
+        if !matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::Abstract { .. })
+        ) || !self.has_abstract_to_function(ty, string)
+        {
+            return None;
+        }
+        self.maybe_abstract_to_convert(value, ty, string)
+    }
+
+    /// `cast(e, Int)` and the other basic targets: the value is boxed, its tag
+    /// checked at runtime (a mismatch throws), then opened as the target. A
+    /// scalar source needs no check and takes the ordinary path (None).
+    fn lower_checked_basic_cast(&mut self, expr: &HirExpr, target: TypeId) -> Option<IrId> {
+        use rayzor_runtime::type_system::{TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_STRING};
+        let tag = match self.type_table.get(target).map(|t| &t.kind) {
+            Some(TypeKind::Int) => TYPE_INT,
+            Some(TypeKind::Float) => TYPE_FLOAT,
+            Some(TypeKind::Bool) => TYPE_BOOL,
+            Some(TypeKind::String) => TYPE_STRING,
+            _ => return None,
+        };
+        let source = self.resolve_storage_type(expr.ty);
+        if source == target
+            || matches!(
+                self.type_table.get(source).map(|t| &t.kind),
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+            )
+        {
+            return None;
+        }
+        let dynamic = self.type_table.dynamic_type();
+        // From here the expression is lowered: falling back would lower it twice.
+        let value = self.lower_expression(expr)?;
+        let boxed = self
+            .maybe_box_value(value, source, dynamic)
+            .unwrap_or(value);
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let boxed = self.coerce_reg_to(boxed, &ptr).unwrap_or(boxed);
+        let check = self.get_or_register_extern_function(
+            "haxe_checked_cast_basic",
+            vec![ptr.clone(), IrType::I64],
+            ptr.clone(),
+        );
+        let expected = self.builder.build_const(IrValue::I64(tag.0 as i64))?;
+        let checked = self
+            .builder
+            .build_call_direct(check, vec![boxed, expected], ptr)?;
+        Some(
+            self.maybe_unbox_value(checked, dynamic, target)
+                .unwrap_or(checked),
+        )
     }
 
     fn lower_checked_object_cast(&mut self, expr: &HirExpr, target: TypeId) -> Option<IrId> {

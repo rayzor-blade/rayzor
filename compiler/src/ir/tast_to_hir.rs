@@ -313,6 +313,7 @@ impl<'a> TastToHirContext<'a> {
             BinaryOperator::Le => "Le",
             BinaryOperator::Gt => "Gt",
             BinaryOperator::Ge => "Ge",
+            BinaryOperator::In => "In",
             _ => "Other",
         }
         .to_string()
@@ -2578,6 +2579,21 @@ impl<'a> TastToHirContext<'a> {
                         let right_type = self.resolved_type(right);
                         self.find_binary_operator_method(right_type, left.expr_type, operator, true)
                             .map(|(method, owner, is_class)| (method, owner, is_class, true))
+                    })
+                    // `a in b` is declared on the container, the right operand,
+                    // and takes its operands in source order.
+                    .or_else(|| {
+                        if *operator != BinaryOperator::In {
+                            return None;
+                        }
+                        let right_type = self.resolved_type(right);
+                        self.find_binary_operator_method(
+                            right_type,
+                            left.expr_type,
+                            operator,
+                            false,
+                        )
+                        .map(|(method, owner, is_class)| (method, owner, is_class, false))
                     });
                 let owner_name_id = op_method.as_ref().and_then(|(_, owner, _, _)| {
                     self.symbol_table.get_symbol(*owner).map(|s| s.name)
@@ -5794,6 +5810,7 @@ impl<'a> TastToHirContext<'a> {
                 "Le" => Some(BinaryOperator::Le),
                 "Gt" => Some(BinaryOperator::Gt),
                 "Ge" => Some(BinaryOperator::Ge),
+                "In" => Some(BinaryOperator::In),
                 _ => {
                     warn!(
                         "WARNING: Unknown binary operator in metadata: '{}'",
@@ -6657,6 +6674,13 @@ impl<'a> TastToHirContext<'a> {
         ))
     }
 
+    fn is_type_parameter(&self, ty: TypeId) -> bool {
+        matches!(
+            self.type_table.borrow().get(ty).map(|t| &t.kind),
+            Some(TypeKind::TypeParameter { .. })
+        )
+    }
+
     fn try_inline_abstract_method(
         &mut self,
         receiver: &TypedExpression,
@@ -7378,8 +7402,16 @@ impl<'a> TastToHirContext<'a> {
         };
         // println!("DEBUG inline_expression_deep: Processing {}", kind_name);
         match &expr.kind {
-            // If it's a `this` reference, replace it with the receiver
-            TypedExpressionKind::This { .. } => this_replacement.clone(),
+            // `this` is the receiver read as the underlying type, which is how
+            // the body typed it: `asString().indexOf(..)` is a String call.
+            // A type parameter (`abstract W<T>(T)`) keeps the receiver's type.
+            TypedExpressionKind::This { .. } => {
+                let mut receiver = this_replacement.clone();
+                if !self.is_type_parameter(expr.expr_type) {
+                    receiver.ty = expr.expr_type;
+                }
+                receiver
+            }
 
             // If it's a variable reference, check if it's a parameter
             TypedExpressionKind::Variable { symbol_id, .. } => {
@@ -7392,7 +7424,11 @@ impl<'a> TastToHirContext<'a> {
                 {
                     // An implicit receiver the typer spelled as the `this`
                     // variable (a bare `get(0)` inside the abstract).
-                    this_replacement.clone()
+                    let mut receiver = this_replacement.clone();
+                    if !self.is_type_parameter(expr.expr_type) {
+                        receiver.ty = expr.expr_type;
+                    }
+                    receiver
                 } else {
                     // Not a parameter, lower normally
                     self.lower_expression(expr)

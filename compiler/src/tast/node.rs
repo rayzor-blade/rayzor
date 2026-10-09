@@ -1532,6 +1532,9 @@ pub enum BinaryOperator {
 
     /// Unsigned shift right: a >>> b
     Ushr,
+
+    /// `a in b`: only meaningful through an abstract's `@:op(a in b)`.
+    In,
 }
 
 /// Unary operators

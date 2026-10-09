@@ -2827,6 +2827,18 @@ pub extern "C" fn haxe_std_parse_int(str_ptr: *const crate::haxe_string::HaxeStr
     sign.saturating_mul(result)
 }
 
+/// `Std.parseInt` as Haxe types it, `Null<Int>`: an Int box, or null when the
+/// string holds no number.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_std_parse_int_box(
+    str_ptr: *const crate::haxe_string::HaxeString,
+) -> *mut u8 {
+    match haxe_std_parse_int(str_ptr) {
+        i64::MIN => std::ptr::null_mut(),
+        value => haxe_box_int_ptr(value as i32 as i64),
+    }
+}
+
 /// Parse a String to a Float
 /// Implements Std.parseFloat(x:String):Float
 /// Returns NaN if parsing fails
@@ -4024,6 +4036,24 @@ pub extern "C" fn haxe_checked_cast_dynamic(value: *mut u8, target: i64) -> *mut
         crate::exception::throw_with_message("Invalid cast".to_string())
     } else {
         object
+    }
+}
+
+/// `cast(value, T)` for a basic `T` (Int, Float, Bool, String) over a box:
+/// the box itself when its tag fits -- an Int fits Float -- and a throw
+/// otherwise. Null passes, as it does for a class target.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_checked_cast_basic(value: *mut u8, target: i64) -> *mut u8 {
+    if haxe_dynamic_is_null(value) {
+        return std::ptr::null_mut();
+    }
+    let fits = dynamic_box_at(value).is_some_and(|d| {
+        d.type_id.0 as i64 == target || (target == TYPE_FLOAT.0 as i64 && d.type_id == TYPE_INT)
+    });
+    if fits {
+        value
+    } else {
+        crate::exception::throw_with_message("Class cast error".to_string())
     }
 }
 

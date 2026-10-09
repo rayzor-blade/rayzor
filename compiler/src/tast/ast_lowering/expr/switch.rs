@@ -283,9 +283,11 @@ impl<'a> AstLowering<'a> {
     /// A case lowered as a guard and bindings over parts of the subject
     /// expression, which therefore re-reads the subject.
     pub(crate) fn case_reads_subject_parts(case: &parser::Case) -> bool {
-        case.patterns
-            .first()
-            .is_some_and(|p| Self::pattern_destructures(p) || Self::pattern_needs_guard(p))
+        case.patterns.first().is_some_and(|p| {
+            Self::pattern_destructures(p)
+                || Self::pattern_needs_guard(p)
+                || matches!(p, parser::Pattern::Null)
+        })
     }
 
     fn pattern_needs_guard(pattern: &parser::Pattern) -> bool {
@@ -425,24 +427,61 @@ impl<'a> AstLowering<'a> {
                 }
                 Some((Self::conjoin(tests, span), bindings))
             }
-            // Alternatives that bind would each need their own bindings.
+            // Every alternative binds the same names; each name takes the part
+            // of the subject from the first alternative that matches.
             P::Or(alternatives) => {
-                let mut tests = Vec::new();
+                let mut parts = Vec::new();
                 for alt in alternatives {
-                    let (test, bound) = self.pattern_guard_parts(alt, subject)?;
-                    if !bound.is_empty() {
+                    parts.push(self.pattern_guard_parts(alt, subject)?);
+                }
+                let mut names: Vec<&String> = parts[0].1.iter().map(|(n, _)| n).collect();
+                names.sort();
+                for (_, bound) in &parts[1..] {
+                    let mut other: Vec<&String> = bound.iter().map(|(n, _)| n).collect();
+                    other.sort();
+                    if other != names {
                         return None;
                     }
-                    tests.push(test?);
                 }
-                let any = tests.into_iter().reduce(|a, b| {
-                    expr(parser::ExprKind::Binary {
-                        left: Box::new(a),
-                        op: parser::BinaryOp::Or,
-                        right: Box::new(b),
+                let bindings = parts[0]
+                    .1
+                    .iter()
+                    .map(|(name, _)| {
+                        let value_in = |bound: &Vec<(String, parser::Expr)>| {
+                            bound
+                                .iter()
+                                .find(|(n, _)| n == name)
+                                .map(|(_, e)| e.clone())
+                        };
+                        let mut picked = value_in(&parts[parts.len() - 1].1)?;
+                        for (test, bound) in parts[..parts.len() - 1].iter().rev() {
+                            let value = value_in(bound)?;
+                            picked = match test {
+                                Some(test) => expr(parser::ExprKind::Ternary {
+                                    cond: Box::new(test.clone()),
+                                    then_expr: Box::new(value),
+                                    else_expr: Box::new(picked),
+                                }),
+                                None => value,
+                            };
+                        }
+                        Some((name.clone(), picked))
                     })
-                });
-                Some((any, Vec::new()))
+                    .collect::<Option<Vec<_>>>()?;
+                let any = parts
+                    .into_iter()
+                    .map(|(test, _)| test)
+                    .collect::<Option<Vec<_>>>()
+                    .and_then(|tests| {
+                        tests.into_iter().reduce(|a, b| {
+                            expr(parser::ExprKind::Binary {
+                                left: Box::new(a),
+                                op: parser::BinaryOp::Or,
+                                right: Box::new(b),
+                            })
+                        })
+                    });
+                Some((any, bindings))
             }
             P::Bind { name, pattern } => {
                 let (test, mut bindings) = self.pattern_guard_parts(pattern, subject)?;
@@ -567,7 +606,11 @@ impl<'a> AstLowering<'a> {
         pattern: &parser::Pattern,
         subject: &parser::Expr,
     ) -> Option<Result<(TypedExpression, Vec<(String, parser::Expr)>), LoweringError>> {
-        if !Self::pattern_destructures(pattern) && !Self::pattern_needs_guard(pattern) {
+        // `case null` is a test of the subject, never a wildcard.
+        if !Self::pattern_destructures(pattern)
+            && !Self::pattern_needs_guard(pattern)
+            && !matches!(pattern, parser::Pattern::Null)
+        {
             return None;
         }
         let (test, bindings) = self.pattern_guard_parts(pattern, subject)?;

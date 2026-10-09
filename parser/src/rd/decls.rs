@@ -514,6 +514,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         // them anyway is the point: the corpus scores what the compiler does,
         // and a parse error hides those gaps from it entirely.
         let mut saw_field_keyword = true;
+        let mut overload = false;
         while saw_field_keyword {
             saw_field_keyword = self.stream.eat(TokenKind::KwAbstract).is_some();
             if self.stream.peek().kind == TokenKind::Ident
@@ -521,6 +522,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
             {
                 self.stream.advance();
                 saw_field_keyword = true;
+                overload = true;
             }
         }
         let (access, mut modifiers) = self.parse_access_and_modifiers();
@@ -531,8 +533,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
             && self.stream.current_text() == "overload"
         {
             self.stream.advance();
+            overload = true;
             let (_, more_modifiers) = self.parse_access_and_modifiers();
             modifiers.extend(more_modifiers);
+        }
+        if overload {
+            modifiers.push(Modifier::Overload);
         }
         // Either order: `abstract public function` and `public abstract function`.
         while self.stream.eat(TokenKind::KwAbstract).is_some() {}
@@ -784,7 +790,16 @@ impl<'a, 'b> RdParser<'a, 'b> {
     pub fn parse_module_field(&mut self) -> Result<ModuleField, ParseError> {
         let start = self.stream.current_offset();
         let meta = self.parse_metadata_list();
-        let (access, modifiers) = self.parse_access_and_modifiers();
+        let (access, mut modifiers) = self.parse_access_and_modifiers();
+        // `private overload extern inline function f(..)` at module level.
+        while self.stream.peek().kind == TokenKind::Ident
+            && self.stream.current_text() == "overload"
+        {
+            self.stream.advance();
+            modifiers.push(Modifier::Overload);
+            let (_, more_modifiers) = self.parse_access_and_modifiers();
+            modifiers.extend(more_modifiers);
+        }
 
         // `final` is consumed by `parse_access_and_modifiers` as a modifier.
         // Detect `final <ident>` patterns by checking modifiers.

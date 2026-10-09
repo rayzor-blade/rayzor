@@ -183,6 +183,8 @@ pub enum Modifier {
     Override,
     Final,
     Extern,
+    /// `overload`: one of several same-named functions picked by argument types.
+    Overload,
 }
 
 /// Metadata/Attributes: `@:meta`, `@:native("name")`

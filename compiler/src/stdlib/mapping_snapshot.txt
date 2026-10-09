@@ -102,7 +102,7 @@ Std int static=true ctor=false params=1 -> haxe_std_int
 Std is static=true ctor=false params=2 -> haxe_std_is
 Std isOfType static=true ctor=false params=2 -> haxe_std_is
 Std parseFloat static=true ctor=false params=1 -> haxe_std_parse_float
-Std parseInt static=true ctor=false params=1 -> haxe_std_parse_int
+Std parseInt static=true ctor=false params=1 -> haxe_std_parse_int_box
 Std random static=true ctor=false params=1 -> haxe_std_random
 Std string static=true ctor=false params=1 -> haxe_std_string_ptr
 String cca static=false ctor=false params=1 -> haxe_string_char_code_at_ptr

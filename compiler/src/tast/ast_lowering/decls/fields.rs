@@ -312,6 +312,7 @@ impl<'a> AstLowering<'a> {
                 parser::haxe_ast::Modifier::Override => SymbolFlags::OVERRIDE,
                 parser::haxe_ast::Modifier::Final => SymbolFlags::FINAL,
                 parser::haxe_ast::Modifier::Extern => SymbolFlags::EXTERN,
+                parser::haxe_ast::Modifier::Overload => SymbolFlags::NONE,
             });
         }
         if !field_flags.is_empty() {
@@ -425,6 +426,7 @@ impl<'a> AstLowering<'a> {
                 parser::haxe_ast::Modifier::Override => SymbolFlags::OVERRIDE,
                 parser::haxe_ast::Modifier::Final => SymbolFlags::FINAL,
                 parser::haxe_ast::Modifier::Extern => SymbolFlags::EXTERN,
+                parser::haxe_ast::Modifier::Overload => SymbolFlags::NONE,
             });
         }
         if !symbol_flags.is_empty() {
@@ -559,6 +561,7 @@ impl<'a> AstLowering<'a> {
                 parser::haxe_ast::Modifier::Override => SymbolFlags::OVERRIDE,
                 parser::haxe_ast::Modifier::Final => SymbolFlags::FINAL,
                 parser::haxe_ast::Modifier::Extern => SymbolFlags::EXTERN,
+                parser::haxe_ast::Modifier::Overload => SymbolFlags::NONE,
             });
         }
         if !function_flags.is_empty() {

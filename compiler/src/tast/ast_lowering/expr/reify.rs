@@ -546,6 +546,7 @@ impl Reifier {
                 Modifier::Override => "AOverride",
                 Modifier::Final => "AFinal",
                 Modifier::Extern => "AExtern",
+                Modifier::Overload => "AOverload",
             });
         }
         let (name, kind) = match &f.kind {

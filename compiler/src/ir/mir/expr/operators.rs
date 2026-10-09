@@ -527,7 +527,14 @@ impl<'a> HirToMirContext<'a> {
                     || (rhs_is_string
                         && matches!(&rhs_mir_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void)));
 
-                let lhs_str_val = if !lhs_is_string_mir {
+                // An abstract converts through its own `@:to String` or
+                // `toString` even when its value is already a String.
+                let lhs_converted = self
+                    .abstract_to_string(lhs_reg, lhs.ty)
+                    .or_else(|| self.try_call_abstract_tostring(lhs_reg, lhs.ty));
+                let lhs_str_val = if let Some(converted) = lhs_converted {
+                    converted
+                } else if !lhs_is_string_mir {
                     if self.expr_is_value_type_expr(lhs) {
                         self.convert_value_type_to_string(lhs_reg)?
                     } else if let Some(reg) =
@@ -541,7 +548,14 @@ impl<'a> HirToMirContext<'a> {
                     lhs_reg
                 };
 
-                let rhs_str_val = if !rhs_is_string_mir {
+                // An abstract converts through its own `@:to String` or
+                // `toString` even when its value is already a String.
+                let rhs_converted = self
+                    .abstract_to_string(rhs_reg, rhs.ty)
+                    .or_else(|| self.try_call_abstract_tostring(rhs_reg, rhs.ty));
+                let rhs_str_val = if let Some(converted) = rhs_converted {
+                    converted
+                } else if !rhs_is_string_mir {
                     if self.expr_is_value_type_expr(rhs) {
                         self.convert_value_type_to_string(rhs_reg)?
                     } else if let Some(reg) =

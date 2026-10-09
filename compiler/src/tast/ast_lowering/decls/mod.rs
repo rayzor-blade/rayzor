@@ -22,6 +22,12 @@ impl<'a> AstLowering<'a> {
             .map(|(_, unknown)| unknown.iter().cloned().collect())
             .unwrap_or_default();
         let file = desugared.as_ref().map_or(file, |(file, _)| file);
+        let overloaded = super::overloads::desugar(file);
+        self.overload_groups = overloaded
+            .as_ref()
+            .map(|(_, groups)| groups.clone())
+            .unwrap_or_default();
+        let file = overloaded.as_ref().map_or(file, |(file, _)| file);
         self.seed_const_generics(std::iter::once(file));
         // Optimizer barrier
 
@@ -258,6 +264,7 @@ impl<'a> AstLowering<'a> {
                 parser::haxe_ast::Modifier::Override => SymbolFlags::OVERRIDE,
                 parser::haxe_ast::Modifier::Final => SymbolFlags::FINAL,
                 parser::haxe_ast::Modifier::Extern => SymbolFlags::EXTERN,
+                parser::haxe_ast::Modifier::Overload => SymbolFlags::NONE,
             });
         }
         if !field_flags.is_empty() {
@@ -703,6 +710,7 @@ impl<'a> AstLowering<'a> {
                 parser::Modifier::Macro => modifier_info.is_macro = true,
                 parser::Modifier::Final => modifier_info.is_final = true,
                 parser::Modifier::Extern => modifier_info.is_extern = true,
+                parser::Modifier::Overload => {}
             }
         }
 
