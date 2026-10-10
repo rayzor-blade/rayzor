@@ -4276,10 +4276,10 @@ impl StdlibMapping {
             map_method!(static "Reflect", "makeVarArgs" => "haxe_reflect_make_var_args", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
             // Reflect.getProperty(o:Dynamic, field:String):Dynamic — maps to field access
-            map_method!(static "Reflect", "getProperty" => "haxe_reflect_field", params: 2, returns: primitive,
+            map_method!(static "Reflect", "getProperty" => "haxe_reflect_get_property", params: 2, returns: primitive,
                 types: &[PtrU8, PtrU8] => PtrU8),
             // Reflect.setProperty(o:Dynamic, field:String, value:Dynamic):Void — maps to setField
-            map_method!(static "Reflect", "setProperty" => "haxe_reflect_set_field", params: 3, returns: void,
+            map_method!(static "Reflect", "setProperty" => "haxe_reflect_set_property", params: 3, returns: void,
                 types: &[PtrU8, PtrU8, PtrU8]),
         ];
 

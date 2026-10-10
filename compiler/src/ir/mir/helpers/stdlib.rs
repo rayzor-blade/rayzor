@@ -845,7 +845,7 @@ impl<'a> HirToMirContext<'a> {
             "haxe_reflect_make_var_args" | "Reflect.makeVarArgs" => {
                 Some(self.lower_reflect_make_var_args(args, result_type, location))
             }
-            "haxe_reflect_set_field" if args.len() == 3 => {
+            "haxe_reflect_set_field" | "haxe_reflect_set_property" if args.len() == 3 => {
                 let object = self.lower_expression(&args[0])?;
                 let name = self.lower_expression(&args[1])?;
                 let value = self.lower_expression(&args[2])?;

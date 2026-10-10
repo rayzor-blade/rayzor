@@ -2310,6 +2310,30 @@ impl<'a> TastToHirContext<'a> {
                     );
                 }
 
+                // `x.name(args)` on an abstract with no member `name` calls the
+                // value its `@:op(a.b)` method returns for "name".
+                if let Some(callee) =
+                    self.resolve_operator_call(receiver, *method_symbol, None, expr)
+                {
+                    let ty = match self.type_table.borrow().get(callee.ty).map(|t| &t.kind) {
+                        Some(TypeKind::Function { return_type, .. }) => *return_type,
+                        _ => expr.expr_type,
+                    };
+                    let args = arguments.iter().map(|a| self.lower_expression(a)).collect();
+                    return HirExpr::new(
+                        HirExprKind::Call {
+                            target: CallTarget::Function,
+                            callee: Box::new(callee),
+                            type_args: Vec::new(),
+                            args,
+                            is_method: false,
+                        },
+                        ty,
+                        self.current_lifetime,
+                        expr.source_location,
+                    );
+                }
+
                 // Check if this is an abstract type method that should be inlined
                 if let Some(inlined) = self.try_inline_abstract_method(
                     receiver,

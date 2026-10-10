@@ -88,14 +88,14 @@ Reflect copy static=true ctor=false params=1 -> haxe_reflect_copy
 Reflect deleteField static=true ctor=false params=2 -> haxe_reflect_delete_field
 Reflect field static=true ctor=false params=2 -> haxe_reflect_field
 Reflect fields static=true ctor=false params=1 -> haxe_reflect_fields
-Reflect getProperty static=true ctor=false params=2 -> haxe_reflect_field
+Reflect getProperty static=true ctor=false params=2 -> haxe_reflect_get_property
 Reflect hasField static=true ctor=false params=2 -> haxe_reflect_has_field
 Reflect isEnumValue static=true ctor=false params=1 -> haxe_reflect_is_enum_value
 Reflect isFunction static=true ctor=false params=1 -> haxe_reflect_is_function
 Reflect isObject static=true ctor=false params=1 -> haxe_reflect_is_object
 Reflect makeVarArgs static=true ctor=false params=1 -> haxe_reflect_make_var_args
 Reflect setField static=true ctor=false params=3 -> haxe_reflect_set_field
-Reflect setProperty static=true ctor=false params=3 -> haxe_reflect_set_field
+Reflect setProperty static=true ctor=false params=3 -> haxe_reflect_set_property
 Std downcast static=true ctor=false params=2 -> haxe_std_downcast
 Std instance static=true ctor=false params=2 -> haxe_std_downcast
 Std int static=true ctor=false params=1 -> haxe_std_int

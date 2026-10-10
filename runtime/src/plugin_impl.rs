@@ -2384,6 +2384,18 @@ register_symbol!(
     crate::closure_entries::haxe_closure_register_bound_thunk
 );
 register_symbol!(
+    "haxe_register_static_field",
+    crate::reflect::haxe_register_static_field
+);
+register_symbol!(
+    "haxe_reflect_get_property",
+    crate::reflect::haxe_reflect_get_property
+);
+register_symbol!(
+    "haxe_reflect_set_property",
+    crate::reflect::haxe_reflect_set_property
+);
+register_symbol!(
     "haxe_closure_register_packed_entry",
     crate::closure_entries::haxe_closure_register_packed_entry
 );

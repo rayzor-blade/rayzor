@@ -2877,6 +2877,7 @@ impl MirInterpreter {
             // `__vtable_init__` when it takes over and registers the real ones.
             "haxe_closure_register_entries"
             | "haxe_closure_register_bound_thunk"
+            | "haxe_register_static_field"
             | "haxe_register_method" => Ok(InterpValue::Void),
             "trace" | "haxe_print" | "print" => {
                 // Print function - handle all numeric types

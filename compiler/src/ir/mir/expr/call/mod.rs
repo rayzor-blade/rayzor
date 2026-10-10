@@ -120,11 +120,19 @@ impl<'a> HirToMirContext<'a> {
                     .map(|sym| self.interned_str(sym.name))
                     .unwrap_or("")
             };
-            if name_of(class) == "Reflect" && matches!(name_of(method), "field" | "getProperty") {
+            let method_name = name_of(method);
+            if name_of(class) == "Reflect"
+                && matches!(method_name, "field" | "getProperty" | "setProperty")
+            {
                 if let Some(HirExprKind::Literal(HirLiteral::String(field))) =
                     args.get(1).map(|a| &a.kind)
                 {
                     let field = self.interned_str(*field).to_string();
+                    // A property is read and written through its accessors.
+                    if method_name != "field" {
+                        self.dynamic_member_names.insert(format!("get_{field}"));
+                        self.dynamic_member_names.insert(format!("set_{field}"));
+                    }
                     self.dynamic_member_names.insert(field);
                 }
             }

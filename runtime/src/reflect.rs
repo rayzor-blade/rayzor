@@ -197,11 +197,93 @@ pub extern "C" fn haxe_reflect_has_field(obj: *mut u8, field: *mut u8) -> bool {
 /// DynamicValue wrapping either.
 /// field: HaxeString pointer.
 /// Returns: `DynamicValue*`, or null on miss.
+/// Getter and setter thunk codes of class statics, by type id and name.
+type StaticAccessors = std::collections::HashMap<(u32, String), (usize, usize)>;
+static STATIC_FIELDS: std::sync::RwLock<Option<StaticAccessors>> = std::sync::RwLock::new(None);
+
+/// Records a class static's accessors: `getter(env) -> box`,
+/// `setter(env, box)`; either record may be null.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_register_static_field(
+    type_id: i64,
+    name: *mut u8,
+    getter: *const u8,
+    setter: *const u8,
+) {
+    let Some((ptr, len)) = (unsafe { extract_field_name(name) }) else {
+        return;
+    };
+    let name =
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize)) };
+    let code = |record: *const u8| {
+        if record.is_null() {
+            0
+        } else {
+            unsafe { *(record as *const usize) }
+        }
+    };
+    STATIC_FIELDS
+        .write()
+        .unwrap()
+        .get_or_insert_with(Default::default)
+        .insert(
+            (type_id as u32, name.to_string()),
+            (code(getter), code(setter)),
+        );
+}
+
+fn static_accessors(type_id: u32, field: *mut u8) -> Option<(usize, usize)> {
+    let (ptr, len) = unsafe { extract_field_name(field)? };
+    let name =
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize)) };
+    STATIC_FIELDS
+        .read()
+        .unwrap()
+        .as_ref()?
+        .get(&(type_id, name.to_string()))
+        .copied()
+}
+
+/// The class a value names when it is a class used as a value: its bare
+/// 32-bit type id, or that id in a box.
+fn class_token_of(obj: *mut u8) -> Option<u32> {
+    if obj.is_null() {
+        return None;
+    }
+    if (obj as usize) >> 32 == 0 {
+        return Some(obj as u32);
+    }
+    let d = dynamic_box_at(obj)?;
+    let token = d.value_ptr as usize;
+    (token != 0 && token >> 32 == 0 && token as u32 == d.type_id.0).then_some(token as u32)
+}
+
+fn static_field_get(type_id: u32, field: *mut u8) -> Option<*mut u8> {
+    let (getter, _) = static_accessors(type_id, field)?;
+    if getter == 0 {
+        return None;
+    }
+    let getter: extern "C" fn(*mut u8) -> *mut u8 = unsafe { std::mem::transmute(getter) };
+    Some(getter(std::ptr::null_mut()))
+}
+
+fn static_field_set(type_id: u32, field: *mut u8, value: *mut u8) {
+    if let Some((_, setter)) = static_accessors(type_id, field)
+        && setter != 0
+    {
+        let setter: extern "C" fn(*mut u8, *mut u8) = unsafe { std::mem::transmute(setter) };
+        setter(std::ptr::null_mut(), value);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
-    // A class used as a value is its 32-bit type id, not an object.
-    if obj.is_null() || (obj as usize) >> 32 == 0 {
+    if obj.is_null() {
         return std::ptr::null_mut();
+    }
+    // A class used as a value: a read of its statics.
+    if let Some(class) = class_token_of(obj) {
+        return static_field_get(class, field).unwrap_or(std::ptr::null_mut());
     }
     unsafe {
         let (name_ptr, name_len) = match extract_field_name(field) {
@@ -257,6 +339,53 @@ unsafe fn class_field_of(type_id: u32, obj: *mut u8, name: &str) -> *mut u8 {
     }
 }
 
+/// The instance accessor `prefix + name` of the class `obj` is, as a
+/// dynamic-entry closure `(code, env)`.
+fn property_accessor(obj: *mut u8, prefix: &str, field: *mut u8) -> Option<(usize, usize)> {
+    let (ptr, len) = unsafe { extract_field_name(field)? };
+    let name =
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize)) };
+    let actual = unsafe { unwrap_anon_dynamic(obj) };
+    let type_id = unsafe { read_class_type_id(actual) };
+    if !is_class_type(type_id) {
+        return None;
+    }
+    let code = method_code_in_chain(type_id, &format!("{prefix}{name}"))?;
+    let record = crate::closure_entries::bound_method_record(code, actual);
+    let view = crate::closure_entries::haxe_closure_dynamic_view(record);
+    if view.is_null() {
+        return None;
+    }
+    unsafe { Some((*(view as *const usize), *(view as *const usize).add(1))) }
+}
+
+/// Reflect.getProperty: through the `get_` accessor when the class has one.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_reflect_get_property(obj: *mut u8, field: *mut u8) -> *mut u8 {
+    if !obj.is_null()
+        && class_token_of(obj).is_none()
+        && let Some((code, env)) = property_accessor(obj, "get_", field)
+    {
+        let getter: extern "C" fn(usize) -> *mut u8 = unsafe { std::mem::transmute(code) };
+        return getter(env);
+    }
+    haxe_reflect_field(obj, field)
+}
+
+/// Reflect.setProperty: through the `set_` accessor when the class has one.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_reflect_set_property(obj: *mut u8, field: *mut u8, value: *mut u8) {
+    if !obj.is_null()
+        && class_token_of(obj).is_none()
+        && let Some((code, env)) = property_accessor(obj, "set_", field)
+    {
+        let setter: extern "C" fn(usize, *mut u8) -> *mut u8 = unsafe { std::mem::transmute(code) };
+        setter(env, value);
+        return;
+    }
+    haxe_reflect_set_field(obj, field, value)
+}
+
 /// The bound thunk registered for `name` on the class or its nearest parent.
 fn method_code_in_chain(start_type_id: u32, name: &str) -> Option<usize> {
     let mut current = Some(start_type_id);
@@ -299,9 +428,12 @@ fn class_declares_method(start_type_id: u32, name: &str) -> bool {
 /// taken as the object itself.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
-    // A class used as a value is its 32-bit type id, not an object.
-    if obj.is_null() || (obj as usize) >> 32 == 0 {
+    if obj.is_null() {
         return std::ptr::null_mut();
+    }
+    // A class used as a value: a read of its statics.
+    if let Some(class) = class_token_of(obj) {
+        return static_field_get(class, field).unwrap_or(std::ptr::null_mut());
     }
     // A raw anonymous-object handle starts with an Arc pointer. Its low word
     // can look like a user type ID, but only registered IDs name Dynamic boxes.
@@ -348,8 +480,12 @@ pub extern "C" fn haxe_dynamic_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
 /// `box_class_field_as_dynamic` direction).
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_set_field(obj: *mut u8, field: *mut u8, value: *mut u8) {
-    // A class used as a value is its 32-bit type id, not an object.
-    if obj.is_null() || (obj as usize) >> 32 == 0 {
+    if obj.is_null() {
+        return;
+    }
+    // A class used as a value: a write of its statics.
+    if let Some(class) = class_token_of(obj) {
+        static_field_set(class, field, value);
         return;
     }
     unsafe {

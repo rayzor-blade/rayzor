@@ -1509,6 +1509,172 @@ impl<'a> HirToMirContext<'a> {
         Some(thunk_id)
     }
 
+    /// Getter and setter thunks for each class static, keyed by the class's
+    /// runtime id and the field's run-time name: `(env) -> box` and
+    /// `(env, box) -> void`, a property going through its accessors.
+    fn static_field_accessors(
+        &mut self,
+    ) -> Vec<(u32, String, Option<IrFunctionId>, Option<IrFunctionId>)> {
+        let fields: Vec<(SymbolId, SymbolId)> = self
+            .static_field_owners
+            .iter()
+            .map(|(field, owner)| (*field, *owner))
+            .collect();
+        let mut out = Vec::new();
+        for (field, owner) in fields {
+            let Some(owner_sym) = self.symbol_table.get_symbol(owner) else {
+                continue;
+            };
+            if owner_sym.kind != crate::tast::symbols::SymbolKind::Class {
+                continue;
+            }
+            let class_type = owner_sym.type_id;
+            let Some(field_sym) = self.symbol_table.get_symbol(field) else {
+                continue;
+            };
+            let (field_ty, is_final) = (field_sym.type_id, field_sym.is_final());
+            let Some(name) = field_sym
+                .native_name
+                .or(Some(field_sym.name))
+                .and_then(|n| self.string_interner.get(n))
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let access = self.property_access_map.get(&field).cloned();
+            let accessor = |this: &Self, which: &crate::tast::PropertyAccessor| match which {
+                crate::tast::PropertyAccessor::Method(m) => this
+                    .class_method_by_name
+                    .get(&(owner, *m))
+                    .and_then(|sym| this.function_map.get(sym).copied()),
+                _ => None,
+            };
+            let get_fn = access.as_ref().and_then(|a| accessor(self, &a.getter));
+            let set_fn = access.as_ref().and_then(|a| accessor(self, &a.setter));
+            let global = self.global_symbol_map.get(&field).copied();
+            let getter = if get_fn.is_some() || global.is_some() {
+                self.static_accessor_thunk(&name, false, |this, _| {
+                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                    let (value, value_ty) = match get_fn {
+                        Some(f) => {
+                            let ret = this
+                                .builder
+                                .module
+                                .functions
+                                .get(&f)?
+                                .signature
+                                .return_type
+                                .clone();
+                            (
+                                this.builder.build_call_direct(f, Vec::new(), ret)?,
+                                field_ty,
+                            )
+                        }
+                        None => {
+                            let gid = global?;
+                            let ty = this.builder.module.globals.get(&gid)?.ty.clone();
+                            (this.builder.build_load_global(gid, ty)?, field_ty)
+                        }
+                    };
+                    let dynamic = this.type_table.dynamic_type();
+                    let boxed = this
+                        .maybe_box_value(value, value_ty, dynamic)
+                        .unwrap_or(value);
+                    this.builder.build_bitcast(boxed, ptr_u8)
+                })
+            } else {
+                None
+            };
+            let setter = if set_fn.is_some() || (global.is_some() && !is_final) {
+                self.static_accessor_thunk(&name, true, |this, value| {
+                    let dynamic = this.type_table.dynamic_type();
+                    let raw = this
+                        .maybe_unbox_value(value, dynamic, field_ty)
+                        .unwrap_or(value);
+                    match set_fn {
+                        Some(f) => {
+                            let sig = this.builder.module.functions.get(&f)?.signature.clone();
+                            let want = sig.parameters.first()?.ty.clone();
+                            let arg = this.coerce_reg_to(raw, &want)?;
+                            this.builder
+                                .build_call_direct(f, vec![arg], sig.return_type.clone());
+                        }
+                        None => {
+                            let gid = global?;
+                            let want = this.builder.module.globals.get(&gid)?.ty.clone();
+                            let arg = this.coerce_reg_to(raw, &want)?;
+                            this.builder.build_store_global(gid, arg)?;
+                        }
+                    }
+                    None
+                })
+            } else {
+                None
+            };
+            if getter.is_some() || setter.is_some() {
+                out.push((self.runtime_type_id(class_type), name, getter, setter));
+            }
+        }
+        out
+    }
+
+    /// One accessor thunk: `(env) -> *u8` for a getter, `(env, value) -> void`
+    /// for a setter; `body` gets the value parameter and answers the result.
+    fn static_accessor_thunk(
+        &mut self,
+        name: &str,
+        setter: bool,
+        body: impl FnOnce(&mut Self, IrId) -> Option<IrId>,
+    ) -> Option<IrFunctionId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let mut sig = FunctionSignatureBuilder::new()
+            .param("env".to_string(), ptr_u8.clone())
+            .calling_convention(CallingConvention::Haxe);
+        sig = if setter {
+            sig.param("value".to_string(), ptr_u8.clone())
+                .returns(IrType::Void)
+        } else {
+            sig.returns(ptr_u8.clone())
+        };
+        let symbol = SymbolId::from_raw(u32::MAX - 2000 - self.next_wrapper_id);
+        self.next_wrapper_id += 1;
+        let kind = if setter { "set" } else { "get" };
+        let saved_function = self.builder.current_function;
+        let saved_block = self.builder.current_block;
+        let saved_symbols = std::mem::take(&mut self.symbol_map);
+        let saved_moves = std::mem::take(&mut self.strict_move_locals);
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
+        self.reset_move_recorder();
+        let id = self.builder.start_function(
+            symbol,
+            format!("__static_{kind}_{}_{name}", self.next_wrapper_id),
+            sig.build(),
+        );
+        let value = self
+            .builder
+            .current_function()
+            .and_then(|f| f.get_param_reg(usize::from(setter)))
+            .unwrap_or(IrId::new(0));
+        let result = body(self, value);
+        if setter {
+            self.builder.build_return(None);
+        } else {
+            let result = match result {
+                Some(r) => Some(r),
+                None => self.builder.build_const(IrValue::Null),
+            };
+            self.builder.build_return(result);
+        }
+        self.check_move_flow();
+        self.builder.finish_function();
+        self.builder.current_function = saved_function;
+        self.builder.current_block = saved_block;
+        self.symbol_map = saved_symbols;
+        self.strict_move_locals = saved_moves;
+        Some(id)
+    }
+
     pub(crate) fn generate_vtable_init_function(&mut self) {
         // Instance methods read by name through Dynamic: a bound thunk each,
         // registered below so the runtime can hand out a callable closure.
@@ -1591,6 +1757,9 @@ impl<'a> HirToMirContext<'a> {
             }
             out
         };
+
+        // A class's statics read and written by name through a class value.
+        let static_accessors = self.static_field_accessors();
 
         // The alternate entries of every closure target, built before the
         // init body so they are whole functions when it references them.
@@ -1965,6 +2134,29 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.build_call_direct(
                     register_method_fn,
                     vec![tid, name, record],
+                    IrType::Void,
+                );
+            }
+        }
+        let register_static_fn = self.get_or_register_extern_function(
+            "haxe_register_static_field",
+            vec![IrType::I64, IrType::String, ptr_u8.clone(), ptr_u8.clone()],
+            IrType::Void,
+        );
+        for (type_id, name, getter, setter) in static_accessors {
+            let mut record = |this: &mut Self, f: Option<IrFunctionId>| match f {
+                Some(id) => this.builder.build_function_ref(id),
+                None => this.builder.build_const(IrValue::Null),
+            };
+            let getter = record(self, getter);
+            let setter = record(self, setter);
+            let tid = self.builder.build_const(IrValue::I64(type_id as i64));
+            let name = self.builder.build_const(IrValue::String(name));
+            if let (Some(tid), Some(name), Some(getter), Some(setter)) = (tid, name, getter, setter)
+            {
+                self.builder.build_call_direct(
+                    register_static_fn,
+                    vec![tid, name, getter, setter],
                     IrType::Void,
                 );
             }
