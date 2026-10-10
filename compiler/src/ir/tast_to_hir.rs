@@ -4062,17 +4062,14 @@ impl<'a> TastToHirContext<'a> {
             {
                 left
             }
-            TypedExpressionKind::UnaryOp { operator, operand }
-                if matches!(
-                    operator,
+            TypedExpressionKind::UnaryOp {
+                operator:
                     UnaryOperator::PreInc
-                        | UnaryOperator::PostInc
-                        | UnaryOperator::PreDec
-                        | UnaryOperator::PostDec
-                ) =>
-            {
-                operand
-            }
+                    | UnaryOperator::PostInc
+                    | UnaryOperator::PreDec
+                    | UnaryOperator::PostDec,
+                operand,
+            } => operand,
             _ => return None,
         };
         let TypedExpressionKind::FieldAccess {
@@ -4093,8 +4090,8 @@ impl<'a> TastToHirContext<'a> {
         };
         let mut write = expr.clone();
         match &mut write.kind {
-            TypedExpressionKind::BinaryOp { left, .. } => *left = Box::new(field),
-            TypedExpressionKind::UnaryOp { operand, .. } => *operand = Box::new(field),
+            TypedExpressionKind::BinaryOp { left, .. } => **left = field,
+            TypedExpressionKind::UnaryOp { operand, .. } => **operand = field,
             _ => return None,
         }
         let condition = HirExpr::new(
