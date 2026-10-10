@@ -342,6 +342,26 @@ impl<'a> AstLowering<'a> {
                                     return Ok(imap);
                                 }
                             }
+                            let declared_target = {
+                                let tt = self.context.type_table.borrow();
+                                tt.types_for_symbol(symbol_id).and_then(|ts| {
+                                    ts.iter().find_map(|t| match &tt.get(*t)?.kind {
+                                        crate::tast::core::TypeKind::TypeAlias {
+                                            target_type,
+                                            ..
+                                        } => Some(*target_type),
+                                        _ => None,
+                                    })
+                                })
+                            };
+                            // A typedef of a `@:generic` template names the
+                            // specialisation its arguments select.
+                            if let Some(target) = declared_target
+                                && let Some(instance) =
+                                    self.generic_alias_target(symbol_id, target, &type_arg_ids)?
+                            {
+                                return Ok(instance);
+                            }
                             // A typedef of an array (`NativeRest<T> = Array<T>`),
                             // of an extern class (`VectorData<T> = rayzor.Vec<T>`)
                             // or of an abstract (`V<T> = haxe.ds.Vector<T>`) is
@@ -351,17 +371,8 @@ impl<'a> AstLowering<'a> {
                             // laid out with.
                             let alias_target = {
                                 let tt = self.context.type_table.borrow();
-                                tt.types_for_symbol(symbol_id)
-                                    .and_then(|ts| {
-                                        ts.iter().find_map(|t| match &tt.get(*t)?.kind {
-                                            crate::tast::core::TypeKind::TypeAlias {
-                                                target_type,
-                                                ..
-                                            } => Some(*target_type),
-                                            _ => None,
-                                        })
-                                    })
-                                    .filter(|target| match tt.get(*target).map(|t| &t.kind) {
+                                declared_target.filter(|target| {
+                                    match tt.get(*target).map(|t| &t.kind) {
                                         Some(crate::tast::core::TypeKind::Array { .. })
                                         | Some(crate::tast::core::TypeKind::Abstract { .. }) => {
                                             true
@@ -379,7 +390,8 @@ impl<'a> AstLowering<'a> {
                                                 )
                                             }),
                                         _ => false,
-                                    })
+                                    }
+                                })
                             };
                             if let Some(target_type) = alias_target {
                                 // The declaration's target names its own
@@ -636,10 +648,8 @@ impl<'a> AstLowering<'a> {
                     .borrow_mut()
                     .create_optional_type(inner_type_id))
             }
-            Type::Parenthesis { inner, .. } => {
-                // Just unwrap parentheses
-                self.lower_type(inner)
-            }
+            // Parentheses and argument names do not change the type.
+            Type::Parenthesis { inner, .. } | Type::Named { inner, .. } => self.lower_type(inner),
             Type::Intersection { left, right, .. } => {
                 let left_type_id = self.lower_type(left)?;
                 let right_type_id = self.lower_type(right)?;

@@ -80,21 +80,16 @@ impl<'a, 'b> RdParser<'a, 'b> {
             });
         }
 
-        // Parenthesized or parameterised-arrow types. Three shapes share
-        // the leading `(`:
+        // Parenthesized or parameterised-arrow types. The shapes sharing the
+        // leading `(`:
         //
-        //   `(Int)`                          — parenthesised single type
-        //   `(Int, String) -> Void`          — function type, unnamed params
-        //   `(idx:Int, node:Int) -> Void`    — function type, named params
-        //                                       (names are decorative,
-        //                                       discarded like in standard Haxe)
-        //   `() -> Void`                     — function type, no params
+        //   `(Int)`, `(a:Int)`               — parenthesised type
+        //   `(Int) -> Void`                  — function type, one argument
+        //   `(idx:Int, node:Int) -> Void`    — function type, named arguments
+        //   `() -> Void`                     — function type, no arguments
         //
-        // The parser disambiguates by parsing a comma-separated list of
-        // optionally-`name:`-prefixed type entries, then checking what
-        // follows the closing `)`. An arrow means function type; absent
-        // arrow with exactly one unnamed entry means parenthesised type;
-        // anything else is a parse error.
+        // As in haxe's AST, a lone argument keeps its parentheses
+        // (`TParent`) and a named one is `Type::Named`.
         if self.stream.at(TokenKind::LParen) {
             self.stream.advance();
 
@@ -110,44 +105,37 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 });
             }
 
-            // Parse the first entry — and remember whether it was named.
-            let (first_named, first_ty) = self.parse_param_type_entry()?;
-            let mut params = vec![first_ty];
-            let mut had_named_entry = first_named;
-
+            let mut params = vec![self.parse_param_type_entry()?];
             while self.stream.eat(TokenKind::Comma).is_some() {
-                let (named, ty) = self.parse_param_type_entry()?;
-                had_named_entry |= named;
-                params.push(ty);
+                params.push(self.parse_param_type_entry()?);
             }
 
             self.stream.expect(TokenKind::RParen)?;
 
-            if self.stream.eat(TokenKind::Arrow).is_some() {
-                // Function type — parameter names discarded.
-                let ret = self.parse_basic_type()?;
-                let span = self.stream.span_from(start);
-                return Ok(Type::Function {
-                    params,
-                    ret: Box::new(ret),
-                    span,
-                });
-            }
-
-            // No arrow — must be a parenthesised single unnamed type.
-            if params.len() == 1 && !had_named_entry {
-                let inner = params.into_iter().next().unwrap();
-                let span = self.stream.span_from(start);
-                return Ok(Type::Parenthesis {
+            if params.len() == 1 {
+                let inner = params.pop().unwrap();
+                let parenthesised = Type::Parenthesis {
                     inner: Box::new(inner),
-                    span,
-                });
+                    span: self.stream.span_from(start),
+                };
+                if self.stream.eat(TokenKind::Arrow).is_none() {
+                    return Ok(parenthesised);
+                }
+                params.push(parenthesised);
+            } else if self.stream.eat(TokenKind::Arrow).is_none() {
+                return Err(ParseError::new(
+                    "expected '->' after parenthesised parameter list",
+                    self.stream.peek().span,
+                ));
             }
 
-            return Err(ParseError::new(
-                "expected '->' after parenthesised parameter list",
-                self.stream.peek().span,
-            ));
+            let ret = self.parse_basic_type()?;
+            let span = self.stream.span_from(start);
+            return Ok(Type::Function {
+                params,
+                ret: Box::new(ret),
+                span,
+            });
         }
 
         // Anonymous structure: `{ x:Int, y:String }`
@@ -160,43 +148,36 @@ impl<'a, 'b> RdParser<'a, 'b> {
     }
 
     /// Parse one entry inside a parenthesised arrow parameter list:
-    /// either `name:Type` (the name is decorative and discarded) or just
-    /// `Type`. Returns `(was_named, type)` so the caller can distinguish
-    /// `(Int)` (parenthesised type) from `(x:Int)` (1-param function type
-    /// missing its arrow — a parse error, but the disambiguation needs
-    /// to know there was a name).
-    fn parse_param_type_entry(&mut self) -> Result<(bool, Type), ParseError> {
+    /// `Type`, `name:Type`, `?name:Type` or `...name:Type`.
+    fn parse_param_type_entry(&mut self) -> Result<Type, ParseError> {
+        let start = self.stream.current_offset();
         // `?name:Type` — an optional NAMED parameter. Without the name check
         // the `?` reads as `?Type` and the `:` that follows has no place.
-        let start = self.stream.current_offset();
         let optional_named = self.stream.at(TokenKind::Question)
             && self.stream.peek_at(1).kind == TokenKind::Ident
             && self.stream.peek_at(2).kind == TokenKind::Colon;
         if optional_named {
             self.stream.advance(); // `?`
         }
-        // `...name:Type` — a rest parameter, typed `haxe.Rest<Type>`.
+        // `...name:Type` — a rest parameter, typed `haxe.Rest<Type>`; haxe
+        // keeps no name for it.
         let rest_named = self.stream.at(TokenKind::DotDotDot)
             && self.stream.peek_at(1).kind == TokenKind::Ident
             && self.stream.peek_at(2).kind == TokenKind::Colon;
         if rest_named {
             self.stream.advance(); // `...`
         }
-        let was_named =
-            self.stream.at(TokenKind::Ident) && self.stream.peek_at(1).kind == TokenKind::Colon;
-        if was_named {
-            self.stream.advance(); // identifier
-            self.stream.advance(); // `:`
-        }
+        let name = (self.stream.at(TokenKind::Ident)
+            && self.stream.peek_at(1).kind == TokenKind::Colon)
+            .then(|| {
+                let name = self.stream.current_text().to_string();
+                self.stream.advance(); // identifier
+                self.stream.advance(); // `:`
+                name
+            });
         let ty = self.parse_type()?;
-        let ty = if optional_named {
-            let span = Span::new(start, ty.span().end);
-            Type::Optional {
-                inner: Box::new(ty),
-                span,
-            }
-        } else if rest_named {
-            let span = Span::new(start, ty.span().end);
+        let span = Span::new(start, ty.span().end);
+        let ty = if rest_named {
             Type::Path {
                 path: TypePath {
                     package: vec!["haxe".to_string()],
@@ -209,7 +190,22 @@ impl<'a, 'b> RdParser<'a, 'b> {
         } else {
             ty
         };
-        Ok((was_named, ty))
+        let ty = match name {
+            Some(name) if !rest_named => Type::Named {
+                name,
+                inner: Box::new(ty),
+                span,
+            },
+            _ => ty,
+        };
+        Ok(if optional_named {
+            Type::Optional {
+                inner: Box::new(ty),
+                span,
+            }
+        } else {
+            ty
+        })
     }
 
     fn parse_named_type(&mut self, start: usize) -> Result<Type, ParseError> {
@@ -503,6 +499,7 @@ impl Type {
             Type::Anonymous { span, .. } => *span,
             Type::Optional { span, .. } => *span,
             Type::Parenthesis { span, .. } => *span,
+            Type::Named { span, .. } => *span,
             Type::Intersection { span, .. } => *span,
             Type::Wildcard { span } => *span,
             Type::Const { span, .. } => *span,

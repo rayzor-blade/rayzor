@@ -591,7 +591,7 @@ fn type_text(ty: &Type) -> String {
             format!("{{{}}}", fields.join(","))
         }
         Type::Optional { inner, .. } => format!("Null<{}>", type_text(inner)),
-        Type::Parenthesis { inner, .. } => type_text(inner),
+        Type::Parenthesis { inner, .. } | Type::Named { inner, .. } => type_text(inner),
         Type::Intersection { left, right, .. } => {
             format!("{}&{}", type_text(left), type_text(right))
         }
@@ -642,6 +642,11 @@ fn subst_type(ty: &Type, map: &BTreeMap<String, Type>) -> Type {
             inner: Box::new(subst_type(inner, map)),
             span: *span,
         },
+        Type::Named { name, inner, span } => Type::Named {
+            name: name.clone(),
+            inner: Box::new(subst_type(inner, map)),
+            span: *span,
+        },
         Type::Intersection { left, right, span } => Type::Intersection {
             left: Box::new(subst_type(left, map)),
             right: Box::new(subst_type(right, map)),
@@ -662,7 +667,9 @@ pub(crate) fn mentions(ty: &Type, names: &[&str]) -> bool {
             params.iter().any(|p| mentions(p, names)) || mentions(ret, names)
         }
         Type::Anonymous { fields, .. } => fields.iter().any(|f| mentions(&f.type_hint, names)),
-        Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => mentions(inner, names),
+        Type::Optional { inner, .. }
+        | Type::Parenthesis { inner, .. }
+        | Type::Named { inner, .. } => mentions(inner, names),
         Type::Intersection { left, right, .. } => mentions(left, names) || mentions(right, names),
         Type::Wildcard { .. } | Type::Const { .. } => false,
     }

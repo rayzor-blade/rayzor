@@ -495,9 +495,9 @@ impl StaticSigIndex {
         let mut t = p.type_hint.as_ref();
         while let Some(ty) = t {
             match ty {
-                parser::Type::Optional { inner, .. } | parser::Type::Parenthesis { inner, .. } => {
-                    t = Some(inner)
-                }
+                parser::Type::Optional { inner, .. }
+                | parser::Type::Parenthesis { inner, .. }
+                | parser::Type::Named { inner, .. } => t = Some(inner),
                 parser::Type::Path { path, .. }
                     if nullable && matches!(path.name.as_str(), "Int" | "Float" | "Bool") =>
                 {
@@ -832,16 +832,56 @@ impl StaticSigIndex {
         is_static: bool,
         resolve_file: &dyn Fn(&str) -> Option<std::path::PathBuf>,
     ) -> Option<StaticMethodSig> {
+        let key = self.declaring_class(class_name, method, is_static, resolve_file)?;
+        self.classes
+            .get(&key)?
+            .table(is_static)
+            .get(method)
+            .cloned()
+    }
+
+    /// The nearest ancestor's declaration of the instance method `method`
+    /// that states a return type, starting above the class `resolve` finds
+    /// declaring it.
+    pub fn inherited_return(
+        &mut self,
+        class_name: &str,
+        method: &str,
+        resolve_file: &dyn Fn(&str) -> Option<std::path::PathBuf>,
+    ) -> Option<StaticMethodSig> {
+        let mut current = self.declaring_class(class_name, method, false, resolve_file)?;
+        let mut seen = BTreeSet::new();
+        while seen.insert(current.clone()) {
+            let parent = self.parent_of(&current)?;
+            self.ensure_indexed(&parent, resolve_file);
+            if let Some(sig) = self.classes.get(&parent)?.instances.get(method)
+                && sig.return_type.is_some()
+            {
+                return Some(sig.clone());
+            }
+            current = parent;
+        }
+        None
+    }
+
+    /// The index key of the class `resolve` reads `method` from.
+    fn declaring_class(
+        &mut self,
+        class_name: &str,
+        method: &str,
+        is_static: bool,
+        resolve_file: &dyn Fn(&str) -> Option<std::path::PathBuf>,
+    ) -> Option<String> {
         // Direct name, following typedef aliases (`haxe.io.Bytes → rayzor.Bytes`).
         let mut name = class_name.to_string();
         for _ in 0..4 {
             self.ensure_indexed(&name, resolve_file);
-            if let Some(sig) = self
+            if self
                 .classes
                 .get(&name)
-                .and_then(|c| c.table(is_static).get(method))
+                .is_some_and(|c| c.table(is_static).contains_key(method))
             {
-                return Some(sig.clone());
+                return Some(name);
             }
             match self.aliases.get(&name) {
                 Some(target) => name = target.clone(),
@@ -895,7 +935,7 @@ impl StaticSigIndex {
                 })
                 .unwrap_or_default();
             if let [only] = candidates.as_slice() {
-                return self.classes[*only].table(is_static).get(method).cloned();
+                return Some((*only).clone());
             }
         }
         None

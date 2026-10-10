@@ -687,7 +687,9 @@ impl<'a> AstLowering<'a> {
                     .any(|f| self.type_might_reference_undefined_params(&f.type_hint))
             }
             Type::Optional { inner, .. } => self.type_might_reference_undefined_params(inner),
-            Type::Parenthesis { inner, .. } => self.type_might_reference_undefined_params(inner),
+            Type::Parenthesis { inner, .. } | Type::Named { inner, .. } => {
+                self.type_might_reference_undefined_params(inner)
+            }
             Type::Intersection { left, right, .. } => {
                 self.type_might_reference_undefined_params(left)
                     || self.type_might_reference_undefined_params(right)

@@ -781,7 +781,9 @@ fn collect_qualified_type_refs_from_ast(ast: &parser::HaxeFile, out: &mut Vec<St
                 }
                 collect_from_type(ret, seen, out);
             }
-            Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => {
+            Type::Optional { inner, .. }
+            | Type::Parenthesis { inner, .. }
+            | Type::Named { inner, .. } => {
                 collect_from_type(inner, seen, out);
             }
             Type::Intersection { left, right, .. } => {

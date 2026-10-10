@@ -66,7 +66,9 @@ impl ReificationEngine {
                     field.type_hint = Self::process_type(&field.type_hint, env)?;
                 }
             }
-            Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => {
+            Type::Optional { inner, .. }
+            | Type::Parenthesis { inner, .. }
+            | Type::Named { inner, .. } => {
                 **inner = Self::process_type(inner, env)?;
             }
             Type::Intersection { left, right, .. } => {

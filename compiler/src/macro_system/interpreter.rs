@@ -643,10 +643,18 @@ impl MacroInterpreter {
                     // (accidentally correct) "true" to a wrong "false". The
                     // right ending is a stricter typechecker, then this
                     // becomes uncatchable so the probe answers for real.
+                    // A catch that reads the error would answer from the
+                    // signal's own text, so an expression macro defers then.
                     Err(e) if !e.is_control_flow() => {
                         // The first catch whose type admits the error takes it.
                         let err_val = Self::caught_value(&e);
-                        if let Some(catch) = catches.iter().find(|c| Self::catch_admits(c, &e)) {
+                        let defers = matches!(e, MacroError::NeedsTyper { .. })
+                            && self.macro_context.is_none();
+                        if let Some(catch) = catches
+                            .iter()
+                            .find(|c| Self::catch_admits(c, &e))
+                            .filter(|c| !(defers && Self::reads_name(&c.body, &c.var)))
+                        {
                             self.env.push_scope();
                             self.env.define(&catch.var, err_val);
                             let catch_result = self.eval_expr(&catch.body);
@@ -2307,6 +2315,14 @@ impl MacroInterpreter {
                             None => Err(MacroError::NeedsTyper { location }),
                         }
                     }
+                    // A `TFun` value, as `ClassField.overloads` gives.
+                    Some(t @ MacroValue::Enum(_, variant, _)) if &**variant == "TFun" => {
+                        let rendered = self.fun_type_string(t).map(|(text, _)| text);
+                        match rendered {
+                            Some(text) => Ok(Some(MacroValue::String(Arc::from(text.as_str())))),
+                            None => Err(MacroError::NeedsTyper { location }),
+                        }
+                    }
                     _ => Ok(Some(MacroValue::Null)),
                 },
                 _ => Ok(None),
@@ -2460,6 +2476,67 @@ impl MacroInterpreter {
         true
     }
 
+    /// Haxe's spelling of a function type, and whether `t` is one. A `TFun`
+    /// value prints its argument names: `(x : Int) -> String`, one unnamed
+    /// argument as `Int -> String`.
+    fn fun_type_string(&mut self, t: &MacroValue) -> Option<(String, bool)> {
+        match t {
+            MacroValue::Enum(_, variant, payload) if &**variant == "TFun" => {
+                let MacroValue::Array(args) = payload.first()? else {
+                    return None;
+                };
+                let mut parts = Vec::with_capacity(args.len());
+                let mut named = false;
+                for arg in args.iter() {
+                    // `{name, opt, t}`, or a bare type for an unnamed argument.
+                    let (name, opt, t) = match arg {
+                        MacroValue::Object(arg) => (
+                            arg.get("name").and_then(|n| n.as_string()).unwrap_or(""),
+                            matches!(arg.get("opt"), Some(MacroValue::Bool(true))),
+                            arg.get("t")?,
+                        ),
+                        other => ("", false, other),
+                    };
+                    let t = self.fun_part_string(t, true)?;
+                    let opt = if opt { "?" } else { "" };
+                    named |= !name.is_empty();
+                    parts.push(if name.is_empty() {
+                        format!("{opt}{t}")
+                    } else {
+                        format!("{opt}{name} : {t}")
+                    });
+                }
+                let ret = self.fun_part_string(payload.get(1)?, false)?;
+                let text = match parts.as_slice() {
+                    [] => format!("() -> {ret}"),
+                    [only] if !named => format!("{only} -> {ret}"),
+                    _ => format!("({}) -> {ret}", parts.join(", ")),
+                };
+                Some((text, true))
+            }
+            MacroValue::Type(id) => {
+                let ctx = self.macro_context.as_mut()?;
+                let text = ctx.format_type(*id, false)?;
+                let is_fun = ctx
+                    .project_type(*id)
+                    .is_some_and(|(variant, _)| variant == "TFun");
+                Some((text, is_fun))
+            }
+            _ => None,
+        }
+    }
+
+    /// A type inside a function type: parenthesised when it is a function,
+    /// and when it is `Void` in argument position.
+    fn fun_part_string(&mut self, t: &MacroValue, argument: bool) -> Option<String> {
+        let (text, is_fun) = self.fun_type_string(t)?;
+        Some(if is_fun || (argument && text == "Void") {
+            format!("({text})")
+        } else {
+            text
+        })
+    }
+
     /// What a catch binds: the thrown value itself, or for an error the
     /// compiler raised, a `haxe.macro.Error` shaped object.
     fn caught_value(e: &MacroError) -> MacroValue {
@@ -2491,6 +2568,15 @@ impl MacroInterpreter {
             | MacroError::ReificationError { message, .. } => message.clone(),
             other => other.to_string(),
         }
+    }
+
+    /// Whether `body` mentions `name`, in nested functions too.
+    fn reads_name(body: &Expr, name: &str) -> bool {
+        let mut found = false;
+        crate::tast::ast_lowering::walk_expr(body, &mut |e| {
+            found |= matches!(&e.kind, ExprKind::Ident(n) if n == name);
+        });
+        found
     }
 
     /// Whether a catch clause's type admits the error. The typer-deferral

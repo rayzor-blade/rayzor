@@ -108,6 +108,7 @@ impl<'a> AstLowering<'a> {
             enum_abstracts: std::collections::BTreeSet::new(),
             abstract_postfix_not: BTreeMap::new(),
             abstract_unops: BTreeMap::new(),
+            method_overloads: BTreeMap::new(),
             annotated_dynamic_params: std::collections::BTreeSet::new(),
             resources: None,
         }

@@ -599,6 +599,12 @@ pub enum Type {
     Optional { inner: Box<Type>, span: Span },
     /// Parenthesized type: `(Int)`
     Parenthesis { inner: Box<Type>, span: Span },
+    /// A named function-type argument: the `a:Int` of `(a:Int) -> Void`.
+    Named {
+        name: String,
+        inner: Box<Type>,
+        span: Span,
+    },
     /// Intersection type: `Type & { extraField: Int }`
     Intersection {
         left: Box<Type>,

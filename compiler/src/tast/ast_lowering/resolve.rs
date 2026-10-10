@@ -422,6 +422,42 @@ impl<'a> AstLowering<'a> {
         None
     }
 
+    /// The return type an override written without one takes from the
+    /// nearest ancestor declaring one, when that type has no subtype the
+    /// override could have narrowed it to.
+    pub(crate) fn inherited_method_return(
+        &self,
+        class_symbol: SymbolId,
+        method_name: InternedString,
+    ) -> Option<Type> {
+        let index = self.static_sig_index.as_ref()?.clone();
+        let names: Vec<String> = {
+            let sym = self.context.symbol_table.get_symbol(class_symbol)?;
+            [sym.qualified_name, Some(sym.name)]
+                .into_iter()
+                .flatten()
+                .filter_map(|n| self.context.string_interner.get(n))
+                .map(str::to_string)
+                .collect()
+        };
+        let method = self.context.string_interner.get(method_name)?.to_string();
+        let resolver: &super::namespace::NamespaceResolver = self.context.namespace_resolver;
+        let resolve_file = |q: &str| resolver.resolve_qualified_path_to_file_force(q);
+        let sig = names.iter().find_map(|name| {
+            index
+                .borrow_mut()
+                .inherited_return(name, &method, &resolve_file)
+        })?;
+        let ret = sig.return_type?;
+        let Type::Path { path, params, .. } = &ret else {
+            return None;
+        };
+        let builtin = (path.package.is_empty() || path.package == ["StdTypes"])
+            && params.is_empty()
+            && matches!(path.name.as_str(), "String" | "Bool" | "Int" | "Void");
+        builtin.then_some(ret)
+    }
+
     /// If `field_name` names a data field of *function* type on the class of
     /// `receiver_type`, return `(field_symbol, function_type)`. This lets a call
     /// `obj.fieldFn(args)` be lowered as an indirect call through the field value

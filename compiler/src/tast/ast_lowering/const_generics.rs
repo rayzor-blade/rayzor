@@ -283,7 +283,9 @@ impl Substitution {
             Type::Anonymous { fields, .. } => fields
                 .iter_mut()
                 .for_each(|field| self.ty(&mut field.type_hint)),
-            Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => self.ty(inner),
+            Type::Optional { inner, .. }
+            | Type::Parenthesis { inner, .. }
+            | Type::Named { inner, .. } => self.ty(inner),
             Type::Intersection { left, right, .. } => {
                 self.ty(left);
                 self.ty(right);

@@ -903,7 +903,9 @@ pub fn type_to_blade(ty: &parser::Type) -> BladeType {
                 .collect(),
         },
         parser::Type::Optional { inner, .. } => BladeType::Optional(Box::new(type_to_blade(inner))),
-        parser::Type::Parenthesis { inner, .. } => type_to_blade(inner),
+        parser::Type::Parenthesis { inner, .. } | parser::Type::Named { inner, .. } => {
+            type_to_blade(inner)
+        }
         parser::Type::Intersection { left, right, .. } => BladeType::Intersection {
             left: Box::new(type_to_blade(left)),
             right: Box::new(type_to_blade(right)),

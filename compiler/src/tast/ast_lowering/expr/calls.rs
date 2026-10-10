@@ -6369,7 +6369,10 @@ impl<'a> AstLowering<'a> {
                         // index and type this symbol from it, so the call's
                         // return doesn't decay to Dynamic (whose later member
                         // dispatch guesses among same-named methods).
-                        if let Some(sig) = self.resolve_declared_method_sig(cs, mn, false) {
+                        if let Some(mut sig) = self.resolve_declared_method_sig(cs, mn, false) {
+                            if sig.return_type.is_none() && sig.type_params.is_empty() {
+                                sig.return_type = self.inherited_method_return(cs, mn);
+                            }
                             let fn_ty = self.apply_declared_sig(method_symbol, &sig);
                             let ret = {
                                 let tt = self.context.type_table.borrow();

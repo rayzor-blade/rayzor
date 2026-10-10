@@ -144,9 +144,87 @@ impl AstLowering<'_> {
                 );
                 return Err(error(format!("Cannot compare {left} and {right}")));
             }
+            TypedExpressionKind::Cast {
+                expression: literal,
+                target_type,
+                cast_kind: CastKind::Checked,
+            } => {
+                if let Some(message) = self.macro_probe_structure_mismatch(literal, *target_type) {
+                    return Err(error(message));
+                }
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    /// `({..} : {..})`: the literal must supply every required field of the
+    /// structure and no other. Haxe lists fields in descending name order and
+    /// names the last extra field the literal declares.
+    fn macro_probe_structure_mismatch(
+        &self,
+        mut literal: &TypedExpression,
+        target: TypeId,
+    ) -> Option<String> {
+        while let TypedExpressionKind::Cast {
+            expression,
+            cast_kind: CastKind::Implicit,
+            ..
+        } = &literal.kind
+        {
+            literal = &**expression;
+        }
+        let TypedExpressionKind::ObjectLiteral { fields } = &literal.kind else {
+            return None;
+        };
+        let expected: Vec<_> = {
+            let table = self.context.type_table.borrow();
+            match table
+                .get(Self::resolve_alias_chain(&table, target))
+                .map(|ty| &ty.kind)
+            {
+                Some(TypeKind::Anonymous { fields }) => {
+                    fields.iter().map(|f| (f.name, f.optional)).collect()
+                }
+                _ => return None,
+            }
+        };
+        let name = |id| self.context.string_interner.get(id).unwrap_or("");
+        let mut missing: Vec<&str> = expected
+            .iter()
+            .filter(|(field, optional)| !optional && !fields.iter().any(|f| f.name == *field))
+            .map(|(field, _)| name(*field))
+            .collect();
+        missing.sort_unstable_by(|a, b| b.cmp(a));
+        match missing.as_slice() {
+            [] => {}
+            [one] => return Some(format!("Object requires field {one}")),
+            many => return Some(format!("Object requires fields: {}", many.join(", "))),
+        }
+        let extra = fields
+            .iter()
+            .rev()
+            .find(|f| !expected.iter().any(|(field, _)| *field == f.name))?;
+        let mut shown: Vec<(&str, String)> = fields
+            .iter()
+            .map(|f| {
+                let ty = super::macro_defer::render_type(
+                    f.value.expr_type,
+                    self.context.type_table,
+                    self.context.symbol_table,
+                    self.context.string_interner,
+                    0,
+                );
+                (name(f.name), ty)
+            })
+            .collect();
+        shown.sort_by(|a, b| b.0.cmp(&a.0));
+        let shown: Vec<String> = shown.iter().map(|(n, t)| format!("{n} : {t}")).collect();
+        Some(format!(
+            "{{ {} }} has extra field {}",
+            shown.join(", "),
+            name(extra.name)
+        ))
     }
 
     /// One abstract reaches another only through a cast either declares

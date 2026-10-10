@@ -437,7 +437,9 @@ impl<'a> TypeResolver<'a> {
                     self.collect_type_refs_from_parser_type(&field.type_hint, deps, declared_names);
                 }
             }
-            ParserType::Optional { inner, .. } | ParserType::Parenthesis { inner, .. } => {
+            ParserType::Optional { inner, .. }
+            | ParserType::Parenthesis { inner, .. }
+            | ParserType::Named { inner, .. } => {
                 self.collect_type_refs_from_parser_type(inner, deps, declared_names);
             }
             ParserType::Intersection { left, right, .. } => {
@@ -926,7 +928,9 @@ impl<'a> TypeResolver<'a> {
                 Ok(type_id)
             }
 
-            ParserType::Parenthesis { inner, .. } => self.resolve_type_reference(inner),
+            ParserType::Parenthesis { inner, .. } | ParserType::Named { inner, .. } => {
+                self.resolve_type_reference(inner)
+            }
 
             ParserType::Anonymous { fields, .. } => {
                 let mut anon_fields = Vec::new();

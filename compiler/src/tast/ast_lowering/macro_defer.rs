@@ -684,6 +684,61 @@ impl AstLowering<'_> {
 }
 
 impl DeferredMacroTyper<'_, '_> {
+    /// An `@:overload` signature as a `ClassField`. Its type is a `TFun` over
+    /// `{name, opt, t}` args, as haxe builds it; a function TypeId has no
+    /// argument names.
+    fn overload_field_view(
+        &mut self,
+        name: &str,
+        func: &parser::Function,
+    ) -> crate::macro_system::value::MacroValue {
+        use crate::macro_system::value::MacroValue as V;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        let errors_before = self.lowering.collected_errors.len();
+        let ctx_errors_before = self.lowering.context.errors.len();
+        let (dynamic, void) = {
+            let table = self.lowering.context.type_table.borrow();
+            (table.dynamic_type(), table.void_type())
+        };
+        let mut args = Vec::with_capacity(func.params.len());
+        for param in &func.params {
+            let t = param.type_hint.as_ref().map_or(dynamic, |hint| {
+                self.lowering.lower_type(hint).unwrap_or(dynamic)
+            });
+            args.push(V::Object(Arc::new(BTreeMap::from([
+                (
+                    "name".to_string(),
+                    V::String(Arc::from(param.name.as_str())),
+                ),
+                ("opt".to_string(), V::Bool(param.optional)),
+                ("t".to_string(), V::Type(t)),
+            ]))));
+        }
+        let ret = func.return_type.as_ref().map_or(void, |hint| {
+            self.lowering.lower_type(hint).unwrap_or(dynamic)
+        });
+        self.lowering.collected_errors.truncate(errors_before);
+        self.lowering.context.errors.truncate(ctx_errors_before);
+        let fun = V::Enum(
+            Arc::from("Type"),
+            Arc::from("TFun"),
+            Arc::new(vec![V::Array(Arc::new(args)), V::Type(ret)]),
+        );
+        V::Object(Arc::new(BTreeMap::from([
+            ("name".to_string(), V::String(Arc::from(name))),
+            ("type".to_string(), fun),
+            (
+                "meta".to_string(),
+                V::Object(Arc::new(BTreeMap::from([(
+                    "__meta__".to_string(),
+                    V::Array(Arc::new(Vec::new())),
+                )]))),
+            ),
+        ])))
+    }
+
     fn definition_target(&self, symbol: crate::tast::SymbolId) -> Option<TypeId> {
         let table = self.lowering.context.type_table.borrow();
         let sym = self.lowering.context.symbol_table.get_symbol(symbol)?;
@@ -1290,18 +1345,27 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 let Some(sym) = self.lowering.context.symbol_table.get_symbol(member) else {
                     continue;
                 };
+                let type_id = sym.type_id;
+                let field_name = self
+                    .lowering
+                    .context
+                    .string_interner
+                    .get(name)
+                    .unwrap_or("")
+                    .to_string();
+                let overloads = self
+                    .lowering
+                    .method_overloads
+                    .get(&member)
+                    .cloned()
+                    .unwrap_or_default();
+                let overloads = overloads
+                    .iter()
+                    .map(|func| self.overload_field_view(&field_name, func))
+                    .collect();
                 let entry = object(BTreeMap::from([
-                    (
-                        "name".to_string(),
-                        string(
-                            self.lowering
-                                .context
-                                .string_interner
-                                .get(name)
-                                .unwrap_or(""),
-                        ),
-                    ),
-                    ("type".to_string(), V::Type(sym.type_id)),
+                    ("name".to_string(), string(&field_name)),
+                    ("type".to_string(), V::Type(type_id)),
                     (
                         "meta".to_string(),
                         object(BTreeMap::from([(
@@ -1309,6 +1373,7 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                             array(Vec::new()),
                         )])),
                     ),
+                    ("overloads".to_string(), reference(array(overloads))),
                 ]));
                 if is_static {
                     statics.push(entry);

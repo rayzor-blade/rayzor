@@ -469,6 +469,11 @@ impl Reifier {
             parser::Type::Parenthesis { inner, .. } => {
                 self.ctor("ComplexType", "TParent", vec![self.complex_type(inner)?])
             }
+            parser::Type::Named { name, inner, .. } => self.ctor(
+                "ComplexType",
+                "TNamed",
+                vec![self.string(name), self.complex_type(inner)?],
+            ),
             parser::Type::Intersection { .. } if extension_parts(t).is_some() => {
                 let (extended, fields) = extension_parts(t)?;
                 let paths = extended

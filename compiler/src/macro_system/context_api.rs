@@ -1591,9 +1591,9 @@ fn qualify_std_types_module(t: &mut parser::Type) {
                 qualify_std_types_module(&mut field.type_hint);
             }
         }
-        Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => {
-            qualify_std_types_module(inner)
-        }
+        Type::Optional { inner, .. }
+        | Type::Parenthesis { inner, .. }
+        | Type::Named { inner, .. } => qualify_std_types_module(inner),
         Type::Intersection { left, right, .. } => {
             qualify_std_types_module(left);
             qualify_std_types_module(right);

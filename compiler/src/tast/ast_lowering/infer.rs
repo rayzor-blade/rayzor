@@ -607,24 +607,8 @@ impl<'a> AstLowering<'a> {
             TypedExpressionKind::New { class_type, .. } => Ok(*class_type),
             TypedExpressionKind::ArrayLiteral { elements } => {
                 if let Some(first_element) = elements.first() {
-                    let types: Vec<TypeId> = elements.iter().map(|e| e.expr_type).collect();
-                    let values: Vec<TypeId> = elements
-                        .iter()
-                        .filter(|e| !matches!(e.kind, TypedExpressionKind::Null))
-                        .map(|e| e.expr_type)
-                        .collect();
-                    // A `null` element makes a reference element `Null<T>`;
-                    // other types keep the first element's.
-                    let unified = self.unify_min(&values).and_then(|ty| {
-                        if values.len() == elements.len() {
-                            Some(ty)
-                        } else {
-                            self.nullable_slot(ty)
-                        }
-                    });
                     let element_type = self
-                        .common_function_type(&types)
-                        .or(unified)
+                        .literal_slot_type(elements.iter())
                         .unwrap_or(first_element.expr_type);
                     Ok(self
                         .context
@@ -1234,14 +1218,18 @@ impl<'a> AstLowering<'a> {
             TypedExpressionKind::VarDeclarationExpr { var_type, .. } => Ok(*var_type),
             TypedExpressionKind::FinalDeclarationExpr { var_type, .. } => Ok(*var_type),
             TypedExpressionKind::MapLiteral { entries } => {
-                // Infer key and value types from initial values
+                // Keys and values each unify as an array literal's elements do.
                 let (key_type, value_type) = if entries.is_empty() {
                     let dyn_type = self.context.type_table.borrow().dynamic_type();
                     (dyn_type, dyn_type)
                 } else {
-                    // Use first entry to infer types
                     let first = &entries[0];
-                    (first.key.expr_type, first.value.expr_type)
+                    (
+                        self.literal_slot_type(entries.iter().map(|e| &e.key))
+                            .unwrap_or(first.key.expr_type),
+                        self.literal_slot_type(entries.iter().map(|e| &e.value))
+                            .unwrap_or(first.value.expr_type),
+                    )
                 };
                 // Typed like `new Map<K, V>()`: the concrete map for K, so its
                 // methods resolve with V known.
@@ -1865,6 +1853,30 @@ impl<'a> AstLowering<'a> {
         )
     }
 
+    /// The element type of a literal holding `values`: their common function
+    /// type, else their `unify_min`, made `Null<T>` for a reference type when
+    /// a `null` is among them.
+    fn literal_slot_type<'e>(
+        &self,
+        values: impl Iterator<Item = &'e TypedExpression>,
+    ) -> Option<TypeId> {
+        let values: Vec<&TypedExpression> = values.collect();
+        let types: Vec<TypeId> = values.iter().map(|e| e.expr_type).collect();
+        let non_null: Vec<TypeId> = values
+            .iter()
+            .filter(|e| !matches!(e.kind, TypedExpressionKind::Null))
+            .map(|e| e.expr_type)
+            .collect();
+        let unified = self.unify_min(&non_null).and_then(|ty| {
+            if non_null.len() == values.len() {
+                Some(ty)
+            } else {
+                self.nullable_slot(ty)
+            }
+        });
+        self.common_function_type(&types).or(unified)
+    }
+
     /// The type haxe's `unify_min` gives values of `types`: the most general
     /// of them when each of the others unifies with it; else, for object
     /// literals of one shape, that shape with each field unified; else the
@@ -1928,8 +1940,8 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Whether a value of `from` can be used as `to`, for `unify_min`.
-    /// Classes extend or implement; structures match field for field. A
-    /// class instance is not taken as a structure: it is not laid out as
+    /// Classes extend or implement; structures match on the fields `to`
+    /// names. A class instance is not taken as a structure: it is not laid out as
     /// one. Generic instances only unify when identical.
     fn unifies_with(&self, from: TypeId, to: TypeId) -> bool {
         let (from, to) = (self.unalias(from), self.unalias(to));
@@ -1987,12 +1999,26 @@ impl<'a> AstLowering<'a> {
                     && interface_args.is_empty()
                     && self.type_declares_interface(*class, *interface)
             }
+            // Fields are read by name-sorted slot, so `to`'s fields must take
+            // the same slots in `from`.
             (TypeKind::Anonymous { fields: have }, TypeKind::Anonymous { fields: want }) => {
-                have.len() == want.len()
-                    && want.iter().all(|w| {
-                        have.iter()
-                            .any(|h| h.name == w.name && self.same_type(h.type_id, w.type_id))
-                    })
+                let sorted = |fields: &[AnonymousField]| {
+                    let mut names: Vec<(&str, TypeId)> = fields
+                        .iter()
+                        .map(|f| {
+                            let name = self.context.string_interner.get(f.name);
+                            (name.unwrap_or_default(), f.type_id)
+                        })
+                        .collect();
+                    names.sort_by(|a, b| a.0.cmp(&b.0));
+                    names
+                };
+                let (have, want) = (sorted(have.as_slice()), sorted(want.as_slice()));
+                want.len() <= have.len()
+                    && want
+                        .iter()
+                        .zip(&have)
+                        .all(|((wn, wt), (hn, ht))| wn == hn && self.same_type(*ht, *wt))
             }
             _ => false,
         }

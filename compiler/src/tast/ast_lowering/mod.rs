@@ -1727,6 +1727,9 @@ pub struct AstLowering<'a> {
     /// Each abstract's `@:op` unary operators: (operator, method name), in
     /// declaration order. `AbstractType.unops` in macros reads these.
     pub(crate) abstract_unops: BTreeMap<SymbolId, Vec<(parser::UnaryOp, String)>>,
+    /// Each method's `@:overload(function ..)` signatures, in declaration
+    /// order. `ClassField.overloads` in macros reads these.
+    pub(crate) method_overloads: BTreeMap<SymbolId, Vec<parser::Function>>,
     /// Parameters the source annotates `Dynamic`. Callers box what they pass,
     /// so these hold boxes; a Dynamic that is merely a decay may not.
     pub(crate) annotated_dynamic_params: std::collections::BTreeSet<SymbolId>,

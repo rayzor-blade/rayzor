@@ -1040,9 +1040,9 @@ fn erase_type_params(ty: &mut Type, names: &[String]) {
                 erase_type_params(&mut f.type_hint, names);
             }
         }
-        Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => {
-            erase_type_params(inner, names)
-        }
+        Type::Optional { inner, .. }
+        | Type::Parenthesis { inner, .. }
+        | Type::Named { inner, .. } => erase_type_params(inner, names),
         Type::Intersection { left, right, .. } => {
             erase_type_params(left, names);
             erase_type_params(right, names);

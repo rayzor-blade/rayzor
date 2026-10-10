@@ -223,6 +223,37 @@ impl<'a> AstLowering<'a> {
         self.lower_expression(expr)
     }
 
+    /// With a Float among Int and Float literal values, the Int ones widen.
+    fn widen_mixed_numeric(&self, mut values: Vec<&mut TypedExpression>) {
+        let (int_t, float_t) = {
+            let tt = self.context.type_table.borrow();
+            (tt.int_type(), tt.float_type())
+        };
+        if !values.iter().any(|e| e.expr_type == float_t)
+            || !values
+                .iter()
+                .all(|e| e.expr_type == float_t || e.expr_type == int_t)
+        {
+            return;
+        }
+        for e in values.iter_mut().filter(|e| e.expr_type == int_t) {
+            let widened = match e.kind {
+                TypedExpressionKind::Literal {
+                    value: LiteralValue::Int(n),
+                } => TypedExpressionKind::Literal {
+                    value: LiteralValue::Float(n as f64),
+                },
+                _ => TypedExpressionKind::Cast {
+                    expression: Box::new((**e).clone()),
+                    target_type: float_t,
+                    cast_kind: CastKind::Implicit,
+                },
+            };
+            e.kind = widened;
+            e.expr_type = float_t;
+        }
+    }
+
     /// The elements of a `@:mergeBlock { .. }` block element.
     fn merge_block_body(elem: &parser::BlockElement) -> Option<&Vec<parser::BlockElement>> {
         let parser::BlockElement::Expr(e) = elem else {
@@ -1907,33 +1938,8 @@ impl<'a> AstLowering<'a> {
                 self.expected_arg_type_stack.pop();
                 self.context.expected_new_type_hint = previous_hint;
                 let mut element_exprs = lowered?;
-                // `[1, 2.5]` is Array<Float>: its Int elements widen.
-                let (int_t, float_t) = {
-                    let tt = self.context.type_table.borrow();
-                    (tt.int_type(), tt.float_type())
-                };
-                if element_exprs.iter().any(|e| e.expr_type == float_t)
-                    && element_exprs
-                        .iter()
-                        .all(|e| e.expr_type == float_t || e.expr_type == int_t)
-                {
-                    for e in element_exprs.iter_mut().filter(|e| e.expr_type == int_t) {
-                        let widened = match e.kind {
-                            TypedExpressionKind::Literal {
-                                value: LiteralValue::Int(n),
-                            } => TypedExpressionKind::Literal {
-                                value: LiteralValue::Float(n as f64),
-                            },
-                            _ => TypedExpressionKind::Cast {
-                                expression: Box::new(e.clone()),
-                                target_type: float_t,
-                                cast_kind: CastKind::Implicit,
-                            },
-                        };
-                        e.kind = widened;
-                        e.expr_type = float_t;
-                    }
-                }
+                // `[1, 2.5]` is Array<Float>.
+                self.widen_mixed_numeric(element_exprs.iter_mut().collect());
 
                 TypedExpressionKind::ArrayLiteral {
                     elements: element_exprs,
@@ -2187,8 +2193,8 @@ impl<'a> AstLowering<'a> {
                 let expected_types = expected.and_then(|ty| self.map_literal_entry_types(ty));
                 let mut typed_entries = Vec::with_capacity(entries.len());
                 for (key_expr, value_expr) in entries {
-                    let key = self.lower_expression(key_expr)?;
-                    let value = self.lower_expression(value_expr)?;
+                    let key = self.lower_value_expression(key_expr)?;
+                    let value = self.lower_value_expression(value_expr)?;
                     let key_target = expected_types.map(|(key, _)| key);
                     let value_target = expected_types.map(|(_, value)| value);
                     let key = self.coerce_arg_via_abstract_to(key, key_target);
@@ -2201,6 +2207,8 @@ impl<'a> AstLowering<'a> {
                         source_location: self.context.create_location(),
                     });
                 }
+                // `["a" => 1, "b" => 2.5]` is Map<String, Float>.
+                self.widen_mixed_numeric(typed_entries.iter_mut().map(|e| &mut e.value).collect());
                 TypedExpressionKind::MapLiteral {
                     entries: typed_entries,
                 }
@@ -2224,7 +2232,7 @@ impl<'a> AstLowering<'a> {
                         self.expected_lambda_params_stack.pop();
                         value?
                     } else {
-                        self.lower_expression(&field.expr)?
+                        self.lower_value_expression(&field.expr)?
                     };
                     let field_name = self.context.intern_string(&field.name);
                     typed_fields.push(TypedObjectField {

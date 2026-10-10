@@ -581,6 +581,19 @@ impl<'a> AstLowering<'a> {
                 .unwrap_or("<none>");
         }
 
+        let overloads: Vec<Function> = field
+            .meta
+            .iter()
+            .filter(|m| m.name == "overload")
+            .filter_map(|m| match &m.params.first()?.kind {
+                ExprKind::Function(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
+        if !overloads.is_empty() {
+            self.method_overloads.insert(function_symbol, overloads);
+        }
+
         // Also track this method in our class_fields for field resolution
         if let Some(class_symbol) = current_class {
             if let Some(fields_list) = self.class_fields.get_mut(&class_symbol) {

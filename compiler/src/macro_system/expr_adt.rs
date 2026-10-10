@@ -228,6 +228,11 @@ pub fn complex_type_of(t: &Type) -> MacroValue {
         Type::Parenthesis { inner, .. } => {
             en("ComplexType", "TParent", vec![complex_type_of(inner)])
         }
+        Type::Named { name, inner, .. } => en(
+            "ComplexType",
+            "TNamed",
+            vec![s(name), complex_type_of(inner)],
+        ),
         Type::Intersection { left, right, .. } => en(
             "ComplexType",
             "TIntersection",
@@ -334,6 +339,11 @@ pub fn type_of_value(v: &MacroValue, span: Span) -> Option<Type> {
                     span,
                 }),
                 ("TParent", [inner]) => Some(Type::Parenthesis {
+                    inner: Box::new(type_of_value(inner, span)?),
+                    span,
+                }),
+                ("TNamed", [name, inner]) => Some(Type::Named {
+                    name: string_of(Some(name))?,
                     inner: Box::new(type_of_value(inner, span)?),
                     span,
                 }),
@@ -1386,7 +1396,9 @@ pub fn is_expr_type(t: &Type) -> bool {
             "Rest" | "Array" => params.first().is_some_and(is_expr_type),
             _ => false,
         },
-        Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => is_expr_type(inner),
+        Type::Optional { inner, .. }
+        | Type::Parenthesis { inner, .. }
+        | Type::Named { inner, .. } => is_expr_type(inner),
         _ => false,
     }
 }
