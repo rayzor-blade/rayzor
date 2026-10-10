@@ -159,6 +159,7 @@ impl<'a> HirToMirContext<'a> {
                 IrType::U64 => IrValue::U64(0),
                 IrType::F32 => IrValue::F32(0.0),
                 IrType::F64 => IrValue::F64(0.0),
+                IrType::NullInt => IrValue::null_int(),
                 _ => IrValue::Null,
             },
             Some(init) => init.clone(),
@@ -225,6 +226,9 @@ impl<'a> HirToMirContext<'a> {
     /// Build a type-based default value: 0 for Int, 0.0 for Float, false for Bool, "" for String,
     /// recursive default or no-arg constructor for classes, null otherwise.
     pub(crate) fn build_type_default(&mut self, field_type_id: TypeId) -> Option<IrId> {
+        if self.is_null_int_type(field_type_id) {
+            return self.builder.build_null_int();
+        }
         let type_kind = {
             let type_table = self.type_table;
             type_table.get(field_type_id).map(|t| t.kind.clone())

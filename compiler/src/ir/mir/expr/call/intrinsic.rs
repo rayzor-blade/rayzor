@@ -343,6 +343,20 @@ impl<'a> HirToMirContext<'a> {
                 .get_register_type(arg_reg)
                 .unwrap_or_else(|| self.convert_type(arg.ty));
 
+            // A `Null<Int>` prints "null" for `NULL_INT`, else its Int.
+            if actual_reg_type == IrType::NullInt {
+                let ptr_string = IrType::Ptr(Box::new(IrType::String));
+                let text = self.convert_to_string(arg_reg, &IrType::NullInt)?;
+                let trace_id = self.get_or_register_extern_function(
+                    "haxe_trace_string_struct",
+                    vec![ptr_string],
+                    IrType::Void,
+                );
+                return self
+                    .builder
+                    .build_call_direct(trace_id, vec![text], IrType::Void);
+            }
+
             let mut arg_type = actual_reg_type.clone();
             // A Ptr(Void) register defers to the symbol's type: trace(t) where t is a
             // float from Sys.time() still has a Dynamic trace() signature. Ptr(U8) is
@@ -482,6 +496,7 @@ impl<'a> HirToMirContext<'a> {
                     &hir_type_kind,
                     Some(crate::tast::core::TypeKind::Optional { .. })
                 )
+                && !self.is_null_int_type(arg.ty)
                 && !matches!(&arg.kind, HirExprKind::Call { .. });
 
             let trace_method = {
@@ -738,6 +753,13 @@ impl<'a> HirToMirContext<'a> {
                     vec![as_ptr],
                     IrType::Ptr(Box::new(IrType::String)),
                 );
+            }
+
+            // A `Null<Int>` prints "null" or its Int.
+            if arg_type == IrType::NullInt {
+                let arg_reg = self.lower_expression(arg)?;
+                let value = self.to_null_int(arg_reg)?;
+                return self.convert_to_string(value, &IrType::NullInt);
             }
 
             // These MIR wrappers forward to the extern runtime functions.

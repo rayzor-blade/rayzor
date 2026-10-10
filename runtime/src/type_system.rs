@@ -274,6 +274,7 @@ pub enum ParamType {
     Array = 6,   // HaxeArray pointer
     Anon = 7,    // anonymous object handle
     Boxed = 8,   // DynamicValue pointer or null (a `Null<scalar>` slot)
+    NullInt = 9, // unboxed `Null<Int>`: `NULL_INT` is null, else an Int
 }
 
 /// Enum variant metadata
@@ -1342,7 +1343,8 @@ pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32, string_params:
                 | ParamType::Dynamic
                 | ParamType::Array
                 | ParamType::Anon
-                | ParamType::Boxed => va == vb,
+                | ParamType::Boxed
+                | ParamType::NullInt => va == vb,
                 ParamType::Float => f64::from_bits(va as u64) == f64::from_bits(vb as u64),
                 ParamType::String => haxe_string_ptr_eq(va, vb),
             };
@@ -1507,8 +1509,11 @@ fn create_enum_value_from_slots(
             let mut val = slot;
             // Array<Dynamic> holds boxed values, while an enum field uses
             // its declared representation. Match only the expected box tag
-            // so a raw pointer cannot be mistaken for a DynamicValue.
-            if let Some(param_type) = param_types.get(i)
+            // so a raw pointer cannot be mistaken for a DynamicValue. A
+            // `Null<Int>` field takes the box (or null) as a `NullInt`.
+            if param_types.get(i) == Some(&ParamType::NullInt) {
+                val = haxe_null_int_from_dynamic(val as *mut u8);
+            } else if let Some(param_type) = param_types.get(i)
                 && let Some(dynamic) = dynamic_box_at(val as *mut u8)
             {
                 val = match (param_type, dynamic.type_id) {
@@ -2242,6 +2247,14 @@ fn format_enum_boxed(type_id: u32, ptr: *const u8) -> String {
                         None => out.push_str(&val.to_string()),
                     }
                 }
+                ParamType::NullInt => {
+                    let val = *(field_ptr as *const i64);
+                    if val == NULL_INT {
+                        out.push_str("null");
+                    } else {
+                        out.push_str(&(val as i32).to_string());
+                    }
+                }
                 ParamType::Boxed => {
                     let val = *(field_ptr as *const i64);
                     let text = if val == 0 {
@@ -2404,6 +2417,14 @@ pub extern "C" fn haxe_trace_enum_boxed_typed(
                     ParamType::Int => {
                         let val = *(field_ptr as *const i64);
                         print!("{}", val);
+                    }
+                    ParamType::NullInt => {
+                        let val = *(field_ptr as *const i64);
+                        if val == NULL_INT {
+                            print!("null");
+                        } else {
+                            print!("{}", val as i32);
+                        }
                     }
                     ParamType::Float => {
                         let val = *(field_ptr as *const f64);
@@ -4244,6 +4265,7 @@ pub unsafe fn box_class_field_as_dynamic(value: u64, ty: ParamType) -> *mut u8 {
             haxe_box_reference_ptr(value as *mut u8, crate::anon_object::TYPE_ANON_OBJECT.0)
         }
         ParamType::Boxed => value as *mut u8,
+        ParamType::NullInt => haxe_null_int_to_dynamic(value as i64),
     }
 }
 

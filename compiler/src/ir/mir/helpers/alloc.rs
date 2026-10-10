@@ -150,6 +150,56 @@ impl<'a> HirToMirContext<'a> {
         Some(obj_ptr)
     }
 
+    /// Write `NULL_INT` into the `Null<Int>` slots of a `class_symbol`
+    /// instance -- its own fields, and its ancestors' with `inherited` -- since
+    /// a zeroed slot reads as Int 0, not null.
+    pub(crate) fn fill_null_int_fields(
+        &mut self,
+        object: IrId,
+        class_symbol: SymbolId,
+        inherited: bool,
+    ) -> Option<()> {
+        // A `@:cstruct` lays its fields out by C rules, not in 8-byte slots.
+        if self
+            .symbol_table
+            .get_symbol(class_symbol)
+            .is_some_and(|s| s.flags.is_cstruct())
+        {
+            return Some(());
+        }
+        let mut fields = self
+            .class_instance_fields
+            .get(&class_symbol)
+            .cloned()
+            .unwrap_or_default();
+        if inherited {
+            let mut seen = vec![class_symbol];
+            let mut current = class_symbol;
+            while let Some(parent) = self.parent_class_symbol(current) {
+                if seen.contains(&parent) {
+                    break;
+                }
+                seen.push(parent);
+                if let Some(parent_fields) = self.class_instance_fields.get(&parent) {
+                    fields.extend(parent_fields.iter().copied());
+                }
+                current = parent;
+            }
+        }
+        for (_, field_type, index) in fields {
+            if !self.is_null_int_type(field_type) {
+                continue;
+            }
+            let null = self.builder.build_null_int()?;
+            let index = self.builder.build_const(IrValue::I32(index as i32))?;
+            let slot = self
+                .builder
+                .build_gep(object, vec![index], IrType::NullInt)?;
+            self.builder.build_store(slot, null)?;
+        }
+        Some(())
+    }
+
     /// Expand a class instance's allocation size to cover its full inheritance
     /// chain. A subclass contains every field of its parent at the same slot
     /// indices, so its allocation must be at least as large as the parent's.

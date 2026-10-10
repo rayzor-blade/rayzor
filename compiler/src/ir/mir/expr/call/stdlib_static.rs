@@ -236,6 +236,9 @@ impl<'a> HirToMirContext<'a> {
                                                     debug!("[STATIC METHOD BOX] box_value_for_dynamic returned None for arg {}", i);
                                                 }
                                                 debug!("[STATIC METHOD] Casting arg {} from {:?} to {:?}", i, actual_ty, expected_ty);
+                                                if let Some(converted) = self.coerce_null_int(reg, expected_ty) {
+                                                    return converted;
+                                                }
                                                 if let Some(casted) = self.builder.build_cast(reg, actual_ty.clone(), expected_ty.clone()) {
                                                     return casted;
                                                 }
@@ -422,6 +425,10 @@ impl<'a> HirToMirContext<'a> {
                                     expected_param_types.get(i),
                                     self.builder.get_register_type(reg),
                                 ) {
+                                    if let Some(converted) = self.coerce_null_int(reg, expected_ty)
+                                    {
+                                        return converted;
+                                    }
                                     if *expected_ty != actual_ty {
                                         if let Some(casted) = self.builder.build_cast(
                                             reg,

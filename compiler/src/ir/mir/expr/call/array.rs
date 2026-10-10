@@ -199,6 +199,21 @@ impl<'a> HirToMirContext<'a> {
                     })
                     .unwrap_or((false, false))
             };
+            // An `Array<Null<Int>>` slot holds a box or null.
+            if self.array_of_null_int(args[0].ty) {
+                let arr = self.lower_expression(&args[0])?;
+                let value = self.lower_expression(&args[1])?;
+                let boxed = self.null_int_slot_box(value)?;
+                let slot = self.builder.build_bitcast(boxed, IrType::I64)?;
+                let push = self.get_or_register_extern_function(
+                    "haxe_array_push_i64",
+                    vec![IrType::Ptr(Box::new(IrType::I64)), IrType::I64],
+                    IrType::Void,
+                );
+                return self
+                    .builder
+                    .build_call_direct(push, vec![arr, slot], IrType::Void);
+            }
             // Dynamic string slots need a tag for value-based equality.
             if elem_is_dynamic && self.convert_type(args[1].ty) == IrType::String {
                 let arr = self.lower_expression(&args[0])?;

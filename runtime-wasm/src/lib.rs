@@ -978,6 +978,51 @@ pub extern "C" fn haxe_coerce_dynamic_to_int(ptr: i32) -> i32 {
     ptr
 }
 
+/// Null of an unboxed `Null<Int>` (a wasm i64): outside the i32 range.
+const NULL_INT: i64 = 1 << 32;
+
+/// A `Null<Int>` bound for a Dynamic slot: null for null, else an Int box.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_null_int_to_dynamic(value: i64) -> i32 {
+    if value == NULL_INT {
+        return 0;
+    }
+    haxe_box_int_ptr(value as i32)
+}
+
+/// A Dynamic read as an unboxed `Null<Int>`: null or a null box is
+/// `NULL_INT`, a box gives its Int, a raw scalar is that Int. Same
+/// heuristic as `haxe_coerce_dynamic_to_int`.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_null_int_from_dynamic(ptr: i32) -> i64 {
+    if ptr == 0 {
+        return NULL_INT;
+    }
+    let addr = ptr as u32;
+    if addr >= 0x1000 && (addr & 3) == 0 {
+        let (type_id, _) = unsafe { read_dynamic(ptr) };
+        if type_id == TYPE_NULL {
+            return NULL_INT;
+        }
+    }
+    i64::from(haxe_coerce_dynamic_to_int(ptr))
+}
+
+/// A `Null<Int>` as a HaxeString: "null" or the Int.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_null_int_to_string(value: i64) -> i32 {
+    if value != NULL_INT {
+        return haxe_string_from_int(value as i32);
+    }
+    let out = rt_alloc(12);
+    if out == 0 {
+        return 0;
+    }
+    let text = b"null";
+    haxe_string_from_bytes(out, text.as_ptr() as i32, text.len() as i32);
+    out
+}
+
 /// Safely coerce a Dynamic-typed value to a Float. Same heuristic as
 /// `haxe_coerce_dynamic_to_int`.
 #[unsafe(no_mangle)]

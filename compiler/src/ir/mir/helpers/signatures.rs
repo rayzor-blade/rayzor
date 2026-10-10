@@ -363,6 +363,20 @@ impl<'a> HirToMirContext<'a> {
         if matches!(arg_expr.kind, HirExprKind::Null) {
             return self.lower_expression(&default_expr);
         }
+        // A `Null<Int>` argument: the default when it holds `NULL_INT`.
+        if self.builder.get_register_type(arg_reg) == Some(IrType::NullInt) {
+            let is_null = self.null_int_is_null(arg_reg)?;
+            let value = self.null_int_to_ir(arg_reg, &formal)?;
+            let default = self.lower_expression(&default_expr)?;
+            let default = match self.builder.get_register_type(default) {
+                Some(have @ (IrType::I32 | IrType::I64)) if formal == IrType::F64 => self
+                    .builder
+                    .build_cast(default, have, IrType::F64)
+                    .unwrap_or(default),
+                _ => default,
+            };
+            return self.builder.build_select(is_null, default, value);
+        }
         let nullable = matches!(
             self.type_table
                 .get(self.resolve_through_aliases(arg_expr.ty))
@@ -562,6 +576,13 @@ impl<'a> HirToMirContext<'a> {
             for i in total_provided..sig_param_count {
                 let default_val = if i < sig_params.len() {
                     match &sig_params[i] {
+                        // An omitted `Null<Int>` is null, not 0.
+                        IrType::NullInt => {
+                            if let Some(reg) = self.builder.build_null_int() {
+                                arg_regs.push(reg);
+                            }
+                            continue;
+                        }
                         IrType::I32 | IrType::U32 => IrValue::I32(0),
                         IrType::F32 => IrValue::F32(0.0),
                         IrType::F64 => IrValue::F64(0.0),
@@ -853,6 +874,16 @@ impl<'a> HirToMirContext<'a> {
                         self.unbox_optional_for_erased_formal(arg_reg, resolved_arg, resolved_param)
                     {
                         return erased;
+                    }
+                    // A `Null<Int>` meets any other formal by value: a box slot
+                    // (`Null<T>`, Dynamic) takes its box, an Int its value.
+                    if self.builder.get_register_type(arg_reg) == Some(IrType::NullInt) {
+                        let formal_ir = self.convert_type(param_type_id);
+                        if formal_ir != IrType::NullInt {
+                            if let Some(converted) = self.null_int_to_ir(arg_reg, &formal_ir) {
+                                return converted;
+                            }
+                        }
                     }
                     // A register KNOWN to hold a box (a Dynamic call's result)
                     // handed to a typed or erased formal comes out of it.

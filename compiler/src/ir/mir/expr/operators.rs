@@ -60,6 +60,15 @@ impl<'a> HirToMirContext<'a> {
         Some(result)
     }
 
+    /// The stepped scalar written back where `opened` came from: a `NullInt`
+    /// sign-extends, a box re-boxes.
+    fn close_nullable_scalar(&mut self, opened: IrId, value: IrId) -> Option<IrId> {
+        if self.builder.get_register_type(opened) == Some(IrType::NullInt) {
+            return self.to_null_int(value);
+        }
+        self.box_scalar_register(value)
+    }
+
     /// `x + 1` or `x - 1` for `++`/`--`; a Dynamic operand is a box or a raw
     /// slot, so it steps through the runtime's Dynamic arithmetic.
     fn step_value(&mut self, old: IrId, operand_ty: TypeId, increment: bool) -> Option<IrId> {
@@ -151,7 +160,7 @@ impl<'a> HirToMirContext<'a> {
                     let old_value = opened.unwrap_or(loaded);
                     let new_value = self.step_value(old_value, operand.ty, is_increment)?;
                     let (old_value, new_value, stored) = if opened.is_some() {
-                        let stored = self.box_scalar_register(new_value)?;
+                        let stored = self.close_nullable_scalar(loaded, new_value)?;
                         (loaded, stored, stored)
                     } else {
                         (old_value, new_value, new_value)
@@ -211,7 +220,7 @@ impl<'a> HirToMirContext<'a> {
                     let old_value = opened.unwrap_or(loaded);
                     let new_value = self.step_value(old_value, operand.ty, is_increment)?;
                     let (old_value, new_value, stored) = if opened.is_some() {
-                        let stored = self.box_scalar_register(new_value)?;
+                        let stored = self.close_nullable_scalar(loaded, new_value)?;
                         (loaded, stored, stored)
                     } else {
                         (old_value, new_value, new_value)
@@ -242,7 +251,7 @@ impl<'a> HirToMirContext<'a> {
                 let old_value = opened.unwrap_or(loaded);
                 let new_value = self.step_value(old_value, operand.ty, is_increment)?;
                 let (old_value, new_value) = if opened.is_some() {
-                    (loaded, self.box_scalar_register(new_value)?)
+                    (loaded, self.close_nullable_scalar(loaded, new_value)?)
                 } else {
                     (old_value, new_value)
                 };
@@ -792,6 +801,7 @@ impl<'a> HirToMirContext<'a> {
                     IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String) => Some(5),
                     IrType::Bool => Some(2),
                     IrType::F32 | IrType::F64 => Some(4),
+                    IrType::NullInt => Some(rayzor_runtime::type_system::ValueTag::NullInt as i32),
                     ty if ty.is_integer() => Some(1),
                     _ => None,
                 }
@@ -1035,8 +1045,14 @@ impl<'a> HirToMirContext<'a> {
                         | HirBinaryOp::Ne
                 );
                 if is_supported {
-                    let lhs_reg = self.lower_expression(lhs)?;
-                    let rhs_reg = self.lower_expression(rhs)?;
+                    let mut lhs_reg = self.lower_expression(lhs)?;
+                    let mut rhs_reg = self.lower_expression(rhs)?;
+                    // A `Null<Int>` under a Dynamic type compares as its box.
+                    for reg in [&mut lhs_reg, &mut rhs_reg] {
+                        if self.builder.get_register_type(*reg) == Some(IrType::NullInt) {
+                            *reg = self.null_int_to_dynamic(*reg)?;
+                        }
+                    }
 
                     // SIMD vector short-circuit: @:coreType abstracts like SIMD4f
                     // have HIR type Dynamic but lower to Vector register type.
@@ -1449,6 +1465,18 @@ impl<'a> HirToMirContext<'a> {
                 } else {
                     lhs
                 };
+                // A `Null<Int>` is null exactly when it holds `NULL_INT`.
+                if self.is_null_int_type(value_expr.ty) {
+                    let reg = self.lower_expression(value_expr)?;
+                    let reg = self.to_null_int(reg)?;
+                    let null = self.builder.build_null_int()?;
+                    let cmp = if matches!(op, HirBinaryOp::Eq) {
+                        CompareOp::Eq
+                    } else {
+                        CompareOp::Ne
+                    };
+                    return self.builder.build_cmp(cmp, reg, null);
+                }
                 // Only a `Null<primitive>` is a BOX. `Null<SomeClass>` is the
                 // object pointer itself, with no header to read, so it keeps
                 // the pointer comparison.
@@ -1461,6 +1489,15 @@ impl<'a> HirToMirContext<'a> {
                 };
                 if boxed {
                     let reg = self.lower_expression(value_expr)?;
+                    if self.builder.get_register_type(reg) == Some(IrType::NullInt) {
+                        let null = self.builder.build_null_int()?;
+                        let cmp = if matches!(op, HirBinaryOp::Eq) {
+                            CompareOp::Eq
+                        } else {
+                            CompareOp::Ne
+                        };
+                        return self.builder.build_cmp(cmp, reg, null);
+                    }
                     if matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_))) {
                         let is_null_fn = self.get_or_register_extern_function(
                             "haxe_dynamic_is_null",
@@ -1614,6 +1651,14 @@ impl<'a> HirToMirContext<'a> {
                     // DynamicValue* and type-erased raw integers.
                     let coerce_dyn = |s: &mut Self, reg: IrId| -> Option<IrId> {
                         let reg_ty = s.builder.get_register_type(reg);
+                        if reg_ty == Some(IrType::NullInt) {
+                            let target = if is_float {
+                                IrType::F64
+                            } else {
+                                concrete_ty.clone()
+                            };
+                            return s.null_int_to_ir(reg, &target);
+                        }
                         if reg_ty
                             .as_ref()
                             .map(|t| {
@@ -1685,6 +1730,7 @@ impl<'a> HirToMirContext<'a> {
                 ctx.type_table.get(e.ty).map(|t| &t.kind),
                 Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool)
             ) || ctx.is_optional_primitive(e.ty)
+                || ctx.is_null_int_type(e.ty)
         };
         let is_arith = matches!(
             op,
@@ -1710,12 +1756,21 @@ impl<'a> HirToMirContext<'a> {
                 | HirBinaryOp::Ne
         ) && scalar_side(self, lhs)
             && scalar_side(self, rhs);
+        let null_int_operand = |ctx: &Self, reg: IrId, ty: TypeId| {
+            ctx.builder.get_register_type(reg) == Some(IrType::NullInt) || ctx.is_null_int_type(ty)
+        };
         let nullable_comparison = if is_scalar_cmp
-            && (self.is_optional_primitive(lhs.ty) || self.is_optional_primitive(rhs.ty))
+            && (self.is_optional_primitive(lhs.ty)
+                || self.is_optional_primitive(rhs.ty)
+                || null_int_operand(self, lhs_reg, lhs.ty)
+                || null_int_operand(self, rhs_reg, rhs.ty))
         {
             let mut nulls = Vec::with_capacity(2);
             for (reg, ty) in [(lhs_reg, lhs.ty), (rhs_reg, rhs.ty)] {
-                let is_null = if self.is_optional_primitive(ty)
+                let is_null = if null_int_operand(self, reg, ty) {
+                    let reg = self.to_null_int(reg)?;
+                    self.null_int_is_null(reg)?
+                } else if self.is_optional_primitive(ty)
                     && matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_)))
                 {
                     let check = self.get_or_register_extern_function(
@@ -1738,6 +1793,19 @@ impl<'a> HirToMirContext<'a> {
         let mut lhs_ty = lhs.ty;
         let mut rhs_ty = rhs.ty;
         if is_arith || is_scalar_cmp {
+            // A `Null<Int>` operand reads its Int; null is 0 (the null flags
+            // above already settled a comparison against null).
+            let int_ty = self.type_table.int_type();
+            if null_int_operand(self, lhs_reg, lhs.ty) {
+                let n = self.to_null_int(lhs_reg)?;
+                lhs_reg = self.null_int_to_ir(n, &IrType::I32)?;
+                lhs_ty = int_ty;
+            }
+            if null_int_operand(self, rhs_reg, rhs.ty) {
+                let n = self.to_null_int(rhs_reg)?;
+                rhs_reg = self.null_int_to_ir(n, &IrType::I32)?;
+                rhs_ty = int_ty;
+            }
             if self.is_optional_primitive(lhs.ty) {
                 if let Some(inner) = self.optional_inner_type(lhs.ty) {
                     if let Some(unboxed) = self.maybe_unbox_optional(lhs_reg, lhs.ty, inner) {

@@ -1547,6 +1547,16 @@ impl<'a> HirToMirContext<'a> {
                                     let mut param_types = Vec::new();
                                     for (i, arg) in static_args.iter().enumerate() {
                                         if let Some(reg) = self.lower_expression(arg) {
+                                            if declared.get(i).and_then(|k| k.as_deref())
+                                                == Some("NullInt")
+                                            {
+                                                let Some(value) = self.to_null_int(reg) else {
+                                                    continue;
+                                                };
+                                                arg_regs.push(value);
+                                                param_types.push(IrType::NullInt);
+                                                continue;
+                                            }
                                             // A `Null<scalar>`/`Dynamic` formal is a box
                                             // slot; the declaration says so where the
                                             // callee's own signature has not arrived.
@@ -1565,6 +1575,19 @@ impl<'a> HirToMirContext<'a> {
                                                     param_types
                                                         .push(IrType::Ptr(Box::new(IrType::U8)));
                                                 }
+                                                None if declared
+                                                    .get(i)
+                                                    .and_then(|k| k.as_deref())
+                                                    == Some("Int")
+                                                    && self.builder.get_register_type(reg)
+                                                        == Some(IrType::NullInt) =>
+                                                {
+                                                    let int = self
+                                                        .null_int_to_ir(reg, &IrType::I32)
+                                                        .unwrap_or(reg);
+                                                    arg_regs.push(int);
+                                                    param_types.push(IrType::I32);
+                                                }
                                                 None => {
                                                     arg_regs.push(reg);
                                                     param_types.push(self.convert_type(arg.ty));
@@ -1576,6 +1599,14 @@ impl<'a> HirToMirContext<'a> {
                                     // out take the zero of their declared type, as
                                     // `fill_default_args` gives a cross-module call.
                                     for name in declared.iter().skip(arg_regs.len()) {
+                                        if name.as_deref() == Some("NullInt") {
+                                            let Some(reg) = self.builder.build_null_int() else {
+                                                break;
+                                            };
+                                            arg_regs.push(reg);
+                                            param_types.push(IrType::NullInt);
+                                            continue;
+                                        }
                                         let (ty, zero) = match name.as_deref() {
                                             Some("Int") => (IrType::I32, IrValue::I32(0)),
                                             Some("Float") => (IrType::F64, IrValue::F64(0.0)),
@@ -1648,6 +1679,9 @@ impl<'a> HirToMirContext<'a> {
                                                         if let Some(boxed) = self.box_value_for_dynamic(reg, args[i].ty) {
                                                             return boxed;
                                                         }
+                                                    }
+                                                    if let Some(converted) = self.coerce_null_int(reg, expected_ty) {
+                                                        return converted;
                                                     }
                                                     if let Some(casted) = self.builder.build_cast(reg, actual_ty.clone(), expected_ty.clone()) {
                                                         return casted;

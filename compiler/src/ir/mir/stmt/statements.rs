@@ -295,7 +295,7 @@ impl<'a> HirToMirContext<'a> {
                                 .maybe_box_value(value_reg, init_ty, target_ty)
                                 .unwrap_or(value_reg);
 
-                            if after_box != value_reg {
+                            if after_box != value_reg && !self.is_scalar_register(after_box) {
                                 if let HirPattern::Variable { symbol, .. } = pattern {
                                     self.boxed_dynamic_symbols.insert(*symbol);
                                 }
@@ -445,6 +445,24 @@ impl<'a> HirToMirContext<'a> {
                             self.maybe_clone_anonymous(final_value, init_expr.ty)
                         } else {
                             final_value
+                        };
+
+                        // A local whose type came from a later assignment (`var x = null;
+                        // ... x = 1;`) is Null<Int> although its initializer is a pointer.
+                        let final_value = match pattern {
+                            HirPattern::Variable { symbol, .. }
+                                if self.builder.get_register_type(final_value)
+                                    != Some(IrType::NullInt)
+                                    && self
+                                        .symbol_table
+                                        .get_symbol(*symbol)
+                                        .map(|s| s.type_id)
+                                        .or(*type_hint)
+                                        .is_some_and(|t| self.is_null_int_type(t)) =>
+                            {
+                                self.to_null_int(final_value).unwrap_or(final_value)
+                            }
+                            _ => final_value,
                         };
 
                         self.bind_pattern_with_type(pattern, final_value, var_type, *is_mutable);
@@ -891,7 +909,7 @@ impl<'a> HirToMirContext<'a> {
                                 .maybe_box_value(value, rhs_ty, target_ty)
                                 .unwrap_or(value);
                             // Track boxing for Dynamic arithmetic safety (variable targets only).
-                            if after_box != value {
+                            if after_box != value && !self.is_scalar_register(after_box) {
                                 if let HirLValue::Variable(sym) = lhs {
                                     self.boxed_dynamic_symbols.insert(*sym);
                                 }
@@ -958,7 +976,12 @@ impl<'a> HirToMirContext<'a> {
                                 }
                                 _ => None,
                             };
-                            if let Some(tgt_ir) = tgt_ir_opt {
+                            if let Some(converted) = tgt_ir_opt
+                                .as_ref()
+                                .and_then(|tgt_ir| self.coerce_null_int(value, tgt_ir))
+                            {
+                                converted
+                            } else if let Some(tgt_ir) = tgt_ir_opt {
                                 let val_ir =
                                     self.builder.get_register_type(value).unwrap_or(IrType::I64);
                                 let needs_coerce = matches!(

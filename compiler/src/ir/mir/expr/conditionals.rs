@@ -168,6 +168,9 @@ impl<'a> HirToMirContext<'a> {
                 _ => (None, prim_of(ty)),
             }
         };
+        if let Some(eq) = self.lower_null_int_eq(op, lhs, rhs) {
+            return eq;
+        }
         let (lhs_opt, lhs_bare) = classify(self, lhs.ty);
         let (rhs_opt, rhs_bare) = classify(self, rhs.ty);
 
@@ -199,6 +202,9 @@ impl<'a> HirToMirContext<'a> {
         let box_if_raw = |me: &mut Self, reg: IrId, inner: Prim| -> Option<IrId> {
             if matches!(me.builder.get_register_type(reg), Some(IrType::Ptr(_))) {
                 return Some(reg);
+            }
+            if me.builder.get_register_type(reg) == Some(IrType::NullInt) {
+                return me.null_int_to_dynamic(reg);
             }
             let boxed_ptr = IrType::Ptr(Box::new(IrType::U8));
             let (name, arg_ty) = match inner {
@@ -334,7 +340,136 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// `==`/`!=` with a `Null<Int>` side, against another `Null<Int>`, an Int,
+    /// a Bool, a Float or a Dynamic: null equals only null. `None` when the
+    /// shape does not apply; `Some(None)` when lowering failed.
+    fn lower_null_int_eq(
+        &mut self,
+        op: &HirBinaryOp,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+    ) -> Option<Option<IrId>> {
+        use crate::tast::TypeKind;
+        let lhs_ni = self.is_null_int_type(lhs.ty);
+        let rhs_ni = self.is_null_int_type(rhs.ty);
+        if !lhs_ni && !rhs_ni {
+            return None;
+        }
+        let (ni_expr, other_expr) = if lhs_ni { (lhs, rhs) } else { (rhs, lhs) };
+        let other_dyn = matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(other_expr.ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        );
+        let other_ir = self.convert_type(other_expr.ty);
+        let applies = other_dyn
+            || matches!(
+                other_ir,
+                IrType::NullInt | IrType::I32 | IrType::Bool | IrType::F64 | IrType::F32
+            );
+        if !applies {
+            return None;
+        }
+        Some(self.lower_null_int_eq_operands(op, ni_expr, other_expr, other_dyn, &other_ir))
+    }
+
+    fn lower_null_int_eq_operands(
+        &mut self,
+        op: &HirBinaryOp,
+        ni_expr: &HirExpr,
+        other_expr: &HirExpr,
+        other_dyn: bool,
+        other_ir: &IrType,
+    ) -> Option<IrId> {
+        let ni_reg = self.lower_expression(ni_expr)?;
+        let ni_reg = self.to_null_int(ni_reg)?;
+        let other_reg = self.lower_expression(other_expr)?;
+        let other_reg_ty = self.builder.get_register_type(other_reg);
+        let eq = if other_dyn && other_reg_ty != Some(IrType::NullInt) {
+            // The runtime reads the Dynamic side as its box or raw slot.
+            let tag = self.builder.build_const(IrValue::I32(
+                rayzor_runtime::type_system::ValueTag::NullInt as i32,
+            ))?;
+            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+            let other_ptr = self.coerce_reg_to(other_reg, &ptr_void)?;
+            // The tag reads the bits, `NULL_INT` included.
+            let bits = self
+                .builder
+                .build_cast(ni_reg, IrType::NullInt, IrType::I64)?;
+            let f = self.get_or_register_extern_function(
+                "haxe_dynamic_equals_typed",
+                vec![IrType::I64, IrType::I32, ptr_void],
+                IrType::Bool,
+            );
+            self.builder
+                .build_call_direct(f, vec![bits, tag, other_ptr], IrType::Bool)?
+        } else if matches!(other_ir, IrType::F64 | IrType::F32) {
+            let is_null = self.null_int_is_null(ni_reg)?;
+            let value = self.null_int_to_ir(ni_reg, &IrType::F64)?;
+            let other = match other_reg_ty {
+                Some(IrType::F32) => {
+                    self.builder
+                        .build_cast(other_reg, IrType::F32, IrType::F64)?
+                }
+                _ => other_reg,
+            };
+            let same = self.builder.build_cmp(CompareOp::Eq, value, other)?;
+            let no = self.builder.build_bool(false)?;
+            let present = self.builder.build_cmp(CompareOp::Eq, is_null, no)?;
+            self.builder.build_binop(BinaryOp::And, present, same)?
+        } else {
+            let other = self.to_null_int(other_reg)?;
+            self.builder.build_cmp(CompareOp::Eq, ni_reg, other)?
+        };
+        if matches!(op, HirBinaryOp::Ne) {
+            let no = self.builder.build_bool(false)?;
+            self.builder.build_cmp(CompareOp::Eq, eq, no)
+        } else {
+            Some(eq)
+        }
+    }
+
+    /// `a ?? b` with `a` a `Null<Int>`: `a` unless it holds `NULL_INT`.
+    fn lower_null_int_coalesce(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
+        let lhs_pass = self.builder.create_block()?;
+        let eval_rhs = self.builder.create_block()?;
+        let merge = self.builder.create_block()?;
+
+        let lhs_val = self.lower_expression(lhs)?;
+        let lhs_val = self.to_null_int(lhs_val)?;
+        let null = self.builder.build_null_int()?;
+        let present = self.builder.build_cmp(CompareOp::Ne, lhs_val, null)?;
+        self.builder
+            .build_cond_branch(present, lhs_pass, eval_rhs)?;
+
+        let result_type = self.convert_type(rhs.ty);
+        self.builder.switch_to_block(lhs_pass);
+        let lhs_final = self.null_int_to_ir(lhs_val, &result_type)?;
+        let lhs_pass_block = self.builder.current_block()?;
+        self.builder.build_branch(merge)?;
+
+        self.builder.switch_to_block(eval_rhs);
+        let rhs_val = self.lower_expression(rhs)?;
+        let rhs_val = self
+            .coerce_null_int(rhs_val, &result_type)
+            .unwrap_or(rhs_val);
+        let rhs_block = self.builder.current_block()?;
+        self.builder.build_branch(merge)?;
+
+        self.builder.switch_to_block(merge);
+        let result = self.builder.build_phi(merge, result_type)?;
+        self.builder
+            .add_phi_incoming(merge, result, lhs_pass_block, lhs_final)?;
+        self.builder
+            .add_phi_incoming(merge, result, rhs_block, rhs_val)?;
+        Some(result)
+    }
+
     pub(crate) fn lower_null_coalesce(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
+        if self.is_null_int_type(lhs.ty) {
+            return self.lower_null_int_coalesce(lhs, rhs);
+        }
         // Intermediary blocks (as for ternary) avoid Cranelift phi issues when
         // br_if targets a merge block directly.
         let lhs_pass = self.builder.create_block()?;
@@ -671,7 +806,49 @@ impl<'a> HirToMirContext<'a> {
                 let then_is_null_lit = matches!(then_expr.kind, HirExprKind::Null);
                 let else_is_null_lit = matches!(else_expr.kind, HirExprKind::Null);
 
-                if result_is_scalar && then_is_ptr && else_is_prim && then_is_null_lit {
+                // A `Null<Int>` arm meeting another shape: both take the
+                // result's type, or `NullInt` when there is none.
+                let then_ni = then_rty == Some(IrType::NullInt);
+                let else_ni = else_rty == Some(IrType::NullInt);
+                if then_ni != else_ni {
+                    // Against a scalar arm the result is Null<Int> even when the
+                    // expression's type decayed to a pointer: boxing the
+                    // Null<Int> arm would leave a pointer in a scalar phi.
+                    let other_scalar = matches!(
+                        if then_ni { &else_rty } else { &then_rty },
+                        Some(IrType::I32 | IrType::I64 | IrType::Bool)
+                    );
+                    let result_ir = result_ty
+                        .map(|t| self.convert_type(t))
+                        .filter(|t| *t != IrType::NullInt)
+                        .filter(|t| !(other_scalar && matches!(t, IrType::Ptr(_))));
+                    let (ni_block, ni_val, other_block, other_val) = if then_ni {
+                        (then_end_block, tv, else_end_block, ev)
+                    } else {
+                        (else_end_block, ev, then_end_block, tv)
+                    };
+                    let (ni_out, other_out) = match &result_ir {
+                        Some(target) => {
+                            self.builder.switch_to_block(ni_block);
+                            let out = self.null_int_to_ir(ni_val, target);
+                            self.builder.switch_to_block(other_block);
+                            (out, self.coerce_null_int(other_val, target))
+                        }
+                        None => {
+                            self.builder.switch_to_block(other_block);
+                            (Some(ni_val), self.to_null_int(other_val))
+                        }
+                    };
+                    let (ni_out, other_out) =
+                        (ni_out.unwrap_or(ni_val), other_out.unwrap_or(other_val));
+                    if then_ni {
+                        then_val = Some(ni_out);
+                        else_val = Some(other_out);
+                    } else {
+                        else_val = Some(ni_out);
+                        then_val = Some(other_out);
+                    }
+                } else if result_is_scalar && then_is_ptr && else_is_prim && then_is_null_lit {
                     let cur = self.builder.current_block();
                     self.builder.switch_to_block(then_end_block);
                     if let Some(z) = self.zero_of_ir_type(&else_rty.clone().unwrap()) {

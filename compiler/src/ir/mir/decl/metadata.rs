@@ -84,6 +84,18 @@ impl<'a> HirToMirContext<'a> {
         } else {
             None
         };
+        // A `Null<Int>` static starts null, not 0; a constant is its Int
+        // sign-extended.
+        let initializer = if self.is_null_int_type(field.ty) {
+            Some(match initializer {
+                Some(IrValue::I32(v)) => IrValue::I64(i64::from(v)),
+                Some(IrValue::I64(v)) => IrValue::I64(i64::from(v as i32)),
+                Some(other) => other,
+                None => IrValue::null_int(),
+            })
+        } else {
+            initializer
+        };
 
         let global_ty = self
             .refine_global_type_from_initializer(self.convert_type(field.ty), initializer.as_ref());

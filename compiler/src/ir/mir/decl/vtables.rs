@@ -41,6 +41,8 @@ enum SlotKind {
     Reference(Option<TypeId>),
     /// An erased type parameter: raw bits.
     Erased,
+    /// A `Null<Int>`: crosses a slot or a Dynamic entry as its box.
+    NullInt,
     Void,
 }
 
@@ -716,6 +718,11 @@ impl<'a> HirToMirContext<'a> {
                 Some(TypeKind::Bool) => return SlotKind::Bool,
                 Some(TypeKind::String) => return SlotKind::String(ir_ty.clone()),
                 Some(TypeKind::TypeParameter { .. }) => return SlotKind::Erased,
+                Some(TypeKind::Optional { inner_type })
+                    if self.optional_inner_is_null_int(*inner_type) =>
+                {
+                    return SlotKind::NullInt;
+                }
                 Some(TypeKind::Optional { inner_type }) => {
                     return if self.optional_inner_is_boxable_primitive(*inner_type) {
                         SlotKind::Dynamic
@@ -745,6 +752,7 @@ impl<'a> HirToMirContext<'a> {
             IrType::String => SlotKind::String(ir_ty.clone()),
             IrType::Ptr(_) => SlotKind::Reference(None),
             IrType::I64 => SlotKind::Erased,
+            IrType::NullInt => SlotKind::NullInt,
             IrType::F64 | IrType::F32 => SlotKind::Float(ir_ty.clone()),
             IrType::Bool => SlotKind::Bool,
             IrType::Void => SlotKind::Void,
@@ -920,6 +928,15 @@ impl<'a> HirToMirContext<'a> {
         shape: EntryShape,
     ) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        if *kind == SlotKind::NullInt {
+            // The slot or Dynamic holds a box, null, or a raw Int.
+            let as_ptr = if shape == EntryShape::Slot {
+                self.builder.build_bitcast(reg, ptr_u8)?
+            } else {
+                reg
+            };
+            return self.to_null_int(as_ptr);
+        }
         match shape {
             EntryShape::Slot => match kind {
                 SlotKind::Erased => Some(reg),
@@ -986,6 +1003,14 @@ impl<'a> HirToMirContext<'a> {
         shape: EntryShape,
     ) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        if let (Some(r), SlotKind::NullInt) = (result, kind) {
+            let boxed = self.null_int_to_dynamic(r)?;
+            return if shape == EntryShape::Slot {
+                self.builder.build_bitcast(boxed, IrType::I64)
+            } else {
+                Some(boxed)
+            };
+        }
         match shape {
             EntryShape::Slot => match (result, kind) {
                 (None, _) => self.builder.build_const(IrValue::I64(0)),
@@ -1004,6 +1029,7 @@ impl<'a> HirToMirContext<'a> {
                 };
                 let (box_fn, param_ty, arg) = match kind {
                     SlotKind::Void => return self.builder.build_const(IrValue::Null),
+                    SlotKind::NullInt => return self.null_int_to_dynamic(r),
                     SlotKind::Dynamic => {
                         return if *ret_ty == ptr_u8 {
                             Some(r)

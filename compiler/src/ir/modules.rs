@@ -177,6 +177,8 @@ pub enum IrFieldShape {
     Anonymous,
     /// A `Null<scalar>` slot: a box pointer or null, never a raw value.
     Boxed,
+    /// An unboxed `Null<Int>` slot: `NULL_INT` or an Int.
+    NullInt,
 }
 
 /// Struct field

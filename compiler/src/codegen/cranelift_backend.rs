@@ -6204,6 +6204,7 @@ impl CraneliftBackend {
         use crate::ir::IrFieldShape;
         use rayzor_runtime::type_system::ParamType;
         match (&field.ty, field.shape) {
+            (IrType::NullInt, _) | (_, IrFieldShape::NullInt) => ParamType::NullInt,
             (IrType::I32 | IrType::I64, _) => ParamType::Int,
             (IrType::F32 | IrType::F64, _) => ParamType::Float,
             (IrType::Bool, _) => ParamType::Bool,

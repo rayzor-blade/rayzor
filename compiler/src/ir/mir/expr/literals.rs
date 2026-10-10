@@ -27,6 +27,14 @@ impl<'a> HirToMirContext<'a> {
             HirLiteral::Int(i) => {
                 // Use the actual type from type checking instead of always using I64
                 let mut ir_type = self.convert_type(type_id);
+                // An Int literal typed `Null<Int>` is its `NullInt` value.
+                if ir_type == IrType::NullInt {
+                    let reg = self
+                        .builder
+                        .build_const(IrValue::I64(i64::from(*i as i32)))?;
+                    self.builder.set_register_type(reg, IrType::NullInt);
+                    return Some(reg);
+                }
                 // A literal too wide for the slot the typer picked is widened
                 // rather than cut: `3000000000000` typed `Int` was emitted as
                 // its low 32 bits and printed 2112827392, and
@@ -122,6 +130,8 @@ impl<'a> HirToMirContext<'a> {
             })
         };
         let elem_iface_sym = element_type_id.and_then(|et| self.get_interface_symbol(et));
+        // An `Array<Null<Int>>` slot holds a box or null.
+        let null_int_elements = element_type_id.is_some_and(|et| self.is_null_int_type(et));
         // An `Array<Dynamic>` holds references as boxes. Scalars stay raw: the
         // reflection helpers and erased-generic readers take them that way.
         let dynamic_elements = element_type_id.is_some_and(|et| {
@@ -331,6 +341,11 @@ impl<'a> HirToMirContext<'a> {
                         {
                             let dynamic = self.type_table.dynamic_type();
                             self.maybe_box_value(v, storage_ty, dynamic).unwrap_or(v)
+                        } else {
+                            v
+                        };
+                        let v = if null_int_elements {
+                            self.null_int_slot_box(v)?
                         } else {
                             v
                         };
@@ -864,6 +879,7 @@ impl<'a> HirToMirContext<'a> {
                 }
                 None => self.build_type_default(field_type)?,
             };
+            let value = self.coerce_null_int(value, &field_ir_type).unwrap_or(value);
             let index = self.builder.build_const(IrValue::I64(index as i64))?;
             let field_ptr = self.builder.build_gep(object, vec![index], field_ir_type)?;
             self.builder.build_store(field_ptr, value);
@@ -902,6 +918,7 @@ impl<'a> HirToMirContext<'a> {
                 }
                 _ => value,
             };
+            let value = self.coerce_null_int(value, &field_ir_type).unwrap_or(value);
             let index = self.builder.build_const(IrValue::I64(index as i64))?;
             let field_ptr = self.builder.build_gep(object, vec![index], field_ir_type)?;
             self.builder.build_store(field_ptr, value);
@@ -1152,7 +1169,18 @@ impl<'a> HirToMirContext<'a> {
                         .get(field_val_ty)
                         .map(|t| matches!(t.kind, TypeKind::Optional { .. }))
                         .unwrap_or(false);
-                    let val_as_i64 = if erased_target && boxed_source {
+                    let null_int_target = field_target_types
+                        .get(field_name)
+                        .copied()
+                        .filter(|t| self.is_null_int_type(*t));
+                    let val_as_i64 = if let Some(target_ty) = null_int_target {
+                        // A `Null<Int>` anon slot holds a box or null.
+                        self.coerce_to_i64(field_val, target_ty)?
+                    } else if erased_target
+                        && self.builder.get_register_type(field_val) == Some(IrType::NullInt)
+                    {
+                        self.null_int_to_ir(field_val, &IrType::I64)?
+                    } else if erased_target && boxed_source {
                         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                         let unbox_id = self.get_or_register_extern_function(
                             "haxe_unbox_scalar_or_addr",
@@ -1219,6 +1247,11 @@ impl<'a> HirToMirContext<'a> {
                         };
 
                         match expr_type_kind.as_ref() {
+                            _ if self.builder.get_register_type(expr_val)
+                                == Some(IrType::NullInt) =>
+                            {
+                                self.convert_to_string(expr_val, &IrType::NullInt)?
+                            }
                             Some(TypeKind::String) => expr_val, // already a string
                             Some(TypeKind::Int) => {
                                 let conv_fn = self.get_or_register_extern_function(

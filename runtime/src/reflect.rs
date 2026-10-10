@@ -547,6 +547,9 @@ pub extern "C" fn haxe_reflect_set_field(obj: *mut u8, field: *mut u8, value: *m
 /// pointer for `Object`, or the bitcast of the primitive value into
 /// `*mut u8` for `Int`/`Float`/`Bool`.
 unsafe fn raw_value_to_slot(value: *mut u8, ty: ParamType) -> u64 {
+    if ty == ParamType::NullInt {
+        return crate::type_system::haxe_null_int_from_dynamic(value) as u64;
+    }
     // A class instance that arrives boxed stores the instance.
     if matches!(ty, ParamType::Object)
         && let Some(instance) = crate::type_system::class_box_instance(value)
@@ -596,7 +599,8 @@ unsafe fn raw_value_to_slot(value: *mut u8, ty: ParamType) -> u64 {
         | ParamType::Dynamic
         | ParamType::Array
         | ParamType::Anon
-        | ParamType::Boxed => value as u64,
+        | ParamType::Boxed
+        | ParamType::NullInt => value as u64,
     }
 }
 
@@ -936,6 +940,16 @@ pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i
         }
         // Each evaluation of a function value allocates a fresh record.
         9 if crate::closure_entries::haxe_closure_equals(a as *mut u8, b as *mut u8) => 0,
+        // Unboxed `Null<Int>`: null equals only null and sorts first.
+        10 => {
+            let null = crate::type_system::NULL_INT;
+            match (a == null, b == null) {
+                (true, true) => 0,
+                (true, false) => -1,
+                (false, true) => 1,
+                (false, false) => (i64::from(a as i32) - i64::from(b as i32)).signum(),
+            }
+        }
         _ => {
             // A generic slot can hold the same array as a raw pointer or a box.
             if same_array_reference(a, b) {

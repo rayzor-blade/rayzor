@@ -1218,6 +1218,13 @@ impl<'a> HirToMirContext<'a> {
     pub(super) fn iter_elem_from_i64(&mut self, value: IrId, target: &IrType) -> Option<IrId> {
         match target {
             IrType::I64 => Some(value),
+            // A `Null<Int>` slot holds a box or null.
+            IrType::NullInt => {
+                let as_ptr = self
+                    .builder
+                    .build_bitcast(value, IrType::Ptr(Box::new(IrType::U8)))?;
+                self.to_null_int(as_ptr)
+            }
             IrType::I32
             | IrType::I16
             | IrType::I8

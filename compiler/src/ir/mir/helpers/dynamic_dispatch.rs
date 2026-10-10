@@ -351,6 +351,7 @@ impl<'a> HirToMirContext<'a> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         match ty {
             IrType::Void => self.builder.build_const(IrValue::Null),
+            IrType::NullInt => self.null_int_to_dynamic(value),
             IrType::I32 | IrType::I64 | IrType::U32 | IrType::U64 => {
                 self.box_primitive_as_dynamic(value, ty, PrimBoxKind::Int)
             }

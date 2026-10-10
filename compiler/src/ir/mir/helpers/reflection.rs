@@ -82,6 +82,8 @@ impl<'a> HirToMirContext<'a> {
             .map(|t| t.kind.clone());
 
         let result = match field_type_kind.as_ref() {
+            // A `Null<Int>` field reads its box (or null) as a `NullInt`.
+            _ if self.is_null_int_type(field_ty) => self.to_null_int(dynamic_result)?,
             Some(TypeKind::Int) => {
                 let unbox_id = self.get_or_register_extern_function(
                     "haxe_unbox_int_ptr",
@@ -191,6 +193,8 @@ impl<'a> HirToMirContext<'a> {
             .map(|t| t.kind.clone());
 
         let result = match field_type_kind.as_ref() {
+            // A `Null<Int>` field reads its box (or null) as a `NullInt`.
+            _ if self.is_null_int_type(field_ty) => self.to_null_int(dynamic_result)?,
             Some(TypeKind::Int) => {
                 let unbox_id = self.get_or_register_extern_function(
                     "haxe_unbox_int_ptr",

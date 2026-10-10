@@ -65,3 +65,9 @@ cached_flag!(
     no_xmodule_ctor,
     "RAYZOR_NO_XMODULE_CTOR"
 );
+cached_flag!(
+    /// `RAYZOR_NULL_INT_BOXED`: keep `Null<Int>` as a box instead of `NullInt`.
+    /// Safe to run with; compile with `--no-cache`, the cache does not key on it.
+    null_int_boxed,
+    "RAYZOR_NULL_INT_BOXED"
+);

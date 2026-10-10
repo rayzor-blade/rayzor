@@ -131,6 +131,9 @@ impl<'a> HirToMirContext<'a> {
                 Some(TypeKind::Anonymous { .. }) => return IrFieldShape::Anonymous,
                 Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
                 Some(TypeKind::Optional { inner_type }) => {
+                    if self.optional_inner_is_null_int(*inner_type) {
+                        return IrFieldShape::NullInt;
+                    }
                     if self.optional_inner_is_boxable_primitive(*inner_type) {
                         return IrFieldShape::Boxed;
                     }
@@ -272,6 +275,10 @@ impl<'a> HirToMirContext<'a> {
                 let inner_ir = self.convert_type(*inner_type);
                 if heap_enum {
                     return inner_ir;
+                }
+                // `Null<Int>` is held unboxed, null being `NULL_INT`.
+                if inner_ir == IrType::I32 && self.optional_inner_is_null_int(*inner_type) {
+                    return IrType::NullInt;
                 }
                 match inner_ir {
                     IrType::I32 | IrType::I64 | IrType::F64 | IrType::F32 | IrType::Bool => {
@@ -527,6 +534,10 @@ impl<'a> HirToMirContext<'a> {
         let start = if skip_first { 1 } else { 0 };
         for (i, arg_reg) in arg_regs.iter_mut().enumerate().skip(start) {
             if let Some(expected_ty) = param_types.get(i) {
+                if let Some(converted) = self.coerce_null_int(*arg_reg, expected_ty) {
+                    *arg_reg = converted;
+                    continue;
+                }
                 let actual_ty = self.builder.get_register_type(*arg_reg);
                 // Cast I32/I64 → F64 when callee expects Float
                 if matches!(expected_ty, IrType::F64)
@@ -748,6 +759,14 @@ impl<'a> HirToMirContext<'a> {
                 }
                 _ => continue,
             };
+            // A `NullInt` hands an erased slot its Int sign-extended (null is 0).
+            if self.builder.get_register_type(*arg_reg) == Some(IrType::NullInt) {
+                let target = formal.clone().unwrap_or(IrType::I64);
+                if let Some(converted) = self.null_int_to_ir(*arg_reg, &target) {
+                    *arg_reg = converted;
+                }
+                continue;
+            }
             if !matches!(
                 self.builder.get_register_type(*arg_reg),
                 Some(IrType::Ptr(_))
@@ -962,6 +981,11 @@ impl<'a> HirToMirContext<'a> {
         from_type: &IrType,
         hir_type_id: Option<crate::tast::TypeId>,
     ) -> Option<IrId> {
+        if *from_type == IrType::NullInt
+            || self.builder.get_register_type(value) == Some(IrType::NullInt)
+        {
+            return self.convert_to_string(value, &IrType::NullInt);
+        }
         // Check HIR type for Array (maps to Ptr(Void) in MIR, indistinguishable from Dynamic)
         if let Some(type_id) = hir_type_id {
             let type_kind = self.type_table.get(type_id).map(|ti| ti.kind.clone());
@@ -1125,6 +1149,16 @@ impl<'a> HirToMirContext<'a> {
     /// Convert a value to a string pointer.
     /// A nullable String renders as the literal "null".
     pub(crate) fn convert_to_string(&mut self, value: IrId, from_type: &IrType) -> Option<IrId> {
+        if *from_type == IrType::NullInt {
+            let value = self.to_null_int(value)?;
+            let string_ptr = IrType::Ptr(Box::new(IrType::String));
+            let f = self.get_or_register_extern_function(
+                "haxe_null_int_to_string",
+                vec![IrType::NullInt],
+                string_ptr.clone(),
+            );
+            return self.builder.build_call_direct(f, vec![value], string_ptr);
+        }
         let mir_wrapper = match from_type {
             IrType::I32 | IrType::I64 => "int_to_string",
             IrType::F32 | IrType::F64 => "float_to_string",
@@ -1302,6 +1336,11 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
+        // A `Null<Int>` payload: the box or null converts to a `NullInt`.
+        if *resolved_expected == IrType::NullInt {
+            return self.to_null_int(value);
+        }
+
         if is_try {
             if let IrType::Ptr(inner) = resolved_expected {
                 match inner.as_ref() {
@@ -1416,6 +1455,7 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn box_primitive_to_dynamic(&mut self, value: IrId, reg_ty: IrType) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         match reg_ty {
+            IrType::NullInt => self.null_int_to_dynamic(value),
             IrType::I32 | IrType::I64 => {
                 let v64 = if matches!(reg_ty, IrType::I32) {
                     self.builder.build_cast(value, IrType::I32, IrType::I64)?
@@ -1466,6 +1506,10 @@ impl<'a> HirToMirContext<'a> {
         kind: PrimBoxKind,
     ) -> Option<IrId> {
         let dyn_ptr = IrType::Ptr(Box::new(IrType::Dynamic));
+        if value_ty == IrType::NullInt {
+            let boxed = self.null_int_to_dynamic(value)?;
+            return self.builder.build_bitcast(boxed, dyn_ptr);
+        }
         let (box_fn, box_arg_ty) = match kind {
             PrimBoxKind::Int => ("haxe_box_int_ptr", IrType::I64),
             PrimBoxKind::Float => ("haxe_box_float_ptr", IrType::F64),
@@ -1523,6 +1567,13 @@ impl<'a> HirToMirContext<'a> {
         }
 
         let ir_type = self.convert_type(concrete_type_id);
+        if ir_type == IrType::NullInt
+            || self.builder.get_register_type(value) == Some(IrType::NullInt)
+        {
+            let as_null_int = self.to_null_int(value)?;
+            let boxed = self.null_int_to_dynamic(as_null_int)?;
+            return self.builder.build_bitcast(boxed, dyn_ptr);
+        }
         if self.is_int64_type(concrete_type_id) {
             let box_func = self.get_or_register_extern_function(
                 "haxe_box_int64_ptr",
@@ -1717,6 +1768,15 @@ impl<'a> HirToMirContext<'a> {
     /// Ints pass through, floats are bitcast, pointers are cast to i64.
     pub(crate) fn coerce_to_i64(&mut self, value: IrId, type_id: TypeId) -> Option<IrId> {
         let ir_type = self.convert_type(type_id);
+        // A `Null<Int>` slot here still holds a box (or null), as the runtime
+        // reads these slots.
+        if ir_type == IrType::NullInt
+            || self.builder.get_register_type(value) == Some(IrType::NullInt)
+        {
+            let as_null_int = self.to_null_int(value)?;
+            let boxed = self.null_int_to_dynamic(as_null_int)?;
+            return self.builder.build_bitcast(boxed, IrType::I64);
+        }
         match &ir_type {
             IrType::I64 => Some(value),
             IrType::I32 | IrType::U64 | IrType::Bool => {
@@ -1754,6 +1814,11 @@ impl<'a> HirToMirContext<'a> {
         if native_ty == declared_ty {
             return value;
         }
+        // `Null<Int>` meeting a scalar: an Int widens to it, it narrows to a
+        // scalar (null reads as 0), and a pointer slot takes a Dynamic.
+        if *declared_ty == IrType::NullInt || *native_ty == IrType::NullInt {
+            return self.coerce_null_int(value, declared_ty).unwrap_or(value);
+        }
         let is_numeric = |t: &IrType| {
             matches!(
                 t,
@@ -1781,6 +1846,16 @@ impl<'a> HirToMirContext<'a> {
     /// type. Inverse of `coerce_to_i64`.
     pub(crate) fn coerce_from_i64(&mut self, value: IrId, type_id: TypeId) -> Option<IrId> {
         let ir_type = self.convert_type(type_id);
+        // The slot holds a box, null, or an erased raw Int.
+        if ir_type == IrType::NullInt {
+            let as_ptr = match self.builder.get_register_type(value) {
+                Some(IrType::Ptr(_)) | Some(IrType::NullInt) => value,
+                _ => self
+                    .builder
+                    .build_bitcast(value, IrType::Ptr(Box::new(IrType::U8)))?,
+            };
+            return self.to_null_int(as_ptr);
+        }
         match &ir_type {
             IrType::I64 => Some(value),
             IrType::I32 | IrType::U64 | IrType::Bool => {

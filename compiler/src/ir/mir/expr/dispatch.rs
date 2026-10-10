@@ -1031,6 +1031,8 @@ impl<'a> HirToMirContext<'a> {
                 self.symbol_map.get(&SymbolId::from_raw(0)).copied()
             }
 
+            // A null typed `Null<Int>` is `NULL_INT` from the start.
+            HirExprKind::Null if self.is_null_int_type(expr.ty) => self.builder.build_null_int(),
             HirExprKind::Null => self.builder.build_null(),
 
             HirExprKind::Untyped(inner) => {

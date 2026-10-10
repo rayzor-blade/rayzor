@@ -73,7 +73,7 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::Int | TypeKind::Bool) => CallMethodSlots::Int,
             Some(TypeKind::Float) => CallMethodSlots::Float,
             Some(TypeKind::Dynamic | TypeKind::Unknown | TypeKind::Optional { .. })
-                if matches!(self.convert_type(element), IrType::Ptr(_)) =>
+                if matches!(self.convert_type(element), IrType::Ptr(_) | IrType::NullInt) =>
             {
                 CallMethodSlots::Boxed
             }
@@ -106,6 +106,24 @@ impl<'a> HirToMirContext<'a> {
         let as_ptr = self.builder.build_cast(raw, IrType::I64, ptr_u8)?;
         self.builder
             .build_call_direct(unbox, vec![as_ptr], IrType::I64)
+    }
+
+    /// Element `idx` of callMethod's arguments array for a `Null<Int>`
+    /// parameter: an Int slot sign-extends, any other slot is a box or null.
+    fn call_method_null_int(
+        &mut self,
+        array: IrId,
+        idx: usize,
+        slots: CallMethodSlots,
+    ) -> Option<IrId> {
+        let raw = self.call_method_raw(array, idx)?;
+        if slots == CallMethodSlots::Int {
+            return self.to_null_int(raw);
+        }
+        let as_ptr = self
+            .builder
+            .build_bitcast(raw, IrType::Ptr(Box::new(IrType::U8)))?;
+        self.to_null_int(as_ptr)
     }
 
     /// Element `idx` of callMethod's arguments array as an Int or Float
@@ -359,6 +377,9 @@ impl<'a> HirToMirContext<'a> {
                         target_ty,
                         slots,
                         |this| {
+                            if *target_ty == IrType::NullInt {
+                                return this.call_method_null_int(args_array_ptr, idx, slots);
+                            }
                             if let Some(value) =
                                 this.call_method_number(args_array_ptr, idx, slots, target_ty)?
                             {
@@ -464,6 +485,9 @@ impl<'a> HirToMirContext<'a> {
                 &target_ty,
                 slots,
                 |this| {
+                    if target_ty == IrType::NullInt {
+                        return this.call_method_null_int(args_array_ptr, idx, slots);
+                    }
                     if let Some(value) =
                         this.call_method_number(args_array_ptr, idx, slots, &target_ty)?
                     {
@@ -551,7 +575,9 @@ impl<'a> HirToMirContext<'a> {
             self.type_table.get(args[0].ty).map(|t| &t.kind),
             Some(crate::tast::TypeKind::Dynamic)
         );
-        let value_dyn = if arg_is_dynamic || actual_ty == dynamic_ptr_ty {
+        let value_dyn = if actual_ty == IrType::NullInt {
+            self.null_int_to_dynamic(value_reg)?
+        } else if arg_is_dynamic || actual_ty == dynamic_ptr_ty {
             value_reg
         } else {
             self.box_value_for_dynamic(value_reg, args[0].ty)?

@@ -280,6 +280,7 @@ impl<'a> HirToMirContext<'a> {
                         | TypeKind::Interface { .. }
                 )
             ) || self.is_optional_primitive(ret)
+                || self.is_null_int_type(ret)
         });
         if declared_return.is_some() {
             self.current_function_return_type = declared_return;

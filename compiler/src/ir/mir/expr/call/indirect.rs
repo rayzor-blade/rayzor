@@ -243,6 +243,13 @@ impl<'a> HirToMirContext<'a> {
             arg_regs.push(value);
         }
 
+        // A `Null<Int>` meets an Int or Dynamic formal (or the reverse) by value.
+        for (reg, ty) in arg_regs.iter_mut().zip(&param_types) {
+            if let Some(converted) = self.coerce_null_int(*reg, ty) {
+                *reg = converted;
+            }
+        }
+
         let func_signature = IrType::Function {
             params: param_types,
             return_type,
@@ -266,6 +273,11 @@ impl<'a> HirToMirContext<'a> {
             let ty = self.builder.get_register_type(*reg)?;
             let slot = match ty {
                 IrType::I64 => *reg,
+                // A `Null<Int>` crosses a generic slot as its box.
+                IrType::NullInt => {
+                    let boxed = self.null_int_to_dynamic(*reg)?;
+                    self.builder.build_bitcast(boxed, IrType::I64)?
+                }
                 IrType::F32 => {
                     let widened = self.builder.build_cast(*reg, IrType::F32, IrType::F64)?;
                     self.builder.build_bitcast(widened, IrType::I64)?
@@ -310,6 +322,12 @@ impl<'a> HirToMirContext<'a> {
             .build_call_indirect(closure, slots, signature)?;
         match expected {
             IrType::I64 | IrType::Void => Some(result),
+            IrType::NullInt => {
+                let as_ptr = self
+                    .builder
+                    .build_bitcast(result, IrType::Ptr(Box::new(IrType::U8)))?;
+                self.to_null_int(as_ptr)
+            }
             IrType::F32 => {
                 let value = self.builder.build_bitcast(result, IrType::F64)?;
                 self.builder.build_cast(value, IrType::F64, IrType::F32)
@@ -583,6 +601,7 @@ impl<'a> HirToMirContext<'a> {
             IrType::Bool => self.builder.build_const(IrValue::Bool(false)),
             IrType::I32 => self.builder.build_const(IrValue::I32(0)),
             IrType::I64 => self.builder.build_const(IrValue::I64(0)),
+            IrType::NullInt => self.builder.build_null_int(),
             other => {
                 let null = self.builder.build_const(IrValue::Null)?;
                 self.builder.build_bitcast(null, other.clone())

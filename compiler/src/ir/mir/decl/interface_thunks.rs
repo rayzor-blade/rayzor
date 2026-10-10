@@ -115,7 +115,13 @@ impl<'a> HirToMirContext<'a> {
                 return true;
             }
         }
-        let numeric = |ty| matches!(ty, IrType::I32 | IrType::F32 | IrType::F64);
+        // A `Null<Int>` slot meets an Int or Float one by value.
+        let numeric = |ty| {
+            matches!(
+                ty,
+                IrType::I32 | IrType::F32 | IrType::F64 | IrType::NullInt
+            )
+        };
         let from = self.convert_type(source);
         let to = self.convert_type(target);
         from != to && numeric(from) && numeric(to)

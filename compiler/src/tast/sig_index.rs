@@ -486,7 +486,15 @@ impl StaticSigIndex {
     }
 
     fn param_kind(p: &parser::FunctionParam) -> Option<String> {
-        // `?x:Int`, `?x = 1` and `x:Int = null` are `Null<Int>`: a box slot.
+        // `?x:Int`, `?x = 1` and `x:Int = null` are `Null<Int>`: a `NullInt`
+        // slot. A nullable Float or Bool is a box slot.
+        let null_of = |name: &str| {
+            if name == "Int" && !crate::debug_flags::null_int_boxed() {
+                "NullInt"
+            } else {
+                "Null"
+            }
+        };
         let nullable = p.optional
             || matches!(
                 p.default_value.as_deref().map(|e| &e.kind),
@@ -501,18 +509,15 @@ impl StaticSigIndex {
                 parser::Type::Path { path, .. }
                     if nullable && matches!(path.name.as_str(), "Int" | "Float" | "Bool") =>
                 {
-                    return Some("Null".to_string());
+                    return Some(null_of(path.name.as_str()).to_string());
                 }
                 parser::Type::Path { path, .. } => return Some(path.name.clone()),
                 _ => break,
             }
         }
         let kind = match p.default_value.as_deref().map(|e| &e.kind)? {
-            parser::ExprKind::Int(_) | parser::ExprKind::Float(_) | parser::ExprKind::Bool(_)
-                if nullable =>
-            {
-                "Null"
-            }
+            parser::ExprKind::Int(_) if nullable => null_of("Int"),
+            parser::ExprKind::Float(_) | parser::ExprKind::Bool(_) if nullable => "Null",
             parser::ExprKind::Int(_) => "Int",
             parser::ExprKind::Float(_) => "Float",
             parser::ExprKind::Bool(_) => "Bool",

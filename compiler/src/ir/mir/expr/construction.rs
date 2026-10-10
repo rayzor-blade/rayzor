@@ -776,6 +776,9 @@ impl<'a> HirToMirContext<'a> {
         let header = self.builder.build_const(IrValue::I64(runtime_type_id));
         let obj_ptr = self.build_heap_alloc_with_header(obj_size, header);
         let obj_ptr = obj_ptr?;
+        if let Some(class_sym) = actual_symbol_id {
+            self.fill_null_int_fields(obj_ptr, class_sym, true);
+        }
 
         // @:derive(Default): initialize all fields before constructor call.
         // Uses @:default(value) metadata if present, else type-based defaults.

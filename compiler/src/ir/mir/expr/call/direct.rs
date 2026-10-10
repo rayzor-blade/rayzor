@@ -248,7 +248,11 @@ impl<'a> HirToMirContext<'a> {
                             } else if scalar_formal {
                                 self.open_nullable_scalar(reg, a.ty).unwrap_or(reg)
                             } else {
-                                reg
+                                // A `Null<Int>` meets any other formal by value.
+                                formals
+                                    .get(i)
+                                    .and_then(|formal| self.coerce_null_int(reg, formal))
+                                    .unwrap_or(reg)
                             })
                         })
                         .collect()

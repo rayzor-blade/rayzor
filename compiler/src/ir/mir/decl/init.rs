@@ -90,6 +90,21 @@ impl<'a> HirToMirContext<'a> {
             .collect();
 
         for (global_id, global_ty, reset_value) in globals_to_reset {
+            // A `Null<Int>` constant keeps all 64 bits in a `NullInt` register.
+            if global_ty == IrType::NullInt {
+                let bits = match reset_value {
+                    IrValue::I64(v) => Some(v),
+                    IrValue::I32(v) => Some(i64::from(v)),
+                    _ => None,
+                };
+                if let Some(bits) = bits {
+                    if let Some(val_reg) = self.builder.build_const(IrValue::I64(bits)) {
+                        self.builder.set_register_type(val_reg, IrType::NullInt);
+                        self.builder.build_store_global(global_id, val_reg);
+                    }
+                    continue;
+                }
+            }
             if let Some(val_reg) = self.builder.build_const(reset_value) {
                 let store_val = match self.builder.get_register_type(val_reg) {
                     Some(val_ty) if val_ty != global_ty => self

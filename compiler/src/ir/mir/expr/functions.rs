@@ -961,6 +961,9 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // A `Null<Int>` field starts null, not 0, however the object was allocated.
+        self.fill_null_int_fields(this_reg, class_symbol, false);
+
         // Apply field initializers declared at field-declaration sites
         // before source statements and super(), so parent virtual calls see them.
         for field_init in &constructor.field_inits {

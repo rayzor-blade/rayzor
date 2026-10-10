@@ -177,7 +177,9 @@ impl<'a> HirToMirContext<'a> {
                                 }
                                 // Value types stored in 8 bytes
                                 IrType::I32 | IrType::Bool => (IrType::I64, None),
-                                IrType::I64 | IrType::F64 => (resolved_type.clone(), None),
+                                IrType::I64 | IrType::F64 | IrType::NullInt => {
+                                    (resolved_type.clone(), None)
+                                }
                                 // Unknown/Any: load as I64 for runtime dispatch
                                 _ => (IrType::I64, None),
                             };

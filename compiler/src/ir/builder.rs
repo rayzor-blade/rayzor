@@ -217,6 +217,7 @@ impl IrBuilder {
 
     /// Build a store instruction. Infers store type from the value's register type.
     pub fn build_store(&mut self, ptr: IrId, value: IrId) -> Option<()> {
+        let value = self.reconcile_null_int_store(ptr, value)?;
         let store_ty = self.get_register_type(value);
         self.add_instruction(IrInstruction::Store {
             ptr,
@@ -239,11 +240,28 @@ impl IrBuilder {
 
     /// Build a store to global variable
     pub fn build_store_global(&mut self, global_id: super::IrGlobalId, value: IrId) -> Option<()> {
+        // A `Null<Int>` global takes an Int sign-extended, a null constant as
+        // `NULL_INT`.
+        let value = if self.module.globals.get(&global_id).map(|g| &g.ty) == Some(&IrType::NullInt)
+        {
+            match self.get_register_type(value) {
+                Some(t @ (IrType::I8 | IrType::I16 | IrType::I32 | IrType::Bool)) => {
+                    self.build_cast(value, t, IrType::NullInt)?
+                }
+                Some(IrType::Ptr(_)) if self.is_null_const(value) => self.build_null_int()?,
+                _ => value,
+            }
+        } else {
+            value
+        };
         self.add_instruction(IrInstruction::StoreGlobal { global_id, value })
     }
 
     /// Build a binary operation
     pub fn build_binop(&mut self, op: BinaryOp, left: IrId, right: IrId) -> Option<IrId> {
+        // A `Null<Int>` operand is read as its Int: null is 0.
+        let left = self.null_int_as_int(left)?;
+        let right = self.null_int_as_int(right)?;
         // Int meeting Int64 is Int64 arithmetic: the 32-bit side sign-extends.
         // A shift's count does not decide the width of its result.
         let shift = matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Ushr);
@@ -276,6 +294,7 @@ impl IrBuilder {
 
     /// Build a unary operation
     pub fn build_unop(&mut self, op: UnaryOp, operand: IrId) -> Option<IrId> {
+        let operand = self.null_int_as_int(operand)?;
         let dest = self.alloc_reg()?;
         // Infer result type from operand for LLVM backend
         if let Some(ty) = self.get_register_type(operand) {
@@ -287,6 +306,7 @@ impl IrBuilder {
 
     /// Build a comparison operation
     pub fn build_cmp(&mut self, op: CompareOp, left: IrId, right: IrId) -> Option<IrId> {
+        let (left, right) = self.reconcile_null_int_operands(op, left, right)?;
         // Coerce mixed int/float operands: promote int → float for correct comparison.
         // e.g., `arr.length == 3.0` where length is I32 and 3.0 is F64.
         let left_ty = self.get_register_type(left);
@@ -474,6 +494,10 @@ impl IrBuilder {
                         .map(|l| l.ty.clone())
                 });
                 if let Some(arg_ty) = arg_ty_opt {
+                    if let Some(coerced) = self.coerce_null_int_arg(*arg_id, &arg_ty, param_ty) {
+                        *arg_id = coerced;
+                        continue;
+                    }
                     let needs_cast = matches!(
                         (&arg_ty, param_ty),
                         (IrType::I32 | IrType::I64, IrType::F64 | IrType::F32)
@@ -611,6 +635,14 @@ impl IrBuilder {
 
                 let actual_is_vector = actual_return_type.is_vector();
 
+                if actual_return_type == IrType::NullInt || ty == IrType::NullInt {
+                    // Narrow Ints and floats convert; an i64 or pointer
+                    // result keeps its own type for the caller to convert.
+                    return Some(
+                        self.coerce_null_int_arg(dest_reg, &actual_return_type, &ty)
+                            .unwrap_or(dest_reg),
+                    );
+                }
                 if actual_is_vector {
                     // Vector types (e.g., F32X4 from SIMD4f) should never be cast.
                     // The function returns the correct vector type; the caller's expected
@@ -765,6 +797,14 @@ impl IrBuilder {
 
             // Skip cast when ty is TypeVar — we've already resolved the concrete type
             // from type_args. The TypeVar was a placeholder in the caller's context.
+            if (actual_return_type == IrType::NullInt || ty == IrType::NullInt)
+                && actual_return_type != ty
+            {
+                return Some(
+                    self.coerce_null_int_arg(dest_reg, &actual_return_type, &ty)
+                        .unwrap_or(dest_reg),
+                );
+            }
             if actual_return_type != ty && !matches!(ty, IrType::TypeVar(_)) {
                 let actual_is_ptr = matches!(actual_return_type, IrType::Ptr(_));
                 let expected_is_scalar = matches!(
@@ -1180,6 +1220,12 @@ impl IrBuilder {
 
     /// Build an integer constant
     pub fn build_int(&mut self, value: i64, ty: IrType) -> Option<IrId> {
+        // A `Null<Int>` constant is the Int sign-extended.
+        if ty == IrType::NullInt {
+            let reg = self.build_const(IrValue::I64(i64::from(value as i32)))?;
+            self.set_register_type(reg, IrType::NullInt);
+            return Some(reg);
+        }
         let ir_value = match ty {
             IrType::I8 => IrValue::I8(value as i8),
             IrType::I16 => IrValue::I16(value as i16),
@@ -1216,6 +1262,136 @@ impl IrBuilder {
         let dest = self.build_const(IrValue::null_int())?;
         self.set_register_type(dest, IrType::NullInt);
         Some(dest)
+    }
+
+    /// An argument crossing between `NullInt` and an Int, an erased i64 slot
+    /// or a float parameter: Int sign-extends in, and out it truncates (null
+    /// reads as 0; an i64 slot gets that Int sign-extended). A caller that
+    /// wants the bits casts to I64 first. Pointers are left to the caller.
+    fn coerce_null_int_arg(
+        &mut self,
+        arg: IrId,
+        arg_ty: &IrType,
+        param_ty: &IrType,
+    ) -> Option<IrId> {
+        match (arg_ty, param_ty) {
+            (
+                IrType::I8 | IrType::I16 | IrType::I32 | IrType::U8 | IrType::U16 | IrType::Bool,
+                IrType::NullInt,
+            ) => self.build_cast(arg, arg_ty.clone(), IrType::NullInt),
+            (
+                IrType::NullInt,
+                IrType::I8 | IrType::I16 | IrType::I32 | IrType::U8 | IrType::U16 | IrType::U32,
+            ) => self.build_cast(arg, IrType::NullInt, param_ty.clone()),
+            (IrType::NullInt, IrType::F64 | IrType::F32 | IrType::I64 | IrType::U64) => {
+                let int = self.build_cast(arg, IrType::NullInt, IrType::I32)?;
+                self.build_cast(int, IrType::I32, param_ty.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// A store into a typed slot where one side is a `NullInt`: an Int
+    /// sign-extends into a `Null<Int>` slot and a null constant becomes
+    /// `NULL_INT`; a `NullInt` truncates into an Int slot. A box is left to
+    /// the caller.
+    fn reconcile_null_int_store(&mut self, ptr: IrId, value: IrId) -> Option<IrId> {
+        let Some(IrType::Ptr(slot)) = self.get_register_type(ptr) else {
+            return Some(value);
+        };
+        let value_ty = self.get_register_type(value);
+        match (slot.as_ref(), value_ty) {
+            (
+                IrType::NullInt,
+                Some(t @ (IrType::I8 | IrType::I16 | IrType::I32 | IrType::Bool)),
+            ) => self.build_cast(value, t, IrType::NullInt),
+            (IrType::NullInt, Some(IrType::Ptr(_))) if self.is_null_const(value) => {
+                self.build_null_int()
+            }
+            (IrType::I32, Some(IrType::NullInt)) => {
+                self.build_cast(value, IrType::NullInt, IrType::I32)
+            }
+            _ => Some(value),
+        }
+    }
+
+    /// Whether `reg` is a null pointer constant defined in the current block.
+    pub fn is_null_const(&self, reg: IrId) -> bool {
+        let Some(block) = self.current_block else {
+            return false;
+        };
+        self.current_function()
+            .and_then(|f| f.cfg.get_block(block))
+            .is_some_and(|b| {
+                b.instructions.iter().rev().any(|inst| {
+                    matches!(inst, IrInstruction::Const { dest, value: IrValue::Null } if *dest == reg)
+                })
+            })
+    }
+
+    /// A `NullInt` register truncated to its Int (null reads as 0); any other
+    /// register unchanged.
+    pub fn null_int_as_int(&mut self, reg: IrId) -> Option<IrId> {
+        if self.get_register_type(reg) == Some(IrType::NullInt) {
+            self.build_cast(reg, IrType::NullInt, IrType::I32)
+        } else {
+            Some(reg)
+        }
+    }
+
+    /// Compare operands where one side is a `NullInt`. Equality keeps null
+    /// distinct from every Int (the Int side sign-extends, a null pointer
+    /// constant becomes `NULL_INT`); an ordering reads null as 0.
+    fn reconcile_null_int_operands(
+        &mut self,
+        op: CompareOp,
+        left: IrId,
+        right: IrId,
+    ) -> Option<(IrId, IrId)> {
+        let left_ty = self.get_register_type(left);
+        let right_ty = self.get_register_type(right);
+        let left_null_int = left_ty == Some(IrType::NullInt);
+        let right_null_int = right_ty == Some(IrType::NullInt);
+        if !left_null_int && !right_null_int {
+            return Some((left, right));
+        }
+        let is_float = |t: &Option<IrType>| t.as_ref().is_some_and(|t| t.is_float());
+        let equality = matches!(op, CompareOp::Eq | CompareOp::Ne)
+            && !is_float(&left_ty)
+            && !is_float(&right_ty);
+        if equality {
+            let widen = |this: &mut Self, reg: IrId, ty: &Option<IrType>| -> Option<IrId> {
+                match ty {
+                    Some(IrType::NullInt) => Some(reg),
+                    Some(t @ (IrType::I8 | IrType::I16 | IrType::I32 | IrType::Bool)) => {
+                        this.build_cast(reg, t.clone(), IrType::NullInt)
+                    }
+                    Some(IrType::Ptr(_)) if this.is_null_const(reg) => this.build_null_int(),
+                    _ => Some(reg),
+                }
+            };
+            let l = widen(self, left, &left_ty)?;
+            let r = widen(self, right, &right_ty)?;
+            return Some((l, r));
+        }
+        let narrow = |this: &mut Self, reg: IrId, other: &Option<IrType>| -> Option<IrId> {
+            let int = this.null_int_as_int(reg)?;
+            match other {
+                Some(IrType::I64) => this.build_cast(int, IrType::I32, IrType::I64),
+                _ => Some(int),
+            }
+        };
+        let l = if left_null_int {
+            narrow(self, left, &right_ty)?
+        } else {
+            left
+        };
+        let r = if right_null_int {
+            narrow(self, right, &left_ty)?
+        } else {
+            right
+        };
+        Some((l, r))
     }
 
     /// Build addition

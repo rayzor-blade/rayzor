@@ -1439,6 +1439,13 @@ impl<'a> HirToMirContext<'a> {
         self.builder
             .add_phi_incoming(merge, value, check_block, zero)?;
 
+        // An `Array<Null<Int>>` slot holds a box or null; out of bounds is null.
+        if self.is_null_int_type(ty) {
+            let as_ptr = self
+                .builder
+                .build_bitcast(value, IrType::Ptr(Box::new(IrType::U8)))?;
+            return self.to_null_int(as_ptr);
+        }
         if load_type != target_type {
             self.builder.build_cast(value, load_type, target_type)
         } else {
@@ -1907,6 +1914,15 @@ impl<'a> HirToMirContext<'a> {
         let have = self.builder.get_register_type(reg).unwrap_or(IrType::I64);
         if have == *want {
             return Some(reg);
+        }
+        // `Null<Int>` converts by value, except through an 8-byte slot, which
+        // keeps its bits.
+        let slot = |t: &IrType| matches!(t, IrType::I64 | IrType::U64);
+        if *want == IrType::NullInt && !slot(&have) {
+            return self.to_null_int(reg);
+        }
+        if have == IrType::NullInt && !slot(want) {
+            return self.null_int_to_ir(reg, want);
         }
         match (&have, want) {
             (IrType::F64, IrType::I64) | (IrType::I64, IrType::F64) => {

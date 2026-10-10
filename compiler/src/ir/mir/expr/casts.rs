@@ -197,6 +197,16 @@ impl<'a> HirToMirContext<'a> {
         let from_type = self.convert_type(expr.ty);
         let to_type = self.convert_type(*target);
 
+        // `Null<Int>` on one side converts by value, as an assignment does.
+        if (from_type == IrType::NullInt) != (to_type == IrType::NullInt) {
+            let value_reg = self.lower_expression(expr)?;
+            let value = self.to_null_int_typed(value_reg, expr.ty)?;
+            if to_type == IrType::NullInt {
+                return Some(value);
+            }
+            return self.null_int_to_ir(value, &to_type);
+        }
+
         // A Dynamic source is a box, so even the unchecked cast changes the
         // representation: the value comes out of the box, unverified. Before
         // the same-MIR-type shortcut, which a box and an object both take.
@@ -898,6 +908,13 @@ impl<'a> HirToMirContext<'a> {
                     rayzor_runtime::type_system::TYPE_DYNAMIC_TOKEN.0 as i64,
                 ))?;
                 self.runtime_type_check_token(value, expr.ty, token)
+            }
+            // A `Null<Int>` is checked as its box: null is no type.
+            _ if self.is_null_int_type(expr.ty) => {
+                let value_reg = self.lower_expression(expr)?;
+                let value = self.to_null_int(value_reg)?;
+                let boxed = self.null_int_to_dynamic(value)?;
+                self.runtime_type_check(boxed, *expected)
             }
             // Dynamic source: runtime type check via haxe_std_is
             (Some(TypeKind::Dynamic), _) => {

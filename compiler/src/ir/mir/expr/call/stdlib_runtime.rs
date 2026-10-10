@@ -437,6 +437,7 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                         _ => Some(arg_reg),
                                     },
+                                    IrType::NullInt => self.null_int_to_dynamic(arg_reg),
                                     IrType::Struct { .. } => {
                                         if let Some(stack_slot) =
                                             self.builder.build_alloc(arg_type.clone(), None)
@@ -796,6 +797,9 @@ impl<'a> HirToMirContext<'a> {
                                                         return boxed;
                                                     }
                                                 }
+                                                if let Some(converted) = self.coerce_null_int(reg, expected_ty) {
+                                                    return converted;
+                                                }
                                                 if let Some(casted) = self.builder.build_cast(reg, actual_ty.clone(), expected_ty.clone()) {
                                                     return casted;
                                                 }
@@ -846,6 +850,12 @@ impl<'a> HirToMirContext<'a> {
                                                 // Array element slots are always 8 bytes, so
                                                 // widen smaller values.
                                                 let (alloc_type, value_to_store) = match arg_type {
+                                                    // A `Null<Int>` stores its Int (null is 0).
+                                                    IrType::NullInt => {
+                                                        let int = self
+                                                            .null_int_to_ir(arg_reg, &IrType::I64);
+                                                        (IrType::I64, int.unwrap_or(arg_reg))
+                                                    }
                                                     IrType::I32 => {
                                                         let ext_val = self.builder.build_cast(
                                                             arg_reg,
@@ -1059,6 +1069,12 @@ impl<'a> HirToMirContext<'a> {
                                                 // Array element slots are always 8 bytes, so
                                                 // widen smaller values.
                                                 let (alloc_type, value_to_store) = match arg_type {
+                                                    // A `Null<Int>` stores its Int (null is 0).
+                                                    IrType::NullInt => {
+                                                        let int = self
+                                                            .null_int_to_ir(arg_reg, &IrType::I64);
+                                                        (IrType::I64, int.unwrap_or(arg_reg))
+                                                    }
                                                     IrType::I32 => {
                                                         let ext_val = self.builder.build_cast(
                                                             arg_reg,
@@ -1224,6 +1240,12 @@ impl<'a> HirToMirContext<'a> {
                                                 // Array element slots are always 8 bytes, so
                                                 // widen smaller values.
                                                 let (alloc_type, value_to_store) = match arg_type {
+                                                    // A `Null<Int>` stores its Int (null is 0).
+                                                    IrType::NullInt => {
+                                                        let int = self
+                                                            .null_int_to_ir(arg_reg, &IrType::I64);
+                                                        (IrType::I64, int.unwrap_or(arg_reg))
+                                                    }
                                                     IrType::I32 => {
                                                         let ext_val = self.builder.build_cast(
                                                             arg_reg,

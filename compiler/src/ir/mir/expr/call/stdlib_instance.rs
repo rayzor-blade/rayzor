@@ -465,7 +465,13 @@ impl<'a> HirToMirContext<'a> {
                                         // Resolve generic T from the receiver's type args to
                                         // unbox: Channel<Int>.tryReceive() returns Ptr(U8)
                                         // where the caller expects I32.
-                                        let resolved_expected = {
+                                        // An `Array<Null<Int>>` element is its slot: a box or null.
+                                        let null_int_element = !args.is_empty()
+                                            && self.array_of_null_int(args[0].ty)
+                                            && self.is_null_int_type(expr.ty);
+                                        let resolved_expected = if null_int_element {
+                                            IrType::NullInt
+                                        } else {
                                             let type_table = self.type_table;
                                             let from_receiver = if !args.is_empty() {
                                                 type_table.get(args[0].ty).and_then(|ti| match &ti

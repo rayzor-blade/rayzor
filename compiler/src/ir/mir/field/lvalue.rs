@@ -1009,6 +1009,19 @@ impl<'a> HirToMirContext<'a> {
             let elem = self.type_table.dynamic_type();
             return self.load_vec_index_with_regs(&class, obj_reg, idx_reg, elem);
         }
+        // An `Array<Null<Int>>` element reads by its own type: its slot is a box.
+        let null_int_element = match self
+            .type_table
+            .get(self.resolve_through_aliases(object_ty))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Array { element_type }) => Some(*element_type),
+            _ => None,
+        }
+        .filter(|element_type| self.is_null_int_type(*element_type));
+        if let Some(element_type) = null_int_element {
+            return self.lower_index_access(obj_reg, idx_reg, element_type);
+        }
         self.lower_index_access(obj_reg, idx_reg, object_ty)
     }
 
@@ -1133,6 +1146,12 @@ impl<'a> HirToMirContext<'a> {
                     Some(TypeKind::Dynamic)
                 )
         );
+        // An `Array<Null<Int>>` slot holds a box or null.
+        let value = if self.array_of_null_int(object_ty) {
+            self.null_int_slot_box(value).unwrap_or(value)
+        } else {
+            value
+        };
         let mut value = value;
         let mut value_ir_type = self.builder.get_register_type(value);
         let raw_string = match &value_ir_type {
