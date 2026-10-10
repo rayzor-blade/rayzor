@@ -359,6 +359,33 @@ impl MacroRegistry {
         Ok(())
     }
 
+    /// Register the macro functions of a `Context.defineType` class, so calls
+    /// walked after the definition expand. Their bodies resolve under the
+    /// defining macro's file and imports.
+    pub(crate) fn register_defined_macros(
+        &mut self,
+        defined: &super::context_api::DefinedType,
+        source_file: &str,
+        imports: &Arc<BTreeMap<String, String>>,
+    ) -> Result<(), MacroError> {
+        let class_qualified = defined
+            .pack
+            .iter()
+            .chain(std::iter::once(&defined.name))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(".");
+        for value in &defined.field_values {
+            if !super::build_macros::is_macro_field_value(value) {
+                continue;
+            }
+            if let Some(field) = super::build_macros::value_to_class_field(value) {
+                self.register_macro_field(&field, &class_qualified, source_file, imports)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Extract the macro name from @:build metadata arguments
     fn extract_build_macro_name(&self, args: &[Expr]) -> String {
         extract_macro_name_from_args(args)

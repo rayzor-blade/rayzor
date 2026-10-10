@@ -854,12 +854,12 @@ impl<'a> AstLowering<'a> {
                         self.expected_arg_type_stack.pop();
                     }
                     let right_expr = right_result?;
+                    let typed_op = self.lower_binary_operator(op)?;
                     let (left_expr, right_expr) = if matches!(op, BinaryOp::Eq | BinaryOp::NotEq) {
                         self.coerce_eq_operands_via_abstract_from(left_expr, right_expr)
                     } else {
-                        (left_expr, right_expr)
+                        self.promote_operands_to_expected_abstract(typed_op, left_expr, right_expr)
                     };
-                    let typed_op = self.lower_binary_operator(op)?;
 
                     // `Int % 0` is NaN in Haxe; a constant one would trap as a remainder.
                     if typed_op == BinaryOperator::Mod
@@ -1098,6 +1098,9 @@ impl<'a> AstLowering<'a> {
                 // `var m:Map<String,V>` annotation, base `Map` from
                 // `new Map()` call site).
                 let mut base_class_type_id = self.resolve_type_path(type_path)?;
+                if let Some(concrete) = self.native_class_behind_extern(base_class_type_id) {
+                    base_class_type_id = concrete;
+                }
                 if let Some(symbol) = self.resolve_type_to_class_symbol(base_class_type_id) {
                     if let Some(built) =
                         self.generic_build_type(symbol, params, Some(args), expression.span)?
@@ -3580,6 +3583,44 @@ impl<'a> AstLowering<'a> {
             parser::ExprKind::Try { catches, .. } => catches.len() as u32,
             _ => 0,
         }
+    }
+
+    /// The class an extern class describes: a non-extern class compiled here
+    /// under the same `@:native` path, which is what constructing the extern
+    /// builds at runtime.
+    fn native_class_behind_extern(&self, ty: TypeId) -> Option<TypeId> {
+        use crate::tast::symbols::{SymbolFlags, SymbolKind};
+        let extern_class = self.resolve_type_to_class_symbol(ty)?;
+        let symbol = self.context.symbol_table.get_symbol(extern_class)?;
+        if symbol.kind != SymbolKind::Class || !symbol.flags.contains(SymbolFlags::EXTERN) {
+            return None;
+        }
+        let native = symbol.native_name?;
+        let concrete = self
+            .context
+            .symbol_table
+            .all_symbols()
+            .find(|s| {
+                s.id != extern_class
+                    && s.kind == SymbolKind::Class
+                    && s.native_name == Some(native)
+                    && !s.flags.contains(SymbolFlags::EXTERN)
+            })?
+            .id;
+        if self
+            .context
+            .symbol_table
+            .get_class_type_params(concrete)
+            .is_some_and(|params| !params.is_empty())
+        {
+            return None;
+        }
+        Some(
+            self.context
+                .type_table
+                .borrow_mut()
+                .create_class_type(concrete, Vec::new()),
+        )
     }
 }
 

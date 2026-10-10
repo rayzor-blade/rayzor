@@ -299,8 +299,9 @@ enum ParamUse<'a> {
     Hint(&'a Type),
     /// Stored into a field or indexed element with a declared type.
     StoredIn(&'a Expr),
-    /// Matched against an enum constructor pattern: that constructor's enum.
-    EnumOf(&'a str),
+    /// Matched against an enum constructor pattern: that constructor's enum,
+    /// with the cases whose bindings can bind its type arguments.
+    EnumOf(&'a str, &'a [parser::Case]),
 }
 
 /// The parameter an expression names: the parameter itself, or a local
@@ -598,7 +599,7 @@ fn collect_param_operator_uses<'a>(
                     _ => None,
                 })
             }) {
-                note(subject, ParamUse::EnumOf(ctor), uses);
+                note(subject, ParamUse::EnumOf(ctor, cases), uses);
             }
             visit(subject, uses);
             for case in cases {

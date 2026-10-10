@@ -138,6 +138,84 @@ impl<'a> AstLowering<'a> {
         self.lower_expression(&call)
     }
 
+    /// Haxe promotes an expected abstract declaring exactly one `@:op` for
+    /// `operator` to the operands: `var f:EnumFlags<E> = A | B` reads as
+    /// `(A : EnumFlags<E>) | (B : EnumFlags<E>)`, converting through `@:from`.
+    /// Operands with an operator of their own (a primitive, an abstract
+    /// declaring it) keep it.
+    pub(crate) fn promote_operands_to_expected_abstract(
+        &mut self,
+        operator: BinaryOperator,
+        left: TypedExpression,
+        right: TypedExpression,
+    ) -> (TypedExpression, TypedExpression) {
+        let Some(expected) = self.expected_arg_type_stack.last().copied().flatten() else {
+            return (left, right);
+        };
+        let Some(target) = self.abstract_symbol_of(expected) else {
+            return (left, right);
+        };
+        if self.binary_operator_method_count(target, operator) != 1 {
+            return (left, right);
+        }
+        let has_own_operator = |this: &mut Self, ty: TypeId| {
+            let builtin = {
+                let tt = this.context.type_table.borrow();
+                let ty = Self::resolve_alias_chain(&tt, ty);
+                !matches!(
+                    tt.get(ty).map(|t| &t.kind),
+                    Some(
+                        TypeKind::Enum { .. }
+                            | TypeKind::Class { .. }
+                            | TypeKind::Anonymous { .. }
+                            | TypeKind::Abstract { .. }
+                            | TypeKind::GenericInstance { .. }
+                    )
+                )
+            };
+            builtin
+                || this
+                    .abstract_symbol_of(ty)
+                    .is_some_and(|owner| this.binary_operator_method_count(owner, operator) > 0)
+        };
+        if has_own_operator(self, left.expr_type) || has_own_operator(self, right.expr_type) {
+            return (left, right);
+        }
+        let cast = |operand: TypedExpression| TypedExpression {
+            expr_type: expected,
+            source_location: operand.source_location,
+            usage: operand.usage.clone(),
+            lifetime_id: operand.lifetime_id,
+            metadata: operand.metadata.clone(),
+            kind: TypedExpressionKind::Cast {
+                expression: Box::new(operand),
+                target_type: expected,
+                cast_kind: CastKind::Checked,
+            },
+        };
+        (cast(left), cast(right))
+    }
+
+    /// How many `@:op` methods `owner` declares for a binary operator.
+    fn binary_operator_method_count(&mut self, owner: SymbolId, operator: BinaryOperator) -> usize {
+        let Some(index) = self.static_sig_index.as_ref().cloned() else {
+            return 0;
+        };
+        let Some(symbol) = self.context.symbol_table.get_symbol(owner) else {
+            return 0;
+        };
+        let Some(name) = self
+            .context
+            .string_interner
+            .get(symbol.qualified_name.unwrap_or(symbol.name))
+            .map(str::to_string)
+        else {
+            return 0;
+        };
+        let methods = index.borrow_mut().binary_operator_methods(&name, operator);
+        methods.len()
+    }
+
     /// The `@:op(A!)` method of an abstract: (name, is_static).
     fn postfix_not_method(&self, owner: SymbolId) -> Option<(String, bool)> {
         if let Some(found) = self.abstract_postfix_not.get(&owner) {

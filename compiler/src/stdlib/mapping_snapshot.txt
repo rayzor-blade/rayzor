@@ -131,6 +131,7 @@ Sys args static=true ctor=false params=0 -> haxe_sys_args
 Sys command static=true ctor=false params=1 -> haxe_sys_command
 Sys cpuArch static=true ctor=false params=0 -> haxe_sys_cpu_arch
 Sys cpuTime static=true ctor=false params=0 -> haxe_sys_cpu_time
+Sys environment static=true ctor=false params=0 -> haxe_sys_environment
 Sys executablePath static=true ctor=false params=0 -> haxe_sys_program_path
 Sys exit static=true ctor=false params=1 -> haxe_sys_exit
 Sys getChar static=true ctor=false params=1 -> haxe_sys_get_char

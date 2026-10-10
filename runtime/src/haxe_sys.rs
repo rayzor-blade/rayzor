@@ -1462,6 +1462,19 @@ pub extern "C" fn haxe_sys_put_env(name: *const HaxeString, value: *const HaxeSt
     }
 }
 
+/// Sys.environment(): a fresh StringMap<String> snapshot, so writes to it do
+/// not reach the process environment and later calls do not see them.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_sys_environment() -> *mut HaxeStringMap {
+    let map = haxe_stringmap_new();
+    for (name, value) in std::env::vars_os() {
+        let name = name.to_string_lossy().into_owned();
+        let value = rust_string_to_haxe(value.to_string_lossy().into_owned());
+        unsafe { (*map).map.insert(name, value as u64) };
+    }
+    map
+}
+
 // ============================================================================
 // Working Directory
 // ============================================================================

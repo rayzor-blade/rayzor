@@ -21,6 +21,19 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+/// How a callMethod arguments array holds its elements.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CallMethodSlots {
+    /// Int or Bool values.
+    Int,
+    /// Float bits.
+    Float,
+    /// Dynamic or `Null<T>`: a box, or null.
+    Boxed,
+    /// Anything else: read as slot bits.
+    Erased,
+}
+
 impl<'a> HirToMirContext<'a> {
     /// Wrap an Array<Dynamic> callback in a function that packs its arguments.
     pub(crate) fn lower_reflect_make_var_args(
@@ -47,38 +60,108 @@ impl<'a> HirToMirContext<'a> {
         Some(result)
     }
 
+    /// How callMethod's arguments array holds its elements, from its static
+    /// element type.
+    fn call_method_slots(&self, array_ty: TypeId) -> CallMethodSlots {
+        let Some(element) = self
+            .get_array_element_type(self.resolve_through_aliases(array_ty))
+            .map(|element| self.resolve_through_aliases(element))
+        else {
+            return CallMethodSlots::Erased;
+        };
+        match self.type_table.get(element).map(|t| &t.kind) {
+            Some(TypeKind::Int | TypeKind::Bool) => CallMethodSlots::Int,
+            Some(TypeKind::Float) => CallMethodSlots::Float,
+            Some(TypeKind::Dynamic | TypeKind::Unknown | TypeKind::Optional { .. })
+                if matches!(self.convert_type(element), IrType::Ptr(_)) =>
+            {
+                CallMethodSlots::Boxed
+            }
+            _ => CallMethodSlots::Erased,
+        }
+    }
+
+    /// Element `idx` of callMethod's arguments array, unconverted.
+    fn call_method_raw(&mut self, array: IrId, idx: usize) -> Option<IrId> {
+        let get = self.get_or_register_extern_function(
+            "haxe_array_get_i64",
+            vec![IrType::Ptr(Box::new(IrType::Void)), IrType::I64],
+            IrType::I64,
+        );
+        let index = self.builder.build_const(IrValue::I64(idx as i64))?;
+        self.builder
+            .build_call_direct(get, vec![array, index], IrType::I64)
+    }
+
     /// Element `idx` of callMethod's arguments array as raw slot bits: a box
     /// in a mixed array gives up its payload, anything else is read as is.
     fn call_method_slot(&mut self, array: IrId, idx: usize) -> Option<IrId> {
-        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-        let get = self.get_or_register_extern_function(
-            "haxe_array_get_i64",
-            vec![ptr_void, IrType::I64],
-            IrType::I64,
-        );
         let unbox = self.get_or_register_extern_function(
             "haxe_unbox_erased_return",
             vec![ptr_u8.clone()],
             IrType::I64,
         );
-        let index = self.builder.build_const(IrValue::I64(idx as i64))?;
-        let raw = self
-            .builder
-            .build_call_direct(get, vec![array, index], IrType::I64)?;
+        let raw = self.call_method_raw(array, idx)?;
         let as_ptr = self.builder.build_cast(raw, IrType::I64, ptr_u8)?;
         self.builder
             .build_call_direct(unbox, vec![as_ptr], IrType::I64)
     }
 
+    /// Element `idx` of callMethod's arguments array as an Int or Float
+    /// parameter's value: a number crosses to the parameter's numeric type, as
+    /// a Dynamic argument would. None for any other parameter or an erased
+    /// element, which the caller reads as slot bits.
+    fn call_method_number(
+        &mut self,
+        array: IrId,
+        idx: usize,
+        slots: CallMethodSlots,
+        target: &IrType,
+    ) -> Option<Option<IrId>> {
+        let float = match target {
+            IrType::I32 => false,
+            IrType::F64 | IrType::F32 => true,
+            _ => return Some(None),
+        };
+        if slots == CallMethodSlots::Erased {
+            return Some(None);
+        }
+        let raw = self.call_method_raw(array, idx)?;
+        let (value, ty) = match slots {
+            CallMethodSlots::Int => (raw, IrType::I64),
+            CallMethodSlots::Float => (self.builder.build_bitcast(raw, IrType::F64)?, IrType::F64),
+            _ => {
+                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                let (name, ty) = if float {
+                    ("haxe_coerce_dynamic_to_float", IrType::F64)
+                } else {
+                    ("haxe_coerce_dynamic_to_int", IrType::I64)
+                };
+                let coerce =
+                    self.get_or_register_extern_function(name, vec![ptr_void.clone()], ty.clone());
+                let as_ptr = self.builder.build_cast(raw, IrType::I64, ptr_void)?;
+                let value = self
+                    .builder
+                    .build_call_direct(coerce, vec![as_ptr], ty.clone())?;
+                (value, ty)
+            }
+        };
+        if &ty == target {
+            return Some(Some(value));
+        }
+        Some(Some(self.builder.build_cast(value, ty, target.clone())?))
+    }
+
     /// Argument `idx` of a callMethod call: read from the arguments array, or
-    /// the parameter's default when the array stops short of it.
+    /// the parameter's default when the array stops short of it or holds null.
     fn call_method_arg(
         &mut self,
         array: IrId,
         idx: usize,
         default: Option<&HirExpr>,
         target: &IrType,
+        slots: CallMethodSlots,
         read: impl FnOnce(&mut Self) -> Option<IrId>,
     ) -> Option<IrId> {
         let Some(default) = default else {
@@ -102,6 +185,17 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_cond_branch(present, have, missing)?;
 
         self.builder.switch_to_block(have);
+        // A null in an array of boxes is a skipped argument, as in a direct call.
+        if slots == CallMethodSlots::Boxed {
+            let raw = self.call_method_raw(array, idx)?;
+            let zero = self.builder.build_const(IrValue::I64(0))?;
+            let given = self
+                .builder
+                .build_cmp(crate::ir::CompareOp::Ne, raw, zero)?;
+            let read_block = self.builder.create_block()?;
+            self.builder.build_cond_branch(given, read_block, missing)?;
+            self.builder.switch_to_block(read_block);
+        }
         let given = read(self)?;
         let from_have = self.builder.current_block()?;
         self.builder.build_branch(merge)?;
@@ -155,6 +249,7 @@ impl<'a> HirToMirContext<'a> {
             }
             _ => None,
         };
+        let slots = self.call_method_slots(args_array_expr.ty);
         let defaults: Vec<Option<HirExpr>> = callee
             .and_then(|id| self.function_param_defaults.get(&id).cloned())
             .unwrap_or_default();
@@ -262,7 +357,13 @@ impl<'a> HirToMirContext<'a> {
                         idx,
                         default.as_ref(),
                         target_ty,
+                        slots,
                         |this| {
+                            if let Some(value) =
+                                this.call_method_number(args_array_ptr, idx, slots, target_ty)?
+                            {
+                                return Some(value);
+                            }
                             let raw_val = this.call_method_slot(args_array_ptr, idx)?;
                             let coerced = match target_ty {
                                 IrType::I64 => Some(raw_val),
@@ -356,14 +457,25 @@ impl<'a> HirToMirContext<'a> {
         for (idx, param_ty_id) in param_type_ids.iter().enumerate() {
             let default = defaults.get(idx).cloned().flatten();
             let target_ty = self.convert_type(*param_ty_id);
-            let value =
-                self.call_method_arg(args_array_ptr, idx, default.as_ref(), &target_ty, |this| {
+            let value = self.call_method_arg(
+                args_array_ptr,
+                idx,
+                default.as_ref(),
+                &target_ty,
+                slots,
+                |this| {
+                    if let Some(value) =
+                        this.call_method_number(args_array_ptr, idx, slots, &target_ty)?
+                    {
+                        return Some(value);
+                    }
                     let raw_val = this.call_method_slot(args_array_ptr, idx)?;
                     Some(
                         this.coerce_from_i64(raw_val, *param_ty_id)
                             .unwrap_or(raw_val),
                     )
-                })?;
+                },
+            )?;
             call_args.push(value);
         }
 

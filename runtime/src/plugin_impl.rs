@@ -572,6 +572,10 @@ register_symbol!(
 // Environment
 register_symbol!("haxe_sys_get_env", crate::haxe_sys::haxe_sys_get_env);
 register_symbol!("haxe_sys_put_env", crate::haxe_sys::haxe_sys_put_env);
+register_symbol!(
+    "haxe_sys_environment",
+    crate::haxe_sys::haxe_sys_environment
+);
 
 // Working directory
 register_symbol!("haxe_sys_get_cwd", crate::haxe_sys::haxe_sys_get_cwd);

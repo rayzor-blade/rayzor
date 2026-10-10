@@ -2096,6 +2096,8 @@ impl StdlibMapping {
                 types: &[PtrVoid] => PtrString),
             map_method!(static "Sys", "putEnv" => "haxe_sys_put_env", params: 2, returns: void,
                 types: &[PtrVoid, PtrVoid]),
+            map_method!(static "Sys", "environment" => "haxe_sys_environment", params: 0, returns: complex,
+                types: &[] => PtrVoid),
             // Working directory
             map_method!(static "Sys", "getCwd" => "haxe_sys_get_cwd", params: 0, returns: complex,
                 types: &[] => PtrString),

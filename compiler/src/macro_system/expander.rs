@@ -1201,6 +1201,10 @@ impl MacroExpander {
             Err(e) => Err(e),
         }?;
 
+        for d in &defined {
+            self.registry
+                .register_defined_macros(d, &macro_def.source_file, &macro_def.imports)?;
+        }
         self.defined_types.extend(defined);
         self.hooks.extend(hooks);
 
@@ -1347,9 +1351,11 @@ fn module_types(file: &HaxeFile) -> Vec<MacroValue> {
 pub(crate) fn defined_declaration(
     defined: &super::context_api::DefinedType,
 ) -> parser::TypeDeclaration {
+    // Macro functions are compile-time only; `register_defined_macros` took them.
     let fields = defined
         .field_values
         .iter()
+        .filter(|v| !super::build_macros::is_macro_field_value(v))
         .filter_map(super::build_macros::value_to_class_field)
         .collect();
     let class = parser::ClassDecl {

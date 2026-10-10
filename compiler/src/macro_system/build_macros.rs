@@ -571,6 +571,20 @@ fn field_name(field: &ClassField) -> &str {
     }
 }
 
+/// A field value whose `access` carries `AMacro`.
+pub(crate) fn is_macro_field_value(value: &MacroValue) -> bool {
+    let MacroValue::Object(obj) = value else {
+        return false;
+    };
+    obj.get("access")
+        .and_then(|v| v.as_array())
+        .is_some_and(|access| {
+            access
+                .iter()
+                .any(|a| matches!(a, MacroValue::String(s) if &**s == "Macro"))
+        })
+}
+
 /// Convert a single MacroValue (Object) back to a ClassField
 pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
     let obj = match value {

@@ -1427,6 +1427,124 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// Bind a generic enum's type parameters from the uses of the variables
+    /// its constructor patterns bind at positions typed by that parameter, as
+    /// Haxe unifies them: `case leaf(x): acc + x` makes `T` Int. A parameter
+    /// whose bindings say nothing, or disagree, stays as it was.
+    fn bind_enum_args_from_cases(
+        &mut self,
+        enum_ty: TypeId,
+        cases: &[parser::Case],
+        parameter_hints: &[(&str, Option<&Type>)],
+        return_hint: Option<&Type>,
+    ) -> TypeId {
+        let (enum_symbol, mut args) = match self.context.type_table.borrow().get(enum_ty) {
+            Some(t) => match &t.kind {
+                TypeKind::Enum {
+                    symbol_id,
+                    type_args,
+                } if !type_args.is_empty() => (*symbol_id, type_args.clone()),
+                _ => return enum_ty,
+            },
+            None => return enum_ty,
+        };
+        let generic = args.clone();
+        let mut bound: Vec<Option<Option<TypeId>>> = vec![None; args.len()];
+        for case in cases {
+            for pattern in &case.patterns {
+                let parser::Pattern::Constructor { path, params } = pattern else {
+                    continue;
+                };
+                let Some(ctor_ty) = self.enum_of_constructor_params(&path.name) else {
+                    continue;
+                };
+                for (sub, formal) in params.iter().zip(ctor_ty) {
+                    let parser::Pattern::Var(name) = sub else {
+                        continue;
+                    };
+                    let Some(slot) = generic.iter().position(|g| *g == formal) else {
+                        continue;
+                    };
+                    let mut hints = parameter_hints.to_vec();
+                    hints.push((name.as_str(), None));
+                    let mut found = BTreeMap::new();
+                    self.apply_param_operator_uses(
+                        &case.body,
+                        &[name.as_str()],
+                        hints,
+                        return_hint,
+                        &std::collections::BTreeSet::new(),
+                        &mut found,
+                    );
+                    let key = self.context.intern_string(name);
+                    let Some(ty) = found.get(&key).copied() else {
+                        continue;
+                    };
+                    bound[slot] = match bound[slot] {
+                        None => Some(Some(ty)),
+                        Some(Some(seen)) if seen == ty => Some(Some(ty)),
+                        _ => Some(None),
+                    };
+                }
+            }
+        }
+        let mut changed = false;
+        for (arg, b) in args.iter_mut().zip(&bound) {
+            if let Some(Some(ty)) = b {
+                *arg = *ty;
+                changed = true;
+            }
+        }
+        if !changed {
+            return enum_ty;
+        }
+        self.context
+            .type_table
+            .borrow_mut()
+            .create_enum_type(enum_symbol, args)
+    }
+
+    /// Whether `bound` is `generic` with some of its type parameters bound:
+    /// the same enum, each argument equal or a type parameter in `generic`.
+    fn enum_binds_more(&self, bound: TypeId, generic: TypeId) -> bool {
+        let table = self.context.type_table.borrow();
+        let args = |ty: TypeId| match table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Enum {
+                symbol_id,
+                type_args,
+            }) => Some((*symbol_id, type_args.clone())),
+            _ => None,
+        };
+        let (Some((bs, ba)), Some((gs, ga))) = (args(bound), args(generic)) else {
+            return false;
+        };
+        bound != generic
+            && bs == gs
+            && ba.len() == ga.len()
+            && ba.iter().zip(&ga).all(|(b, g)| {
+                b == g
+                    || matches!(
+                        table.get(*g).map(|t| &t.kind),
+                        Some(TypeKind::TypeParameter { .. })
+                    )
+            })
+    }
+
+    /// A constructor's parameter types, in declaration order.
+    fn enum_of_constructor_params(&self, ctor: &str) -> Option<Vec<TypeId>> {
+        let key = self.context.string_interner.get_id(ctor)?;
+        let sym = self.resolve_symbol_in_scope_hierarchy(key)?;
+        let symbol = self.context.symbol_table.get_symbol(sym)?;
+        if symbol.kind != crate::tast::symbols::SymbolKind::EnumVariant {
+            return None;
+        }
+        let tt = self.context.type_table.borrow();
+        match tt.get(symbol.type_id).map(|t| &t.kind) {
+            Some(TypeKind::Function { params, .. }) => Some(params.clone()),
+            _ => None,
+        }
+    }
+
     /// Resolve a store rooted in a class field without lowering its receiver.
     fn parameter_store_target_type(
         &self,
@@ -1545,13 +1663,18 @@ impl<'a> AstLowering<'a> {
                             None => continue,
                         }
                     }
-                    ParamUse::EnumOf(ctor) => match self.enum_of_constructor(ctor) {
-                        Some(ty) => ty,
+                    ParamUse::EnumOf(ctor, cases) => match self.enum_of_constructor(ctor) {
+                        Some(ty) => {
+                            self.bind_enum_args_from_cases(ty, cases, &parameter_hints, return_hint)
+                        }
                         None => continue,
                     },
                 };
                 concat_only = false;
                 match agreed {
+                    // One match bound the enum's arguments, another did not.
+                    Some(seen) if self.enum_binds_more(ty, seen) => agreed = Some(ty),
+                    Some(seen) if self.enum_binds_more(seen, ty) => {}
                     Some(seen) if seen != ty => {
                         conflict = true;
                         break;

@@ -115,7 +115,7 @@ impl<'a> HirToMirContext<'a> {
                     }
 
                     if let Some(constructor) = &class.constructor {
-                        if !class.is_extern {
+                        if !self.constructor_is_external(class) {
                             self.register_constructor_signature_with_class_type_params(
                                 class.symbol_id,
                                 constructor,
@@ -366,7 +366,7 @@ impl<'a> HirToMirContext<'a> {
                         // its constructor from the mapping system, so no MIR
                         // constructor is generated. Qualified class name first
                         // (e.g. "rayzor_Bytes"), then the simple name.
-                        let should_skip_constructor = class.is_extern
+                        let should_skip_constructor = self.constructor_is_external(class)
                             || {
                                 let check_class_runtime = |name: &str| -> bool {
                                     if let Some(class_name_static) =
@@ -486,5 +486,29 @@ impl<'a> HirToMirContext<'a> {
         } else {
             Err(std::mem::take(&mut self.errors))
         }
+    }
+
+    /// Whether a class's constructor comes from outside this module: an
+    /// `extern` class, or a `@:native` one the runtime mapping provides. Any
+    /// other `@:native` class only renames itself and compiles its own.
+    fn constructor_is_external(&self, class: &HirClass) -> bool {
+        let Some(symbol) = self.symbol_table.get_symbol(class.symbol_id) else {
+            return class.is_extern;
+        };
+        if symbol.flags.contains(SymbolFlags::EXTERN) {
+            return true;
+        }
+        if !class.is_extern {
+            return false;
+        }
+        [symbol.native_name, symbol.qualified_name]
+            .into_iter()
+            .flatten()
+            .filter_map(|name| self.string_interner.get(name))
+            .any(|name| {
+                self.stdlib_mapping
+                    .class_key(&name.replace("::", "."))
+                    .is_some()
+            })
     }
 }

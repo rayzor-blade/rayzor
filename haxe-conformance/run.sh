@@ -157,6 +157,11 @@ cp "$HERE/shims/unit/ConfCheck.hx" "$SHARED/unit/ConfCheck.hx"
 cp "$HERE/shims/utest/Assert.hx" "$SHARED/utest/Assert.hx"
 cp "$HERE/shims/utest/Test.hx" "$SHARED/utest/Test.hx"
 cp "$HERE/shims/utest/Async.hx" "$SHARED/utest/Async.hx"
+# utest.Runner and utest.ui.Report, for a case whose own main builds them.
+mkdir -p "$SHARED/utest/ui/common"
+cp "$HERE/shims/utest/Runner.hx" "$SHARED/utest/Runner.hx"
+cp "$HERE/shims/utest/ui/Report.hx" "$SHARED/utest/ui/Report.hx"
+cp "$HERE/shims/utest/ui/common/"*.hx "$SHARED/utest/ui/common/"
 
 # How many files are candidates, so progress has a denominator.
 # Both spellings. A file in `package unit.issues` may name the base class
@@ -458,6 +463,82 @@ for name, st, takes_async in methods:
     main.append('        ' + call)
 main += ['        unit.ConfCheck.summary();', '    }']
 open(dst, 'w', encoding='utf-8').write('\n'.join(lines[:last] + main + lines[last:]))
+
+# TestArguments is a program upstream runs with `expectedArgs` on its command
+# line (TestCommandBase drives it); run without them it can only fail. Read the
+# literal -- arrays of strings joined by `.concat`, and a
+# `switch (Sys.systemName())` choosing per host -- and pass the same list.
+# Anything else in the initializer leaves the case run without arguments.
+import json
+import platform
+
+def expected_args(src_text):
+    m = re.search(r'\bvar\s+expectedArgs\b[^=;]*=', src_text)
+    if not m:
+        return None
+    toks = re.findall(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[A-Za-z_]\w*|\S',
+                      src_text[m.end():], re.S)
+    host = {'Windows': 'Windows', 'Darwin': 'Mac', 'Linux': 'Linux'}.get(platform.system(), 'BSD')
+    pos = [0]
+    def peek():
+        return toks[pos[0]] if pos[0] < len(toks) else None
+    def take(want=None):
+        t = peek()
+        if t is None or (want is not None and t != want):
+            raise ValueError(t)
+        pos[0] += 1
+        return t
+    def string(t):
+        if t[0] not in '"\'' or (t[0] == "'" and re.search(r'(?<!\$)\$(?!\$)', t)):
+            raise ValueError(t)
+        esc = {'n': '\n', 'r': '\r', 't': '\t', '\\': '\\', '"': '"', "'": "'", '$': '$'}
+        return re.sub(r'\\(.)', lambda e: esc[e.group(1)], t[1:-1].replace('$$', '$')
+                      if t[0] == "'" else t[1:-1])
+    def array():
+        take('[')
+        out = []
+        while peek() != ']':
+            out.append(string(take()))
+            if peek() == ',':
+                take(',')
+        take(']')
+        return out
+    def switch():
+        take('switch'); take('('); take('Sys'); take('.'); take('systemName')
+        take('('); take(')'); take(')'); take('{')
+        chosen, fallback = None, None
+        while peek() != '}':
+            take('case')
+            pat = take()
+            take(':')
+            val = expr()
+            if peek() == ';':
+                take(';')
+            if pat == '_':
+                fallback = val
+            elif chosen is None and string(pat) == host:
+                chosen = val
+        take('}')
+        if chosen is None and fallback is None:
+            raise ValueError('no branch')
+        return chosen if chosen is not None else fallback
+    def expr():
+        val = array() if peek() == '[' else switch()
+        while peek() == '.':
+            take('.'); take('concat'); take('(')
+            val = val + expr()
+            take(')')
+        return val
+    try:
+        val = expr()
+        take(';')
+        return val
+    except (ValueError, KeyError):
+        return None
+
+args = expected_args(blank_comments(text))
+if args is not None:
+    open(dst[:-3] + '.args.json', 'w', encoding='utf-8').write(json.dumps(args))
 PYGEN
   gen=$?
   if [[ $gen -eq 3 ]]; then
@@ -476,6 +557,9 @@ PYGEN
   # class path compiles the siblings too.
   printf '[project]\nname = "conformance"\nentry = "%s%s.hx"\n\n[build]\nclass-paths = [".", "%s"]\n' \
     "${rel:+$rel/}" "$base" "$SHARED" > "$d/rayzor.toml"
+  # Program arguments the generator found for this case, if any.
+  local args_file="$d${rel:+/$rel}/$base.args.json"
+  [[ -f "$args_file" ]] || args_file=""
   # Bounded. A test that now compiles can also loop forever, and without a
   # limit one of those stalls the whole corpus -- in CI, until the job is
   # killed hours later. `timeout` is not on every platform we run this on, so
@@ -486,12 +570,12 @@ PYGEN
   # ships, treats "${empty[@]}" as an unbound variable -- which fails EVERY
   # invocation and scores the whole corpus COMPILE_FAIL.
   if [[ "$LLVM" != 0 ]]; then
-    out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" --llvm 2>&1 )
+    out=$( cd "$d" && RUNWITH_ARGS="$args_file" python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" --llvm 2>&1 )
   elif [[ "$CRANELIFT" != 0 ]]; then
-    out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" \
+    out=$( cd "$d" && RUNWITH_ARGS="$args_file" python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" \
              --tier 1 --tier-start-interpreted false --tier-promotion false 2>&1 )
   else
-    out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" 2>&1 )
+    out=$( cd "$d" && RUNWITH_ARGS="$args_file" python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" 2>&1 )
   fi
   code=$?
   # The compact TSV is for scoring, not diagnosis. Preserve the complete output

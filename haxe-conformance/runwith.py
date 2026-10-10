@@ -4,12 +4,21 @@
 `timeout(1)` is not present on every platform the harness runs on, and a test
 that hangs would otherwise stall the whole corpus.
 """
+import json
+import os
 import subprocess
 import sys
 
 limit = float(sys.argv[1])
+cmd = sys.argv[2:]
+# RUNWITH_ARGS names a JSON list of program arguments, passed after `--`. A
+# file rather than argv, so they survive bash 3.2 intact: empty strings,
+# newlines and quotes included.
+if os.environ.get("RUNWITH_ARGS"):
+    with open(os.environ["RUNWITH_ARGS"], encoding="utf-8") as f:
+        cmd += ["--"] + json.load(f)
 try:
-    p = subprocess.run(sys.argv[2:], capture_output=True, timeout=limit)
+    p = subprocess.run(cmd, capture_output=True, timeout=limit)
 except subprocess.TimeoutExpired as e:
     for chunk in (e.stdout, e.stderr):
         if chunk:
