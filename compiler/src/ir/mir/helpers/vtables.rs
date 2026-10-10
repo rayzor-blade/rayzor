@@ -289,7 +289,10 @@ impl<'a> HirToMirContext<'a> {
                         let Some(parent_qn) = self.class_qualified_name(parent) else {
                             continue;
                         };
-                        if index.declares_instance_method(&parent_qn, method) {
+                        if index.declares_instance_method(&parent_qn, method)
+                            || index_slot_layout(&mut index, &parent_qn)
+                                .is_some_and(|layout| layout.iter().any(|m| m == method))
+                        {
                             defining_class = Some(parent);
                         }
                     }
@@ -301,8 +304,8 @@ impl<'a> HirToMirContext<'a> {
                             let Some(qn) = self.class_qualified_name(cls) else {
                                 continue;
                             };
-                            let names: Vec<InternedString> = index
-                                .virtual_methods_of(&qn)
+                            let names: Vec<InternedString> = index_slot_layout(&mut index, &qn)
+                                .unwrap_or_default()
                                 .iter()
                                 .map(|m| self.string_interner.intern(m))
                                 .collect();

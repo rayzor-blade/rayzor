@@ -1327,6 +1327,12 @@ impl FunctionSignatureBuilder {
     }
 
     pub fn param(mut self, name: String, ty: IrType) -> Self {
+        // A `Void` formal carries no value; a word keeps every backend able to type it.
+        let ty = if matches!(ty, IrType::Void) {
+            IrType::I64
+        } else {
+            ty
+        };
         self.parameters.push(IrParameter {
             name,
             ty,

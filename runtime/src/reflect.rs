@@ -473,6 +473,10 @@ pub extern "C" fn haxe_reflect_fields(obj: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return std::ptr::null_mut();
     }
+    // A class used as a value is its 32-bit type id: its fields are the statics.
+    if (obj as usize) >> 32 == 0 {
+        return crate::type_system::haxe_type_get_class_fields(obj as i64);
+    }
     unsafe {
         if builtin_box(obj).is_some() {
             // Not an object: no fields, as Haxe's other targets answer.

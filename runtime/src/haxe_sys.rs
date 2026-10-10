@@ -370,7 +370,7 @@ fn format_array_slot(val: i64) -> String {
     // `Array<Float>` storing 3.14 has bit pattern 0x400921FB54442D1F whose
     // low 3 bits are 0b111 — the pointer-alignment heuristic below would
     // misclassify it as a raw int. But heap pointers (user-space range
-    // 4 GiB..16 TiB), reinterpreted as f64, give subnormal values
+    // 4 GiB..128 TiB), reinterpreted as f64, give subnormal values
     // ~10⁻³⁰⁸ — far below this window — so a value that decodes to a
     // human-scale finite f64 (1e-10..1e15) is almost certainly the
     // float a user put there, not a pointer the heuristic should keep
@@ -391,14 +391,12 @@ fn format_array_slot(val: i64) -> String {
         return val.to_string();
     }
 
-    // User-space heap range gate. macOS / Linux user-heap addresses live
-    // in roughly `[4 GiB, 16 TiB]`. Anything above 16 TiB is either
-    // kernel space (where dereferencing SIGSEGVs userspace) or pure
-    // garbage — most importantly this excludes `f64` bit patterns that
-    // happen to look 8-aligned (e.g. the bits of 3.14 are about 4×10¹⁸,
-    // way above any real heap address).
+    // User-space range gate: `[4 GiB, 2^47)`, the 47-bit user address space
+    // (Linux heaps sit near its top). Anything above is kernel space or
+    // garbage, which excludes `f64` bit patterns that look 8-aligned (the
+    // bits of 3.14 are about 4×10¹⁸).
     const USER_HEAP_LO: u64 = 0x0000_0001_0000_0000; // 4 GiB
-    const USER_HEAP_HI: u64 = 0x0000_1000_0000_0000; // 16 TiB
+    const USER_HEAP_HI: u64 = 0x0000_8000_0000_0000; // 128 TiB
     if !(USER_HEAP_LO..=USER_HEAP_HI).contains(&uval) {
         return val.to_string();
     }

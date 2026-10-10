@@ -69,6 +69,36 @@ impl<'a> HirToMirContext<'a> {
             unreachable!("lower_cast on a non-Cast expression")
         };
         let target_type = self.resolve_through_aliases(*target);
+        // A literal checked against a type is built as that type, as under a
+        // declaration's hint: `({..} : C)` as the `@:structInit` class,
+        // `([..] : Array<Dynamic>)` with boxed reference elements.
+        match &expr.kind {
+            HirExprKind::ObjectLiteral { fields }
+                if self.is_abstract_over_class(*target)
+                    || matches!(
+                        self.type_table.get(target_type).map(|t| &t.kind),
+                        Some(TypeKind::Class { .. })
+                    ) =>
+            {
+                let prev = self.object_literal_target_ty.replace(*target);
+                let value = self.lower_object_literal(fields, expr.ty);
+                self.object_literal_target_ty = prev;
+                return value;
+            }
+            HirExprKind::Array { elements }
+                if matches!(
+                    self.type_table.get(target_type).map(|t| &t.kind),
+                    Some(TypeKind::Array { element_type })
+                        if matches!(
+                            self.type_table.get(*element_type).map(|t| &t.kind),
+                            Some(TypeKind::Dynamic)
+                        )
+                ) =>
+            {
+                return self.lower_array_literal(elements, target_type);
+            }
+            _ => {}
+        }
         if *is_checked
             && self.runtime_type_id(target_type) >= rayzor_runtime::type_system::TYPE_USER_START
             && matches!(

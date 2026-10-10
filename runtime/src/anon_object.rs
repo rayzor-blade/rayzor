@@ -654,13 +654,7 @@ fn box_value_as_dynamic(type_id: u32, value: u64) -> *mut u8 {
         t if t == TYPE_STRING => {
             crate::type_system::haxe_box_reference_ptr(value as *mut u8, TYPE_STRING.0)
         }
-        t if t == TYPE_NULL => {
-            let dv = DynamicValue {
-                type_id: TYPE_NULL,
-                value_ptr: std::ptr::null_mut(),
-            };
-            Box::into_raw(Box::new(dv)) as *mut u8
-        }
+        t if t == TYPE_NULL => std::ptr::null_mut(),
         // A reference slot holding 0 is null; an enum's 0 is its first value.
         _ if value == 0
             && !crate::type_system::get_type_info(TypeId(type_id))

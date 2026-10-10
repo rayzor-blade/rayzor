@@ -623,11 +623,76 @@ impl<'a> AstLowering<'a> {
 
     /// Lower a switch case
     /// Lower a switch case for expression context (where case body is an expression)
+    /// `case NAME:` naming a static final or inline var compares against that
+    /// value, as `case C.NAME:` does; any other bare name captures.
+    fn value_field_pattern(
+        &mut self,
+        pattern: &parser::Pattern,
+        span: parser::Span,
+    ) -> Option<parser::Pattern> {
+        let parser::Pattern::Var(name) = pattern else {
+            return None;
+        };
+        if name.contains('.') || self.names_enum_variant(name) {
+            return None;
+        }
+        let interned = self.context.intern_string(name);
+        let symbol = self.resolve_symbol_in_scope_hierarchy(interned)?;
+        let symbol = self.context.symbol_table.get_symbol(symbol)?;
+        let constant = symbol.kind != crate::tast::SymbolKind::Function
+            && symbol.is_static()
+            && (symbol.is_final()
+                || symbol.is_inline()
+                || symbol.mutability == crate::tast::Mutability::Immutable);
+        constant.then(|| {
+            parser::Pattern::Const(parser::Expr {
+                kind: parser::ExprKind::Ident(name.clone()),
+                span,
+            })
+        })
+    }
+
+    /// The case with its value-naming bare names rewritten as constants.
+    fn with_value_field_patterns(&mut self, case: &parser::Case) -> Option<parser::Case> {
+        let mut changed = false;
+        let mut patterns = Vec::with_capacity(case.patterns.len());
+        for pattern in &case.patterns {
+            let rewritten = if let parser::Pattern::Or(alternatives) = pattern {
+                let mut alts = Vec::with_capacity(alternatives.len());
+                for alt in alternatives {
+                    match self.value_field_pattern(alt, case.span) {
+                        Some(p) => {
+                            changed = true;
+                            alts.push(p);
+                        }
+                        None => alts.push(alt.clone()),
+                    }
+                }
+                parser::Pattern::Or(alts)
+            } else if let Some(p) = self.value_field_pattern(pattern, case.span) {
+                changed = true;
+                p
+            } else {
+                pattern.clone()
+            };
+            patterns.push(rewritten);
+        }
+        changed.then(|| parser::Case {
+            patterns,
+            guard: case.guard.clone(),
+            body: case.body.clone(),
+            span: case.span,
+        })
+    }
+
     pub(crate) fn lower_switch_case_expression(
         &mut self,
         case: &parser::Case,
         subject: &parser::Expr,
     ) -> Result<TypedSwitchCase, LoweringError> {
+        if let Some(case) = self.with_value_field_patterns(case) {
+            return self.lower_switch_case_expression(&case, subject);
+        }
         if let Some(guard) = case
             .patterns
             .first()
@@ -732,6 +797,9 @@ impl<'a> AstLowering<'a> {
         case: &parser::Case,
         subject: &parser::Expr,
     ) -> Result<TypedSwitchCase, LoweringError> {
+        if let Some(case) = self.with_value_field_patterns(case) {
+            return self.lower_switch_case(&case, subject);
+        }
         if let Some(guard) = case
             .patterns
             .first()

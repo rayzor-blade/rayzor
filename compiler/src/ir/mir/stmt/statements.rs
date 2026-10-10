@@ -689,7 +689,10 @@ impl<'a> HirToMirContext<'a> {
                 {
                     self.let_target_type_hint = slot_ty;
                 }
+                // `@:bypassAccessor` on an assignment reaches its target only.
+                let bypass = std::mem::replace(&mut self.bypass_accessors, false);
                 let rhs_value = self.lower_expression(rhs);
+                self.bypass_accessors = bypass;
                 self.object_literal_target_ty = prev_anon_target;
                 self.let_target_type_hint = prev_call_target;
                 let rhs_value = match (rhs_value, slot_ty) {

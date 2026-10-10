@@ -310,14 +310,24 @@ impl StaticSigIndex {
     /// in each enclosing one; fall back to the name as written so an imported
     /// parent still resolves through the unambiguous bare form.
     fn qualify_parent(&self, parent: String, pkg: &str) -> String {
-        if parent.contains('.') || pkg.is_empty() {
+        if parent.contains('.') {
             return parent;
         }
-        let segments: Vec<&str> = pkg.split('.').collect();
+        let segments: Vec<&str> = if pkg.is_empty() {
+            Vec::new()
+        } else {
+            pkg.split('.').collect()
+        };
         (1..=segments.len())
             .rev()
             .map(|depth| format!("{}.{}", segments[..depth].join("."), parent))
             .find(|qualified| self.classes.contains_key(qualified))
+            .or_else(|| self.classes.contains_key(&parent).then(|| parent.clone()))
+            // An imported parent: the one indexed type with that bare name.
+            .or_else(|| match self.bare_to_qualified.get(&parent) {
+                Some(names) if names.len() == 1 => names.first().cloned(),
+                _ => None,
+            })
             .unwrap_or(parent)
     }
 

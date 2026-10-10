@@ -856,10 +856,30 @@ impl<'a> AstLowering<'a> {
                     let right_expr = right_result?;
                     let typed_op = self.lower_binary_operator(op)?;
 
-                    TypedExpressionKind::BinaryOp {
-                        left: Box::new(left_expr),
-                        operator: typed_op,
-                        right: Box::new(right_expr),
+                    // `Int % 0` is NaN in Haxe; a constant one would trap as a remainder.
+                    if typed_op == BinaryOperator::Mod
+                        && matches!(
+                            left_expr.kind,
+                            TypedExpressionKind::Literal {
+                                value: LiteralValue::Int(_)
+                            }
+                        )
+                        && matches!(
+                            right_expr.kind,
+                            TypedExpressionKind::Literal {
+                                value: LiteralValue::Int(0)
+                            }
+                        )
+                    {
+                        TypedExpressionKind::Literal {
+                            value: LiteralValue::Float(f64::NAN),
+                        }
+                    } else {
+                        TypedExpressionKind::BinaryOp {
+                            left: Box::new(left_expr),
+                            operator: typed_op,
+                            right: Box::new(right_expr),
+                        }
                     }
                 }
             }

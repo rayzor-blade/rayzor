@@ -125,8 +125,9 @@ pub(super) fn attach(module: &mut IrModule, file: &HaxeFile) -> Result<(), Strin
         }
         for ctor in constructors {
             let value = metadata(&ctor.meta)?;
+            // Haxe keys the constructor's metadata `_`.
             if value.as_object().is_some_and(|v| !v.is_empty()) {
-                instance.insert(ctor.name.clone(), value);
+                instance.insert("_".to_string(), value);
             }
         }
         for (kind, data) in [
