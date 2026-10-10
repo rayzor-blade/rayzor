@@ -995,6 +995,9 @@ impl<'a> AstLowering<'a> {
             ExprKind::Index { expr, index } => {
                 let array_expr = self.lower_expression(expr)?;
                 let index_expr = self.lower_expression(index)?;
+                // An `@:arrayAccess` key converts through its formal's `@:from`.
+                let key_formal = self.array_access_key_formal(array_expr.expr_type);
+                let index_expr = self.coerce_arg_via_abstract_from(index_expr, key_formal);
 
                 TypedExpressionKind::ArrayAccess {
                     array: Box::new(array_expr),
@@ -2803,7 +2806,9 @@ impl<'a> AstLowering<'a> {
                     });
                     self.expected_lambda_params_stack.push(lambda_hint);
                     self.expected_arg_type_stack.push(declared_type);
+                    let prev_expected = self.enter_var_init(init_expr, declared_type);
                     let result = self.lower_value_expression(init_expr);
+                    self.var_init_expected = prev_expected;
                     self.expected_arg_type_stack.pop();
                     self.expected_lambda_params_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;
@@ -3008,7 +3013,9 @@ impl<'a> AstLowering<'a> {
                     self.context.expected_new_type_hint = declared_type.or(map_hint);
                     self.expected_lambda_params_stack.push(lambda_hint);
                     self.expected_arg_type_stack.push(declared_type);
+                    let prev_expected = self.enter_var_init(init_expr, declared_type);
                     let result = self.lower_value_expression(init_expr);
+                    self.var_init_expected = prev_expected;
                     self.expected_arg_type_stack.pop();
                     self.expected_lambda_params_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;

@@ -19,9 +19,24 @@ use crate::tast::TypeId;
 pub(crate) struct DeferredMacroTyper<'l, 'a> {
     pub lowering: &'l mut AstLowering<'a>,
     pub receiver: Option<(&'l parser::Expr, TypeId)>,
+    /// The type the call's position expects (`Context.getExpectedType`).
+    pub expected: Option<TypeId>,
 }
 
 impl AstLowering<'_> {
+    /// Record what a declaration expects of its initializer — the annotation,
+    /// else a monomorph — for a deferred macro call that is the initializer.
+    /// Returns the previous record for the caller to restore.
+    pub(crate) fn enter_var_init(
+        &mut self,
+        init: &parser::Expr,
+        declared: Option<TypeId>,
+    ) -> Option<((usize, usize), TypeId)> {
+        let expected = declared.unwrap_or_else(|| self.context.type_table.borrow().unknown_type());
+        self.var_init_expected
+            .replace(((init.span.start, init.span.end), expected))
+    }
+
     /// A `?.` chain is nullable as a whole: `a?.b.c` is `Null<typeof c>`.
     fn safe_chain_type(&self, e: &crate::tast::TypedExpression) -> TypeId {
         use crate::tast::TypedExpressionKind as K;
@@ -121,6 +136,7 @@ impl AstLowering<'_> {
             let mut typer = DeferredMacroTyper {
                 lowering: self,
                 receiver: None,
+                expected: None,
             };
             engine.evaluate(&info, local_type, args, span, &mut typer)
         };
@@ -381,6 +397,7 @@ impl AstLowering<'_> {
             let mut typer = DeferredMacroTyper {
                 lowering: self,
                 receiver: Some((receiver_ast, receiver.expr_type)),
+                expected: None,
             };
             cell.borrow_mut()
                 .expand_deferred_call(&name, &macro_call, &mut typer)
@@ -480,6 +497,7 @@ impl AstLowering<'_> {
             let mut typer = DeferredMacroTyper {
                 lowering: self,
                 receiver: Some((receiver_ast, receiver_type)),
+                expected: None,
             };
             cell.borrow_mut()
                 .expand_deferred_call(&name, &macro_call, &mut typer)
@@ -633,6 +651,10 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
             }
         }
         None
+    }
+
+    fn expected_type(&mut self) -> Option<TypeId> {
+        self.expected
     }
 
     fn type_display(&mut self, id: TypeId) -> String {

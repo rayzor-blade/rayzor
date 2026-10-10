@@ -278,7 +278,7 @@ fn list_of(v: Option<&MacroValue>) -> Vec<MacroValue> {
 }
 
 pub(crate) fn type_path_of(v: &MacroValue, span: Span) -> Option<(TypePath, Vec<Type>)> {
-    let path = TypePath {
+    let mut path = TypePath {
         package: list_of(field(v, "pack"))
             .iter()
             .filter_map(|p| string_of(Some(p)))
@@ -286,6 +286,13 @@ pub(crate) fn type_path_of(v: &MacroValue, span: Span) -> Option<(TypePath, Vec<
         name: string_of(field(v, "name"))?,
         sub: string_of(field(v, "sub")),
     };
+    // `StdTypes.Int` is the builtin `Int`; the module itself names no type.
+    if path.package.is_empty()
+        && path.name == "StdTypes"
+        && let Some(sub) = path.sub.take()
+    {
+        path.name = sub;
+    }
     let params = list_of(field(v, "params"))
         .iter()
         .filter_map(|p| match p {

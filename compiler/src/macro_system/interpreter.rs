@@ -1766,6 +1766,11 @@ impl MacroInterpreter {
                 let f = args.get(2).cloned().unwrap_or(MacroValue::Null);
                 self.call_value(f, Vec::new(), location).map(Some)
             }
+            // An expression macro's expected type is known only to the typer,
+            // so the call defers until lowering reaches its site.
+            "haxe.macro.Context" if method == "getExpectedType" && self.macro_context.is_none() => {
+                Err(MacroError::NeedsTyper { location })
+            }
             "haxe.macro.Context" => {
                 // Use the stored macro_context if available (set by @:build
                 // pipeline so Context.getBuildFields() returns class fields).

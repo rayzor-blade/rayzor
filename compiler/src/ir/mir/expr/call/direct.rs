@@ -353,7 +353,8 @@ impl<'a> HirToMirContext<'a> {
                         // callee is an import, not the signature, so it cannot
                         // say whether the return is erased; the declaration
                         // can. The unboxer still validates at runtime.
-                        return self.unbox_erased_generic_return(result?, None, args[0].ty);
+                        return self
+                            .unbox_erased_generic_return(result?, None, args[0].ty, expr.ty);
                     }
                     return result;
                 }
@@ -363,7 +364,7 @@ impl<'a> HirToMirContext<'a> {
                     actual_return_type.clone(),
                 )?;
                 if *is_method && !args.is_empty() && self.callee_returns_type_param(*symbol) {
-                    return self.unbox_erased_generic_return(result, None, args[0].ty);
+                    return self.unbox_erased_generic_return(result, None, args[0].ty, expr.ty);
                 }
                 return Some(result);
             }
@@ -461,7 +462,8 @@ impl<'a> HirToMirContext<'a> {
                         // declaration says whether it is erased, and the
                         // unboxer validates at runtime.
                         if self.callee_returns_type_param(*symbol) {
-                            return self.unbox_erased_generic_return(result, None, args[0].ty);
+                            return self
+                                .unbox_erased_generic_return(result, None, args[0].ty, expr.ty);
                         }
                         return Some(result);
                     }

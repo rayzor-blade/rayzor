@@ -87,6 +87,12 @@ pub trait MacroTyper {
     fn field_access_kind(&mut self, _receiver: TypeId, _name: &str) -> Option<(bool, bool)> {
         None
     }
+
+    /// `Context.getExpectedType` — the type the macro call's position
+    /// expects, or None where it expects none.
+    fn expected_type(&mut self) -> Option<TypeId> {
+        None
+    }
 }
 
 /// A scoped, non-owning handle to the live typer.
@@ -975,11 +981,15 @@ impl MacroContext {
                 Ok(self.defined_value(&key))
             }
             "getDefines" => Ok(self.get_defines()),
-            // `Context.getExpectedType()` — Haxe types this `Null<Type>` and
-            // null is the honest answer: the expected type at a macro call
-            // site is not tracked. A macro that branches on it takes its
-            // unknown path instead of failing to expand at all.
-            "getExpectedType" => Ok(MacroValue::Null),
+            // `Context.getExpectedType()` — answered by the live typer at a
+            // deferred call site; null outside one (a build macro has no
+            // call position to expect anything).
+            "getExpectedType" => Ok(self
+                .typer
+                .as_mut()
+                .and_then(|typer| typer.get().expected_type())
+                .map(MacroValue::Type)
+                .unwrap_or(MacroValue::Null)),
             "follow" | "followWithAbstracts" => {
                 let id = args
                     .first()
@@ -1096,7 +1106,10 @@ impl MacroContext {
                     return Ok(MacroValue::Null);
                 }
                 Ok(parse_type_spelling(&spelling)
-                    .map(|t| super::expr_adt::complex_type_of(&t))
+                    .map(|mut t| {
+                        qualify_std_types_module(&mut t);
+                        super::expr_adt::complex_type_of(&t)
+                    })
                     .unwrap_or(MacroValue::Null))
             }
             // `Context.storeTypedExpr(t)` — hand back the expression `typeExpr`
@@ -1418,6 +1431,55 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
     obj.insert("meta".to_string(), MacroValue::Array(Arc::new(meta)));
 
     MacroValue::Object(Arc::new(obj))
+}
+
+/// The types `StdTypes.hx` declares. Their module is not named after them.
+const STD_TYPES_MODULE: [&str; 10] = [
+    "Void",
+    "Float",
+    "Int",
+    "Null",
+    "Bool",
+    "Iterator",
+    "Iterable",
+    "KeyValueIterator",
+    "KeyValueIterable",
+    "ArrayAccess",
+];
+
+/// A type declared in a module of another name has the module as its path
+/// `name` and itself as `sub`, as Haxe's `toComplexType` builds it:
+/// `Int` is `StdTypes.Int`.
+fn qualify_std_types_module(t: &mut parser::Type) {
+    use parser::Type;
+    match t {
+        Type::Path { path, params, .. } => {
+            if path.package.is_empty()
+                && path.sub.is_none()
+                && STD_TYPES_MODULE.contains(&path.name.as_str())
+            {
+                path.sub = Some(std::mem::replace(&mut path.name, "StdTypes".to_string()));
+            }
+            params.iter_mut().for_each(qualify_std_types_module);
+        }
+        Type::Function { params, ret, .. } => {
+            params.iter_mut().for_each(qualify_std_types_module);
+            qualify_std_types_module(ret);
+        }
+        Type::Anonymous { fields, .. } => {
+            for field in fields {
+                qualify_std_types_module(&mut field.type_hint);
+            }
+        }
+        Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => {
+            qualify_std_types_module(inner)
+        }
+        Type::Intersection { left, right, .. } => {
+            qualify_std_types_module(left);
+            qualify_std_types_module(right);
+        }
+        Type::Wildcard { .. } | Type::Const { .. } => {}
+    }
 }
 
 /// A type spelled as Haxe source, parsed back to its syntax.

@@ -1681,6 +1681,11 @@ pub struct AstLowering<'a> {
     /// Deferred call sites by (span.start, span.end), mapped to the registry
     /// name the expander resolved at expansion time.
     deferred_macro_calls: BTreeMap<(usize, usize), String>,
+    /// The variable initializer being lowered, by (span.start, span.end), and
+    /// the type its declaration expects: the annotation, else a monomorph.
+    /// A deferred macro call that IS the initializer reports it as
+    /// `Context.getExpectedType()`.
+    var_init_expected: Option<((usize, usize), TypeId)>,
     /// Each abstract's declared implicit casts, `(from types, to types)`.
     /// `Context.unify` consults these; nothing else records them anywhere
     /// queryable.

@@ -138,6 +138,8 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        self.note_constraint_methods(callee, _resolved_target);
+
         // @:shader wgsl() — intercept at Call entry point
         probe!(self.try_shader_call(expr));
 

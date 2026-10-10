@@ -89,6 +89,7 @@ impl<'a> AstLowering<'a> {
             macro_private_access: false,
             class_value_bindings: BTreeMap::new(),
             deferred_macro_calls: BTreeMap::new(),
+            var_init_expected: None,
             abstract_casts: BTreeMap::new(),
             abstract_from_methods: BTreeMap::new(),
             abstract_postfix_not: BTreeMap::new(),

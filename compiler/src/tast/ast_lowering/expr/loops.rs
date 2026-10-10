@@ -31,6 +31,32 @@ impl<'a> AstLowering<'a> {
         None
     }
 
+    /// An abstract over a class instance that declares `keyValueIterator`:
+    /// its representation has no builtin key-value shape to iterate.
+    fn class_backed_kv_abstract(&self, iterable_ty: TypeId) -> bool {
+        let Some(symbol) = self.iterable_abstract(iterable_ty) else {
+            return false;
+        };
+        if !self.abstract_has_method(symbol, "keyValueIterator") {
+            return false;
+        }
+        let tt = self.context.type_table.borrow();
+        let declared = tt.resolve_abstract_underlying(symbol);
+        let mut ty = iterable_ty;
+        for _ in 0..8 {
+            match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::GenericInstance { base_type, .. }) => ty = *base_type,
+                Some(TypeKind::Abstract { underlying, .. }) => match underlying.or(declared) {
+                    Some(u) if u != ty => ty = u,
+                    _ => return false,
+                },
+                Some(TypeKind::Class { .. }) => return true,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     fn abstract_has_method(&self, abstract_symbol: SymbolId, name: &str) -> bool {
         let name = self.context.string_interner.intern(name);
         self.resolve_class_method_symbol(abstract_symbol, name)
@@ -120,7 +146,8 @@ impl<'a> AstLowering<'a> {
             kind,
             Some(TypeKind::Class { .. } | TypeKind::Interface { .. } | TypeKind::Anonymous { .. })
         );
-        if !primitive && !class_like {
+        let kv_abstract = self.class_backed_kv_abstract(iterable_ty);
+        if !primitive && !class_like && !kv_abstract {
             return Ok(None);
         }
         let reject = |this: &Self, ty: TypeId| LoweringError::SemanticError {
@@ -166,6 +193,8 @@ impl<'a> AstLowering<'a> {
             if scalar(self, ret, false) {
                 return Err(reject(self, ret));
             }
+            call_kv_iterator()
+        } else if kv_abstract {
             call_kv_iterator()
         } else if let Some(has_next) = return_of(self, iterable_ty, "hasNext") {
             if scalar(self, has_next, true) || return_of(self, iterable_ty, "next").is_none() {

@@ -60,6 +60,22 @@ impl<'a> AstLowering<'a> {
                 };
                 self.lower_type(&normal)
             }
+            // `StdTypes.Int` is the builtin `Int`: StdTypes is the module
+            // that declares it, not a package.
+            Type::Path { path, params, span }
+                if path.package.len() == 1 && path.package[0] == "StdTypes" =>
+            {
+                let bare = Type::Path {
+                    path: parser::TypePath {
+                        package: Vec::new(),
+                        name: path.name.clone(),
+                        sub: None,
+                    },
+                    params: params.clone(),
+                    span: *span,
+                };
+                self.lower_type(&bare)
+            }
             Type::Path { path, params, span } => {
                 let name = if path.package.is_empty() {
                     path.name.clone()
@@ -239,6 +255,7 @@ impl<'a> AstLowering<'a> {
                             let id = super::macro_defer::DeferredMacroTyper {
                                 lowering: self,
                                 receiver: None,
+                                expected: None,
                             }
                             .fresh_monomorph();
                             self.generic_build_monomorphs.insert(id);

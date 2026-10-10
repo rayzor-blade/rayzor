@@ -1329,14 +1329,16 @@ impl<'a> HirToMirContext<'a> {
     /// to its bits and passes anything else through unchanged. The caller's
     /// knowledge of T is used only to shape the result register.
     ///
-    /// One type parameter only. With two, nothing here says which one the
-    /// return is -- `BalancedTree<K,V>.get` returns V -- and shaping the bits
-    /// as the wrong one is worse than leaving them.
+    /// With one type parameter the receiver's argument is T. With several,
+    /// only the call's own type (`Null<V>` bound at the call site) says which
+    /// one the return is, and a call type still naming a parameter leaves the
+    /// bits alone.
     pub(crate) fn unbox_erased_generic_return(
         &mut self,
         call_result: IrId,
         actual_return_type: Option<&IrType>,
         receiver_ty: TypeId,
+        call_ty: TypeId,
     ) -> Option<IrId> {
         use crate::tast::TypeKind;
         // An import's signature is not recorded, so its return type arrives as
@@ -1356,6 +1358,30 @@ impl<'a> HirToMirContext<'a> {
                     if type_args.len() == 1 =>
                 {
                     Some(self.convert_type(type_args[0]))
+                }
+                Some(TypeKind::Class { type_args, .. })
+                | Some(TypeKind::GenericInstance { type_args, .. })
+                | Some(TypeKind::Abstract { type_args, .. })
+                    if type_args.len() > 1 =>
+                {
+                    let mut ty = call_ty;
+                    for _ in 0..4 {
+                        match type_table.get(ty).map(|ti| &ti.kind) {
+                            Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                            Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                            _ => break,
+                        }
+                    }
+                    match type_table.get(ty).map(|ti| &ti.kind) {
+                        None
+                        | Some(
+                            TypeKind::TypeParameter { .. }
+                            | TypeKind::Dynamic
+                            | TypeKind::Unknown
+                            | TypeKind::Placeholder { .. },
+                        ) => None,
+                        Some(_) => Some(self.convert_type(ty)),
+                    }
                 }
                 _ => None,
             }

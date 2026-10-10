@@ -1263,6 +1263,40 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// The key parameter type of the `@:arrayAccess` method `a[i]` calls on
+    /// an abstract receiver: the one named `get`, else the first declared.
+    pub(crate) fn array_access_key_formal(&self, receiver: TypeId) -> Option<TypeId> {
+        use crate::tast::core::TypeKind;
+        let table = self.context.type_table.borrow();
+        let receiver = Self::resolve_alias_chain(&table, receiver);
+        let Some(TypeKind::Abstract { symbol_id, .. }) = table.get(receiver).map(|t| &t.kind)
+        else {
+            return None;
+        };
+        let key_of = |symbol: SymbolId| {
+            let s = self.context.symbol_table.get_symbol(symbol)?;
+            if !s
+                .flags
+                .contains(crate::tast::symbols::SymbolFlags::ARRAY_ACCESS)
+                || s.is_static()
+            {
+                return None;
+            }
+            match table.get(s.type_id).map(|t| &t.kind) {
+                Some(TypeKind::Function { params, .. }) => params.first().copied(),
+                _ => None,
+            }
+        };
+        self.find_wrapper_get_method(*symbol_id)
+            .and_then(&key_of)
+            .or_else(|| {
+                self.class_methods
+                    .get(symbol_id)?
+                    .iter()
+                    .find_map(|(_, symbol, _)| key_of(*symbol))
+            })
+    }
+
     pub(crate) fn coerce_arg_via_abstract_from(
         &mut self,
         arg: TypedExpression,
@@ -1854,10 +1888,15 @@ impl<'a> AstLowering<'a> {
                 let cell = self
                     .deferred_macro_expander
                     .expect("deferred call recorded without its expander");
+                let expected = self
+                    .var_init_expected
+                    .filter(|(span, _)| *span == key)
+                    .map(|(_, ty)| ty);
                 let expanded = {
                     let mut typer = super::super::macro_defer::DeferredMacroTyper {
                         lowering: self,
                         receiver: None,
+                        expected,
                     };
                     cell.borrow_mut()
                         .expand_deferred_call(&name, expression, &mut typer)
@@ -6155,6 +6194,26 @@ impl<'a> AstLowering<'a> {
                     }
                     if let Some(mn) = method_name_intern {
                         if let Some(ret) = self.structural_method_return_type(receiver_type, mn) {
+                            return Ok(ret);
+                        }
+                        // `k.hashCode()` with `K:{function hashCode():Int;}`:
+                        // the constraint's structure declares the method.
+                        let constraints = match self
+                            .context
+                            .type_table
+                            .borrow()
+                            .get(receiver_type)
+                            .map(|t| &t.kind)
+                        {
+                            Some(TypeKind::TypeParameter { constraints, .. }) => {
+                                constraints.clone()
+                            }
+                            _ => Vec::new(),
+                        };
+                        if let Some(ret) = constraints
+                            .into_iter()
+                            .find_map(|c| self.structural_method_return_type(c, mn))
+                        {
                             return Ok(ret);
                         }
                     }

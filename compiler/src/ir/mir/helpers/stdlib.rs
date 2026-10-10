@@ -819,22 +819,51 @@ impl<'a> HirToMirContext<'a> {
         let Some(abs_name) = self.resolve_abstract_name(source_type) else {
             return false;
         };
-        let Some(target_kind) = self
+        self.abstract_to_rule(abs_name, target_type).is_some()
+    }
+
+    /// The abstract's `@:to` method rule for `target_type`, and whether its
+    /// result is a `Null<T>` box to open for a scalar `T` target. An exact
+    /// conversion, method or clause, wins over the boxed one.
+    fn abstract_to_rule(
+        &self,
+        abs_name: InternedString,
+        target_type: TypeId,
+    ) -> Option<(HirCastRule, bool)> {
+        let target_kind = &self
             .type_table
-            .get(self.resolve_through_aliases(target_type))
-            .map(|t| t.kind.clone())
-        else {
-            return false;
+            .get(self.resolve_through_aliases(target_type))?
+            .kind;
+        let kind_of = |ty: TypeId| {
+            self.type_table
+                .get(self.resolve_through_aliases(ty))
+                .map(|t| &t.kind)
         };
-        self.abstract_to_rules.get(&abs_name).is_some_and(|rules| {
-            rules.iter().any(|r| {
+        let rules = self.abstract_to_rules.get(&abs_name)?;
+        let exact = |r: &&HirCastRule| kind_of(r.to_type) == Some(target_kind);
+        if let Some(rule) = rules
+            .iter()
+            .filter(&exact)
+            .find(|r| r.cast_function.is_some())
+        {
+            return Some((rule.clone(), false));
+        }
+        if rules.iter().any(|r| exact(&r))
+            || !matches!(
+                target_kind,
+                TypeKind::Int | TypeKind::Float | TypeKind::Bool
+            )
+        {
+            return None;
+        }
+        rules
+            .iter()
+            .find(|r| {
                 r.cast_function.is_some()
-                    && self
-                        .type_table
-                        .get(self.resolve_through_aliases(r.to_type))
-                        .is_some_and(|t| t.kind == target_kind)
+                    && matches!(kind_of(r.to_type), Some(TypeKind::Optional { inner_type })
+                        if kind_of(*inner_type) == Some(target_kind))
             })
-        })
+            .map(|r| (r.clone(), true))
     }
 
     pub(crate) fn maybe_abstract_to_convert(
@@ -844,28 +873,19 @@ impl<'a> HirToMirContext<'a> {
         target_type: TypeId,
     ) -> Option<IrId> {
         let abs_name = self.resolve_abstract_name(source_type)?;
-        let target_kind = self
-            .type_table
-            .get(self.resolve_through_aliases(target_type))
-            .map(|t| t.kind.clone())?;
-        let rule = self.abstract_to_rules.get(&abs_name).and_then(|rules| {
-            rules
-                .iter()
-                .find(|r| {
-                    r.cast_function.is_some()
-                        && self
-                            .type_table
-                            .get(self.resolve_through_aliases(r.to_type))
-                            .is_some_and(|t| t.kind == target_kind)
-                })
-                .cloned()
-        });
-        let Some(rule) = rule else {
+        let Some((rule, boxed)) = self.abstract_to_rule(abs_name, target_type) else {
             let mid = self.chained_to_source(source_type, target_type)?;
             return self.maybe_abstract_to_convert(value, mid, target_type);
         };
         let func_id =
             self.resolve_abstract_conversion_function(rule.cast_function?, source_type)?;
+        if boxed {
+            let result_type = self.convert_type(rule.to_type);
+            let result = self
+                .builder
+                .build_call_direct(func_id, vec![value], result_type)?;
+            return self.maybe_unbox_value(result, rule.to_type, target_type);
+        }
         let result_type = self.convert_type(target_type);
         self.builder
             .build_call_direct(func_id, vec![value], result_type)

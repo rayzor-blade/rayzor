@@ -21,6 +21,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+/// Iterator protocol members: a structural receiver keeps their static binding.
+const ITERATOR_MEMBERS: &[&str] = &["hasNext", "next", "iterator", "keyValueIterator"];
+
 impl<'a> HirToMirContext<'a> {
     pub(crate) fn lower_indirect_call(&mut self, expr: &HirExpr) -> Option<IrId> {
         let HirExprKind::Call { callee, args, .. } = &expr.kind else {
@@ -319,9 +322,11 @@ impl<'a> HirToMirContext<'a> {
     /// `recv.m(args)` on a Dynamic or structurally typed receiver whose method
     /// the typer could not resolve: `m` is read by name at run time (a closure
     /// field, or a class method's bound thunk) and called through its
-    /// box-shaped entry. On a Dynamic receiver, names of builtin container,
-    /// string and iterator members keep their static binding, since the value
-    /// may be an array or a string, which has no methods by name.
+    /// box-shaped entry. A type parameter whose constraint is a structure
+    /// declaring `m` counts as structurally typed. On a Dynamic receiver, names
+    /// of builtin container, string and iterator members keep their static
+    /// binding, since the value may be an array or a string, which has no
+    /// methods by name.
     pub(crate) fn try_dynamic_member_call(
         &mut self,
         expr: &HirExpr,
@@ -365,7 +370,6 @@ impl<'a> HirToMirContext<'a> {
             "hasNext",
             "next",
         ];
-        const ITERATOR_MEMBERS: &[&str] = &["hasNext", "next", "iterator", "keyValueIterator"];
         let HirExprKind::Call {
             callee,
             args,
@@ -406,16 +410,23 @@ impl<'a> HirToMirContext<'a> {
             return None;
         }
         let receiver_ty = self.resolve_through_aliases(args[0].ty);
-        let (dynamic, structural) = match self.type_table.get(receiver_ty).map(|t| &t.kind) {
-            Some(TypeKind::Dynamic) => (true, false),
-            Some(TypeKind::Anonymous { .. }) => (false, true),
-            _ => (false, false),
-        };
         let name = self
             .symbol_table
             .get_symbol(method)
             .and_then(|s| self.string_interner.get(s.name))
             .unwrap_or("");
+        let type_table = self.type_table;
+        let (dynamic, structural) = match type_table.get(receiver_ty).map(|t| &t.kind) {
+            Some(TypeKind::Dynamic) => (true, false),
+            Some(TypeKind::Anonymous { .. }) => (false, true),
+            Some(TypeKind::TypeParameter { constraints, .. }) => (
+                false,
+                self.constraint_methods(constraints)
+                    .iter()
+                    .any(|m| m == name),
+            ),
+            _ => (false, false),
+        };
         let excluded = (dynamic && BUILTIN_MEMBERS.contains(&name))
             || (structural && ITERATOR_MEMBERS.contains(&name));
         if !(dynamic || structural) || name.is_empty() || excluded {
@@ -424,12 +435,17 @@ impl<'a> HirToMirContext<'a> {
         }
         let dynamic_ty = self.type_table.dynamic_type();
         let receiver = self.lower_expression(&args[0])?;
-        let member = if dynamic {
-            self.dynamic_reflect_field_read(receiver, method, dynamic_ty)?
-        } else {
-            self.raw_anon_reflect_field_read(receiver, method, dynamic_ty)?
-        };
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        // An erased type parameter arrives as an i64 slot.
+        let object = match self.builder.get_register_type(receiver) {
+            Some(IrType::Ptr(_)) | None => receiver,
+            Some(_) => self.builder.build_bitcast(receiver, ptr_u8.clone())?,
+        };
+        let member = if dynamic {
+            self.dynamic_reflect_field_read(object, method, dynamic_ty)?
+        } else {
+            self.raw_anon_reflect_field_read(object, method, dynamic_ty)?
+        };
         let member = match self.builder.get_register_type(member) {
             Some(IrType::Ptr(_)) | None => member,
             Some(other) => self.builder.build_cast(member, other, ptr_u8.clone())?,
@@ -490,6 +506,59 @@ impl<'a> HirToMirContext<'a> {
             self.boxed_value_regs.insert(phi);
         }
         Some(phi)
+    }
+
+    /// The methods a type parameter's structural constraints declare, less
+    /// the iterator protocol, which keeps its static binding.
+    fn constraint_methods(&self, constraints: &[TypeId]) -> Vec<String> {
+        let type_table = self.type_table;
+        let mut names = Vec::new();
+        for &constraint in constraints {
+            let constraint = self.resolve_through_aliases(constraint);
+            let Some(TypeKind::Anonymous { fields }) = type_table.get(constraint).map(|t| &t.kind)
+            else {
+                continue;
+            };
+            for field in fields {
+                let is_method = matches!(
+                    type_table.get(field.type_id).map(|t| &t.kind),
+                    Some(TypeKind::Function { .. })
+                );
+                let Some(name) = self.string_interner.get(field.name) else {
+                    continue;
+                };
+                if is_method && !ITERATOR_MEMBERS.contains(&name) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        names
+    }
+
+    /// A callee whose formal is a structurally constrained type parameter may
+    /// call the constraint's methods by name on what this module passes it,
+    /// so this module's classes register bound thunks for those names.
+    pub(crate) fn note_constraint_methods(&mut self, callee: &HirExpr, target: &CallTarget) {
+        let symbol = match (&callee.kind, target) {
+            (HirExprKind::Variable { symbol, .. }, _) => *symbol,
+            (_, CallTarget::Method { method } | CallTarget::Static { method, .. }) => *method,
+            _ => return,
+        };
+        let type_table = self.type_table;
+        let Some(fn_ty) = self.symbol_table.get_symbol(symbol).map(|s| s.type_id) else {
+            return;
+        };
+        let Some(TypeKind::Function { params, .. }) = type_table.get(fn_ty).map(|t| &t.kind) else {
+            return;
+        };
+        for &param in params {
+            if let Some(TypeKind::TypeParameter { constraints, .. }) =
+                type_table.get(param).map(|t| &t.kind)
+            {
+                let names = self.constraint_methods(constraints);
+                self.dynamic_member_names.extend(names);
+            }
+        }
     }
 
     fn call_member_closure(
