@@ -2656,6 +2656,31 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
         return crate::haxe_sys::haxe_string_from_int(dynamic_ptr as usize as i64);
     };
 
+    // An enum in a box: a tag-only one carries its discriminant, one with
+    // parameters a pointer to its cell.
+    let is_enum = TYPE_REGISTRY
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|r| r.get(&dynamic.type_id))
+        .is_some_and(|ti| ti.enum_info.is_some());
+    if is_enum {
+        let tid = dynamic.type_id.0;
+        let text = if enum_is_boxed(tid) {
+            (!dynamic.value_ptr.is_null()).then(|| format_enum_boxed(tid, dynamic.value_ptr))
+        } else {
+            get_enum_variant_name(dynamic.type_id, dynamic.value_ptr as i64).map(str::to_string)
+        };
+        if let Some(text) = text {
+            let leaked = Box::leak(text.into_boxed_str());
+            return Box::into_raw(Box::new(HaxeString {
+                ptr: leaked.as_ptr() as *mut u8,
+                len: leaked.len(),
+                cap: 0,
+            }));
+        }
+    }
+
     unsafe {
         // Handle null type
         if dynamic.type_id == TYPE_NULL || dynamic.value_ptr.is_null() {

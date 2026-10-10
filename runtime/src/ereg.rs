@@ -3,7 +3,6 @@
 //! Implements the Haxe EReg API backed by Rust's `regex` crate.
 //! EReg is an opaque pointer type: Box<HaxeEReg> cast to *mut u8.
 
-use regex::Regex;
 use std::alloc::{Layout, alloc};
 use std::ptr;
 
@@ -15,7 +14,7 @@ use crate::haxe_string::{HaxeString, haxe_string_from_bytes};
 // ============================================================================
 
 struct HaxeEReg {
-    regex: Regex,
+    regex: Engine,
     global: bool,
     /// Last matched input string (cloned from match() call)
     last_input: Option<String>,
@@ -44,6 +43,67 @@ pub fn rust_str_to_hs(s: &str) -> *mut u8 {
     let hs_ptr = Box::into_raw(hs);
     haxe_string_from_bytes(hs_ptr, s.as_ptr(), s.len());
     hs_ptr as *mut u8
+}
+
+/// A compiled pattern: the linear-time engine when the pattern fits it, a
+/// backtracking one for lookaround and backreferences.
+enum Engine {
+    Linear(regex::Regex),
+    Backtracking(fancy_regex::Regex),
+}
+
+impl Engine {
+    fn new(pattern: &str) -> Engine {
+        if let Ok(regex) = regex::Regex::new(pattern) {
+            return Engine::Linear(regex);
+        }
+        match fancy_regex::Regex::new(pattern) {
+            Ok(regex) => Engine::Backtracking(regex),
+            // An invalid pattern never matches.
+            Err(_) => Engine::Linear(regex::Regex::new("(?:$^)").unwrap()),
+        }
+    }
+
+    /// Group spans of the first match, group 0 first.
+    fn captures(&self, s: &str) -> Option<Vec<Option<(usize, usize)>>> {
+        match self {
+            Engine::Linear(r) => r.captures(s).map(|c| {
+                (0..c.len())
+                    .map(|i| c.get(i).map(|m| (m.start(), m.end())))
+                    .collect()
+            }),
+            Engine::Backtracking(r) => r.captures(s).ok().flatten().map(|c| {
+                (0..c.len())
+                    .map(|i| c.get(i).map(|m| (m.start(), m.end())))
+                    .collect()
+            }),
+        }
+    }
+
+    fn find(&self, s: &str) -> Option<(usize, usize)> {
+        match self {
+            Engine::Linear(r) => r.find(s).map(|m| (m.start(), m.end())),
+            Engine::Backtracking(r) => r.find(s).ok().flatten().map(|m| (m.start(), m.end())),
+        }
+    }
+
+    fn split<'h>(&self, s: &'h str) -> Vec<&'h str> {
+        match self {
+            Engine::Linear(r) => r.split(s).collect(),
+            Engine::Backtracking(r) => r.split(s).filter_map(Result::ok).collect(),
+        }
+    }
+
+    fn replace(&self, s: &str, by: &str, all: bool) -> String {
+        match self {
+            Engine::Linear(r) if all => r.replace_all(s, by).into_owned(),
+            Engine::Linear(r) => r.replace(s, by).into_owned(),
+            Engine::Backtracking(r) => r
+                .try_replacen(s, if all { 0 } else { 1 }, by)
+                .map(|c| c.into_owned())
+                .unwrap_or_else(|_| s.to_string()),
+        }
+    }
 }
 
 /// Parse Haxe regex flags string into (global, inline_prefix)
@@ -81,13 +141,7 @@ pub extern "C" fn haxe_ereg_new(pattern: *const HaxeString, opts: *const HaxeStr
 
         let full_pattern = format!("{}{}", prefix, pattern_str);
 
-        let regex = match Regex::new(&full_pattern) {
-            Ok(r) => r,
-            Err(_) => {
-                // On invalid regex, create one that never matches
-                Regex::new("(?:$^)").unwrap()
-            }
-        };
+        let regex = Engine::new(&full_pattern);
 
         let ereg = Box::new(HaxeEReg {
             regex,
@@ -110,11 +164,7 @@ pub extern "C" fn haxe_ereg_match(ereg: *mut u8, s: *const HaxeString) -> i32 {
         let ereg = &mut *(ereg as *mut HaxeEReg);
         let input = hs_to_str(s).to_string();
 
-        if let Some(caps) = ereg.regex.captures(&input) {
-            let mut capture_ranges = Vec::new();
-            for i in 0..caps.len() {
-                capture_ranges.push(caps.get(i).map(|m| (m.start(), m.end())));
-            }
+        if let Some(capture_ranges) = ereg.regex.captures(&input) {
             ereg.last_captures = Some(capture_ranges);
             ereg.last_input = Some(input);
             1
@@ -267,12 +317,12 @@ pub extern "C" fn haxe_ereg_match_sub(
         };
         let sub = &full_input[start..end];
 
-        if let Some(caps) = ereg_ref.regex.captures(sub) {
-            let mut capture_ranges = Vec::new();
-            for i in 0..caps.len() {
-                // Adjust offsets to be relative to the full input string
-                capture_ranges.push(caps.get(i).map(|m| (m.start() + start, m.end() + start)));
-            }
+        if let Some(spans) = ereg_ref.regex.captures(sub) {
+            // Offsets relative to the full input string.
+            let capture_ranges = spans
+                .into_iter()
+                .map(|g| g.map(|(a, b)| (a + start, b + start)))
+                .collect();
             ereg_ref.last_captures = Some(capture_ranges);
             ereg_ref.last_input = Some(full_input.to_string());
             1
@@ -302,11 +352,11 @@ pub extern "C" fn haxe_ereg_split(ereg: *mut u8, s: *const HaxeString) -> *mut H
         let input = hs_to_str(s);
 
         let parts: Vec<&str> = if ereg.global {
-            ereg.regex.split(input).collect()
+            ereg.regex.split(input)
         } else {
             // Non-global: split at first match only → [before, after]
-            if let Some(m) = ereg.regex.find(input) {
-                vec![&input[..m.start()], &input[m.end()..]]
+            if let Some((start, end)) = ereg.regex.find(input) {
+                vec![&input[..start], &input[end..]]
             } else {
                 vec![input]
             }
@@ -361,11 +411,7 @@ pub extern "C" fn haxe_ereg_replace(
         let input = hs_to_str(s);
         let replacement = hs_to_str(by);
 
-        let result = if ereg.global {
-            ereg.regex.replace_all(input, replacement).into_owned()
-        } else {
-            ereg.regex.replace(input, replacement).into_owned()
-        };
+        let result = ereg.regex.replace(input, replacement, ereg.global);
 
         rust_str_to_hs(&result)
     }
@@ -394,20 +440,17 @@ pub extern "C" fn haxe_ereg_map(
 
         loop {
             let sub = &input[offset..];
-            if let Some(caps) = ereg_ref.regex.captures(sub) {
-                let full_match = caps.get(0).unwrap();
-                let match_start = full_match.start();
-                let match_end = full_match.end();
+            if let Some(spans) = ereg_ref.regex.captures(sub) {
+                let (match_start, match_end) = spans[0].unwrap_or((0, 0));
 
                 // Append text before match
                 result.push_str(&sub[..match_start]);
 
                 // Update ereg state so callback can use matched()/matchedLeft()/etc.
-                let mut capture_ranges = Vec::new();
-                for i in 0..caps.len() {
-                    capture_ranges
-                        .push(caps.get(i).map(|m| (m.start() + offset, m.end() + offset)));
-                }
+                let capture_ranges = spans
+                    .into_iter()
+                    .map(|g| g.map(|(a, b)| (a + offset, b + offset)))
+                    .collect();
                 ereg_ref.last_captures = Some(capture_ranges);
                 ereg_ref.last_input = Some(input.clone());
 

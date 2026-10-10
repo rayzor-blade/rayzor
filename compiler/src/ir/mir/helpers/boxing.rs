@@ -73,6 +73,15 @@ impl<'a> HirToMirContext<'a> {
         if stores_dynamic(value_storage) {
             value_ty = value_storage;
         }
+        // An abstract over an Array boxes as that Array.
+        if value_storage != value_ty
+            && matches!(
+                self.type_table.get(value_storage).map(|ty| &ty.kind),
+                Some(TypeKind::Array { .. })
+            )
+        {
+            value_ty = value_storage;
+        }
         if stores_dynamic(target_storage) && target_storage != target_ty {
             target_ty = target_storage;
             if !self.is_int64_type(value_ty) {
