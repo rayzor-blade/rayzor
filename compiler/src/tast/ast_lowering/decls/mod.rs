@@ -28,6 +28,8 @@ impl<'a> AstLowering<'a> {
             .map(|(_, groups)| groups.clone())
             .unwrap_or_default();
         let file = overloaded.as_ref().map_or(file, |(file, _)| file);
+        let stubbed = super::interface_stubs::desugar(file);
+        let file = stubbed.as_ref().unwrap_or(file);
         self.seed_const_generics(std::iter::once(file));
         // Optimizer barrier
 

@@ -135,6 +135,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     decl.meta = meta;
                     decl.access = access;
                     decl.modifiers = modifiers;
+                    decl.is_abstract = true;
                     return Ok(TypeDeclaration::Class(decl));
                 }
                 // `abstract private class Foo`: the access may follow `abstract`.
@@ -150,6 +151,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     decl.meta = meta;
                     decl.access = access.or(late_access);
                     decl.modifiers = modifiers;
+                    decl.is_abstract = true;
                     return Ok(TypeDeclaration::Class(decl));
                 }
                 let mut decl = self.parse_abstract()?;
@@ -205,6 +207,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
             implements,
             fields,
             span: self.stream.span_from(start),
+            is_abstract: false,
         })
     }
 

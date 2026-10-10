@@ -1445,6 +1445,121 @@ impl<'a> AstLowering<'a> {
         (left, right)
     }
 
+    /// `T.f(args)` on a class or enum without its own `f`, through a type's
+    /// `@:using` extension taking the type as a value: `Ext.f(T, args)`.
+    fn type_value_extension_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        span: parser::Span,
+    ) -> Option<Expr> {
+        let ExprKind::Field {
+            expr: owner_expr,
+            field,
+            ..
+        } = &callee.kind
+        else {
+            return None;
+        };
+        let ExprKind::Ident(owner_name) = &owner_expr.kind else {
+            return None;
+        };
+        let owner_interned = self.context.intern_string(owner_name);
+        let owner = self.resolve_symbol_in_scope_hierarchy(owner_interned)?;
+        let owner_sym = self.context.symbol_table.get_symbol(owner)?;
+        let (owner_kind, owner_key) = (owner_sym.kind, owner_sym.name);
+        let method = self.context.intern_string(field);
+        match owner_kind {
+            crate::tast::SymbolKind::Class => {
+                if self.resolve_class_method_symbol(owner, method).is_some() {
+                    return None;
+                }
+            }
+            crate::tast::SymbolKind::Enum => {
+                let variants = self.context.symbol_table.get_enum_variants(owner);
+                if variants.into_iter().flatten().any(|v| {
+                    self.context
+                        .symbol_table
+                        .get_symbol(*v)
+                        .is_some_and(|s| s.name == method)
+                }) {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+        let extension = self
+            .type_usings
+            .get(&owner_key)?
+            .clone()
+            .into_iter()
+            .find(|ext| {
+                self.resolve_class_like_symbol_by_name(*ext)
+                    .and_then(|class| self.resolve_class_method_symbol(class, method))
+                    .and_then(|m| self.context.symbol_table.get_symbol(m))
+                    .is_some_and(|m| m.is_static())
+            })?;
+        let mk = |kind| Expr { kind, span };
+        let mut call_args = vec![(**owner_expr).clone()];
+        call_args.extend(args.iter().cloned());
+        Some(mk(ExprKind::Call {
+            expr: Box::new(mk(ExprKind::Field {
+                expr: Box::new(mk(ExprKind::Ident(
+                    self.context.string_interner.get(extension)?.to_string(),
+                ))),
+                field: field.clone(),
+                is_optional: false,
+            })),
+            args: call_args,
+        }))
+    }
+
+    /// An abstract over an enum that declares no `match` of its own: `.match`
+    /// on it is the enum's pattern test.
+    fn abstract_over_enum_without_match(&mut self, ty: TypeId) -> bool {
+        use crate::tast::core::TypeKind;
+        let Some(abs) = self.abstract_symbol_of(ty) else {
+            return false;
+        };
+        let underlying = {
+            let tt = self.context.type_table.borrow();
+            let mut current = match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Abstract { underlying, .. }) => *underlying,
+                _ => None,
+            }
+            .or_else(|| tt.resolve_abstract_underlying(abs));
+            for _ in 0..4 {
+                match current.and_then(|u| tt.get(u)).map(|t| &t.kind) {
+                    Some(TypeKind::GenericInstance { base_type, .. }) => current = Some(*base_type),
+                    _ => break,
+                }
+            }
+            current.and_then(|u| tt.get(u)).map(|t| t.kind.clone())
+        };
+        if !matches!(underlying, Some(TypeKind::Enum { .. })) {
+            return false;
+        }
+        let name = self.context.intern_string("match");
+        if self.resolve_class_method_symbol(abs, name).is_some() {
+            return false;
+        }
+        let qualified = self
+            .context
+            .symbol_table
+            .get_symbol(abs)
+            .and_then(|s| {
+                self.context
+                    .string_interner
+                    .get(s.qualified_name.unwrap_or(s.name))
+            })
+            .map(str::to_string);
+        !qualified.is_some_and(|q| {
+            self.static_sig_index
+                .as_ref()
+                .is_some_and(|index| index.borrow_mut().declares_instance_method(&q, "match"))
+        })
+    }
+
     pub(crate) fn abstract_symbol_of(&self, ty: TypeId) -> Option<SymbolId> {
         use crate::tast::core::TypeKind;
         let tt = self.context.type_table.borrow();
@@ -1572,6 +1687,9 @@ impl<'a> AstLowering<'a> {
                 },
                 span: expression.span,
             };
+            return self.lower_expression(&call);
+        }
+        if let Some(call) = self.type_value_extension_call(expr, args, expression.span) {
             return self.lower_expression(&call);
         }
         // Haxe reads a callee before its arguments: a dynamic method whose
@@ -1724,7 +1842,8 @@ impl<'a> AstLowering<'a> {
                     tt.get(receiver.expr_type)
                         .map(|t| matches!(t.kind, crate::tast::core::TypeKind::Enum { .. }))
                         .unwrap_or(false)
-                };
+                } || self
+                    .abstract_over_enum_without_match(receiver.expr_type);
                 if receiver_is_enum || Self::expr_has_wildcard(&args[0]) {
                     if let Some(pattern) = Self::pattern_from_expr(&args[0]) {
                         let span = expression.span;

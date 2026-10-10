@@ -1727,6 +1727,7 @@ mod expr;
 mod fn_variance;
 mod imports;
 mod infer;
+mod interface_stubs;
 mod macro_defer;
 mod macro_probe;
 mod metadata;

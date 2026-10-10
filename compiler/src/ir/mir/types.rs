@@ -91,7 +91,7 @@ impl<'a> HirToMirContext<'a> {
     /// hands it back so the conversion sees an f64.
     ///
     /// Bind a bare storage parameter using the declaration's parameter order.
-    fn substitute_abstract_type_arg(
+    pub(crate) fn substitute_abstract_type_arg(
         &self,
         abstract_symbol: SymbolId,
         underlying: TypeId,

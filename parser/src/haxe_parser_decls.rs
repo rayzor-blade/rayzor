@@ -94,6 +94,7 @@ pub fn class_decl<'a>(full: &'a str, input: &'a str) -> PResult<'a, ClassDecl> {
         implements,
         fields,
         span: Span::new(start, end),
+        is_abstract: false,
     }))
     }).parse(input)
 }

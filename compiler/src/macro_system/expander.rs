@@ -1362,6 +1362,7 @@ pub(crate) fn defined_declaration(
         implements: Vec::new(),
         fields,
         span: parser::Span::default(),
+        is_abstract: false,
     };
     match defined.kind {
         super::context_api::DefinedTypeKind::Interface => {

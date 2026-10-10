@@ -554,11 +554,78 @@ impl<'a> HirToMirContext<'a> {
                     self.builder.build_cast(value_reg, from_type, to_type)
                 }
             }
+        } else if let Some(mid) = self.chained_from_target(target, source_type) {
+            let value = self.lower_expression(expr)?;
+            self.maybe_abstract_from_convert(value, source_type, mid)
         } else {
             // Fallback: for extern/imported abstracts (e.g., SIMD4f) whose @:from rules
             // weren't populated (not in file.abstracts), try stdlib mapping directly.
             self.try_stdlib_from_cast(expr, target, &abs_name)
         }
+    }
+
+    /// An abstract's symbol and type arguments, through aliases and instances.
+    fn abstract_and_args(&self, ty: TypeId) -> Option<(SymbolId, Vec<TypeId>)> {
+        let ty = self.resolve_through_aliases(ty);
+        match &self.type_table.get(ty)?.kind {
+            TypeKind::Abstract {
+                symbol_id,
+                type_args,
+                ..
+            } => Some((*symbol_id, type_args.clone())),
+            TypeKind::GenericInstance {
+                base_type,
+                type_args,
+                ..
+            } => match &self
+                .type_table
+                .get(self.resolve_through_aliases(*base_type))?
+                .kind
+            {
+                TypeKind::Abstract { symbol_id, .. } => Some((*symbol_id, type_args.clone())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `M<A>` with `from Null<T>` takes a value A converts from: the
+    /// instantiated `T` when it is another abstract with an `@:from` for
+    /// `source` (one step, as Haxe allows).
+    fn chained_from_target(&self, target: TypeId, source: TypeId) -> Option<TypeId> {
+        let abs_name = self.abstract_name_of(target)?;
+        let (symbol, args) = self.abstract_and_args(target)?;
+        self.abstract_from_rules
+            .get(&abs_name)?
+            .iter()
+            .filter(|r| r.cast_function.is_none())
+            .find_map(|r| {
+                let inner = match self.type_table.get(r.from_type).map(|t| &t.kind) {
+                    Some(TypeKind::Optional { inner_type }) => *inner_type,
+                    _ => r.from_type,
+                };
+                let mid = self.substitute_abstract_type_arg(symbol, inner, &args)?;
+                let mid_name = self.abstract_name_of(mid)?;
+                (mid_name != abs_name && self.abstract_from_rule(mid_name, source).is_some())
+                    .then_some(mid)
+            })
+    }
+
+    /// `M2<A2>` with `to T` converts to what A2 converts to: the instantiated
+    /// `T` when it has an `@:to` for `target` (one step).
+    fn chained_to_source(&self, source: TypeId, target: TypeId) -> Option<TypeId> {
+        let abs_name = self.abstract_name_of(source)?;
+        let (symbol, args) = self.abstract_and_args(source)?;
+        self.abstract_to_rules
+            .get(&abs_name)?
+            .iter()
+            .filter(|r| r.cast_function.is_none())
+            .find_map(|r| {
+                let mid = self.substitute_abstract_type_arg(symbol, r.to_type, &args)?;
+                (self.abstract_name_of(mid) != Some(abs_name)
+                    && self.has_direct_abstract_to_function(mid, target))
+                .then_some(mid)
+            })
     }
 
     /// The abstract's `@:from` rule for `source_type`: one declared for that
@@ -576,6 +643,25 @@ impl<'a> HirToMirContext<'a> {
         }
         if self.abstract_name_of(source_type) == Some(abs_name) {
             return None;
+        }
+        // `from(i:Iterable<T>)` takes anything that supplies `iterator()`.
+        if self.iter_protocol_of(source_type).is_none()
+            && matches!(
+                self.iter_source_of(source_type),
+                Some(
+                    super::iter_handle::IterSource::Array
+                        | super::iter_handle::IterSource::MapValues { .. }
+                        | super::iter_handle::IterSource::ClassIterable { .. }
+                        | super::iter_handle::IterSource::AnonIterable { .. }
+                )
+            )
+            && let Some(rule) = rules.iter().find(|r| {
+                r.cast_function.is_some()
+                    && self.iter_protocol_of(r.from_type)
+                        == Some(super::iter_handle::IterProtocol::Iterable)
+            })
+        {
+            return Some(rule.clone());
         }
         rules
             .iter()
@@ -597,6 +683,10 @@ impl<'a> HirToMirContext<'a> {
     /// A generic conversion reads a structural constraint's fields by name,
     /// which needs a String in its box: the raw string has no header.
     fn from_rule_argument(&mut self, value: IrId, source_type: TypeId, rule: &HirCastRule) -> IrId {
+        if let Some(handle) = self.maybe_wrap_for_iter_protocol(value, source_type, rule.from_type)
+        {
+            return handle;
+        }
         let generic = matches!(
             self.type_table.get(rule.from_type).map(|t| &t.kind),
             Some(TypeKind::TypeParameter { .. })
@@ -686,7 +776,10 @@ impl<'a> HirToMirContext<'a> {
         }
         let abs_name = self.resolve_abstract_name(target_type)?;
 
-        let rule = self.abstract_from_rule(abs_name, source_type)?;
+        let Some(rule) = self.abstract_from_rule(abs_name, source_type) else {
+            let mid = self.chained_from_target(target_type, source_type)?;
+            return self.maybe_abstract_from_convert(value, source_type, mid);
+        };
 
         if let Some(cast_func_sym) = rule.cast_function {
             let value = self.from_rule_argument(value, source_type, &rule);
@@ -718,6 +811,11 @@ impl<'a> HirToMirContext<'a> {
         source_type: TypeId,
         target_type: TypeId,
     ) -> bool {
+        self.has_direct_abstract_to_function(source_type, target_type)
+            || self.chained_to_source(source_type, target_type).is_some()
+    }
+
+    fn has_direct_abstract_to_function(&self, source_type: TypeId, target_type: TypeId) -> bool {
         let Some(abs_name) = self.resolve_abstract_name(source_type) else {
             return false;
         };
@@ -750,18 +848,22 @@ impl<'a> HirToMirContext<'a> {
             .type_table
             .get(self.resolve_through_aliases(target_type))
             .map(|t| t.kind.clone())?;
-        let rule = self
-            .abstract_to_rules
-            .get(&abs_name)?
-            .iter()
-            .find(|r| {
-                r.cast_function.is_some()
-                    && self
-                        .type_table
-                        .get(self.resolve_through_aliases(r.to_type))
-                        .is_some_and(|t| t.kind == target_kind)
-            })
-            .cloned()?;
+        let rule = self.abstract_to_rules.get(&abs_name).and_then(|rules| {
+            rules
+                .iter()
+                .find(|r| {
+                    r.cast_function.is_some()
+                        && self
+                            .type_table
+                            .get(self.resolve_through_aliases(r.to_type))
+                            .is_some_and(|t| t.kind == target_kind)
+                })
+                .cloned()
+        });
+        let Some(rule) = rule else {
+            let mid = self.chained_to_source(source_type, target_type)?;
+            return self.maybe_abstract_to_convert(value, mid, target_type);
+        };
         let func_id =
             self.resolve_abstract_conversion_function(rule.cast_function?, source_type)?;
         let result_type = self.convert_type(target_type);

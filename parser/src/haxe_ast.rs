@@ -209,6 +209,8 @@ pub struct ClassDecl {
     pub implements: Vec<Type>,
     pub fields: Vec<ClassField>,
     pub span: Span,
+    /// Declared `abstract class`: it may leave members unimplemented.
+    pub is_abstract: bool,
 }
 
 impl ClassDecl {
