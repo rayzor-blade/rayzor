@@ -402,7 +402,26 @@ pub fn span_to_source_location(span: Span, file_id: u32) -> SourceLocation {
     SourceLocation::new(file_id, 0, 0, span.start as u32)
 }
 
+/// Spans at or above this lie in a file named by a macro position
+/// (`Context.makePosition({file: "name", ..})`): bits 32.. index the
+/// file in `context_api`'s named-file table, the low 32 bits are the offset.
+pub const NAMED_FILE_SPAN: usize = 1 << 48;
+
+/// `SourceLocation::file_id` of a named-file position is this plus its index.
+/// Such a location is a range: `byte_offset` is its min, `column` its max.
+pub const NAMED_FILE_ID: u32 = 1 << 30;
+
 /// Convert a parser Span to a SourceLocation with unknown file context
 pub fn span_to_location(span: Span) -> SourceLocation {
+    if span.start >= NAMED_FILE_SPAN {
+        let file = ((span.start - NAMED_FILE_SPAN) >> 32) as u32;
+        let offset = |at: usize| (at & 0xffff_ffff) as u32;
+        return SourceLocation::new(
+            NAMED_FILE_ID + file,
+            0,
+            offset(span.end),
+            offset(span.start),
+        );
+    }
     SourceLocation::new(0, 0, 0, span.start as u32)
 }

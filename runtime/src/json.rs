@@ -82,9 +82,26 @@ pub extern "C" fn haxe_json_parse(str_ptr: *const u8) -> *mut u8 {
 /// Returns a `*mut HaxeString`.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_json_stringify(value_ptr: *mut u8) -> *mut u8 {
-    let mut buf = String::with_capacity(128);
-    stringify_value(value_ptr, &mut buf);
-    alloc_haxe_string(&buf)
+    let mut out = Out::new(None);
+    stringify_value(value_ptr, &mut out);
+    alloc_haxe_string(&out.buf)
+}
+
+/// `haxe.Json.stringify(value, space)`: a non-null `space` (`*const
+/// HaxeString`) prints one member per line, indented by `space` per level.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_json_stringify_pretty(value_ptr: *mut u8, space: *const u8) -> *mut u8 {
+    let indent = (!space.is_null()).then(|| unsafe {
+        let hs = &*(space as *const HaxeString);
+        if hs.ptr.is_null() || hs.len == 0 {
+            String::new()
+        } else {
+            String::from_utf8_lossy(std::slice::from_raw_parts(hs.ptr, hs.len)).into_owned()
+        }
+    });
+    let mut out = Out::new(indent);
+    stringify_value(value_ptr, &mut out);
+    alloc_haxe_string(&out.buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -634,14 +651,67 @@ fn alloc_haxe_string(s: &str) -> *mut u8 {
 // Stringify
 // ---------------------------------------------------------------------------
 
-fn stringify_value(ptr: *mut u8, buf: &mut String) {
+/// The text so far and, when pretty-printing, the indent unit and depth.
+struct Out {
+    buf: String,
+    indent: Option<String>,
+    level: usize,
+}
+
+impl Out {
+    fn new(indent: Option<String>) -> Self {
+        Out {
+            buf: String::with_capacity(128),
+            indent,
+            level: 0,
+        }
+    }
+
+    /// A line break and the current indent, as upstream's `newl(); ipad()`.
+    fn break_line(&mut self) {
+        if let Some(indent) = &self.indent {
+            self.buf.push('\n');
+            for _ in 0..self.level {
+                self.buf.push_str(indent);
+            }
+        }
+    }
+
+    /// Opens a member: separator, then line break and indent.
+    fn member(&mut self, first: bool) {
+        if first {
+            self.level += 1;
+        } else {
+            self.buf.push(',');
+        }
+        self.break_line();
+    }
+
+    /// Closes a container that printed members.
+    fn close(&mut self, any: bool) {
+        if any {
+            self.level -= 1;
+            self.break_line();
+        }
+    }
+
+    fn key(&mut self, name: &[u8]) {
+        stringify_string_bytes(name, &mut self.buf);
+        self.buf.push(':');
+        if self.indent.is_some() {
+            self.buf.push(' ');
+        }
+    }
+}
+
+fn stringify_value(ptr: *mut u8, out: &mut Out) {
     if ptr.is_null() {
-        buf.push_str("null");
+        out.buf.push_str("null");
         return;
     }
     // A structural value can arrive as its handle rather than in a box.
     if anon_object::is_anon_handle(ptr) {
-        stringify_anon_object(ptr, buf);
+        stringify_anon_object(ptr, out);
         return;
     }
 
@@ -651,64 +721,64 @@ fn stringify_value(ptr: *mut u8, buf: &mut String) {
         if dv.type_id == TYPE_INT {
             if !dv.value_ptr.is_null() {
                 let v = *(dv.value_ptr as *const i64);
-                itoa_i64(v, buf);
+                itoa_i64(v, &mut out.buf);
             } else {
-                buf.push('0');
+                out.buf.push('0');
             }
         } else if dv.type_id == TYPE_FLOAT {
             if !dv.value_ptr.is_null() {
                 let v = *(dv.value_ptr as *const f64);
                 if !v.is_finite() {
-                    buf.push_str("null");
+                    out.buf.push_str("null");
                 } else if v.fract() == 0.0 && v.abs() < 1e15 {
-                    itoa_i64(v as i64, buf);
-                    buf.push_str(".0");
+                    itoa_i64(v as i64, &mut out.buf);
+                    out.buf.push_str(".0");
                 } else {
-                    buf.push_str(&v.to_string());
+                    out.buf.push_str(&v.to_string());
                 }
             } else {
-                buf.push_str("0.0");
+                out.buf.push_str("0.0");
             }
         } else if dv.type_id == TYPE_BOOL {
             if !dv.value_ptr.is_null() {
                 // Bool boxes hold one byte; the parser's own hold an i64.
                 let v = *dv.value_ptr;
-                buf.push_str(if v != 0 { "true" } else { "false" });
+                out.buf.push_str(if v != 0 { "true" } else { "false" });
             } else {
-                buf.push_str("false");
+                out.buf.push_str("false");
             }
         } else if dv.type_id == TYPE_STRING {
             if !dv.value_ptr.is_null() {
                 let sp = &*(dv.value_ptr as *const StringPtr);
                 if !sp.ptr.is_null() && sp.len > 0 {
                     let bytes = std::slice::from_raw_parts(sp.ptr, sp.len);
-                    stringify_string_bytes(bytes, buf);
+                    stringify_string_bytes(bytes, &mut out.buf);
                 } else {
-                    buf.push_str("\"\"");
+                    out.buf.push_str("\"\"");
                 }
             } else {
-                buf.push_str("\"\"");
+                out.buf.push_str("\"\"");
             }
         } else if dv.type_id == anon_object::TYPE_ANON_OBJECT {
-            stringify_anon_object(dv.value_ptr, buf);
+            stringify_anon_object(dv.value_ptr, out);
         } else if dv.type_id == TYPE_ARRAY {
             // The parser's arrays are boxed without a layout: their slots are boxes.
             let layout = boxed_array_slot_layout(ptr)
                 .filter(|_| boxed_array_points_to(ptr as usize, dv.value_ptr as usize))
                 .unwrap_or(0);
-            stringify_array(dv.value_ptr, layout, buf);
+            stringify_array(dv.value_ptr, layout, out);
         } else if dv.type_id == TYPE_FUNCTION {
-            buf.push_str("\"<fun>\"");
+            out.buf.push_str("\"<fun>\"");
         } else if is_class_type(dv.type_id.0) {
-            stringify_class_instance(ptr, dv, buf);
+            stringify_class_instance(ptr, dv, out);
         } else {
-            buf.push_str("null");
+            out.buf.push_str("null");
         }
     }
 }
 
 /// A class instance, raw or in a box, as an object of its instance variables.
-unsafe fn stringify_class_instance(ptr: *mut u8, dv: DynamicValue, buf: &mut String) {
+unsafe fn stringify_class_instance(ptr: *mut u8, dv: DynamicValue, out: &mut Out) {
     let type_id = dv.type_id.0;
     // A box holds the instance, whose own header names the same class; a raw
     // instance has its first field where a box keeps the payload.
@@ -716,10 +786,10 @@ unsafe fn stringify_class_instance(ptr: *mut u8, dv: DynamicValue, buf: &mut Str
         && unsafe { *(dv.value_ptr as *const u32) } == type_id;
     let obj = if boxed { dv.value_ptr } else { ptr };
     let Some(info) = get_type_info(TypeId(type_id)).and_then(|t| t.class_info) else {
-        buf.push_str("null");
+        out.buf.push_str("null");
         return;
     };
-    buf.push('{');
+    out.buf.push('{');
     let mut first = true;
     for (i, name) in info.instance_fields.iter().enumerate() {
         let ty = info
@@ -733,15 +803,13 @@ unsafe fn stringify_class_instance(ptr: *mut u8, dv: DynamicValue, buf: &mut Str
         if is_function_value(value) {
             continue;
         }
-        if !first {
-            buf.push(',');
-        }
+        out.member(first);
         first = false;
-        stringify_string_bytes(name.as_bytes(), buf);
-        buf.push(':');
-        stringify_value(value, buf);
+        out.key(name.as_bytes());
+        stringify_value(value, out);
     }
-    buf.push('}');
+    out.close(!first);
+    out.buf.push('}');
 }
 
 /// Fast integer-to-string without allocating a temporary String.
@@ -842,19 +910,19 @@ fn stringify_string_bytes(bytes: &[u8], buf: &mut String) {
 
 const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 
-fn stringify_anon_object(obj_ptr: *mut u8, buf: &mut String) {
+fn stringify_anon_object(obj_ptr: *mut u8, out: &mut Out) {
     if obj_ptr.is_null() {
-        buf.push_str("null");
+        out.buf.push_str("null");
         return;
     }
 
     let fields_arr = anon_object::rayzor_anon_fields(obj_ptr);
     if fields_arr.is_null() {
-        buf.push_str("{}");
+        out.buf.push_str("{}");
         return;
     }
 
-    buf.push('{');
+    out.buf.push('{');
 
     unsafe {
         let arr = &*(fields_arr as *const crate::haxe_array::HaxeArray);
@@ -881,18 +949,15 @@ fn stringify_anon_object(obj_ptr: *mut u8, buf: &mut String) {
                 continue;
             }
 
-            if !first {
-                buf.push(',');
-            }
+            out.member(first);
             first = false;
-
-            stringify_string_bytes(name_bytes, buf);
-            buf.push(':');
-            stringify_value(val, buf);
+            out.key(name_bytes);
+            stringify_value(val, out);
         }
+        out.close(!first);
     }
 
-    buf.push('}');
+    out.buf.push('}');
 }
 
 /// Whether a field value is a function, which an object's JSON leaves out.
@@ -902,24 +967,23 @@ fn is_function_value(value: *mut u8) -> bool {
 
 /// `layout` is the slot kind the array was boxed with; 0 means its slots
 /// already hold boxes.
-fn stringify_array(arr_ptr: *mut u8, layout: u64, buf: &mut String) {
+fn stringify_array(arr_ptr: *mut u8, layout: u64, out: &mut Out) {
     if arr_ptr.is_null() {
-        buf.push_str("null");
+        out.buf.push_str("null");
         return;
     }
 
-    buf.push('[');
+    out.buf.push('[');
 
     unsafe {
         let arr = &*(arr_ptr as *const crate::haxe_array::HaxeArray);
         for i in 0..arr.len {
-            if i > 0 {
-                buf.push(',');
-            }
+            out.member(i == 0);
             let slot = *(arr.ptr.add(i * 8) as *const u64);
-            stringify_value(box_erased_array_slot(slot, layout), buf);
+            stringify_value(box_erased_array_slot(slot, layout), out);
         }
+        out.close(arr.len > 0);
     }
 
-    buf.push(']');
+    out.buf.push(']');
 }

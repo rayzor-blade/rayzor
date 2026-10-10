@@ -279,6 +279,38 @@ impl MacroInterpreter {
                 if let Some(v) = self.read_class_static(None, name)? {
                     return Ok(v);
                 }
+                // A bare method of the running instance, as a value bound to it.
+                if let Some((_, arity)) = self.this_with_method(name) {
+                    let span = expr.span;
+                    let at = |kind| Expr { kind, span };
+                    let params: Vec<String> = (0..arity).map(|i| format!("__a{i}")).collect();
+                    let body = at(ExprKind::Call {
+                        expr: Box::new(at(ExprKind::Field {
+                            expr: Box::new(at(ExprKind::This)),
+                            field: name.clone(),
+                            is_optional: false,
+                        })),
+                        args: params
+                            .iter()
+                            .map(|p| at(ExprKind::Ident(p.clone())))
+                            .collect(),
+                    });
+                    let this = std::collections::BTreeSet::from(["this".to_string()]);
+                    return Ok(MacroValue::Function(Arc::new(MacroFunction {
+                        name: name.clone(),
+                        params: params
+                            .into_iter()
+                            .map(|name| MacroParam {
+                                name,
+                                optional: true,
+                                rest: false,
+                                default_value: None,
+                            })
+                            .collect(),
+                        body: Arc::new(body),
+                        captures: self.env.capture_used(&this),
+                    })));
+                }
                 // Bare enum-constructor identifiers from haxe.macro.Expr —
                 // `APublic`, `AInline`, etc. — appear unbound in build macros
                 // because the interpreter doesn't load enum declarations.
@@ -1189,6 +1221,10 @@ impl MacroInterpreter {
                 if let Some(func_val) = self.env.get(name) {
                     return self.call_value(func_val, arg_vals, location);
                 }
+                // A sibling method of the running instance method.
+                if let Some((this, _)) = self.this_with_method(name) {
+                    return self.object_method(&this, name, arg_vals, location);
+                }
                 // Look up in macro registry
                 if let Some(macro_def) = self.registry.find_macro_by_name(name).cloned() {
                     return self.call_macro_def(&macro_def, arg_vals, location);
@@ -1438,14 +1474,75 @@ impl MacroInterpreter {
             );
             values.push(MacroValue::Object(Arc::new(value)));
         }
+        let complex = super::expr_adt::complex_type_of;
+        let type_path = |t: &parser::Type| match complex(t) {
+            MacroValue::Enum(_, variant, payload) if &*variant == "TPath" => {
+                payload.first().cloned().unwrap_or(MacroValue::Null)
+            }
+            _ => MacroValue::Null,
+        };
+        let array = |items: Vec<MacroValue>| MacroValue::Array(Arc::new(items));
+        let flag = MacroValue::Bool;
+        // `TDClass(superClass, interfaces, isInterface, isFinal, isAbstract)`.
+        let (type_params, kind) = match decl {
+            parser::TypeDeclaration::Class(c) => (
+                c.type_params.as_slice(),
+                Some(vec![
+                    c.extends.as_ref().map_or(MacroValue::Null, type_path),
+                    array(c.implements.iter().map(type_path).collect()),
+                    flag(false),
+                    flag(c.modifiers.contains(&parser::Modifier::Final)),
+                    flag(c.is_abstract),
+                ]),
+            ),
+            parser::TypeDeclaration::Interface(i) => (
+                i.type_params.as_slice(),
+                Some(vec![
+                    MacroValue::Null,
+                    array(i.extends.iter().map(type_path).collect()),
+                    flag(true),
+                    flag(false),
+                    flag(false),
+                ]),
+            ),
+            parser::TypeDeclaration::Typedef(t) => (t.type_params.as_slice(), None),
+            _ => (&[][..], None),
+        };
+        let params = type_params
+            .iter()
+            .map(|p| {
+                let mut entry = BTreeMap::new();
+                entry.insert("name".to_string(), string(&p.name));
+                entry.insert(
+                    "constraints".to_string(),
+                    array(p.constraints.iter().map(complex).collect()),
+                );
+                entry.insert("params".to_string(), array(Vec::new()));
+                entry.insert("meta".to_string(), array(Vec::new()));
+                entry.insert(
+                    "defaultType".to_string(),
+                    p.default_type.as_ref().map_or(MacroValue::Null, complex),
+                );
+                MacroValue::Object(Arc::new(entry))
+            })
+            .collect();
         let mut td = BTreeMap::new();
         td.insert("pack".to_string(), MacroValue::Array(Arc::new(Vec::new())));
         td.insert("name".to_string(), string(&name));
         td.insert("fields".to_string(), MacroValue::Array(Arc::new(values)));
-        td.insert(
-            "params".to_string(),
-            MacroValue::Array(Arc::new(Vec::new())),
-        );
+        td.insert("params".to_string(), array(params));
+        if let Some(payload) = kind {
+            td.insert(
+                "kind".to_string(),
+                MacroValue::Enum(
+                    Arc::from("TypeDefKind"),
+                    Arc::from("TDClass"),
+                    Arc::new(payload),
+                ),
+            );
+        }
+        td.insert("isExtern".to_string(), flag(false));
+        td.insert("doc".to_string(), MacroValue::Null);
         td.insert("meta".to_string(), MacroValue::Array(Arc::new(Vec::new())));
         td.insert("pos".to_string(), MacroValue::Null);
         Ok(MacroValue::Object(Arc::new(td)))
@@ -2088,6 +2185,15 @@ impl MacroInterpreter {
                         s.replace(from, to).as_str(),
                     ))))
                 }
+                "startsWith" | "endsWith" | "contains" => {
+                    let s = args.first().and_then(|v| v.as_string()).unwrap_or("");
+                    let part = args.get(1).and_then(|v| v.as_string()).unwrap_or("");
+                    Ok(Some(MacroValue::Bool(match method {
+                        "startsWith" => s.starts_with(part),
+                        "endsWith" => s.ends_with(part),
+                        _ => s.contains(part),
+                    })))
+                }
                 _ => Ok(None),
             },
             "haxe.macro.MacroStringTools" | "MacroStringTools" if method == "isFormatExpr" => {
@@ -2321,6 +2427,23 @@ impl MacroInterpreter {
         Ok(Some(value))
     }
 
+    /// The `this` of the running instance method, with the arity of its
+    /// class's instance method `name`; None when there is no such method.
+    fn this_with_method(
+        &self,
+        name: &str,
+    ) -> Option<(Arc<std::collections::BTreeMap<String, MacroValue>>, usize)> {
+        let MacroValue::Object(this) = self.env.get("this")? else {
+            return None;
+        };
+        let class = this.get("__type__")?.as_string()?.to_string();
+        let method = self
+            .class_registry
+            .as_ref()?
+            .find_instance_method(&class, name)?;
+        Some((this, method.params.len()))
+    }
+
     /// Store to a static variable of the running macro's class; false when
     /// there is none of that name.
     fn write_class_static(&mut self, name: &str, value: MacroValue) -> bool {
@@ -2440,8 +2563,17 @@ impl MacroInterpreter {
 
         // Check for static method calls (e.g., Std.string(), Math.abs())
         if let MacroValue::String(s) = base {
-            // String methods would be handled here in a full implementation
-            return self.string_method(s, method, args, location);
+            // Not a String method: a `using StringTools` extension.
+            return match self.string_method(s, method, args.clone(), location) {
+                Err(unsupported @ MacroError::UnsupportedOperation { .. }) => {
+                    let mut all = vec![base.clone()];
+                    all.extend(args);
+                    Ok(self
+                        .try_static_call("StringTools", method, &all, location)?
+                        .ok_or(unsupported)?)
+                }
+                other => other,
+            };
         }
 
         match base {

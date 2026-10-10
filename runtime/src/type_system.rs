@@ -1333,6 +1333,58 @@ pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32, string_params:
     true
 }
 
+/// The registered variants of enum `type_id`. The `'static` info is copied out
+/// so no registry lock is held when a reflective construction throws.
+fn registered_enum_info(type_id: u32) -> Option<&'static EnumInfo> {
+    TYPE_REGISTRY
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|registry| registry.get(&TypeId(type_id)))
+        .and_then(|type_info| type_info.enum_info)
+}
+
+/// Variant `index` of a registered enum, after Haxe's argument checks: a
+/// constructor with parameters needs an array, one without takes none.
+fn create_registered_enum(
+    type_id: u32,
+    enum_info: &EnumInfo,
+    index: usize,
+    params_ptr: *mut u8,
+) -> i64 {
+    let variant = &enum_info.variants[index];
+    let given = (!params_ptr.is_null())
+        .then(|| unsafe { (*(params_ptr as *const crate::haxe_array::HaxeArray)).len });
+    match given {
+        None if variant.param_count > 0 => crate::exception::throw_with_message(format!(
+            "Constructor {} need parameters",
+            variant.name
+        )),
+        Some(n) if n > 0 && variant.param_count == 0 => crate::exception::throw_with_message(
+            format!("Constructor {} does not need parameters", variant.name),
+        ),
+        _ => {}
+    }
+    let boxed = enum_info
+        .variants
+        .iter()
+        .any(|variant| variant.param_count > 0);
+    if boxed && variant.param_count == 0 {
+        return haxe_enum_nullary_cell(type_id, index as i32) as i64;
+    }
+    let value = create_enum_value(
+        index as i32,
+        variant.param_count,
+        variant.param_types,
+        params_ptr,
+        boxed,
+    );
+    if boxed {
+        register_reflected_enum_value(value, type_id);
+    }
+    value
+}
+
 /// Type.createEnum(e, constr, ?params) -> T
 /// Creates an enum value dynamically by constructor name.
 /// All constructors use the enum's registered boxed or unboxed representation.
@@ -1350,36 +1402,18 @@ pub extern "C" fn haxe_type_create_enum(
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(hs.ptr, hs.len))
         }
     };
-
-    let guard = TYPE_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref()
-        && let Some(type_info) = registry.get(&TypeId(reflected_type_id(type_id)))
-        && let Some(enum_info) = &type_info.enum_info
+    let type_id = reflected_type_id(type_id);
+    let Some(enum_info) = registered_enum_info(type_id) else {
+        return 0;
+    };
+    match enum_info
+        .variants
+        .iter()
+        .position(|variant| variant.name == constr_name)
     {
-        let boxed = enum_info
-            .variants
-            .iter()
-            .any(|variant| variant.param_count > 0);
-        for (idx, variant) in enum_info.variants.iter().enumerate() {
-            if variant.name == constr_name {
-                if boxed && variant.param_count == 0 {
-                    return haxe_enum_nullary_cell(reflected_type_id(type_id), idx as i32) as i64;
-                }
-                let value = create_enum_value(
-                    idx as i32,
-                    variant.param_count,
-                    variant.param_types,
-                    params_ptr,
-                    boxed,
-                );
-                if boxed {
-                    register_reflected_enum_value(value, reflected_type_id(type_id));
-                }
-                return value;
-            }
-        }
+        Some(index) => create_registered_enum(type_id, enum_info, index, params_ptr),
+        None => crate::exception::throw_with_message(format!("No such constructor {constr_name}")),
     }
-    0
 }
 
 /// Type.createEnumIndex(e, index, ?params) -> T
@@ -1390,40 +1424,46 @@ pub extern "C" fn haxe_type_create_enum_index(
     index: i64,
     params_ptr: *mut u8,
 ) -> i64 {
-    let guard = TYPE_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref()
-        && let Some(type_info) = registry.get(&TypeId(reflected_type_id(type_id)))
-        && let Some(enum_info) = &type_info.enum_info
-        && let Some(variant) = enum_info.variants.get(index as usize)
-    {
-        let boxed = enum_info
-            .variants
-            .iter()
-            .any(|variant| variant.param_count > 0);
-        if boxed && variant.param_count == 0 {
-            return haxe_enum_nullary_cell(reflected_type_id(type_id), index as i32) as i64;
-        }
-        let value = create_enum_value(
-            index as i32,
-            variant.param_count,
-            variant.param_types,
-            params_ptr,
-            boxed,
-        );
-        if boxed {
-            register_reflected_enum_value(value, reflected_type_id(type_id));
-        }
-        return value;
+    let type_id = reflected_type_id(type_id);
+    let Some(enum_info) = registered_enum_info(type_id) else {
+        return 0;
+    };
+    if index < 0 || index as usize >= enum_info.variants.len() {
+        crate::exception::throw_with_message(format!(
+            "{index} is not a valid enum constructor index"
+        ));
     }
-    0
+    create_registered_enum(type_id, enum_info, index as usize, params_ptr)
 }
 
-/// Helper: create an enum value (unboxed tag or boxed struct)
+/// Helper: create an enum value (unboxed tag or boxed struct) from the
+/// parameters in the HaxeArray at `params_ptr`, if any.
 fn create_enum_value(
     tag: i32,
     param_count: usize,
     param_types: &[ParamType],
     params_ptr: *mut u8,
+    boxed: bool,
+) -> i64 {
+    let slots: Vec<i64> = if params_ptr.is_null() {
+        Vec::new()
+    } else {
+        let arr = params_ptr as *const crate::haxe_array::HaxeArray;
+        let len = unsafe { (*arr).len };
+        (0..param_count.min(len))
+            .map(|i| crate::haxe_array::haxe_array_get_i64(arr, i))
+            .collect()
+    };
+    create_enum_value_from_slots(tag, param_count, param_types, &slots, boxed)
+}
+
+/// An enum value whose leading parameters are `slots`, each a raw value or a
+/// Dynamic box.
+fn create_enum_value_from_slots(
+    tag: i32,
+    param_count: usize,
+    param_types: &[ParamType],
+    slots: &[i64],
     boxed: bool,
 ) -> i64 {
     if !boxed {
@@ -1442,39 +1482,77 @@ fn create_enum_value(
         // Write tag
         *(ptr as *mut i32) = tag;
 
-        // Copy parameters from the HaxeArray if provided
-        if !params_ptr.is_null() {
-            let arr = &*(params_ptr as *const crate::haxe_array::HaxeArray);
-            for i in 0..param_count.min(arr.len) {
-                let mut val = crate::haxe_array::haxe_array_get_i64(
-                    params_ptr as *const crate::haxe_array::HaxeArray,
-                    i,
-                );
-                // Array<Dynamic> holds boxed values, while an enum field uses
-                // its declared representation. Match only the expected box tag
-                // so a raw pointer cannot be mistaken for a DynamicValue.
-                if let Some(param_type) = param_types.get(i)
-                    && let Some(dynamic) = dynamic_box_at(val as *mut u8)
-                {
-                    val = match (param_type, dynamic.type_id) {
-                        (ParamType::String, TYPE_STRING) => dynamic.value_ptr as i64,
-                        (ParamType::Int, TYPE_INT) | (ParamType::Bool, TYPE_BOOL) => {
-                            haxe_unbox_int(dynamic)
-                        }
-                        (ParamType::Float, TYPE_FLOAT) => {
-                            haxe_unbox_float(dynamic).to_bits() as i64
-                        }
-                        (_, TYPE_NULL) => 0,
-                        _ => val,
-                    };
-                }
-                let field_ptr = ptr.add(8 + i * 8);
-                *(field_ptr as *mut i64) = val;
+        for (i, &slot) in slots.iter().take(param_count).enumerate() {
+            let mut val = slot;
+            // Array<Dynamic> holds boxed values, while an enum field uses
+            // its declared representation. Match only the expected box tag
+            // so a raw pointer cannot be mistaken for a DynamicValue.
+            if let Some(param_type) = param_types.get(i)
+                && let Some(dynamic) = dynamic_box_at(val as *mut u8)
+            {
+                val = match (param_type, dynamic.type_id) {
+                    (ParamType::String, TYPE_STRING) => dynamic.value_ptr as i64,
+                    (ParamType::Int, TYPE_INT) | (ParamType::Bool, TYPE_BOOL) => {
+                        haxe_unbox_int(dynamic)
+                    }
+                    (ParamType::Float, TYPE_FLOAT) => haxe_unbox_float(dynamic).to_bits() as i64,
+                    (_, TYPE_NULL) => 0,
+                    _ => val,
+                };
             }
+            let field_ptr = ptr.add(8 + i * 8);
+            *(field_ptr as *mut i64) = val;
         }
 
         ptr as i64
     }
+}
+
+/// `Reflect.field(E, "C")`, boxed as Dynamic: the value of a constructor
+/// without parameters, or a function building the value of one with them.
+pub(crate) fn enum_constructor_field(type_id: u32, name: &str) -> Option<*mut u8> {
+    let enum_info = registered_enum_info(type_id)?;
+    let index = enum_info.variants.iter().position(|v| v.name == name)?;
+    if enum_info.variants[index].param_count == 0 {
+        let value = create_registered_enum(type_id, enum_info, index, std::ptr::null_mut());
+        return Some(haxe_box_reference_ptr(value as *mut u8, type_id));
+    }
+    let env = Box::into_raw(Box::new([type_id as usize, index])) as usize;
+    let code = enum_constructor_entry as *const () as usize;
+    let record = Box::into_raw(Box::new([code, env])) as *mut u8;
+    Some(haxe_box_function_ptr(record))
+}
+
+/// Code of a closure from `enum_constructor_field`, in the shape of a dynamic
+/// entry: env is `[type id, constructor index]`, arguments and result are
+/// Dynamic boxes. Its arity matches the call `haxe_call_method_dynamic` makes.
+#[allow(clippy::too_many_arguments)]
+extern "C" fn enum_constructor_entry(
+    env: *const usize,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    a4: i64,
+    a5: i64,
+    a6: i64,
+) -> *mut u8 {
+    let (type_id, index) = unsafe { (*env as u32, *env.add(1)) };
+    let Some(enum_info) = registered_enum_info(type_id) else {
+        return std::ptr::null_mut();
+    };
+    let variant = &enum_info.variants[index];
+    let args = [a0, a1, a2, a3, a4, a5, a6];
+    let count = variant.param_count.min(args.len());
+    let value = create_enum_value_from_slots(
+        index as i32,
+        variant.param_count,
+        variant.param_types,
+        &args[..count],
+        true,
+    );
+    register_reflected_enum_value(value, type_id);
+    haxe_box_reference_ptr(value as *mut u8, type_id)
 }
 
 // ============================================================================
@@ -4006,6 +4084,10 @@ pub fn is_class_type(type_id: u32) -> bool {
 /// untyped i64 which they can re-interpret).
 pub unsafe fn box_class_field_as_dynamic(value: u64, ty: ParamType) -> *mut u8 {
     match ty {
+        // A null reference reads as null, not as an empty value of its type.
+        ParamType::String | ParamType::Array | ParamType::Anon if value == 0 => {
+            std::ptr::null_mut()
+        }
         ParamType::Int => haxe_box_int_ptr(value as i64),
         ParamType::Float => haxe_box_float_ptr(f64::from_bits(value)),
         ParamType::Bool => haxe_box_bool_ptr(value != 0),
@@ -4081,16 +4163,18 @@ pub extern "C" fn haxe_type_get_class(obj_ptr: *const u8) -> i64 {
     if obj_ptr.is_null() || (obj_ptr as usize) >> 32 == 0 {
         return 0;
     }
+    // A String or Array arrives boxed; the box's u32 tag is followed by
+    // uninitialised padding, so only the low half of the word is the tag.
+    let value = unsafe { &*(obj_ptr as *const DynamicValue) };
+    if matches!(value.type_id, TYPE_STRING | TYPE_ARRAY) {
+        return if value.value_ptr.is_null() {
+            0
+        } else {
+            reflected_class_token(value.type_id.0) as i64
+        };
+    }
     let header = unsafe { *(obj_ptr as *const i64) };
     match u32::try_from(header) {
-        Ok(id) if matches!(TypeId(id), TYPE_STRING | TYPE_ARRAY) => {
-            let value = unsafe { &*(obj_ptr as *const DynamicValue) };
-            if value.value_ptr.is_null() {
-                0
-            } else {
-                reflected_class_token(id) as i64
-            }
-        }
         Ok(id) if is_class_type(id) => header,
         _ => 0,
     }

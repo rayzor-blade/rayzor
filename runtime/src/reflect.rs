@@ -13,8 +13,8 @@ use crate::haxe_string::HaxeString;
 use crate::type_system::{
     DynamicValue, ParamType, TYPE_ARRAY, TYPE_BOOL, TYPE_CLASS_TOKEN, TYPE_DYNAMIC_TOKEN,
     TYPE_ENUM_TOKEN, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_NULL, TYPE_STRING, TYPE_VOID,
-    TypeId, box_class_field_as_dynamic, dynamic_box_at, get_type_info, haxe_box_int_ptr,
-    is_class_type, lookup_class_field, reflected_class_token,
+    TypeId, box_class_field_as_dynamic, dynamic_box_at, enum_constructor_field, get_type_info,
+    haxe_box_int_ptr, is_class_type, lookup_class_field, reflected_class_token,
 };
 
 mod strings;
@@ -266,6 +266,18 @@ fn static_field_get(type_id: u32, field: *mut u8) -> Option<*mut u8> {
     Some(getter(std::ptr::null_mut()))
 }
 
+/// A field read through a class or enum used as a value: a class's static,
+/// or an enum's constructor.
+fn type_value_field(type_id: u32, field: *mut u8) -> *mut u8 {
+    static_field_get(type_id, field)
+        .or_else(|| {
+            let (ptr, len) = unsafe { extract_field_name(field)? };
+            let name = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+            enum_constructor_field(type_id, std::str::from_utf8(name).ok()?)
+        })
+        .unwrap_or(std::ptr::null_mut())
+}
+
 fn static_field_set(type_id: u32, field: *mut u8, value: *mut u8) {
     if let Some((_, setter)) = static_accessors(type_id, field)
         && setter != 0
@@ -280,9 +292,9 @@ pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return std::ptr::null_mut();
     }
-    // A class used as a value: a read of its statics.
+    // A class or enum used as a value.
     if let Some(class) = class_token_of(obj) {
-        return static_field_get(class, field).unwrap_or(std::ptr::null_mut());
+        return type_value_field(class, field);
     }
     unsafe {
         let (name_ptr, name_len) = match extract_field_name(field) {
@@ -430,9 +442,9 @@ pub extern "C" fn haxe_dynamic_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return std::ptr::null_mut();
     }
-    // A class used as a value: a read of its statics.
+    // A class or enum used as a value.
     if let Some(class) = class_token_of(obj) {
-        return static_field_get(class, field).unwrap_or(std::ptr::null_mut());
+        return type_value_field(class, field);
     }
     // A raw anonymous-object handle starts with an Arc pointer. Its low word
     // can look like a user type ID, but only registered IDs name Dynamic boxes.

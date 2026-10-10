@@ -382,9 +382,8 @@ impl MacroValue {
             }
             MacroValue::Type(_) => "<type>".to_string(),
             MacroValue::Function(f) => format!("<function:{}>", f.name),
-            MacroValue::Position(loc) => {
-                format!("{}:{}", loc.file_id, loc.line)
-            }
+            MacroValue::Position(loc) => super::context_api::named_position_string(loc)
+                .unwrap_or_else(|| format!("{}:{}", loc.file_id, loc.line)),
         }
     }
 

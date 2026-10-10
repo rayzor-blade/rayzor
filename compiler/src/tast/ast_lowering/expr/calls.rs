@@ -1055,6 +1055,11 @@ impl<'a> AstLowering<'a> {
             .chain(self.using_modules.iter().rev().copied())
             .collect();
         for (_class_name, class_symbol) in candidates {
+            if !receiver_is_dynamic
+                && !self.extension_constraints_hold(class_symbol, method_name, receiver_type)
+            {
+                continue;
+            }
             // First, check local class_methods (for classes lowered in this instance)
             if let Some(methods) = self.class_methods.get(&class_symbol) {
                 for (meth_name, meth_symbol, is_static) in methods {
@@ -1128,6 +1133,62 @@ impl<'a> AstLowering<'a> {
             }
         }
         None
+    }
+
+    /// Whether the receiver meets the constraints of the type parameters an
+    /// extension's first parameter binds: `sorted<T:Float, A:Array<T>>(a:A)`
+    /// does not extend `Array<String>`. Read from the declaration; only a
+    /// primitive constraint the bound type cannot meet rejects.
+    fn extension_constraints_hold(
+        &mut self,
+        class_symbol: SymbolId,
+        method_name: InternedString,
+        receiver: TypeId,
+    ) -> bool {
+        let Some(sig) = self.resolve_declared_method_sig(class_symbol, method_name, true) else {
+            return true;
+        };
+        let Some(Some(first)) = sig.params.first() else {
+            return true;
+        };
+        let mut bound = std::collections::BTreeSet::new();
+        // (declared type, the type it binds, whether it is a constraint)
+        let mut pending: Vec<(&parser::Type, TypeId, bool)> = vec![(first, receiver, false)];
+        while let Some((ty, actual, is_constraint)) = pending.pop() {
+            let parser::Type::Path { path, params, .. } = ty else {
+                continue;
+            };
+            if !path.package.is_empty() {
+                continue;
+            }
+            if let Some(param) = sig.type_params.iter().find(|p| p.name == path.name) {
+                if params.is_empty() && bound.insert(path.name.as_str()) {
+                    pending.extend(param.constraints.iter().map(|c| (c, actual, true)));
+                }
+                continue;
+            }
+            let tt = self.context.type_table.borrow();
+            let kind = tt.get(actual).map(|t| &t.kind);
+            match (path.name.as_str(), kind) {
+                ("Array", Some(TypeKind::Array { element_type })) if params.len() == 1 => {
+                    pending.push((&params[0], *element_type, is_constraint));
+                }
+                (want @ ("Int" | "Float" | "Bool" | "String"), Some(kind)) if is_constraint => {
+                    let have = match kind {
+                        TypeKind::Int => "Int",
+                        TypeKind::Float => "Float",
+                        TypeKind::Bool => "Bool",
+                        TypeKind::String => "String",
+                        _ => continue,
+                    };
+                    if have != want && !(have == "Int" && want == "Float") {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
     }
 
     /// An array literal passed for `Array<Dynamic>` is that array, and its

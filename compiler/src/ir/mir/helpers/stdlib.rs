@@ -961,6 +961,57 @@ impl<'a> HirToMirContext<'a> {
                 }
                 None
             }
+            // `stringify(v, ?replacer, ?space)`: a String second argument is
+            // the space, skipping the replacer, as Haxe binds it.
+            "haxe_json_stringify" if args.len() >= 2 => {
+                let space_idx = if args.len() >= 3 {
+                    2
+                } else {
+                    let ty = self.resolve_storage_type(args[1].ty);
+                    let ty = match self.type_table.get(ty).map(|t| &t.kind) {
+                        Some(TypeKind::Optional { inner_type }) => {
+                            self.resolve_storage_type(*inner_type)
+                        }
+                        _ => ty,
+                    };
+                    if !matches!(
+                        self.type_table.get(ty).map(|t| &t.kind),
+                        Some(TypeKind::String)
+                    ) {
+                        return None;
+                    }
+                    1
+                };
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let mut regs = Vec::with_capacity(args.len());
+                for arg in args {
+                    regs.push(self.lower_expression(arg)?);
+                }
+                let value = match self
+                    .box_for_runtime_dynamic_param(runtime_func, 0, regs[0], args[0].ty)
+                    .or_else(|| self.box_anon_for_dynamic_slot(regs[0], args[0].ty, &ptr_u8))
+                {
+                    Some(boxed) => boxed,
+                    None => {
+                        let actual = self.convert_type(args[0].ty);
+                        self.maybe_box_for_extern_call(regs[0], &actual, &ptr_u8)?
+                    }
+                };
+                let space = regs[space_idx];
+                let space_ty = self
+                    .builder
+                    .get_register_type(space)
+                    .unwrap_or_else(|| ptr_u8.clone());
+                let func_id = self.get_or_register_extern_function(
+                    "haxe_json_stringify_pretty",
+                    vec![ptr_u8.clone(), space_ty],
+                    ptr_u8.clone(),
+                );
+                Some(
+                    self.builder
+                        .build_call_direct(func_id, vec![value, space], ptr_u8),
+                )
+            }
             "haxe_reflect_call_method" | "Reflect.callMethod" => {
                 Some(self.lower_reflect_call_method(args, result_type, location))
             }

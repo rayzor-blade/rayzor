@@ -119,15 +119,16 @@ pub(super) fn attach(module: &mut IrModule, file: &HaxeFile) -> Result<(), Strin
                 if field.modifiers.contains(&Modifier::Static) {
                     statics.insert(name.clone(), value);
                 } else {
-                    instance.insert(name.clone(), value);
+                    // Haxe keys the class constructor's metadata `_`.
+                    let key = if name == "new" { "_" } else { name.as_str() };
+                    instance.insert(key.to_string(), value);
                 }
             }
         }
         for ctor in constructors {
             let value = metadata(&ctor.meta)?;
-            // Haxe keys the constructor's metadata `_`.
             if value.as_object().is_some_and(|v| !v.is_empty()) {
-                instance.insert("_".to_string(), value);
+                instance.insert(ctor.name.clone(), value);
             }
         }
         for (kind, data) in [

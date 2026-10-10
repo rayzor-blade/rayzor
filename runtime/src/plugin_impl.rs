@@ -1886,6 +1886,10 @@ register_symbol!(
 // ============================================================================
 register_symbol!("haxe_json_parse", crate::json::haxe_json_parse);
 register_symbol!("haxe_json_stringify", crate::json::haxe_json_stringify);
+register_symbol!(
+    "haxe_json_stringify_pretty",
+    crate::json::haxe_json_stringify_pretty
+);
 
 // ============================================================================
 // Class Virtual Method Dispatch (Vtable)

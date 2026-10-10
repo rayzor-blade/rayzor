@@ -1589,11 +1589,29 @@ impl<'a> HirToMirContext<'a> {
                 vec![obj_reg] // 'this' as first arg
             };
             for (i, arg) in args.iter().enumerate() {
-                let arg_reg = self.lower_expression(arg)?;
+                let mut arg_reg = self.lower_expression(arg)?;
                 let actual_ty = self.convert_type(arg.ty);
 
                 // Instance methods offset by 1 for 'this'.
                 let param_idx = if prepend_receiver { i + 1 } else { i };
+
+                // Reflection reads the object an interface value wraps, not its
+                // fat pointer.
+                if param_idx == 0
+                    && matches!(class_name, "Reflect" | "Type")
+                    && self.is_interface_value_type(arg.ty)
+                {
+                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                    let identity = self.get_or_register_extern_function(
+                        "haxe_iface_identity",
+                        vec![ptr_u8.clone()],
+                        ptr_u8.clone(),
+                    );
+                    let object = self.coerce_reg_to(arg_reg, &ptr_u8)?;
+                    arg_reg = self
+                        .builder
+                        .build_call_direct(identity, vec![object], ptr_u8)?;
+                }
                 let expected_ty = expected_param_types
                     .get(param_idx)
                     .cloned()

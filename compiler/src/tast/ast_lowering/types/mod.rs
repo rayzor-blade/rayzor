@@ -272,7 +272,7 @@ impl<'a> AstLowering<'a> {
                         return result;
                     }
                     // Process type arguments if present (now the symbol borrow is dropped)
-                    let type_arg_ids = if !params.is_empty() {
+                    let mut type_arg_ids = if !params.is_empty() {
                         let mut result = Vec::new();
                         for arg in params {
                             result.push(self.lower_type(arg)?);
@@ -281,6 +281,21 @@ impl<'a> AstLowering<'a> {
                     } else {
                         Vec::new()
                     };
+                    // Trailing arguments left out take the declared defaults:
+                    // `Foo` names `Foo<String>` for `class Foo<T = String>`.
+                    if matches!(symbol_kind, crate::tast::SymbolKind::Class)
+                        && let Some(defaults) = self
+                            .context
+                            .symbol_table
+                            .get_class_type_param_defaults(symbol_id)
+                    {
+                        for default in defaults.iter().skip(type_arg_ids.len()) {
+                            match default {
+                                Some(ty) => type_arg_ids.push(*ty),
+                                None => break,
+                            }
+                        }
+                    }
 
                     // Create appropriate type based on symbol kind
                     match symbol_kind {

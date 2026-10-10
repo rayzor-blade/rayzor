@@ -689,6 +689,32 @@ impl DeferredMacroTyper<'_, '_> {
         }
     }
 
+    /// An abstract's type with a fresh unknown for each of its parameters.
+    fn with_unknown_arguments(&self, abs: TypeId) -> TypeId {
+        let kind = self
+            .lowering
+            .context
+            .type_table
+            .borrow()
+            .get(abs)
+            .map(|t| t.kind.clone());
+        let Some(crate::tast::TypeKind::Abstract {
+            symbol_id,
+            underlying,
+            type_args,
+        }) = kind
+        else {
+            return abs;
+        };
+        let params = self.definition_parameters(symbol_id).len();
+        if params == 0 || !type_args.is_empty() {
+            return abs;
+        }
+        let mut table = self.lowering.context.type_table.borrow_mut();
+        let unknown = table.unknown_type();
+        table.create_abstract_type(symbol_id, underlying, vec![unknown; params])
+    }
+
     fn definition_parameters(&self, symbol: crate::tast::SymbolId) -> Vec<TypeId> {
         if let Some(params) = self
             .lowering
@@ -750,6 +776,13 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                     && let Some(&source) = self.lowering.macro_source_types.get(symbol_id)
                 {
                     return Ok(source);
+                }
+                // An unhinted enum abstract value has its abstract's type.
+                if let Some(abs) = self.lowering.enum_abstract_value_type(&typed) {
+                    let dynamic = self.lowering.context.type_table.borrow().dynamic_type();
+                    if typed.expr_type == dynamic {
+                        return Ok(self.with_unknown_arguments(abs));
+                    }
                 }
                 let ty = self.lowering.safe_chain_type(&typed);
                 // `a ?? b` where `b` never completes is `a` without its Null.
@@ -844,6 +877,53 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
             }
         }
         None
+    }
+
+    fn forwarded_receiver(&mut self, receiver: TypeId, name: &str) -> Option<TypeId> {
+        let (symbol_id, underlying) = match self
+            .lowering
+            .context
+            .type_table
+            .borrow()
+            .get(receiver)
+            .map(|t| &t.kind)
+        {
+            Some(crate::tast::TypeKind::Abstract {
+                symbol_id,
+                underlying,
+                ..
+            }) => (*symbol_id, *underlying),
+            _ => return None,
+        };
+        let forwards = self
+            .lowering
+            .context
+            .symbol_table
+            .get_symbol(symbol_id)
+            .is_some_and(|s| s.flags.contains(crate::tast::SymbolFlags::FORWARD));
+        if !forwards {
+            return None;
+        }
+        let interned = self.lowering.context.intern_string(name);
+        let declared = self
+            .lowering
+            .class_fields
+            .get(&symbol_id)
+            .is_some_and(|fields| fields.iter().any(|(n, _, _)| *n == interned))
+            || self
+                .lowering
+                .resolve_class_method_symbol(symbol_id, interned)
+                .is_some();
+        if declared {
+            return None;
+        }
+        underlying.or_else(|| {
+            self.lowering
+                .context
+                .type_table
+                .borrow()
+                .resolve_abstract_underlying(symbol_id)
+        })
     }
 
     fn expected_type(&mut self) -> Option<TypeId> {

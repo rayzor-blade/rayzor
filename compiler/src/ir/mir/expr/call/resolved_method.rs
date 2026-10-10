@@ -693,6 +693,17 @@ impl<'a> HirToMirContext<'a> {
                         let explicit_return_type =
                             runtime_call.return_type.map(|rt| rt.to_ir_type());
                         let is_static_call = sig.is_static;
+                        if is_static_call {
+                            let result_type = self.convert_type(expr.ty);
+                            if let Some(special_result) = self.try_lower_special_runtime_call(
+                                runtime_func,
+                                args,
+                                result_type,
+                                expr.source_location,
+                            ) {
+                                return special_result;
+                            }
+                        }
 
                         // A plugin mapping declares its exact ABI (param_types
                         // includes self for instance methods) and is authoritative;

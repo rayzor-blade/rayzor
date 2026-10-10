@@ -95,6 +95,12 @@ pub trait MacroTyper {
         None
     }
 
+    /// The type `receiver.name` is read through when the receiver is a
+    /// `@:forward` abstract that does not declare `name`: its underlying type.
+    fn forwarded_receiver(&mut self, _receiver: TypeId, _name: &str) -> Option<TypeId> {
+        None
+    }
+
     /// `Context.getExpectedType` — the type the macro call's position
     /// expects, or None where it expects none.
     fn expected_type(&mut self) -> Option<TypeId> {
@@ -795,6 +801,10 @@ impl MacroContext {
         };
         let typer = self.typer.as_mut()?;
         let receiver_ty = typer.get().type_expr_in_scope(receiver).ok()?;
+        let receiver_ty = typer
+            .get()
+            .forwarded_receiver(receiver_ty, field)
+            .unwrap_or(receiver_ty);
         let (on_class, is_method) = typer.get().field_access_kind(receiver_ty, field)?;
         let enum_value = |e: &str, v: &str, args: Vec<MacroValue>| {
             MacroValue::Enum(Arc::from(e), Arc::from(v), Arc::new(args))
@@ -840,10 +850,7 @@ impl MacroContext {
     /// Returns the parsed expression as a MacroValue::Expr.
     pub fn parse(&self, code: &str, location: SourceLocation) -> Result<MacroValue, MacroError> {
         // Wrap in a class/function context so the parser can handle it
-        let wrapper = format!(
-            "class __MacroParse__ {{ static function __parse__() {{ {}; }} }}",
-            code
-        );
+        let wrapper = format!("{PARSE_PREFIX}{code}; }} }}");
 
         let file = parser::parse_haxe_file("__macro_parse__", &wrapper, false).map_err(|e| {
             MacroError::ContextError {
@@ -933,18 +940,31 @@ impl MacroContext {
     /// `Context.getPosInfos(pos)` — Get position information
     pub fn get_pos_infos(&self, pos: &SourceLocation) -> MacroValue {
         let mut obj = BTreeMap::new();
-        obj.insert("file".to_string(), MacroValue::Int(pos.file_id as i64));
+        let (file, max) = match named_file(pos.file_id) {
+            Some((name, _)) => (MacroValue::from_str(&name), pos.column),
+            None => (MacroValue::Int(pos.file_id as i64), pos.byte_offset),
+        };
+        obj.insert("file".to_string(), file);
         obj.insert("min".to_string(), MacroValue::Int(pos.byte_offset as i64));
-        obj.insert("max".to_string(), MacroValue::Int(pos.byte_offset as i64));
+        obj.insert("max".to_string(), MacroValue::Int(max as i64));
         MacroValue::Object(Arc::new(obj))
     }
 
     /// `Context.makePosition(inf)` — Build a position from info object
     pub fn make_position(&self, info: &MacroValue) -> Result<MacroValue, MacroError> {
         if let MacroValue::Object(obj) = info {
-            let file_id = obj.get("file").and_then(|v| v.as_int()).unwrap_or(0) as u32;
             let min = obj.get("min").and_then(|v| v.as_int()).unwrap_or(0) as u32;
-            let _max = obj.get("max").and_then(|v| v.as_int()).unwrap_or(0);
+            let max = obj.get("max").and_then(|v| v.as_int()).unwrap_or(0) as u32;
+            let file = obj.get("file").map(super::ast_bridge::unwrap_expr_value);
+            if let Some(MacroValue::String(name)) = file {
+                return Ok(MacroValue::Position(SourceLocation::new(
+                    named_file_id(&name),
+                    0,
+                    max,
+                    min,
+                )));
+            }
+            let file_id = obj.get("file").and_then(|v| v.as_int()).unwrap_or(0) as u32;
 
             Ok(MacroValue::Position(SourceLocation::new(
                 file_id, 0, 0, min,
@@ -1271,6 +1291,38 @@ impl MacroContext {
                 let code = arg_as_string(args, 0, "parse", location)?;
                 self.parse(&code, location)
             }
+            // The string is `pos`'s file from `pos.min` on, so the expression
+            // spans its own range there.
+            "parseInlineString" => {
+                let code = arg_as_string(args, 0, "parseInlineString", location)?;
+                let pos = arg_as_position(args, 1).unwrap_or(location);
+                let mut parsed = self.parse(&code, location)?;
+                if let MacroValue::Expr(expr) = &mut parsed {
+                    let file_base = match named_file(pos.file_id) {
+                        Some((name, contents)) => {
+                            // Unregistered, the parsed string is all there is of it.
+                            if contents.is_none() {
+                                register_file_contents(&name, &code);
+                            }
+                            let file = (pos.file_id - super::errors::NAMED_FILE_ID) as usize;
+                            super::errors::NAMED_FILE_SPAN + (file << 32)
+                        }
+                        None => 0,
+                    };
+                    let base = file_base + pos.byte_offset as usize;
+                    let expr = Arc::make_mut(expr);
+                    let start = expr.span.start.saturating_sub(PARSE_PREFIX.len());
+                    let end = expr.span.end.saturating_sub(PARSE_PREFIX.len());
+                    expr.span = parser::Span::new(base + start, base + end);
+                }
+                Ok(parsed)
+            }
+            "registerFileContents" => {
+                let file = arg_as_string(args, 0, "registerFileContents", location)?;
+                let content = arg_as_string(args, 1, "registerFileContents", location)?;
+                register_file_contents(&file, &content);
+                Ok(MacroValue::Null)
+            }
             "makeExpr" => {
                 if let Some(val) = args.first() {
                     self.make_expr(val, location)
@@ -1585,6 +1637,70 @@ fn extract_body_expr(file: &HaxeFile) -> Option<parser::Expr> {
     None
 }
 
+/// What `Context.parse` wraps its code in; the code starts right after it.
+const PARSE_PREFIX: &str = "class __MacroParse__ { static function __parse__() { ";
+
+thread_local! {
+    /// Files named by macro positions, with any contents registered for them.
+    static NAMED_FILES: RefCell<Vec<(String, Option<Arc<str>>)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// The `file_id` of a position in the file `name`, adding it when new.
+fn named_file_id(name: &str) -> u32 {
+    NAMED_FILES.with_borrow_mut(|files| {
+        let index = match files.iter().position(|(n, _)| n == name) {
+            Some(index) => index,
+            None => {
+                files.push((name.to_string(), None));
+                files.len() - 1
+            }
+        };
+        super::errors::NAMED_FILE_ID + index as u32
+    })
+}
+
+/// `Context.registerFileContents`: the text positions in `name` find lines in.
+fn register_file_contents(name: &str, contents: &str) {
+    let index = (named_file_id(name) - super::errors::NAMED_FILE_ID) as usize;
+    NAMED_FILES.with_borrow_mut(|files| files[index].1 = Some(Arc::from(contents)));
+}
+
+/// The name and registered contents of a named-file position's file.
+pub(crate) fn named_file(file_id: u32) -> Option<(String, Option<Arc<str>>)> {
+    let index = file_id.checked_sub(super::errors::NAMED_FILE_ID)? as usize;
+    NAMED_FILES.with_borrow(|files| files.get(index).cloned())
+}
+
+/// `Std.string` of a named-file position, printed as Haxe prints one:
+/// `#pos(file:line: characters a-b)`, or `lines a-b` when it spans lines.
+pub(crate) fn named_position_string(pos: &SourceLocation) -> Option<String> {
+    let (name, contents) = named_file(pos.file_id)?;
+    let text = contents.as_deref().unwrap_or("").as_bytes();
+    let before = |at: u32| &text[..(at as usize).min(text.len())];
+    let line = |at| 1 + before(at).iter().filter(|b| **b == b'\n').count();
+    let column = |at: u32| {
+        let line_start = before(at)
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |i| i + 1);
+        at as usize - line_start + 1
+    };
+    let (min, max) = (pos.byte_offset, pos.column);
+    let (first, last) = (line(min), line(max));
+    Some(if first != last {
+        format!("#pos({name}:{first}: lines {first}-{last})")
+    } else if min == max {
+        format!("#pos({name}:{first}: character {})", column(min))
+    } else {
+        format!(
+            "#pos({name}:{first}: characters {}-{})",
+            column(min),
+            column(max)
+        )
+    })
+}
+
 /// Convert a MacroValue (Object) to a DefinedType
 fn value_to_defined_type(
     value: Option<&MacroValue>,
@@ -1672,7 +1788,9 @@ fn value_to_defined_type(
                     constraints,
                     variance: parser::Variance::Invariant,
                     meta: Vec::new(),
-                    default_type: None,
+                    default_type: param
+                        .get("defaultType")
+                        .and_then(|ty| super::expr_adt::type_of_value(ty, parser::Span::default())),
                     span: parser::Span::default(),
                 })
             })
