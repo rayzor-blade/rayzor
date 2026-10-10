@@ -8772,7 +8772,7 @@ impl<'a> TastToHirContext<'a> {
             TypedExpressionKind::Switch {
                 discriminant,
                 cases,
-                ..
+                default_case,
             } => {
                 self.collect_var_refs_expr(discriminant, refs);
                 for case in cases {
@@ -8784,6 +8784,9 @@ impl<'a> TastToHirContext<'a> {
                         self.collect_var_refs_expr(guard, refs);
                     }
                     self.collect_var_refs_stmt(&case.body, refs);
+                }
+                if let Some(default) = default_case {
+                    self.collect_var_refs_expr(default, refs);
                 }
             }
             // A static call (`Class.method(args)`) has no receiver but its

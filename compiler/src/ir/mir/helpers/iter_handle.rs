@@ -75,9 +75,9 @@ pub(crate) enum IterSource {
     /// array iterator, so the runtime builds the handle, given the array
     /// wrappers' entry points. Anything else yields no handle.
     Dynamic,
-    /// A structure `{ iterator: f }`: the runtime reads the closure and
-    /// steps whatever iterator it answers.
-    AnonIterable,
+    /// A structure `{ iterator: f }`: the runtime reads the closure. When `f`
+    /// is declared to return a class, that class's methods step the result.
+    AnonIterable { iterator_class: Option<SymbolId> },
     /// A structure `{ hasNext: f, next: f }`, stepped through its closures.
     AnonIterator,
 }
@@ -218,8 +218,11 @@ impl<'a> HirToMirContext<'a> {
                     if has("hasNext") && has("next") {
                         return Some(IterSource::AnonIterator);
                     }
-                    if has("iterator") {
-                        return Some(IterSource::AnonIterable);
+                    let iterator_name = self.string_interner.intern("iterator");
+                    if let Some(field) = fields.iter().find(|f| f.name == iterator_name) {
+                        return Some(IterSource::AnonIterable {
+                            iterator_class: self.returned_iterator_class(field.type_id),
+                        });
                     }
                     return None;
                 }
@@ -293,20 +296,27 @@ impl<'a> HirToMirContext<'a> {
                     .get(&(class_sym, iterator_name))
                     .copied()
             })?;
-        let ty = self
-            .type_table
-            .get(self.symbol_table.get_symbol(method_sym)?.type_id)?;
-        let TypeKind::Function { return_type, .. } = &ty.kind else {
+        self.returned_iterator_class(self.symbol_table.get_symbol(method_sym)?.type_id)
+    }
+
+    /// The class a function type returns; `Iterator<T>` names the protocol,
+    /// not a class with entry points.
+    fn returned_iterator_class(&self, fn_ty: TypeId) -> Option<SymbolId> {
+        let TypeKind::Function { return_type, .. } = &self.type_table.get(fn_ty)?.kind else {
             return None;
         };
-        // `Iterator<T>` names the protocol, not a class with entry points.
         if self.iter_protocol_of(*return_type).is_some() {
             return None;
         }
-        match &self.type_table.get(*return_type)?.kind {
-            TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-            _ => None,
+        let mut ty = *return_type;
+        for _ in 0..4 {
+            match &self.type_table.get(ty)?.kind {
+                TypeKind::Class { symbol_id, .. } => return Some(*symbol_id),
+                TypeKind::GenericInstance { base_type, .. } => ty = *base_type,
+                _ => return None,
+            }
         }
+        None
     }
 
     /// The entry point for one protocol method on one class, as a thunk that can
@@ -462,15 +472,31 @@ impl<'a> HirToMirContext<'a> {
                 let nx = self.iter_thunk_for_runtime(&next.clone(), *next_is_mir, IrType::I64)?;
                 (None, hn, nx)
             }
-            IterSource::AnonIterable => (
-                Some(self.iter_thunk_for_runtime(
+            IterSource::AnonIterable { iterator_class } => {
+                let make = self.iter_thunk_for_runtime(
                     "rayzor_anon_iterable_iterator",
                     false,
                     ptr_void.clone(),
-                )?),
-                self.iter_thunk_for_runtime("rayzor_iter_value_has_next", false, IrType::I32)?,
-                self.iter_thunk_for_runtime("rayzor_iter_value_next", false, IrType::I64)?,
-            ),
+                )?;
+                let by_class = iterator_class.and_then(|class| {
+                    Some((
+                        self.iter_thunk_for_class(class, "hasNext")?,
+                        self.iter_thunk_for_class(class, "next")?,
+                    ))
+                });
+                let (has_next, next) = match by_class {
+                    Some(pair) => pair,
+                    None => (
+                        self.iter_thunk_for_runtime(
+                            "rayzor_iter_value_has_next",
+                            false,
+                            IrType::I32,
+                        )?,
+                        self.iter_thunk_for_runtime("rayzor_iter_value_next", false, IrType::I64)?,
+                    ),
+                };
+                (Some(make), has_next, next)
+            }
             IterSource::AnonIterator => (
                 None,
                 self.iter_thunk_for_runtime("rayzor_iter_value_has_next", false, IrType::I32)?,

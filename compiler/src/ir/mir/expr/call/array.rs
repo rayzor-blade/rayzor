@@ -182,6 +182,49 @@ impl<'a> HirToMirContext<'a> {
                     .builder
                     .build_call_direct(push, vec![arr, slot], IrType::Void);
             }
+            // A Dynamic pushed into an Int or Bool array stores the scalar its
+            // box holds; raw bits pass through unchanged.
+            let elem_is_int_or_bool = self
+                .type_table
+                .get(self.resolve_through_aliases(args[0].ty))
+                .and_then(|t| match &t.kind {
+                    TypeKind::Array { element_type } => Some(*element_type),
+                    _ => None,
+                })
+                .is_some_and(|et| {
+                    matches!(
+                        self.type_table.get(et).map(|t| &t.kind),
+                        Some(TypeKind::Int | TypeKind::Bool)
+                    )
+                });
+            let arg_is_dynamic = matches!(
+                self.type_table
+                    .get(self.resolve_through_aliases(args[1].ty))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            );
+            if elem_is_int_or_bool && arg_is_dynamic {
+                let arr = self.lower_expression(&args[0])?;
+                let value = self.lower_expression(&args[1])?;
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let value = self.coerce_reg_to(value, &ptr_u8)?;
+                let unbox = self.get_or_register_extern_function(
+                    "haxe_unbox_scalar_or_addr",
+                    vec![ptr_u8],
+                    IrType::I64,
+                );
+                let slot = self
+                    .builder
+                    .build_call_direct(unbox, vec![value], IrType::I64)?;
+                let push = self.get_or_register_extern_function(
+                    "haxe_array_push_i64",
+                    vec![IrType::Ptr(Box::new(IrType::I64)), IrType::I64],
+                    IrType::Void,
+                );
+                return self
+                    .builder
+                    .build_call_direct(push, vec![arr, slot], IrType::Void);
+            }
             if elem_is_f64 {
                 if let (Some(arr_reg), Some(val_reg)) = (
                     self.lower_expression(&args[0]),

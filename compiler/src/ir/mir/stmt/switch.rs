@@ -147,8 +147,12 @@ impl<'a> HirToMirContext<'a> {
         // Per-case end block + post-body symbol_map snapshots, used to wire
         // phi node incoming edges at the continuation.
         let mut case_incoming: Vec<(IrBlockId, BTreeMap<SymbolId, IrId>)> = Vec::new();
+        // Every case starts from the bindings before the switch: a loop in one
+        // case rebinds even names it never assigns to registers of its own blocks.
+        let pre_switch_symbols = self.symbol_map.clone();
 
         for (i, case) in cases.iter().enumerate() {
+            self.symbol_map = pre_switch_symbols.clone();
             let mut bound = false;
             let test_block = case_test_blocks[i];
             let body_block = case_body_blocks[i];
@@ -296,6 +300,7 @@ impl<'a> HirToMirContext<'a> {
                 self.symbol_map.insert(*symbol_id, reg);
             }
         }
+        self.symbol_map = pre_switch_symbols;
         self.builder.switch_to_block(default_block);
         let default_end = self.builder.current_block();
         let mut default_snapshot: BTreeMap<SymbolId, IrId> = BTreeMap::new();

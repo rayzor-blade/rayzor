@@ -348,7 +348,8 @@ pub extern "C" fn haxe_dynamic_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
 /// `box_class_field_as_dynamic` direction).
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_set_field(obj: *mut u8, field: *mut u8, value: *mut u8) {
-    if obj.is_null() {
+    // A class used as a value is its 32-bit type id, not an object.
+    if obj.is_null() || (obj as usize) >> 32 == 0 {
         return;
     }
     unsafe {
