@@ -2167,16 +2167,21 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         let recv_info = type_table.get(receiver_type_id)?;
+        // An instantiated abstract also names its underlying type.
+        let mut receiver_underlying = None;
         let (class_symbol, concrete_args) = match &recv_info.kind {
             crate::tast::TypeKind::Class {
                 symbol_id,
                 type_args,
-            }
-            | crate::tast::TypeKind::Abstract {
+            } => (*symbol_id, type_args.clone()),
+            crate::tast::TypeKind::Abstract {
                 symbol_id,
                 type_args,
-                ..
-            } => (*symbol_id, type_args.clone()),
+                underlying,
+            } => {
+                receiver_underlying = *underlying;
+                (*symbol_id, type_args.clone())
+            }
             crate::tast::TypeKind::GenericInstance {
                 base_type,
                 type_args,
@@ -2208,6 +2213,29 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
                 }
+            }
+            // `abstract A<T>(T)`: the parameter by position, or the
+            // receiver's underlying type when the abstract wraps it directly.
+            if let crate::ir::hir::HirTypeDecl::Abstract(a) = decl
+                && a.symbol_id == class_symbol
+            {
+                if let Some(i) = a.type_params.iter().position(|tp| tp.name == param_name)
+                    && let Some(arg) = concrete_args.get(i)
+                {
+                    return Some(*arg);
+                }
+                let wraps_param = matches!(
+                    type_table.get(a.underlying).map(|t| &t.kind),
+                    Some(crate::tast::TypeKind::TypeParameter { symbol_id, .. })
+                        if self.symbol_table.get_symbol(*symbol_id).map(|s| s.name) == Some(param_name)
+                );
+                return receiver_underlying.filter(|u| {
+                    wraps_param
+                        && !matches!(
+                            type_table.get(*u).map(|t| &t.kind),
+                            Some(crate::tast::TypeKind::TypeParameter { .. })
+                        )
+                });
             }
         }
         None

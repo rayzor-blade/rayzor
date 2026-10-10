@@ -3149,6 +3149,31 @@ impl<'a> AstLowering<'a> {
             ExprKind::Meta { meta, expr } if meta.name == "staticLocal" => {
                 return self.lower_expression(expr);
             }
+            // `abstract`: `this` typed as the enclosing abstract, so its
+            // operators and methods apply rather than the underlying type's.
+            ExprKind::Meta { meta, expr } if meta.name == "abstractThis" => {
+                let this = self.lower_expression(expr)?;
+                let abstract_type = self
+                    .context
+                    .class_context_stack
+                    .last()
+                    .and_then(|owner| self.context.symbol_table.get_symbol(*owner))
+                    .map(|owner| owner.type_id)
+                    .filter(|ty| {
+                        matches!(
+                            self.context.type_table.borrow().get(*ty).map(|t| &t.kind),
+                            Some(TypeKind::Abstract { .. })
+                        )
+                    });
+                let Some(abstract_type) = abstract_type else {
+                    return Ok(this);
+                };
+                TypedExpressionKind::Cast {
+                    expression: Box::new(this),
+                    target_type: abstract_type,
+                    cast_kind: CastKind::Unsafe,
+                }
+            }
             ExprKind::Meta { meta, expr } => {
                 // Metadata annotation: @:meta expr
                 if std::env::var("RAYZOR_META_LOG").is_ok_and(|v| v != "0") {

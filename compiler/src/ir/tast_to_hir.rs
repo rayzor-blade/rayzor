@@ -6070,6 +6070,46 @@ impl<'a> TastToHirContext<'a> {
             .map(|(method, _)| (method, owner, false))
     }
 
+    /// Whether a binary lowers as a call to an `@:op` method with a body,
+    /// rather than as a plain binary.
+    fn dispatches_operator_method(
+        &self,
+        operator: &BinaryOperator,
+        left: &TypedExpression,
+        right: &TypedExpression,
+    ) -> bool {
+        let arithmetic = matches!(
+            operator,
+            BinaryOperator::Add | BinaryOperator::Sub | BinaryOperator::Mul | BinaryOperator::Div
+        );
+        self.find_binary_operator_method(
+            left.expr_type,
+            right.expr_type,
+            operator,
+            false,
+            [false, false],
+        )
+        .or_else(|| {
+            self.find_binary_operator_method(
+                right.expr_type,
+                left.expr_type,
+                operator,
+                true,
+                [false, false],
+            )
+        })
+        .is_some_and(|(method, owner, _)| {
+            // SIMD vector arithmetic markers lower as a plain binary.
+            let simd = arithmetic
+                && self
+                    .symbol_table
+                    .get_symbol(owner)
+                    .and_then(|s| self.string_interner.get(s.name))
+                    .is_some_and(|n| n.starts_with("SIMD"));
+            !self.native_abstract_operators.contains(&method) && !simd
+        })
+    }
+
     /// Find a method with matching @:op metadata for a binary operator.
     /// Returns (method_symbol, owner_symbol, is_class) if found.
     /// Owner is the abstract symbol or class symbol that declares the method.
@@ -8145,8 +8185,15 @@ impl<'a> TastToHirContext<'a> {
                 arguments,
                 ..
             } => self.inline_safe(receiver, params) && all(arguments),
-            TypedExpressionKind::BinaryOp { left, right, .. } => {
-                self.inline_safe(left, params) && self.inline_safe(right, params)
+            // The inliner emits a plain binary; an `@:op` operator is a call.
+            TypedExpressionKind::BinaryOp {
+                left,
+                right,
+                operator,
+            } => {
+                self.inline_safe(left, params)
+                    && self.inline_safe(right, params)
+                    && !self.dispatches_operator_method(operator, left, right)
             }
             TypedExpressionKind::UnaryOp { operand, .. } => self.inline_safe(operand, params),
             TypedExpressionKind::Conditional {
@@ -8639,6 +8686,20 @@ impl<'a> TastToHirContext<'a> {
                     param_map,
                     expression.expr_type,
                 );
+
+                // `abstract` is the receiver, which already has its abstract
+                // type with the caller's type arguments.
+                let abstract_of =
+                    |ty: TypeId| match self.type_table.borrow().get(ty).map(|t| &t.kind) {
+                        Some(TypeKind::Abstract { symbol_id, .. }) => Some(*symbol_id),
+                        _ => None,
+                    };
+                if matches!(expression.kind, TypedExpressionKind::This { .. })
+                    && abstract_of(lowered_inner.ty)
+                        .is_some_and(|owner| abstract_of(*target_type) == Some(owner))
+                {
+                    return lowered_inner;
+                }
 
                 // For abstract method inlining, `cast this` (Unsafe → Dynamic) is a no-op
                 // because `this` is already the underlying type. Eliminate the spurious cast
