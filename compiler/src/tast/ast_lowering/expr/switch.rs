@@ -598,6 +598,30 @@ impl<'a> AstLowering<'a> {
             .is_some_and(|sy| sy.kind == crate::tast::symbols::SymbolKind::EnumVariant)
     }
 
+    /// The abstract a subject naming an `enum abstract` value has: haxe types
+    /// the value as its abstract, so a bare case name resolves to one of its
+    /// values ahead of a same-named local.
+    pub(crate) fn enum_abstract_value_type(&self, subject: &TypedExpression) -> Option<TypeId> {
+        let field = match &subject.kind {
+            TypedExpressionKind::Variable { symbol_id } => *symbol_id,
+            TypedExpressionKind::StaticFieldAccess { field_symbol, .. } => *field_symbol,
+            _ => return None,
+        };
+        let owner = self.enum_abstracts.iter().copied().find(|abs| {
+            self.class_fields.get(abs).is_some_and(|fields| {
+                fields
+                    .iter()
+                    .any(|(_, symbol, is_static)| *is_static && *symbol == field)
+            })
+        })?;
+        let ty = self.context.symbol_table.get_symbol(owner)?.type_id;
+        matches!(
+            self.context.type_table.borrow().get(ty).map(|t| &t.kind),
+            Some(TypeKind::Abstract { .. })
+        )
+        .then_some(ty)
+    }
+
     /// An array or object pattern, or any pattern that binds with `name =`
     /// or runs an extractor, becomes a wildcard case guarded by its test,
     /// with its bindings declared ahead of the body.

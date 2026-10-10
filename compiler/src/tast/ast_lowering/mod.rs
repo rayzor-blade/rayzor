@@ -1590,6 +1590,9 @@ pub struct AstLowering<'a> {
     null_read_in_closure: std::collections::BTreeSet<SymbolId>,
     /// The closure depth each of them is declared at.
     null_decl_depth: std::collections::BTreeMap<SymbolId, usize>,
+    /// Locals represented as Dynamic where the source types them as a type
+    /// parameter; macro typing reports the source type.
+    macro_source_types: std::collections::BTreeMap<SymbolId, TypeId>,
     /// How many function literals enclose the expression being lowered.
     closure_depth: usize,
     /// `haxe.Rest`'s abstract symbol once looked up (`None` inside = not found).
@@ -1698,6 +1701,8 @@ pub struct AstLowering<'a> {
     /// The clause form (`from Y`) is representation compatibility and needs no
     /// call; the method form is a real conversion the call site must invoke.
     pub(crate) abstract_from_methods: BTreeMap<SymbolId, Vec<(SymbolId, TypeId)>>,
+    /// Every `enum abstract` declared so far; its values type as the abstract.
+    pub(crate) enum_abstracts: std::collections::BTreeSet<SymbolId>,
     /// Each abstract's `@:op(A!)` method: (name, is_static).
     pub(crate) abstract_postfix_not: BTreeMap<SymbolId, (String, bool)>,
     /// Each abstract's `@:op` unary operators: (operator, method name), in

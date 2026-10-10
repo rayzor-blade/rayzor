@@ -1512,6 +1512,29 @@ impl<'a> AstLowering<'a> {
                 location: self.context.create_location_from_span(expression.span),
             });
         }
+        // A class without a constructor of its own takes its parent's parameters.
+        let ctor = ctor.or_else(|| {
+            if kind != crate::tast::symbols::SymbolKind::Class {
+                return None;
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            let mut current = self.parent_class_symbol(symbol);
+            while let Some(class) = current {
+                if !seen.insert(class) {
+                    break;
+                }
+                let own = self
+                    .class_constructor_symbols
+                    .get(&class)
+                    .copied()
+                    .or_else(|| self.context.symbol_table.get_class_constructor(class));
+                if own.is_some() {
+                    return own;
+                }
+                current = self.parent_class_symbol(class);
+            }
+            None
+        });
         let Some(param_types) = ctor.and_then(|c| self.function_param_types_from_symbol(c)) else {
             return Ok(None);
         };

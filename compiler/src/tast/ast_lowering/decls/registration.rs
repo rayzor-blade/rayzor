@@ -887,7 +887,10 @@ impl<'a> AstLowering<'a> {
                 if default.is_none() && constant.is_none() {
                     return None;
                 }
-                default.unwrap_or_else(|| self.context.type_table.borrow().dynamic_type())
+                match default {
+                    Some(ty) => self.optional_param_type(parameter, ty),
+                    None => self.context.type_table.borrow().dynamic_type(),
+                }
             };
             params.push(ty);
         }
@@ -1119,6 +1122,9 @@ impl<'a> AstLowering<'a> {
             .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
 
         self.class_fields.entry(abstract_symbol).or_default();
+        if abstract_decl.is_enum_abstract {
+            self.enum_abstracts.insert(abstract_symbol);
+        }
         for field in &abstract_decl.fields {
             if !abstract_decl.is_enum_abstract
                 && !field.modifiers.contains(&parser::Modifier::Static)

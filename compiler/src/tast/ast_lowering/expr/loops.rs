@@ -850,6 +850,12 @@ impl<'a> AstLowering<'a> {
                 loop_body_scope_id,
                 element_type,
             );
+            let dynamic = self.context.type_table.borrow().dynamic_type();
+            if element_type == dynamic
+                && let Some(param) = self.bare_param_element_type(&iterable_expr)
+            {
+                self.macro_source_types.insert(var_symbol, param);
+            }
 
             let key_sym = if let Some(ref key_name) = key_var {
                 let key_interned = self.context.intern_string(key_name);
@@ -1458,6 +1464,45 @@ impl<'a> AstLowering<'a> {
             }
         }
         dynamic
+    }
+
+    /// The type parameter a loop over `iterable` binds in the source, where
+    /// `infer_element_type_from_iterable` represents it as Dynamic.
+    fn bare_param_element_type(&self, iterable: &TypedExpression) -> Option<TypeId> {
+        if let Some(elem) = self.element_type_from_iterator_call(iterable) {
+            return self.is_bare_type_param(elem).then_some(elem);
+        }
+        let mut ty = iterable.expr_type;
+        for _ in 0..32 {
+            let kind = self
+                .context
+                .type_table
+                .borrow()
+                .get(ty)
+                .map(|t| t.kind.clone());
+            let element = match kind {
+                Some(TypeKind::TypeAlias {
+                    symbol_id,
+                    target_type,
+                    type_args,
+                }) => match self.structural_element_type(ty) {
+                    Some(element) => element,
+                    None => {
+                        ty = self.substitute_alias_args(
+                            target_type,
+                            &self.alias_bindings(symbol_id, &type_args),
+                        );
+                        continue;
+                    }
+                },
+                Some(TypeKind::Class { .. } | TypeKind::Anonymous { .. }) => {
+                    self.structural_element_type(ty)?
+                }
+                _ => return None,
+            };
+            return self.is_bare_type_param(element).then_some(element);
+        }
+        None
     }
 
     fn is_bare_type_param(&self, ty: TypeId) -> bool {

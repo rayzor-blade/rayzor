@@ -2005,7 +2005,10 @@ impl<'a> AstLowering<'a> {
                 // Store the discriminant type for use in pattern matching
                 // This allows resolving enum constructor names like "Some" to "Option.Some"
                 let prev_switch_type = self.context.switch_discriminant_type;
-                self.context.switch_discriminant_type = Some(discriminant.expr_type);
+                self.context.switch_discriminant_type = Some(
+                    self.enum_abstract_value_type(&discriminant)
+                        .unwrap_or(discriminant.expr_type),
+                );
 
                 // Check if this is a switch expression or switch statement
                 // In a switch expression, all cases must have expression values

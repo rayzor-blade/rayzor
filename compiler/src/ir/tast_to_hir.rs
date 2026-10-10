@@ -4425,28 +4425,40 @@ impl<'a> TastToHirContext<'a> {
             .collect()
     }
 
-    /// `if (p == null) p = default;` for each String parameter with a non-null
-    /// default: Haxe applies a default in the callee, so an explicit null or a
-    /// call through a function value still gets it.
+    /// `if (p == null) p = default;` for each String or `Null<scalar>`
+    /// parameter with a non-null default: Haxe applies a default in the
+    /// callee, so an explicit null or a call through a function value still
+    /// gets it. A plain scalar parameter has no null to test.
     fn param_default_guards(&mut self, params: &[TypedParameter]) -> Vec<HirStatement> {
         let mut guards = Vec::new();
         for param in params {
             let Some(default) = &param.default_value else {
                 continue;
             };
-            let is_string = {
+            let (is_string, nullable_scalar, is_float) = {
                 let tt = self.type_table.borrow();
                 let mut ty = param.param_type;
+                let mut nullable = false;
                 for _ in 0..8 {
                     match tt.get(ty).map(|t| &t.kind) {
                         Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
-                        Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                        Some(TypeKind::Optional { inner_type }) => {
+                            nullable = true;
+                            ty = *inner_type;
+                        }
                         _ => break,
                     }
                 }
-                matches!(tt.get(ty).map(|t| &t.kind), Some(TypeKind::String))
+                let kind = tt.get(ty).map(|t| &t.kind);
+                (
+                    matches!(kind, Some(TypeKind::String)),
+                    nullable
+                        && matches!(kind, Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)),
+                    matches!(kind, Some(TypeKind::Float)),
+                )
             };
-            if !is_string || matches!(default.kind, TypedExpressionKind::Null) {
+            if !(is_string || nullable_scalar) || matches!(default.kind, TypedExpressionKind::Null)
+            {
                 continue;
             }
             let location = param.source_location;
@@ -4469,9 +4481,21 @@ impl<'a> TastToHirContext<'a> {
                 self.current_lifetime,
                 location,
             );
+            // `?y:Null<Float> = 6` stores a Float, not an Int box.
+            let rhs = match &default.kind {
+                TypedExpressionKind::Literal {
+                    value: LiteralValue::Int(n),
+                } if is_float => HirExpr::new(
+                    HirExprKind::Literal(HirLiteral::Float(*n as f64)),
+                    self.type_table.borrow().float_type(),
+                    self.current_lifetime,
+                    default.source_location,
+                ),
+                _ => self.lower_expression(default),
+            };
             let assign = HirStatement::Assign {
                 lhs: HirLValue::Variable(param.symbol_id),
-                rhs: self.lower_expression(default),
+                rhs,
                 op: None,
             };
             guards.push(HirStatement::If {

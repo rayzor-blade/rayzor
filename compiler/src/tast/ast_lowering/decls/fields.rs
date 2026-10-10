@@ -892,11 +892,15 @@ impl<'a> AstLowering<'a> {
         })
     }
 
-    /// Haxe types `?x:Int` -- optional, no default -- as `Null<Int>`, and so
-    /// an abstract over a basic type (`?f:EnumFlags<E>`); a parameter with a
-    /// default keeps its basic type, as does a reference.
+    /// Haxe types an optional parameter (`?x:Int`, `?x:Int = 1`) or one
+    /// defaulting to `null` (`x:Int = null`) as `Null<Int>`, and so an
+    /// abstract over a basic type (`?f:EnumFlags<E>`); a reference keeps its type.
     pub(crate) fn optional_param_type(&self, param: &FunctionParam, ty: TypeId) -> TypeId {
-        if !param.optional || param.default_value.is_some() {
+        let null_default = matches!(
+            param.default_value.as_deref().map(|d| &d.kind),
+            Some(ExprKind::Null)
+        );
+        if !param.optional && !null_default {
             return ty;
         }
         let mut tt = self.context.type_table.borrow_mut();
@@ -986,14 +990,14 @@ impl<'a> AstLowering<'a> {
             let ty = self.lower_type(type_annotation)?;
             self.optional_param_type(parameter, ty)
         } else if let Some(ty) = inferred {
-            ty
+            self.optional_param_type(parameter, ty)
         } else if let Some(ty) = parameter
             .default_value
             .as_deref()
             .and_then(|d| self.literal_type(d))
             .or(default_type)
         {
-            ty
+            self.optional_param_type(parameter, ty)
         } else {
             self.context.type_table.borrow().dynamic_type()
         };

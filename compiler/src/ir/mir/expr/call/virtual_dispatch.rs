@@ -70,6 +70,13 @@ impl<'a> HirToMirContext<'a> {
 
             if let Some(slot_index) = vtable_slot {
                 let obj_reg = self.lower_expression(&args[0])?;
+                // A receiver typed by a class-constrained `T` arrives as i64.
+                let obj_reg = if self.builder.get_register_type(obj_reg) == Some(IrType::I64) {
+                    self.builder
+                        .build_bitcast(obj_reg, IrType::Ptr(Box::new(IrType::Void)))?
+                } else {
+                    obj_reg
+                };
                 // The method's own formals: a `Null<scalar>` bound for an erased
                 // `T` hands over the scalar's bits, as at a direct call.
                 let formals: Vec<TypeId> = self

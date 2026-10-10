@@ -1240,7 +1240,7 @@ impl<'a> AstLowering<'a> {
             }
             let key = self.context.intern_string(&param.name);
             *slot = match inferred.get(&key) {
-                Some(ty) => *ty,
+                Some(ty) => self.optional_param_type(param, *ty),
                 None => self.context.type_table.borrow().dynamic_type(),
             };
         }

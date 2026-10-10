@@ -552,6 +552,41 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        // A receiver typed by a type parameter constrained to a user class
+        // (`T:Node<T>`) has that class's methods, inherited ones included; the
+        // call then dispatches on the value's own class like any other.
+        let constraints = match self
+            .context
+            .type_table
+            .borrow()
+            .get(receiver.expr_type)
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::TypeParameter { constraints, .. }) => constraints.clone(),
+            _ => Vec::new(),
+        };
+        let user_class = |this: &Self, class: &SymbolId| {
+            this.context
+                .symbol_table
+                .get_symbol(*class)
+                .is_some_and(|s| {
+                    s.kind == crate::tast::symbols::SymbolKind::Class
+                        && !s.flags.contains(SymbolFlags::EXTERN)
+                })
+        };
+        for constraint in constraints {
+            let mut current = self.resolve_type_to_class_symbol(constraint);
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(class) =
+                current.filter(|class| user_class(self, class) && seen.insert(*class))
+            {
+                if let Some(found) = self.resolve_class_method_symbol(class, method_name) {
+                    return found;
+                }
+                current = self.parent_class_symbol(class);
+            }
+        }
+
         // Fallback: Try to resolve using the receiver expression's type
         // (may differ from the variable symbol's type for extern classes).
         // Route through `resolve_class_method_symbol` so the phantom-class

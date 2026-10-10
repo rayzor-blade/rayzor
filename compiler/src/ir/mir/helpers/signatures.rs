@@ -492,6 +492,28 @@ impl<'a> HirToMirContext<'a> {
                         arg_regs,
                         has_implicit_this,
                     ) {
+                        // A scalar default for a `Null<scalar>` formal travels
+                        // boxed, as a passed argument does.
+                        let optional_formal = self
+                            .function_param_hir_types
+                            .get(&func_id)
+                            .and_then(|types| types.get(i))
+                            .is_some_and(|ty| {
+                                matches!(
+                                    self.type_table
+                                        .get(self.resolve_through_aliases(*ty))
+                                        .map(|t| &t.kind),
+                                    Some(TypeKind::Optional { .. })
+                                )
+                            });
+                        let reg = if optional_formal
+                            && self.optional_inner_is_boxable_primitive(
+                                self.resolve_through_aliases(default_expr.ty),
+                            ) {
+                            self.maybe_materialize_for_call(default_expr, reg, Some(func_id), i)
+                        } else {
+                            reg
+                        };
                         arg_regs.push(reg);
                     }
                 }

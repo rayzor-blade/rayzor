@@ -712,7 +712,14 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         );
 
         match result {
-            Ok(typed) if probe_errors.is_empty() => Ok(self.lowering.safe_chain_type(&typed)),
+            Ok(typed) if probe_errors.is_empty() => {
+                if let crate::tast::TypedExpressionKind::Variable { symbol_id } = &typed.kind
+                    && let Some(&source) = self.lowering.macro_source_types.get(symbol_id)
+                {
+                    return Ok(source);
+                }
+                Ok(self.lowering.safe_chain_type(&typed))
+            }
             Ok(_) => Err(probe_errors.join("\n")),
             Err(e) => {
                 let mut msg = e.to_compilation_error().message;

@@ -607,7 +607,10 @@ impl<'a> AstLowering<'a> {
             TypedExpressionKind::New { class_type, .. } => Ok(*class_type),
             TypedExpressionKind::ArrayLiteral { elements } => {
                 if let Some(first_element) = elements.first() {
-                    let element_type = first_element.expr_type;
+                    let types: Vec<TypeId> = elements.iter().map(|e| e.expr_type).collect();
+                    let element_type = self
+                        .common_function_type(&types)
+                        .unwrap_or(first_element.expr_type);
                     Ok(self
                         .context
                         .type_table
@@ -1759,6 +1762,62 @@ impl<'a> AstLowering<'a> {
             .find(|class| chains.iter().all(|chain| chain.contains(class)))?;
         let ty = self.context.symbol_table.get_symbol(*shared)?.type_id;
         (plain_class(ty) == Some(*shared)).then_some(ty)
+    }
+
+    /// The one function type differing function types of one arity all
+    /// unify to, as haxe types an array of them: each parameter narrows to
+    /// the class every other one's is or extends, the results meet at their
+    /// common class. `None` when they are alike or do not meet.
+    fn common_function_type(&self, types: &[TypeId]) -> Option<TypeId> {
+        let sigs = {
+            let tt = self.context.type_table.borrow();
+            types
+                .iter()
+                .map(|&ty| match tt.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Function {
+                        params,
+                        return_type,
+                        ..
+                    }) => Some((params.clone(), *return_type)),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?
+        };
+        let (first_params, _) = sigs.first()?;
+        if sigs.iter().all(|sig| *sig == sigs[0])
+            || sigs.iter().any(|(p, _)| p.len() != first_params.len())
+        {
+            return None;
+        }
+        // `narrow` is `wide` or a subclass: the class they share is `wide`'s own.
+        let extends = |narrow: TypeId, wide: TypeId| {
+            narrow == wide
+                || self
+                    .common_branch_class(&[narrow, wide])
+                    .is_some_and(|shared| self.common_branch_class(&[wide]) == Some(shared))
+        };
+        let mut params = Vec::with_capacity(first_params.len());
+        for i in 0..first_params.len() {
+            let column: Vec<TypeId> = sigs.iter().map(|(p, _)| p[i]).collect();
+            params.push(
+                column
+                    .iter()
+                    .copied()
+                    .find(|&c| column.iter().all(|&t| extends(c, t)))?,
+            );
+        }
+        let results: Vec<TypeId> = sigs.iter().map(|(_, r)| *r).collect();
+        let result = if results.iter().all(|&r| r == results[0]) {
+            results[0]
+        } else {
+            self.common_branch_class(&results)?
+        };
+        Some(
+            self.context
+                .type_table
+                .borrow_mut()
+                .create_function_type(params, result),
+        )
     }
 
     /// The value a statement used as a block's result carries: an expression

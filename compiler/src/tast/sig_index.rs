@@ -486,17 +486,20 @@ impl StaticSigIndex {
     }
 
     fn param_kind(p: &parser::FunctionParam) -> Option<String> {
+        // `?x:Int`, `?x = 1` and `x:Int = null` are `Null<Int>`: a box slot.
+        let nullable = p.optional
+            || matches!(
+                p.default_value.as_deref().map(|e| &e.kind),
+                Some(parser::ExprKind::Null)
+            );
         let mut t = p.type_hint.as_ref();
         while let Some(ty) = t {
             match ty {
                 parser::Type::Optional { inner, .. } | parser::Type::Parenthesis { inner, .. } => {
                     t = Some(inner)
                 }
-                // `?x:Int` without a default is `Null<Int>`: a box slot.
                 parser::Type::Path { path, .. }
-                    if p.optional
-                        && p.default_value.is_none()
-                        && matches!(path.name.as_str(), "Int" | "Float" | "Bool") =>
+                    if nullable && matches!(path.name.as_str(), "Int" | "Float" | "Bool") =>
                 {
                     return Some("Null".to_string());
                 }
@@ -505,6 +508,11 @@ impl StaticSigIndex {
             }
         }
         let kind = match p.default_value.as_deref().map(|e| &e.kind)? {
+            parser::ExprKind::Int(_) | parser::ExprKind::Float(_) | parser::ExprKind::Bool(_)
+                if nullable =>
+            {
+                "Null"
+            }
             parser::ExprKind::Int(_) => "Int",
             parser::ExprKind::Float(_) => "Float",
             parser::ExprKind::Bool(_) => "Bool",
