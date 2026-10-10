@@ -822,6 +822,21 @@ impl<'a> AstLowering<'a> {
                         expression: Box::new(left_expr),
                         check_type,
                     }
+                } else if matches!(op, BinaryOp::Range) {
+                    // `a...b` outside a `for` head is `new IntIterator(a, b)`.
+                    let iterator = Expr {
+                        kind: ExprKind::New {
+                            type_path: parser::TypePath {
+                                package: vec![],
+                                name: "IntIterator".to_string(),
+                                sub: None,
+                            },
+                            params: Vec::new(),
+                            args: vec![(**left).clone(), (**right).clone()],
+                        },
+                        span: expression.span,
+                    };
+                    return self.lower_expression(&iterator);
                 } else {
                     let left_expr = self.lower_expression(left)?;
                     // For ==/!= and ?? the LHS's static type is the expected
@@ -1592,7 +1607,23 @@ impl<'a> AstLowering<'a> {
                     });
                 }
 
-                let class_name_str = match final_class_name.or(aliased_class_name) {
+                let generic = self.generic_construction(
+                    final_class_type,
+                    type_path,
+                    params,
+                    &arg_exprs,
+                    expression.span,
+                )?;
+                let (final_class_type, final_type_args) = match generic {
+                    Some(instance) => (instance, Vec::new()),
+                    None => (final_class_type, final_type_args),
+                };
+                let generic_class_name =
+                    self.generic_constructed_name(type_path, final_class_type, generic.is_some());
+                let class_name_str = match generic_class_name
+                    .or(final_class_name)
+                    .or(aliased_class_name)
+                {
                     Some(name) => name,
                     None if type_path.package.is_empty() => type_path.name.clone(),
                     None => format!("{}.{}", type_path.package.join("."), type_path.name),

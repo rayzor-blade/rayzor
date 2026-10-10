@@ -896,6 +896,35 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// A comprehension's `for` head: a range stays the range the comprehension
+    /// counts over, not the `IntIterator` a range value is.
+    fn lower_iteration_head(&mut self, iter: &Expr) -> LoweringResult<TypedExpression> {
+        let ExprKind::Binary {
+            op: BinaryOp::Range,
+            left,
+            right,
+        } = &iter.kind
+        else {
+            return self.lower_expression(iter);
+        };
+        let left = self.lower_expression(left)?;
+        let right = self.lower_expression(right)?;
+        let kind = TypedExpressionKind::BinaryOp {
+            left: Box::new(left),
+            operator: BinaryOperator::Range,
+            right: Box::new(right),
+        };
+        let expr_type = self.infer_expression_type(&kind)?;
+        Ok(TypedExpression {
+            expr_type,
+            usage: self.determine_variable_usage(&kind),
+            lifetime_id: self.assign_lifetime(&kind, &expr_type),
+            metadata: self.analyze_expression_metadata(&kind),
+            source_location: self.context.span_to_location(&iter.span),
+            kind,
+        })
+    }
+
     /// Lower array comprehension: [for (i in 0...10) i * 2]
     pub(crate) fn lower_array_comprehension(
         &mut self,
@@ -917,7 +946,7 @@ impl<'a> AstLowering<'a> {
 
         for for_part in for_parts {
             // Lower the iterator expression first
-            let mut typed_iterator = self.lower_expression(&for_part.iter)?;
+            let mut typed_iterator = self.lower_iteration_head(&for_part.iter)?;
             if let Some(call) =
                 self.iterable_iterator_call(typed_iterator.expr_type, &for_part.iter)
             {
@@ -1015,7 +1044,7 @@ impl<'a> AstLowering<'a> {
 
         for for_part in for_parts {
             // Lower the iterator expression first
-            let mut typed_iterator = self.lower_expression(&for_part.iter)?;
+            let mut typed_iterator = self.lower_iteration_head(&for_part.iter)?;
             if let Some(call) =
                 self.iterable_iterator_call(typed_iterator.expr_type, &for_part.iter)
             {

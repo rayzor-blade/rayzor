@@ -30,6 +30,7 @@ pub(super) fn is_template(class: &ClassDecl) -> bool {
 impl AstLowering<'_> {
     pub(crate) fn seed_const_generics<'f>(&mut self, files: impl Iterator<Item = &'f HaxeFile>) {
         for file in files {
+            self.seed_generic_templates(file);
             let pack = file
                 .package
                 .as_ref()
@@ -169,6 +170,8 @@ impl AstLowering<'_> {
         let mut substitution = Substitution {
             values: bindings,
             shadowed: BTreeSet::new(),
+            types: BTreeMap::new(),
+            type_shadowed: BTreeSet::new(),
         };
         substitution.class(&mut class);
         let qualified = template
@@ -227,12 +230,24 @@ fn normalized_constant(expr: &Expr) -> Option<Expr> {
     })
 }
 
-struct Substitution {
+pub(super) struct Substitution {
     values: BTreeMap<String, Expr>,
     shadowed: BTreeSet<String>,
+    /// Type parameter names renamed to the placeholders their arguments bind.
+    types: BTreeMap<String, String>,
+    type_shadowed: BTreeSet<String>,
 }
 
 impl Substitution {
+    pub(super) fn of_types(types: BTreeMap<String, String>) -> Self {
+        Self {
+            values: BTreeMap::new(),
+            shadowed: BTreeSet::new(),
+            types,
+            type_shadowed: BTreeSet::new(),
+        }
+    }
+
     fn ty(&mut self, ty: &mut Type) {
         if let Type::Path { path, params, span } = ty
             && path.package.is_empty()
@@ -247,6 +262,16 @@ impl Substitution {
                 value: Box::new(value.clone()),
                 span: *span,
             };
+            return;
+        }
+        if let Type::Path { path, params, .. } = ty
+            && path.package.is_empty()
+            && path.sub.is_none()
+            && params.is_empty()
+            && !self.type_shadowed.contains(&path.name)
+            && let Some(name) = self.types.get(&path.name)
+        {
+            path.name = name.clone();
             return;
         }
         match ty {
@@ -268,7 +293,7 @@ impl Substitution {
         }
     }
 
-    fn class(&mut self, class: &mut ClassDecl) {
+    pub(super) fn class(&mut self, class: &mut ClassDecl) {
         if let Some(ty) = &mut class.extends {
             self.ty(ty);
         }
@@ -299,10 +324,16 @@ impl Substitution {
         }
     }
 
-    fn function(&mut self, function: &mut Function) {
+    pub(super) fn function(&mut self, function: &mut Function) {
         let shadowed = self.shadowed.clone();
+        let type_shadowed = self.type_shadowed.clone();
         self.shadowed
             .extend(function.type_params.iter().map(|p| p.name.clone()));
+        self.type_shadowed
+            .extend(function.type_params.iter().map(|p| p.name.clone()));
+        for param in &mut function.type_params {
+            param.constraints.iter_mut().for_each(|ty| self.ty(ty));
+        }
         for param in &mut function.params {
             if let Some(ty) = &mut param.type_hint {
                 self.ty(ty);
@@ -319,13 +350,18 @@ impl Substitution {
             self.expr(body);
         }
         self.shadowed = shadowed;
+        self.type_shadowed = type_shadowed;
     }
 
     fn pattern(&mut self, pattern: &mut Pattern) {
         match pattern {
             Pattern::Const(expr) => self.expr(expr),
-            Pattern::Var(name) | Pattern::Type { var: name, .. } => {
+            Pattern::Var(name) => {
                 self.shadowed.insert(name.clone());
+            }
+            Pattern::Type { var, type_hint } => {
+                self.ty(type_hint);
+                self.shadowed.insert(var.clone());
             }
             Pattern::Constructor { params, .. } | Pattern::Array(params) | Pattern::Or(params) => {
                 params.iter_mut().for_each(|p| self.pattern(p))
@@ -392,7 +428,18 @@ impl Substitution {
                 }
                 self.expr(expr);
             }
-            ExprKind::New { params, args, .. } => {
+            ExprKind::New {
+                type_path,
+                params,
+                args,
+            } => {
+                if type_path.package.is_empty()
+                    && type_path.sub.is_none()
+                    && !self.type_shadowed.contains(&type_path.name)
+                    && let Some(name) = self.types.get(&type_path.name)
+                {
+                    type_path.name = name.clone();
+                }
                 params.iter_mut().for_each(|ty| self.ty(ty));
                 args.iter_mut().for_each(|expr| self.expr(expr));
             }

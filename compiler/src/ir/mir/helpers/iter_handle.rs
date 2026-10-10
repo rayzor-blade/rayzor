@@ -97,6 +97,11 @@ impl<'a> HirToMirContext<'a> {
                 return None;
             }
             let ty = type_table.get(tid)?;
+            // A type parameter constrained to a protocol holds that protocol's
+            // handles, built where a value crosses into it.
+            if let TypeKind::TypeParameter { constraints, .. } = &ty.kind {
+                return constraints.iter().find_map(|c| self.iter_protocol_of(*c));
+            }
             let sym = match &ty.kind {
                 TypeKind::Class { symbol_id, .. }
                 | TypeKind::Interface { symbol_id, .. }

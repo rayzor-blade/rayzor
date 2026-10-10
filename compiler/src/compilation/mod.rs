@@ -902,7 +902,13 @@ fn collect_qualified_type_refs_from_ast(ast: &parser::HaxeFile, out: &mut Vec<St
                 }
             }
             ExprKind::Return(Some(e)) => collect_from_expr(e, seen, out),
-            ExprKind::Binary { left, right, .. } => {
+            ExprKind::Binary { left, op, right } => {
+                // `a...b` used as a value lowers to `new IntIterator(a, b)`.
+                if matches!(op, parser::haxe_ast::BinaryOp::Range)
+                    && seen.insert("IntIterator".to_string())
+                {
+                    out.push("IntIterator".to_string());
+                }
                 collect_from_expr(left, seen, out);
                 collect_from_expr(right, seen, out);
             }

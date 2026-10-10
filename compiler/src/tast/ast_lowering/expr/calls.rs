@@ -1869,6 +1869,16 @@ impl<'a> AstLowering<'a> {
             };
             return self.lower_expression(&call);
         }
+        if let Some(callee) = self.generic_method_callee(expr, args)? {
+            let call = Expr {
+                kind: ExprKind::Call {
+                    expr: Box::new(callee),
+                    args: args.to_vec(),
+                },
+                span: expression.span,
+            };
+            return self.lower_expression(&call);
+        }
         if let Some(forwarded) = self.forwarded_static_expression(expr) {
             let call = Expr {
                 kind: ExprKind::Call {

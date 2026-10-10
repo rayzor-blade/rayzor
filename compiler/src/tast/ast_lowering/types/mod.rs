@@ -77,6 +77,11 @@ impl<'a> AstLowering<'a> {
                 self.lower_type(&bare)
             }
             Type::Path { path, params, span } => {
+                if params.is_empty()
+                    && let Some(bound) = self.generic_placeholder_type(path)
+                {
+                    return Ok(bound);
+                }
                 let name = if path.package.is_empty() {
                     path.name.clone()
                 } else {
@@ -249,6 +254,9 @@ impl<'a> AstLowering<'a> {
                     eprintln!("[sym] type-path {name} -> {symbol_info:?}");
                 }
                 if let Some((symbol_id, symbol_kind)) = symbol_info {
+                    if let Some(instance) = self.generic_class_annotation(symbol_id, params)? {
+                        return Ok(instance);
+                    }
                     if let Some(built) = self.generic_build_type(symbol_id, params, None, *span)? {
                         let Some(built) = built else {
                             use crate::macro_system::context_api::MacroTyper;
@@ -457,6 +465,11 @@ impl<'a> AstLowering<'a> {
                                 self.context.symbol_table,
                                 symbol_id,
                             );
+                            if let Some(instance) =
+                                self.generic_alias_target(symbol_id, target_type, &type_arg_ids)?
+                            {
+                                return Ok(instance);
+                            }
                             Ok(self.context.type_table.borrow_mut().create_type(
                                 crate::tast::core::TypeKind::TypeAlias {
                                     symbol_id,
@@ -711,6 +724,9 @@ impl<'a> AstLowering<'a> {
         &mut self,
         type_path: &parser::TypePath,
     ) -> LoweringResult<TypeId> {
+        if let Some(bound) = self.generic_placeholder_type(type_path) {
+            return Ok(bound);
+        }
         let name_interned = self.context.string_interner.intern(&type_path.name);
         // A type the current module declares comes before any import.
         if type_path.package.is_empty()

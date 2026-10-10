@@ -208,6 +208,7 @@ impl<'a> AstLowering<'a> {
                 }
             }
         }
+        self.attach_generic_methods(&mut typed_file.classes);
         // Resolve any deferred type references (second pass)
         if let Err(e) = self.resolve_deferred_types() {
             self.collected_errors.push(e);

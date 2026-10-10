@@ -217,7 +217,23 @@ impl AstLowering<'_> {
         declaration: &parser::TypeDeclaration,
         pack: &[String],
     ) -> super::LoweringResult<()> {
-        // A generated declaration belongs to its package, outside the calling function.
+        let result = self.in_generated_context(pack, |this| {
+            this.pre_register_declaration(declaration)?;
+            if let parser::TypeDeclaration::Class(class) = declaration {
+                this.pre_register_class_fields(class)?;
+            }
+            this.lower_declaration(declaration)
+        });
+        self.generated_declarations.push(result?);
+        Ok(())
+    }
+
+    /// Run `lower` as a declaration of `pack`, outside the calling function.
+    pub(crate) fn in_generated_context<R>(
+        &mut self,
+        pack: &[String],
+        lower: impl FnOnce(&mut Self) -> super::LoweringResult<R>,
+    ) -> super::LoweringResult<R> {
         let scope = self.context.current_scope;
         let package = self.context.current_package;
         let classes = std::mem::take(&mut self.context.class_context_stack);
@@ -237,13 +253,7 @@ impl AstLowering<'_> {
         self.in_static_method = false;
         self.lowering_callee = false;
         self.closure_depth = 0;
-        let result = (|| {
-            self.pre_register_declaration(declaration)?;
-            if let parser::TypeDeclaration::Class(class) = declaration {
-                self.pre_register_class_fields(class)?;
-            }
-            self.lower_declaration(declaration)
-        })();
+        let result = lower(self);
         self.context.current_scope = scope;
         self.context.current_package = package;
         self.context.class_context_stack = classes;
@@ -257,8 +267,7 @@ impl AstLowering<'_> {
         self.expected_lambda_params_stack = lambda_params;
         self.expected_arg_type_stack = arg_types;
         self.map_first_uses = map_uses;
-        self.generated_declarations.push(result?);
-        Ok(())
+        result
     }
 
     /// Resolve compile-time members against the typed receiver before ordinary arguments lower.

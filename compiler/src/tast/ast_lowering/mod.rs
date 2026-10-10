@@ -1687,6 +1687,18 @@ pub struct AstLowering<'a> {
     const_generic_templates: BTreeMap<String, const_generics::Template>,
     const_generic_instances: BTreeMap<(String, Vec<String>), parser::Type>,
     const_generic_origins: BTreeMap<String, String>,
+    generic_class_templates: BTreeMap<String, generic_instances::GenericClass>,
+    /// Specialisations by template and argument names; None where the copy
+    /// did not lower and uses stay on the template.
+    generic_class_instances: BTreeMap<(String, Vec<String>), Option<SymbolId>>,
+    generic_class_origins: BTreeMap<SymbolId, String>,
+    generic_method_templates: BTreeMap<(String, String), generic_instances::GenericMethod>,
+    generic_method_instances: BTreeMap<(SymbolId, String), bool>,
+    /// Lowered method copies, added to their classes once the file is lowered.
+    generic_method_functions: Vec<(SymbolId, TypedFunction)>,
+    generic_overridden_methods: std::collections::BTreeSet<String>,
+    /// Type names a copy's type parameters were renamed to, and what they bind.
+    generic_placeholders: BTreeMap<String, TypeId>,
     generated_declarations: Vec<TypedDeclaration>,
     generated_type_names: std::collections::BTreeSet<String>,
     macro_probe_depth: usize,
@@ -1766,6 +1778,7 @@ mod decls;
 mod dynamic_methods;
 mod expr;
 mod fn_variance;
+mod generic_instances;
 mod imports;
 mod infer;
 mod interface_stubs;
