@@ -1107,6 +1107,18 @@ register_symbol!(
     crate::type_system::haxe_std_parse_int_box
 );
 register_symbol!(
+    "haxe_null_int_to_dynamic",
+    crate::type_system::haxe_null_int_to_dynamic
+);
+register_symbol!(
+    "haxe_null_int_from_dynamic",
+    crate::type_system::haxe_null_int_from_dynamic
+);
+register_symbol!(
+    "haxe_null_int_to_string",
+    crate::haxe_sys::haxe_null_int_to_string
+);
+register_symbol!(
     "haxe_std_parse_float",
     crate::type_system::haxe_std_parse_float
 );

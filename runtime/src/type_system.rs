@@ -2969,6 +2969,33 @@ pub extern "C" fn haxe_dynamic_is_null(ptr: *mut u8) -> bool {
     }
 }
 
+/// An unboxed `Null<Int>`: the Int sign-extended to 64 bits, and null this
+/// value, which lies outside the i32 range and truncates to 0.
+pub const NULL_INT: i64 = 1 << 32;
+
+/// A `Null<Int>` bound for a Dynamic slot: null for null, else an Int box.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_null_int_to_dynamic(value: i64) -> *mut u8 {
+    if value == NULL_INT {
+        return std::ptr::null_mut();
+    }
+    haxe_box_int_ptr(value as i32 as i64)
+}
+
+/// A Dynamic read as an unboxed `Null<Int>`: null or a null box is
+/// `NULL_INT`, a box gives its number as an Int, and a raw scalar in the
+/// pointer slot keeps its low 32 bits.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_null_int_from_dynamic(ptr: *mut u8) -> i64 {
+    if haxe_dynamic_is_null(ptr) {
+        return NULL_INT;
+    }
+    match dynamic_value_if_boxed(ptr) {
+        Some(d) => haxe_unbox_int(d) as i32 as i64,
+        None => ptr as usize as i32 as i64,
+    }
+}
+
 /// A Dynamic read as a condition: null and a false or zero box are false,
 /// any other box or raw non-zero value is true.
 #[unsafe(no_mangle)]
@@ -4935,5 +4962,42 @@ mod channel_unbox_tests {
         // Real class id (>= 6) — not a numeric prim tag — must round-trip the ptr.
         let boxed = haxe_box_reference_ptr(obj_ptr, 1000);
         assert_eq!(haxe_channel_unbox_erased(boxed), obj_ptr as i64);
+    }
+}
+
+#[cfg(test)]
+mod null_int_tests {
+    use super::*;
+
+    #[test]
+    fn null_is_outside_int_and_reads_as_zero() {
+        assert!(i32::try_from(NULL_INT).is_err());
+        assert_eq!(NULL_INT as i32, 0);
+    }
+
+    #[test]
+    fn null_round_trips_through_dynamic() {
+        assert!(haxe_null_int_to_dynamic(NULL_INT).is_null());
+        assert_eq!(haxe_null_int_from_dynamic(std::ptr::null_mut()), NULL_INT);
+        let null_box = Box::into_raw(Box::new(haxe_box_null())) as *mut u8;
+        assert_eq!(haxe_null_int_from_dynamic(null_box), NULL_INT);
+    }
+
+    // Zero is a value, not null: the distinction the unboxed form exists for.
+    #[test]
+    fn values_round_trip_through_dynamic() {
+        for v in [0i64, 1, -1, i32::MAX as i64, i32::MIN as i64] {
+            let boxed = haxe_null_int_to_dynamic(v);
+            assert!(!boxed.is_null());
+            assert_eq!(haxe_unbox_int_ptr(boxed), v);
+            assert_eq!(haxe_null_int_from_dynamic(boxed), v);
+        }
+    }
+
+    #[test]
+    fn foreign_boxes_and_raw_scalars_read_as_int() {
+        assert_eq!(haxe_null_int_from_dynamic(haxe_box_float_ptr(2.5)), 2);
+        assert_eq!(haxe_null_int_from_dynamic(haxe_box_bool_ptr(true)), 1);
+        assert_eq!(haxe_null_int_from_dynamic(7usize as *mut u8), 7);
     }
 }

@@ -560,6 +560,18 @@ mod tests {
         let val = 0x1_0000_0001_i64;
         assert_eq!(super::format_array_slot(val), val.to_string());
     }
+
+    #[test]
+    fn null_int_to_string_names_null() {
+        let text = |value: i64| {
+            let s = unsafe { &*super::haxe_null_int_to_string(value) };
+            let bytes = unsafe { std::slice::from_raw_parts(s.ptr, s.len) };
+            String::from_utf8(bytes.to_vec()).unwrap()
+        };
+        assert_eq!(text(crate::type_system::NULL_INT), "null");
+        assert_eq!(text(0), "0");
+        assert_eq!(text(-5), "-5");
+    }
 }
 
 // ============================================================================
@@ -671,6 +683,15 @@ pub extern "C" fn haxe_string_from_null() -> *mut HaxeString {
         len: s.len(),
         cap: 0, // static string
     }))
+}
+
+/// `Std.string` of an unboxed `Null<Int>`.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_null_int_to_string(value: i64) -> *mut HaxeString {
+    if value == crate::type_system::NULL_INT {
+        return haxe_string_from_null();
+    }
+    haxe_string_from_int(value as i32 as i64)
 }
 
 /// Create a string literal from embedded bytes
