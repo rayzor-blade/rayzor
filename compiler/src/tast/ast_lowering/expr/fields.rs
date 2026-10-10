@@ -1129,6 +1129,7 @@ impl<'a> AstLowering<'a> {
                 name: recv,
                 type_hint: None,
                 expr: Some(Box::new(receiver.clone())),
+                attrs: Default::default(),
             })),
             BlockElement::Expr(literal),
         ]));
@@ -1441,6 +1442,7 @@ impl<'a> AstLowering<'a> {
                     name: recv,
                     type_hint: None,
                     expr: Some(Box::new(receiver.clone())),
+                    attrs: Default::default(),
                 })),
                 BlockElement::Expr(literal),
             ])),

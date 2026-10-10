@@ -1910,6 +1910,7 @@ impl<'a> AstLowering<'a> {
                                     name: "__dyn_callee".to_string(),
                                     type_hint: None,
                                     expr: Some(Box::new(read)),
+                                    attrs: Default::default(),
                                 })),
                                 parser::BlockElement::Expr(at(ExprKind::Call {
                                     expr: Box::new(at(ExprKind::Ident("__dyn_callee".to_string()))),

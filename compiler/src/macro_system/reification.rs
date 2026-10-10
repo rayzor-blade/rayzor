@@ -263,6 +263,7 @@ impl ReificationEngine {
                 name,
                 type_hint,
                 expr: init,
+                attrs,
             } => {
                 let new_init = init
                     .as_ref()
@@ -276,6 +277,7 @@ impl ReificationEngine {
                             .map(|ty| Self::process_type(ty, env))
                             .transpose()?,
                         expr: new_init.map(Box::new),
+                        attrs: attrs.clone(),
                     },
                     span: expr.span,
                 })
@@ -330,6 +332,7 @@ impl ReificationEngine {
                 name,
                 type_hint,
                 expr: init,
+                attrs,
             } => Ok(Expr {
                 kind: ExprKind::Final {
                     name: Self::process_name(name, env, expr.span)?,
@@ -341,6 +344,7 @@ impl ReificationEngine {
                         .as_ref()
                         .map(|e| Self::process_expr(e, env).map(Box::new))
                         .transpose()?,
+                    attrs: attrs.clone(),
                 },
                 span: expr.span,
             }),
@@ -429,6 +433,7 @@ impl ReificationEngine {
                             name: f.name.clone(),
                             expr: Self::process_expr(&f.expr, env)?,
                             span: f.span,
+                            quoted: f.quoted,
                         })
                     })
                     .collect::<Result<Vec<_>, MacroError>>()?;

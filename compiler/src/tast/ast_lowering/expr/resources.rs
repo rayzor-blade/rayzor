@@ -14,6 +14,7 @@ impl<'a> AstLowering<'a> {
             name: name.to_string(),
             expr,
             span,
+            quoted: false,
         };
         let entries = self
             .resources

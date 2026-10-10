@@ -928,6 +928,7 @@ fn take_static_locals(
                         name,
                         type_hint,
                         expr,
+                        ..
                     } => (
                         name.clone(),
                         ClassFieldKind::Var {
@@ -940,6 +941,7 @@ fn take_static_locals(
                         name,
                         type_hint,
                         expr,
+                        ..
                     } => (
                         name.clone(),
                         ClassFieldKind::Final {

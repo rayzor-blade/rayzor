@@ -287,12 +287,14 @@ pub fn var_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
             name,
             type_hint,
             expr: expr.map(Box::new),
+            attrs: VarAttrs::default(),
         }
     } else {
         ExprKind::Var {
             name,
             type_hint,
             expr: expr.map(Box::new),
+            attrs: VarAttrs::default(),
         }
     };
 

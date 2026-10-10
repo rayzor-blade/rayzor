@@ -17,6 +17,37 @@ fn strip_numeric_noise(text: &str) -> String {
     body.replace('_', "")
 }
 
+/// A function-static local, marked for the type body to hoist (decls.rs).
+fn static_local(local: Expr) -> Expr {
+    let span = local.span;
+    Expr {
+        kind: ExprKind::Meta {
+            meta: Metadata {
+                name: "staticLocal".to_string(),
+                params: Vec::new(),
+                span,
+                compile_time: true,
+            },
+            expr: Box::new(local),
+        },
+        span,
+    }
+}
+
+/// `(is_final, is_static)` when `expr` is a local declaration, seen through
+/// the metadata written before it.
+fn declaration_shape(expr: &Expr) -> Option<(bool, bool)> {
+    match &expr.kind {
+        ExprKind::Var { .. } => Some((false, false)),
+        ExprKind::Final { .. } => Some((true, false)),
+        ExprKind::Meta { meta, expr } => {
+            let (is_final, is_static) = declaration_shape(expr)?;
+            Some((is_final, is_static || meta.name == "staticLocal"))
+        }
+        _ => None,
+    }
+}
+
 fn map_entry(expression: &Expr) -> Option<(Expr, Expr)> {
     match &expression.kind {
         ExprKind::Binary {
@@ -704,59 +735,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     span: Span::new(start, end),
                 })
             }
-            TokenKind::KwVar => {
+            TokenKind::KwVar | TokenKind::KwFinal => {
+                let is_final = token.kind == TokenKind::KwFinal;
                 self.stream.advance();
-                let name = self.stream.current_text().to_string();
-                self.stream.advance();
-                let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
-                    Some(self.parse_type()?)
-                } else {
-                    None
-                };
-                let expr = if self.stream.eat(TokenKind::Assign).is_some() {
-                    Some(Box::new(self.parse_expression()?))
-                } else {
-                    None
-                };
-                let end = expr
-                    .as_ref()
-                    .map(|e| e.span.end)
-                    .unwrap_or(self.stream.current_offset());
-                Ok(Expr {
-                    kind: ExprKind::Var {
-                        name,
-                        type_hint,
-                        expr,
-                    },
-                    span: Span::new(start, end),
-                })
-            }
-            TokenKind::KwFinal => {
-                self.stream.advance();
-                let name = self.stream.current_text().to_string();
-                self.stream.advance();
-                let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
-                    Some(self.parse_type()?)
-                } else {
-                    None
-                };
-                let expr = if self.stream.eat(TokenKind::Assign).is_some() {
-                    Some(Box::new(self.parse_expression()?))
-                } else {
-                    None
-                };
-                let end = expr
-                    .as_ref()
-                    .map(|e| e.span.end)
-                    .unwrap_or(self.stream.current_offset());
-                Ok(Expr {
-                    kind: ExprKind::Final {
-                        name,
-                        type_hint,
-                        expr,
-                    },
-                    span: Span::new(start, end),
-                })
+                self.parse_var_decl(start, is_final, false)
             }
             // `static var` / `static final` / `static function` in statement
             // position declares a function-static local in Haxe. The `static`
@@ -1105,7 +1087,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     && !self.stream.at(TokenKind::RBrace)
                     && !self.stream.is_eof()
                 {
-                    body_exprs.push(self.parse_expression()?);
+                    self.parse_statement_into(&mut body_exprs)?;
                     self.stream.eat(TokenKind::Semicolon);
                 }
                 // Wrap body in block if multiple statements
@@ -1130,7 +1112,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 self.stream.expect(TokenKind::Colon)?;
                 let mut body_exprs = Vec::new();
                 while !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof() {
-                    body_exprs.push(self.parse_expression()?);
+                    self.parse_statement_into(&mut body_exprs)?;
                     self.stream.eat(TokenKind::Semicolon);
                 }
                 let def_body = if body_exprs.len() == 1 {
@@ -1431,6 +1413,76 @@ impl<'a, 'b> RdParser<'a, 'b> {
         Ok(params)
     }
 
+    /// One declaration of a `var`/`final` statement, after the keyword or
+    /// the separating comma: `@:m name:T = e`.
+    fn parse_var_decl(
+        &mut self,
+        start: usize,
+        is_final: bool,
+        grouped: bool,
+    ) -> Result<Expr, ParseError> {
+        let meta = self.parse_metadata_list();
+        let name = self.stream.current_text().to_string();
+        self.stream.advance();
+        let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        let expr = if self.stream.eat(TokenKind::Assign).is_some() {
+            Some(Box::new(self.parse_expression()?))
+        } else {
+            None
+        };
+        let end = expr
+            .as_ref()
+            .map(|e| e.span.end)
+            .unwrap_or(self.stream.current_offset());
+        let attrs = VarAttrs { meta, grouped };
+        Ok(Expr {
+            kind: if is_final {
+                ExprKind::Final {
+                    name,
+                    type_hint,
+                    expr,
+                    attrs,
+                }
+            } else {
+                ExprKind::Var {
+                    name,
+                    type_hint,
+                    expr,
+                    attrs,
+                }
+            },
+            span: Span::new(start, end),
+        })
+    }
+
+    /// Parse one statement of a block or case body into `out`. A declaration
+    /// naming several locals (`var a = 1, b;`) adds one element per name, the
+    /// later ones marked `grouped`.
+    fn parse_statement_into(&mut self, out: &mut Vec<Expr>) -> Result<(), ParseError> {
+        let expr = self.parse_expression()?;
+        let shape = declaration_shape(&expr);
+        out.push(expr);
+        let Some((is_final, is_static)) = shape else {
+            return Ok(());
+        };
+        while self.stream.at(TokenKind::Comma)
+            && matches!(
+                self.stream.peek_at(1).kind,
+                TokenKind::Ident | TokenKind::At | TokenKind::AtColon
+            )
+        {
+            self.stream.advance(); // eat comma
+            let decl_start = self.stream.current_offset();
+            let decl = self.parse_var_decl(decl_start, is_final, true)?;
+            out.push(if is_static { static_local(decl) } else { decl });
+        }
+        Ok(())
+    }
+
     /// Parse the declaration that follows a function-local `static`.
     fn parse_static_local(&mut self, start: usize) -> Result<Expr, ParseError> {
         self.stream.advance(); // consume `static`
@@ -1438,51 +1490,8 @@ impl<'a, 'b> RdParser<'a, 'b> {
             TokenKind::KwVar | TokenKind::KwFinal => {
                 let is_final = matches!(self.stream.peek().kind, TokenKind::KwFinal);
                 self.stream.advance();
-                let name = self.stream.current_text().to_string();
-                self.stream.advance();
-                let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
-                    Some(self.parse_type()?)
-                } else {
-                    None
-                };
-                let expr = if self.stream.eat(TokenKind::Assign).is_some() {
-                    Some(Box::new(self.parse_expression()?))
-                } else {
-                    None
-                };
-                let end = expr
-                    .as_ref()
-                    .map(|e| e.span.end)
-                    .unwrap_or(self.stream.current_offset());
-                let local = Expr {
-                    kind: if is_final {
-                        ExprKind::Final {
-                            name,
-                            type_hint,
-                            expr,
-                        }
-                    } else {
-                        ExprKind::Var {
-                            name,
-                            type_hint,
-                            expr,
-                        }
-                    },
-                    span: Span::new(start, end),
-                };
-                // Marked for the type body to hoist (decls.rs).
-                Ok(Expr {
-                    kind: ExprKind::Meta {
-                        meta: Metadata {
-                            name: "staticLocal".to_string(),
-                            params: Vec::new(),
-                            span: Span::new(start, end),
-                            compile_time: true,
-                        },
-                        expr: Box::new(local),
-                    },
-                    span: Span::new(start, end),
-                })
+                let local = self.parse_var_decl(start, is_final, false)?;
+                Ok(static_local(local))
             }
             TokenKind::KwFunction => self.parse_function_literal(),
             _ => Err(ParseError::new(
@@ -2021,6 +2030,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let mut fields = Vec::new();
             while !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof() {
                 let field_name = self.stream.current_text().to_string();
+                let quoted = self.stream.at(TokenKind::StringLit);
                 // A string key is its unescaped contents.
                 let field_name = if field_name.starts_with('"') || field_name.starts_with('\'') {
                     unescape_string(&field_name[1..field_name.len() - 1])
@@ -2034,6 +2044,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     name: field_name,
                     expr: value,
                     span: self.stream.span_from(start),
+                    quoted,
                 });
                 if !self.stream.at(TokenKind::RBrace) {
                     self.stream.eat(TokenKind::Comma);
@@ -2054,45 +2065,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.expect(TokenKind::LBrace)?;
         let mut elements = Vec::new();
         while !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof() {
-            let expr = self.parse_expression()?;
-            let is_var = matches!(expr.kind, ExprKind::Var { .. });
-            elements.push(BlockElement::Expr(expr));
-            // Multi-var splice: `var a = 1, b = 2;` → two sibling Var
-            // block elements. Only triggers when the just-parsed expression
-            // is itself a Var; otherwise comma is left alone (it belongs to
-            // a containing list — argument list, array literal, etc).
-            if is_var {
-                while self.stream.at(TokenKind::Comma)
-                    && self.stream.peek_at(1).kind == TokenKind::Ident
-                {
-                    self.stream.advance(); // eat comma
-                    let sib_start = self.stream.current_offset();
-                    let name = self.stream.current_text().to_string();
-                    self.stream.advance();
-                    let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
-                        Some(self.parse_type()?)
-                    } else {
-                        None
-                    };
-                    let init = if self.stream.eat(TokenKind::Assign).is_some() {
-                        Some(Box::new(self.parse_expression()?))
-                    } else {
-                        None
-                    };
-                    let end_off = init
-                        .as_ref()
-                        .map(|e| e.span.end)
-                        .unwrap_or(self.stream.current_offset());
-                    elements.push(BlockElement::Expr(Expr {
-                        kind: ExprKind::Var {
-                            name,
-                            type_hint,
-                            expr: init,
-                        },
-                        span: Span::new(sib_start, end_off),
-                    }));
-                }
-            }
+            let mut statement = Vec::new();
+            self.parse_statement_into(&mut statement)?;
+            elements.extend(statement.into_iter().map(BlockElement::Expr));
             self.stream.eat(TokenKind::Semicolon);
         }
         let end = self.stream.expect(TokenKind::RBrace)?;

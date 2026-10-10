@@ -209,10 +209,12 @@ impl<'a> AstLowering<'a> {
                 name,
                 type_hint,
                 expr: init,
+                attrs,
             } => K::Var {
                 name: name.clone(),
                 type_hint: type_hint.clone(),
                 expr: sub_opt(init),
+                attrs: attrs.clone(),
             },
             K::Return(value) => K::Return(sub_opt(value)),
             K::Throw(value) => K::Throw(sub(value)),

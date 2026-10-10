@@ -828,6 +828,7 @@ impl MacroExpander {
                 name,
                 type_hint,
                 expr: init,
+                attrs,
             } => {
                 if let Some(init_expr) = init {
                     let (expanded, c) = self.walk_expr(*init_expr)?;
@@ -836,12 +837,14 @@ impl MacroExpander {
                         name,
                         type_hint,
                         expr: Some(Box::new(expanded)),
+                        attrs,
                     }
                 } else {
                     ExprKind::Var {
                         name,
                         type_hint,
                         expr: None,
+                        attrs,
                     }
                 }
             }
@@ -850,6 +853,7 @@ impl MacroExpander {
                 name,
                 type_hint,
                 expr: init,
+                attrs,
             } => {
                 if let Some(init_expr) = init {
                     let (expanded, c) = self.walk_expr(*init_expr)?;
@@ -858,12 +862,14 @@ impl MacroExpander {
                         name,
                         type_hint,
                         expr: Some(Box::new(expanded)),
+                        attrs,
                     }
                 } else {
                     ExprKind::Final {
                         name,
                         type_hint,
                         expr: None,
+                        attrs,
                     }
                 }
             }
@@ -898,6 +904,7 @@ impl MacroExpander {
                         name: field.name,
                         expr: expanded,
                         span: field.span,
+                        quoted: field.quoted,
                     });
                 }
                 ExprKind::Object(new_fields)

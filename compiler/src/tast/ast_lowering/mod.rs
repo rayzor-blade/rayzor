@@ -325,11 +325,13 @@ fn collect_param_copies<'a>(expr: &'a Expr, names: &mut BTreeMap<&'a str, &'a st
             name,
             type_hint: None,
             expr: Some(init),
+            ..
         }
         | ExprKind::Final {
             name,
             type_hint: None,
             expr: Some(init),
+            ..
         } => {
             if let Some(p) = param_ident(init, names) {
                 if !names.contains_key(name.as_str()) {

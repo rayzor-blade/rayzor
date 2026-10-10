@@ -734,6 +734,7 @@ pub enum ExprKind {
         name: String,
         type_hint: Option<Type>,
         expr: Option<Box<Expr>>,
+        attrs: VarAttrs,
     },
 
     /// Final declaration: `final x = 10`
@@ -741,6 +742,7 @@ pub enum ExprKind {
         name: String,
         type_hint: Option<Type>,
         expr: Option<Box<Expr>>,
+        attrs: VarAttrs,
     },
 
     /// Function expression: `function(x) return x * 2`
@@ -882,6 +884,18 @@ pub struct ObjectField {
     pub name: String,
     pub expr: Expr,
     pub span: Span,
+    /// The key was written as a string literal: `{ "a": 1 }`.
+    pub quoted: bool,
+}
+
+/// What a local `var`/`final` carries beyond its name, type and value.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct VarAttrs {
+    /// Metadata written before the name: `var @:m x`.
+    pub meta: Vec<Metadata>,
+    /// Declared by the same statement as the preceding declaration (`b` in
+    /// `var a, b`); the parser splits such a statement into sibling elements.
+    pub grouped: bool,
 }
 
 /// String interpolation part

@@ -171,6 +171,7 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
                     name: name.clone(),
                     expr: value_to_expr(value),
                     span,
+                    quoted: false,
                 })
                 .collect();
             Expr {
@@ -229,6 +230,7 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
                         span,
                     },
                     span,
+                    quoted: false,
                 },
                 parser::ObjectField {
                     name: "min".to_string(),
@@ -237,6 +239,7 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
                         span,
                     },
                     span,
+                    quoted: false,
                 },
                 parser::ObjectField {
                     name: "max".to_string(),
@@ -245,6 +248,7 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
                         span,
                     },
                     span,
+                    quoted: false,
                 },
             ];
             Expr {

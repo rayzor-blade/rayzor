@@ -197,6 +197,7 @@ impl<'a> AstLowering<'a> {
                     params: params.to_vec(),
                     args: Vec::new(),
                 }))),
+                attrs: Default::default(),
             })),
             parser::BlockElement::Expr(at(ExprKind::Call {
                 expr: Box::new(at(ExprKind::Field {

@@ -624,6 +624,7 @@ impl<'a> AstLowering<'a> {
                 name,
                 type_hint: None,
                 expr: Some(init),
+                ..
             } = &e.kind
             else {
                 continue;

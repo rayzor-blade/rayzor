@@ -76,6 +76,7 @@ impl<'a> AstLowering<'a> {
                     name: local.clone(),
                     type_hint: hints[i].cloned(),
                     expr: Some(Box::new(at(ExprKind::Ident(name.clone())))),
+                    attrs: Default::default(),
                 })));
                 args.push(at(ExprKind::Ident(local)));
             } else {
@@ -89,6 +90,7 @@ impl<'a> AstLowering<'a> {
                 name: "__widen_fn".to_string(),
                 type_hint: None,
                 expr: Some(Box::new(literal.clone())),
+                attrs: Default::default(),
             })),
         );
         let call = at(ExprKind::Call {

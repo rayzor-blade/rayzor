@@ -1683,12 +1683,14 @@ impl MacroInterpreter {
         // before pop_scope, or we'd leak the function scope.
         let mut bind_err: Option<MacroError> = None;
         for (i, param) in func.params.iter().enumerate() {
+            // An omitted or null argument takes the parameter's default.
             let value = if param.rest {
                 MacroValue::Array(Arc::new(args.get(i..).unwrap_or_default().to_vec()))
-            } else if let Some(arg) = args.get(i) {
+            } else if let Some(arg) = args
+                .get(i)
+                .filter(|a| param.default_value.is_none() || !matches!(a, MacroValue::Null))
+            {
                 arg.clone()
-            } else if param.optional {
-                MacroValue::Null
             } else if let Some(default) = &param.default_value {
                 match self.eval_expr(default) {
                     Ok(v) => v,
@@ -2392,7 +2394,7 @@ impl MacroInterpreter {
                     }
                     self.env.push_scope();
                     for (i, param) in params.iter().enumerate() {
-                        let val = args.get(i).cloned().unwrap_or(MacroValue::Null);
+                        let val = self.param_value(param, args.get(i));
                         self.env.define(&param.name, val);
                     }
                     let caller_imports = self.take_import_map();
@@ -3108,7 +3110,7 @@ impl MacroInterpreter {
                             self.env
                                 .define("this", MacroValue::Object(Arc::new(obj.clone())));
                             for (i, param) in params.iter().enumerate() {
-                                let val = _args.get(i).cloned().unwrap_or(MacroValue::Null);
+                                let val = self.param_value(param, _args.get(i));
                                 self.env.define(&param.name, val);
                             }
                             let result = self.eval_expr(&body);
@@ -3224,6 +3226,21 @@ impl MacroInterpreter {
         Ok(MacroValue::Object(Arc::new(obj)))
     }
 
+    /// A class method's argument, or the parameter's default when it is
+    /// omitted or null.
+    fn param_value(
+        &mut self,
+        param: &parser::FunctionParam,
+        arg: Option<&MacroValue>,
+    ) -> MacroValue {
+        match (arg, &param.default_value) {
+            (Some(MacroValue::Null) | None, Some(default)) => {
+                self.eval_expr(default).unwrap_or(MacroValue::Null)
+            }
+            (arg, _) => arg.cloned().unwrap_or(MacroValue::Null),
+        }
+    }
+
     /// Construct an object from pre-extracted ClassRegistry data.
     /// Takes cloned data to avoid borrow conflicts with &mut self.
     fn construct_from_registry_data(
@@ -3262,7 +3279,7 @@ impl MacroInterpreter {
 
             // Bind constructor params
             for (i, param) in ctor_params.iter().enumerate() {
-                let val = args.get(i).cloned().unwrap_or(MacroValue::Null);
+                let val = self.param_value(param, args.get(i));
                 self.env.define(&param.name, val);
             }
 
@@ -3675,23 +3692,27 @@ impl MacroInterpreter {
                     name,
                     type_hint,
                     expr,
+                    attrs,
                 } => ExprKind::Var {
                     name,
                     type_hint,
                     expr: expr
                         .map(|e| walk(interp, *e, counter).map(Box::new))
                         .transpose()?,
+                    attrs,
                 },
                 ExprKind::Final {
                     name,
                     type_hint,
                     expr,
+                    attrs,
                 } => ExprKind::Final {
                     name,
                     type_hint,
                     expr: expr
                         .map(|e| walk(interp, *e, counter).map(Box::new))
                         .transpose()?,
+                    attrs,
                 },
                 ExprKind::Call { expr, args } => ExprKind::Call {
                     expr: Box::new(walk(interp, *expr, counter)?),

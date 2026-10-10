@@ -385,6 +385,32 @@ impl Monomorphizer {
                             }
                         }
                     }
+                    // No argument spells the variable (`Enum<T>`, a result-only
+                    // `T`), so Haxe leaves it unbound. Specialize it as the
+                    // erased slot the template already lowers it to, rather
+                    // than call a template that is stubbed. Not for a variable
+                    // the body reads a tag for: erasure says nothing there.
+                    if !found
+                        && references_type_params(callee)
+                        && !callee
+                            .signature
+                            .parameters
+                            .iter()
+                            .any(|p| p.ty.type_param_name() == Some(type_param.name.as_str()))
+                        && !callee
+                            .type_param_tag_fixups
+                            .iter()
+                            .any(|(_, name)| *name == type_param.name)
+                    {
+                        if dbg_mono {
+                            eprintln!(
+                                "[mono]   -> '{}' is unbound; erased to I64",
+                                type_param.name
+                            );
+                        }
+                        inferred_args.push(IrType::I64);
+                        found = true;
+                    }
                     if !found {
                         // Can't infer all type params — skip
                         if dbg_mono {
@@ -1087,6 +1113,37 @@ impl Default for Monomorphizer {
     }
 }
 
+/// Whether a generic function's body still depends on its type parameters.
+///
+/// A template is stubbed because its body cannot be compiled until the
+/// parameters are known. That only holds while something in it still refers
+/// to them: a body whose values all travel in concrete slots is already
+/// monomorphic, whatever its declaration says, and compiling it is what lets
+/// a caller reach it at all.
+pub fn references_type_params(function: &IrFunction) -> bool {
+    fn is_var(ty: &IrType) -> bool {
+        match ty {
+            IrType::TypeVar(_) => true,
+            IrType::Ptr(inner) => is_var(inner),
+            IrType::Function {
+                params,
+                return_type,
+                ..
+            } => params.iter().any(is_var) || is_var(return_type),
+            _ => false,
+        }
+    }
+    if !function.type_param_tag_fixups.is_empty() {
+        return true;
+    }
+    if function.signature.parameters.iter().any(|p| is_var(&p.ty))
+        || is_var(&function.signature.return_type)
+    {
+        return true;
+    }
+    function.locals.values().any(|l| is_var(&l.ty))
+}
+
 /// Location of a call site in the IR
 #[derive(Debug, Clone)]
 struct CallSiteLocation {
@@ -1130,5 +1187,91 @@ mod tests {
         let original = IrType::Ptr(Box::new(IrType::TypeVar("T".to_string())));
         let substituted = mono.substitute_type(&original);
         assert_eq!(substituted, IrType::Ptr(Box::new(IrType::String)));
+    }
+
+    /// `make<T>(e:Enum<T>):T` (the enum lowers to an i32 id) and a caller
+    /// passing it with no type arguments; returns the callee the call targets.
+    fn call_result_only_generic(tag_fixup: bool) -> (IrModule, IrFunctionId) {
+        use crate::ir::{CallingConvention, IrTypeParam, OwnershipMode};
+        use crate::tast::SymbolId;
+        let signature = |ret: IrType, type_params: Vec<IrTypeParam>| IrFunctionSignature {
+            parameters: vec![IrParameter {
+                name: "e".to_string(),
+                ty: IrType::I32,
+                reg: IrId::new(0),
+                by_ref: false,
+            }],
+            return_type: ret,
+            calling_convention: CallingConvention::Haxe,
+            can_throw: false,
+            type_params,
+            uses_sret: false,
+        };
+        let t = IrTypeParam {
+            name: "T".to_string(),
+            constraints: Vec::new(),
+        };
+        let mut template = IrFunction::new(
+            IrFunctionId(0),
+            SymbolId::from_raw(1),
+            "make".to_string(),
+            signature(IrType::TypeVar("T".to_string()), vec![t]),
+        );
+        if tag_fixup {
+            let tag = template.alloc_reg();
+            template.type_param_tag_fixups.push((tag, "T".to_string()));
+        }
+        let mut caller = IrFunction::new(
+            IrFunctionId(1),
+            SymbolId::from_raw(2),
+            "caller".to_string(),
+            signature(IrType::Ptr(Box::new(IrType::Void)), Vec::new()),
+        );
+        let arg = caller.signature.parameters[0].reg;
+        let dest = caller.alloc_reg();
+        caller
+            .register_types
+            .insert(dest, IrType::TypeVar("T".to_string()));
+        let entry = caller.cfg.entry_block;
+        caller
+            .cfg
+            .blocks
+            .get_mut(&entry)
+            .unwrap()
+            .instructions
+            .push(IrInstruction::CallDirect {
+                dest: Some(dest),
+                func_id: IrFunctionId(0),
+                args: vec![arg],
+                arg_ownership: vec![OwnershipMode::Copy],
+                type_args: Vec::new(),
+                is_tail_call: false,
+            });
+        let mut module = IrModule::new("m".to_string(), "m.hx".to_string());
+        module.add_function(template);
+        module.add_function(caller);
+        Monomorphizer::new().monomorphize_module(&mut module);
+        let caller = &module.functions[&IrFunctionId(1)];
+        let callee = match &caller.cfg.blocks[&caller.cfg.entry_block].instructions[0] {
+            IrInstruction::CallDirect { func_id, .. } => *func_id,
+            other => panic!("expected a direct call, got {other:?}"),
+        };
+        (module, callee)
+    }
+
+    #[test]
+    fn unbound_variable_specialises_erased() {
+        let (module, callee) = call_result_only_generic(false);
+        assert_ne!(callee, IrFunctionId(0));
+        let instance = &module.functions[&callee];
+        assert!(instance.signature.type_params.is_empty());
+        assert_eq!(instance.signature.return_type, IrType::I64);
+        assert!(!references_type_params(instance));
+    }
+
+    #[test]
+    fn unbound_variable_with_a_tag_stays_on_the_template() {
+        let (_, callee) = call_result_only_generic(true);
+        assert_eq!(callee, IrFunctionId(0));
     }
 }

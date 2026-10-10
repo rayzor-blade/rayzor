@@ -10,7 +10,7 @@ use super::ast_bridge::span_to_location;
 use super::value::MacroValue;
 use parser::{
     AssignOp, BinaryOp, BlockElement, Case, Catch, Expr, ExprKind, Function, FunctionParam,
-    Metadata, ObjectField, Pattern, Span, StringPart, Type, TypePath, UnaryOp,
+    Metadata, ObjectField, Pattern, Span, StringPart, Type, TypePath, UnaryOp, VarAttrs,
 };
 use std::sync::Arc;
 
@@ -454,6 +454,7 @@ pub fn pattern_to_expr(p: &Pattern, span: Span) -> Expr {
                     name: n.clone(),
                     expr: pattern_to_expr(p, span),
                     span,
+                    quoted: false,
                 })
                 .collect(),
         )),
@@ -603,16 +604,94 @@ pub(crate) fn arg_value(p: &FunctionParam) -> MacroValue {
     ])
 }
 
-fn var_value(name: &str, hint: Option<&Type>, init: Option<&Expr>, is_final: bool) -> MacroValue {
-    obj(vec![
+/// The `haxe.macro.Var` a local declaration stands for, seen through the
+/// function-static marker; `None` for any other expression.
+fn var_entry(kind: &ExprKind) -> Option<MacroValue> {
+    let (kind, is_static) = match kind {
+        ExprKind::Meta { meta, expr } if meta.name == "staticLocal" => (&expr.kind, true),
+        _ => (kind, false),
+    };
+    let (name, hint, init, attrs, is_final) = match kind {
+        ExprKind::Var {
+            name,
+            type_hint,
+            expr,
+            attrs,
+        } => (name, type_hint, expr, attrs, false),
+        ExprKind::Final {
+            name,
+            type_hint,
+            expr,
+            attrs,
+        } => (name, type_hint, expr, attrs, true),
+        _ => return None,
+    };
+    Some(obj(vec![
         ("name", s(name)),
         (
             "type",
-            hint.map(complex_type_of).unwrap_or(MacroValue::Null),
+            hint.as_ref()
+                .map(complex_type_of)
+                .unwrap_or(MacroValue::Null),
         ),
-        ("expr", opt_sub(init)),
+        ("expr", opt_sub(init.as_deref())),
         ("isFinal", MacroValue::Bool(is_final)),
+        ("isStatic", MacroValue::Bool(is_static)),
+        ("meta", arr(attrs.meta.iter().map(metadata_value).collect())),
+    ]))
+}
+
+/// A declaration the parser split off the statement before it (`b` in
+/// `var a, b`).
+fn is_grouped(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Var { attrs, .. } | ExprKind::Final { attrs, .. } => attrs.grouped,
+        ExprKind::Meta { meta, expr } if meta.name == "staticLocal" => is_grouped(expr),
+        _ => false,
+    }
+}
+
+/// A declaration, under any metadata written before it.
+fn heads_declaration(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Var { .. } | ExprKind::Final { .. } => true,
+        ExprKind::Meta { expr, .. } => heads_declaration(expr),
+        _ => false,
+    }
+}
+
+/// A declaration statement and the declarations split off it, as the one
+/// `EVars` Haxe parses it to (under the metadata written before it).
+fn group_value(leader: &Expr, followers: &[&Expr]) -> MacroValue {
+    let def = match (var_entry(&leader.kind), &leader.kind) {
+        (Some(first), _) => en(
+            "ExprDef",
+            "EVars",
+            vec![arr(std::iter::once(first)
+                .chain(followers.iter().filter_map(|f| var_entry(&f.kind)))
+                .collect())],
+        ),
+        (None, ExprKind::Meta { meta, expr }) => en(
+            "ExprDef",
+            "EMeta",
+            vec![metadata_value(meta), group_value(expr, followers)],
+        ),
+        _ => return sub(leader),
+    };
+    obj(vec![
+        ("expr", def),
+        ("pos", MacroValue::Position(span_to_location(leader.span))),
     ])
+}
+
+fn metadata_of(entry: &MacroValue, span: Span) -> Metadata {
+    let raw = string_of(field(entry, "name")).unwrap_or_default();
+    Metadata {
+        name: raw.trim_start_matches(':').to_string(),
+        params: exprs_of(field(entry, "params"), span),
+        span,
+        compile_time: raw.starts_with(':'),
+    }
 }
 
 fn metadata_value(m: &Metadata) -> MacroValue {
@@ -784,53 +863,47 @@ pub fn def_of(kind: &ExprKind, span: Span) -> Option<MacroValue> {
             vec![arr(fields
                 .iter()
                 .map(|f| {
+                    let quotes = if f.quoted { "Quoted" } else { "Unquoted" };
                     obj(vec![
                         ("field", s(&f.name)),
                         ("expr", sub(&f.expr)),
-                        ("quotes", en("QuoteStatus", "Unquoted", Vec::new())),
+                        ("quotes", en("QuoteStatus", quotes, Vec::new())),
                     ])
                 })
                 .collect())],
         ),
-        ExprKind::Block(elements) => en(
-            "ExprDef",
-            "EBlock",
-            vec![arr(elements
+        ExprKind::Block(elements) => {
+            let exprs: Vec<&Expr> = elements
                 .iter()
                 .filter_map(|el| match el {
-                    BlockElement::Expr(e) => Some(sub(e)),
+                    BlockElement::Expr(e) => Some(e),
                     _ => None,
                 })
-                .collect())],
-        ),
-        ExprKind::Var {
-            name,
-            type_hint,
-            expr,
-        } => en(
-            "ExprDef",
-            "EVars",
-            vec![arr(vec![var_value(
-                name,
-                type_hint.as_ref(),
-                expr.as_deref(),
-                false,
-            )])],
-        ),
-        ExprKind::Final {
-            name,
-            type_hint,
-            expr,
-        } => en(
-            "ExprDef",
-            "EVars",
-            vec![arr(vec![var_value(
-                name,
-                type_hint.as_ref(),
-                expr.as_deref(),
-                true,
-            )])],
-        ),
+                .collect();
+            let mut items = Vec::with_capacity(exprs.len());
+            let mut i = 0;
+            while i < exprs.len() {
+                let mut end = i + 1;
+                if heads_declaration(exprs[i]) {
+                    while end < exprs.len() && is_grouped(exprs[end]) {
+                        end += 1;
+                    }
+                }
+                items.push(if end == i + 1 {
+                    sub(exprs[i])
+                } else {
+                    group_value(exprs[i], &exprs[i + 1..end])
+                });
+                i = end;
+            }
+            en("ExprDef", "EBlock", vec![arr(items)])
+        }
+        ExprKind::Var { .. } | ExprKind::Final { .. } => {
+            en("ExprDef", "EVars", vec![arr(vec![var_entry(kind)?])])
+        }
+        ExprKind::Meta { meta, .. } if meta.name == "staticLocal" && var_entry(kind).is_some() => {
+            en("ExprDef", "EVars", vec![arr(vec![var_entry(kind)?])])
+        }
         ExprKind::Function(func) => {
             let kind = if func.name.is_empty() {
                 en("FunctionKind", "FAnonymous", Vec::new())
@@ -1052,6 +1125,17 @@ fn type_of_is_operand(e: &Expr) -> Option<Type> {
 // ExprDef → expressions
 // ----------------------------------------------------------------------
 
+/// An `EVars` value naming more than one local.
+fn declares_several(v: &MacroValue) -> bool {
+    let def = match v {
+        MacroValue::Object(m) => m.get("expr"),
+        MacroValue::Enum(..) => Some(v),
+        _ => None,
+    };
+    matches!(def, Some(MacroValue::Enum(e, k, args))
+        if &**e == "ExprDef" && &**k == "EVars" && list_of(args.first()).len() > 1)
+}
+
 fn exprs_of(v: Option<&MacroValue>, span: Span) -> Vec<Expr> {
     list_of(v).iter().map(|e| expr_of(e, span)).collect()
 }
@@ -1173,6 +1257,10 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                             name: string_of(field(f, "field")).unwrap_or_default(),
                             expr: expr_of(field(f, "expr").unwrap_or(&MacroValue::Null), span),
                             span,
+                            quoted: matches!(
+                                field(f, "quotes"),
+                                Some(MacroValue::Enum(_, q, _)) if &**q == "Quoted"
+                            ),
                         })
                         .collect(),
                 ),
@@ -1212,25 +1300,47 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                     let vars = list_of(a(0));
                     let decls: Vec<Expr> = vars
                         .iter()
-                        .map(|v| {
+                        .enumerate()
+                        .map(|(i, v)| {
                             let name = string_of(field(v, "name")).unwrap_or_default();
                             let type_hint = field(v, "type").and_then(|t| type_of_value(t, span));
                             let expr = opt_expr_of(field(v, "expr"), span);
-                            mk(
+                            let attrs = VarAttrs {
+                                meta: list_of(field(v, "meta"))
+                                    .iter()
+                                    .map(|m| metadata_of(m, span))
+                                    .collect(),
+                                grouped: i > 0,
+                            };
+                            let decl = mk(
                                 if matches!(field(v, "isFinal"), Some(MacroValue::Bool(true))) {
                                     ExprKind::Final {
                                         name,
                                         type_hint,
                                         expr,
+                                        attrs,
                                     }
                                 } else {
                                     ExprKind::Var {
                                         name,
                                         type_hint,
                                         expr,
+                                        attrs,
                                     }
                                 },
-                            )
+                            );
+                            if !matches!(field(v, "isStatic"), Some(MacroValue::Bool(true))) {
+                                return decl;
+                            }
+                            mk(ExprKind::Meta {
+                                meta: Metadata {
+                                    name: "staticLocal".to_string(),
+                                    params: Vec::new(),
+                                    span,
+                                    compile_time: true,
+                                },
+                                expr: Box::new(decl),
+                            })
                         })
                         .collect();
                     if decls.len() == 1 {
@@ -1247,10 +1357,18 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                     };
                     ExprKind::Function(function_of(a(1)?, name, span))
                 }
+                // A statement declaring several locals declares each in
+                // this block, not in a block of its own.
                 "EBlock" => ExprKind::Block(
-                    exprs_of(a(0), span)
-                        .into_iter()
-                        .map(BlockElement::Expr)
+                    list_of(a(0))
+                        .iter()
+                        .flat_map(|v| match expr_of(v, span) {
+                            Expr {
+                                kind: ExprKind::Block(decls),
+                                ..
+                            } if declares_several(v) => decls,
+                            e => vec![BlockElement::Expr(e)],
+                        })
                         .collect(),
                 ),
                 "EFor" => {
@@ -1358,19 +1476,10 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                         _ => return None,
                     })),
                 },
-                "EMeta" => {
-                    let entry = a(0)?;
-                    let raw = string_of(field(entry, "name")).unwrap_or_default();
-                    ExprKind::Meta {
-                        meta: Metadata {
-                            name: raw.trim_start_matches(':').to_string(),
-                            params: exprs_of(field(entry, "params"), span),
-                            span,
-                            compile_time: raw.starts_with(':'),
-                        },
-                        expr: bx(1),
-                    }
-                }
+                "EMeta" => ExprKind::Meta {
+                    meta: metadata_of(a(0)?, span),
+                    expr: bx(1),
+                },
                 "EDisplay" => return try_expr_of(a(0)?, span),
                 _ => return None,
             }))

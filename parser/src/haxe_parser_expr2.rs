@@ -752,6 +752,7 @@ fn object_field<'a>(full: &'a str, input: &'a str) -> PResult<'a, ObjectField> {
             name,
             expr,
             span: Span::new(start, end),
+            quoted: false,
         },
     ))
 }

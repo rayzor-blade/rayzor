@@ -66,6 +66,7 @@ impl Reifier {
                     name: name.to_string(),
                     expr,
                     span: self.span,
+                    quoted: false,
                 })
                 .collect(),
         ))
@@ -235,6 +236,7 @@ impl Reifier {
                 name,
                 type_hint: None,
                 expr: init,
+                ..
             } => {
                 let init = match init {
                     Some(v) => self.expr(v)?,

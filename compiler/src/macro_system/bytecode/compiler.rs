@@ -1229,6 +1229,7 @@ mod tests {
                 name: "x".to_string(),
                 type_hint: None,
                 expr: Some(Box::new(make_expr(ExprKind::Int(42)))),
+                attrs: Default::default(),
             })),
             BlockElement::Expr(make_expr(ExprKind::Ident("x".to_string()))),
         ]));

@@ -228,6 +228,7 @@ impl<'a> AstLowering<'a> {
                     name: name.to_string(),
                     type_hint: None,
                     expr: Some(Box::new(read(field))),
+                    attrs: Default::default(),
                 },
                 span,
             })

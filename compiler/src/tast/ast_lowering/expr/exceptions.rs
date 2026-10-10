@@ -136,6 +136,7 @@ impl<'a> AstLowering<'a> {
             name: catch.var.clone(),
             type_hint: Some(ty(&["haxe"], "Exception")),
             expr: Some(Box::new(as_exception)),
+            attrs: Default::default(),
         });
         parser::Catch {
             var: raw,

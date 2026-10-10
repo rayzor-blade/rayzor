@@ -159,34 +159,8 @@ fn jit_reloc_debug_enabled() -> bool {
 
 impl CraneliftBackend {
     /// Whether a generic function's body still depends on its type parameters.
-    ///
-    /// A template is stubbed because its body cannot be compiled until the
-    /// parameters are known. That only holds while something in it still refers
-    /// to them: a body whose values all travel in concrete slots is already
-    /// monomorphic, whatever its declaration says, and compiling it is what lets
-    /// a caller reach it at all.
     fn references_type_params(function: &IrFunction) -> bool {
-        fn is_var(ty: &IrType) -> bool {
-            match ty {
-                IrType::TypeVar(_) => true,
-                IrType::Ptr(inner) => is_var(inner),
-                IrType::Function {
-                    params,
-                    return_type,
-                    ..
-                } => params.iter().any(is_var) || is_var(return_type),
-                _ => false,
-            }
-        }
-        if !function.type_param_tag_fixups.is_empty() {
-            return true;
-        }
-        if function.signature.parameters.iter().any(|p| is_var(&p.ty))
-            || is_var(&function.signature.return_type)
-        {
-            return true;
-        }
-        function.locals.values().any(|l| is_var(&l.ty))
+        crate::ir::monomorphize::references_type_params(function)
     }
 
     /// Create a new Cranelift backend with default optimization level (speed)

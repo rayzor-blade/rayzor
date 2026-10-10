@@ -2012,6 +2012,7 @@ impl<'a> AstLowering<'a> {
                                 name: name.clone(),
                                 type_hint: None,
                                 expr: Some(Box::new(value.clone())),
+                                attrs: Default::default(),
                             },
                             span: value.span,
                         }));
@@ -2677,6 +2678,7 @@ impl<'a> AstLowering<'a> {
                 name,
                 type_hint,
                 expr,
+                ..
             } => {
                 // Variable declaration as expression: `var x = 5` returns 5
                 let var_name = self.context.intern_string(name);
@@ -2765,6 +2767,7 @@ impl<'a> AstLowering<'a> {
                                     name: name.clone(),
                                     type_hint: type_hint.clone(),
                                     expr: Some(Box::new(ctor)),
+                                    attrs: Default::default(),
                                 },
                                 span: expression.span,
                             };
@@ -2968,6 +2971,7 @@ impl<'a> AstLowering<'a> {
                 name,
                 type_hint,
                 expr,
+                ..
             } => {
                 // Final declaration as expression: `final x = 5` returns 5
                 let var_name = self.context.intern_string(name);
@@ -3041,6 +3045,7 @@ impl<'a> AstLowering<'a> {
                                     name: name.clone(),
                                     type_hint: type_hint.clone(),
                                     expr: Some(Box::new(ctor)),
+                                    attrs: Default::default(),
                                 },
                                 span: expression.span,
                             };
@@ -3933,6 +3938,7 @@ impl<'a> AstLowering<'a> {
                 name: param.name.clone(),
                 type_hint: param.type_hint.clone(),
                 expr: param.default_value.clone(),
+                attrs: Default::default(),
             })));
             let incoming = mk(ExprKind::Ident(hidden));
             prelude.push(parser::BlockElement::Expr(mk(ExprKind::If {

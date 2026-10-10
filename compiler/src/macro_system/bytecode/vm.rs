@@ -1483,6 +1483,7 @@ mod tests {
                 name: "x".to_string(),
                 type_hint: None,
                 expr: Some(Box::new(make_expr(parser::ExprKind::Int(42)))),
+                attrs: Default::default(),
             })),
             parser::BlockElement::Expr(make_expr(parser::ExprKind::Ident("x".to_string()))),
         ]));
@@ -1497,6 +1498,7 @@ mod tests {
                 name: "x".to_string(),
                 type_hint: None,
                 expr: Some(Box::new(make_expr(parser::ExprKind::Int(10)))),
+                attrs: Default::default(),
             })),
             parser::BlockElement::Expr(make_expr(parser::ExprKind::Assign {
                 left: Box::new(make_expr(parser::ExprKind::Ident("x".to_string()))),
@@ -1580,6 +1582,7 @@ mod tests {
                 name: "x".to_string(),
                 type_hint: None,
                 expr: Some(Box::new(make_expr(parser::ExprKind::Int(0)))),
+                attrs: Default::default(),
             })),
             parser::BlockElement::Expr(make_expr(parser::ExprKind::While {
                 cond: Box::new(make_expr(parser::ExprKind::Binary {
@@ -1642,6 +1645,7 @@ mod tests {
                 name: "x".to_owned(),
                 expr: make_expr(parser::ExprKind::Int(1)),
                 span: Span::default(),
+                quoted: false,
             }]))
         };
         let expr = make_expr(parser::ExprKind::Map(vec![
@@ -1735,6 +1739,7 @@ mod tests {
                 name: "x".to_string(),
                 type_hint: None,
                 expr: Some(Box::new(make_expr(parser::ExprKind::Int(10)))),
+                attrs: Default::default(),
             })),
             parser::BlockElement::Expr(make_expr(parser::ExprKind::Assign {
                 left: Box::new(make_expr(parser::ExprKind::Ident("x".to_string()))),
