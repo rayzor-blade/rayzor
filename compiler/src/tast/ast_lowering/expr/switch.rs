@@ -31,10 +31,15 @@ impl<'a> AstLowering<'a> {
         self.context.current_scope = case_scope;
 
         // Names the value side binds are declared in the case's own scope,
-        // ahead of the body that reads them.
+        // ahead of the body that reads them. Every part is read before any
+        // name is bound: `case [a, b]` on a subject named `a` reads both
+        // elements of that subject.
+        let values = bindings
+            .iter()
+            .map(|(_, accessor)| self.lower_expression(accessor))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut prelude = Vec::with_capacity(bindings.len());
-        for (name, accessor) in &bindings {
-            let value = self.lower_expression(accessor)?;
+        for ((name, _), value) in bindings.iter().zip(values) {
             let interned = self.context.intern_string(name);
             let symbol_id = self
                 .context
@@ -282,12 +287,53 @@ impl<'a> AstLowering<'a> {
 
     /// A case lowered as a guard and bindings over parts of the subject
     /// expression, which therefore re-reads the subject.
-    pub(crate) fn case_reads_subject_parts(case: &parser::Case) -> bool {
+    pub(crate) fn case_reads_subject_parts(&mut self, case: &parser::Case) -> bool {
         case.patterns.first().is_some_and(|p| {
             Self::pattern_destructures(p)
                 || Self::pattern_needs_guard(p)
                 || matches!(p, parser::Pattern::Null)
+                || self.pattern_names_type(p)
         })
+    }
+
+    /// A name in a pattern that resolves to a type: `case String:` and
+    /// `TClass(haxe.ds.List)` compare against that type's value. Enum
+    /// constructors and locals keep their meaning.
+    fn names_type(&mut self, name: &str) -> bool {
+        let symbol = if let Some((package, last)) = name.rsplit_once('.') {
+            let package = package
+                .split('.')
+                .map(|p| self.context.intern_string(p))
+                .collect();
+            let last = self.context.intern_string(last);
+            let path = crate::tast::namespace::QualifiedPath::new(package, last);
+            let full = self.context.intern_string(name);
+            self.context
+                .namespace_resolver
+                .lookup_symbol(&path)
+                .or_else(|| self.context.symbol_table.resolve_qualified_name(full))
+                .or_else(|| self.resolve_symbol_in_scope_hierarchy(last))
+        } else {
+            if self.names_enum_variant(name) {
+                return false;
+            }
+            let interned = self.context.intern_string(name);
+            self.resolve_symbol_in_scope_hierarchy(interned)
+        };
+        symbol
+            .and_then(|s| self.context.symbol_table.get_symbol(s))
+            .is_some_and(|s| s.kind.is_type() && s.kind != crate::tast::SymbolKind::TypeParameter)
+    }
+
+    /// Whether a type name appears where the ordinary matcher would capture.
+    fn pattern_names_type(&mut self, pattern: &parser::Pattern) -> bool {
+        use parser::Pattern as P;
+        match pattern {
+            P::Var(name) => self.names_type(name),
+            P::Or(items) | P::Array(items) => items.iter().any(|p| self.pattern_names_type(p)),
+            P::Constructor { params, .. } => params.iter().any(|p| self.pattern_names_type(p)),
+            _ => false,
+        }
     }
 
     fn pattern_needs_guard(pattern: &parser::Pattern) -> bool {
@@ -298,10 +344,10 @@ impl<'a> AstLowering<'a> {
             P::ArrayRest { elements, .. } => elements.iter().any(Self::pattern_needs_guard),
             P::Object { fields } => fields.iter().any(|(_, p)| Self::pattern_needs_guard(p)),
             // The ordinary matcher compares an object argument as a literal
-            // and takes an array argument for a wildcard.
+            // and takes an array or `null` argument for a wildcard.
             P::Constructor { params, .. } => params.iter().any(|p| {
                 Self::pattern_needs_guard(p)
-                    || matches!(p, P::Object { .. } | P::Array(_))
+                    || matches!(p, P::Object { .. } | P::Array(_) | P::Null)
                     || matches!(p, P::Const(v) if matches!(v.kind, parser::ExprKind::Object(_)))
             }),
             _ => false,
@@ -337,6 +383,19 @@ impl<'a> AstLowering<'a> {
         match pattern {
             P::Underscore => Some((None, Vec::new())),
             P::Null => Some((Some(eq(subject, expr(parser::ExprKind::Null))), Vec::new())),
+            // A type name compares against the type's value.
+            P::Var(name) if self.names_type(name) => {
+                let mut parts = name.split('.');
+                let mut value = expr(parser::ExprKind::Ident(parts.next()?.to_string()));
+                for part in parts {
+                    value = expr(parser::ExprKind::Field {
+                        expr: Box::new(value),
+                        field: part.to_string(),
+                        is_optional: false,
+                    });
+                }
+                Some((Some(eq(subject, value)), Vec::new()))
+            }
             // `E.A` in a pattern names a value, never a capture.
             P::Var(name) if name.contains('.') => {
                 let mut parts: Vec<String> = name.split('.').map(str::to_string).collect();
@@ -634,6 +693,7 @@ impl<'a> AstLowering<'a> {
         if !Self::pattern_destructures(pattern)
             && !Self::pattern_needs_guard(pattern)
             && !matches!(pattern, parser::Pattern::Null)
+            && !self.pattern_names_type(pattern)
         {
             return None;
         }

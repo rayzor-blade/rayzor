@@ -257,6 +257,44 @@ emit_result() { # emit_result <path> <test> <status> <detail>
   printf '%s\t%s\t%s\t%s\n' "$t" "$st" "${det//$'\t'/ }" "${suite:-unit}" > "$result"
 }
 
+# True when every registration of <case> in its suite's upstream entry point
+# sits inside `#if false`: no target runs it, so it is not ours to score.
+# Only a literal `false` is known dead -- any other condition may hold for us.
+upstream_disabled() { # upstream_disabled <case> <suite>
+  local runner
+  case "$2" in
+    sys)      runner="$SYS_SRC/Main.hx" ;;
+    features) runner="$FEATURE_SRC/TestMain.hx" ;;
+    *)        return 1 ;;
+  esac
+  [[ -f "$runner" ]] || return 1
+  python3 - "$runner" "$1" <<'PYOFF'
+import re, sys
+runner, case = sys.argv[1], sys.argv[2]
+ctor = re.compile(r'\bnew\s+(?:[a-z_][A-Za-z0-9_]*\.)*' + re.escape(case) + r'\s*\(')
+stack, live, dead = [], 0, 0
+for line in open(runner, encoding='utf-8', errors='replace'):
+    code = line.split('//', 1)[0]
+    m = re.match(r'\s*#(if|elseif|else|end)\b(.*)', code)
+    if m:
+        kind, cond = m.group(1), re.sub(r'[\s()]', '', m.group(2))
+        if kind == 'if':
+            stack.append(cond == 'false')
+        elif kind == 'end':
+            if stack:
+                stack.pop()
+        elif stack:
+            stack[-1] = kind == 'elseif' and cond == 'false'
+        continue
+    if ctor.search(code):
+        if any(stack):
+            dead += 1
+        else:
+            live += 1
+sys.exit(0 if dead and not live else 1)
+PYOFF
+}
+
 process_one() { # process_one <source> <result-file>
   local f="$1" result="$2"
   local base pkg d gen out code det status suite
@@ -285,6 +323,10 @@ process_one() { # process_one <source> <result-file>
          } | sort -u | tr '\n' ' ')
   if [[ -n "$pkg" ]]; then
     emit_result "$result" "$base" SKIP "targets ${pkg% }"
+    return
+  fi
+  if upstream_disabled "$base" "$suite"; then
+    emit_result "$result" "$base" SKIP "disabled in upstream runner"
     return
   fi
 

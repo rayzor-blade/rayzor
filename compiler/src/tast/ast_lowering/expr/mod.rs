@@ -1962,7 +1962,7 @@ impl<'a> AstLowering<'a> {
                     ExprKind::Array(elements) => !elements.iter().all(|e| plain(e)),
                     _ => !plain(expr),
                 };
-                if needs_binding && cases.iter().any(Self::case_reads_subject_parts) {
+                if needs_binding && cases.iter().any(|case| self.case_reads_subject_parts(case)) {
                     let span = expr.span;
                     let mut elements = Vec::new();
                     let mut bind = |value: &Expr, this: &mut Self| -> Expr {

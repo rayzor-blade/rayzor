@@ -89,11 +89,12 @@ impl Reifier {
     }
 
     fn constant(&self, ctor: &str, text: &str) -> Expr {
-        self.wrap(self.ctor(
-            "ExprDef",
-            "EConst",
-            vec![self.ctor("Constant", ctor, vec![self.string(text)])],
-        ))
+        let mut args = vec![self.string(text)];
+        // A reified string literal is double-quoted.
+        if ctor == "CString" {
+            args.push(self.ctor("StringLiteralKind", "DoubleQuotes", vec![]));
+        }
+        self.wrap(self.ctor("ExprDef", "EConst", vec![self.ctor("Constant", ctor, args)]))
     }
 
     fn list(&self, items: &[Expr]) -> Option<Expr> {
@@ -157,6 +158,7 @@ impl Reifier {
                 def("EArray", vec![self.expr(obj)?, self.expr(index)?])
             }
             ExprKind::Paren(inner) => def("EParenthesis", vec![self.expr(inner)?]),
+            ExprKind::Untyped(inner) => def("EUntyped", vec![self.expr(inner)?]),
             ExprKind::Array(items) => def("EArrayDecl", vec![self.list(items)?]),
             ExprKind::Block(elements) => {
                 let items = elements

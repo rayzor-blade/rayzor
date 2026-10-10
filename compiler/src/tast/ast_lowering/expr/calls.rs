@@ -4522,7 +4522,7 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    fn type_declares_interface(&self, class: SymbolId, interface: SymbolId) -> bool {
+    pub(crate) fn type_declares_interface(&self, class: SymbolId, interface: SymbolId) -> bool {
         if self
             .context
             .symbol_table

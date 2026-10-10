@@ -1261,10 +1261,18 @@ pub extern "C" fn haxe_type_all_enums(type_id: i64) -> *mut u8 {
 /// order) its instantiation binds to String: an erased payload cannot say so itself.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32, string_params: i64) -> bool {
+    // One slot is one value, null included.
+    if a == b {
+        return true;
+    }
     if type_id <= 0 {
         return false;
     }
     let enum_type = type_id as u32;
+    // Every value of an enum with payloads is a cell, so a zero slot is null.
+    if (a == 0 || b == 0) && enum_is_boxed(enum_type) {
+        return false;
+    }
     let Some((tag_a, boxed_a, variant_a)) = enum_variant_from_value(enum_type, a) else {
         return false;
     };
@@ -2204,7 +2212,7 @@ fn format_enum_boxed(type_id: u32, ptr: *const u8) -> String {
         out.push('(');
         for i in 0..variant_info.param_count {
             if i > 0 {
-                out.push_str(", ");
+                out.push(',');
             }
             let field_ptr = ptr.add(8 + i * 8);
             let param_type = variant_info
@@ -2213,8 +2221,28 @@ fn format_enum_boxed(type_id: u32, ptr: *const u8) -> String {
                 .copied()
                 .unwrap_or(ParamType::Int);
             match param_type {
+                // An enum argument with payloads is a stamped cell.
                 ParamType::Int | ParamType::Dynamic => {
-                    out.push_str(&(*(field_ptr as *const i64)).to_string())
+                    let val = *(field_ptr as *const i64);
+                    match stamped_enum_cell_type(val) {
+                        Some(nested) => out.push_str(&format_enum_boxed(nested, val as *const u8)),
+                        None => out.push_str(&val.to_string()),
+                    }
+                }
+                ParamType::Boxed => {
+                    let val = *(field_ptr as *const i64);
+                    let text = if val == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        haxe_std_string_ptr(val as *mut u8)
+                    };
+                    match text.as_ref() {
+                        Some(text) if !text.ptr.is_null() => {
+                            let bytes = std::slice::from_raw_parts(text.ptr as *const u8, text.len);
+                            out.push_str(&String::from_utf8_lossy(bytes));
+                        }
+                        _ => out.push_str("null"),
+                    }
                 }
                 ParamType::Float => out.push_str(&(*(field_ptr as *const f64)).to_string()),
                 ParamType::Bool => out.push_str(&(*(field_ptr as *const i64) != 0).to_string()),
@@ -2232,7 +2260,7 @@ fn format_enum_boxed(type_id: u32, ptr: *const u8) -> String {
                         }
                     }
                 }
-                ParamType::Object | ParamType::Array | ParamType::Anon | ParamType::Boxed => {
+                ParamType::Object | ParamType::Array | ParamType::Anon => {
                     let val = *(field_ptr as *const i64);
                     out.push_str(&format!("<object@0x{:x}>", val));
                 }

@@ -608,8 +608,23 @@ impl<'a> AstLowering<'a> {
             TypedExpressionKind::ArrayLiteral { elements } => {
                 if let Some(first_element) = elements.first() {
                     let types: Vec<TypeId> = elements.iter().map(|e| e.expr_type).collect();
+                    let values: Vec<TypeId> = elements
+                        .iter()
+                        .filter(|e| !matches!(e.kind, TypedExpressionKind::Null))
+                        .map(|e| e.expr_type)
+                        .collect();
+                    // A `null` element makes a reference element `Null<T>`;
+                    // other types keep the first element's.
+                    let unified = self.unify_min(&values).and_then(|ty| {
+                        if values.len() == elements.len() {
+                            Some(ty)
+                        } else {
+                            self.nullable_slot(ty)
+                        }
+                    });
                     let element_type = self
                         .common_function_type(&types)
+                        .or(unified)
                         .unwrap_or(first_element.expr_type);
                     Ok(self
                         .context
@@ -1040,10 +1055,40 @@ impl<'a> AstLowering<'a> {
                 if nullable_inner(else_t) == Some(then_t) {
                     return Ok(else_t);
                 }
+                let kind_of = |id: TypeId| type_table.get(id).map(|t| t.kind.clone());
+                let (then_kind, else_kind) = (kind_of(then_t), kind_of(else_t));
                 drop(type_table);
-                Ok(self
-                    .common_branch_class(&[then_t, else_t])
-                    .unwrap_or(then_t))
+                // A null branch makes a scalar branch `Null<T>`.
+                let scalar = |kind: &Option<TypeKind>| {
+                    matches!(kind, Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool))
+                };
+                let then_null = matches!(then_expr.kind, TypedExpressionKind::Null);
+                let else_null = matches!(else_e.kind, TypedExpressionKind::Null);
+                let nullable = match (then_null, else_null) {
+                    (true, false) if scalar(&else_kind) => Some(else_t),
+                    (false, true) if scalar(&then_kind) => Some(then_t),
+                    _ => None,
+                };
+                if let Some(ty) = nullable {
+                    return Ok(self
+                        .context
+                        .type_table
+                        .borrow_mut()
+                        .create_optional_type(ty));
+                }
+                // Objects meet at a class, a structure, or an interface of two
+                // classes (the branches are wrapped for it); scalars keep the
+                // then-branch type.
+                let both_classes = matches!(then_kind, Some(TypeKind::Class { .. }))
+                    && matches!(else_kind, Some(TypeKind::Class { .. }));
+                let unified = self.unify_min(&[then_t, else_t]).filter(|ty| {
+                    match self.context.type_table.borrow().get(*ty).map(|t| &t.kind) {
+                        Some(TypeKind::Class { .. } | TypeKind::Anonymous { .. }) => true,
+                        Some(TypeKind::Interface { .. }) => both_classes,
+                        _ => false,
+                    }
+                });
+                Ok(unified.unwrap_or(then_t))
             }
             TypedExpressionKind::While { .. }
             | TypedExpressionKind::For { .. }
@@ -1818,6 +1863,277 @@ impl<'a> AstLowering<'a> {
                 .borrow_mut()
                 .create_function_type(params, result),
         )
+    }
+
+    /// The type haxe's `unify_min` gives values of `types`: the most general
+    /// of them when each of the others unifies with it; else, for object
+    /// literals of one shape, that shape with each field unified; else the
+    /// first class or interface of that type's hierarchy all of them unify
+    /// with. `None` when nothing is found.
+    pub(crate) fn unify_min(&self, types: &[TypeId]) -> Option<TypeId> {
+        let mut most_general = *types.first()?;
+        let mut conflict = false;
+        for &ty in &types[1..] {
+            if self.unifies_with(ty, most_general) {
+                continue;
+            }
+            if self.unifies_with(most_general, ty) {
+                most_general = ty;
+                continue;
+            }
+            conflict = true;
+            break;
+        }
+        if !conflict {
+            return Some(most_general);
+        }
+        if let Some(shape) = self.unify_min_fields(types) {
+            return Some(shape);
+        }
+        self.base_types(most_general)
+            .into_iter()
+            .find(|&base| types.iter().all(|&ty| self.unifies_with(ty, base)))
+    }
+
+    /// Object literals with the same field names, each field unified.
+    fn unify_min_fields(&self, types: &[TypeId]) -> Option<TypeId> {
+        let shapes = types
+            .iter()
+            .map(|&ty| {
+                let ty = self.unalias(ty);
+                match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Anonymous { fields }) => Some(fields.clone()),
+                    _ => None,
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let first = shapes.first()?;
+        let mut fields = Vec::with_capacity(first.len());
+        for field in first {
+            let column = shapes
+                .iter()
+                .map(|shape| {
+                    (shape.len() == first.len())
+                        .then(|| shape.iter().find(|f| f.name == field.name))
+                        .flatten()
+                        .map(|f| f.type_id)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            fields.push((field.name, self.unify_min(&column)?));
+        }
+        Some(type_resolution::create_anonymous_object_type(
+            &self.context.type_table,
+            fields,
+        ))
+    }
+
+    /// Whether a value of `from` can be used as `to`, for `unify_min`.
+    /// Classes extend or implement; structures match field for field. A
+    /// class instance is not taken as a structure: it is not laid out as
+    /// one. Generic instances only unify when identical.
+    fn unifies_with(&self, from: TypeId, to: TypeId) -> bool {
+        let (from, to) = (self.unalias(from), self.unalias(to));
+        if from == to {
+            return true;
+        }
+        let (from_kind, to_kind) = {
+            let tt = self.context.type_table.borrow();
+            match (tt.get(from), tt.get(to)) {
+                (Some(f), Some(t)) => (f.kind.clone(), t.kind.clone()),
+                _ => return false,
+            }
+        };
+        if from_kind == to_kind {
+            return true;
+        }
+        match (&from_kind, &to_kind) {
+            (TypeKind::Dynamic, _) | (_, TypeKind::Dynamic) | (TypeKind::Int, TypeKind::Float) => {
+                true
+            }
+            (TypeKind::Optional { inner_type: a }, TypeKind::Optional { inner_type: b }) => {
+                self.unifies_with(*a, *b)
+            }
+            (_, TypeKind::Optional { inner_type }) => self.unifies_with(from, *inner_type),
+            (TypeKind::Optional { inner_type }, _) => self.unifies_with(*inner_type, to),
+            (
+                TypeKind::Class {
+                    symbol_id: class,
+                    type_args: class_args,
+                },
+                TypeKind::Class {
+                    symbol_id: parent,
+                    type_args: parent_args,
+                },
+            ) => {
+                class_args.is_empty()
+                    && parent_args.is_empty()
+                    && self.class_chain(*class).contains(parent)
+            }
+            (
+                TypeKind::Class {
+                    symbol_id: class,
+                    type_args: class_args,
+                }
+                | TypeKind::Interface {
+                    symbol_id: class,
+                    type_args: class_args,
+                },
+                TypeKind::Interface {
+                    symbol_id: interface,
+                    type_args: interface_args,
+                },
+            ) => {
+                class_args.is_empty()
+                    && interface_args.is_empty()
+                    && self.type_declares_interface(*class, *interface)
+            }
+            (TypeKind::Anonymous { fields: have }, TypeKind::Anonymous { fields: want }) => {
+                have.len() == want.len()
+                    && want.iter().all(|w| {
+                        have.iter()
+                            .any(|h| h.name == w.name && self.same_type(h.type_id, w.type_id))
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    fn same_type(&self, a: TypeId, b: TypeId) -> bool {
+        let (a, b) = (self.unalias(a), self.unalias(b));
+        let tt = self.context.type_table.borrow();
+        a == b || tt.get(a).map(|t| &t.kind) == tt.get(b).map(|t| &t.kind)
+    }
+
+    fn unalias(&self, mut ty: TypeId) -> TypeId {
+        let tt = self.context.type_table.borrow();
+        for _ in 0..16 {
+            match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                _ => break,
+            }
+        }
+        ty
+    }
+
+    /// `class` and its ancestors, nearest first.
+    fn class_chain(&self, class: SymbolId) -> Vec<SymbolId> {
+        let mut chain = vec![class];
+        while let Some(parent) = chain.last().and_then(|c| self.parent_class_symbol(*c)) {
+            if chain.contains(&parent) {
+                break;
+            }
+            chain.push(parent);
+        }
+        chain
+    }
+
+    /// The non-generic classes and interfaces a value of `ty` is, in haxe's
+    /// `unify_min` order: its class chain nearest first, then the interfaces,
+    /// the farthest ancestor's first and each ahead of those it extends.
+    fn base_types(&self, ty: TypeId) -> Vec<TypeId> {
+        let (symbol, is_interface) = match self
+            .context
+            .type_table
+            .borrow()
+            .get(self.unalias(ty))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Class { symbol_id, .. }) => (*symbol_id, false),
+            Some(TypeKind::Interface { symbol_id, .. }) => (*symbol_id, true),
+            _ => return Vec::new(),
+        };
+        let chain = if is_interface {
+            Vec::new()
+        } else {
+            self.class_chain(symbol)
+        };
+        let mut interfaces = Vec::new();
+        if is_interface {
+            self.push_interface(symbol, &mut interfaces);
+        }
+        for &class in chain.iter().rev() {
+            for interface in self.direct_interfaces(class).into_iter().rev() {
+                self.push_interface(interface, &mut interfaces);
+            }
+        }
+        chain
+            .into_iter()
+            .chain(interfaces)
+            .filter_map(|symbol| {
+                let ty = self.context.symbol_table.get_symbol(symbol)?.type_id;
+                let plain = match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+                    Some(
+                        TypeKind::Class {
+                            symbol_id,
+                            type_args,
+                        }
+                        | TypeKind::Interface {
+                            symbol_id,
+                            type_args,
+                        },
+                    ) => *symbol_id == symbol && type_args.is_empty(),
+                    _ => false,
+                };
+                plain.then_some(ty)
+            })
+            .collect()
+    }
+
+    fn push_interface(&self, interface: SymbolId, out: &mut Vec<SymbolId>) {
+        if out.contains(&interface) {
+            return;
+        }
+        out.push(interface);
+        for parent in self.direct_interfaces(interface).into_iter().rev() {
+            self.push_interface(parent, out);
+        }
+    }
+
+    /// The interfaces a class implements, or an interface extends, directly.
+    fn direct_interfaces(&self, symbol: SymbolId) -> Vec<SymbolId> {
+        let Some(index) = &self.static_sig_index else {
+            return Vec::new();
+        };
+        let interner = &self.context.string_interner;
+        let Some(name) = self
+            .context
+            .symbol_table
+            .get_symbol(symbol)
+            .and_then(|s| interner.get(s.qualified_name.unwrap_or(s.name)))
+            .map(str::to_owned)
+        else {
+            return Vec::new();
+        };
+        let names = index.borrow_mut().interfaces_of(&name);
+        names
+            .iter()
+            .filter_map(|name| {
+                self.context
+                    .symbol_table
+                    .all_symbols()
+                    .find(|s| {
+                        s.kind == crate::tast::SymbolKind::Interface
+                            && interner.get(s.qualified_name.unwrap_or(s.name))
+                                == Some(name.as_str())
+                    })
+                    .map(|s| s.id)
+            })
+            .collect()
+    }
+
+    /// `Null<ty>` for an array slot of a reference, which `Null` leaves as
+    /// it is; `None` for any other type.
+    fn nullable_slot(&self, ty: TypeId) -> Option<TypeId> {
+        let wraps = matches!(
+            self.context.type_table.borrow().get(ty).map(|t| &t.kind),
+            Some(TypeKind::Class { .. } | TypeKind::Interface { .. })
+        );
+        wraps.then(|| {
+            self.context
+                .type_table
+                .borrow_mut()
+                .create_optional_type(ty)
+        })
     }
 
     /// The value a statement used as a block's result carries: an expression

@@ -1789,7 +1789,7 @@ impl<'a> HirToMirContext<'a> {
                 _ => None,
             })
             .and_then(|sym| self.symbol_table.get_symbol(sym))
-            .map(|s| s.flags.contains(SymbolFlags::EXTERN))
+            .map(|s| s.flags.contains(SymbolFlags::EXTERN) || self.names_runtime_class_alias(s))
             .unwrap_or(false);
         if receiver_is_extern_class {
             return FieldIndexResolution::None;
@@ -1818,6 +1818,22 @@ impl<'a> HirToMirContext<'a> {
 
         let (class_ty, idx) = all_matches[0];
         FieldIndexResolution::Unique(class_ty, idx)
+    }
+
+    /// A class symbol standing for a stdlib typedef of a runtime class, as an
+    /// import placeholder for `haxe.io.Bytes` stands for `rayzor.Bytes`.
+    fn names_runtime_class_alias(&self, symbol: &crate::tast::Symbol) -> bool {
+        let Some(name) = symbol
+            .qualified_name
+            .and_then(|qn| self.string_interner.get(qn))
+        else {
+            return false;
+        };
+        (name.starts_with("haxe.") || name.starts_with("sys."))
+            && self
+                .stdlib_mapping
+                .get_class_static_str(name)
+                .is_some_and(|key| key != name)
     }
 
     pub(crate) fn resolve_interface_method_names(
