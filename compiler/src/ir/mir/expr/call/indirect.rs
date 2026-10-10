@@ -117,18 +117,19 @@ impl<'a> HirToMirContext<'a> {
             // direct-call path does: the callee unboxes those. It does NOT unbox
             // a function, anonymous, class or enum value received as `Dynamic` —
             // it uses the raw pointer, so boxing those here breaks the callee.
-            let boxable = {
-                let type_table = self.type_table;
-                matches!(
-                    type_table.get(a.ty).map(|t| &t.kind),
-                    Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
-                )
-            };
+            // An abstract travels as the type it stores.
+            let storage_ty = self.resolve_storage_type(a.ty);
+            let boxable = matches!(
+                self.type_table.get(storage_ty).map(|t| &t.kind),
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
+            );
             let reg = match formal_tys
                 .as_ref()
                 .and_then(|f| f.get(arg_formals[i]).copied())
             {
-                Some(formal) if boxable => self.maybe_box_value(reg, a.ty, formal).unwrap_or(reg),
+                Some(formal) if boxable => {
+                    self.maybe_box_value(reg, storage_ty, formal).unwrap_or(reg)
+                }
                 Some(formal) => self
                     .unbox_optional_for_erased_formal(reg, a.ty, formal)
                     .unwrap_or(reg),

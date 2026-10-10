@@ -882,6 +882,24 @@ impl<'a> HirToMirContext<'a> {
                 let value_reg = self.lower_expression(expr)?;
                 match self.box_type_param_for_dynamic(value_reg, symbol_id) {
                     Some(boxed) => self.runtime_type_check(boxed, *expected),
+                    // A call whose parameter nothing bound returns an erased
+                    // value; only its nullness is decidable.
+                    None if matches!(expr.kind, HirExprKind::Call { .. }) => {
+                        let ty = self
+                            .builder
+                            .get_register_type(value_reg)
+                            .unwrap_or(IrType::I64);
+                        if !matches!(ty, IrType::Ptr(_) | IrType::I64 | IrType::TypeVar(_)) {
+                            return self.builder.build_const(IrValue::Bool(true));
+                        }
+                        let bits = if ty == IrType::I64 {
+                            value_reg
+                        } else {
+                            self.builder.build_bitcast(value_reg, IrType::I64)?
+                        };
+                        let zero = self.builder.build_const(IrValue::I64(0))?;
+                        self.builder.build_cmp(CompareOp::Ne, bits, zero)
+                    }
                     None => self.builder.build_const(IrValue::Bool(true)),
                 }
             }

@@ -82,6 +82,17 @@ pub extern "C" fn rayzor_throw(exception_value: i64) {
 /// then longjmps to the most recent handler.
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_throw_typed(exception_value: i64, type_id: u32) {
+    // A thrown null is an instance of no type; a value type's zero is a value.
+    use crate::type_system::{TYPE_BOOL, TYPE_FLOAT, TYPE_FROM_HEADER, TYPE_INT, TYPE_NULL};
+    let type_id =
+        if exception_value == 0 && ![TYPE_INT.0, TYPE_FLOAT.0, TYPE_BOOL.0].contains(&type_id) {
+            TYPE_NULL.0
+        } else if type_id == TYPE_FROM_HEADER.0 {
+            // SAFETY: a non-null class instance starts with its type id.
+            unsafe { *(exception_value as *const i64) as u32 }
+        } else {
+            type_id
+        };
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         state.current_exception = exception_value;

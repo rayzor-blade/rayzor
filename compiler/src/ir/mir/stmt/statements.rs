@@ -1526,30 +1526,14 @@ impl<'a> HirToMirContext<'a> {
                         exception_reg
                     };
 
-                    // For class throws the type id comes from the object header[0]: it
-                    // already holds the id `runtime_type_id` produces for typed catches, so
-                    // thrown and expected ids share one encoding.
+                    // A class instance's type id is its header's; the runtime reads
+                    // it at the throw, where a null object has none to read.
                     let thrown_type_reg = if self.get_class_symbol(thrown_type).is_some() {
-                        let obj_ptr_ty = IrType::Ptr(Box::new(IrType::U8));
-                        let obj_ptr = self
-                            .builder
-                            .build_cast(exc_as_i64, IrType::I64, obj_ptr_ty.clone())
-                            .unwrap_or(exception_reg);
-                        let idx0 = self
-                            .builder
-                            .build_const(IrValue::I32(0))
-                            .expect("failed to create throw header index const");
-                        let header_ptr = self
-                            .builder
-                            .build_gep(obj_ptr, vec![idx0], IrType::I64)
-                            .expect("failed to build throw header gep");
-                        let header_raw = self
-                            .builder
-                            .build_load(header_ptr, IrType::I64)
-                            .expect("failed to load throw header type id");
                         self.builder
-                            .build_cast(header_raw, IrType::I64, IrType::I32)
-                            .expect("failed to cast throw class type id")
+                            .build_const(IrValue::I32(
+                                rayzor_runtime::type_system::TYPE_FROM_HEADER.0 as i32,
+                            ))
+                            .expect("failed to create throw type_id const")
                     } else {
                         let thrown_type_id =
                             self.runtime_type_id(self.exception_carrier_type(expr.ty));

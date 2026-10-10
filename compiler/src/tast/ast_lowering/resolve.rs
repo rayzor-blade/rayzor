@@ -560,7 +560,14 @@ impl<'a> AstLowering<'a> {
                     // the constant is an enum value the existing enum
                     // machinery already resolves, and short-circuiting to the
                     // abstract's field symbol makes the field unreachable.
-                    let prim = underlying.and_then(|u| type_table.get(u)).is_some_and(|u| {
+                    // `Null<Int>` counts as its primitive.
+                    let underlying =
+                        underlying.or_else(|| type_table.resolve_abstract_underlying(*symbol_id));
+                    let stored = underlying.map(|u| match type_table.get(u).map(|t| &t.kind) {
+                        Some(crate::tast::core::TypeKind::Optional { inner_type }) => *inner_type,
+                        _ => u,
+                    });
+                    let prim = stored.and_then(|u| type_table.get(u)).is_some_and(|u| {
                         matches!(
                             u.kind,
                             crate::tast::core::TypeKind::Int
@@ -570,7 +577,14 @@ impl<'a> AstLowering<'a> {
                         )
                     });
                     if !prim {
-                        return None;
+                        // A plain abstract over an enum matches the enum's constructors.
+                        match underlying {
+                            Some(u) => {
+                                current_type_id = u;
+                                continue;
+                            }
+                            None => return None,
+                        }
                     }
                     abstract_symbol = Some(*symbol_id);
                     break *symbol_id;

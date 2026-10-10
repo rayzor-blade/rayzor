@@ -624,6 +624,36 @@ impl<'a> HirToMirContext<'a> {
             return;
         };
         let start = if skip_first { 1 } else { 0 };
+        // Slots sharing a type parameter must agree on representation: with
+        // nothing binding it concretely, a known box keeps its box below, so
+        // every Dynamic sibling keeps its own.
+        let is_dynamic = |me: &Self, t: Option<crate::tast::TypeId>| {
+            t.is_some_and(|t| {
+                matches!(
+                    me.type_table.get(t).map(|t| &t.kind),
+                    Some(TypeKind::Dynamic)
+                )
+            })
+        };
+        let any_concrete = arg_types.iter().enumerate().skip(start).any(|(j, t)| {
+            matches!(param_types.get(j), Some(IrType::I64 | IrType::TypeVar(_)))
+                && t.is_some_and(|t| {
+                    !matches!(
+                        self.type_table.get(t).map(|ti| &ti.kind),
+                        None | Some(TypeKind::Dynamic)
+                            | Some(TypeKind::TypeParameter { .. })
+                            | Some(TypeKind::Unknown)
+                    )
+                })
+        });
+        let keeps_a_box = arg_regs.iter().enumerate().skip(start).any(|(i, reg)| {
+            matches!(param_types.get(i), Some(IrType::I64))
+                && self.boxed_value_regs.contains(reg)
+                && is_dynamic(self, arg_types.get(i).copied().flatten())
+        });
+        if !any_concrete && keeps_a_box {
+            return;
+        }
         for (i, arg_reg) in arg_regs.iter_mut().enumerate().skip(start) {
             if !matches!(param_types.get(i), Some(IrType::I64)) {
                 continue;

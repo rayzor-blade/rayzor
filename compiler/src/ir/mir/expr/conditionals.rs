@@ -149,6 +149,13 @@ impl<'a> HirToMirContext<'a> {
         let classify = |me: &Self, ty: crate::tast::TypeId| -> (Option<Prim>, Option<Prim>) {
             // (optional_inner_prim, bare_prim)
             let tt = me.type_table;
+            // An abstract compares as the type it stores.
+            let ty = match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Abstract { .. }) if !me.is_int64_type(ty) => {
+                    me.resolve_storage_type(ty)
+                }
+                _ => ty,
+            };
             let prim_of = |t: crate::tast::TypeId| match tt.get(t).map(|x| &x.kind) {
                 Some(TypeKind::Int) => Some(Prim::Int),
                 Some(TypeKind::Float) => Some(Prim::Float),

@@ -2431,6 +2431,9 @@ impl<'a> TastToHirContext<'a> {
                 }
             }
             TypedExpressionKind::UnaryOp { operator, operand } => {
+                if let Some(guarded) = self.lower_safe_navigation_write(expr) {
+                    return guarded;
+                }
                 if let Some((method_symbol, abstract_symbol)) =
                     self.find_unary_operator_method(operand.expr_type, operator)
                 {
@@ -2480,6 +2483,9 @@ impl<'a> TastToHirContext<'a> {
                 operator,
                 right,
             } => {
+                if let Some(guarded) = self.lower_safe_navigation_write(expr) {
+                    return guarded;
+                }
                 if *operator == BinaryOperator::Assign
                     && let TypedExpressionKind::FieldAccess {
                         object,
@@ -2572,13 +2578,30 @@ impl<'a> TastToHirContext<'a> {
                 // it sees the vector-typed operand registers.
                 // A field read through `@:op(a.b)` has the resolver's type.
                 let left_type = self.resolved_type(left);
+                let is_eq = matches!(operator, BinaryOperator::Eq | BinaryOperator::Ne);
+                let (ln, rn) = (
+                    is_eq && matches!(left.kind, TypedExpressionKind::Null),
+                    is_eq && matches!(right.kind, TypedExpressionKind::Null),
+                );
                 let op_method = self
-                    .find_binary_operator_method(left_type, right.expr_type, operator, false)
+                    .find_binary_operator_method(
+                        left_type,
+                        right.expr_type,
+                        operator,
+                        false,
+                        [ln, rn],
+                    )
                     .map(|(method, owner, is_class)| (method, owner, is_class, false))
                     .or_else(|| {
                         let right_type = self.resolved_type(right);
-                        self.find_binary_operator_method(right_type, left.expr_type, operator, true)
-                            .map(|(method, owner, is_class)| (method, owner, is_class, true))
+                        self.find_binary_operator_method(
+                            right_type,
+                            left.expr_type,
+                            operator,
+                            true,
+                            [rn, ln],
+                        )
+                        .map(|(method, owner, is_class)| (method, owner, is_class, true))
                     })
                     // A right operand's static operator applies in source order
                     // when the left operand converts to its first parameter.
@@ -2589,6 +2612,7 @@ impl<'a> TastToHirContext<'a> {
                             left.expr_type,
                             right.expr_type,
                             operator,
+                            [ln, rn],
                         )
                         .map(|(method, owner, is_class)| (method, owner, is_class, false))
                     })
@@ -2604,6 +2628,7 @@ impl<'a> TastToHirContext<'a> {
                             left.expr_type,
                             operator,
                             false,
+                            [false, false],
                         )
                         .map(|(method, owner, is_class)| (method, owner, is_class, false))
                     });
@@ -2857,8 +2882,11 @@ impl<'a> TastToHirContext<'a> {
                             );
                         }
 
-                        // Reference types: desugar to conditional
-                        let lhs_expr = self.lower_expression(left);
+                        // Reference types: `{ var t = lhs; t != null ? t : rhs }`,
+                        // evaluating lhs once.
+                        let mut statements = Vec::new();
+                        let lhs_init = self.lower_expression(left);
+                        let lhs_expr = self.bind_hir_operand(lhs_init, &mut statements);
                         let rhs_expr = self.lower_expression(right);
                         let null_expr = self.make_null_literal();
                         let condition = HirExpr::new(
@@ -2871,11 +2899,21 @@ impl<'a> TastToHirContext<'a> {
                             self.current_lifetime,
                             expr.source_location,
                         );
-                        HirExprKind::If {
-                            condition: Box::new(condition),
-                            then_expr: Box::new(lhs_expr),
-                            else_expr: Box::new(rhs_expr),
-                        }
+                        let choice = HirExpr::new(
+                            HirExprKind::If {
+                                condition: Box::new(condition),
+                                then_expr: Box::new(lhs_expr),
+                                else_expr: Box::new(rhs_expr),
+                            },
+                            expr.expr_type,
+                            self.current_lifetime,
+                            expr.source_location,
+                        );
+                        HirExprKind::Block(HirBlock::with_expr(
+                            statements,
+                            choice,
+                            self.current_scope,
+                        ))
                     }
                     _ => {
                         // Regular binary operators
@@ -4012,6 +4050,79 @@ impl<'a> TastToHirContext<'a> {
         let mut reference = operand.clone();
         reference.kind = TypedExpressionKind::Variable { symbol_id: symbol };
         reference
+    }
+
+    /// `o?.f = v`, `o?.f op= v`, `o?.f++`: the write happens only when `o`
+    /// is not null.
+    fn lower_safe_navigation_write(&mut self, expr: &TypedExpression) -> Option<HirExpr> {
+        let target = match &expr.kind {
+            TypedExpressionKind::BinaryOp { left, operator, .. }
+                if *operator == BinaryOperator::Assign
+                    || Self::compound_assignment_operator(operator).is_some() =>
+            {
+                left
+            }
+            TypedExpressionKind::UnaryOp { operator, operand }
+                if matches!(
+                    operator,
+                    UnaryOperator::PreInc
+                        | UnaryOperator::PostInc
+                        | UnaryOperator::PreDec
+                        | UnaryOperator::PostDec
+                ) =>
+            {
+                operand
+            }
+            _ => return None,
+        };
+        let TypedExpressionKind::FieldAccess {
+            object,
+            field_symbol,
+            is_optional: true,
+        } = &target.kind
+        else {
+            return None;
+        };
+        let mut statements = Vec::new();
+        let receiver = self.bind_assignment_operand(object, &mut statements);
+        let mut field = (**target).clone();
+        field.kind = TypedExpressionKind::FieldAccess {
+            object: Box::new(receiver.clone()),
+            field_symbol: *field_symbol,
+            is_optional: false,
+        };
+        let mut write = expr.clone();
+        match &mut write.kind {
+            TypedExpressionKind::BinaryOp { left, .. } => *left = Box::new(field),
+            TypedExpressionKind::UnaryOp { operand, .. } => *operand = Box::new(field),
+            _ => return None,
+        }
+        let condition = HirExpr::new(
+            HirExprKind::Binary {
+                op: HirBinaryOp::Ne,
+                lhs: Box::new(self.lower_expression(&receiver)),
+                rhs: Box::new(self.make_null_literal()),
+            },
+            self.get_bool_type(),
+            self.current_lifetime,
+            expr.source_location,
+        );
+        let guarded = HirExpr::new(
+            HirExprKind::If {
+                condition: Box::new(condition),
+                then_expr: Box::new(self.lower_expression(&write)),
+                else_expr: Box::new(self.make_null_literal()),
+            },
+            expr.expr_type,
+            self.current_lifetime,
+            expr.source_location,
+        );
+        Some(HirExpr::new(
+            HirExprKind::Block(HirBlock::with_expr(statements, guarded, self.current_scope)),
+            expr.expr_type,
+            self.current_lifetime,
+            expr.source_location,
+        ))
     }
 
     fn lower_lvalue(&mut self, expr: &TypedExpression) -> HirLValue {
@@ -5658,11 +5769,14 @@ impl<'a> TastToHirContext<'a> {
     }
 
     /// Rank the overload's parameters against the operands it receives.
+    /// `nulls` marks a `null` literal operand of `==`/`!=`, which only an
+    /// explicit `Null<T>` parameter accepts.
     fn operator_method_score(
         &self,
         method: SymbolId,
         left_ty: TypeId,
         right_ty: TypeId,
+        nulls: [bool; 2],
     ) -> Option<u32> {
         let Some(info) = self.symbol_table.get_symbol(method) else {
             return Some(0);
@@ -5675,15 +5789,27 @@ impl<'a> TastToHirContext<'a> {
         else {
             return Some(0);
         };
-        let operands = if is_static {
-            vec![left_ty, right_ty]
+        if !is_static && nulls[0] {
+            return None;
+        }
+        let (operands, nulls) = if is_static {
+            (vec![left_ty, right_ty], vec![nulls[0], nulls[1]])
         } else {
-            vec![right_ty]
+            (vec![right_ty], vec![nulls[1]])
         };
         params
             .iter()
             .zip(operands)
-            .try_fold(0, |score, (formal, actual)| {
+            .zip(nulls)
+            .try_fold(0, |score, ((formal, actual), is_null)| {
+                if is_null
+                    && !matches!(
+                        table.get(*formal).map(|t| &t.kind),
+                        Some(TypeKind::Optional { .. })
+                    )
+                {
+                    return None;
+                }
                 Some(score + table.operator_operand_score(*formal, actual)?)
             })
     }
@@ -5696,6 +5822,7 @@ impl<'a> TastToHirContext<'a> {
         left_ty: TypeId,
         right_ty: TypeId,
         operator: &BinaryOperator,
+        nulls: [bool; 2],
     ) -> Option<(SymbolId, SymbolId, bool)> {
         let owner = {
             let table = self.type_table.borrow();
@@ -5724,7 +5851,7 @@ impl<'a> TastToHirContext<'a> {
             .filter_map(|method| {
                 Some((
                     *method,
-                    self.operator_method_score(*method, left_ty, right_ty)?,
+                    self.operator_method_score(*method, left_ty, right_ty, nulls)?,
                 ))
             })
             .fold(None, |best: Option<(SymbolId, u32)>, (method, score)| {
@@ -5746,6 +5873,7 @@ impl<'a> TastToHirContext<'a> {
         other_type: TypeId,
         operator: &BinaryOperator,
         commutative_only: bool,
+        nulls: [bool; 2],
     ) -> Option<(SymbolId, SymbolId, bool)> {
         let type_table = self.type_table.borrow();
         let mut operand = operand_type;
@@ -5775,7 +5903,9 @@ impl<'a> TastToHirContext<'a> {
                 if commutative_only && !self.commutative_operator_methods.contains(method) {
                     continue;
                 }
-                if let Some(score) = self.operator_method_score(*method, operand_type, other_type) {
+                if let Some(score) =
+                    self.operator_method_score(*method, operand_type, other_type, nulls)
+                {
                     if best.is_none_or(|(_, prev)| score > prev) {
                         best = Some((*method, score));
                     }

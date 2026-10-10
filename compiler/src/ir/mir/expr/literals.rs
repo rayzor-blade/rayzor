@@ -39,7 +39,21 @@ impl<'a> HirToMirContext<'a> {
                 let result = self.builder.build_int(*i, ir_type);
                 if result.is_none() {
                     // Fallback to I32 if the type is unrecognized (e.g., Ptr(Void) from inlined static fields)
-                    return self.builder.build_int(*i, IrType::I32);
+                    let raw = self.builder.build_int(*i, IrType::I32)?;
+                    // A constant of an abstract over `Null<Int>` is boxed like
+                    // every other value of that type.
+                    let storage = self.resolve_storage_type(type_id);
+                    let null_int = match self.type_table.get(storage).map(|t| &t.kind) {
+                        Some(TypeKind::Optional { inner_type }) => matches!(
+                            self.type_table.get(*inner_type).map(|t| &t.kind),
+                            Some(TypeKind::Int)
+                        ),
+                        _ => false,
+                    };
+                    if null_int {
+                        return self.box_scalar_register(raw).or(Some(raw));
+                    }
+                    return Some(raw);
                 }
                 result
             }

@@ -53,6 +53,8 @@ pub const TYPE_FUNCTION: TypeId = TypeId(u32::MAX - 1);
 pub const TYPE_DYNAMIC_TOKEN: TypeId = TypeId(u32::MAX - 2);
 pub const TYPE_CLASS_TOKEN: TypeId = TypeId(u32::MAX - 3);
 pub const TYPE_ENUM_TOKEN: TypeId = TypeId(u32::MAX - 4);
+/// A thrown class instance: the type id is its header's, read at the throw.
+pub const TYPE_FROM_HEADER: TypeId = TypeId(u32::MAX - 5);
 
 // Compound type IDs (6 = anon object defined in anon_object.rs, 7 = array)
 pub const TYPE_ARRAY: TypeId = TypeId(7);
