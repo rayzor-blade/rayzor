@@ -391,6 +391,105 @@ impl AstLowering<'_> {
         })?;
         self.lower_expression(&expanded).map(Some)
     }
+
+    /// `x.name` read through a macro `@:resolve`/`@:op(a.b)` of `x`'s
+    /// abstract: the expansion of `resolver(x, "name")`.
+    pub(crate) fn lower_resolve_macro_field(
+        &mut self,
+        field_expr: &parser::Expr,
+        receiver_ast: &parser::Expr,
+        field: &str,
+        receiver_type: TypeId,
+    ) -> Result<Option<crate::tast::TypedExpression>, super::LoweringError> {
+        use crate::tast::TypeKind;
+        use parser::ExprKind;
+
+        let Some(registry) = self.deferred_macro_registry.as_ref() else {
+            return Ok(None);
+        };
+        let owner = {
+            let tt = self.context.type_table.borrow();
+            let mut ty = receiver_type;
+            for _ in 0..8 {
+                match tt.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Abstract { symbol_id, .. }) => *symbol_id,
+                _ => return Ok(None),
+            }
+        };
+        let Some(sym) = self.context.symbol_table.get_symbol(owner) else {
+            return Ok(None);
+        };
+        let interner = &self.context.string_interner;
+        let bare = interner.get(sym.name).unwrap_or_default();
+        let qualified = sym
+            .qualified_name
+            .and_then(|q| interner.get(q))
+            .unwrap_or(bare);
+        let owner_of = |def: &crate::macro_system::registry::MacroDefinition| {
+            def.qualified_name
+                .rsplit_once('.')
+                .map_or("", |(owner, _)| owner)
+                .to_string()
+        };
+        let resolvers: Vec<_> = registry
+            .all_macros()
+            .filter(|def| def.is_resolver && def.params.len() == 2)
+            .collect();
+        // The abstract's qualified name first, else its bare name.
+        let Some(def) = resolvers
+            .iter()
+            .find(|def| owner_of(**def) == qualified)
+            .or_else(|| {
+                resolvers.iter().find(|def| {
+                    let o = owner_of(**def);
+                    o == bare || o.ends_with(&format!(".{bare}"))
+                })
+            })
+        else {
+            return Ok(None);
+        };
+        let (name, method) = (def.qualified_name.clone(), def.name.clone());
+        let span = field_expr.span;
+        let macro_call = parser::Expr {
+            kind: ExprKind::Call {
+                expr: Box::new(parser::Expr {
+                    kind: ExprKind::Field {
+                        expr: Box::new(receiver_ast.clone()),
+                        field: method,
+                        is_optional: false,
+                    },
+                    span,
+                }),
+                args: vec![
+                    receiver_ast.clone(),
+                    parser::Expr {
+                        kind: ExprKind::String(field.to_string()),
+                        span,
+                    },
+                ],
+            },
+            span,
+        };
+        let cell = self.deferred_macro_expander.unwrap();
+        let expanded = {
+            let mut typer = DeferredMacroTyper {
+                lowering: self,
+                receiver: Some((receiver_ast, receiver_type)),
+            };
+            cell.borrow_mut()
+                .expand_deferred_call(&name, &macro_call, &mut typer)
+        }
+        .map_err(|e| super::LoweringError::SemanticError {
+            message: format!("macro '{}' failed during typing: {}", name, e),
+            location: self.context.create_location_from_span(span),
+        })?;
+        self.lower_expression(&expanded).map(Some)
+    }
 }
 
 impl DeferredMacroTyper<'_, '_> {

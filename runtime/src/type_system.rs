@@ -73,6 +73,28 @@ fn register_reflected_enum_value(value: i64, type_id: u32) {
     }
 }
 
+/// The enum of a registered enum cell. Only an address-shaped value is looked
+/// up, so an ordinary Int never takes the lock.
+fn registered_enum_cell_type(value: i64) -> Option<u32> {
+    let addr = value as usize;
+    if addr <= u32::MAX as usize || (addr & 7) != 0 || (addr >> 47) != 0 {
+        return None;
+    }
+    ENUM_VALUE_TYPES
+        .read()
+        .unwrap()
+        .as_ref()?
+        .get(&addr)
+        .copied()
+}
+
+/// An enum box's payload as the enum's I64 slot: a tag-only enum's
+/// discriminant, else its cell. None for any other box.
+pub(crate) fn enum_box_slot(d: &DynamicValue) -> Option<i64> {
+    (d.type_id.0 > 100 && get_type_info(d.type_id).is_some_and(|ti| ti.enum_info.is_some()))
+        .then_some(d.value_ptr as i64)
+}
+
 pub(crate) fn reflected_enum_array_type(
     array: *const crate::haxe_array::HaxeArray,
 ) -> Option<(u32, bool)> {
@@ -2545,7 +2567,8 @@ pub extern "C" fn haxe_unbox_int(dynamic: DynamicValue) -> i64 {
             }
         }
     } else {
-        0
+        // An enum lowers to I64, so an erased T reads its box back here.
+        enum_box_slot(&dynamic).unwrap_or(0)
     }
 }
 
@@ -3609,7 +3632,8 @@ pub extern "C" fn haxe_dynamic_equals_typed(raw: i64, type_tag: i32, other: *mut
             1 | 3 => match d.type_id {
                 TYPE_INT => *(d.value_ptr as *const i64) == raw,
                 TYPE_FLOAT => *(d.value_ptr as *const f64) == raw as f64,
-                _ => false,
+                // An enum is I64 too.
+                _ => enum_box_slot(&d) == Some(raw),
             },
             2 => d.type_id == TYPE_BOOL && *(d.value_ptr as *const bool) == (raw != 0),
             4 => {
@@ -3662,7 +3686,10 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
             haxe_box_typed_ptr(object as i64, ValueTag::Reference as i32)
         }
         Some(ValueTag::Int) => {
-            // Int: allocate and store value, same as haxe_box_int_ptr
+            // An enum lowers to I64 too: a registered cell boxes as its enum.
+            if let Some(type_id) = registered_enum_cell_type(value) {
+                return haxe_box_reference_ptr(value as *mut u8, type_id);
+            }
             haxe_box_int_ptr(value)
         }
         Some(ValueTag::Bool) => {

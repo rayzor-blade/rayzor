@@ -92,6 +92,7 @@ impl<'a> AstLowering<'a> {
             abstract_casts: BTreeMap::new(),
             abstract_from_methods: BTreeMap::new(),
             abstract_postfix_not: BTreeMap::new(),
+            annotated_dynamic_params: std::collections::BTreeSet::new(),
         }
     }
 

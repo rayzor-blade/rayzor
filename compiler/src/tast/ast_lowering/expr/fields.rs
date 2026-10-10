@@ -927,6 +927,11 @@ impl<'a> AstLowering<'a> {
             });
         if is_placeholder && !is_optional && field != "new" {
             if let Some(value) =
+                self.lower_resolve_macro_field(expression, expr, field, obj_expr.expr_type)?
+            {
+                return Ok(value);
+            }
+            if let Some(value) =
                 self.lower_unresolved_method_value(expression, expr, field, &obj_expr)?
             {
                 return Ok(value);

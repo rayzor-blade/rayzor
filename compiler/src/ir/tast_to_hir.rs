@@ -19,6 +19,18 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+/// An abstract's non-macro `@:op(a.b)` method, as a field read or write
+/// calls it.
+struct OperatorResolver {
+    method: SymbolId,
+    result_type: TypeId,
+    /// The abstract, when the method is static and takes the receiver first.
+    static_owner: Option<SymbolId>,
+    /// Trailing optional parameters past the explicit arguments: type and
+    /// default.
+    defaults: Vec<(TypeId, Option<TypedExpression>)>,
+}
+
 /// Context for lowering TAST to HIR
 pub struct TastToHirContext<'a> {
     /// Symbol table from TAST
@@ -6273,8 +6285,9 @@ impl<'a> TastToHirContext<'a> {
         expr: &TypedExpression,
     ) -> Option<HirExpr> {
         let arity = if value.is_some() { 2 } else { 1 };
-        let (method_symbol, result_type) =
+        let resolver =
             self.resolve_operator_method(self.resolved_type(object), field_symbol, arity)?;
+        let (method_symbol, result_type) = (resolver.method, resolver.result_type);
         let name = self.symbol_table.get_symbol(field_symbol)?.name;
         let name_literal = TypedExpression {
             kind: TypedExpressionKind::Literal {
@@ -6287,7 +6300,29 @@ impl<'a> TastToHirContext<'a> {
         };
         let mut args = vec![name_literal];
         args.extend(value.cloned());
+        args.extend(resolver.defaults.into_iter().map(|(ty, default)| {
+            default.unwrap_or_else(|| TypedExpression {
+                expr_type: ty,
+                kind: TypedExpressionKind::Null,
+                ..expr.clone()
+            })
+        }));
         let location = expr.source_location;
+        if let Some(owner) = resolver.static_owner {
+            // A static resolver takes the receiver as its first argument.
+            args.insert(0, object.clone());
+            let call = TypedExpression {
+                expr_type: result_type,
+                kind: TypedExpressionKind::StaticMethodCall {
+                    class_symbol: owner,
+                    method_symbol,
+                    arguments: args,
+                    type_arguments: Vec::new(),
+                },
+                ..expr.clone()
+            };
+            return Some(self.lower_expression(&call));
+        }
         Some(
             self.try_inline_abstract_method(object, method_symbol, &args, result_type, location)
                 .unwrap_or_else(|| {
@@ -6306,19 +6341,20 @@ impl<'a> TastToHirContext<'a> {
                 is_optional: false,
             } => self
                 .resolve_operator_method(self.resolved_type(object), *field_symbol, 1)
-                .map_or(expr.expr_type, |(_, ty)| ty),
+                .map_or(expr.expr_type, |r| r.result_type),
             _ => expr.expr_type,
         }
     }
 
-    /// The `@:op(a.b)` method taking `arity` arguments that `field_symbol`
-    /// resolves through on a receiver of `object_type`, and its result type.
+    /// The non-macro `@:op(a.b)` method taking `arity` arguments besides the
+    /// receiver that `field_symbol` resolves through on a receiver of
+    /// `object_type`.
     fn resolve_operator_method(
         &self,
         object_type: TypeId,
         field_symbol: SymbolId,
         arity: usize,
-    ) -> Option<(SymbolId, TypeId)> {
+    ) -> Option<OperatorResolver> {
         let abstract_symbol = {
             let table = self.type_table.borrow();
             let mut ty = object_type;
@@ -6349,18 +6385,41 @@ impl<'a> TastToHirContext<'a> {
         if is_member {
             return None;
         }
-        abstract_def
+        // A static resolver takes the receiver first; trailing optional
+        // parameters take their defaults. An exact arity wins.
+        let explicit = |m: &TypedFunction| arity + usize::from(m.is_static);
+        let resolvers: Vec<&TypedFunction> = abstract_def
             .methods
             .iter()
-            .find(|m| {
-                !m.is_static
-                    && m.parameters.len() == arity
-                    && m.metadata
-                        .operator_metadata
+            .filter(|m| {
+                m.metadata
+                    .operator_metadata
+                    .iter()
+                    .any(|(op, _)| op == "a.b")
+                    && !self
+                        .symbol_table
+                        .get_symbol(m.symbol_id)
+                        .is_some_and(|s| s.flags.contains(crate::tast::symbols::SymbolFlags::MACRO))
+                    && explicit(*m) <= m.parameters.len()
+                    && m.parameters[explicit(*m)..]
                         .iter()
-                        .any(|(op, _)| op == "a.b")
+                        .all(|p| p.is_optional || p.default_value.is_some())
             })
-            .map(|m| (m.symbol_id, m.return_type))
+            .collect();
+        let method = resolvers
+            .iter()
+            .find(|m| m.parameters.len() == explicit(**m))
+            .or_else(|| resolvers.first())?;
+        let defaults = method.parameters[explicit(*method)..]
+            .iter()
+            .map(|p| (p.param_type, p.default_value.clone()))
+            .collect();
+        Some(OperatorResolver {
+            method: method.symbol_id,
+            result_type: method.return_type,
+            static_owner: method.is_static.then_some(abstract_symbol),
+            defaults,
+        })
     }
 
     /// Generic Map slots hold IMap fat pointers and read through its get slot.

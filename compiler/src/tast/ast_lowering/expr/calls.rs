@@ -1600,6 +1600,39 @@ impl<'a> AstLowering<'a> {
         None
     }
 
+    /// The type a primitive `actual` takes on its way into `abstract_ty`
+    /// through a declared `from`: itself, or Float for an Int when only Float
+    /// is accepted. None when the abstract takes no such primitive.
+    pub(crate) fn abstract_from_source(
+        &self,
+        abstract_ty: TypeId,
+        actual: TypeId,
+    ) -> Option<TypeId> {
+        use crate::tast::core::TypeKind;
+        let symbol = self.abstract_symbol_of(abstract_ty)?;
+        let (sources, _) = self.abstract_casts.get(&symbol)?;
+        let tt = self.context.type_table.borrow();
+        let kind_of = |ty: TypeId| {
+            tt.get(Self::resolve_alias_chain(&tt, ty))
+                .map(|t| t.kind.clone())
+        };
+        let accepts = |wanted: &TypeKind| {
+            sources.iter().any(|s| {
+                kind_of(*s)
+                    .is_some_and(|k| std::mem::discriminant(&k) == std::mem::discriminant(wanted))
+            })
+        };
+        match kind_of(actual)? {
+            k @ (TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
+                if accepts(&k) =>
+            {
+                Some(actual)
+            }
+            TypeKind::Int if accepts(&TypeKind::Float) => Some(tt.float_type()),
+            _ => None,
+        }
+    }
+
     /// Convert an abstract-typed argument when the formal is a concrete type
     /// the abstract implicitly casts to (a `to` clause or an `@:to` method):
     /// `f(meters)` with `f(s:String)` passes `meters` through its `@:to`. The
@@ -3781,6 +3814,14 @@ impl<'a> AstLowering<'a> {
                 crate::tast::core::TypeKind::GenericInstance { base_type, .. } => {
                     current = base_type
                 }
+                // `Null<S>.m()`, as `?.` reaches it, typed for a macro's probe
+                // only: the runtime chain guards each `?.` link alone, so a
+                // typed `[i]` after the call would index its null.
+                crate::tast::core::TypeKind::Optional { inner_type, .. }
+                    if self.macro_probe_depth > 0 =>
+                {
+                    current = inner_type
+                }
                 // A typedef pre-registered as a class keeps that symbol kind, so
                 // its instantiation is a Class node whose arguments bind the
                 // alias's parameters all the same.
@@ -4531,6 +4572,11 @@ impl<'a> AstLowering<'a> {
                 resolved.insert(var, float_t);
                 continue;
             }
+            // An abstract bound first keeps the variable; a later primitive
+            // converts to it through the abstract's `from`, as Haxe unifies.
+            if direct_vars.contains(&var) && self.abstract_from_source(prev, ty).is_some() {
+                continue;
+            }
             if direct_vars.contains(&var) {
                 let table = self.context.type_table.borrow();
                 let common_interface = match (
@@ -4560,12 +4606,23 @@ impl<'a> AstLowering<'a> {
             }
             return Vec::new();
         }
-        // Mixed Float/Dynamic arguments use boxes to preserve value tags.
-        // A result involving T retains the type inferred by its caller.
+        // Mixed Float/Dynamic arguments use boxes to preserve value tags, as
+        // do Int and Bool for a bare T met by a parameter annotated Dynamic:
+        // that one holds a box no scalar slot reads. A result involving T
+        // retains the type inferred by its caller.
+        let bool_t = self.context.type_table.borrow().bool_type();
         for (declared, argument) in params.iter().zip(arguments.iter()) {
             if let Some(var) = self.dynamic_bound_var(*declared, argument.expr_type, 0) {
+                let bound = resolved.get(&var).copied();
+                let annotated_dynamic = direct_vars.contains(&var)
+                    && matches!(
+                        argument.kind,
+                        TypedExpressionKind::Variable { symbol_id }
+                            if self.annotated_dynamic_params.contains(&symbol_id)
+                    );
                 if !result_depends_on_parameters
-                    && resolved.get(&var) == Some(&self.context.type_table.borrow().float_type())
+                    && (bound == Some(float_t)
+                        || (annotated_dynamic && (bound == Some(int_t) || bound == Some(bool_t))))
                     && matches!(
                         self.context
                             .type_table
@@ -4636,6 +4693,37 @@ impl<'a> AstLowering<'a> {
             let Some(&target) = bound.get(symbol_id) else {
                 continue;
             };
+            // A primitive for a variable bound to an abstract converts the
+            // way `(v:A)` does, Int widening first when only Float is accepted.
+            if target != argument.expr_type
+                && let Some(source) = self.abstract_from_source(target, argument.expr_type)
+            {
+                let mut inner = argument.clone();
+                if source != inner.expr_type {
+                    if let TypedExpressionKind::Literal {
+                        value: LiteralValue::Int(n),
+                    } = inner.kind
+                    {
+                        inner.kind = TypedExpressionKind::Literal {
+                            value: LiteralValue::Float(n as f64),
+                        };
+                    } else {
+                        inner.kind = TypedExpressionKind::Cast {
+                            expression: Box::new(inner.clone()),
+                            target_type: source,
+                            cast_kind: CastKind::Implicit,
+                        };
+                    }
+                    inner.expr_type = source;
+                }
+                argument.kind = TypedExpressionKind::Cast {
+                    expression: Box::new(inner),
+                    target_type: target,
+                    cast_kind: CastKind::Checked,
+                };
+                argument.expr_type = target;
+                continue;
+            }
             if target != argument.expr_type
                 && matches!(
                     tt.get(target).map(|t| &t.kind),

@@ -5,7 +5,8 @@ package unit;
 class Test {
     public function new() {}
 
-    function eq<T>(v:T, v2:T):Void {
+    // `pos` matches upstream's signature; tests forward their own.
+    function eq<T>(v:T, v2:T, ?pos:haxe.PosInfos):Void {
         unit.ConfCheck.ok();
         // Marker first, values second. Rendering a wrong value can crash --
         // a wrong value is often a wrong REPRESENTATION -- and a crash that

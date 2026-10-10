@@ -50,6 +50,19 @@ pub fn extract_macro_name_from_meta(meta: &parser::Metadata) -> String {
     extract_macro_name_from_args(&meta.params)
 }
 
+/// `@:resolve`, or `@:op(a.b)`.
+fn is_resolver_meta(meta: &parser::Metadata) -> bool {
+    use parser::ExprKind;
+    match meta.name.trim_start_matches(':') {
+        "resolve" => true,
+        "op" => meta.params.first().is_some_and(|p| {
+            matches!(&p.kind, ExprKind::Field { expr, field, .. }
+                if field == "b" && matches!(&expr.kind, ExprKind::Ident(a) if a == "a"))
+        }),
+        _ => false,
+    }
+}
+
 /// A registered macro function definition
 #[derive(Debug, Clone)]
 pub struct MacroDefinition {
@@ -68,6 +81,8 @@ pub struct MacroDefinition {
     pub is_build_macro: bool,
     /// Static macros take only explicit arguments; instance macros take `ethis` first.
     pub is_static: bool,
+    /// Declared `@:resolve` or `@:op(a.b)`: expands field reads on its abstract.
+    pub is_resolver: bool,
     /// Source file where defined
     pub source_file: String,
     /// The DEFINING file's imports, resolved once here.
@@ -328,6 +343,7 @@ impl MacroRegistry {
                 body,
                 is_build_macro: false,
                 is_static: field.modifiers.contains(&Modifier::Static),
+                is_resolver: field.meta.iter().any(is_resolver_meta),
                 source_file: source_file.to_string(),
                 imports: file_imports.clone(),
                 location: SourceLocation::new(0, 0, 0, field.span.start as u32),

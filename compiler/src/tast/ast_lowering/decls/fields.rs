@@ -995,6 +995,18 @@ impl<'a> AstLowering<'a> {
         } else {
             self.context.type_table.borrow().dynamic_type()
         };
+        if parameter.type_hint.is_some()
+            && matches!(
+                self.context
+                    .type_table
+                    .borrow()
+                    .get(param_type)
+                    .map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            )
+        {
+            self.annotated_dynamic_params.insert(param_symbol);
+        }
 
         // Update the parameter symbol with its type
         self.context

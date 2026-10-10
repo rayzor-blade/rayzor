@@ -837,10 +837,12 @@ pub(crate) fn walk_expr_pruned<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr) -
 }
 
 /// The methods of this class a body calls by bare name, `this.m(..)` or
-/// `Cls.m(..)`, including calls made from nested functions.
+/// `Cls.m(..)` (any `x.m(..)` with `any_receiver`), including calls made
+/// from nested functions.
 fn collect_same_class_calls<'a>(
     body: &'a Expr,
     class_name: &str,
+    any_receiver: bool,
     out: &mut std::collections::BTreeSet<&'a str>,
 ) {
     walk_expr(body, &mut |e| {
@@ -856,6 +858,9 @@ fn collect_same_class_calls<'a>(
                         out.insert(field.as_str());
                     }
                     ExprKind::Ident(cls) if cls == class_name => {
+                        out.insert(field.as_str());
+                    }
+                    _ if any_receiver => {
                         out.insert(field.as_str());
                     }
                     _ => {}
@@ -1685,6 +1690,9 @@ pub struct AstLowering<'a> {
     pub(crate) abstract_from_methods: BTreeMap<SymbolId, Vec<(SymbolId, TypeId)>>,
     /// Each abstract's `@:op(A!)` method: (name, is_static).
     pub(crate) abstract_postfix_not: BTreeMap<SymbolId, (String, bool)>,
+    /// Parameters the source annotates `Dynamic`. Callers box what they pass,
+    /// so these hold boxes; a Dynamic that is merely a decay may not.
+    pub(crate) annotated_dynamic_params: std::collections::BTreeSet<SymbolId>,
 }
 
 /// Result of type parameter substitution for generic method return types

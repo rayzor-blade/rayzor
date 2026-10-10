@@ -1030,6 +1030,16 @@ fn compare_reference_slot(a: i64, b: i64) -> i64 {
     if b == 0 {
         return 1;
     }
+    // Two boxes of one enum value.
+    let enum_box = |v: i64| {
+        crate::type_system::dynamic_value_if_boxed(v as *mut u8)
+            .and_then(|d| crate::type_system::enum_box_slot(&d).map(|slot| (d.type_id, slot)))
+    };
+    if let (Some(x), Some(y)) = (enum_box(a), enum_box(b))
+        && x == y
+    {
+        return 0;
+    }
     let a_token = type_token_id(a);
     let b_token = type_token_id(b);
     if let (Some(a_id), Some(b_id)) = (a_token, b_token) {

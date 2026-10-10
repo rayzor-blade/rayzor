@@ -481,7 +481,7 @@ impl<'a> AstLowering<'a> {
         // whose return type is inferred sees that type rather than Dynamic.
         // Declaration order is kept for everything the lowered list feeds.
         let mut lowered: BTreeMap<usize, TypedFunction> = BTreeMap::new();
-        for index in self.method_lowering_order(class_decl, class_symbol) {
+        for index in self.method_lowering_order(&class_decl.fields, class_symbol, false) {
             let field = &class_decl.fields[index];
             if let ClassFieldKind::Function(func) = &field.kind {
                 match self.lower_function_from_field(field, func) {
@@ -925,8 +925,15 @@ impl<'a> AstLowering<'a> {
 
     /// Field indices of the class's functions, callees before callers when
     /// the callee's return type is left to inference; otherwise declaration
-    /// order. A cycle falls back to declaration order.
-    fn method_lowering_order(&self, class_decl: &ClassDecl, class_symbol: SymbolId) -> Vec<usize> {
+    /// order. A cycle falls back to declaration order. `any_receiver` counts
+    /// `x.m()` on any receiver, as an abstract's static methods take theirs
+    /// as a parameter.
+    pub(crate) fn method_lowering_order(
+        &self,
+        fields: &[ClassField],
+        class_symbol: SymbolId,
+        any_receiver: bool,
+    ) -> Vec<usize> {
         let class_name = self
             .context
             .symbol_table
@@ -934,8 +941,7 @@ impl<'a> AstLowering<'a> {
             .and_then(|s| self.context.string_interner.get(s.name))
             .unwrap_or("")
             .to_string();
-        let by_name: BTreeMap<&str, usize> = class_decl
-            .fields
+        let by_name: BTreeMap<&str, usize> = fields
             .iter()
             .enumerate()
             .filter_map(|(i, f)| match &f.kind {
@@ -948,12 +954,13 @@ impl<'a> AstLowering<'a> {
             })
             .collect();
         let mut order = Vec::new();
-        let mut done = vec![false; class_decl.fields.len()];
-        let mut on_path = vec![false; class_decl.fields.len()];
+        let mut done = vec![false; fields.len()];
+        let mut on_path = vec![false; fields.len()];
         fn visit(
             index: usize,
-            class_decl: &ClassDecl,
+            fields: &[ClassField],
             class_name: &str,
+            any_receiver: bool,
             by_name: &BTreeMap<&str, usize>,
             done: &mut [bool],
             on_path: &mut [bool],
@@ -963,14 +970,21 @@ impl<'a> AstLowering<'a> {
                 return;
             }
             on_path[index] = true;
-            if let ClassFieldKind::Function(func) = &class_decl.fields[index].kind {
+            if let ClassFieldKind::Function(func) = &fields[index].kind {
                 if let Some(body) = &func.body {
                     let mut callees = std::collections::BTreeSet::new();
-                    collect_same_class_calls(body, class_name, &mut callees);
+                    collect_same_class_calls(body, class_name, any_receiver, &mut callees);
                     for callee in callees {
                         if let Some(&target) = by_name.get(callee) {
                             visit(
-                                target, class_decl, class_name, by_name, done, on_path, order,
+                                target,
+                                fields,
+                                class_name,
+                                any_receiver,
+                                by_name,
+                                done,
+                                on_path,
+                                order,
                             );
                         }
                     }
@@ -980,12 +994,13 @@ impl<'a> AstLowering<'a> {
             done[index] = true;
             order.push(index);
         }
-        for (index, field) in class_decl.fields.iter().enumerate() {
+        for (index, field) in fields.iter().enumerate() {
             if matches!(field.kind, ClassFieldKind::Function(_)) {
                 visit(
                     index,
-                    class_decl,
+                    fields,
                     &class_name,
+                    any_receiver,
                     &by_name,
                     &mut done,
                     &mut on_path,

@@ -573,8 +573,12 @@ impl<'a> AstLowering<'a> {
         });
         let mut next_int: i64 = 0;
         let mut next_bool = false;
+        // Methods lower callee-first, as a class's do; constructors and
+        // fields keep declaration order.
+        let mut lowered_methods: Option<BTreeMap<usize, Result<TypedFunction, LoweringError>>> =
+            None;
 
-        for field in &abstract_decl.fields {
+        for (field_index, field) in abstract_decl.fields.iter().enumerate() {
             match &field.kind {
                 ClassFieldKind::Function(func) => {
                     if func.name == "new" {
@@ -644,11 +648,32 @@ impl<'a> AstLowering<'a> {
                             }
                         }
                         // Regular method
-                        match self.lower_function_from_field(field, func) {
-                            Ok(typed_function) => {
-                                methods.push(typed_function);
+                        if lowered_methods.is_none() {
+                            let mut lowered = BTreeMap::new();
+                            for index in self.method_lowering_order(
+                                &abstract_decl.fields,
+                                abstract_symbol,
+                                true,
+                            ) {
+                                let method_field = &abstract_decl.fields[index];
+                                if let ClassFieldKind::Function(f) = &method_field.kind {
+                                    if f.name != "new" {
+                                        lowered.insert(
+                                            index,
+                                            self.lower_function_from_field(method_field, f),
+                                        );
+                                    }
+                                }
                             }
-                            Err(e) => self.context.add_error(e),
+                            lowered_methods = Some(lowered);
+                        }
+                        match lowered_methods
+                            .as_mut()
+                            .and_then(|lowered| lowered.remove(&field_index))
+                        {
+                            Some(Ok(typed_function)) => methods.push(typed_function),
+                            Some(Err(e)) => self.context.add_error(e),
+                            None => {}
                         }
                     }
                 }
