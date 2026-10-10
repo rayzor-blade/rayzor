@@ -607,7 +607,7 @@ impl<'a> AstLowering<'a> {
             .map(|s| self.context.string_interner.intern(s))
             .collect();
         let qualified_path =
-            super::namespace::QualifiedPath::new(package_path, class_name_interned);
+            super::namespace::QualifiedPath::new(package_path.clone(), class_name_interned);
 
         let class_symbol_id = if let Some(symbol_id) = self
             .context
@@ -669,6 +669,34 @@ impl<'a> AstLowering<'a> {
             self.using_modules.push((class_name_interned, symbol_id));
         } else {
             self.unresolved_usings.push(class_name_interned);
+        }
+
+        // `using pkg.Module` also brings the module's other classes; they
+        // register under `pkg` alone.
+        for name in self
+            .context
+            .namespace_resolver
+            .module_class_names(&module_path_str)
+        {
+            if name == class_name {
+                continue;
+            }
+            let name = self.context.intern_string(&name);
+            let path = super::namespace::QualifiedPath::new(package_path.clone(), name);
+            let symbol = self
+                .context
+                .namespace_resolver
+                .lookup_symbol(&path)
+                .or_else(|| {
+                    self.context
+                        .symbol_table
+                        .lookup_symbol(ScopeId::first(), name)
+                        .map(|s| s.id)
+                });
+            match symbol {
+                Some(symbol) => self.using_modules.push((name, symbol)),
+                None => self.unresolved_usings.push(name),
+            }
         }
         // Note: If class not found, static extensions will still work through the
         // "LAST RESORT" mechanism in hir_to_mir.rs which searches all stdlib classes

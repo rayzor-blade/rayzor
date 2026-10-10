@@ -26,7 +26,8 @@
 use crate::anon_object::{self, DYNAMIC_SHAPE};
 use crate::haxe_string::HaxeString;
 use crate::type_system::{
-    DynamicValue, StringPtr, TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_STRING, TypeId,
+    DynamicValue, ParamType, StringPtr, TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_STRING, TypeId,
+    box_class_field_as_dynamic, dynamic_box_at, get_type_info, is_class_type,
 };
 
 /// Type ID for arrays in the DynamicValue type system
@@ -682,10 +683,43 @@ fn stringify_value(ptr: *mut u8, buf: &mut String) {
             stringify_anon_object(dv.value_ptr, buf);
         } else if dv.type_id == TYPE_ARRAY {
             stringify_array(dv.value_ptr, buf);
+        } else if is_class_type(dv.type_id.0) {
+            stringify_class_instance(ptr, dv, buf);
         } else {
             buf.push_str("null");
         }
     }
+}
+
+/// A class instance, raw or in a box, as an object of its instance variables.
+unsafe fn stringify_class_instance(ptr: *mut u8, dv: DynamicValue, buf: &mut String) {
+    let type_id = dv.type_id.0;
+    // A box holds the instance, whose own header names the same class; a raw
+    // instance has its first field where a box keeps the payload.
+    let boxed = dynamic_box_at(dv.value_ptr).is_some()
+        && unsafe { *(dv.value_ptr as *const u32) } == type_id;
+    let obj = if boxed { dv.value_ptr } else { ptr };
+    let Some(info) = get_type_info(TypeId(type_id)).and_then(|t| t.class_info) else {
+        buf.push_str("null");
+        return;
+    };
+    buf.push('{');
+    for (i, name) in info.instance_fields.iter().enumerate() {
+        let ty = info
+            .instance_field_types
+            .get(i)
+            .copied()
+            .unwrap_or(ParamType::Dynamic);
+        // Slot 0 is the type header; field `i` sits at `(i + 1) * 8`.
+        let raw = unsafe { *(obj.add((i + 1) * 8) as *const u64) };
+        if i > 0 {
+            buf.push(',');
+        }
+        stringify_string_bytes(name.as_bytes(), buf);
+        buf.push(':');
+        stringify_value(unsafe { box_class_field_as_dynamic(raw, ty) }, buf);
+    }
+    buf.push('}');
 }
 
 /// Fast integer-to-string without allocating a temporary String.

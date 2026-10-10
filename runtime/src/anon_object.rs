@@ -8,8 +8,8 @@
 //! ## Handle Layout
 //!
 //! Each JIT variable holding an anon object stores a `*mut u8` that points to
-//! a `Box<Arc<AnonObject>>`. This double indirection allows COW via `Arc::make_mut`
-//! without changing the handle pointer seen by JIT code.
+//! a boxed tag word and `Arc<AnonObject>`. This double indirection allows COW
+//! via `Arc::make_mut` without changing the handle pointer seen by JIT code.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -236,15 +236,39 @@ fn get_shape(shape_id: u32) -> Option<ShapeDescriptor> {
 }
 
 // ============================================================================
-// Handle helpers: Box<Arc<AnonObject>> stored as *mut u8
+// Handle helpers: Box<AnonHandle> stored as *mut u8
 // ============================================================================
+
+/// First word of a handle: a non-canonical address, so no class instance
+/// (type id), array or string (data pointer) or box (type id) starts with it.
+const ANON_HANDLE_TAG: u64 = 0x52_5A_41_4E_4F_4E_00_01;
+
+#[repr(C)]
+struct AnonHandle {
+    tag: u64,
+    arc: Arc<AnonObject>,
+}
+
+fn new_handle(arc: Arc<AnonObject>) -> *mut u8 {
+    Box::into_raw(Box::new(AnonHandle {
+        tag: ANON_HANDLE_TAG,
+        arc,
+    })) as *mut u8
+}
+
+/// Whether `ptr` is a handle from `rayzor_anon_new` and friends, rather than
+/// another reference a structural type was given (an array, a class instance).
+pub(crate) fn is_anon_handle(ptr: *mut u8) -> bool {
+    let addr = ptr as usize;
+    addr >= 0x1000 && addr & 7 == 0 && unsafe { *(ptr as *const u64) } == ANON_HANDLE_TAG
+}
 
 /// Borrow the Arc from a handle pointer (does NOT take ownership)
 ///
 /// # Safety
 /// ptr must be a valid handle returned by rayzor_anon_new or rayzor_anon_clone
 unsafe fn borrow_arc(ptr: *mut u8) -> &'static Arc<AnonObject> {
-    unsafe { &*(ptr as *const Arc<AnonObject>) }
+    unsafe { &(*(ptr as *const AnonHandle)).arc }
 }
 
 /// Borrow the Arc mutably from a handle pointer (does NOT take ownership)
@@ -252,7 +276,7 @@ unsafe fn borrow_arc(ptr: *mut u8) -> &'static Arc<AnonObject> {
 /// # Safety
 /// ptr must be a valid handle, and no other references must exist
 unsafe fn borrow_arc_mut(ptr: *mut u8) -> &'static mut Arc<AnonObject> {
-    unsafe { &mut *(ptr as *mut Arc<AnonObject>) }
+    unsafe { &mut (*(ptr as *mut AnonHandle)).arc }
 }
 
 // ============================================================================
@@ -268,10 +292,7 @@ pub extern "C" fn rayzor_anon_new(shape_id: u32, field_count: u32) -> *mut u8 {
         AnonData::Inline(vec![0u64; field_count as usize])
     };
 
-    let obj = AnonObject { shape_id, data };
-    let arc = Arc::new(obj);
-    let boxed = Box::new(arc);
-    Box::into_raw(boxed) as *mut u8
+    new_handle(Arc::new(AnonObject { shape_id, data }))
 }
 
 /// Clone an anonymous object handle (creates new handle sharing the same Arc)
@@ -280,12 +301,7 @@ pub extern "C" fn rayzor_anon_clone(ptr: *mut u8) -> *mut u8 {
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
-    unsafe {
-        let arc_ref = borrow_arc(ptr);
-        let cloned = Arc::clone(arc_ref);
-        let boxed = Box::new(cloned);
-        Box::into_raw(boxed) as *mut u8
-    }
+    unsafe { new_handle(Arc::clone(borrow_arc(ptr))) }
 }
 
 /// Drop an anonymous object handle (decrements Arc refcount, frees if zero)
@@ -295,7 +311,7 @@ pub extern "C" fn rayzor_anon_drop(ptr: *mut u8) {
         return;
     }
     unsafe {
-        let _boxed: Box<Arc<AnonObject>> = Box::from_raw(ptr as *mut Arc<AnonObject>);
+        let _boxed: Box<AnonHandle> = Box::from_raw(ptr as *mut AnonHandle);
         // Box dropped here → Arc dropped → refcount decremented → object freed if zero
     }
 }
@@ -335,7 +351,7 @@ pub extern "C" fn rayzor_anon_set_field_by_index(ptr: *mut u8, index: u32, value
 /// Check if field exists by name
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_has_field(ptr: *mut u8, name_ptr: *const u8, name_len: u32) -> bool {
-    if ptr.is_null() || name_ptr.is_null() {
+    if !is_anon_handle(ptr) || name_ptr.is_null() {
         return false;
     }
     unsafe {
@@ -362,7 +378,7 @@ pub extern "C" fn rayzor_anon_has_field(ptr: *mut u8, name_ptr: *const u8, name_
 
 /// A field's stored bits, by name; `None` when the object has no such field.
 pub(crate) fn anon_raw_field(ptr: *mut u8, name: &str) -> Option<u64> {
-    if ptr.is_null() {
+    if !is_anon_handle(ptr) {
         return None;
     }
     let arc_ref = unsafe { borrow_arc(ptr) };
@@ -383,7 +399,7 @@ pub extern "C" fn rayzor_anon_get_field(
     name_ptr: *const u8,
     name_len: u32,
 ) -> *mut u8 {
-    if ptr.is_null() || name_ptr.is_null() {
+    if !is_anon_handle(ptr) || name_ptr.is_null() {
         return std::ptr::null_mut();
     }
     unsafe {
@@ -618,13 +634,7 @@ pub extern "C" fn rayzor_anon_copy(ptr: *mut u8) -> *mut u8 {
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
-    unsafe {
-        let arc_ref = borrow_arc(ptr);
-        let cloned_obj = (**arc_ref).clone();
-        let arc = Arc::new(cloned_obj);
-        let boxed = Box::new(arc);
-        Box::into_raw(boxed) as *mut u8
-    }
+    unsafe { new_handle(Arc::new((**borrow_arc(ptr)).clone())) }
 }
 
 // ============================================================================

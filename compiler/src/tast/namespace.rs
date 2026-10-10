@@ -356,6 +356,80 @@ impl NamespaceResolver {
         Self::declaring_keyword(&content, name)
     }
 
+    /// Non-private classes and abstracts declared at the top level of the
+    /// module at `qualified_path`, in declaration order: what `using` of that
+    /// module brings into scope.
+    pub fn module_class_names(&self, qualified_path: &str) -> Vec<String> {
+        let file_path = qualified_path.replace('.', "/") + ".hx";
+        self.source_paths
+            .iter()
+            .chain(self.stdlib_paths.iter())
+            .map(|base| base.join(&file_path))
+            .find(|path| path.exists())
+            .and_then(|file| std::fs::read_to_string(file).ok())
+            .map(|content| Self::top_level_class_names(&content))
+            .unwrap_or_default()
+    }
+
+    fn top_level_class_names(content: &str) -> Vec<String> {
+        let bytes = content.as_bytes();
+        let mut names = Vec::new();
+        let (mut i, mut depth) = (0usize, 0usize);
+        // `declaring`: the next word names a class; `skipping`: it names
+        // some other type.
+        let (mut declaring, mut skipping, mut private) = (false, false, false);
+        while i < bytes.len() {
+            match bytes[i] {
+                b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                    i += 2;
+                    while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/'))
+                    {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                quote @ (b'"' | b'\'') => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != quote {
+                        i += if bytes[i] == b'\\' { 2 } else { 1 };
+                    }
+                }
+                b'{' => depth += 1,
+                b'}' => depth = depth.saturating_sub(1),
+                c if c.is_ascii_alphabetic() || c == b'_' => {
+                    let start = i;
+                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                    {
+                        i += 1;
+                    }
+                    if depth == 0 {
+                        match &content[start..i] {
+                            "class" | "abstract" => (declaring, skipping) = (true, false),
+                            "private" => private = true,
+                            "enum" | "interface" | "typedef" => skipping = !declaring,
+                            word if declaring || skipping => {
+                                if declaring && !private {
+                                    names.push(word.to_string());
+                                }
+                                (declaring, skipping, private) = (false, false, false);
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        names
+    }
+
     /// Resolve a QualifiedPath to a filesystem path
     pub fn resolve_to_file(
         &self,

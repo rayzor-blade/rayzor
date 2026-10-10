@@ -85,6 +85,7 @@ impl<'a> HirToMirContext<'a> {
                                         variant_sym?.name,
                                     );
                                     return self.build_boxed_enum_with_fields(
+                                        *enum_symbol,
                                         idx as i32,
                                         field_count,
                                         constructor_args,
@@ -161,6 +162,7 @@ impl<'a> HirToMirContext<'a> {
                                         sym.name,
                                     );
                                     return self.build_boxed_enum_with_fields(
+                                        parent_enum_id,
                                         idx as i32,
                                         field_count,
                                         constructor_args,

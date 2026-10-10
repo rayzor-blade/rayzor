@@ -102,9 +102,12 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Allocate a boxed enum struct with payload fields.
-    /// Layout: [tag:i32][pad:i32][field0:i64][field1:i64]...
+    /// Layout: [tag:i32][type_id:i32][field0:i64][field1:i64]...
+    /// The enum's runtime id in the pad word lets code that holds the value
+    /// as a bare `EnumValue` recover its enum.
     pub(crate) fn build_boxed_enum_with_fields(
         &mut self,
+        enum_symbol: SymbolId,
         tag_idx: i32,
         field_count: usize,
         constructor_args: &[HirExpr],
@@ -132,6 +135,16 @@ impl<'a> HirToMirContext<'a> {
             .build_bitcast(tag_ptr, IrType::Ptr(Box::new(IrType::I32)))?;
         let tag_val = self.builder.build_const(IrValue::I32(tag_idx))?;
         self.builder.build_store(tag_ptr_i32, tag_val)?;
+        let type_offset = self.builder.build_const(IrValue::I64(4))?;
+        let type_ptr =
+            self.builder
+                .build_gep(ptr, vec![type_offset], IrType::Ptr(Box::new(IrType::I8)))?;
+        let type_ptr_i32 = self
+            .builder
+            .build_bitcast(type_ptr, IrType::Ptr(Box::new(IrType::I32)))?;
+        let type_id = self.enum_runtime_id(enum_symbol) as i32;
+        let type_val = self.builder.build_const(IrValue::I32(type_id))?;
+        self.builder.build_store(type_ptr_i32, type_val)?;
 
         for (i, arg) in constructor_args.iter().take(field_count).enumerate() {
             let prev_target = self.let_target_type_hint.take();
@@ -352,7 +365,9 @@ impl<'a> HirToMirContext<'a> {
         args: &[HirExpr],
     ) -> Option<Option<IrId>> {
         let receiver = &args[0];
-        let enum_sym_id = self.resolve_enum_symbol(receiver.ty)?;
+        let Some(enum_sym_id) = self.resolve_enum_symbol(receiver.ty) else {
+            return self.try_dispatch_enum_value_method(method_symbol, receiver);
+        };
 
         // Look up the method in stdlib mapping under "Enum" class
         let method_name = self
@@ -404,6 +419,44 @@ impl<'a> HirToMirContext<'a> {
         let result = self
             .builder
             .build_call_direct(func_id, call_args, return_type)?;
+        Some(Some(result))
+    }
+
+    /// An `EnumValue` method on a value whose enum is not known statically:
+    /// the Type API entry points recover the enum from the value itself.
+    fn try_dispatch_enum_value_method(
+        &mut self,
+        method_symbol: SymbolId,
+        receiver: &HirExpr,
+    ) -> Option<Option<IrId>> {
+        let qualified = self
+            .symbol_table
+            .get_symbol(method_symbol)?
+            .qualified_name
+            .and_then(|name| self.string_interner.get(name))?;
+        let (runtime_func, return_type) = match qualified {
+            "EnumValue.getIndex" => ("haxe_type_enum_index", IrType::I64),
+            "EnumValue.getName" => (
+                "haxe_type_enum_constructor",
+                IrType::Ptr(Box::new(IrType::String)),
+            ),
+            "EnumValue.getParameters" => (
+                "haxe_type_enum_parameters",
+                IrType::Ptr(Box::new(IrType::Void)),
+            ),
+            _ => return None,
+        };
+        let value = self.lower_expression(receiver)?;
+        let value = self.coerce_reg_to(value, &IrType::I64)?;
+        let unknown_enum = self.builder.build_const(IrValue::I32(0))?;
+        let func_id = self.get_or_register_extern_function(
+            runtime_func,
+            vec![IrType::I64, IrType::I32],
+            return_type.clone(),
+        );
+        let result =
+            self.builder
+                .build_call_direct(func_id, vec![value, unknown_enum], return_type)?;
         Some(Some(result))
     }
 

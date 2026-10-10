@@ -4,7 +4,7 @@
 //! isObject, isFunction, copy) and Type.typeof for anonymous objects.
 //!
 //! All functions receive raw `*mut u8` pointers from JIT code:
-//! - `obj`: anonymous object handle (Box<Arc<AnonObject>>)
+//! - `obj`: anonymous object handle (see `anon_object`)
 //! - `field`: HaxeString pointer containing the field name
 //! - `value`: DynamicValue pointer for set operations
 
@@ -63,8 +63,7 @@ unsafe fn extract_field_name(field_ptr: *mut u8) -> Option<(*const u8, u32)> {
 /// `ptr` unchanged. This enables Reflect methods to work on both raw anon
 /// handles and DynamicValue-wrapped anon objects (e.g. from Json.parse).
 ///
-/// Safety: the first 4 bytes of a raw anon handle (`Box<Arc<AnonObject>>`)
-/// are the low bits of a heap pointer — always a large number, never 6.
+/// Safety: the first 4 bytes of a raw anon handle are its tag, never 6.
 /// So the `type_id == 6` check reliably distinguishes the two cases.
 /// What a builtin-tagged box holds, for the entries that expect an object:
 /// an array or string (which answer `length`), or a scalar or function
@@ -1039,6 +1038,16 @@ fn compare_reference_slot(a: i64, b: i64) -> i64 {
         && x == y
     {
         return 0;
+    }
+    // Boxes of class instances order by the instance, so two boxes of one
+    // object are equal and the order does not depend on which box is held.
+    let object_box = |v: i64| {
+        crate::type_system::dynamic_value_if_boxed(v as *mut u8)
+            .filter(|d| crate::type_system::is_class_type(d.type_id.0) && !d.value_ptr.is_null())
+            .map(|d| d.value_ptr as i64)
+    };
+    if let (Some(x), Some(y)) = (object_box(a), object_box(b)) {
+        return (x - y).signum();
     }
     let a_token = type_token_id(a);
     let b_token = type_token_id(b);

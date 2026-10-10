@@ -2813,6 +2813,10 @@ impl<'a> AstLowering<'a> {
                     self.expected_lambda_params_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;
                     let result = result?;
+                    let result = match self.lower_macro_from(init_expr, &result, declared_type)? {
+                        Some(converted) => converted,
+                        None => result,
+                    };
                     let convertible = {
                         let table = self.context.type_table.borrow();
                         let ty = Self::resolve_alias_chain(&table, result.expr_type);
@@ -3019,9 +3023,14 @@ impl<'a> AstLowering<'a> {
                     self.expected_arg_type_stack.pop();
                     self.expected_lambda_params_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;
+                    let result = result?;
+                    let result = match self.lower_macro_from(init_expr, &result, declared_type)? {
+                        Some(converted) => converted,
+                        None => result,
+                    };
                     match declared_type {
-                        Some(dt) => self.retype_literal_to(result?, dt),
-                        None => result?,
+                        Some(dt) => self.retype_literal_to(result, dt),
+                        None => result,
                     }
                 } else {
                     return Err(LoweringError::IncompleteImplementation {

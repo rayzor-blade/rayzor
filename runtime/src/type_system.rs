@@ -63,8 +63,11 @@ static ARRAY_BOXES: RwLock<Option<HashMap<usize, (usize, u64)>>> = RwLock::new(N
 static ENUM_ARRAY_TYPES: RwLock<Option<HashMap<usize, (u32, bool)>>> = RwLock::new(None);
 static ENUM_VALUE_TYPES: RwLock<Option<HashMap<usize, u32>>> = RwLock::new(None);
 
+/// Record a runtime-built enum cell's enum, and stamp it into the cell's pad
+/// word as compiled constructors do.
 fn register_reflected_enum_value(value: i64, type_id: u32) {
     if value != 0 {
+        unsafe { *(value as *mut u32).add(1) = type_id };
         ENUM_VALUE_TYPES
             .write()
             .unwrap()
@@ -86,6 +89,20 @@ fn registered_enum_cell_type(value: i64) -> Option<u32> {
         .as_ref()?
         .get(&addr)
         .copied()
+}
+
+/// The enum of a boxed enum cell, read from the type id in its pad word. The
+/// tag must be a variant of that enum, so a pointer to anything else is not
+/// taken for a cell.
+fn stamped_enum_cell_type(value: i64) -> Option<u32> {
+    let addr = value as usize;
+    if addr <= u32::MAX as usize || (addr & 7) != 0 || (addr >> 47) != 0 {
+        return None;
+    }
+    let (tag, type_id) = unsafe { (*(addr as *const i32), *(addr as *const u32).add(1)) };
+    let info = get_type_info(TypeId(type_id))?.enum_info?;
+    let boxed = info.variants.iter().any(|v| v.param_count > 0);
+    (boxed && usize::try_from(tag).is_ok_and(|tag| tag < info.variants.len())).then_some(type_id)
 }
 
 /// An enum box's payload as the enum's I64 slot: a tag-only enum's
@@ -2019,6 +2036,8 @@ fn resolve_dynamic_enum(value: i64, type_id: i32) -> (i64, u32) {
         .unwrap_or(false);
     if is_enum {
         (boxed_value, boxed_type_id)
+    } else if let Some(type_id) = stamped_enum_cell_type(value) {
+        (value, type_id)
     } else {
         (value, 0)
     }

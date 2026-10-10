@@ -1633,6 +1633,11 @@ impl<'a> TastToHirContext<'a> {
                 stmt.source_location(),
             )),
             TypedStatement::Assignment { target, value, .. } => {
+                if let TypedExpressionKind::ArrayAccess { array, index } = &target.kind
+                    && let Some(call) = self.class_map_set(target, array, index, value)
+                {
+                    return HirStatement::Expr(call);
+                }
                 // ARRAY ACCESS OVERLOADING: Check if target is array access with @:arrayAccess set method
                 if let TypedExpressionKind::ArrayAccess { array, index } = &target.kind {
                     if let Some((set_method, _abstract_symbol)) =
@@ -2132,7 +2137,10 @@ impl<'a> TastToHirContext<'a> {
                 }
             }
             TypedExpressionKind::ArrayAccess { array, index } => {
-                if let Some(method) = self.erased_map_get(array.expr_type) {
+                if let Some(method) = self
+                    .erased_map_get(array.expr_type)
+                    .or_else(|| self.class_map_access_method(array.expr_type, "get"))
+                {
                     let mut call = expr.clone();
                     call.kind = TypedExpressionKind::MethodCall {
                         receiver: array.clone(),
@@ -2579,6 +2587,11 @@ impl<'a> TastToHirContext<'a> {
                 }
                 // ARRAY ACCESS OVERLOADING: Check if this is an assignment to array access with @:arrayAccess set method
                 if *operator == BinaryOperator::Assign {
+                    if let TypedExpressionKind::ArrayAccess { array, index } = &left.kind
+                        && let Some(call) = self.class_map_set(expr, array, index, right)
+                    {
+                        return call;
+                    }
                     if let TypedExpressionKind::ArrayAccess { array, index } = &left.kind {
                         if let Some((set_method, _abstract_symbol)) =
                             self.find_array_access_method(array.expr_type, "set")
@@ -6270,6 +6283,61 @@ impl<'a> TastToHirContext<'a> {
             self.current_lifetime,
             location,
         )
+    }
+
+    /// `get`/`set` of `EnumValueMap`, the map class written in Haxe:
+    /// `Map<K, V>` resolves to it directly, so `m[k]` never sees the `Map`
+    /// abstract's `@:arrayAccess` methods.
+    fn class_map_access_method(&self, operand_type: TypeId, method_name: &str) -> Option<SymbolId> {
+        let class_of = |ty: TypeId| match self.type_table.borrow().get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Class { symbol_id, .. }) => Some(*symbol_id),
+            _ => None,
+        };
+        let mut class = class_of(operand_type)?;
+        let name = self.symbol_table.get_symbol(class)?.name;
+        if self.string_interner.get(name) != Some("EnumValueMap") {
+            return None;
+        }
+        for _ in 0..8 {
+            let scope = self.symbol_table.get_symbol(class)?.scope_id;
+            if let Some(method) = self
+                .symbol_table
+                .symbols_in_scope(scope)
+                .into_iter()
+                .find(|s| {
+                    s.kind == crate::tast::SymbolKind::Function
+                        && !s.is_static()
+                        && self.string_interner.get(s.name) == Some(method_name)
+                })
+            {
+                return Some(method.id);
+            }
+            class = class_of(self.symbol_table.get_class_super_type(class)?)?;
+        }
+        None
+    }
+
+    /// `m[k] = v` on `EnumValueMap` as `m.set(k, v)`.
+    fn class_map_set(
+        &mut self,
+        assignment: &TypedExpression,
+        map: &TypedExpression,
+        key: &TypedExpression,
+        value: &TypedExpression,
+    ) -> Option<HirExpr> {
+        let set = self.class_map_access_method(map.expr_type, "set")?;
+        let call = TypedExpression {
+            kind: TypedExpressionKind::MethodCall {
+                receiver: Box::new(map.clone()),
+                method_symbol: set,
+                type_arguments: Vec::new(),
+                arguments: vec![key.clone(), value.clone()],
+                is_optional: false,
+            },
+            expr_type: self.get_void_type(),
+            ..assignment.clone()
+        };
+        Some(self.lower_expression(&call))
     }
 
     /// Find a method with @:arrayAccess metadata for array access operations

@@ -83,6 +83,8 @@ pub struct MacroDefinition {
     pub is_static: bool,
     /// Declared `@:resolve` or `@:op(a.b)`: expands field reads on its abstract.
     pub is_resolver: bool,
+    /// Declared `@:from`: converts an expression its abstract does not accept.
+    pub is_from: bool,
     /// Source file where defined
     pub source_file: String,
     /// The DEFINING file's imports, resolved once here.
@@ -344,6 +346,10 @@ impl MacroRegistry {
                 is_build_macro: false,
                 is_static: field.modifiers.contains(&Modifier::Static),
                 is_resolver: field.meta.iter().any(is_resolver_meta),
+                is_from: field
+                    .meta
+                    .iter()
+                    .any(|m| m.name.trim_start_matches(':') == "from"),
                 source_file: source_file.to_string(),
                 imports: file_imports.clone(),
                 location: SourceLocation::new(0, 0, 0, field.span.start as u32),

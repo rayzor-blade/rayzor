@@ -369,9 +369,10 @@ impl AstLowering<'_> {
             let late = self
                 .unresolved_usings
                 .iter()
+                .rev()
                 .chain(type_usings.iter())
                 .filter_map(|n| self.resolve_class_like_symbol_by_name(*n));
-            for owner in self.using_modules.iter().map(|(_, s)| *s).chain(late) {
+            for owner in self.using_modules.iter().rev().map(|(_, s)| *s).chain(late) {
                 if let Some(def) = find(owner).filter(|def| def.is_static) {
                     name = Some(def.qualified_name.clone());
                     break;
@@ -507,6 +508,136 @@ impl AstLowering<'_> {
             location: self.context.create_location_from_span(span),
         })?;
         self.lower_expression(&expanded).map(Some)
+    }
+
+    /// `var v:A = e` where `e` does not unify with the abstract `A`, which
+    /// declares a macro `@:from`: the expansion of that macro over `e`.
+    pub(crate) fn lower_macro_from(
+        &mut self,
+        init: &parser::Expr,
+        typed: &crate::tast::TypedExpression,
+        declared: Option<TypeId>,
+    ) -> Result<Option<crate::tast::TypedExpression>, super::LoweringError> {
+        use crate::tast::TypeKind;
+        use parser::ExprKind;
+
+        let Some(declared) = declared else {
+            return Ok(None);
+        };
+        let Some(registry) = self.deferred_macro_registry.as_ref() else {
+            return Ok(None);
+        };
+        let owner = {
+            let tt = self.context.type_table.borrow();
+            let mut ty = declared;
+            for _ in 0..8 {
+                match tt.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Abstract { symbol_id, .. }) => *symbol_id,
+                _ => return Ok(None),
+            }
+        };
+        let Some(sym) = self.context.symbol_table.get_symbol(owner) else {
+            return Ok(None);
+        };
+        let interner = &self.context.string_interner;
+        let bare = interner.get(sym.name).unwrap_or_default().to_string();
+        let qualified = sym
+            .qualified_name
+            .and_then(|q| interner.get(q))
+            .unwrap_or(bare.as_str())
+            .to_string();
+        let owner_of = |def: &crate::macro_system::registry::MacroDefinition| {
+            def.qualified_name
+                .rsplit_once('.')
+                .map_or("", |(owner, _)| owner)
+                .to_string()
+        };
+        let converters: Vec<_> = registry
+            .all_macros()
+            .filter(|def| def.is_from && def.is_static && def.params.len() == 1)
+            .collect();
+        let Some(def) = converters
+            .iter()
+            .find(|def| owner_of(**def) == qualified)
+            .or_else(|| {
+                converters.iter().find(|def| {
+                    let o = owner_of(**def);
+                    o == bare || o.ends_with(&format!(".{bare}"))
+                })
+            })
+        else {
+            return Ok(None);
+        };
+        let (name, method) = (def.qualified_name.clone(), def.name.clone());
+        // A value the abstract already accepts, or one not yet typed, converts
+        // as it would without the macro.
+        let undecided = matches!(
+            self.context
+                .type_table
+                .borrow()
+                .get(typed.expr_type)
+                .map(|t| &t.kind),
+            None | Some(
+                TypeKind::Unknown
+                    | TypeKind::Error
+                    | TypeKind::Placeholder { .. }
+                    | TypeKind::TypeParameter { .. }
+            )
+        );
+        if undecided
+            || unify(
+                typed.expr_type,
+                declared,
+                self.context.type_table,
+                &self.abstract_casts,
+                &std::collections::BTreeSet::new(),
+                &mut std::collections::BTreeMap::new(),
+                0,
+            )
+        {
+            return Ok(None);
+        }
+        let span = init.span;
+        let macro_call = parser::Expr {
+            kind: ExprKind::Call {
+                expr: Box::new(parser::Expr {
+                    kind: ExprKind::Field {
+                        expr: Box::new(parser::Expr {
+                            kind: ExprKind::Ident(bare),
+                            span,
+                        }),
+                        field: method,
+                        is_optional: false,
+                    },
+                    span,
+                }),
+                args: vec![init.clone()],
+            },
+            span,
+        };
+        let cell = self.deferred_macro_expander.unwrap();
+        let expanded = {
+            let mut typer = DeferredMacroTyper {
+                lowering: self,
+                receiver: None,
+                expected: Some(declared),
+            };
+            cell.borrow_mut()
+                .expand_deferred_call(&name, &macro_call, &mut typer)
+        }
+        .map_err(|e| super::LoweringError::SemanticError {
+            message: format!("macro '{}' failed during typing: {}", name, e),
+            location: self.context.create_location_from_span(span),
+        })?;
+        self.expected_arg_type_stack.push(Some(declared));
+        let lowered = self.lower_value_expression(&expanded);
+        self.expected_arg_type_stack.pop();
+        lowered.map(Some)
     }
 }
 

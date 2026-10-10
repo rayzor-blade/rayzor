@@ -1009,14 +1009,15 @@ impl<'a> AstLowering<'a> {
                 queue.push_back(parent);
             }
         }
+        // The latest `using` takes precedence, as does the later class of a module.
         let late: Vec<(InternedString, SymbolId)> = type_using_names
             .iter()
-            .chain(self.unresolved_usings.iter())
+            .chain(self.unresolved_usings.iter().rev())
             .filter_map(|name| Some((*name, self.resolve_class_like_symbol_by_name(*name)?)))
             .collect();
         let candidates: Vec<_> = late
             .into_iter()
-            .chain(self.using_modules.iter().copied())
+            .chain(self.using_modules.iter().rev().copied())
             .collect();
         for (_class_name, class_symbol) in candidates {
             // First, check local class_methods (for classes lowered in this instance)
