@@ -745,8 +745,19 @@ impl<'a> HirToMirContext<'a> {
                                     .get(i + param_offset)
                                     .cloned()
                                     .unwrap_or_else(|| actual_ty.clone());
-                                let final_reg =
-                                    self.maybe_box_for_extern_call(reg, &actual_ty, &expected_ty)?;
+                                let final_reg = match self.box_for_runtime_dynamic_param(
+                                    runtime_func,
+                                    i + param_offset,
+                                    reg,
+                                    arg.ty,
+                                ) {
+                                    Some(boxed) => boxed,
+                                    None => self.maybe_box_for_extern_call(
+                                        reg,
+                                        &actual_ty,
+                                        &expected_ty,
+                                    )?,
+                                };
                                 arg_regs.push(final_reg);
                             }
                         }

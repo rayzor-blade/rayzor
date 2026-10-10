@@ -359,7 +359,12 @@ impl CompilationUnit {
             self.macro_hooks.extend(expansion.hooks);
             // A type named only in a macro's output (`new $tPath(...)`) was
             // never seen by the import scan; its module loads before lowering.
-            if !skip_stdlib_merge && expansion.expansions_count > 0 {
+            // An entry naming its own module is first typed by the import loop.
+            let is_user_file = self
+                .user_files
+                .iter()
+                .any(|file| source_file_identity(&file.filename) == source_file_identity(filename));
+            if (!skip_stdlib_merge || is_user_file) && expansion.expansions_count > 0 {
                 let mut named_before = Vec::new();
                 collect_qualified_type_refs_from_ast(ast_file, &mut named_before);
                 let mut introduced = Vec::new();
@@ -381,7 +386,10 @@ impl CompilationUnit {
                             })
                 });
                 if !introduced.is_empty() {
+                    // The nested compiles overwrite this file's cache record.
+                    let type_info = self.last_compiled_type_info.take();
                     let _ = self.load_imports_efficiently(&introduced);
+                    self.last_compiled_type_info = type_info;
                 }
             }
             ast_file_owned = expansion.file;

@@ -1037,7 +1037,10 @@ impl<'a> AstLowering<'a> {
                 if nullable_inner(else_t) == Some(then_t) {
                     return Ok(else_t);
                 }
-                Ok(then_t)
+                drop(type_table);
+                Ok(self
+                    .common_branch_class(&[then_t, else_t])
+                    .unwrap_or(then_t))
             }
             TypedExpressionKind::While { .. }
             | TypedExpressionKind::For { .. }
@@ -1150,13 +1153,10 @@ impl<'a> AstLowering<'a> {
                     return Ok(void_type);
                 }
 
-                // For now, use the first non-void branch type
-                // Type unification deferred to type checker
-                // eprintln!(
-                //     "DEBUG: Switch expression inferred type: {:?}",
-                //     non_void_types[0]
-                // );
-                Ok(non_void_types[0])
+                // Branches of different classes type as the class they all extend.
+                Ok(self
+                    .common_branch_class(&non_void_types)
+                    .unwrap_or(non_void_types[0]))
             }
             TypedExpressionKind::Try {
                 try_expr,
@@ -1726,6 +1726,39 @@ impl<'a> AstLowering<'a> {
         } else {
             inferred
         }
+    }
+
+    /// The nearest class every one of `types` is or extends, the way haxe
+    /// unifies branch types. `None` unless each is a class without type
+    /// arguments and they share one.
+    fn common_branch_class(&self, types: &[TypeId]) -> Option<TypeId> {
+        let plain_class =
+            |ty: TypeId| match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Class {
+                    symbol_id,
+                    type_args,
+                }) if type_args.is_empty() => Some(*symbol_id),
+                _ => None,
+            };
+        let chains = types
+            .iter()
+            .map(|&ty| {
+                let mut chain = vec![plain_class(ty)?];
+                while let Some(parent) = self.parent_class_symbol(*chain.last()?) {
+                    if chain.contains(&parent) {
+                        break;
+                    }
+                    chain.push(parent);
+                }
+                Some(chain)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let shared = chains
+            .first()?
+            .iter()
+            .find(|class| chains.iter().all(|chain| chain.contains(class)))?;
+        let ty = self.context.symbol_table.get_symbol(*shared)?.type_id;
+        (plain_class(ty) == Some(*shared)).then_some(ty)
     }
 
     /// The value a statement used as a block's result carries: an expression
