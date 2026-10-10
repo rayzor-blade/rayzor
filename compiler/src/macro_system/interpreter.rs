@@ -71,6 +71,8 @@ pub struct MacroInterpreter {
     import_map: BTreeMap<String, String>,
     /// The calling module's own imports, as written: `Context.getLocalImports`.
     pub local_imports: Vec<parser::Import>,
+    /// Qualified name of the class the macro call sits in: `Context.getLocalClass`.
+    pub local_class: Option<String>,
     /// Class registry for fallback dispatch to any imported/user class
     class_registry: Option<Arc<ClassRegistry>>,
     /// Cache of extracted class data for constructor calls (avoids re-cloning)
@@ -126,6 +128,7 @@ impl MacroInterpreter {
             class_registry: None,
             class_data_cache: BTreeMap::new(),
             local_imports: Vec::new(),
+            local_class: None,
             vm,
             scheduler,
             macro_context: None,
@@ -148,6 +151,7 @@ impl MacroInterpreter {
             class_registry: None,
             class_data_cache: BTreeMap::new(),
             local_imports: Vec::new(),
+            local_class: None,
             vm,
             scheduler,
             macro_context: None,
@@ -176,6 +180,7 @@ impl MacroInterpreter {
             class_registry: Some(class_registry),
             class_data_cache: BTreeMap::new(),
             local_imports: Vec::new(),
+            local_class: None,
             vm,
             scheduler,
             macro_context: None,
@@ -1779,15 +1784,47 @@ impl MacroInterpreter {
     ) -> Result<Option<MacroValue>, MacroError> {
         // Resolve bare class names through imports
         let resolved = self.resolve_class_name(class_name);
+        // An expression macro's local class is the one its call sits in; a
+        // build macro's context names the class being built instead.
+        if resolved == "haxe.macro.Context"
+            && method == "getLocalClass"
+            && self
+                .macro_context
+                .as_ref()
+                .is_none_or(|ctx| ctx.current_class.is_none())
+            && let Some(view) = self
+                .local_class
+                .as_deref()
+                .and_then(|name| self.class_registry.as_ref()?.local_class_view(name))
+        {
+            return Ok(Some(view));
+        }
         match resolved.as_str() {
             "haxe.macro.Context" if method == "getLocalImports" => {
                 Ok(Some(local_imports_value(&self.local_imports)))
             }
-            // `withImports(imports, usings, f)`: `f`'s result. Names inside
-            // are typed in the caller's scope, which is where they resolve.
+            // `withImports(imports, usings, f)`: `f`'s result, with the imports
+            // and usings in scope of whatever `f` types.
             "haxe.macro.Context" if method == "withImports" => {
+                let strings = |v: Option<&MacroValue>| -> Vec<String> {
+                    match v {
+                        Some(MacroValue::Array(items)) => {
+                            items.iter().map(|i| i.to_display_string()).collect()
+                        }
+                        _ => Vec::new(),
+                    }
+                };
+                let (imports, usings) = (strings(args.first()), strings(args.get(1)));
+                let token = self
+                    .macro_context
+                    .as_mut()
+                    .and_then(|ctx| ctx.enter_imports(&imports, &usings));
                 let f = args.get(2).cloned().unwrap_or(MacroValue::Null);
-                self.call_value(f, Vec::new(), location).map(Some)
+                let result = self.call_value(f, Vec::new(), location);
+                if let (Some(token), Some(ctx)) = (token, self.macro_context.as_mut()) {
+                    ctx.exit_imports(token);
+                }
+                result.map(Some)
             }
             // An expression macro's expected type is known only to the typer,
             // so the call defers until lowering reaches its site.
@@ -2744,6 +2781,13 @@ impl MacroInterpreter {
         _args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        // `ClassField.expr()`: the typed body, where one was built.
+        if method == "expr"
+            && _args.is_empty()
+            && let Some(typed) = obj.get("__expr__")
+        {
+            return Ok(typed.clone());
+        }
         // `.get()` on plain objects acts as a Ref/Null<T> dereference — it
         // returns the object itself. This lets Haxe macro idioms like
         // `Context.getLocalClass().get().name` work when the underlying

@@ -4,6 +4,7 @@
 //! - `var __dyn_m:F`, the rebinding slot, null until assigned;
 //! - `function __orig_m(a) body`, the declared implementation;
 //! - `function m(a)`, forwarding to the slot when set, else to `__orig_m`.
+//! `override dynamic` becomes the `override function __orig_m` alone.
 //! Every call path (direct, virtual, interface) reaches `m` unchanged. Writing
 //! `x.m` writes the slot; reading it takes the slot, else `x.__orig_m`, so a
 //! read is a snapshot. An interface's dynamic method gets the slot declared too.
@@ -94,6 +95,20 @@ fn desugar_fields(
         };
         let is_static = field.modifiers.contains(&Modifier::Static);
         let span = field.span;
+        // `override dynamic` replaces only the declared body: the slot and the
+        // forwarder are the parent's, which calls the body virtually.
+        if class_name.is_some()
+            && func.body.is_some()
+            && field.modifiers.contains(&Modifier::Override)
+        {
+            let mut orig = field;
+            orig.modifiers.retain(|m| *m != Modifier::Dynamic);
+            if let ClassFieldKind::Function(f) = &mut orig.kind {
+                f.name = format!("{ORIG_PREFIX}{}", f.name);
+            }
+            out.push(orig);
+            continue;
+        }
         if func.return_type.is_none()
             && func.body.as_deref().is_some_and(has_value_return)
             && returned_param_hint(func).is_none()
@@ -398,6 +413,36 @@ impl<'a> AstLowering<'a> {
             else {
                 return false;
             };
+            class = parent;
+        }
+        false
+    }
+
+    /// Whether `class` reaches dynamic `field` through a plain `override`
+    /// declared below the class whose declared body it inherits.
+    pub(crate) fn plainly_overridden(&self, class: SymbolId, field: &str) -> bool {
+        let interner = &self.context.string_interner;
+        let (Some(name), Some(orig)) = (
+            interner.get_id(field),
+            interner.get_id(&format!("{ORIG_PREFIX}{field}")),
+        ) else {
+            return false;
+        };
+        let mut class = class;
+        for _ in 0..16 {
+            let Some(parent) = self.parent_class_symbol(class) else {
+                return false;
+            };
+            let declares = |member| {
+                self.resolve_class_method_symbol(class, member)
+                    != self.resolve_class_method_symbol(parent, member)
+            };
+            if declares(orig) {
+                return false;
+            }
+            if declares(name) {
+                return true;
+            }
             class = parent;
         }
         false

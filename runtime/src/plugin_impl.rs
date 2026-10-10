@@ -203,6 +203,10 @@ register_symbol!(
     crate::haxe_array::haxe_array_string_index_of
 );
 register_symbol!(
+    "haxe_array_typed_index_of",
+    crate::haxe_array::haxe_array_typed_index_of
+);
+register_symbol!(
     "haxe_array_index_of",
     crate::haxe_array::haxe_array_index_of
 );

@@ -297,6 +297,10 @@ impl MacroExpander {
         let mut changed = true;
         let num_decls = file.declarations.len();
         let mut dirty: std::collections::BTreeSet<usize> = (0..num_decls).collect();
+        let package_prefix = match &file.package {
+            Some(pkg) if !pkg.path.is_empty() => format!("{}.", pkg.path.join(".")),
+            _ => String::new(),
+        };
 
         while changed && iteration < self.max_iterations {
             changed = false;
@@ -307,6 +311,13 @@ impl MacroExpander {
 
             for (idx, decl) in file.declarations.drain(..).enumerate() {
                 if dirty.contains(&idx) {
+                    // The class a call sits in, for `Context.getLocalClass`.
+                    self.context.current_class = match &decl {
+                        TypeDeclaration::Class(class) => {
+                            Some(format!("{package_prefix}{}", class.name))
+                        }
+                        _ => None,
+                    };
                     let (expanded, did_change) = self.expand_declaration(decl);
                     if did_change {
                         changed = true;
@@ -321,6 +332,7 @@ impl MacroExpander {
             file.declarations = new_decls;
             dirty = next_dirty;
         }
+        self.context.current_class = None;
 
         if iteration >= self.max_iterations {
             self.context.diagnostics.push(MacroDiagnostic::warning(
@@ -1126,6 +1138,7 @@ impl MacroExpander {
             self.class_registry.clone(),
         );
         interp.local_imports = self.file_imports.clone();
+        interp.local_class = self.context.current_class.clone();
 
         // During a deferred re-expansion the live typer is installed on THIS
         // context; the interpreter builds its own, so hand the typer across

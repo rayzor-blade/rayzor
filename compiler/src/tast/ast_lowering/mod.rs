@@ -1557,6 +1557,10 @@ pub struct AstLowering<'a> {
     pub(crate) current_module_types: std::collections::BTreeSet<String>,
     /// Slots of this file's dynamic methods whose return type is unknown.
     pub(crate) unknown_return_slots: std::collections::BTreeSet<String>,
+    /// The values of this file's enum abstracts, by bare name. The root scope
+    /// keeps whichever namesake registered first, so another module's enum
+    /// constructor (`ValueType.TEnum`) can hold the name there.
+    pub(crate) module_enum_abstract_values: BTreeMap<InternedString, SymbolId>,
     /// The current file's `overload` groups, keyed by owner and name.
     pub(crate) overload_groups: overloads::OverloadGroups,
     /// Child class symbol -> parent class symbol, for resolving inherited
@@ -1593,6 +1597,9 @@ pub struct AstLowering<'a> {
     /// Locals represented as Dynamic where the source types them as a type
     /// parameter; macro typing reports the source type.
     macro_source_types: std::collections::BTreeMap<SymbolId, TypeId>,
+    /// Typedefs declared as a structure extension or intersection, with the
+    /// types they are built from (a macro's `AExtend` status).
+    alias_extensions: BTreeMap<SymbolId, Vec<TypeId>>,
     /// How many function literals enclose the expression being lowered.
     closure_depth: usize,
     /// `haxe.Rest`'s abstract symbol once looked up (`None` inside = not found).

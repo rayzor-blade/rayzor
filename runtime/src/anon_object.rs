@@ -316,10 +316,15 @@ pub extern "C" fn rayzor_anon_drop(ptr: *mut u8) {
     }
 }
 
-/// Get field by index (optimized path for known shapes)
+/// Get field by index (optimized path for known shapes). A null object
+/// inside a `try` throws, as a null class field read does; elsewhere it reads
+/// as null.
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_get_field_by_index(ptr: *mut u8, index: u32) -> u64 {
     if ptr.is_null() {
+        if crate::exception::has_handler() {
+            crate::exception::throw_with_message("Null Object Reference".to_string());
+        }
         return 0;
     }
     unsafe {

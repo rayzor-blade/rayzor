@@ -134,6 +134,7 @@ impl<'a> AstLowering<'a> {
         // bound to `haxe.Int64.eq` -- a namesake visible further up -- and the
         // call carried that method's types from then on.
         let mut outer_match: Option<SymbolId> = None;
+        let mut outer_in_root = false;
 
         loop {
             // Check if symbol exists in current scope
@@ -147,6 +148,7 @@ impl<'a> AstLowering<'a> {
                 }
                 if outer_match.is_none() {
                     outer_match = Some(symbol.id);
+                    outer_in_root = current_scope == ScopeId::first();
                 }
             }
 
@@ -245,6 +247,14 @@ impl<'a> AstLowering<'a> {
                     }
                 }
                 current = parent;
+            }
+        }
+
+        // This file's enum abstract values come before a namesake that only
+        // the root scope holds.
+        if outer_match.is_none() || outer_in_root {
+            if let Some(&value) = self.module_enum_abstract_values.get(&name) {
+                return Some(value);
             }
         }
 

@@ -649,10 +649,19 @@ impl<'a> HirToMirContext<'a> {
                 // (haxe_box_* is invisible to insert_free.rs). Skipping the
                 // harmonisation is not an option — the phi would merge f64 with
                 // Ptr. Null<T> cases such as `if (x == null) null else x.field`
-                // have a Dynamic/Null result type and keep the boxing path.
+                // have a Dynamic/Null result type and keep the boxing path. An
+                // erased type parameter is a raw slot whose null is zero too.
                 let result_is_scalar = result_ty
                     .and_then(|t| self.type_table.get(t))
-                    .map(|t| matches!(t.kind, TypeKind::Float | TypeKind::Int | TypeKind::Bool))
+                    .map(|t| {
+                        matches!(
+                            t.kind,
+                            TypeKind::Float
+                                | TypeKind::Int
+                                | TypeKind::Bool
+                                | TypeKind::TypeParameter { .. }
+                        )
+                    })
                     .unwrap_or(false);
 
                 // ...and only when the pointer side is literally `null`. A pointer

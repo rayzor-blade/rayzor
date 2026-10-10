@@ -5368,6 +5368,10 @@ impl<'a> AstLowering<'a> {
                 TypeKind::Optional { inner_type: di, .. },
                 TypeKind::Optional { inner_type: ai, .. },
             ) => self.unify_type_args_inner(*di, *ai, depth + 1, out, bind_parameters),
+            // `Null<X>` accepts a plain X.
+            (TypeKind::Optional { inner_type: di, .. }, _) => {
+                self.unify_type_args_inner(*di, actual, depth + 1, out, bind_parameters)
+            }
             (
                 TypeKind::Function {
                     params: dp,

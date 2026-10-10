@@ -1,5 +1,6 @@
 //! Class declarations, inheritance and field seeding.
 
+use super::super::dynamic_methods::{ORIG_PREFIX, SLOT_PREFIX};
 use super::*;
 use crate::tast::node::HasSourceLocation;
 use crate::tast::{core::*, node::MemoryEffects, node::*, type_resolution, *};
@@ -476,6 +477,21 @@ impl<'a> AstLowering<'a> {
         }
 
         self.infer_unannotated_param_types(class_decl, class_symbol);
+        for field in &mut fields {
+            let slot = self
+                .context
+                .string_interner
+                .get(field.name)
+                .map(str::to_string);
+            if let Some(method) = slot.as_deref().and_then(|s| s.strip_prefix(SLOT_PREFIX)) {
+                let orig = self
+                    .context
+                    .intern_string(&format!("{ORIG_PREFIX}{method}"));
+                if let Some(orig) = self.resolve_class_method_symbol(class_symbol, orig) {
+                    self.retype_dynamic_slot(field, orig, false);
+                }
+            }
+        }
 
         // Bodies lower callee-first, so a caller declared above a method
         // whose return type is inferred sees that type rather than Dynamic.
@@ -486,6 +502,14 @@ impl<'a> AstLowering<'a> {
             if let ClassFieldKind::Function(func) = &field.kind {
                 match self.lower_function_from_field(field, func) {
                     Ok(typed_function) => {
+                        if let Some(method) = func.name.strip_prefix(ORIG_PREFIX) {
+                            let slot_name = self
+                                .context
+                                .intern_string(&format!("{SLOT_PREFIX}{method}"));
+                            if let Some(slot) = fields.iter_mut().find(|f| f.name == slot_name) {
+                                self.retype_dynamic_slot(slot, typed_function.symbol_id, true);
+                            }
+                        }
                         lowered.insert(index, typed_function);
                     }
                     Err(e) => self.context.add_error(e),
@@ -1122,6 +1146,69 @@ impl<'a> AstLowering<'a> {
                 break;
             }
         }
+    }
+
+    /// Type the slot of a dynamic method as the method `orig` that keeps its
+    /// body: the parameters once inferred, and with `with_return` the return
+    /// type, known only once that body is lowered. The desugar wrote Dynamic
+    /// for whatever was unannotated, and a closure stored in or read from a
+    /// slot typed apart from the method is called with the other's ABI.
+    fn retype_dynamic_slot(&mut self, slot: &mut TypedField, orig: SymbolId, with_return: bool) {
+        let Some(method_type) = self
+            .context
+            .symbol_table
+            .get_symbol(orig)
+            .map(|s| s.type_id)
+        else {
+            return;
+        };
+        let (params, return_type) = {
+            let tt = self.context.type_table.borrow();
+            let (
+                Some(TypeKind::Function {
+                    params,
+                    return_type,
+                    ..
+                }),
+                Some(TypeKind::Function {
+                    params: slot_params,
+                    return_type: slot_return,
+                    ..
+                }),
+            ) = (
+                tt.get(method_type).map(|t| &t.kind),
+                tt.get(slot.field_type).map(|t| &t.kind),
+            )
+            else {
+                return;
+            };
+            if params.len() != slot_params.len() {
+                return;
+            }
+            let known = tt.get(*return_type).is_some_and(|t| {
+                !matches!(
+                    t.kind,
+                    TypeKind::Unknown
+                        | TypeKind::Placeholder { .. }
+                        | TypeKind::TypeParameter { .. }
+                )
+            });
+            let return_type = if with_return && known {
+                *return_type
+            } else {
+                *slot_return
+            };
+            (params.clone(), return_type)
+        };
+        let retyped = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_function_type(params, return_type);
+        slot.field_type = retyped;
+        self.context
+            .symbol_table
+            .update_symbol_type(slot.symbol_id, retyped);
     }
 
     fn inherited_parameter_types(

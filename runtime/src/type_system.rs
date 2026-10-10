@@ -2398,6 +2398,24 @@ unsafe extern "C" fn function_to_string(_value_ptr: *const u8) -> StringPtr {
 
 unsafe extern "C" fn anon_object_to_string(value_ptr: *const u8) -> StringPtr {
     unsafe {
+        // A structure with a `toString` function prints as what it returns.
+        let name = "toString";
+        let method = crate::anon_object::rayzor_anon_get_field(
+            value_ptr as *mut u8,
+            name.as_ptr(),
+            name.len() as u32,
+        );
+        if dynamic_value_if_boxed(method).is_some_and(|d| d.type_id == TYPE_FUNCTION) {
+            let result =
+                crate::closure_entries::haxe_call_method_dynamic(method, std::ptr::null_mut());
+            let hs = haxe_std_string_ptr(result);
+            if !hs.is_null() {
+                return StringPtr {
+                    ptr: (*hs).ptr,
+                    len: (*hs).len,
+                };
+            }
+        }
         // value_ptr is an anon object handle — stringify it
         let mut buf = String::from("{object}");
         // Try to list fields

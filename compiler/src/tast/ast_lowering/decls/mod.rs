@@ -22,6 +22,7 @@ impl<'a> AstLowering<'a> {
             .map(|(_, unknown)| unknown.iter().cloned().collect())
             .unwrap_or_default();
         let file = desugared.as_ref().map_or(file, |(file, _)| file);
+        self.module_enum_abstract_values.clear();
         let overloaded = super::overloads::desugar(file);
         self.overload_groups = overloaded
             .as_ref()
@@ -637,6 +638,9 @@ impl<'a> AstLowering<'a> {
 
         // Now process target type (can reference type parameters)
         let mut target_type = self.lower_type(&typedef_decl.type_def)?;
+        if let Some(extended) = self.extended_types(&typedef_decl.type_def) {
+            self.alias_extensions.insert(typedef_symbol, extended);
+        }
 
         // Pop type parameters from stack
         self.context.pop_type_parameters();

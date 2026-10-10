@@ -469,6 +469,45 @@ impl ClassRegistry {
         self.classes.get(&qualified)
     }
 
+    /// `Context.getLocalClass().get()` for a class known only by its source:
+    /// path, metadata and fields, each method's `expr()` a `TFunction` whose
+    /// arguments carry their metadata.
+    pub fn local_class_view(&self, qualified_name: &str) -> Option<super::value::MacroValue> {
+        use super::value::MacroValue as V;
+        let info = self.classes.get(qualified_name)?;
+        let pack: Vec<V> = qualified_name
+            .rsplit_once('.')
+            .map(|(pack, _)| pack.split('.').map(|p| V::String(Arc::from(p))).collect())
+            .unwrap_or_default();
+        let base = BTreeMap::from([
+            ("name".to_string(), V::String(Arc::from(info.name.as_str()))),
+            ("pack".to_string(), V::Array(Arc::new(pack))),
+        ]);
+        let V::Object(mut view) = self.enrich_type_view(V::Object(Arc::new(base))) else {
+            return None;
+        };
+        let view_mut = Arc::make_mut(&mut view);
+        for (key, methods) in [
+            ("statics", &info.static_methods),
+            ("fields", &info.instance_methods),
+        ] {
+            let Some(V::Object(reference)) = view_mut.get_mut(key) else {
+                continue;
+            };
+            let Some(V::Array(fields)) = Arc::make_mut(reference).get_mut("__ref__") else {
+                continue;
+            };
+            for field in Arc::make_mut(fields).iter_mut() {
+                let V::Object(field) = field else { continue };
+                let name = field.get("name").map(V::to_display_string);
+                if let Some(method) = name.and_then(|n| methods.get(&n)) {
+                    Arc::make_mut(field).insert("__expr__".to_string(), typed_function(method));
+                }
+            }
+        }
+        Some(V::Object(view))
+    }
+
     /// Find a static method on a class.
     pub fn find_static_method(&self, class_name: &str, method: &str) -> Option<&MethodInfo> {
         self.find_class(class_name)
@@ -538,6 +577,53 @@ fn metadata_entries(metadata: &[Metadata]) -> Vec<super::value::MacroValue> {
             ])))
         })
         .collect()
+}
+
+/// A method's `ClassField.expr()`: a `TypedExpr` over `TFunction`. Only the
+/// arguments are filled, each a `TVar` with its name and metadata.
+fn typed_function(method: &MethodInfo) -> super::value::MacroValue {
+    use super::value::MacroValue as V;
+    let object = |entries: Vec<(&str, V)>| {
+        V::Object(Arc::new(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        ))
+    };
+    let args = method
+        .params
+        .iter()
+        .enumerate()
+        .map(|(id, param)| {
+            let var = object(vec![
+                ("id", V::Int(id as i64)),
+                ("name", V::String(Arc::from(param.name.as_str()))),
+                ("meta", metadata_access(metadata_entries(&param.meta))),
+                ("capture", V::Bool(false)),
+                ("t", V::Null),
+                ("extra", V::Null),
+            ]);
+            object(vec![("v", var), ("value", V::Null)])
+        })
+        .collect();
+    let function = object(vec![
+        ("args", V::Array(Arc::new(args))),
+        ("t", V::Null),
+        ("expr", V::Null),
+    ]);
+    object(vec![
+        (
+            "expr",
+            V::Enum(
+                Arc::from("TypedExprDef"),
+                Arc::from("TFunction"),
+                Arc::new(vec![function]),
+            ),
+        ),
+        ("t", V::Null),
+        ("pos", V::Null),
+    ])
 }
 
 fn metadata_access(entries: Vec<super::value::MacroValue>) -> super::value::MacroValue {

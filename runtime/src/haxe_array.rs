@@ -1877,6 +1877,39 @@ pub unsafe extern "C" fn haxe_array_dynamic_index_of(
     }
 }
 
+/// Search an erased array the way `==` on its type parameter compares, by
+/// the `haxe_reflect_compare_typed` tag the parameter was resolved to.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn haxe_array_typed_index_of(
+    arr: *const HaxeArray,
+    value: i64,
+    from: i64,
+    reverse: i32,
+    tag: i32,
+) -> i64 {
+    unsafe {
+        if arr.is_null() || (*arr).len == 0 {
+            return -1;
+        }
+        let array = &*arr;
+        let len = array.len as i64;
+        let start = if from < 0 { len + from } else { from };
+        let mut i = if reverse != 0 {
+            start.min(len - 1)
+        } else {
+            start.max(0)
+        };
+        while i >= 0 && i < len {
+            let element = *(array.ptr as *const i64).add(i as usize);
+            if crate::reflect::haxe_reflect_compare_typed(element, value, tag) == 0 {
+                return i;
+            }
+            i += if reverse != 0 { -1 } else { 1 };
+        }
+        -1
+    }
+}
+
 /// String search compares contents; the generic search compares raw slots.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn haxe_array_string_index_of(

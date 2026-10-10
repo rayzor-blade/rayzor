@@ -69,6 +69,13 @@ pub trait MacroTyper {
     /// Follow typedefs and monomorphs, optionally following abstract storage.
     fn follow_type(&mut self, id: TypeId, once: bool, abstracts: bool) -> TypeId;
 
+    /// The types a typedef declared as a structure extension (`{>A, >B,}`)
+    /// or intersection (`A & B`) is built from, found along `id`'s typedef
+    /// chain.
+    fn extension_types(&mut self, _id: TypeId) -> Option<Vec<TypeId>> {
+        None
+    }
+
     /// Substitute the declared parameters of a macro type definition.
     fn apply_type_parameters(&mut self, id: TypeId, params: &[TypeId], args: &[TypeId]) -> TypeId;
 
@@ -93,6 +100,15 @@ pub trait MacroTyper {
     fn expected_type(&mut self) -> Option<TypeId> {
         None
     }
+
+    /// `Context.withImports` — bring `imports` and `usings` (as written after
+    /// `import`/`using`) into scope until the matching `exit_imports`, which
+    /// is handed the returned token.
+    fn enter_imports(&mut self, _imports: &[String], _usings: &[String]) -> [usize; 2] {
+        [0; 2]
+    }
+
+    fn exit_imports(&mut self, _token: [usize; 2]) {}
 }
 
 /// A scoped, non-owning handle to the live typer.
@@ -135,6 +151,9 @@ pub struct MacroContext {
     /// call, and what `unify` bound them to. Cleared with the typer.
     monomorphs: std::collections::BTreeSet<TypeId>,
     mono_bindings: BTreeMap<TypeId, TypeId>,
+    /// Structures `follow` reached through a structure extension or
+    /// intersection, with the types it extends: their `AExtend` status.
+    anon_extends: BTreeMap<TypeId, Vec<TypeId>>,
     // --- Compiler state references ---
     /// Symbol table for resolving names and looking up symbols
     symbol_table: Option<SymbolTableRef>,
@@ -330,6 +349,7 @@ impl MacroContext {
             typer: None,
             monomorphs: std::collections::BTreeSet::new(),
             mono_bindings: BTreeMap::new(),
+            anon_extends: BTreeMap::new(),
             diagnostics: Vec::new(),
             defined_types: Vec::new(),
             hooks: Vec::new(),
@@ -360,6 +380,7 @@ impl MacroContext {
                 typer: None,
                 monomorphs: std::collections::BTreeSet::new(),
                 mono_bindings: BTreeMap::new(),
+                anon_extends: BTreeMap::new(),
                 diagnostics: Vec::new(),
                 defined_types: Vec::new(),
                 hooks: Vec::new(),
@@ -390,6 +411,7 @@ impl MacroContext {
         self.typer = None;
         self.monomorphs.clear();
         self.mono_bindings.clear();
+        self.anon_extends.clear();
     }
 
     /// The ADT constructor view of a Type value, for pattern matching.
@@ -403,6 +425,20 @@ impl MacroContext {
             return Some(MacroValue::Type(bound));
         }
         let mut view = self.typer.as_mut()?.get().type_ref_view(id)?;
+        if let (Some(extends), MacroValue::Object(fields)) = (self.anon_extends.get(&id), &mut view)
+        {
+            let types = extends.iter().map(|&t| MacroValue::Type(t)).collect();
+            let reference =
+                BTreeMap::from([("__ref__".to_string(), MacroValue::Array(Arc::new(types)))]);
+            Arc::make_mut(fields).insert(
+                "status".to_string(),
+                MacroValue::Enum(
+                    Arc::from("AnonStatus"),
+                    Arc::from("AExtend"),
+                    Arc::new(vec![MacroValue::Object(Arc::new(reference))]),
+                ),
+            );
+        }
         if self.local_type == Some(id)
             && let Some(class) = &self.build_class
             && let MacroValue::Object(fields) = &mut view
@@ -482,6 +518,17 @@ impl MacroContext {
     /// Whether a live typer is installed (deferred re-expansion in progress).
     pub fn has_typer(&self) -> bool {
         self.typer.is_some()
+    }
+
+    /// Scope `Context.withImports` imports on the live typer, if installed.
+    pub fn enter_imports(&mut self, imports: &[String], usings: &[String]) -> Option<[usize; 2]> {
+        Some(self.typer.as_mut()?.get().enter_imports(imports, usings))
+    }
+
+    pub fn exit_imports(&mut self, token: [usize; 2]) {
+        if let Some(typer) = self.typer.as_mut() {
+            typer.get().exit_imports(token);
+        }
     }
 
     /// `TypeTools.toString` / `Std.string` rendering for a `Type` value, when
@@ -1011,11 +1058,14 @@ impl MacroContext {
                     return Err(MacroError::NeedsTyper { location });
                 };
                 let once = matches!(args.get(1), Some(MacroValue::Bool(true)));
-                Ok(MacroValue::Type(typer.get().follow_type(
-                    id,
-                    once,
-                    method == "followWithAbstracts",
-                )))
+                let extends = typer.get().extension_types(id);
+                let followed = typer
+                    .get()
+                    .follow_type(id, once, method == "followWithAbstracts");
+                if let Some(extends) = extends {
+                    self.anon_extends.insert(followed, extends);
+                }
+                Ok(MacroValue::Type(followed))
             }
             "applyTypeParameters" => {
                 let Some(value) = args.first() else {

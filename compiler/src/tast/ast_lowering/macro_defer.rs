@@ -37,6 +37,39 @@ impl AstLowering<'_> {
             .replace(((init.span.start, init.span.end), expected))
     }
 
+    /// The types `{>A, >B, ..}` or `A & B` is built from, in source order: an
+    /// extension's own fields are not among them, an intersection's operands
+    /// all are. None for any other type.
+    pub(crate) fn extended_types(&mut self, t: &parser::Type) -> Option<Vec<TypeId>> {
+        fn parts<'t>(t: &'t parser::Type, out: &mut Vec<&'t parser::Type>) {
+            match t {
+                // `{>A, ..}` parses as an intersection spanning from the brace.
+                parser::Type::Intersection { left, right, span }
+                    if span.start < left.span().start =>
+                {
+                    out.push(left);
+                    if !matches!(**right, parser::Type::Anonymous { .. }) {
+                        parts(right, out);
+                    }
+                }
+                parser::Type::Intersection { left, right, .. } => {
+                    parts(left, out);
+                    parts(right, out);
+                }
+                other => out.push(other),
+            }
+        }
+        if !matches!(t, parser::Type::Intersection { .. }) {
+            return None;
+        }
+        let mut leaves = Vec::new();
+        parts(t, &mut leaves);
+        leaves
+            .into_iter()
+            .map(|t| self.lower_type(t).ok())
+            .collect()
+    }
+
     /// A `?.` chain is nullable as a whole: `a?.b.c` is `Null<typeof c>`.
     fn safe_chain_type(&self, e: &crate::tast::TypedExpression) -> TypeId {
         use crate::tast::TypedExpressionKind as K;
@@ -718,7 +751,29 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 {
                     return Ok(source);
                 }
-                Ok(self.lowering.safe_chain_type(&typed))
+                let ty = self.lowering.safe_chain_type(&typed);
+                // `a ?? b` where `b` never completes is `a` without its Null.
+                let mut inner = expr;
+                while let parser::ExprKind::Paren(e) = &inner.kind {
+                    inner = &**e;
+                }
+                if let parser::ExprKind::Binary {
+                    op: parser::BinaryOp::NullCoal,
+                    right,
+                    ..
+                } = &inner.kind
+                    && dead_end(right) != Flow::Completes
+                    && let Some(crate::tast::TypeKind::Optional { inner_type }) = self
+                        .lowering
+                        .context
+                        .type_table
+                        .borrow()
+                        .get(ty)
+                        .map(|t| t.kind.clone())
+                {
+                    return Ok(inner_type);
+                }
+                Ok(ty)
             }
             Ok(_) => Err(probe_errors.join("\n")),
             Err(e) => {
@@ -793,6 +848,35 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
 
     fn expected_type(&mut self) -> Option<TypeId> {
         self.expected
+    }
+
+    // The imports land on a scope of their own, so they end with it; usings
+    // are a list on the lowering, cut back to its length at entry.
+    fn enter_imports(&mut self, imports: &[String], usings: &[String]) -> [usize; 2] {
+        let token = [
+            self.lowering.using_modules.len(),
+            self.lowering.unresolved_usings.len(),
+        ];
+        self.lowering
+            .context
+            .enter_scope(crate::tast::ScopeKind::Block);
+        let span = parser::Span::default();
+        for source in imports {
+            let _ = self
+                .lowering
+                .lower_import(&import_from_source(source, span));
+        }
+        for source in usings {
+            let path = source.trim().split('.').map(str::to_string).collect();
+            let _ = self.lowering.lower_using(&parser::Using { path, span });
+        }
+        token
+    }
+
+    fn exit_imports(&mut self, token: [usize; 2]) {
+        self.lowering.using_modules.truncate(token[0]);
+        self.lowering.unresolved_usings.truncate(token[1]);
+        self.lowering.context.exit_scope();
     }
 
     fn type_display(&mut self, id: TypeId) -> String {
@@ -1264,6 +1348,32 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         current
     }
 
+    fn extension_types(&mut self, id: TypeId) -> Option<Vec<TypeId>> {
+        use crate::tast::core::TypeKind;
+        let mut current = id;
+        let mut seen = std::collections::BTreeSet::new();
+        while seen.insert(current) {
+            let kind = self
+                .lowering
+                .context
+                .type_table
+                .borrow()
+                .get(current)
+                .map(|t| t.kind.clone());
+            let symbol = match kind {
+                Some(TypeKind::TypeAlias { symbol_id, .. } | TypeKind::Class { symbol_id, .. }) => {
+                    symbol_id
+                }
+                _ => return None,
+            };
+            if let Some(extended) = self.lowering.alias_extensions.get(&symbol) {
+                return Some(extended.clone());
+            }
+            current = self.follow_type(current, true, false);
+        }
+        None
+    }
+
     fn apply_type_parameters(&mut self, id: TypeId, params: &[TypeId], args: &[TypeId]) -> TypeId {
         let bindings: Vec<_> = params
             .iter()
@@ -1428,6 +1538,34 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 .create_type_with_location(rebuilt, crate::tast::SourceLocation::unknown()),
         )
     }
+}
+
+/// An import as written after `import`, read the way the parser reads one.
+fn import_from_source(source: &str, span: parser::Span) -> parser::Import {
+    use parser::ImportMode;
+    let mut words = source.split_whitespace();
+    let mut path: Vec<String> = words
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .map(str::to_string)
+        .collect();
+    let mode = match (words.next(), words.next()) {
+        (Some("as" | "in"), Some(alias)) => ImportMode::Alias(alias.to_string()),
+        _ if path.last().is_some_and(|s| s == "*") => {
+            path.pop();
+            ImportMode::Wildcard
+        }
+        _ if path.len() >= 2
+            && path
+                .last()
+                .is_some_and(|s| s.starts_with(|c: char| c.is_ascii_lowercase())) =>
+        {
+            ImportMode::Field(path.pop().unwrap_or_default())
+        }
+        _ => ImportMode::Normal,
+    };
+    parser::Import { path, mode, span }
 }
 
 /// Follow monomorph bindings to the representative.
@@ -1965,4 +2103,129 @@ fn with_unknown_parameters(
         _ => return id,
     };
     tt.create_type(kind)
+}
+
+/// How control leaves an expression, as Haxe's `DeadEnd` judges it: it
+/// completes, it exits (`return`/`throw`) on every path, or a `break` or
+/// `continue` is reached first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    Completes,
+    Exits,
+    Escapes,
+}
+
+/// Sub-expressions are judged in evaluation order and the first that does
+/// not complete decides; a function literal is never run; a branch, case or
+/// catch is dead only when every alternative is.
+fn dead_end(e: &parser::Expr) -> Flow {
+    use parser::{BinaryOp, ExprKind as K};
+    fn is_bool(mut e: &parser::Expr, value: bool) -> bool {
+        while let K::Paren(inner) = &e.kind {
+            e = &**inner;
+        }
+        matches!(e.kind, K::Bool(b) if b == value)
+    }
+    // Every alternative must be dead; the first that is not decides.
+    fn all<'e>(alternatives: impl IntoIterator<Item = &'e parser::Expr>) -> Flow {
+        for alternative in alternatives {
+            match dead_end(alternative) {
+                Flow::Exits => {}
+                other => return other,
+            }
+        }
+        Flow::Exits
+    }
+    // A `break` or `continue` in a loop body leaves the loop, not the code.
+    let body = |b: &parser::Expr| match dead_end(b) {
+        Flow::Escapes => Flow::Completes,
+        flow => flow,
+    };
+    let first = |parts: &[&parser::Expr]| {
+        parts
+            .iter()
+            .map(|&p| dead_end(p))
+            .find(|f| *f != Flow::Completes)
+            .unwrap_or(Flow::Completes)
+    };
+    match &e.kind {
+        K::Break | K::Continue => Flow::Escapes,
+        K::Return(_) | K::Throw(_) => Flow::Exits,
+        K::Function(_) | K::Arrow { .. } => Flow::Completes,
+        K::If {
+            cond,
+            then_branch,
+            else_branch: Some(else_branch),
+        }
+        | K::Ternary {
+            cond,
+            then_expr: then_branch,
+            else_expr: else_branch,
+        } => match dead_end(cond) {
+            Flow::Completes => all([&**then_branch, &**else_branch]),
+            flow => flow,
+        },
+        K::If { cond, .. } | K::For { iter: cond, .. } => dead_end(cond),
+        K::Binary {
+            op: op @ (BinaryOp::And | BinaryOp::Or),
+            left,
+            right,
+        } => match dead_end(left) {
+            Flow::Completes if is_bool(left, matches!(op, BinaryOp::And)) => dead_end(right),
+            flow => flow,
+        },
+        K::Binary {
+            op: BinaryOp::NullCoal,
+            left,
+            ..
+        } => dead_end(left),
+        K::While { cond, body: b } => match dead_end(cond) {
+            Flow::Completes if is_bool(cond, true) => body(b),
+            flow => flow,
+        },
+        K::DoWhile { body: b, cond } => match body(b) {
+            Flow::Completes => dead_end(cond),
+            flow => flow,
+        },
+        K::Switch {
+            expr: subject,
+            cases,
+            default,
+        } => {
+            let subject = dead_end(subject);
+            let exhaustive = default.is_some()
+                || cases.iter().any(|c| {
+                    c.guard.is_none()
+                        && c.patterns
+                            .iter()
+                            .any(|p| matches!(p, parser::Pattern::Underscore))
+                });
+            match subject {
+                Flow::Completes if exhaustive => {
+                    all(cases.iter().map(|c| &c.body).chain(default.as_deref()))
+                }
+                flow => flow,
+            }
+        }
+        K::Try {
+            expr: tried,
+            catches,
+            ..
+        } => match dead_end(tried) {
+            Flow::Exits => all(catches.iter().map(|c| &c.body)),
+            flow => flow,
+        },
+        _ => {
+            let mut children = Vec::new();
+            let mut root = true;
+            super::walk_expr_pruned(e, &mut |child| {
+                if std::mem::take(&mut root) {
+                    return true;
+                }
+                children.push(child);
+                false
+            });
+            first(&children)
+        }
+    }
 }

@@ -17,10 +17,36 @@ impl AstLowering<'_> {
             message,
             location: expression.source_location,
         };
+        // An exit (`final a = return;`) types as a monomorph in Haxe.
+        let exits = |mut init: &TypedExpression| {
+            while let TypedExpressionKind::Cast {
+                expression,
+                cast_kind: CastKind::Implicit,
+                ..
+            } = &init.kind
+            {
+                init = &**expression;
+            }
+            matches!(
+                init.kind,
+                TypedExpressionKind::Return { .. }
+                    | TypedExpressionKind::Throw { .. }
+                    | TypedExpressionKind::Break
+                    | TypedExpressionKind::Continue
+            )
+        };
         match &expression.kind {
-            TypedExpressionKind::VarDeclarationExpr { var_type, .. }
-            | TypedExpressionKind::FinalDeclarationExpr { var_type, .. }
-                if *var_type == self.context.type_table.borrow().void_type() =>
+            TypedExpressionKind::VarDeclarationExpr {
+                var_type,
+                initializer,
+                ..
+            }
+            | TypedExpressionKind::FinalDeclarationExpr {
+                var_type,
+                initializer,
+                ..
+            } if *var_type == self.context.type_table.borrow().void_type()
+                && !exits(&**initializer) =>
             {
                 return Err(error("Variables of type Void are not allowed".to_string()));
             }

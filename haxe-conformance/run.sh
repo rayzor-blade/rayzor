@@ -388,7 +388,7 @@ targets = set(target_pkgs.split('|'))
 # defines no rayzor build sets. Anything else stays undecidable.
 defined = {'rayzor', 'sys', 'static', 'eval', 'target_unicode'}
 undefined = {'flash_test_swc', 'macro', 'utf16', 'target_utf16', 'interp', 'cppia',
-             'hxcpp_smart_strings'}
+             'hxcpp_smart_strings', 'todo'}
 def branch_is_ours(cond):
     # We are none of the targets, so evaluate the condition with every target
     # name false and see what it says. `#if cpp` is dead, `#if !cpp` is LIVE --

@@ -3143,12 +3143,19 @@ impl<'a> TastToHirContext<'a> {
                     );
                 }
 
-                // A lone `'$x'` is still a String: seed the chain with "" so
-                // the value goes through the concatenation's conversion
-                // instead of being handed on as itself.
-                let lone_expression =
-                    matches!(parts.as_slice(), [StringInterpolationPart::Expression(_)]);
-                let mut result = lone_expression.then(|| {
+                // A lone `'$x'` is still a String, and `'$x$y'` concatenates
+                // rather than adds: seed the chain with "" so the leading
+                // value goes through the concatenation's conversion.
+                let leading_expression = matches!(
+                    parts.as_slice(),
+                    [StringInterpolationPart::Expression(_)]
+                        | [
+                            StringInterpolationPart::Expression(_),
+                            StringInterpolationPart::Expression(_),
+                            ..
+                        ]
+                );
+                let mut result = leading_expression.then(|| {
                     HirExpr::new(
                         HirExprKind::Literal(HirLiteral::String(self.intern_str(""))),
                         self.get_string_type(),

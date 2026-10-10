@@ -534,6 +534,7 @@ impl<'a> AstLowering<'a> {
                     // as well as qualified (`Color.Red`), so also alias them into
                     // the module scope for bare-name resolution.
                     if abstract_decl.is_enum_abstract {
+                        self.module_enum_abstract_values.insert(member_name, sym);
                         self.context.symbol_table.add_symbol_alias(
                             sym,
                             ScopeId::first(),

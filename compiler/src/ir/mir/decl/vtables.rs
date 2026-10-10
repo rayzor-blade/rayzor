@@ -1485,14 +1485,39 @@ impl<'a> HirToMirContext<'a> {
         call_args.extend(forward_regs);
 
         let ret_ty = method_sig.return_type.clone();
+        // A virtual method dispatches on the receiver, as a call through it does.
+        let slot = self
+            .builder
+            .module
+            .functions
+            .get(&method_func_id)
+            .and_then(|f| self.virtual_dispatch_info.get(&f.symbol_id))
+            .map(|(slot, _)| *slot);
+        let result = match slot {
+            Some(slot) => {
+                let lookup = self.get_or_register_extern_function(
+                    "haxe_vtable_lookup",
+                    vec![ptr_u8.clone(), IrType::I32],
+                    IrType::I64,
+                );
+                let slot = self.builder.build_const(IrValue::I32(slot as i32));
+                let pointer = slot.and_then(|slot| {
+                    self.builder
+                        .build_call_direct(lookup, vec![call_args[0], slot], IrType::I64)
+                });
+                let params: Vec<IrType> =
+                    method_sig.parameters.iter().map(|p| p.ty.clone()).collect();
+                pointer.and_then(|pointer| {
+                    self.build_class_slot_call(pointer, call_args, params, ret_ty.clone())
+                })
+            }
+            None => self
+                .builder
+                .build_call_direct(method_func_id, call_args, ret_ty.clone()),
+        };
         if matches!(ret_ty, IrType::Void) {
-            self.builder
-                .build_call_direct(method_func_id, call_args, IrType::Void);
             self.builder.build_return(None);
         } else {
-            let result = self
-                .builder
-                .build_call_direct(method_func_id, call_args, ret_ty.clone());
             self.builder.build_return(result);
         }
 

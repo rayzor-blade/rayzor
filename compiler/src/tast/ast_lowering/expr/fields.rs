@@ -900,11 +900,14 @@ impl<'a> AstLowering<'a> {
             });
         }
 
-        // A dynamic method read as a value takes its current binding.
+        // A dynamic method read as a value takes its current binding; a plain
+        // override is the binding itself, as calls through it ignore the slot.
         if self.is_method_symbol(field_symbol)
             && self
                 .resolve_type_to_class_symbol(obj_expr.expr_type)
-                .is_some_and(|class| self.has_original_body(class, field))
+                .is_some_and(|class| {
+                    self.has_original_body(class, field) && !self.plainly_overridden(class, field)
+                })
         {
             let read = self.dynamic_method_read(Some(expr), field, expression.span);
             return self.lower_expression(&read);

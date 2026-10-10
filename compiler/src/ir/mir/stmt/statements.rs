@@ -1268,6 +1268,15 @@ impl<'a> HirToMirContext<'a> {
                         // with the Let/Assign handlers.
                         let val_ir = self.builder.get_register_type(val).unwrap_or(IrType::I64);
                         let ret_ir = self.convert_type(fn_ret_ty);
+                        // An erased type parameter carries a Float as its bits.
+                        if matches!(val_ir, IrType::F32 | IrType::F64)
+                            && matches!(
+                                self.type_table.get(fn_ret_ty).map(|t| &t.kind),
+                                Some(TypeKind::TypeParameter { .. })
+                            )
+                        {
+                            return Some(self.erase_reflect_compare_arg(val));
+                        }
                         let needs_int_to_float = matches!(
                             (&val_ir, &ret_ir),
                             (

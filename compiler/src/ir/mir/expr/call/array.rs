@@ -69,8 +69,26 @@ impl<'a> HirToMirContext<'a> {
             };
             let dynamic_search =
                 element_type.is_some_and(|ty| is_dynamic(self, ty)) && is_dynamic(self, args[1].ty);
+            // An erased `Array<T>` searched for a `T` compares the way `==` on
+            // T does, by the tag monomorphisation substitutes for T.
+            let type_param_name = |me: &Self, ty: TypeId| match me.type_table.get(ty) {
+                Some(t) => match &t.kind {
+                    TypeKind::TypeParameter { symbol_id, .. } => me
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .and_then(|s| me.string_interner.get(s.name))
+                        .map(str::to_string),
+                    _ => None,
+                },
+                None => None,
+            };
+            let shared_param = element_type
+                .and_then(|ty| type_param_name(self, ty))
+                .filter(|name| type_param_name(self, args[1].ty).as_ref() == Some(name));
             let search = element_type.and_then(|ty| {
-                if self.convert_type(ty) == IrType::String {
+                if shared_param.is_some() {
+                    Some(("haxe_array_typed_index_of", IrType::I64))
+                } else if self.convert_type(ty) == IrType::String {
                     Some(("haxe_array_string_index_of", IrType::String))
                 } else if matches!(
                     self.type_table
@@ -94,7 +112,11 @@ impl<'a> HirToMirContext<'a> {
             if let Some((name, value_type)) = search {
                 let arr = self.lower_expression(&args[0])?;
                 let value = self.lower_expression(&args[1])?;
-                let value = self.coerce_reg_to(value, &value_type)?;
+                let value = if shared_param.is_some() {
+                    self.erase_reflect_compare_arg(value)
+                } else {
+                    self.coerce_reg_to(value, &value_type)?
+                };
                 let from = if let Some(arg) = args.get(2) {
                     self.lower_expression(arg)?
                 } else {
@@ -104,21 +126,25 @@ impl<'a> HirToMirContext<'a> {
                 let reverse = self
                     .builder
                     .build_const(IrValue::I32(i32::from(vname == "lastIndexOf")))?;
-                let function = self.get_or_register_extern_function(
-                    name,
-                    vec![
-                        IrType::Ptr(Box::new(IrType::U8)),
-                        value_type,
-                        IrType::I64,
-                        IrType::I32,
-                    ],
+                let mut param_types = vec![
+                    IrType::Ptr(Box::new(IrType::U8)),
+                    value_type,
                     IrType::I64,
-                );
-                let index = self.builder.build_call_direct(
-                    function,
-                    vec![arr, value, from, reverse],
-                    IrType::I64,
-                )?;
+                    IrType::I32,
+                ];
+                let mut call_args = vec![arr, value, from, reverse];
+                if let Some(tp_name) = shared_param {
+                    let tag = self.builder.build_const(IrValue::I32(0))?;
+                    if let Some(func) = self.builder.current_function_mut() {
+                        func.type_param_tag_fixups.push((tag, tp_name));
+                    }
+                    param_types.push(IrType::I32);
+                    call_args.push(tag);
+                }
+                let function = self.get_or_register_extern_function(name, param_types, IrType::I64);
+                let index = self
+                    .builder
+                    .build_call_direct(function, call_args, IrType::I64)?;
                 return match vname {
                     "contains" => {
                         let zero = self.builder.build_const(IrValue::I64(0))?;
