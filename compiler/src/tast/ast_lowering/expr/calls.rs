@@ -1419,6 +1419,32 @@ impl<'a> AstLowering<'a> {
     }
 
     /// The abstract a type is, through generic instantiation.
+    /// `==` between an abstract and a primitive of another type compares
+    /// through the abstract's `@:from` for that primitive.
+    pub(crate) fn coerce_eq_operands_via_abstract_from(
+        &mut self,
+        left: TypedExpression,
+        right: TypedExpression,
+    ) -> (TypedExpression, TypedExpression) {
+        use crate::tast::core::TypeKind;
+        let primitive = |this: &Self, ty: TypeId| {
+            matches!(
+                this.context.type_table.borrow().get(ty).map(|t| &t.kind),
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
+            )
+        };
+        let (lt, rt) = (left.expr_type, right.expr_type);
+        if self.abstract_symbol_of(lt).is_some() && primitive(self, rt) {
+            let right = self.coerce_arg_via_abstract_from(right, Some(lt));
+            return (left, right);
+        }
+        if self.abstract_symbol_of(rt).is_some() && primitive(self, lt) {
+            let left = self.coerce_arg_via_abstract_from(left, Some(rt));
+            return (left, right);
+        }
+        (left, right)
+    }
+
     pub(crate) fn abstract_symbol_of(&self, ty: TypeId) -> Option<SymbolId> {
         use crate::tast::core::TypeKind;
         let tt = self.context.type_table.borrow();

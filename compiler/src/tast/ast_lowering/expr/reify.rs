@@ -377,6 +377,39 @@ impl Reifier {
         })
     }
 
+    /// The `Field` values of a structure's fields.
+    fn anon_fields(&self, fields: &[parser::AnonField]) -> Option<Expr> {
+        let fields = fields
+            .iter()
+            .map(|f| {
+                let meta = if f.optional {
+                    vec![self.meta_entry(":optional", &[])?]
+                } else {
+                    Vec::new()
+                };
+                Some(self.typed(
+                    "Field",
+                    vec![
+                        ("name", self.string(&f.name)),
+                        ("doc", self.null()),
+                        ("access", self.array(Vec::new())),
+                        (
+                            "kind",
+                            self.ctor(
+                                "FieldType",
+                                "FVar",
+                                vec![self.complex_type(&f.type_hint)?, self.null()],
+                            ),
+                        ),
+                        ("pos", self.null()),
+                        ("meta", self.array(meta)),
+                    ],
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(self.array(fields))
+    }
+
     fn complex_type(&self, t: &parser::Type) -> Option<Expr> {
         Some(match t {
             // `$t` splices a ComplexType value; `$tp<P>` a TypePath given parameters.
@@ -425,41 +458,25 @@ impl Reifier {
                 ],
             ),
             parser::Type::Anonymous { fields, .. } => {
-                let fields = fields
-                    .iter()
-                    .map(|f| {
-                        let meta = if f.optional {
-                            vec![self.meta_entry(":optional", &[])?]
-                        } else {
-                            Vec::new()
-                        };
-                        Some(self.typed(
-                            "Field",
-                            vec![
-                                ("name", self.string(&f.name)),
-                                ("doc", self.null()),
-                                ("access", self.array(Vec::new())),
-                                (
-                                    "kind",
-                                    self.ctor(
-                                        "FieldType",
-                                        "FVar",
-                                        vec![self.complex_type(&f.type_hint)?, self.null()],
-                                    ),
-                                ),
-                                ("pos", self.null()),
-                                ("meta", self.array(meta)),
-                            ],
-                        ))
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                self.ctor("ComplexType", "TAnonymous", vec![self.array(fields)])
+                self.ctor("ComplexType", "TAnonymous", vec![self.anon_fields(fields)?])
             }
             parser::Type::Optional { inner, .. } => {
                 self.ctor("ComplexType", "TOptional", vec![self.complex_type(inner)?])
             }
             parser::Type::Parenthesis { inner, .. } => {
                 self.ctor("ComplexType", "TParent", vec![self.complex_type(inner)?])
+            }
+            parser::Type::Intersection { .. } if extension_parts(t).is_some() => {
+                let (extended, fields) = extension_parts(t)?;
+                let paths = extended
+                    .into_iter()
+                    .map(|(path, params)| self.type_path(path, params))
+                    .collect::<Option<Vec<_>>>()?;
+                self.ctor(
+                    "ComplexType",
+                    "TExtend",
+                    vec![self.array(paths), self.anon_fields(fields)?],
+                )
             }
             parser::Type::Intersection { left, right, .. } => self.ctor(
                 "ComplexType",
@@ -799,5 +816,32 @@ impl Reifier {
             AssignOp::ShrAssign => BinaryOp::Shr,
             AssignOp::UshrAssign => BinaryOp::Ushr,
         })
+    }
+}
+
+/// `{> A, > B, f:T}` parses as `A & (B & {f:T})` with every node spanning the
+/// braces, so each extended path starts after its node; a written `A & {..}`
+/// starts at `A`.
+fn extension_parts(
+    mut t: &parser::Type,
+) -> Option<(
+    Vec<(&parser::TypePath, &[parser::Type])>,
+    &[parser::AnonField],
+)> {
+    let mut extended = Vec::new();
+    loop {
+        match t {
+            parser::Type::Intersection { left, right, span } if span.start < left.span().start => {
+                let parser::Type::Path { path, params, .. } = &**left else {
+                    return None;
+                };
+                extended.push((path, params.as_slice()));
+                t = &**right;
+            }
+            parser::Type::Anonymous { fields, .. } if !extended.is_empty() => {
+                return Some((extended, fields));
+            }
+            _ => return None,
+        }
     }
 }

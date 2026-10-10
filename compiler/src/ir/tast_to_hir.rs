@@ -6656,6 +6656,25 @@ impl<'a> TastToHirContext<'a> {
         result_type: TypeId,
         location: SourceLocation,
     ) -> Option<HirExpr> {
+        self.call_abstract_constructor_with(
+            class_type,
+            arguments.len(),
+            result_type,
+            location,
+            |this| arguments.iter().map(|a| this.lower_expression(a)).collect(),
+        )
+    }
+
+    /// `call_abstract_constructor` with arguments lowered by `lower_args` once
+    /// the constructor is found.
+    fn call_abstract_constructor_with(
+        &mut self,
+        class_type: TypeId,
+        arity: usize,
+        result_type: TypeId,
+        location: SourceLocation,
+        lower_args: impl FnOnce(&mut Self) -> Vec<HirExpr>,
+    ) -> Option<HirExpr> {
         use crate::tast::core::TypeKind;
         let current_file = self.current_file?;
         let (symbol_id, underlying, type_args) = {
@@ -6707,15 +6726,13 @@ impl<'a> TastToHirContext<'a> {
                         .filter(|c| !c.body.is_empty())
                 };
                 let ctor = bodied()
-                    .find(|c| c.parameters.len() == arguments.len())
-                    .or_else(|| bodied().find(|c| c.parameters.len() >= arguments.len()))?;
+                    .find(|c| c.parameters.len() == arity)
+                    .or_else(|| bodied().find(|c| c.parameters.len() >= arity))?;
                 (ctor.symbol_id, underlying.or(abstract_def.underlying_type)?)
             }
             None => {
                 let scope = self.symbol_table.get_symbol(symbol_id)?.scope_id;
-                let by_arity = self
-                    .string_interner
-                    .intern(&format!("new_{}", arguments.len()));
+                let by_arity = self.string_interner.intern(&format!("new_{}", arity));
                 let plain = self.string_interner.intern("new");
                 // The abstract's own `new`: the scope also holds the other
                 // types of its module, and their constructors.
@@ -6775,7 +6792,7 @@ impl<'a> TastToHirContext<'a> {
             self.current_lifetime,
             location,
         )];
-        args.extend(arguments.iter().map(|a| self.lower_expression(a)));
+        args.extend(lower_args(self));
         Some(HirExpr::new(
             HirExprKind::Call {
                 target: CallTarget::Method {
@@ -7959,6 +7976,17 @@ impl<'a> TastToHirContext<'a> {
                     expected_type,
                 ) {
                     return value;
+                }
+                // An imported abstract's constructor runs, as on the non-inlined path.
+                let ctor_args = lowered_args.clone();
+                if let Some(call) = self.call_abstract_constructor_with(
+                    fixed_class_type,
+                    ctor_args.len(),
+                    fixed_class_type,
+                    expr.source_location,
+                    move |_| ctor_args,
+                ) {
+                    return call;
                 }
 
                 // Use class_name from TAST if available, otherwise extract from TypeId

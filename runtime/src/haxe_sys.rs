@@ -1714,7 +1714,7 @@ pub extern "C" fn haxe_file_copy(src: *const HaxeString, dst: *const HaxeString)
             None => return,
         };
         if let Err(e) = std::fs::copy(&src_str, &dst_str) {
-            debug!("File.copy error: {} -> {} - {}", src_str, dst_str, e);
+            crate::exception::throw_with_message(format!("{}: {}", src_str, e));
         }
     }
 }
@@ -1896,15 +1896,56 @@ pub extern "C" fn haxe_filesystem_full_path(path: *const HaxeString) -> *mut Hax
 /// Get absolute path (doesn't need to exist)
 /// FileSystem.absolutePath(relPath: String): String
 #[unsafe(no_mangle)]
+/// `haxe.io.Path.join([base, rel])`: drops `.` and empty segments, folds `..`.
+fn join_normalized(base: &str, rel: &str) -> String {
+    let joined = format!("{}/{}", base, rel).replace('\\', "/");
+    let mut parts: Vec<&str> = Vec::new();
+    for token in joined.split('/') {
+        match token {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|p| *p != "..") => {
+                parts.pop();
+            }
+            t => parts.push(t),
+        }
+    }
+    let lead = if joined.starts_with('/') { "/" } else { "" };
+    let trail = if rel.ends_with('/') && !parts.is_empty() {
+        "/"
+    } else {
+        ""
+    };
+    format!("{}{}{}", lead, parts.join("/"), trail)
+}
+
+/// Throws `haxe.io.Eof`, or its name when the class is not compiled in.
+fn throw_eof() -> ! {
+    let name = rust_string_to_haxe("haxe.io.Eof".to_string());
+    let type_id = crate::type_system::haxe_type_resolve_class(name as *mut u8);
+    if type_id > 0 {
+        let eof = crate::type_system::haxe_type_create_empty_instance(type_id);
+        if !eof.is_null() {
+            crate::exception::rayzor_throw_typed(
+                eof as i64,
+                crate::type_system::TYPE_FROM_HEADER.0,
+            );
+        }
+    }
+    crate::exception::throw_with_message("Eof".to_string())
+}
+
 pub extern "C" fn haxe_filesystem_absolute_path(path: *const HaxeString) -> *mut HaxeString {
     unsafe {
         match haxe_string_to_rust(path) {
             Some(path_str) => {
-                let abs_path = if std::path::Path::new(&path_str).is_absolute() {
+                // haxe.io.Path.isAbsolute: a leading slash or backslash, or a drive letter.
+                let b = path_str.as_bytes();
+                let absolute = matches!(b.first(), Some(b'/' | b'\\')) || b.get(1) == Some(&b':');
+                let abs_path = if absolute {
                     path_str
                 } else {
                     match std::env::current_dir() {
-                        Ok(cwd) => cwd.join(&path_str).to_string_lossy().into_owned(),
+                        Ok(cwd) => join_normalized(&cwd.to_string_lossy(), &path_str),
                         Err(_) => path_str,
                     }
                 };
@@ -2050,7 +2091,7 @@ pub extern "C" fn haxe_filesystem_read_directory(
 
         let entries = match std::fs::read_dir(&path_str) {
             Ok(entries) => entries,
-            Err(_) => return std::ptr::null_mut(),
+            Err(e) => crate::exception::throw_with_message(format!("{}: {}", path_str, e)),
         };
 
         // Allocate array on heap
@@ -2218,14 +2259,10 @@ pub extern "C" fn haxe_fileinput_read_byte(handle: *mut HaxeFileInput) -> i32 {
         let input = &mut *handle;
         let mut buf = [0u8; 1];
         match input.reader.read(&mut buf) {
-            Ok(0) => {
+            Ok(1) => buf[0] as i32,
+            _ => {
                 input.eof_reached = true;
-                -1 // EOF
-            }
-            Ok(_) => buf[0] as i32,
-            Err(_) => {
-                input.eof_reached = true;
-                -1
+                throw_eof()
             }
         }
     }
@@ -2281,14 +2318,10 @@ pub extern "C" fn haxe_fileinput_read_bytes_buf(
         let buf = std::slice::from_raw_parts_mut(b.ptr.add(pos), len);
         let input = &mut *handle;
         match input.reader.read(buf) {
-            Ok(0) => {
+            Ok(n) if n > 0 => n as i32,
+            _ => {
                 input.eof_reached = true;
-                0
-            }
-            Ok(n) => n as i32,
-            Err(_) => {
-                input.eof_reached = true;
-                0
+                throw_eof()
             }
         }
     }

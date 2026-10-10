@@ -854,6 +854,11 @@ impl<'a> AstLowering<'a> {
                         self.expected_arg_type_stack.pop();
                     }
                     let right_expr = right_result?;
+                    let (left_expr, right_expr) = if matches!(op, BinaryOp::Eq | BinaryOp::NotEq) {
+                        self.coerce_eq_operands_via_abstract_from(left_expr, right_expr)
+                    } else {
+                        (left_expr, right_expr)
+                    };
                     let typed_op = self.lower_binary_operator(op)?;
 
                     // `Int % 0` is NaN in Haxe; a constant one would trap as a remainder.

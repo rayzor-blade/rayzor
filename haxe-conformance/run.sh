@@ -271,7 +271,11 @@ process_one() { # process_one <source> <result-file>
           | awk '{print $2}' | tr '.' '/')"
   # The sys suite declares no package at all, so an empty `rel` is the root of
   # the staging directory -- not a missing value to default away.
-  d="$RUN_ROOT/$base"; rm -rf "$d"; mkdir -p "$d${rel:+/$rel}"
+  rm -rf "$RUN_ROOT/$base"; d="$RUN_ROOT/$base"
+  # Upstream runs the sys suite from tests/sys: cases read `.` and `..` (named
+  # `sys`), expect compile.hxml beside them, and write under temp/.
+  case "$f" in "$SYS_SRC"/*) d="$RUN_ROOT/$base/sys" ;; esac
+  mkdir -p "$d${rel:+/$rel}"
   # Haxe applies an `import.hx` at a class-path root to every module beneath
   # it. The threads suite puts its utest imports there, which is why its cases
   # call isTrue/same/pass unqualified. Staged per-test rather than into SHARED:
@@ -279,7 +283,9 @@ process_one() { # process_one <source> <result-file>
   # resolution for the other 1200 cases.
   case "$f" in
     "$THREADS_SRC"/*) cp "$THREADS_SRC/import.hx" "$d/" 2>/dev/null || true ;;
-    "$SYS_SRC"/*)     cp "$SYS_SRC/import.hx" "$d/" 2>/dev/null || true ;;
+    "$SYS_SRC"/*)     cp "$SYS_SRC/import.hx" "$d/" 2>/dev/null || true
+                      cp "$SYS_SRC/../compile.hxml" "$d/" 2>/dev/null || true
+                      mkdir -p "$d/temp" ;;
   esac
   # The corpus is not self-contained: tests reference siblings that upstream
   # ships beside them -- HelperMacros, MyClass, MyEnum, and the macros under

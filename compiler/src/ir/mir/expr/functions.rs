@@ -1008,74 +1008,96 @@ impl<'a> HirToMirContext<'a> {
         // Handle super() call if present
         if let Some(super_call) = &constructor.super_call {
             if let Some(parent_type_id) = parent_type {
-                // Look up parent constructor by TypeId first, then by name as fallback
-                let parent_ctor_id =
-                    self.constructor_map
-                        .get(&parent_type_id)
-                        .copied()
-                        .or_else(|| {
-                            // TypeId mismatch: class.extends uses TAST TypeIds, constructor_map uses MIR TypeIds.
-                            // Fall back to looking up by class name via constructor_name_map.
-                            // Resolve parent class symbol from the type_table.
-                            let type_table = self.type_table;
-                            let parent_symbol = type_table.get(parent_type_id).and_then(|ti| {
-                                if let TypeKind::Class { symbol_id, .. } = &ti.kind {
-                                    Some(*symbol_id)
-                                } else {
-                                    None
-                                }
-                            });
-
-                            if let Some(parent_sym) = parent_symbol {
-                                if let Some(sym_info) = self.symbol_table.get_symbol(parent_sym) {
-                                    // Try qualified name first
-                                    if let Some(qual_name) = sym_info
-                                        .qualified_name
-                                        .and_then(|q| self.string_interner.get(q))
-                                    {
-                                        if let Some(&fid) = self.constructor_name_map.get(qual_name)
-                                        {
-                                            return Some(fid);
-                                        }
+                // The parent by symbol first: `parent_type_id` is symbol-derived,
+                // and a raw id can coincide with another class's TAST TypeId in
+                // constructor_map, so a hit there must name the parent.
+                let parent_qualified = self
+                    .class_parent_map
+                    .get(&class_symbol)
+                    .and_then(|p| self.symbol_table.get_symbol(*p))
+                    .and_then(|s| s.qualified_name)
+                    .and_then(|q| self.string_interner.get(q))
+                    .map(str::to_string);
+                let parent_ctor_id = parent_qualified
+                    .as_deref()
+                    .and_then(|q| self.constructor_name_map.get(q).copied())
+                    .or_else(|| {
+                        self.constructor_map
+                            .get(&parent_type_id)
+                            .copied()
+                            .filter(|fid| {
+                                match (
+                                    self.constructor_owner_map.get(fid),
+                                    parent_qualified.as_deref(),
+                                ) {
+                                    (Some(owner), Some(parent)) => {
+                                        Self::class_names_match(owner, parent)
                                     }
-                                    // Try simple name
-                                    if let Some(name) = self.string_interner.get(sym_info.name) {
-                                        if let Some(&fid) = self.constructor_name_map.get(name) {
-                                            return Some(fid);
-                                        }
-                                    }
+                                    _ => true,
                                 }
+                            })
+                    })
+                    .or_else(|| {
+                        // TypeId mismatch: class.extends uses TAST TypeIds, constructor_map uses MIR TypeIds.
+                        // Fall back to looking up by class name via constructor_name_map.
+                        // Resolve parent class symbol from the type_table.
+                        let type_table = self.type_table;
+                        let parent_symbol = type_table.get(parent_type_id).and_then(|ti| {
+                            if let TypeKind::Class { symbol_id, .. } = &ti.kind {
+                                Some(*symbol_id)
+                            } else {
+                                None
                             }
-
-                            // The parent's TypeId can be renumbered when type_table
-                            // entries are rebuilt across compilation contexts;
-                            // `class_parent_map` is keyed by stable SymbolIds, so
-                            // resolve through it to the name, then constructor_name_map.
-                            // A parent without a constructor of its own hands the
-                            // call to the nearest ancestor that has one.
-                            let mut ancestor = self.class_parent_map.get(&class_symbol).copied();
-                            for _ in 0..16 {
-                                let Some(parent_sym) = ancestor else { break };
-                                if let Some(sym_info) = self.symbol_table.get_symbol(parent_sym) {
-                                    if let Some(qual_name) = sym_info
-                                        .qualified_name
-                                        .and_then(|q| self.string_interner.get(q))
-                                    {
-                                        if let Some(&fid) = self.constructor_name_map.get(qual_name)
-                                        {
-                                            return Some(fid);
-                                        }
-                                    }
-                                    if let Some(name) = self.string_interner.get(sym_info.name) {
-                                        if let Some(&fid) = self.constructor_name_map.get(name) {
-                                            return Some(fid);
-                                        }
-                                    }
-                                }
-                                ancestor = self.class_parent_map.get(&parent_sym).copied();
-                            }
-                            None
                         });
+
+                        if let Some(parent_sym) = parent_symbol {
+                            if let Some(sym_info) = self.symbol_table.get_symbol(parent_sym) {
+                                // Try qualified name first
+                                if let Some(qual_name) = sym_info
+                                    .qualified_name
+                                    .and_then(|q| self.string_interner.get(q))
+                                {
+                                    if let Some(&fid) = self.constructor_name_map.get(qual_name) {
+                                        return Some(fid);
+                                    }
+                                }
+                                // Try simple name
+                                if let Some(name) = self.string_interner.get(sym_info.name) {
+                                    if let Some(&fid) = self.constructor_name_map.get(name) {
+                                        return Some(fid);
+                                    }
+                                }
+                            }
+                        }
+
+                        // The parent's TypeId can be renumbered when type_table
+                        // entries are rebuilt across compilation contexts;
+                        // `class_parent_map` is keyed by stable SymbolIds, so
+                        // resolve through it to the name, then constructor_name_map.
+                        // A parent without a constructor of its own hands the
+                        // call to the nearest ancestor that has one.
+                        let mut ancestor = self.class_parent_map.get(&class_symbol).copied();
+                        for _ in 0..16 {
+                            let Some(parent_sym) = ancestor else { break };
+                            if let Some(sym_info) = self.symbol_table.get_symbol(parent_sym) {
+                                if let Some(qual_name) = sym_info
+                                    .qualified_name
+                                    .and_then(|q| self.string_interner.get(q))
+                                {
+                                    if let Some(&fid) = self.constructor_name_map.get(qual_name) {
+                                        return Some(fid);
+                                    }
+                                }
+                                if let Some(name) = self.string_interner.get(sym_info.name) {
+                                    if let Some(&fid) = self.constructor_name_map.get(name) {
+                                        return Some(fid);
+                                    }
+                                }
+                            }
+                            ancestor = self.class_parent_map.get(&parent_sym).copied();
+                        }
+                        None
+                    });
 
                 // The parent's module may lower later, so its constructor is
                 // not in `constructor_name_map` yet. Name the call and let the
