@@ -278,20 +278,33 @@ impl<'a> HirToMirContext<'a> {
         // with the element's type tag so each element is converted
         // via Std.string first (1=Int 2=Bool 4=Float 5=String 6=Ref).
         // Only an array's (or an unknown receiver's) `join`: a user class
-        // or abstract may declare its own.
-        let receiver_is_arrayish = args
-            .first()
-            .and_then(|a| self.type_table.get(a.ty))
-            .is_none_or(|t| {
-                !matches!(
-                    t.kind,
-                    TypeKind::Class { .. }
-                        | TypeKind::Abstract { .. }
-                        | TypeKind::Interface { .. }
-                        | TypeKind::Anonymous { .. }
-                        | TypeKind::TypeAlias { .. }
+        // or abstract may declare its own. A structure's static fallback
+        // runs once the receiver proved not to be an anon object with the
+        // member, so there it is an array.
+        let structural_fallback = args.first().is_some_and(|a| {
+            self.dynamic_member_fallback
+                .is_some_and(|(node, _)| node == a as *const HirExpr as usize)
+                && matches!(
+                    self.type_table
+                        .get(self.resolve_through_aliases(a.ty))
+                        .map(|t| &t.kind),
+                    Some(TypeKind::Anonymous { .. })
                 )
-            });
+        });
+        let receiver_is_arrayish = structural_fallback
+            || args
+                .first()
+                .and_then(|a| self.type_table.get(a.ty))
+                .is_none_or(|t| {
+                    !matches!(
+                        t.kind,
+                        TypeKind::Class { .. }
+                            | TypeKind::Abstract { .. }
+                            | TypeKind::Interface { .. }
+                            | TypeKind::Anonymous { .. }
+                            | TypeKind::TypeAlias { .. }
+                    )
+                });
         if vname == "join" && *is_method && args.len() == 2 && receiver_is_arrayish {
             let enum_element = self
                 .type_table

@@ -1302,6 +1302,37 @@ impl<'a> AstLowering<'a> {
             t
         };
 
+        // `EnumValueTools.getParameters` on an enum value returns `Array<Dynamic>`:
+        // its `length` and elements are read statically, not by name.
+        if field_name == "getParameters" {
+            let enum_value = {
+                let tt = self.context.type_table.borrow();
+                match tt.get(receiver_type).map(|t| &t.kind) {
+                    Some(TypeKind::Enum { .. }) => true,
+                    Some(
+                        TypeKind::Abstract { symbol_id, .. } | TypeKind::Class { symbol_id, .. },
+                    ) => self
+                        .context
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .is_some_and(|s| {
+                            crate::tast::core::is_haxe_std_type(
+                                s,
+                                self.context.string_interner,
+                                &["EnumValue"],
+                            )
+                        }),
+                    _ => false,
+                }
+            };
+            if enum_value {
+                let mut tt = self.context.type_table.borrow_mut();
+                let dynamic = tt.dynamic_type();
+                let parameters = tt.create_array_type(dynamic);
+                return Ok(tt.create_function_type(Vec::new(), parameters));
+            }
+        }
+
         // Check the object type to see if it's a built-in type with known methods
         let type_table = self.context.type_table.borrow();
         if let Some(object_type_info) = type_table.get(receiver_type) {
