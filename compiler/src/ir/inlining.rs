@@ -499,6 +499,7 @@ impl InliningPass {
             }
             // A narrower integer argument widens into its own register: the
             // caller's register keeps its type, so its arithmetic still wraps.
+            // NullInt converts like the call boundary did: sext in, trunc out.
             let is_int = |t: &IrType| {
                 matches!(
                     t,
@@ -510,6 +511,7 @@ impl InliningPass {
                         | IrType::U16
                         | IrType::U32
                         | IrType::U64
+                        | IrType::NullInt
                 )
             };
             if mapped == *arg

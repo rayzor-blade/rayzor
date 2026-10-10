@@ -242,6 +242,7 @@ pub extern "C" fn haxe_trace_typed(value: i64, type_tag: i32) {
             }
         }
         8 => haxe_trace_string_struct(haxe_value_to_string_by_tag(value, type_tag)),
+        10 if value == crate::type_system::NULL_INT => print_with_prefix("null"),
         _ => haxe_trace_int(value), // fallback
     }
 }
@@ -628,6 +629,7 @@ pub extern "C" fn haxe_value_to_string_by_tag(value: i64, type_tag: i32) -> *mut
         // value is already a HaxeString pointer, return it directly
         Some(ValueTag::String) => value as *mut HaxeString,
         Some(ValueTag::Int) => haxe_string_from_int(value),
+        Some(ValueTag::NullInt) => haxe_null_int_to_string(value),
         Some(ValueTag::Bool) => haxe_string_from_bool(value != 0),
         // reinterpret i64 bits as f64
         Some(ValueTag::Float) => haxe_string_from_float(f64::from_bits(value as u64)),

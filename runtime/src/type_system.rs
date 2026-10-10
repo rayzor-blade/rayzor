@@ -173,6 +173,8 @@ pub enum ValueTag {
     Interface = 8,
     /// Closure record `{code, env}`; other readers treat it as `Int`.
     Function = 9,
+    /// Unboxed `Null<Int>`: `NULL_INT` is null, anything else an Int.
+    NullInt = 10,
 }
 
 impl ValueTag {
@@ -186,6 +188,7 @@ impl ValueTag {
             6 => Some(ValueTag::Reference),
             8 => Some(ValueTag::Interface),
             9 => Some(ValueTag::Function),
+            10 => Some(ValueTag::NullInt),
             _ => None,
         }
     }
@@ -3799,6 +3802,14 @@ pub extern "C" fn haxe_dynamic_equals_typed(raw: i64, type_tag: i32, other: *mut
             haxe_dynamic_ref_equals(other, object)
         };
     }
+    // Null only equals null; zero is a value here.
+    if type_tag == ValueTag::NullInt as i32 {
+        let other_null = haxe_dynamic_is_null(other);
+        if other_null || raw == NULL_INT {
+            return other_null && raw == NULL_INT;
+        }
+        return haxe_dynamic_equals_typed(raw, ValueTag::Int as i32, other);
+    }
     // Reference/Dynamic, and the placeholder a monomorphisation never filled
     // in, both leave `raw` pointer-shaped: neither side is a described value.
     if type_tag == 6 || type_tag == 0 {
@@ -3878,6 +3889,7 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
             }
             haxe_box_int_ptr(value)
         }
+        Some(ValueTag::NullInt) => haxe_null_int_to_dynamic(value),
         Some(ValueTag::Bool) => {
             // Bool: box as bool
             haxe_box_bool_ptr(value != 0)
@@ -4911,6 +4923,8 @@ mod value_tag_tests {
         assert_eq!(ValueTag::String as i32, 5);
         assert_eq!(ValueTag::Reference as i32, 6);
         assert_eq!(ValueTag::Function as i32, 9);
+        assert_eq!(ValueTag::NullInt as i32, 10);
+        assert_eq!(ValueTag::from_i32(10), Some(ValueTag::NullInt));
     }
 
     // ValueTag and TypeId are different spaces. Where they collide, a reader
@@ -4992,6 +5006,25 @@ mod null_int_tests {
             assert_eq!(haxe_unbox_int_ptr(boxed), v);
             assert_eq!(haxe_null_int_from_dynamic(boxed), v);
         }
+    }
+
+    #[test]
+    fn null_int_tag_reads_the_sentinel_as_null() {
+        let tag = ValueTag::NullInt as i32;
+        assert!(haxe_box_typed_ptr(NULL_INT, tag).is_null());
+        assert_eq!(haxe_unbox_int_ptr(haxe_box_typed_ptr(-3, tag)), -3);
+        assert!(haxe_dynamic_equals_typed(
+            NULL_INT,
+            tag,
+            std::ptr::null_mut()
+        ));
+        assert!(!haxe_dynamic_equals_typed(0, tag, std::ptr::null_mut()));
+        assert!(haxe_dynamic_equals_typed(7, tag, haxe_box_int_ptr(7)));
+        assert!(!haxe_dynamic_equals_typed(
+            NULL_INT,
+            tag,
+            haxe_box_int_ptr(0)
+        ));
     }
 
     #[test]

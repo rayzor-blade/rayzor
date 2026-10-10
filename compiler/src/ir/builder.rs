@@ -546,6 +546,13 @@ impl IrBuilder {
         if self.module.functions.contains_key(&func_id) && final_args.len() < param_types.len() {
             for param_ty in &param_types[final_args.len()..] {
                 let default_val = match param_ty {
+                    IrType::NullInt => {
+                        match self.build_null_int() {
+                            Some(reg) => final_args.push(reg),
+                            None => break,
+                        }
+                        continue;
+                    }
                     IrType::I32 | IrType::U32 => IrValue::I32(0),
                     IrType::F32 => IrValue::F32(0.0),
                     IrType::F64 => IrValue::F64(0.0),
@@ -719,6 +726,13 @@ impl IrBuilder {
             if args.len() < param_types.len() {
                 for param_ty in &param_types[args.len()..] {
                     let default_val = match param_ty {
+                        IrType::NullInt => {
+                            match self.build_null_int() {
+                                Some(reg) => args.push(reg),
+                                None => break,
+                            }
+                            continue;
+                        }
                         IrType::I32 | IrType::U32 => IrValue::I32(0),
                         IrType::F32 => IrValue::F32(0.0),
                         IrType::F64 => IrValue::F64(0.0),
@@ -1195,6 +1209,13 @@ impl IrBuilder {
     /// Build a null pointer constant
     pub fn build_null(&mut self) -> Option<IrId> {
         self.build_const(IrValue::Null)
+    }
+
+    /// Build a `Null<Int>` null: `NULL_INT` in a `NullInt` register.
+    pub fn build_null_int(&mut self) -> Option<IrId> {
+        let dest = self.build_const(IrValue::null_int())?;
+        self.set_register_type(dest, IrType::NullInt);
+        Some(dest)
     }
 
     /// Build addition

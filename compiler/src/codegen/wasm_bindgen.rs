@@ -503,6 +503,8 @@ fn ir_type_to_ts(ty: &IrType) -> &'static str {
         | IrType::I64
         | IrType::U64 => "number",
         IrType::F32 | IrType::F64 => "number",
+        // A wasm i64 crosses into JS as a BigInt.
+        IrType::NullInt => "bigint",
         IrType::String => "string",
         IrType::Ptr(_) => "number",
         _ => "any",

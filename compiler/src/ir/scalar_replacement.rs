@@ -478,7 +478,11 @@ fn try_build_phi_candidate(
                             let is_word = |t: &IrType| {
                                 matches!(
                                     t,
-                                    IrType::I64 | IrType::U64 | IrType::F64 | IrType::Ptr(_)
+                                    IrType::I64
+                                        | IrType::U64
+                                        | IrType::F64
+                                        | IrType::NullInt
+                                        | IrType::Ptr(_)
                                 )
                             };
                             if !is_word(existing_ty) || !is_word(ty) {
@@ -1545,6 +1549,7 @@ fn try_build_candidate_function_wide(
                                             IrType::I64
                                                 | IrType::U64
                                                 | IrType::F64
+                                                | IrType::NullInt
                                                 | IrType::Ptr(_)
                                         )
                                     };

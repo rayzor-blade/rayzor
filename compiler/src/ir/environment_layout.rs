@@ -45,7 +45,15 @@ impl EnvironmentLayout {
 
         for (index, capture) in captures.iter().enumerate() {
             let final_ty = type_converter(capture.ty);
-            let storage_ty = IrType::I64; // Always store as I64 (pointer-sized)
+            // Always 8 bytes. A NullInt held by value keeps its own type, so
+            // wasm loads all 64 bits and the loaded register stays a NullInt;
+            // a mutable capture's slot holds the cell pointer instead.
+            let storage_ty =
+                if final_ty == IrType::NullInt && capture.mode != HirCaptureMode::ByMutableRef {
+                    IrType::NullInt
+                } else {
+                    IrType::I64
+                };
 
             debug!(
                 "DEBUG EnvironmentLayout: Capture {} (sym {:?}) - final_ty={:?}",
@@ -64,6 +72,7 @@ impl EnvironmentLayout {
                 IrType::U16 => true,                // I64 → U16 cast needed
                 IrType::U32 => true,                // I64 → U32 cast needed
                 IrType::I64 | IrType::U64 => false, // Already 64-bit
+                IrType::NullInt => false,
                 // CRITICAL: Pointer and reference types are stored as I64 but
                 // should NOT be cast down - they must remain as the full 64-bit value
                 IrType::Dynamic => false,

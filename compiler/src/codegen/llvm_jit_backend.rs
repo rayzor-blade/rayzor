@@ -190,6 +190,9 @@ pub struct LLVMJitBackend<'ctx> {
     /// than re-derived at each use, because declaring takes a dozen paths and
     /// several of them reuse a symbol declared for a different function.
     hidden_prefix: BTreeMap<IrFunctionId, usize>,
+    /// LLVM parameter positions of each declaration's `Null<Int>` parameters,
+    /// so an omitted one is padded with null rather than zero.
+    null_int_params: BTreeMap<IrFunctionId, Vec<usize>>,
     /// Functions that can be reached other than by name, over every module in
     /// this compile. Seeded before anything is declared, because the answer
     /// decides a signature and a signature cannot be revised afterwards.
@@ -340,6 +343,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             current_sret_ptr: None,
             pending_global_bindings: Vec::new(),
             hidden_prefix: BTreeMap::new(),
+            null_int_params: BTreeMap::new(),
             indirect_targets: BTreeSet::new(),
             current_env_param: None,
             aot_mode: false,
@@ -2622,7 +2626,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             IrType::Bool | IrType::I8 | IrType::U8 => Ok(self.context.i8_type().into()),
             IrType::I16 | IrType::U16 => Ok(self.context.i16_type().into()),
             IrType::I32 | IrType::U32 => Ok(self.context.i32_type().into()),
-            IrType::I64 | IrType::U64 => Ok(self.context.i64_type().into()),
+            IrType::I64 | IrType::U64 | IrType::NullInt => Ok(self.context.i64_type().into()),
             IrType::F32 => Ok(self.context.f32_type().into()),
             IrType::F64 => Ok(self.context.f64_type().into()),
 
@@ -2756,6 +2760,20 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .count();
         let hidden = (llvm_func.count_params() as usize).saturating_sub(user_params);
         self.hidden_prefix.insert(func_id, hidden);
+        let null_ints: Vec<usize> = function
+            .signature
+            .parameters
+            .iter()
+            .filter(|p| p.ty != IrType::Void)
+            .enumerate()
+            .filter(|(_, p)| p.ty == IrType::NullInt)
+            .map(|(i, _)| hidden + i)
+            .collect();
+        if null_ints.is_empty() {
+            self.null_int_params.remove(&func_id);
+        } else {
+            self.null_int_params.insert(func_id, null_ints);
+        }
         self.function_map.insert(func_id, llvm_func);
     }
 
@@ -3304,6 +3322,11 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     IrType::I16 | IrType::U16 => self.context.i16_type().const_int(0, false).into(),
                     IrType::I32 | IrType::U32 => self.context.i32_type().const_int(0, false).into(),
                     IrType::I64 | IrType::U64 => self.context.i64_type().const_int(0, false).into(),
+                    IrType::NullInt => self
+                        .context
+                        .i64_type()
+                        .const_int(crate::ir::NULL_INT as u64, false)
+                        .into(),
                     IrType::F32 => self.context.f32_type().const_float(0.0).into(),
                     IrType::F64 => self.context.f64_type().const_float(0.0).into(),
                     _ => self.context.i64_type().const_int(0, false).into(),
@@ -3826,7 +3849,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 if value_val.is_int_value() {
                     let slot_bits = match register_types.get(ptr) {
                         Some(IrType::Ptr(inner)) => match inner.as_ref() {
-                            IrType::I64 | IrType::U64 => Some(64),
+                            IrType::I64 | IrType::U64 | IrType::NullInt => Some(64),
                             IrType::I32 | IrType::U32 => Some(32),
                             _ => None,
                         },
@@ -5219,6 +5242,12 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 if *ty == IrType::Void {
                     let placeholder = self.context.i8_type().const_int(0, false).into();
                     self.value_map.insert(*dest, placeholder);
+                } else if *ty == IrType::NullInt {
+                    let null = self
+                        .context
+                        .i64_type()
+                        .const_int(crate::ir::NULL_INT as u64, false);
+                    self.value_map.insert(*dest, null.into());
                 } else {
                     let llvm_ty = self.translate_type(ty)?;
                     let undef_val = llvm_ty.const_zero(); // Use zero as placeholder for undef
@@ -8213,7 +8242,16 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // zero/null value for any still-missing trailing LLVM parameters.
         while arg_values.len() < expected_params.len() {
             let expected_ty = expected_params[arg_values.len()];
-            let default_value: BasicMetadataValueEnum = if expected_ty.is_int_type() {
+            let null_int = self
+                .null_int_params
+                .get(&func_id)
+                .is_some_and(|slots| slots.contains(&arg_values.len()));
+            let default_value: BasicMetadataValueEnum = if null_int && expected_ty.is_int_type() {
+                expected_ty
+                    .into_int_type()
+                    .const_int(crate::ir::NULL_INT as u64, false)
+                    .into()
+            } else if expected_ty.is_int_type() {
                 expected_ty.into_int_type().const_zero().into()
             } else if expected_ty.is_float_type() {
                 expected_ty.into_float_type().const_zero().into()
@@ -8374,6 +8412,35 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     &name,
                 )
                 .map_err(|e| format!("Failed to build pointer-shaped to int cast: {}", e))?;
+            return Ok(result.into());
+        }
+
+        // NullInt is an i64 holding a sign-extended Int: from an integer it
+        // sign-extends, to one it truncates, from Bool it zero-extends. Same
+        // widths as Cranelift's cast table.
+        if (*from_ty == IrType::NullInt || *to_ty == IrType::NullInt)
+            && actual_is_int
+            && target_llvm_ty.is_int_type()
+        {
+            let src_int = src.into_int_value();
+            let target_int_ty = target_llvm_ty.into_int_type();
+            let src_width = src_int.get_type().get_bit_width();
+            let target_width = target_int_ty.get_bit_width();
+            let result = if src_width == target_width {
+                src_int
+            } else if src_width > target_width {
+                self.builder
+                    .build_int_truncate(src_int, target_int_ty, &name)
+                    .map_err(|e| format!("Failed to build NullInt truncate: {}", e))?
+            } else if src_width == 8 {
+                self.builder
+                    .build_int_z_extend(src_int, target_int_ty, &name)
+                    .map_err(|e| format!("Failed to build NullInt extend: {}", e))?
+            } else {
+                self.builder
+                    .build_int_s_extend(src_int, target_int_ty, &name)
+                    .map_err(|e| format!("Failed to build NullInt extend: {}", e))?
+            };
             return Ok(result.into());
         }
 

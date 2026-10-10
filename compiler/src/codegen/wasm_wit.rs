@@ -148,7 +148,7 @@ fn ir_type_to_wit(ty: &IrType) -> &'static str {
         IrType::I8 => "s8",
         IrType::I16 => "s16",
         IrType::I32 => "s32",
-        IrType::I64 => "s64",
+        IrType::I64 | IrType::NullInt => "s64",
         IrType::U8 => "u8",
         IrType::U16 => "u16",
         IrType::U32 => "u32",

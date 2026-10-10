@@ -401,7 +401,7 @@ impl CBackend {
             IrType::I8 => "i8",
             IrType::I16 => "i16",
             IrType::I32 => "i32",
-            IrType::I64 => "i64",
+            IrType::I64 | IrType::NullInt => "i64",
             IrType::U8 => "u8",
             IrType::U16 => "u16",
             IrType::U32 => "u32",
@@ -1259,8 +1259,14 @@ impl CBackend {
             }
 
             // === Special Values ===
-            IrInstruction::Undef { dest, .. } => {
-                self.emit_line(&format!("r{} = 0;", dest.as_u32()));
+            IrInstruction::Undef { dest, ty } => {
+                // An unset `Null<Int>` reads as null.
+                let value = if *ty == IrType::NullInt {
+                    format!("{}LL", crate::ir::NULL_INT)
+                } else {
+                    "0".to_string()
+                };
+                self.emit_line(&format!("r{} = {};", dest.as_u32(), value));
             }
 
             IrInstruction::FunctionRef { dest, func_id } => {
@@ -1854,7 +1860,7 @@ impl CBackend {
             IrType::I8 => "i8".to_string(),
             IrType::I16 => "i16".to_string(),
             IrType::I32 => "i32".to_string(),
-            IrType::I64 => "i64".to_string(),
+            IrType::I64 | IrType::NullInt => "i64".to_string(),
             IrType::U8 => "u8".to_string(),
             IrType::U16 => "u16".to_string(),
             IrType::U32 => "u32".to_string(),
@@ -2003,7 +2009,7 @@ impl CBackend {
             // Pointer → integer: need intptr_t
             (
                 IrType::Ptr(_) | IrType::Ref(_) | IrType::String,
-                IrType::I64 | IrType::U64 | IrType::I32 | IrType::U32,
+                IrType::I64 | IrType::U64 | IrType::I32 | IrType::U32 | IrType::NullInt,
             ) => {
                 self.emit_line(&format!(
                     "r{} = ({})(intptr_t)r{};",
@@ -2014,7 +2020,7 @@ impl CBackend {
             }
             // Integer → pointer: need intptr_t
             (
-                IrType::I64 | IrType::U64 | IrType::I32 | IrType::U32,
+                IrType::I64 | IrType::U64 | IrType::I32 | IrType::U32 | IrType::NullInt,
                 IrType::Ptr(_) | IrType::Ref(_) | IrType::String,
             ) => {
                 self.emit_line(&format!(

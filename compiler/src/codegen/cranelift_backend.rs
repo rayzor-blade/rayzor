@@ -469,7 +469,7 @@ impl CraneliftBackend {
             IrType::Bool | IrType::I8 | IrType::U8 => 1,
             IrType::I16 | IrType::U16 => 2,
             IrType::I32 | IrType::U32 | IrType::F32 => 4,
-            IrType::I64 | IrType::U64 | IrType::F64 => 8,
+            IrType::I64 | IrType::U64 | IrType::F64 | IrType::NullInt => 8,
             IrType::Dynamic | IrType::Ptr(_) | IrType::Ref(_) | IrType::Function { .. } => {
                 self.get_pointer_size() as u64
             }
@@ -510,7 +510,7 @@ impl CraneliftBackend {
             IrType::Bool | IrType::I8 | IrType::U8 => 1,
             IrType::I16 | IrType::U16 => 2,
             IrType::I32 | IrType::U32 | IrType::F32 => 4,
-            IrType::I64 | IrType::U64 | IrType::F64 => 8,
+            IrType::I64 | IrType::U64 | IrType::F64 | IrType::NullInt => 8,
             IrType::Dynamic | IrType::Ptr(_) | IrType::Ref(_) | IrType::Function { .. } => {
                 self.get_pointer_size()
             }
@@ -2701,7 +2701,7 @@ impl CraneliftBackend {
                 crate::ir::IrType::I8 => types::I8,
                 crate::ir::IrType::I16 => types::I16,
                 crate::ir::IrType::I32 => types::I32,
-                crate::ir::IrType::I64 => types::I64,
+                crate::ir::IrType::I64 | crate::ir::IrType::NullInt => types::I64,
                 crate::ir::IrType::F32 => types::F32,
                 crate::ir::IrType::F64 => types::F64,
                 crate::ir::IrType::Bool => types::I8,
@@ -2803,7 +2803,9 @@ impl CraneliftBackend {
             crate::ir::IrType::I8 => cranelift_codegen::ir::types::I8,
             crate::ir::IrType::I16 => cranelift_codegen::ir::types::I16,
             crate::ir::IrType::I32 => cranelift_codegen::ir::types::I32,
-            crate::ir::IrType::I64 => cranelift_codegen::ir::types::I64,
+            crate::ir::IrType::I64 | crate::ir::IrType::NullInt => {
+                cranelift_codegen::ir::types::I64
+            }
             crate::ir::IrType::F32 => cranelift_codegen::ir::types::F32,
             crate::ir::IrType::F64 => cranelift_codegen::ir::types::F64,
             crate::ir::IrType::Bool => cranelift_codegen::ir::types::I8,
@@ -3714,7 +3716,9 @@ impl CraneliftBackend {
                                 // OR where MIR declares I64 but value is still i32 (also needs extension)
                                 if actual_cl_ty == types::I32 || actual_cl_ty == types::I8 {
                                     match &param.ty {
-                                        crate::ir::IrType::I32 | crate::ir::IrType::I64 => {
+                                        crate::ir::IrType::I32
+                                        | crate::ir::IrType::I64
+                                        | crate::ir::IrType::NullInt => {
                                             // Sign-extend to i64 for C ABI
                                             arg_val = builder.ins().sextend(types::I64, arg_val);
                                         }
@@ -3826,9 +3830,22 @@ impl CraneliftBackend {
                     if call_args.len() < expected_params {
                         let mut paddable = true;
                         let mut pads = Vec::new();
-                        for ty in &expected_param_types[call_args.len()..] {
+                        // Hidden sret/env params lead the Cranelift signature.
+                        let hidden = usize::from(uses_sret) + usize::from(should_add_env);
+                        for (slot, ty) in expected_param_types
+                            .iter()
+                            .enumerate()
+                            .skip(call_args.len())
+                        {
                             let ty = *ty;
-                            let v = if ty == types::F64 {
+                            // A missing `Null<Int>` argument is null, not Int 0.
+                            let null_int = slot
+                                .checked_sub(hidden)
+                                .and_then(|i| called_func.signature.parameters.get(i))
+                                .is_some_and(|p| p.ty == IrType::NullInt);
+                            let v = if null_int && ty == types::I64 {
+                                builder.ins().iconst(types::I64, crate::ir::NULL_INT)
+                            } else if ty == types::F64 {
                                 builder.ins().f64const(0.0)
                             } else if ty == types::F32 {
                                 builder.ins().f32const(0.0)
@@ -4631,7 +4648,9 @@ impl CraneliftBackend {
             IrInstruction::Undef { dest, ty } => {
                 // Undefined value - use zero/null for simplicity
                 let cl_ty = CraneliftBackend::mir_type_to_cranelift_static(ty)?;
-                let undef_val = if cl_ty == types::INVALID {
+                let undef_val = if *ty == IrType::NullInt {
+                    builder.ins().iconst(types::I64, crate::ir::NULL_INT)
+                } else if cl_ty == types::INVALID {
                     // Void type - no value needed, but instruction expects one
                     // Use a dummy i64(0)
                     builder.ins().iconst(types::I64, 0)
@@ -5899,7 +5918,7 @@ impl CraneliftBackend {
             IrType::I8 => Ok(types::I8),
             IrType::I16 => Ok(types::I16),
             IrType::I32 => Ok(types::I32),
-            IrType::I64 => Ok(types::I64),
+            IrType::I64 | IrType::NullInt => Ok(types::I64),
             IrType::U8 => Ok(types::I8),
             IrType::U16 => Ok(types::I16),
             IrType::U32 => Ok(types::I32),
@@ -5995,9 +6014,11 @@ impl CraneliftBackend {
         function: &crate::ir::IrFunction,
         reg: crate::ir::IrId,
     ) -> Value {
-        let ty = function
-            .register_types
-            .get(&reg)
+        let mir_ty = function.register_types.get(&reg);
+        if mir_ty == Some(&IrType::NullInt) {
+            return builder.ins().iconst(types::I64, crate::ir::NULL_INT);
+        }
+        let ty = mir_ty
             .filter(|t| !matches!(t, IrType::Void))
             .and_then(|t| Self::mir_type_to_cranelift_static(t).ok())
             .unwrap_or(types::I64);

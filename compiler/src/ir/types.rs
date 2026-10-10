@@ -7,6 +7,9 @@ use super::IrId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// The `NullInt` encoding of null: outside the i32 range, truncates to 0.
+pub use rayzor_runtime::type_system::NULL_INT;
+
 /// IR type representation
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum IrType {
@@ -103,6 +106,11 @@ pub enum IrType {
 
     /// Any type (dynamic)
     Any,
+
+    /// `Null<Int>` held unboxed: the Int sign-extended to 64 bits, with null
+    /// as `NULL_INT`. An i64 to every backend; a distinct variant so passes
+    /// can tell it apart from Int64, enums and erased slots.
+    NullInt,
 }
 
 impl IrType {
@@ -192,6 +200,7 @@ impl IrType {
             }
             IrType::Ptr(_) => ValueTag::Reference,
             IrType::Function { .. } => ValueTag::Function,
+            IrType::NullInt => ValueTag::NullInt,
             _ => ValueTag::Int,
         }
     }
@@ -203,7 +212,7 @@ impl IrType {
             IrType::Bool | IrType::I8 | IrType::U8 => 1,
             IrType::I16 | IrType::U16 => 2,
             IrType::I32 | IrType::U32 | IrType::F32 => 4,
-            IrType::I64 | IrType::U64 | IrType::F64 => 8,
+            IrType::I64 | IrType::U64 | IrType::F64 | IrType::NullInt => 8,
             IrType::Dynamic | IrType::Ptr(_) | IrType::Ref(_) => std::mem::size_of::<usize>(),
             IrType::Array(elem_ty, count) => elem_ty.size() * count,
             IrType::Slice(_) => std::mem::size_of::<usize>() * 2, // ptr + len
@@ -237,7 +246,7 @@ impl IrType {
             IrType::Bool | IrType::I8 | IrType::U8 => 1,
             IrType::I16 | IrType::U16 => 2,
             IrType::I32 | IrType::U32 | IrType::F32 => 4,
-            IrType::I64 | IrType::U64 | IrType::F64 => 8,
+            IrType::I64 | IrType::U64 | IrType::F64 | IrType::NullInt => 8,
             IrType::Dynamic | IrType::Ptr(_) | IrType::Ref(_) => std::mem::align_of::<usize>(),
             IrType::Array(elem_ty, _) => elem_ty.align(),
             IrType::Slice(_) | IrType::String | IrType::Any => std::mem::align_of::<usize>(),
@@ -270,6 +279,7 @@ impl IrType {
                 | IrType::U64
                 | IrType::F32
                 | IrType::F64
+                | IrType::NullInt
         )
     }
 
@@ -278,7 +288,8 @@ impl IrType {
         matches!(self, IrType::Ptr(_) | IrType::Ref(_))
     }
 
-    /// Check if this is an integer type
+    /// Check if this is an integer type. `NullInt` is not: converting it to or
+    /// from an integer is an explicit sign-extend or truncate.
     pub fn is_integer(&self) -> bool {
         matches!(
             self,
@@ -358,6 +369,7 @@ impl IrType {
             IrType::I16 => IrValue::I16(0),
             IrType::I32 => IrValue::I32(0),
             IrType::I64 => IrValue::I64(0),
+            IrType::NullInt => IrValue::null_int(),
             IrType::U8 => IrValue::U8(0),
             IrType::U16 => IrValue::U16(0),
             IrType::U32 => IrValue::U32(0),
@@ -407,6 +419,13 @@ pub enum IrValue {
         function: super::IrFunctionId,
         environment: Box<IrValue>, // Struct containing captured variables
     },
+}
+
+impl IrValue {
+    /// A `NullInt` null.
+    pub const fn null_int() -> Self {
+        IrValue::I64(NULL_INT)
+    }
 }
 
 impl fmt::Display for IrType {
@@ -462,6 +481,7 @@ impl fmt::Display for IrType {
                 write!(f, ">")
             }
             IrType::Any => write!(f, "any"),
+            IrType::NullInt => write!(f, "nullint"),
             IrType::Vector { element, count } => write!(f, "vec<{}; {}>", element, count),
         }
     }
@@ -497,5 +517,14 @@ mod tests {
         assert!(!IrType::U32.is_signed_integer());
         assert!(IrType::F32.is_float());
         assert!(IrType::Ptr(Box::new(IrType::I32)).is_pointer());
+        assert!(!IrType::NullInt.is_integer());
+    }
+
+    #[test]
+    fn null_int_is_an_i64_whose_default_is_null() {
+        assert_eq!(IrType::NullInt.size(), 8);
+        assert_eq!(IrType::NullInt.align(), 8);
+        assert_eq!(IrType::NullInt.default_value(), IrValue::I64(1 << 32));
+        assert_eq!(NULL_INT as i32, 0);
     }
 }

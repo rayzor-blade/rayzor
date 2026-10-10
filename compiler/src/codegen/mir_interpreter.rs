@@ -2036,10 +2036,14 @@ impl MirInterpreter {
             }
 
             // === Undefined/Special ===
-            IrInstruction::Undef { dest, .. } => {
-                self.current_frame_mut()
-                    .registers
-                    .set(*dest, NanBoxedValue::void());
+            IrInstruction::Undef { dest, ty } => {
+                // An unset `Null<Int>` reads as null.
+                let value = if *ty == IrType::NullInt {
+                    NanBoxedValue::from_i64(crate::ir::NULL_INT)
+                } else {
+                    NanBoxedValue::void()
+                };
+                self.current_frame_mut().registers.set(*dest, value);
             }
 
             IrInstruction::Panic { message } => {
@@ -2612,7 +2616,7 @@ impl MirInterpreter {
             IrType::I8 => Ok(InterpValue::I8(val.to_i64()? as i8)),
             IrType::I16 => Ok(InterpValue::I16(val.to_i64()? as i16)),
             IrType::I32 => Ok(InterpValue::I32(val.to_i64()? as i32)),
-            IrType::I64 => Ok(InterpValue::I64(val.to_i64()?)),
+            IrType::I64 | IrType::NullInt => Ok(InterpValue::I64(val.to_i64()?)),
             IrType::U8 => Ok(InterpValue::U8(val.to_i64()? as u8)),
             IrType::U16 => Ok(InterpValue::U16(val.to_i64()? as u16)),
             IrType::U32 => Ok(InterpValue::U32(val.to_i64()? as u32)),
@@ -2647,7 +2651,7 @@ impl MirInterpreter {
                 IrType::U16 => Ok(InterpValue::U16(*(addr as *const u16))),
                 IrType::I32 => Ok(InterpValue::I32(*(addr as *const i32))),
                 IrType::U32 => Ok(InterpValue::U32(*(addr as *const u32))),
-                IrType::I64 => Ok(InterpValue::I64(*(addr as *const i64))),
+                IrType::I64 | IrType::NullInt => Ok(InterpValue::I64(*(addr as *const i64))),
                 IrType::U64 => Ok(InterpValue::U64(*(addr as *const u64))),
                 IrType::F32 => Ok(InterpValue::F32(*(addr as *const f32))),
                 IrType::F64 => Ok(InterpValue::F64(*(addr as *const f64))),
@@ -3274,6 +3278,7 @@ impl MirInterpreter {
                 Some(bits) => bits,
                 None => val.to_i64()?,
             })),
+            IrType::NullInt => Ok(NativeValue::I64(val.to_i64()?)),
             IrType::U8 => Ok(NativeValue::U8(val.to_i64()? as u8)),
             IrType::U16 => Ok(NativeValue::U16(val.to_i64()? as u16)),
             IrType::U32 => Ok(NativeValue::U32(val.to_i64()? as u32)),
@@ -3353,7 +3358,7 @@ impl MirInterpreter {
             IrType::I8 => Ok(InterpValue::I8(val.to_i64() as i8)),
             IrType::I16 => Ok(InterpValue::I16(val.to_i64() as i16)),
             IrType::I32 => Ok(InterpValue::I32(val.to_i64() as i32)),
-            IrType::I64 => Ok(InterpValue::I64(val.to_i64())),
+            IrType::I64 | IrType::NullInt => Ok(InterpValue::I64(val.to_i64())),
             IrType::U8 => Ok(InterpValue::U8(val.to_i64() as u8)),
             IrType::U16 => Ok(InterpValue::U16(val.to_i64() as u16)),
             IrType::U32 => Ok(InterpValue::U32(val.to_i64() as u32)),
@@ -3398,6 +3403,7 @@ impl MirInterpreter {
             IrType::I16 => InterpValue::I16(0),
             IrType::I32 => InterpValue::I32(0),
             IrType::I64 => InterpValue::I64(0),
+            IrType::NullInt => InterpValue::I64(crate::ir::NULL_INT),
             IrType::U8 => InterpValue::U8(0),
             IrType::U16 => InterpValue::U16(0),
             IrType::U32 => InterpValue::U32(0),

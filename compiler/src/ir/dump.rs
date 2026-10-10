@@ -653,6 +653,7 @@ pub fn dump_type(ty: &IrType) -> String {
             format!("{}<{}>", dump_type(base), args.join(", "))
         }
         IrType::Any => "any".to_string(),
+        IrType::NullInt => "nullint".to_string(),
         IrType::Function {
             params,
             return_type,

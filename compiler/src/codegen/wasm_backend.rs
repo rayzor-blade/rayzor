@@ -1153,11 +1153,16 @@ impl CompileCtx {
                     continue;
                 }
                 let vt = ir_type_to_wasm(&global.ty);
+                let uninit = if global.ty == IrType::NullInt {
+                    crate::ir::NULL_INT
+                } else {
+                    0
+                };
                 let init = global
                     .initializer
                     .as_ref()
                     .map(ir_value_to_i64)
-                    .unwrap_or(0);
+                    .unwrap_or(uninit);
                 self.ir_global_to_idx.insert(*gid, next_global_idx);
                 self.user_globals.push((*gid, vt, init));
                 next_global_idx += 1;
@@ -2122,11 +2127,7 @@ impl<'a> FunctionLowerer<'a> {
                         // Use the actual value type for Const/BitCast instructions — the MIR
                         // register_types may say I32/PtrVoid even for F64 constants.
                         let ty = match inst {
-                            IrInstruction::Const { value, .. } => match value {
-                                IrValue::F32(_) => ValType::F32,
-                                IrValue::F64(_) => ValType::F64,
-                                _ => ValType::I32,
-                            },
+                            IrInstruction::Const { value, .. } => self.const_wasm_type(dest, value),
                             // BitCast to I64/U64 from F64: need I64 local to hold 64 bits
                             IrInstruction::BitCast { ty, .. } => match ty {
                                 IrType::I64 | IrType::U64 => ValType::I64,
@@ -2169,11 +2170,9 @@ impl<'a> FunctionLowerer<'a> {
                         IrInstruction::Cast { to_ty, .. } => Some(ir_type_to_wasm(to_ty)),
 
                         // Constants carry their type
-                        IrInstruction::Const { value, .. } => Some(match value {
-                            IrValue::F32(_) => ValType::F32,
-                            IrValue::F64(_) => ValType::F64,
-                            _ => ValType::I32,
-                        }),
+                        IrInstruction::Const { dest, value } => {
+                            Some(self.const_wasm_type(*dest, value))
+                        }
 
                         // Comparisons always produce i32 (boolean)
                         IrInstruction::Cmp { .. } => Some(ValType::I32),
@@ -2313,11 +2312,7 @@ impl<'a> FunctionLowerer<'a> {
         for block in self.ir_func.cfg.blocks.values() {
             for inst in &block.instructions {
                 if let IrInstruction::Const { dest, value } = inst {
-                    let const_ty = match value {
-                        IrValue::F32(_) => ValType::F32,
-                        IrValue::F64(_) => ValType::F64,
-                        _ => ValType::I32,
-                    };
+                    let const_ty = self.const_wasm_type(*dest, value);
                     if const_ty != ValType::I32 {
                         let current = self.local_type_of(*dest);
                         if current == Some(ValType::I32) || current.is_none() {
@@ -2423,6 +2418,17 @@ impl<'a> FunctionLowerer<'a> {
         } else {
             let type_idx = (local_idx - self.param_count) as usize;
             self.local_types.get(type_idx).copied()
+        }
+    }
+
+    /// The wasm type a constant lands in: floats by value, and a `NullInt`
+    /// register at i64 so `NULL_INT` keeps its high bits.
+    fn const_wasm_type(&self, dest: IrId, value: &IrValue) -> ValType {
+        match value {
+            IrValue::F32(_) => ValType::F32,
+            IrValue::F64(_) => ValType::F64,
+            _ if self.ir_func.register_types.get(&dest) == Some(&IrType::NullInt) => ValType::I64,
+            _ => ValType::I32,
         }
     }
 
@@ -3758,7 +3764,13 @@ impl<'a> FunctionLowerer<'a> {
         match inst {
             // === Const ===
             IrInstruction::Const { dest, value } => {
-                self.emit_const(f, value);
+                // Only a `NullInt` gets an i64 local; its constant keeps all 64
+                // bits, so `NULL_INT` does not wrap to 0.
+                if self.reg_wasm_type(*dest) == ValType::I64 && is_integer_const(value) {
+                    f.instruction(&Instruction::I64Const(ir_value_to_i64(value)));
+                } else {
+                    self.emit_const(f, value);
+                }
                 self.set_reg(f, *dest);
             }
 
@@ -3905,10 +3917,17 @@ impl<'a> FunctionLowerer<'a> {
                         | CompareOp::FGt
                         | CompareOp::FGe
                 );
+                let null_int_operand = [left, right]
+                    .iter()
+                    .any(|r| self.ir_func.register_types.get(*r) == Some(&IrType::NullInt));
                 let cmp_ty = if is_fcmp || left_ty == ValType::F64 || right_ty == ValType::F64 {
                     ValType::F64
                 } else if left_ty == ValType::F32 || right_ty == ValType::F32 {
                     ValType::F32
+                } else if null_int_operand {
+                    // Compare at 64 bits: an i32 operand sign-extends, and
+                    // `NULL_INT` stays distinct from 0.
+                    ValType::I64
                 } else {
                     left_ty
                 };
@@ -4679,10 +4698,15 @@ impl<'a> FunctionLowerer<'a> {
             }
 
             // === Undef ===
-            IrInstruction::Undef { dest, .. } => {
+            IrInstruction::Undef { dest, ty } => {
                 // Use the local's actual WASM type, not the IR type, to avoid
                 // mismatches where F32/F64 register is allocated as I32 local.
-                emit_zero(f, self.reg_wasm_type(*dest));
+                let vt = self.reg_wasm_type(*dest);
+                if *ty == IrType::NullInt && vt == ValType::I64 {
+                    f.instruction(&Instruction::I64Const(crate::ir::NULL_INT));
+                } else {
+                    emit_zero(f, vt);
+                }
                 self.set_reg(f, *dest);
             }
 
@@ -6078,10 +6102,13 @@ fn const_as_offset(v: &IrValue) -> Option<u32> {
 /// Rayzor's `Int` is i64 in native but i32 in WASM32 — same as how
 /// Haxe targets JavaScript with 32-bit integers. Only F64 stays 64-bit.
 /// This eliminates the pointer width mismatch entirely.
+///
+/// `NullInt` is the exception: its null lies outside the i32 range.
 fn ir_type_to_wasm(ty: &IrType) -> ValType {
     match ty {
         IrType::F32 => ValType::F32,
         IrType::F64 => ValType::F64,
+        IrType::NullInt => ValType::I64,
         // SIMD vectors map to WASM v128 — which is 128 bits, full stop. wasm
         // has no wider vector (relaxed-SIMD did not widen it), so a 256-bit
         // type like SIMD32i8 has no representation here. REFUSE it rather than
@@ -6157,6 +6184,25 @@ fn gep_pointee_size(ty: &IrType) -> i32 {
         IrType::Ptr(inner) => size_of(inner),
         other => size_of(other),
     }
+}
+
+/// A constant `ir_value_to_i64` reads as an integer, not as float bits.
+fn is_integer_const(val: &IrValue) -> bool {
+    matches!(
+        val,
+        IrValue::Void
+            | IrValue::Undef
+            | IrValue::Null
+            | IrValue::Bool(_)
+            | IrValue::I8(_)
+            | IrValue::I16(_)
+            | IrValue::I32(_)
+            | IrValue::I64(_)
+            | IrValue::U8(_)
+            | IrValue::U16(_)
+            | IrValue::U32(_)
+            | IrValue::U64(_)
+    )
 }
 
 /// Convert an IrValue to a raw i64 (for global initializers).
@@ -6359,6 +6405,8 @@ mod tests {
         );
         assert_eq!(ir_type_to_wasm(&IrType::String), ValType::I32);
         assert_eq!(ir_type_to_wasm(&IrType::Any), ValType::I32);
+        // NullInt alone keeps 64 bits: its null is outside the i32 range.
+        assert_eq!(ir_type_to_wasm(&IrType::NullInt), ValType::I64);
     }
 
     #[test]
