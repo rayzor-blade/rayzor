@@ -680,6 +680,60 @@ impl<'a> AstLowering<'a> {
         None
     }
 
+    /// The type the surrounding context expects of the expression being
+    /// lowered: the argument slot, else the enclosing return type.
+    pub(crate) fn expected_value_type(&self) -> Option<TypeId> {
+        self.expected_arg_type_stack
+            .last()
+            .copied()
+            .flatten()
+            .or(self.context.expected_return_type)
+    }
+
+    /// The same-named constructor of the enum `expected` names, when the
+    /// scope walk picked `variant` of a different enum. Haxe resolves a bare
+    /// constructor against the expected type before the scope.
+    pub(crate) fn expected_enum_variant(
+        &self,
+        variant: SymbolId,
+        expected: TypeId,
+    ) -> Option<SymbolId> {
+        let symbols = &self.context.symbol_table;
+        let sym = symbols.get_symbol(variant)?;
+        if sym.kind != crate::tast::symbols::SymbolKind::EnumVariant {
+            return None;
+        }
+        let name = sym.name;
+        let expected_enum = {
+            let type_table = self.context.type_table.borrow();
+            let mut ty = expected;
+            let mut found = None;
+            for _ in 0..8 {
+                match &type_table.get(ty)?.kind {
+                    crate::tast::core::TypeKind::Enum { symbol_id, .. } => {
+                        found = Some(*symbol_id);
+                        break;
+                    }
+                    crate::tast::core::TypeKind::Optional { inner_type } => ty = *inner_type,
+                    crate::tast::core::TypeKind::GenericInstance { base_type, .. } => {
+                        ty = *base_type
+                    }
+                    crate::tast::core::TypeKind::TypeAlias { target_type, .. } => ty = *target_type,
+                    _ => return None,
+                }
+            }
+            found?
+        };
+        if symbols.find_parent_enum_for_constructor(variant) == Some(expected_enum) {
+            return None;
+        }
+        symbols
+            .get_enum_variants(expected_enum)?
+            .iter()
+            .copied()
+            .find(|v| symbols.get_symbol(*v).is_some_and(|s| s.name == name))
+    }
+
     /// Lower a function parameter
     /// Inspect a call's callee expression and, when each formal parameter
     /// is itself a function type with concrete parameter types, return a
@@ -743,6 +797,16 @@ impl<'a> AstLowering<'a> {
                     if let Some(params) = self.function_param_types_from_symbol(sym.id) {
                         return Some(params);
                     }
+                }
+                // A bare constructor of an enclosing scope types its arguments
+                // by the constructor the expected type selects, as its own
+                // lowering resolves it.
+                if let Some(variant) = self
+                    .resolve_symbol_in_scope_hierarchy(name_interned)
+                    .zip(self.expected_value_type())
+                    .and_then(|(sym, expected)| self.expected_enum_variant(sym, expected))
+                {
+                    return self.function_param_types_from_symbol(variant);
                 }
                 // Fall back: an unqualified call inside a class method is a
                 // call to a method of the current class (`run(...)` ==

@@ -330,12 +330,7 @@ impl<'a> AstLowering<'a> {
             },
             ExprKind::Ident(name) => {
                 let id_name = self.context.intern_string(name);
-                let prefer = self
-                    .expected_arg_type_stack
-                    .last()
-                    .copied()
-                    .flatten()
-                    .or(self.context.expected_return_type);
+                let prefer = self.expected_value_type();
                 let preferred_abstract_field = prefer.and_then(|expected_ty| {
                     let expected_abstract = {
                         let type_table = self.context.type_table.borrow();
@@ -578,63 +573,8 @@ impl<'a> AstLowering<'a> {
                 // `return F32;` resolved to `MetaValue.F32`, a boxed variant
                 // from an unrelated 13-variant enum, instead of `DType.F32`).
                 if let Some(expected_ty) = prefer {
-                    let needs_reresolve = {
-                        let sym = self.context.symbol_table.get_symbol(symbol_id);
-                        let sym_is_variant = sym
-                            .map(|s| s.kind == crate::tast::symbols::SymbolKind::EnumVariant)
-                            .unwrap_or(false);
-                        if !sym_is_variant {
-                            false
-                        } else {
-                            // Look at expected_ty's TypeKind: if it's an Enum E,
-                            // and the resolved variant's parent enum != E, we want
-                            // to look up the variant within E's scope.
-                            let type_table = self.context.type_table.borrow();
-                            let expected_enum_sym =
-                                type_table.get(expected_ty).and_then(|t| match &t.kind {
-                                    crate::tast::core::TypeKind::Enum { symbol_id, .. } => {
-                                        Some(*symbol_id)
-                                    }
-                                    _ => None,
-                                });
-                            if let Some(expected_enum) = expected_enum_sym {
-                                let resolved_parent_enum = self
-                                    .context
-                                    .symbol_table
-                                    .find_parent_enum_for_constructor(symbol_id);
-                                resolved_parent_enum.map_or(true, |p| p != expected_enum)
-                            } else {
-                                false
-                            }
-                        }
-                    };
-                    if needs_reresolve {
-                        if let Some(expected_enum_sym) = {
-                            let type_table = self.context.type_table.borrow();
-                            type_table.get(expected_ty).and_then(|t| match &t.kind {
-                                crate::tast::core::TypeKind::Enum { symbol_id, .. } => {
-                                    Some(*symbol_id)
-                                }
-                                _ => None,
-                            })
-                        } {
-                            if let Some(variants) = self
-                                .context
-                                .symbol_table
-                                .get_enum_variants(expected_enum_sym)
-                            {
-                                for &variant_sym in variants {
-                                    if let Some(vsym) =
-                                        self.context.symbol_table.get_symbol(variant_sym)
-                                    {
-                                        if vsym.name == id_name {
-                                            symbol_id = variant_sym;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    if let Some(variant) = self.expected_enum_variant(symbol_id, expected_ty) {
+                        symbol_id = variant;
                     }
                 } else {
                     // No expected type disambiguates this bare identifier. If it

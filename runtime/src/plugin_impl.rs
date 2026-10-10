@@ -1089,6 +1089,10 @@ register_symbol!(
     "haxe_unbox_reference_ptr",
     crate::type_system::haxe_unbox_reference_ptr
 );
+register_symbol!(
+    "haxe_unbox_type_handle",
+    crate::type_system::haxe_unbox_type_handle
+);
 
 // Std class functions
 register_symbol!("haxe_std_string", crate::type_system::haxe_std_string);

@@ -41,6 +41,11 @@ pub const TVALUETYPE_TUNKNOWN: i32 = 9;
 /// field_ptr must be a valid HaxeString pointer or null
 unsafe fn extract_field_name(field_ptr: *mut u8) -> Option<(*const u8, u32)> {
     unsafe {
+        // A name typed Dynamic arrives in its String box.
+        let field_ptr = match dynamic_box_at(field_ptr) {
+            Some(d) if d.type_id == TYPE_STRING => d.value_ptr,
+            _ => field_ptr,
+        };
         if field_ptr.is_null() {
             return None;
         }
@@ -67,8 +72,8 @@ unsafe fn extract_field_name(field_ptr: *mut u8) -> Option<(*const u8, u32)> {
 /// So the `type_id == 6` check reliably distinguishes the two cases.
 /// What a builtin-tagged box holds, for the entries that expect an object:
 /// an array or string (which answer `length`), or a scalar or function
-/// (which has no fields). An anonymous object's box is unwrapped by the caller; a class
-/// box shares its first word with a raw instance and is read as one.
+/// (which has no fields). An anonymous object's or a class instance's box is
+/// unwrapped by the caller.
 enum BuiltinBox {
     Array(*mut u8),
     String(*mut u8),
@@ -111,16 +116,19 @@ fn builtin_field(b: &BuiltinBox, name: &str) -> *mut u8 {
     }
 }
 
+/// The object a Dynamic box holds: an anonymous object's handle, or the
+/// instance a class box wraps, which may itself sit in an anonymous box.
 unsafe fn unwrap_anon_dynamic(ptr: *mut u8) -> *mut u8 {
     unsafe {
+        let mut ptr = ptr;
         let type_id = std::ptr::read_unaligned(ptr as *const u32);
         if type_id == anon_object::TYPE_ANON_OBJECT.0 {
             let dv = std::ptr::read_unaligned(ptr as *const DynamicValue);
             if !dv.value_ptr.is_null() {
-                return dv.value_ptr;
+                ptr = dv.value_ptr;
             }
         }
-        ptr
+        crate::type_system::class_box_instance(ptr).unwrap_or(ptr)
     }
 }
 
@@ -539,6 +547,12 @@ pub extern "C" fn haxe_reflect_set_field(obj: *mut u8, field: *mut u8, value: *m
 /// pointer for `Object`, or the bitcast of the primitive value into
 /// `*mut u8` for `Int`/`Float`/`Bool`.
 unsafe fn raw_value_to_slot(value: *mut u8, ty: ParamType) -> u64 {
+    // A class instance that arrives boxed stores the instance.
+    if matches!(ty, ParamType::Object)
+        && let Some(instance) = crate::type_system::class_box_instance(value)
+    {
+        return instance as u64;
+    }
     if matches!(ty, ParamType::String)
         && let Some(d) = dynamic_box_at(value)
         && d.type_id == TYPE_STRING

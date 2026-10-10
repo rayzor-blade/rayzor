@@ -831,7 +831,8 @@ unsafe fn build_i64_array(values: &[i64]) -> *mut u8 {
     }
 }
 
-/// Type values stored in Dynamic slots carry their ID inside a box.
+/// Type values stored in Dynamic slots carry their ID inside a box: their
+/// own, or an Int box when they crossed a Dynamic boundary as an integer.
 fn reflected_type_id(value: i64) -> u32 {
     if value > u32::MAX as i64
         && let Some(boxed) = dynamic_value_if_boxed(value as *mut u8)
@@ -840,8 +841,17 @@ fn reflected_type_id(value: i64) -> u32 {
         if payload <= u32::MAX as usize {
             return payload as u32;
         }
+        if boxed.type_id == TYPE_INT {
+            return unsafe { *(boxed.value_ptr as *const i64) } as u32;
+        }
     }
     value as u32
+}
+
+/// A `Class<T>` or `Enum<T>` read out of a Dynamic slot: its type id.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_unbox_type_handle(value: *mut u8) -> i64 {
+    reflected_type_id(value as i64) as i64
 }
 
 /// Type.getClassName(c) -> String
@@ -3315,10 +3325,7 @@ pub extern "C" fn haxe_box_int64_ptr(value: i64) -> *mut u8 {
     // Class slots expose high/low to reflection and reconstruct the native i64.
     let payload =
         Box::into_raw(Box::new([type_id as i64, value >> 32, value as i32 as i64])) as *mut u8;
-    Box::into_raw(Box::new(DynamicValue {
-        type_id: TypeId(type_id),
-        value_ptr: payload,
-    })) as *mut u8
+    haxe_box_reference_ptr(payload, type_id)
 }
 
 unsafe fn int64_from_object(obj: *const u8) -> i64 {
@@ -3919,6 +3926,17 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
             if p.is_null() {
                 return Box::into_raw(Box::new(haxe_box_null())) as *mut u8;
             }
+            // A `T` bound to Dynamic already holds a box. An enum cell's
+            // first word is its variant index, so cells are ruled out first.
+            let builtin_box = || {
+                stamped_enum_cell_type(value).is_none()
+                    && registered_enum_cell_type(value).is_none()
+                    && dynamic_box_at(p)
+                        .is_some_and(|d| (TYPE_NULL.0..=TYPE_ARRAY.0).contains(&d.type_id.0))
+            };
+            if is_reference_box(p) || builtin_box() {
+                return p;
+            }
             let header = haxe_object_get_type_id(p) as u32;
             let tag = if is_class_type(header) { header } else { 0 };
             haxe_box_reference_ptr(p, tag)
@@ -3932,6 +3950,30 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
 // Reference type boxing/unboxing (Classes, Enums, Anonymous, Arrays, etc.)
 // ============================================================================
 
+/// Written into the padding word of every reference box. A class instance
+/// shares its first word with a box over it, but its header is an i64 whose
+/// high half is zero, so this word tells the two apart.
+const REFERENCE_BOX_MARK: u32 = 0x5258_4258;
+
+/// Whether `obj` is a box made by `haxe_box_reference_ptr`.
+fn is_reference_box(obj: *mut u8) -> bool {
+    let addr = obj as usize;
+    if addr <= u32::MAX as usize || (addr & 7) != 0 || (addr >> 47) != 0 {
+        return false;
+    }
+    unsafe { *(obj as *const u32).add(1) == REFERENCE_BOX_MARK }
+}
+
+/// The instance a class box wraps, when `obj` is such a box rather than the
+/// instance itself.
+pub(crate) fn class_box_instance(obj: *mut u8) -> Option<*mut u8> {
+    if !is_reference_box(obj) || !is_class_type(unsafe { *(obj as *const u32) }) {
+        return None;
+    }
+    let instance = unsafe { *(obj as *const *mut u8).add(1) };
+    (!instance.is_null()).then_some(instance)
+}
+
 /// Box a reference type (class, enum, anonymous object, array, etc.)
 /// The value is already a pointer, so we just wrap it with type metadata
 #[unsafe(no_mangle)]
@@ -3942,6 +3984,7 @@ pub extern "C" fn haxe_box_reference_ptr(value_ptr: *mut u8, type_id: u32) -> *m
     };
     let boxed = Box::new(dynamic);
     let boxed_ptr = Box::into_raw(boxed) as *mut u8;
+    unsafe { *(boxed_ptr as *mut u32).add(1) = REFERENCE_BOX_MARK };
     if type_id == TYPE_ARRAY.0 {
         ARRAY_BOXES
             .write()
@@ -3981,11 +4024,26 @@ pub extern "C" fn haxe_unbox_reference_ptr(ptr: *mut u8) -> *mut u8 {
         );
         return std::ptr::null_mut();
     }
+    if is_raw_class_instance(ptr) {
+        return ptr;
+    }
     unsafe {
         let dynamic_ptr = ptr as *const DynamicValue;
         let dynamic = *dynamic_ptr;
         dynamic.value_ptr
     }
+}
+
+/// A class instance that reached a Dynamic slot unboxed: its i64 header
+/// names a class, where a box over one carries the mark in its high half.
+fn is_raw_class_instance(ptr: *mut u8) -> bool {
+    let addr = ptr as usize;
+    if addr <= u32::MAX as usize || (addr & 7) != 0 || (addr >> 47) != 0 {
+        return false;
+    }
+    let words = ptr as *const u32;
+    let (type_id, high) = unsafe { (*words, *words.add(1)) };
+    high == 0 && is_class_type(type_id)
 }
 
 /// Channel-scoped tag-aware unbox for the statically-erased receive arm.
@@ -4240,6 +4298,9 @@ pub extern "C" fn haxe_type_get_class(obj_ptr: *const u8) -> i64 {
             reflected_class_token(value.type_id.0) as i64
         };
     }
+    if let Some(instance) = class_box_instance(obj_ptr as *mut u8) {
+        return haxe_type_get_class(instance);
+    }
     let header = unsafe { *(obj_ptr as *const i64) };
     match u32::try_from(header) {
         Ok(id) if is_class_type(id) => header,
@@ -4334,7 +4395,8 @@ pub extern "C" fn haxe_object_is_instance(obj_ptr: *const u8, target_type_id: i6
     if obj_ptr.is_null() {
         return 0;
     }
-    let actual_type_id = unsafe { *(obj_ptr as *const i64) };
+    // The id is the header's low half: a box over an instance marks the high one.
+    let actual_type_id = unsafe { *(obj_ptr as *const u32) } as i64;
     if actual_type_id == target_type_id {
         return 1;
     }

@@ -1190,6 +1190,33 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(unbox_func_id, vec![value], ptr_u8)
             }
 
+            // A class or enum used as a value is its type id; under Dynamic it
+            // may travel bare, in an Int box or in a box of its own.
+            Some(TypeKind::Abstract { symbol_id, .. })
+                if matches!(actual_mir_type, Some(IrType::Ptr(_)))
+                    && self.symbol_table.get_symbol(*symbol_id).is_some_and(|s| {
+                        crate::tast::core::is_haxe_std_type(
+                            s,
+                            self.string_interner,
+                            &["Class", "Enum"],
+                        )
+                    }) =>
+            {
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let unbox = self.get_or_register_extern_function(
+                    "haxe_unbox_type_handle",
+                    vec![ptr_u8],
+                    IrType::I64,
+                );
+                let id = self
+                    .builder
+                    .build_call_direct(unbox, vec![value], IrType::I64)?;
+                match self.convert_type(target_ty) {
+                    IrType::I64 => Some(id),
+                    to => self.builder.build_cast(id, IrType::I64, to),
+                }
+            }
+
             // Abstract types (Ptr<T>, Ref<T>, Box<T>, Usize) are zero-cost over
             // Int: plain i64 values, never heap-boxed.
             Some(TypeKind::Abstract { .. }) => {
