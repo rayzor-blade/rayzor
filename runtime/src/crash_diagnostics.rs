@@ -72,9 +72,53 @@ unsafe fn location(pc: usize) {
         write(b" [outside registered JIT code]");
     }
 }
+/// Faults below this address are dereferences of, or calls through, null.
+const NULL_PAGE_LIMIT: usize = 0x10000;
+
+#[cfg(unix)]
+unsafe fn in_jit_code(pc: usize) -> bool {
+    unsafe {
+        let mut node = RANGES.load(Ordering::Acquire);
+        while !node.is_null() {
+            let entry = &*node;
+            if pc >= entry.start && pc < entry.end {
+                return true;
+            }
+            node = entry.next;
+        }
+        false
+    }
+}
+
+/// A null access in compiled Haxe code inside a `try` throws, as on the
+/// other Haxe targets; anywhere else it stays fatal.
+#[cfg(unix)]
+unsafe fn throw_null_access(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+    unsafe {
+        if !(sig == libc::SIGSEGV || sig == libc::SIGBUS) || info.is_null() {
+            return;
+        }
+        if (*info).si_addr() as usize >= NULL_PAGE_LIMIT {
+            return;
+        }
+        let (pc, _) = registers(ctx);
+        if !(pc < NULL_PAGE_LIMIT || in_jit_code(pc)) || !crate::exception::has_handler() {
+            return;
+        }
+        // The handler runs with `sig` blocked, and the throw's longjmp keeps
+        // that mask.
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, sig);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        crate::exception::throw_with_message("Null Object Reference".to_string());
+    }
+}
+
 #[cfg(unix)]
 unsafe extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
     unsafe {
+        throw_null_access(sig, info, ctx);
         write(b"rayzor: native crash signal=");
         write(match sig {
             libc::SIGSEGV => b"SIGSEGV",
@@ -143,7 +187,8 @@ pub fn install() {
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = handler as *const () as usize;
-        action.sa_flags = libc::SA_SIGINFO | libc::SA_RESETHAND;
+        // Stays installed: a converted null access returns to Haxe code.
+        action.sa_flags = libc::SA_SIGINFO;
         libc::sigemptyset(&mut action.sa_mask);
         for sig in [
             libc::SIGSEGV,

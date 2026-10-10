@@ -261,19 +261,26 @@ impl<'a> TastToHirContext<'a> {
                                 .push(method.symbol_id);
                         }
                         if let Some(op) = Self::parse_operator_from_metadata(op_str) {
+                            // A bodyless extern is implemented by its `@:native` sibling.
+                            let implementation = method
+                                .body
+                                .is_empty()
+                                .then(|| self.native_implementation(abstract_def, method.name))
+                                .flatten();
                             if method.body.is_empty()
+                                && implementation.is_none()
                                 && Self::compound_assignment_operator(&op).is_some()
                             {
                                 continue;
                             }
-                            if method.body.is_empty() {
+                            if method.body.is_empty() && implementation.is_none() {
                                 self.native_abstract_operators.insert(method.symbol_id);
                             }
                             let key = Self::op_key_for_binary(&op);
                             self.class_operator_methods
                                 .entry((abstract_def.symbol_id, key))
                                 .or_default()
-                                .push(method.symbol_id);
+                                .push(implementation.unwrap_or(method.symbol_id));
                         }
                     }
                 }
@@ -6239,7 +6246,8 @@ impl<'a> TastToHirContext<'a> {
             .current_file?
             .abstracts
             .iter()
-            .find(|a| a.symbol_id == abstract_symbol)?;
+            .find(|a| a.symbol_id == abstract_symbol)
+            .or_else(|| self.imported_abstracts.get(&abstract_symbol).copied())?;
         let is_member = abstract_def
             .fields
             .iter()
@@ -6296,6 +6304,25 @@ impl<'a> TastToHirContext<'a> {
             })
     }
 
+    /// The method of `abstract_def` that implements bodyless `name` through
+    /// `@:native("name")`.
+    fn native_implementation(
+        &self,
+        abstract_def: &crate::tast::node::TypedAbstract,
+        name: InternedString,
+    ) -> Option<SymbolId> {
+        abstract_def
+            .methods
+            .iter()
+            .filter(|m| !m.body.is_empty())
+            .find(|m| {
+                self.symbol_table
+                    .get_symbol(m.symbol_id)
+                    .is_some_and(|s| s.native_name == Some(name))
+            })
+            .map(|m| m.symbol_id)
+    }
+
     fn find_array_access_method(
         &self,
         operand_type: TypeId,
@@ -6328,7 +6355,18 @@ impl<'a> TastToHirContext<'a> {
 
             // Found the abstract, now search for a method with @:arrayAccess metadata
             for method in &abstract_def.methods {
-                // A bodyless declaration cannot be called; array semantics stay.
+                // A bodyless declaration cannot be called unless its `@:native`
+                // sibling implements it; otherwise array semantics stay.
+                if method.metadata.is_array_access && method.body.is_empty() {
+                    if self.string_interner.get(method.name) == Some(method_name) {
+                        if let Some(implementation) =
+                            self.native_implementation(abstract_def, method.name)
+                        {
+                            return Some((implementation, abstract_symbol));
+                        }
+                    }
+                    continue;
+                }
                 if method.metadata.is_array_access && !method.body.is_empty() {
                     // Check if the method name matches what we're looking for
                     if let Some(name_str) = self.string_interner.get(method.name) {

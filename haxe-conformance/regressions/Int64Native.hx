@@ -14,7 +14,7 @@ class Int64Native {
         check("make/toStr", Int64.toStr(a), "47");
         check("qualified make", Int64.toStr(haxe.Int64.make(0, 5)), "5");
         check("ofInt", Int64.toStr(Int64.ofInt(7)), "7");
-        check("isNeg", Std.string(a.isNeg()), "false");
+        check("isNeg", Std.string(Int64.isNeg(a)), "false");
         var ten:Int64 = 10;
         check("implicit from Int", Std.string(ten.low), "10");
         var r = Int64.divMod(a, ten);

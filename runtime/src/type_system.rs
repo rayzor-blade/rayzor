@@ -4574,6 +4574,26 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
             vtable.len()
         ));
     }
+    // A class with no virtual methods of its own has no table; it dispatches
+    // through its nearest registered ancestor's.
+    if let Some(map) = registry.as_ref() {
+        let super_of = |id: u32| {
+            get_type_info(TypeId(id)).and_then(|t| t.class_info.and_then(|c| c.super_type_id))
+        };
+        let mut parent = super_of(type_id as u32);
+        for _ in 0..32 {
+            let Some(pid) = parent else { break };
+            if let Some(vtable) = map.get(&pid) {
+                if let Some(&v) = inherit_vtable_slots(map, pid, vtable).get(slot)
+                    && v != 0
+                {
+                    return v;
+                }
+                break;
+            }
+            parent = super_of(pid);
+        }
+    }
     crate::exception::throw_with_message(format!(
         "interface dispatch: no vtable registered for type_id {type_id} \
          (slot {slot}) — the receiver is not a registered class instance, or \

@@ -2890,6 +2890,20 @@ impl<'a> AstLowering<'a> {
 
                 // First, try to resolve as a regular method on the receiver
                 let method_symbol = self.resolve_method_symbol(&receiver_expr, method_name);
+                // `using` makes the static an extension: `div(a, b).toInt()`.
+                if self.static_through_abstract_instance(&receiver_expr, method_symbol)
+                    && self
+                        .find_static_extension_method(method_name, receiver_expr.expr_type)
+                        .is_none()
+                {
+                    return Err(LoweringError::SemanticError {
+                        message: format!(
+                            "Invalid call to static function {} through abstract instance",
+                            self.context.string_interner.get(method_name).unwrap_or("")
+                        ),
+                        location: self.context.span_to_location(&expression.span),
+                    });
+                }
                 self.refine_generic_receiver_from_call(&receiver_expr, method_symbol, &arg_exprs);
 
                 // A declaration's typed signature takes precedence over extensions.

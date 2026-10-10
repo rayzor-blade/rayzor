@@ -15,6 +15,22 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// A static member reached through a value of an abstract, not the abstract.
+    pub(crate) fn static_through_abstract_instance(
+        &self,
+        receiver: &TypedExpression,
+        member: SymbolId,
+    ) -> bool {
+        !matches!(receiver.kind, TypedExpressionKind::This { .. })
+            && self.class_value_owner(receiver).is_none()
+            && self.abstract_symbol_of(receiver.expr_type).is_some()
+            && self
+                .context
+                .symbol_table
+                .get_symbol(member)
+                .is_some_and(|s| s.is_static())
+    }
+
     pub(crate) fn class_value_owner(&self, expression: &TypedExpression) -> Option<SymbolId> {
         match &expression.kind {
             TypedExpressionKind::Variable { symbol_id } => {

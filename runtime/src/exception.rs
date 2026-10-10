@@ -180,6 +180,13 @@ pub fn get_exception_stack_trace() -> String {
     STATE.with(|state| state.borrow().current_stack_trace.clone())
 }
 
+/// Whether a `try` is active on this thread; neither allocates nor blocks.
+pub(crate) fn has_handler() -> bool {
+    STATE
+        .try_with(|state| state.try_borrow().is_ok_and(|s| !s.handlers.is_empty()))
+        .unwrap_or(false)
+}
+
 /// Throw an exception with a string message (used by panic guard).
 /// Creates a HaxeString, boxes it as DynamicValue, and throws as TYPE_STRING.
 pub fn throw_with_message(msg: String) -> ! {

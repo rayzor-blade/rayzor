@@ -863,6 +863,19 @@ impl<'a> AstLowering<'a> {
             }
         };
 
+        if self.static_through_abstract_instance(&obj_expr, field_symbol) && {
+            let name = self.context.intern_string(field);
+            self.find_static_extension_method(name, obj_expr.expr_type)
+                .is_none()
+        } {
+            return Err(LoweringError::SemanticError {
+                message: format!(
+                    "Invalid call to static function {field} through abstract instance"
+                ),
+                location: self.context.span_to_location(&expression.span),
+            });
+        }
+
         // A dynamic method read as a value takes its current binding.
         if self.is_method_symbol(field_symbol)
             && self
