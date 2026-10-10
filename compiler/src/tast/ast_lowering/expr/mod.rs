@@ -1101,6 +1101,11 @@ impl<'a> AstLowering<'a> {
                 params,
                 args,
             } => {
+                if let Some(construct) =
+                    self.overloaded_construction(type_path, params, args, expression.span)?
+                {
+                    return self.lower_expression(&construct);
+                }
                 // Resolve the base class type from type_path.
                 // `mut` because the `expected_new_type_hint` block below may
                 // re-target construction to the concrete container when the
@@ -2377,7 +2382,9 @@ impl<'a> AstLowering<'a> {
                 }
             }
             ExprKind::Function(func) => {
-                if let Some(rewritten) = Self::literal_with_entry_defaults(func) {
+                if let Some(rewritten) = Self::literal_with_entry_defaults(func)
+                    .or_else(|| Self::literal_with_inferred_rest(func))
+                {
                     return self.lower_expression(&Expr {
                         kind: ExprKind::Function(rewritten),
                         span: expression.span,
@@ -3777,6 +3784,47 @@ impl<'a> AstLowering<'a> {
 }
 
 impl<'a> AstLowering<'a> {
+    /// An untyped `...r` reaches here as `haxe.Rest<Dynamic>` with the
+    /// element sharing the wrapper's span. Haxe leaves the element open for
+    /// the body to bind, so an element checked as `(r[i] : T)` makes it
+    /// `haxe.Rest<T>`.
+    fn literal_with_inferred_rest(func: &parser::Function) -> Option<parser::Function> {
+        let body = func.body.as_deref()?;
+        let mut rewritten = func.clone();
+        let mut changed = false;
+        for param in rewritten.params.iter_mut().filter(|p| p.rest) {
+            let Some(parser::Type::Path { params, span, .. }) = &mut param.type_hint else {
+                continue;
+            };
+            let untyped = matches!(
+                params.as_slice(),
+                [inner @ parser::Type::Path { path, params: args, .. }]
+                    if inner.span() == *span
+                        && path.package.is_empty()
+                        && path.name == "Dynamic"
+                        && args.is_empty()
+            );
+            if !untyped {
+                continue;
+            }
+            let mut element = None;
+            crate::tast::ast_lowering::walk_expr(body, &mut |e| {
+                if element.is_none()
+                    && let ExprKind::TypeCheck { expr, type_hint } = &e.kind
+                    && let ExprKind::Index { expr: base, .. } = &expr.kind
+                    && matches!(&base.kind, ExprKind::Ident(n) if *n == param.name)
+                {
+                    element = Some(type_hint.clone());
+                }
+            });
+            if let Some(element) = element {
+                params[0] = element;
+                changed = true;
+            }
+        }
+        changed.then_some(rewritten)
+    }
+
     /// A function literal is only called through a value, which carries no
     /// defaults: a defaulted parameter arrives as null. The literal takes it
     /// as a hidden optional parameter and binds the declared name on entry,
