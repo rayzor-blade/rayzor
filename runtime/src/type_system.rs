@@ -132,6 +132,8 @@ pub enum ValueTag {
     Reference = 6,
     /// Interface wrapper or its raw class instance, compared by object identity.
     Interface = 8,
+    /// Closure record `{code, env}`; other readers treat it as `Int`.
+    Function = 9,
 }
 
 impl ValueTag {
@@ -144,6 +146,7 @@ impl ValueTag {
             5 => Some(ValueTag::String),
             6 => Some(ValueTag::Reference),
             8 => Some(ValueTag::Interface),
+            9 => Some(ValueTag::Function),
             _ => None,
         }
     }
@@ -4688,6 +4691,7 @@ mod value_tag_tests {
         assert_eq!(ValueTag::Float as i32, 4);
         assert_eq!(ValueTag::String as i32, 5);
         assert_eq!(ValueTag::Reference as i32, 6);
+        assert_eq!(ValueTag::Function as i32, 9);
     }
 
     // ValueTag and TypeId are different spaces. Where they collide, a reader

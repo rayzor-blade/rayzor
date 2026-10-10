@@ -470,12 +470,16 @@ fn collect_param_operator_uses<'a>(
         ExprKind::Unary { op, expr: inner } => {
             use parser::UnaryOp as U;
             let u = match op {
-                U::Not => ParamUse::Bool,
+                U::Not => Some(ParamUse::Bool),
                 U::Neg | U::BitNot | U::PreIncr | U::PreDecr | U::PostIncr | U::PostDecr => {
-                    ParamUse::Int
+                    Some(ParamUse::Int)
                 }
+                // Defined only by an abstract's `@:op(A!)`: says nothing of a param.
+                U::PostNot => None,
             };
-            note(inner, u, uses);
+            if let Some(u) = u {
+                note(inner, u, uses);
+            }
             visit(inner, uses);
         }
         ExprKind::Assign { left, op, right } => {
@@ -1679,6 +1683,8 @@ pub struct AstLowering<'a> {
     /// The clause form (`from Y`) is representation compatibility and needs no
     /// call; the method form is a real conversion the call site must invoke.
     pub(crate) abstract_from_methods: BTreeMap<SymbolId, Vec<(SymbolId, TypeId)>>,
+    /// Each abstract's `@:op(A!)` method: (name, is_static).
+    pub(crate) abstract_postfix_not: BTreeMap<SymbolId, (String, bool)>,
 }
 
 /// Result of type parameter substitution for generic method return types

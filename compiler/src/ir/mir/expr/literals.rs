@@ -147,7 +147,16 @@ impl<'a> HirToMirContext<'a> {
                 }
             };
             let first = elements.first().and_then(|e| kind_tag(e.ty));
-            first.is_some() && elements.iter().all(|e| kind_tag(e.ty) == first)
+            // Function values arrive as closure records or bare function
+            // references; both are one pointer slot.
+            let all_functions = !elements.is_empty()
+                && elements.iter().all(|e| {
+                    matches!(
+                        self.type_table.get(e.ty).map(|t| &t.kind),
+                        Some(TypeKind::Function { .. })
+                    )
+                });
+            all_functions || (first.is_some() && elements.iter().all(|e| kind_tag(e.ty) == first))
         };
         // The HaxeArray struct must live on the heap: a stack allocation is a
         // use-after-free once the array is stored in a global and read back

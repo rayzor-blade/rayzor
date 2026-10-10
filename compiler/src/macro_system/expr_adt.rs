@@ -148,6 +148,7 @@ fn unop_name(op: UnaryOp) -> (&'static str, bool) {
         UnaryOp::PreDecr => ("OpDecrement", false),
         UnaryOp::PostIncr => ("OpIncrement", true),
         UnaryOp::PostDecr => ("OpDecrement", true),
+        UnaryOp::PostNot => ("OpNot", true),
     }
 }
 
@@ -1178,7 +1179,8 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                     };
                     let postfix = matches!(a(1), Some(MacroValue::Bool(true)));
                     let op = match (name.as_str(), postfix) {
-                        ("OpNot", _) => UnaryOp::Not,
+                        ("OpNot", false) => UnaryOp::Not,
+                        ("OpNot", true) => UnaryOp::PostNot,
                         ("OpNeg", _) => UnaryOp::Neg,
                         ("OpNegBits", _) => UnaryOp::BitNot,
                         ("OpIncrement", false) => UnaryOp::PreIncr,

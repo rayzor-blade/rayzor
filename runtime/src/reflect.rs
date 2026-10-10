@@ -675,7 +675,7 @@ pub extern "C" fn haxe_reflect_is_function(v: *mut u8) -> bool {
 /// Reflect.compareMethods(f1, f2) -> Bool
 ///
 /// Returns true if f1 and f2 are the same function or method closure.
-/// For closures, compares both fn_ptr and env_ptr fields (16 bytes).
+/// Closures compare by `haxe_closure_equals`.
 /// f1, f2: DynamicValue pointers (boxed functions) or raw closure/function pointers
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_compare_methods(f1: *mut u8, f2: *mut u8) -> bool {
@@ -715,7 +715,7 @@ pub extern "C" fn haxe_reflect_compare_methods(f1: *mut u8, f2: *mut u8) -> bool
         return true;
     }
 
-    // Compare closure struct contents: {fn_ptr: i64, env_ptr: i64}
+    // Compare closure records {code, env}, as `==` on two functions does.
     // Only if both pointers are 8-byte aligned (valid closure structs)
     if !p1.is_null()
         && !p2.is_null()
@@ -725,11 +725,7 @@ pub extern "C" fn haxe_reflect_compare_methods(f1: *mut u8, f2: *mut u8) -> bool
         if let Some(equal) = strings::compare_methods(p1, p2) {
             return equal;
         }
-        unsafe {
-            let fn1 = std::ptr::read(p1 as *const [i64; 2]);
-            let fn2 = std::ptr::read(p2 as *const [i64; 2]);
-            return fn1[0] == fn2[0] && fn1[1] == fn2[1];
-        }
+        return crate::closure_entries::haxe_closure_equals(p1, p2);
     }
 
     false
@@ -846,7 +842,8 @@ pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
 /// This is used for generic code where values are type-erased to i64 and boxing
 /// would require knowing the concrete type at compile time.
 ///
-/// type_tag values: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Dynamic
+/// type_tag values: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Dynamic,
+/// 9=Function
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i64 {
     match type_tag {
@@ -912,6 +909,8 @@ pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i
             let b = crate::type_system::haxe_iface_identity(b as *mut u8) as i64;
             compare_reference_slot(a, b)
         }
+        // Each evaluation of a function value allocates a fresh record.
+        9 if crate::closure_entries::haxe_closure_equals(a as *mut u8, b as *mut u8) => 0,
         _ => {
             // A generic slot can hold the same array as a raw pointer or a box.
             if same_array_reference(a, b) {
@@ -1035,6 +1034,16 @@ fn compare_reference_slot(a: i64, b: i64) -> i64 {
     let b_token = type_token_id(b);
     if let (Some(a_id), Some(b_id)) = (a_token, b_token) {
         return (a_id as i64 - b_id as i64).signum();
+    }
+    let function_box = |v: i64| {
+        crate::type_system::dynamic_value_if_boxed(v as *mut u8)
+            .filter(|d| d.type_id == TYPE_FUNCTION)
+            .map(|d| d.value_ptr)
+    };
+    if let (Some(fa), Some(fb)) = (function_box(a), function_box(b))
+        && crate::closure_entries::haxe_closure_equals(fa, fb)
+    {
+        return 0;
     }
     let scalar_box = |v: i64| -> Option<DynamicValue> {
         if v >= 0 && v <= u32::MAX as i64 {

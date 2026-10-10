@@ -70,6 +70,37 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// Record the abstract's `@:op(A!)` method, which `a!` calls.
+    pub(crate) fn record_postfix_not_method(
+        &mut self,
+        abstract_symbol: SymbolId,
+        abstract_decl: &AbstractDecl,
+    ) {
+        for field in &abstract_decl.fields {
+            let ClassFieldKind::Function(func) = &field.kind else {
+                continue;
+            };
+            let postfix_not = field.meta.iter().any(|m| {
+                m.name.trim_start_matches(':') == "op"
+                    && matches!(
+                        m.params.first().map(|p| &p.kind),
+                        Some(ExprKind::Unary {
+                            op: UnaryOp::PostNot,
+                            ..
+                        })
+                    )
+            });
+            if postfix_not {
+                let is_static = field
+                    .modifiers
+                    .iter()
+                    .any(|m| matches!(m, Modifier::Static));
+                self.abstract_postfix_not
+                    .insert(abstract_symbol, (func.name.clone(), is_static));
+            }
+        }
+    }
+
     /// Lower an abstract declaration
     pub(crate) fn lower_abstract_declaration(
         &mut self,
@@ -319,6 +350,7 @@ impl<'a> AstLowering<'a> {
         }
         self.abstract_casts
             .insert(abstract_symbol, (recorded_from, recorded_to));
+        self.record_postfix_not_method(abstract_symbol, abstract_decl);
 
         // Initialize class_fields for this abstract so field tracking works (needed for enum abstract)
         self.class_fields.entry(abstract_symbol).or_default();

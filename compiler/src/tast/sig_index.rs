@@ -408,6 +408,12 @@ impl StaticSigIndex {
         owner: &str,
         operator: super::node::BinaryOperator,
     ) -> Vec<(String, bool, bool)> {
+        self.operator_methods(owner, &format!("{operator:?}"))
+    }
+
+    /// `@:op` methods by key: a binary operator's name, or `Unary<op>` for
+    /// a unary one (`UnaryPostNot`).
+    pub(crate) fn operator_methods(&mut self, owner: &str, key: &str) -> Vec<(String, bool, bool)> {
         self.ensure_indexed_from_known_files(owner);
         let class = self.classes.get(owner).or_else(|| {
             let names = self.bare_to_qualified.get(owner)?;
@@ -417,7 +423,7 @@ impl StaticSigIndex {
             self.classes.get(names.first()?)
         });
         class
-            .and_then(|c| c.operators.get(&format!("{operator:?}")))
+            .and_then(|c| c.operators.get(key))
             .cloned()
             .unwrap_or_default()
     }
@@ -696,23 +702,21 @@ impl StaticSigIndex {
                 if metadata.name != "op" {
                     continue;
                 }
-                if let Some(parser::Expr {
-                    kind: parser::ExprKind::Binary { op, .. },
-                    ..
-                }) = metadata.params.first()
-                {
-                    let key = match op {
+                let key = match metadata.params.first().map(|p| &p.kind) {
+                    Some(parser::ExprKind::Binary { op, .. }) => match op {
                         parser::BinaryOp::NotEq => "Ne".to_string(),
                         op => format!("{op:?}"),
-                    };
-                    let methods = entry.operators.entry(key).or_default();
-                    if !methods.iter().any(|(name, _, _)| name == &func.name) {
-                        methods.push((
-                            func.name.clone(),
-                            is_static,
-                            field.meta.iter().any(|m| m.name == "commutative"),
-                        ));
-                    }
+                    },
+                    Some(parser::ExprKind::Unary { op, .. }) => format!("Unary{op:?}"),
+                    _ => continue,
+                };
+                let methods = entry.operators.entry(key).or_default();
+                if !methods.iter().any(|(name, _, _)| name == &func.name) {
+                    methods.push((
+                        func.name.clone(),
+                        is_static,
+                        field.meta.iter().any(|m| m.name == "commutative"),
+                    ));
                 }
             }
             let table = if is_static {

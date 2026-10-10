@@ -979,6 +979,8 @@ pub enum UnaryOp {
     PostIncr,
     /// `expr--`
     PostDecr,
+    /// `expr!`: only meaningful through an abstract's `@:op(A!)`.
+    PostNot,
 }
 
 /// Binary operators

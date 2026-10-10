@@ -463,6 +463,17 @@ impl<'a, 'b> RdParser<'a, 'b> {
                         },
                     };
                 }
+                TokenKind::Bang if takes_postfix(&expr) => {
+                    let end = self.stream.peek().span.end;
+                    self.stream.advance();
+                    expr = Expr {
+                        span: Span::new(expr.span.start, end),
+                        kind: ExprKind::Unary {
+                            op: UnaryOp::PostNot,
+                            expr: Box::new(expr),
+                        },
+                    };
+                }
                 _ => break,
             }
         }

@@ -2436,6 +2436,10 @@ register_symbol!(
     crate::haxe_array::haxe_array_function_index_of
 );
 register_symbol!(
+    "haxe_array_dynamic_index_of",
+    crate::haxe_array::haxe_array_dynamic_index_of
+);
+register_symbol!(
     "haxe_checked_cast_object",
     crate::type_system::haxe_checked_cast_object
 );

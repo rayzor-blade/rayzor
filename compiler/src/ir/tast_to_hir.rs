@@ -1122,7 +1122,11 @@ impl<'a> TastToHirContext<'a> {
     /// Lower a function
     fn lower_function(&mut self, function: &TypedFunction) -> HirFunction {
         let hir_body = if !function.body.is_empty() {
-            Some(self.lower_block(&function.body))
+            let mut statements = self.param_default_guards(&function.parameters);
+            let mut body = self.lower_block(&function.body);
+            statements.append(&mut body.statements);
+            body.statements = statements;
+            Some(body)
         } else {
             None
         };
@@ -3003,9 +3007,15 @@ impl<'a> TastToHirContext<'a> {
                     debug!("  Captured symbol: {:?}", capture.symbol);
                 }
 
+                let mut statements = self.param_default_guards(parameters);
+                let mut hir_body = self.lower_statements_as_expr(body);
+                if let HirExprKind::Block(block) = &mut hir_body.kind {
+                    statements.append(&mut block.statements);
+                    block.statements = statements;
+                }
                 HirExprKind::Lambda {
                     params: parameters.iter().map(|p| self.lower_param(p)).collect(),
-                    body: Box::new(self.lower_statements_as_expr(body)),
+                    body: Box::new(hir_body),
                     captures,
                 }
             }
@@ -4334,6 +4344,64 @@ impl<'a> TastToHirContext<'a> {
                 default: param.default_type,
             })
             .collect()
+    }
+
+    /// `if (p == null) p = default;` for each String parameter with a non-null
+    /// default: Haxe applies a default in the callee, so an explicit null or a
+    /// call through a function value still gets it.
+    fn param_default_guards(&mut self, params: &[TypedParameter]) -> Vec<HirStatement> {
+        let mut guards = Vec::new();
+        for param in params {
+            let Some(default) = &param.default_value else {
+                continue;
+            };
+            let is_string = {
+                let tt = self.type_table.borrow();
+                let mut ty = param.param_type;
+                for _ in 0..8 {
+                    match tt.get(ty).map(|t| &t.kind) {
+                        Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                        Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                        _ => break,
+                    }
+                }
+                matches!(tt.get(ty).map(|t| &t.kind), Some(TypeKind::String))
+            };
+            if !is_string || matches!(default.kind, TypedExpressionKind::Null) {
+                continue;
+            }
+            let location = param.source_location;
+            let value = HirExpr::new(
+                HirExprKind::Variable {
+                    symbol: param.symbol_id,
+                    capture_mode: None,
+                },
+                param.param_type,
+                self.current_lifetime,
+                location,
+            );
+            let condition = HirExpr::new(
+                HirExprKind::Binary {
+                    op: HirBinaryOp::Eq,
+                    lhs: Box::new(value),
+                    rhs: Box::new(self.make_null_literal()),
+                },
+                self.get_bool_type(),
+                self.current_lifetime,
+                location,
+            );
+            let assign = HirStatement::Assign {
+                lhs: HirLValue::Variable(param.symbol_id),
+                rhs: self.lower_expression(default),
+                op: None,
+            };
+            guards.push(HirStatement::If {
+                condition,
+                then_branch: HirBlock::new(vec![assign], self.current_scope),
+                else_branch: None,
+            });
+        }
+        guards
     }
 
     fn lower_param(&mut self, param: &TypedParameter) -> HirParam {

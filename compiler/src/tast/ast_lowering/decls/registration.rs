@@ -1110,6 +1110,7 @@ impl<'a> AstLowering<'a> {
         else {
             return Ok(());
         };
+        self.record_postfix_not_method(abstract_symbol, abstract_decl);
 
         let underlying_type = abstract_decl
             .underlying

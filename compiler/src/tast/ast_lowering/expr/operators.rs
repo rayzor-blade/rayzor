@@ -65,7 +65,98 @@ impl<'a> AstLowering<'a> {
             UnaryOp::PostIncr => Ok(UnaryOperator::PostInc),
             UnaryOp::PreDecr => Ok(UnaryOperator::PreDec),
             UnaryOp::PostDecr => Ok(UnaryOperator::PostDec),
+            // Lowered as a call by `lower_postfix_not`; no built-in operator.
+            UnaryOp::PostNot => Err(LoweringError::SemanticError {
+                message: "postfix `!` is only defined by an abstract's @:op(A!)".to_string(),
+                location: self.context.create_location(),
+            }),
         }
+    }
+
+    /// `a!`: the operand abstract's `@:op(A!)` method, called as written
+    /// source (`a.method()`, or `A.method(a)` for a static) so it lowers like
+    /// any member call. Postfix `!` has no meaning on any other type.
+    pub(crate) fn lower_postfix_not(
+        &mut self,
+        expression: &Expr,
+        operand: &Expr,
+    ) -> LoweringResult<TypedExpression> {
+        let operand_type = self.lower_expression(operand)?.expr_type;
+        let owner = {
+            let table = self.context.type_table.borrow();
+            let mut ty = operand_type;
+            for _ in 0..16 {
+                match table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            match table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Abstract { symbol_id, .. }) => Some(*symbol_id),
+                _ => None,
+            }
+        };
+        let Some((owner, (method, is_static))) =
+            owner.and_then(|owner| Some((owner, self.postfix_not_method(owner)?)))
+        else {
+            return Err(LoweringError::SemanticError {
+                message: format!(
+                    "{} has no postfix `!` operator",
+                    super::super::macro_defer::render_type(
+                        operand_type,
+                        self.context.type_table,
+                        &*self.context.symbol_table,
+                        &*self.context.string_interner,
+                        0,
+                    )
+                ),
+                location: self.context.create_location_from_span(expression.span),
+            });
+        };
+        let span = expression.span;
+        let mk = |kind: ExprKind| Expr { kind, span };
+        let (receiver, args) = if is_static {
+            let owner_name = self
+                .context
+                .symbol_table
+                .get_symbol(owner)
+                .and_then(|s| self.context.string_interner.get(s.name))
+                .unwrap_or_default()
+                .to_string();
+            (mk(ExprKind::Ident(owner_name)), vec![operand.clone()])
+        } else {
+            (operand.clone(), Vec::new())
+        };
+        let call = mk(ExprKind::Call {
+            expr: Box::new(mk(ExprKind::Field {
+                expr: Box::new(receiver),
+                field: method,
+                is_optional: false,
+            })),
+            args,
+        });
+        self.lower_expression(&call)
+    }
+
+    /// The `@:op(A!)` method of an abstract: (name, is_static).
+    fn postfix_not_method(&self, owner: SymbolId) -> Option<(String, bool)> {
+        if let Some(found) = self.abstract_postfix_not.get(&owner) {
+            return Some(found.clone());
+        }
+        // Declared in another module: known from its indexed declaration.
+        let index = self.static_sig_index.as_ref()?.clone();
+        let symbol = self.context.symbol_table.get_symbol(owner)?;
+        let name = self
+            .context
+            .string_interner
+            .get(symbol.qualified_name.unwrap_or(symbol.name))?
+            .to_string();
+        let (method, is_static, _) = index
+            .borrow_mut()
+            .operator_methods(&name, "UnaryPostNot")
+            .into_iter()
+            .next()?;
+        Some((method, is_static))
     }
 
     // Property access handling removed for simplicity

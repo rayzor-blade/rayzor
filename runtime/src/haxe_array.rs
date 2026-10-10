@@ -1834,6 +1834,49 @@ pub unsafe extern "C" fn haxe_array_function_index_of(
     }
 }
 
+/// Dynamic search: a function box matches an equal closure, any other slot
+/// matches by identity, as the generic search does.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn haxe_array_dynamic_index_of(
+    arr: *const HaxeArray,
+    value: *mut u8,
+    from: i64,
+    reverse: i32,
+) -> i64 {
+    let function_of = |slot: *mut u8| {
+        crate::type_system::dynamic_value_if_boxed(slot)
+            .filter(|d| d.type_id == crate::type_system::TYPE_FUNCTION)
+            .map(|d| d.value_ptr)
+    };
+    let wanted = function_of(value);
+    unsafe {
+        if arr.is_null() || (*arr).len == 0 {
+            return -1;
+        }
+        let array = &*arr;
+        let len = array.len as i64;
+        let start = if from < 0 { len + from } else { from };
+        let mut i = if reverse != 0 {
+            start.min(len - 1)
+        } else {
+            start.max(0)
+        };
+        while i >= 0 && i < len {
+            let element = *(array.ptr as *const *mut u8).add(i as usize);
+            if element == value
+                || wanted.is_some_and(|f| {
+                    function_of(element)
+                        .is_some_and(|g| crate::closure_entries::haxe_closure_equals(f, g))
+                })
+            {
+                return i;
+            }
+            i += if reverse != 0 { -1 } else { 1 };
+        }
+        -1
+    }
+}
+
 /// String search compares contents; the generic search compares raw slots.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn haxe_array_string_index_of(

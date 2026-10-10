@@ -57,6 +57,18 @@ impl<'a> HirToMirContext<'a> {
                     TypeKind::Array { element_type } => Some(*element_type),
                     _ => None,
                 });
+            // A Dynamic searched value is a box, so a function box can be
+            // matched by closure equality.
+            let is_dynamic = |me: &Self, ty: TypeId| {
+                matches!(
+                    me.type_table
+                        .get(me.resolve_through_aliases(ty))
+                        .map(|t| &t.kind),
+                    Some(TypeKind::Dynamic)
+                )
+            };
+            let dynamic_search =
+                element_type.is_some_and(|ty| is_dynamic(self, ty)) && is_dynamic(self, args[1].ty);
             let search = element_type.and_then(|ty| {
                 if self.convert_type(ty) == IrType::String {
                     Some(("haxe_array_string_index_of", IrType::String))
@@ -68,6 +80,11 @@ impl<'a> HirToMirContext<'a> {
                 ) {
                     Some((
                         "haxe_array_function_index_of",
+                        IrType::Ptr(Box::new(IrType::U8)),
+                    ))
+                } else if dynamic_search {
+                    Some((
+                        "haxe_array_dynamic_index_of",
                         IrType::Ptr(Box::new(IrType::U8)),
                     ))
                 } else {

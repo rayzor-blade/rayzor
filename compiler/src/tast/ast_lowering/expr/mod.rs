@@ -888,6 +888,10 @@ impl<'a> AstLowering<'a> {
                     }
                 }
             }
+            ExprKind::Unary {
+                op: parser::UnaryOp::PostNot,
+                expr,
+            } => return self.lower_postfix_not(expression, expr),
             ExprKind::Unary { op, expr } => {
                 let operand_expr = self.lower_expression(expr)?;
                 let typed_op = self.lower_unary_operator(op)?;
@@ -3503,6 +3507,7 @@ impl<'a> AstLowering<'a> {
                     | parser::UnaryOp::PreDecr
                     | parser::UnaryOp::PostIncr
                     | parser::UnaryOp::PostDecr
+                    | parser::UnaryOp::PostNot
             ),
 
             // Function calls might have side effects

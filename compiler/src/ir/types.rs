@@ -191,6 +191,7 @@ impl IrType {
                 ValueTag::Interface
             }
             IrType::Ptr(_) => ValueTag::Reference,
+            IrType::Function { .. } => ValueTag::Function,
             _ => ValueTag::Int,
         }
     }

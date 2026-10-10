@@ -1028,6 +1028,32 @@ impl<'a> AstLowering<'a> {
                 }
             }
 
+            // A static var of function type extends like a static method.
+            if let Some(fields) = self.class_fields.get(&class_symbol) {
+                for (name, field, is_static) in fields {
+                    if *name != method_name || !*is_static {
+                        continue;
+                    }
+                    let function_typed =
+                        self.context
+                            .symbol_table
+                            .get_symbol(*field)
+                            .is_some_and(|symbol| {
+                                matches!(
+                                    self.context
+                                        .type_table
+                                        .borrow()
+                                        .get(symbol.type_id)
+                                        .map(|t| &t.kind),
+                                    Some(TypeKind::Function { .. })
+                                )
+                            });
+                    if function_typed && applies(self, *field) {
+                        return Some((class_symbol, *field));
+                    }
+                }
+            }
+
             if let Some(method) = self.resolve_class_method_symbol(class_symbol, method_name) {
                 if self
                     .context
@@ -3119,14 +3145,45 @@ impl<'a> AstLowering<'a> {
                         );
                         let mut new_args = vec![receiver_expr];
                         new_args.extend(arg_exprs);
-                        let type_arguments = self
-                            .structural_call_type_arguments(static_method_symbol, &mut new_args);
+                        let var_type = self
+                            .context
+                            .symbol_table
+                            .get_symbol(static_method_symbol)
+                            .filter(|s| s.kind != crate::tast::symbols::SymbolKind::Function)
+                            .map(|s| s.type_id);
+                        if let Some(var_type) = var_type {
+                            // A static var extension calls the var's function value.
+                            let access = TypedExpressionKind::StaticFieldAccess {
+                                class_symbol,
+                                field_symbol: static_method_symbol,
+                            };
+                            let lifetime_id = self.assign_lifetime(&access, &var_type);
+                            let metadata = self.analyze_expression_metadata(&access);
+                            let function = TypedExpression {
+                                expr_type: var_type,
+                                kind: access,
+                                usage: VariableUsage::Copy,
+                                lifetime_id,
+                                source_location: self.context.span_to_location(&expression.span),
+                                metadata,
+                            };
+                            TypedExpressionKind::FunctionCall {
+                                function: Box::new(function),
+                                arguments: new_args,
+                                type_arguments: Vec::new(),
+                            }
+                        } else {
+                            let type_arguments = self.structural_call_type_arguments(
+                                static_method_symbol,
+                                &mut new_args,
+                            );
 
-                        TypedExpressionKind::StaticMethodCall {
-                            class_symbol,
-                            method_symbol: static_method_symbol,
-                            arguments: new_args,
-                            type_arguments,
+                            TypedExpressionKind::StaticMethodCall {
+                                class_symbol,
+                                method_symbol: static_method_symbol,
+                                arguments: new_args,
+                                type_arguments,
+                            }
                         }
                     } else {
                         // No static extension found, use regular method call

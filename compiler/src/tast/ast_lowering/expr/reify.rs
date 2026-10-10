@@ -218,6 +218,7 @@ impl Reifier {
                     UnaryOp::PreDecr => ("OpDecrement", false),
                     UnaryOp::PostIncr => ("OpIncrement", true),
                     UnaryOp::PostDecr => ("OpDecrement", true),
+                    UnaryOp::PostNot => ("OpNot", true),
                 };
                 def(
                     "EUnop",

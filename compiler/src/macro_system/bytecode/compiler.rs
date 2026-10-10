@@ -289,6 +289,12 @@ impl BytecodeCompiler {
                     UnaryOp::PostIncr | UnaryOp::PostDecr => {
                         self.compile_post_inc_dec(op, inner, expr.span)?;
                     }
+                    UnaryOp::PostNot => {
+                        return Err(CompileError::new(
+                            "postfix `!` needs an abstract's @:op(A!)",
+                            expr.span,
+                        ));
+                    }
                     _ => {
                         self.compile_expr(inner)?;
                         match op {

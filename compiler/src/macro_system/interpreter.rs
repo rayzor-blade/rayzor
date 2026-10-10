@@ -3123,6 +3123,10 @@ impl MacroInterpreter {
                     location,
                 }),
             },
+            UnaryOp::PostNot => Err(MacroError::TypeError {
+                message: format!("cannot apply postfix `!` to {}", val.type_name()),
+                location,
+            }),
             UnaryOp::PreIncr | UnaryOp::PostIncr | UnaryOp::PreDecr | UnaryOp::PostDecr => {
                 // Inc/dec are handled by `eval_inc_dec` in the caller because
                 // they need lvalue write-back; they should never flow through
