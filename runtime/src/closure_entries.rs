@@ -17,7 +17,7 @@ use crate::type_system::{
     TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_NULL, dynamic_value_if_boxed, haxe_unbox_bool,
     haxe_unbox_float, haxe_unbox_int,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 #[derive(Clone, Copy, Default)]
@@ -219,9 +219,52 @@ pub(crate) fn closure_identity(closure: *mut u8) -> *mut u8 {
         .map_or(closure, |original| original as *mut u8)
 }
 
+/// Codes of bound-method thunks, whose environment is `[receiver]`.
+static BOUND_THUNKS: RwLock<Option<HashSet<usize>>> = RwLock::new(None);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_closure_register_bound_thunk(record: *const u8) {
+    let code = unsafe { record_code(record) };
+    if code != 0 {
+        BOUND_THUNKS
+            .write()
+            .unwrap()
+            .get_or_insert_with(HashSet::new)
+            .insert(code);
+    }
+}
+
+fn is_bound_thunk(code: usize) -> bool {
+    BOUND_THUNKS
+        .read()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|set| set.contains(&code))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_closure_equals(left: *mut u8, right: *mut u8) -> bool {
-    closure_identity(left) == closure_identity(right)
+    let (left, right) = (closure_identity(left), closure_identity(right));
+    if left == right {
+        return true;
+    }
+    if left.is_null() || right.is_null() {
+        return false;
+    }
+    // Each evaluation of a function value allocates its record: a static
+    // function's is `{code, null}`, a bound method's `{thunk, [receiver]}`.
+    unsafe {
+        let (l, r) = (left as *const usize, right as *const usize);
+        if *l != *r {
+            return false;
+        }
+        let (le, re) = (*l.add(1), *r.add(1));
+        le == re
+            || (le != 0
+                && re != 0
+                && is_bound_thunk(*l)
+                && *(le as *const usize) == *(re as *const usize))
+    }
 }
 
 /// Select the caller's typed adapter for a function crossing Dynamic.

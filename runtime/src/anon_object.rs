@@ -225,6 +225,11 @@ pub extern "C" fn rayzor_ensure_shape(shape_id: u32, descriptor_hs: *mut u8) {
 }
 
 /// Get shape descriptor by ID (internal helper)
+/// An optional field the literal omitted: still unset under the null tag.
+fn slot_absent(shape: &ShapeDescriptor, fields: &[u64], i: usize) -> bool {
+    shape.field_types.get(i) == Some(&TYPE_NULL.0) && fields.get(i).copied().unwrap_or(0) == 0
+}
+
 fn get_shape(shape_id: u32) -> Option<ShapeDescriptor> {
     let table = SHAPE_TABLE.read().unwrap();
     table.as_ref()?.get(&shape_id).cloned()
@@ -339,9 +344,13 @@ pub extern "C" fn rayzor_anon_has_field(ptr: *mut u8, name_ptr: *const u8, name_
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr, name_len as usize));
 
         match &arc_ref.data {
-            AnonData::Inline(_) => {
+            AnonData::Inline(fields) => {
                 if let Some(shape) = get_shape(arc_ref.shape_id) {
-                    shape.field_names.iter().any(|n| n == name)
+                    shape
+                        .field_names
+                        .iter()
+                        .position(|n| n == name)
+                        .is_some_and(|i| !slot_absent(&shape, fields, i))
                 } else {
                     false
                 }
@@ -559,9 +568,12 @@ pub extern "C" fn rayzor_anon_fields(ptr: *mut u8) -> *mut u8 {
     let field_names: Vec<String> = unsafe {
         let arc_ref = borrow_arc(ptr);
         match &arc_ref.data {
-            AnonData::Inline(_) => {
+            AnonData::Inline(fields) => {
                 if let Some(shape) = get_shape(arc_ref.shape_id) {
-                    shape.field_names.clone()
+                    (0..shape.field_names.len())
+                        .filter(|&i| !slot_absent(&shape, fields, i))
+                        .map(|i| shape.field_names[i].clone())
+                        .collect()
                 } else {
                     Vec::new()
                 }

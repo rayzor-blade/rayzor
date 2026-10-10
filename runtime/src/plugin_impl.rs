@@ -2380,6 +2380,10 @@ register_symbol!(
     crate::closure_entries::haxe_closure_register_entries
 );
 register_symbol!(
+    "haxe_closure_register_bound_thunk",
+    crate::closure_entries::haxe_closure_register_bound_thunk
+);
+register_symbol!(
     "haxe_closure_register_packed_entry",
     crate::closure_entries::haxe_closure_register_packed_entry
 );

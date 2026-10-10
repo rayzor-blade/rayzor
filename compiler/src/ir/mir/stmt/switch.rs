@@ -22,6 +22,44 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// The enum a constructor pattern names, for a switch over a Dynamic value.
+    fn dynamic_switch_enum(&self, scrutinee_ty: TypeId, cases: &[HirMatchCase]) -> Option<TypeId> {
+        if !matches!(
+            self.type_table.get(scrutinee_ty).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            return None;
+        }
+        fn named(p: &HirPattern) -> Option<TypeId> {
+            match p {
+                HirPattern::Constructor { enum_type, .. } => Some(*enum_type),
+                HirPattern::Or(alts) => alts.iter().find_map(named),
+                HirPattern::Typed { pattern, .. } | HirPattern::Guard { pattern, .. } => {
+                    named(pattern)
+                }
+                _ => None,
+            }
+        }
+        cases
+            .iter()
+            .flat_map(|c| c.patterns.iter())
+            .find_map(named)
+            .filter(|t| self.resolve_enum_symbol(*t).is_some())
+    }
+
+    /// The enum inside a Dynamic box, as the i64 an enum register holds.
+    fn unbox_dynamic_enum(&mut self, boxed: IrId) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let boxed = self.builder.build_bitcast(boxed, ptr_u8.clone())?;
+        let unbox = self.get_or_register_extern_function(
+            "haxe_unbox_reference_ptr",
+            vec![ptr_u8.clone()],
+            ptr_u8.clone(),
+        );
+        let raw = self.builder.build_call_direct(unbox, vec![boxed], ptr_u8)?;
+        self.builder.build_bitcast(raw, IrType::I64)
+    }
+
     pub(crate) fn lower_switch_statement(&mut self, scrutinee: &HirExpr, cases: &[HirMatchCase]) {
         // Check exhaustiveness (analysis only, no codegen effect)
         self.check_switch_exhaustiveness(scrutinee, cases);
@@ -35,6 +73,23 @@ impl<'a> HirToMirContext<'a> {
         let scrut_val = match self.lower_expression(scrutinee) {
             Some(v) => v,
             None => return,
+        };
+        // A Dynamic scrutinee holds its enum in a box; constructor tests and
+        // bindings read the enum itself, and `case v:` binds the Dynamic.
+        let dynamic_val = scrut_val;
+        let (scrut_val, scrut_ty) = match self.dynamic_switch_enum(scrutinee.ty, cases) {
+            Some(enum_ty) => match self.unbox_dynamic_enum(scrut_val) {
+                Some(raw) => (raw, enum_ty),
+                None => return,
+            },
+            None => (scrut_val, scrutinee.ty),
+        };
+        let binding_value = |pattern: &HirPattern| {
+            if matches!(pattern, HirPattern::Variable { .. }) {
+                dynamic_val
+            } else {
+                scrut_val
+            }
         };
 
         let continuation = match self.builder.create_block() {
@@ -131,21 +186,21 @@ impl<'a> HirToMirContext<'a> {
                     self.lower_pattern_test_with_scrutinee_type(
                         scrut_val,
                         &case.patterns[0],
-                        Some(scrutinee.ty),
+                        Some(scrut_ty),
                     )
                 } else {
                     // Multiple patterns per case: OR them all together
                     let mut result = self.lower_pattern_test_with_scrutinee_type(
                         scrut_val,
                         &case.patterns[0],
-                        Some(scrutinee.ty),
+                        Some(scrut_ty),
                     );
                     for pat in &case.patterns[1..] {
                         if let Some(prev) = result {
                             if let Some(pat_match) = self.lower_pattern_test_with_scrutinee_type(
                                 scrut_val,
                                 pat,
-                                Some(scrutinee.ty),
+                                Some(scrut_ty),
                             ) {
                                 result = self.builder.build_binop(BinaryOp::Or, prev, pat_match);
                             }
@@ -177,8 +232,8 @@ impl<'a> HirToMirContext<'a> {
                     if !case.patterns.is_empty() {
                         self.bind_pattern_with_scrutinee_type(
                             &case.patterns[0],
-                            scrut_val,
-                            Some(scrutinee.ty),
+                            binding_value(&case.patterns[0]),
+                            Some(scrut_ty),
                         );
                         bound = true;
                     }
@@ -215,8 +270,8 @@ impl<'a> HirToMirContext<'a> {
             if !bound && !case.patterns.is_empty() {
                 self.bind_pattern_with_scrutinee_type(
                     &case.patterns[0],
-                    scrut_val,
-                    Some(scrutinee.ty),
+                    binding_value(&case.patterns[0]),
+                    Some(scrut_ty),
                 );
             }
             self.lower_block(&case.body);

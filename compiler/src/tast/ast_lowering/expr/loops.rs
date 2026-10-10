@@ -93,6 +93,135 @@ impl<'a> AstLowering<'a> {
         })
     }
 
+    /// `for (k => v in e)` over a value that is not a builtin collection,
+    /// desugared to `for (p in src) { var k = p.key; var v = p.value; body }`.
+    /// `src` is `e.keyValueIterator()` when `e` declares one or a `using`
+    /// extension supplies it, else `e` itself when it is the iterator.
+    /// `None` leaves the loop to the generic path.
+    fn key_value_iteration(
+        &mut self,
+        iterable_ty: TypeId,
+        expression: &Expr,
+        var: &str,
+        key_var: &str,
+        iter: &Expr,
+        body: &Expr,
+    ) -> LoweringResult<Option<Expr>> {
+        let kind_of = |this: &Self, ty: TypeId| {
+            this.context
+                .type_table
+                .borrow()
+                .get(ty)
+                .map(|t| t.kind.clone())
+        };
+        let kind = kind_of(self, iterable_ty);
+        let primitive = matches!(kind, Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool));
+        let class_like = matches!(
+            kind,
+            Some(TypeKind::Class { .. } | TypeKind::Interface { .. } | TypeKind::Anonymous { .. })
+        );
+        if !primitive && !class_like {
+            return Ok(None);
+        }
+        let reject = |this: &Self, ty: TypeId| LoweringError::SemanticError {
+            message: format!(
+                "Cannot iterate on {}",
+                super::super::macro_defer::render_type(
+                    ty,
+                    this.context.type_table,
+                    &*this.context.symbol_table,
+                    &*this.context.string_interner,
+                    0,
+                )
+            ),
+            location: this.context.create_location_from_span(expression.span),
+        };
+        // A concrete scalar where the protocol needs an iterator or a Bool.
+        let scalar = |this: &Self, ty: TypeId, allow_bool: bool| match kind_of(this, ty) {
+            Some(TypeKind::Int | TypeKind::Float | TypeKind::String | TypeKind::Void) => true,
+            Some(TypeKind::Bool) => !allow_bool,
+            _ => false,
+        };
+        let return_of = |this: &Self, ty: TypeId, name: &str| {
+            let name = this.context.string_interner.intern(name);
+            this.structural_method_return_type(ty, name)
+                .or_else(|| this.class_method_return_type(ty, name))
+        };
+        let span = expression.span;
+        let call_kv_iterator = || Expr {
+            kind: ExprKind::Call {
+                expr: Box::new(Expr {
+                    kind: ExprKind::Field {
+                        expr: Box::new(iter.clone()),
+                        field: "keyValueIterator".to_string(),
+                        is_optional: false,
+                    },
+                    span,
+                }),
+                args: Vec::new(),
+            },
+            span,
+        };
+        let source = if let Some(ret) = return_of(self, iterable_ty, "keyValueIterator") {
+            if scalar(self, ret, false) {
+                return Err(reject(self, ret));
+            }
+            call_kv_iterator()
+        } else if let Some(has_next) = return_of(self, iterable_ty, "hasNext") {
+            if scalar(self, has_next, true) || return_of(self, iterable_ty, "next").is_none() {
+                return Err(reject(self, iterable_ty));
+            }
+            iter.clone()
+        } else if primitive {
+            let kv = self.context.string_interner.intern("keyValueIterator");
+            if self.find_static_extension_method(kv, iterable_ty).is_none() {
+                return Err(reject(self, iterable_ty));
+            }
+            call_kv_iterator()
+        } else {
+            return Ok(None);
+        };
+        let pair = format!("__kv_{key_var}");
+        let read = |field: &str| Expr {
+            kind: ExprKind::Field {
+                expr: Box::new(Expr {
+                    kind: ExprKind::Ident(pair.clone()),
+                    span,
+                }),
+                field: field.to_string(),
+                is_optional: false,
+            },
+            span,
+        };
+        let bind = |name: &str, field: &str| {
+            BlockElement::Expr(Expr {
+                kind: ExprKind::Var {
+                    name: name.to_string(),
+                    type_hint: None,
+                    expr: Some(Box::new(read(field))),
+                },
+                span,
+            })
+        };
+        let body = Expr {
+            kind: ExprKind::Block(vec![
+                bind(key_var, "key"),
+                bind(var, "value"),
+                BlockElement::Expr(body.clone()),
+            ]),
+            span,
+        };
+        Ok(Some(Expr {
+            kind: ExprKind::For {
+                var: pair.clone(),
+                key_var: None,
+                iter: Box::new(source),
+                body: Box::new(body),
+            },
+            span,
+        }))
+    }
+
     /// Iterate the result of an abstract's iterator or a static extension.
     /// Receivers with their own hasNext()/next() keep that direct protocol.
     fn abstract_iteration(
@@ -664,6 +793,19 @@ impl<'a> AstLowering<'a> {
                 source_location,
                 metadata: ExpressionMetadata::default(),
             });
+        }
+
+        if let Some(key_var) = key_var {
+            if let Some(rewritten) = self.key_value_iteration(
+                iterable_expr.expr_type,
+                expression,
+                var,
+                key_var,
+                iter,
+                body,
+            )? {
+                return self.lower_expression(&rewritten);
+            }
         }
 
         // For non-Array, non-Map types (classes with iterator protocol, interfaces, etc.),

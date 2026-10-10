@@ -22,6 +22,44 @@ pub(crate) struct DeferredMacroTyper<'l, 'a> {
 }
 
 impl AstLowering<'_> {
+    /// A `?.` chain is nullable as a whole: `a?.b.c` is `Null<typeof c>`.
+    fn safe_chain_type(&self, e: &crate::tast::TypedExpression) -> TypeId {
+        use crate::tast::TypedExpressionKind as K;
+        fn safe(e: &crate::tast::TypedExpression) -> bool {
+            match &e.kind {
+                K::FieldAccess {
+                    object,
+                    is_optional,
+                    ..
+                } => *is_optional || safe(object),
+                K::MethodCall {
+                    receiver,
+                    is_optional,
+                    ..
+                } => *is_optional || safe(receiver),
+                K::MethodReference { receiver, .. } => safe(receiver),
+                K::FunctionCall { function, .. } => safe(function),
+                K::ArrayAccess { array, .. } => safe(array),
+                _ => false,
+            }
+        }
+        let nullable = matches!(
+            self.context
+                .type_table
+                .borrow()
+                .get(e.expr_type)
+                .map(|t| &t.kind),
+            Some(crate::tast::core::TypeKind::Optional { .. })
+        );
+        if nullable || !safe(e) {
+            return e.expr_type;
+        }
+        self.context
+            .type_table
+            .borrow_mut()
+            .create_optional_type(e.expr_type)
+    }
+
     pub(crate) fn generic_build_type(
         &mut self,
         symbol: crate::tast::SymbolId,
@@ -426,7 +464,7 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         );
 
         match result {
-            Ok(typed) if probe_errors.is_empty() => Ok(typed.expr_type),
+            Ok(typed) if probe_errors.is_empty() => Ok(self.lowering.safe_chain_type(&typed)),
             Ok(_) => Err(probe_errors.join("\n")),
             Err(e) => {
                 let mut msg = e.to_compilation_error().message;

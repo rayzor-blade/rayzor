@@ -1969,6 +1969,19 @@ impl<'a> HirToMirContext<'a> {
                 );
             }
         }
+        // A bound method value compares by its receiver: each evaluation allocates.
+        let register_bound_fn = self.get_or_register_extern_function(
+            "haxe_closure_register_bound_thunk",
+            vec![ptr_u8.clone()],
+            IrType::Void,
+        );
+        let bound_thunks: Vec<IrFunctionId> = self.method_ref_thunks.values().copied().collect();
+        for thunk in bound_thunks {
+            if let Some(record) = self.builder.build_function_ref(thunk) {
+                self.builder
+                    .build_call_direct(register_bound_fn, vec![record], IrType::Void);
+            }
+        }
         let register_entries_fn = self.get_or_register_extern_function(
             "haxe_closure_register_entries",
             vec![ptr_u8.clone(), ptr_u8.clone(), ptr_u8.clone()],
