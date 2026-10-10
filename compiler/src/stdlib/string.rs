@@ -397,8 +397,8 @@ fn build_string_charat_wrapper(builder: &mut MirBuilder) {
 
 /// Build: fn String_substr_1(s: *String, pos: i32) -> *String
 /// MIR wrapper for the 1-arg form `s.substr(pos)`. The runtime function
-/// `haxe_string_substr_ptr(s, pos, len)` treats `len < 0` as "empty
-/// string" (matching SubStr semantics from negative lengths), so we
+/// `haxe_string_substr_ptr(s, pos, len)` gives `len < 0` a meaning of its
+/// own (empty, or counted from the end at pos 0), so we
 /// cannot pass a sentinel — we must compute `string.length - pos` and
 /// forward that as the explicit length so the call returns the tail.
 ///

@@ -161,6 +161,22 @@ impl Project {
         self.manifest.tier.as_ref()
     }
 
+    /// The `[build] resources` as (file, name), the file resolved against the
+    /// project root.
+    pub fn resources(&self) -> Vec<(PathBuf, String)> {
+        let specs = self.manifest.build.as_ref().map(|b| b.resources.as_slice());
+        specs
+            .unwrap_or_default()
+            .iter()
+            .map(|spec| {
+                let (file, name) = spec
+                    .split_once('@')
+                    .unwrap_or((spec.as_str(), spec.as_str()));
+                (self.root.join(file), name.to_string())
+            })
+            .collect()
+    }
+
     /// Get defines as (key, optional value) pairs.
     pub fn defines(&self) -> Vec<(String, Option<String>)> {
         self.manifest

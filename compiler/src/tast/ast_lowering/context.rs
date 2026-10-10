@@ -95,7 +95,9 @@ impl<'a> AstLowering<'a> {
             abstract_casts: BTreeMap::new(),
             abstract_from_methods: BTreeMap::new(),
             abstract_postfix_not: BTreeMap::new(),
+            abstract_unops: BTreeMap::new(),
             annotated_dynamic_params: std::collections::BTreeSet::new(),
+            resources: None,
         }
     }
 
@@ -118,6 +120,11 @@ impl<'a> AstLowering<'a> {
             self.deferred_macro_calls
                 .insert((call.span.start, call.span.end), call.name);
         }
+    }
+
+    /// The embedded resources `untyped __resources__()` lowers to.
+    pub fn set_resources(&mut self, resources: std::sync::Arc<Vec<(String, Vec<u8>)>>) {
+        self.resources = Some(resources);
     }
 
     /// Set whether to skip pre-registration pass (for CompilationUnit with two-pass compilation)

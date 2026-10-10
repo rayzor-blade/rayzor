@@ -564,6 +564,10 @@ pub struct CompilationConfig {
     /// Collect detailed typecheck timing breakdowns. Off by default because the
     /// probes sit on cold-start paths and should only exist during profiling.
     pub profile_typecheck: bool,
+
+    /// Embedded resources (`--resource file@name`) as (name, bytes), listed
+    /// by `haxe.Resource`.
+    pub resources: std::sync::Arc<Vec<(String, Vec<u8>)>>,
 }
 
 mod artifact_cache;

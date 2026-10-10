@@ -1700,9 +1700,14 @@ pub struct AstLowering<'a> {
     pub(crate) abstract_from_methods: BTreeMap<SymbolId, Vec<(SymbolId, TypeId)>>,
     /// Each abstract's `@:op(A!)` method: (name, is_static).
     pub(crate) abstract_postfix_not: BTreeMap<SymbolId, (String, bool)>,
+    /// Each abstract's `@:op` unary operators: (operator, method name), in
+    /// declaration order. `AbstractType.unops` in macros reads these.
+    pub(crate) abstract_unops: BTreeMap<SymbolId, Vec<(parser::UnaryOp, String)>>,
     /// Parameters the source annotates `Dynamic`. Callers box what they pass,
     /// so these hold boxes; a Dynamic that is merely a decay may not.
     pub(crate) annotated_dynamic_params: std::collections::BTreeSet<SymbolId>,
+    /// The `--resource` files, (name, bytes), that `__resources__()` lists.
+    resources: Option<std::sync::Arc<Vec<(String, Vec<u8>)>>>,
 }
 
 /// Result of type parameter substitution for generic method return types

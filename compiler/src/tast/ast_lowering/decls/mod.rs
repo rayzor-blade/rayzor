@@ -176,7 +176,11 @@ impl<'a> AstLowering<'a> {
             {
                 continue;
             }
-            match self.lower_declaration(declaration) {
+            let lowered = self.lower_declaration(declaration);
+            if let Ok(typed_decl) = &lowered {
+                self.record_private_type(file, declaration, typed_decl);
+            }
+            match lowered {
                 Ok(typed_decl) => match typed_decl {
                     TypedDeclaration::Function(func) => typed_file.functions.push(func),
                     TypedDeclaration::Class(class) => typed_file.classes.push(class),
@@ -718,6 +722,52 @@ impl<'a> AstLowering<'a> {
         }
 
         Ok(modifier_info)
+    }
+
+    /// A `private` type is named `pack._Module.Name` wherever Haxe prints it.
+    fn record_private_type(
+        &mut self,
+        file: &HaxeFile,
+        declaration: &TypeDeclaration,
+        typed: &TypedDeclaration,
+    ) {
+        let (access, name) = match declaration {
+            TypeDeclaration::Class(d) => (&d.access, &d.name),
+            TypeDeclaration::Interface(d) => (&d.access, &d.name),
+            TypeDeclaration::Enum(d) => (&d.access, &d.name),
+            TypeDeclaration::Typedef(d) => (&d.access, &d.name),
+            TypeDeclaration::Abstract(d) => (&d.access, &d.name),
+            TypeDeclaration::Conditional(_) => return,
+        };
+        if !matches!(access, Some(parser::Access::Private)) {
+            return;
+        }
+        let symbol = match typed {
+            TypedDeclaration::Class(d) => d.symbol_id,
+            TypedDeclaration::Interface(d) => d.symbol_id,
+            TypedDeclaration::Enum(d) => d.symbol_id,
+            TypedDeclaration::TypeAlias(d) => d.symbol_id,
+            TypedDeclaration::Abstract(d) => d.symbol_id,
+            TypedDeclaration::Function(_) => return,
+        };
+        let Some(module) = std::path::Path::new(&file.filename)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+        else {
+            return;
+        };
+        let mut path: Vec<&str> = file
+            .package
+            .as_ref()
+            .map(|p| p.path.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let module = format!("_{module}");
+        path.push(&module);
+        path.push(name);
+        let path = self.context.intern_string(&path.join("."));
+        self.context
+            .symbol_table
+            .set_private_type_path(symbol, path);
     }
 
     /// Lower access modifiers (separate from other modifiers)

@@ -1705,6 +1705,16 @@ fn run_file(
     compile_defines.sort();
     compile_defines.dedup();
 
+    // Manifest `[build] resources`, embedded for `haxe.Resource`.
+    let mut resources: Vec<(String, Vec<u8>)> = Vec::new();
+    if let Some(project) = manifest_project.as_ref() {
+        for (path, name) in project.resources() {
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("failed to read resource {}: {}", path.display(), e))?;
+            resources.push((name, bytes));
+        }
+    }
+
     let raw_mir_requested = std::env::var_os("RAYZOR_RAW_MIR").is_some();
     let opt_level_requested = std::env::var_os("RAYZOR_OPT_LEVEL").is_some();
     let fast_interpreter_start =
@@ -1756,6 +1766,7 @@ fn run_file(
         std::env::var("RAYZOR_RAW_MIR").is_ok().hash(&mut h);
         skip_mir_opt.hash(&mut h);
         compile_defines.hash(&mut h);
+        resources.hash(&mut h);
         for dir in &manifest_dirs {
             dir.to_string_lossy().hash(&mut h);
             if let Ok(abs) = dir.canonicalize() {
@@ -1874,6 +1885,7 @@ fn run_file(
             } else {
                 None
             },
+            resources,
         )?;
         let mut mir_module = compile_result.module;
         let compile_diagnostics = compile_result.diagnostics;

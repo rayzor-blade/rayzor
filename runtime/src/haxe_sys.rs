@@ -922,7 +922,8 @@ pub extern "C" fn haxe_string_last_index_of_ptr(
 }
 
 /// Get substring using substr semantics (pos, len)
-/// If len is negative, returns empty string
+/// A negative len counts back from the end when pos is 0 (`substr(0, -1)`
+/// drops the last character) and is empty otherwise.
 /// If pos is negative, calculated from end
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_substr_ptr(
@@ -939,6 +940,11 @@ pub extern "C" fn haxe_string_substr_ptr(
     }
     unsafe {
         let s_ref = &*s;
+        let len = if len < 0 && pos == 0 {
+            s_ref.len as i64 + i64::from(len)
+        } else {
+            i64::from(len)
+        };
         if s_ref.ptr.is_null() || s_ref.len == 0 || len < 0 {
             return Box::into_raw(Box::new(HaxeString {
                 ptr: std::ptr::null_mut(),

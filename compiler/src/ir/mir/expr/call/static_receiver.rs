@@ -164,15 +164,16 @@ impl<'a> HirToMirContext<'a> {
                             .get(i)
                             .cloned()
                             .unwrap_or_else(|| actual_ty.clone());
-                        let final_reg =
-                            match self.box_anon_for_dynamic_slot(arg_reg, arg.ty, &expected_ty) {
-                                Some(boxed) => boxed,
-                                None => self.maybe_box_for_extern_call(
-                                    arg_reg,
-                                    &actual_ty,
-                                    &expected_ty,
-                                )?,
-                            };
+                        let final_reg = match self
+                            .box_for_runtime_dynamic_param(runtime_func, i, arg_reg, arg.ty)
+                            .or_else(|| {
+                                self.box_anon_for_dynamic_slot(arg_reg, arg.ty, &expected_ty)
+                            }) {
+                            Some(boxed) => boxed,
+                            None => {
+                                self.maybe_box_for_extern_call(arg_reg, &actual_ty, &expected_ty)?
+                            }
+                        };
                         arg_regs.push(final_reg);
                     }
 

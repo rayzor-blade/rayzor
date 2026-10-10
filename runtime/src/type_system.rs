@@ -1256,9 +1256,11 @@ pub extern "C" fn haxe_type_all_enums(type_id: i64) -> *mut u8 {
 /// Type.enumEq(a, b) -> Bool
 /// Deep equality for enum values (constructor + parameters).
 ///
-/// Compiler injects `type_id` as hidden argument because enum values can be unboxed.
+/// Compiler injects `type_id` as hidden argument because enum values can be unboxed,
+/// and `string_params`, the parameter slots (counted through the constructors in
+/// order) its instantiation binds to String: an erased payload cannot say so itself.
 #[unsafe(no_mangle)]
-pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32) -> bool {
+pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32, string_params: i64) -> bool {
     if type_id <= 0 {
         return false;
     }
@@ -1288,16 +1290,30 @@ pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32) -> bool {
     if ptr_a.is_null() || ptr_b.is_null() {
         return false;
     }
+    let first_slot: usize = get_type_info(TypeId(enum_type))
+        .and_then(|info| info.enum_info)
+        .map_or(0, |info| {
+            info.variants
+                .iter()
+                .take(tag_a as usize)
+                .map(|v| v.param_count)
+                .sum()
+        });
 
     unsafe {
         for i in 0..variant_a.param_count {
             let va = *(ptr_a.add(8 + i * 8) as *const i64);
             let vb = *(ptr_b.add(8 + i * 8) as *const i64);
-            let param_type = variant_a
-                .param_types
-                .get(i)
-                .copied()
-                .unwrap_or(ParamType::Dynamic);
+            let slot = first_slot + i;
+            let param_type = if slot < 64 && string_params & (1i64 << slot) != 0 {
+                ParamType::String
+            } else {
+                variant_a
+                    .param_types
+                    .get(i)
+                    .copied()
+                    .unwrap_or(ParamType::Dynamic)
+            };
             let equal = match param_type {
                 ParamType::Int
                 | ParamType::Bool

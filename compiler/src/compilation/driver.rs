@@ -357,6 +357,33 @@ impl CompilationUnit {
             // Store expansion origins for LSP macro hints
             self.macro_expansions.extend(expansion.expansion_origins);
             self.macro_hooks.extend(expansion.hooks);
+            // A type named only in a macro's output (`new $tPath(...)`) was
+            // never seen by the import scan; its module loads before lowering.
+            if !skip_stdlib_merge && expansion.expansions_count > 0 {
+                let mut named_before = Vec::new();
+                collect_qualified_type_refs_from_ast(ast_file, &mut named_before);
+                let mut introduced = Vec::new();
+                collect_qualified_type_refs_from_ast(&expansion.file, &mut introduced);
+                // User files compile in their own order, never nested here.
+                let user_paths: std::collections::BTreeSet<_> = self
+                    .user_files
+                    .iter()
+                    .map(|file| source_file_identity(&file.filename))
+                    .chain(std::iter::once(source_file_identity(filename)))
+                    .collect();
+                introduced.retain(|path| {
+                    !named_before.contains(path)
+                        && self
+                            .namespace_resolver
+                            .resolve_qualified_path_to_file_force(path)
+                            .is_some_and(|file| {
+                                !user_paths.contains(&source_file_identity(&file.to_string_lossy()))
+                            })
+                });
+                if !introduced.is_empty() {
+                    let _ = self.load_imports_efficiently(&introduced);
+                }
+            }
             ast_file_owned = expansion.file;
             &ast_file_owned
         } else {
@@ -399,6 +426,7 @@ impl CompilationUnit {
         // Declared-static-signature index: lets call sites type statics whose
         // declaring file lowers later (no untyped-placeholder decay).
         lowering.set_static_sig_index(Rc::clone(&self.static_sig_index));
+        lowering.set_resources(std::sync::Arc::clone(&self.config.resources));
         lowering.seed_const_generics(
             self.user_files
                 .iter()

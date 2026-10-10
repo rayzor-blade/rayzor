@@ -60,6 +60,8 @@ struct ClassSigs {
     /// extern, bodyless `new`, inherited ctor) is absent, because a `<C>.new`
     /// stub for those would dangle and SIGILL at the call.
     ctor_params: Option<usize>,
+    /// Declares `new` in any form, or has a build macro that may add one.
+    may_declare_new: bool,
     /// Interface slots: inherited declarations first, then own methods and accessors.
     interface: Option<(Vec<String>, Vec<String>)>,
     /// Interfaces named by a class's `implements` clauses.
@@ -360,6 +362,30 @@ impl StaticSigIndex {
         None
     }
 
+    /// Whether `class_name` and every class it extends are indexed and none
+    /// of them can have a constructor. Unknown links answer false.
+    pub fn lacks_constructor(&mut self, class_name: &str) -> bool {
+        let mut next = Some(class_name.to_string());
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        while let Some(name) = next {
+            if !seen.insert(name.clone()) {
+                return false;
+            }
+            if self.known_file(&name).is_some() {
+                self.ensure_indexed_from_known_files(&name);
+            }
+            let Some(class) = self.classes.get(&name) else {
+                return false;
+            };
+            if class.may_declare_new {
+                return false;
+            }
+            let (parent, pkg) = (class.extends.clone(), class.package.clone());
+            next = parent.map(|p| self.qualify_parent(p, &pkg));
+        }
+        true
+    }
+
     /// Whether the class indexed under EXACTLY this name declares instance
     /// method `name` itself. Same strictness as `declared_constructor_arity`.
     pub fn declares_instance_method(&mut self, class_name: &str, name: &str) -> bool {
@@ -520,6 +546,17 @@ impl StaticSigIndex {
                 self.index_fields(package, &c.name, &c.fields, parent, record_ctor);
                 let qname = Self::qualify(package, &c.name);
                 if let Some(class) = self.classes.get_mut(&qname) {
+                    let declares_new = c.fields.iter().any(|field| match &field.kind {
+                        parser::ClassFieldKind::Function(f) => f.name == "new",
+                        _ => false,
+                    });
+                    let built = c.meta.iter().any(|m| {
+                        matches!(
+                            m.name.strip_prefix(':').unwrap_or(&m.name),
+                            "build" | "autoBuild"
+                        )
+                    });
+                    class.may_declare_new |= declares_new || built;
                     class.extends_type = c.extends.clone();
                     class.implements = c
                         .implements

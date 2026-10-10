@@ -1137,6 +1137,24 @@ impl MacroContext {
                 let name = arg_as_string(args, 0, "getType", location)?;
                 self.get_type(&name, location)
             }
+            // `Context.resolveType(t, pos)` — the type a ComplexType names,
+            // resolved through its source spelling like `getType`.
+            "resolveType" => {
+                let spelling = args
+                    .first()
+                    .and_then(|v| super::expr_adt::type_of_value(v, parser::Span::default()))
+                    .map(|t| {
+                        super::printer::Printer::new()
+                            .print_complex_type(&super::expr_adt::complex_type_of(&t))
+                    })
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| MacroError::ContextError {
+                        method: "resolveType".to_string(),
+                        message: "resolveType expects a ComplexType".to_string(),
+                        location,
+                    })?;
+                self.get_type(&spelling, location)
+            }
             "typeof" => {
                 if let Some(MacroValue::Expr(expr)) = args.first() {
                     let expr = expr.clone();

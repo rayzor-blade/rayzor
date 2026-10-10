@@ -425,6 +425,26 @@ impl<'a> HirToMirContext<'a> {
             .filter(|boxed| *boxed != value)
     }
 
+    /// A runtime parameter that reads every argument as a `Dynamic` box: the
+    /// JSON printer tells a function from an object or a string by its tag,
+    /// and a raw closure or string carries none.
+    pub(crate) fn box_for_runtime_dynamic_param(
+        &mut self,
+        runtime_func: &str,
+        param_idx: usize,
+        value: IrId,
+        hir_ty: TypeId,
+    ) -> Option<IrId> {
+        if !matches!((runtime_func, param_idx), ("haxe_json_stringify", 0))
+            || self.boxed_value_regs.contains(&value)
+        {
+            return None;
+        }
+        let dynamic_ty = self.type_table.dynamic_type();
+        self.maybe_box_value(value, hir_ty, dynamic_ty)
+            .filter(|boxed| *boxed != value)
+    }
+
     /// A `Null<scalar>` (or `Null<T>`) register opened for arithmetic: the
     /// scalar out of the box, as an I32/F64/Bool register. None when the
     /// type is not a nullable scalar or the register is not a pointer.

@@ -294,6 +294,48 @@ impl<'a> HirToMirContext<'a> {
         if let Some(tid_reg) = tid_reg {
             arg_regs.push(tid_reg);
         }
+        if runtime_func == "haxe_type_enum_eq" {
+            let mask = self.enum_string_param_mask(args);
+            if let Some(mask_reg) = self.builder.build_const(IrValue::I64(mask)) {
+                arg_regs.push(mask_reg);
+            }
+        }
+    }
+
+    /// The String parameter slots of the arguments' enum instantiation:
+    /// bit `n` is the `n`th parameter counted through the constructors in
+    /// order. An erased `T` payload is a raw reference, so the runtime can
+    /// only compare it by value when told it is a String.
+    fn enum_string_param_mask(&self, args: &[HirExpr]) -> i64 {
+        let mut mask = 0i64;
+        for arg in args {
+            let ty = self.resolve_through_aliases(arg.ty);
+            let Some(enum_sym) = self.resolve_enum_symbol(ty) else {
+                continue;
+            };
+            let Some(variants) = self.symbol_table.get_enum_variants(enum_sym) else {
+                continue;
+            };
+            let mut slot = 0u32;
+            for &variant in variants {
+                let Some(name) = self.symbol_table.get_symbol(variant).map(|s| s.name) else {
+                    break;
+                };
+                for (_, field_ty) in self.get_enum_variant_field_types(ty, name) {
+                    let field_ty = self.resolve_through_aliases(field_ty);
+                    if slot < 64
+                        && matches!(
+                            self.type_table.get(field_ty).map(|t| &t.kind),
+                            Some(TypeKind::String)
+                        )
+                    {
+                        mask |= 1i64 << slot;
+                    }
+                    slot += 1;
+                }
+            }
+        }
+        mask
     }
 
     /// Record an enum for RTTI registration

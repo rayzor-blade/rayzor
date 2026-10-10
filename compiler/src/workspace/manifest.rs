@@ -133,6 +133,10 @@ pub struct BuildConfig {
     /// Q8_0 KV cache lives in `nue-plugins/` alongside the Haxe code).
     #[serde(default)]
     pub native_libs: Vec<String>,
+    /// Resources to embed, as `--resource` spells them: `file@name`, the file
+    /// relative to the manifest's directory. Without `@` the name is the file.
+    #[serde(default)]
+    pub resources: Vec<String>,
 }
 
 /// `[cache]` section.

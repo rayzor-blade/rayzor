@@ -24,10 +24,12 @@
 //!   triggers per-char decoding.
 
 use crate::anon_object::{self, DYNAMIC_SHAPE};
+use crate::haxe_array::box_erased_array_slot;
 use crate::haxe_string::HaxeString;
 use crate::type_system::{
-    DynamicValue, ParamType, StringPtr, TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_STRING, TypeId,
-    box_class_field_as_dynamic, dynamic_box_at, get_type_info, is_class_type,
+    DynamicValue, ParamType, StringPtr, TYPE_BOOL, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT,
+    TYPE_STRING, TypeId, box_class_field_as_dynamic, boxed_array_points_to,
+    boxed_array_slot_layout, dynamic_box_at, get_type_info, is_class_type,
 };
 
 /// Type ID for arrays in the DynamicValue type system
@@ -637,6 +639,11 @@ fn stringify_value(ptr: *mut u8, buf: &mut String) {
         buf.push_str("null");
         return;
     }
+    // A structural value can arrive as its handle rather than in a box.
+    if anon_object::is_anon_handle(ptr) {
+        stringify_anon_object(ptr, buf);
+        return;
+    }
 
     unsafe {
         let dv = *(ptr as *const DynamicValue);
@@ -651,7 +658,9 @@ fn stringify_value(ptr: *mut u8, buf: &mut String) {
         } else if dv.type_id == TYPE_FLOAT {
             if !dv.value_ptr.is_null() {
                 let v = *(dv.value_ptr as *const f64);
-                if v.fract() == 0.0 && v.is_finite() && v.abs() < 1e15 {
+                if !v.is_finite() {
+                    buf.push_str("null");
+                } else if v.fract() == 0.0 && v.abs() < 1e15 {
                     itoa_i64(v as i64, buf);
                     buf.push_str(".0");
                 } else {
@@ -662,7 +671,8 @@ fn stringify_value(ptr: *mut u8, buf: &mut String) {
             }
         } else if dv.type_id == TYPE_BOOL {
             if !dv.value_ptr.is_null() {
-                let v = *(dv.value_ptr as *const i64);
+                // Bool boxes hold one byte; the parser's own hold an i64.
+                let v = *dv.value_ptr;
                 buf.push_str(if v != 0 { "true" } else { "false" });
             } else {
                 buf.push_str("false");
@@ -682,7 +692,13 @@ fn stringify_value(ptr: *mut u8, buf: &mut String) {
         } else if dv.type_id == anon_object::TYPE_ANON_OBJECT {
             stringify_anon_object(dv.value_ptr, buf);
         } else if dv.type_id == TYPE_ARRAY {
-            stringify_array(dv.value_ptr, buf);
+            // The parser's arrays are boxed without a layout: their slots are boxes.
+            let layout = boxed_array_slot_layout(ptr)
+                .filter(|_| boxed_array_points_to(ptr as usize, dv.value_ptr as usize))
+                .unwrap_or(0);
+            stringify_array(dv.value_ptr, layout, buf);
+        } else if dv.type_id == TYPE_FUNCTION {
+            buf.push_str("\"<fun>\"");
         } else if is_class_type(dv.type_id.0) {
             stringify_class_instance(ptr, dv, buf);
         } else {
@@ -704,6 +720,7 @@ unsafe fn stringify_class_instance(ptr: *mut u8, dv: DynamicValue, buf: &mut Str
         return;
     };
     buf.push('{');
+    let mut first = true;
     for (i, name) in info.instance_fields.iter().enumerate() {
         let ty = info
             .instance_field_types
@@ -712,12 +729,17 @@ unsafe fn stringify_class_instance(ptr: *mut u8, dv: DynamicValue, buf: &mut Str
             .unwrap_or(ParamType::Dynamic);
         // Slot 0 is the type header; field `i` sits at `(i + 1) * 8`.
         let raw = unsafe { *(obj.add((i + 1) * 8) as *const u64) };
-        if i > 0 {
+        let value = unsafe { box_class_field_as_dynamic(raw, ty) };
+        if is_function_value(value) {
+            continue;
+        }
+        if !first {
             buf.push(',');
         }
+        first = false;
         stringify_string_bytes(name.as_bytes(), buf);
         buf.push(':');
-        stringify_value(unsafe { box_class_field_as_dynamic(raw, ty) }, buf);
+        stringify_value(value, buf);
     }
     buf.push('}');
 }
@@ -854,6 +876,10 @@ fn stringify_anon_object(obj_ptr: *mut u8, buf: &mut String) {
                 name_bytes.as_ptr(),
                 name_bytes.len() as u32,
             );
+            // Function fields are left out, as the Haxe printer does.
+            if is_function_value(val) {
+                continue;
+            }
 
             if !first {
                 buf.push(',');
@@ -869,7 +895,14 @@ fn stringify_anon_object(obj_ptr: *mut u8, buf: &mut String) {
     buf.push('}');
 }
 
-fn stringify_array(arr_ptr: *mut u8, buf: &mut String) {
+/// Whether a field value is a function, which an object's JSON leaves out.
+fn is_function_value(value: *mut u8) -> bool {
+    dynamic_box_at(value).is_some_and(|dv| dv.type_id == TYPE_FUNCTION)
+}
+
+/// `layout` is the slot kind the array was boxed with; 0 means its slots
+/// already hold boxes.
+fn stringify_array(arr_ptr: *mut u8, layout: u64, buf: &mut String) {
     if arr_ptr.is_null() {
         buf.push_str("null");
         return;
@@ -883,8 +916,8 @@ fn stringify_array(arr_ptr: *mut u8, buf: &mut String) {
             if i > 0 {
                 buf.push(',');
             }
-            let elem = *(arr.ptr.add(i * 8) as *const *mut u8);
-            stringify_value(elem, buf);
+            let slot = *(arr.ptr.add(i * 8) as *const u64);
+            stringify_value(box_erased_array_slot(slot, layout), buf);
         }
     }
 

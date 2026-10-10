@@ -254,6 +254,10 @@ impl CompilationUnit {
         };
         defines.sort();
         defines.hash(&mut hasher);
+        // The module that reads `__resources__()` embeds their bytes.
+        if source.contains("__resources__") {
+            self.config.resources.hash(&mut hasher);
+        }
         // A cached USER module carries state assigned relative to the whole
         // program (id renumbering, class layout, reflection ctor wrappers,
         // inherited fields). Two different programs that both import such a

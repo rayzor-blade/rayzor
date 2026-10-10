@@ -1498,6 +1498,20 @@ impl<'a> AstLowering<'a> {
             }
             _ => None,
         };
+        if ctor.is_none()
+            && kind == crate::tast::symbols::SymbolKind::Class
+            && self.class_lacks_constructor(symbol)
+        {
+            let path = self
+                .context
+                .symbol_table
+                .display_type_path(symbol, self.context.string_interner)
+                .unwrap_or_else(|| name.clone());
+            return Err(LoweringError::SemanticError {
+                message: format!("{path} does not have a constructor"),
+                location: self.context.create_location_from_span(expression.span),
+            });
+        }
         let Some(param_types) = ctor.and_then(|c| self.function_param_types_from_symbol(c)) else {
             return Ok(None);
         };
@@ -1541,6 +1555,34 @@ impl<'a> AstLowering<'a> {
         let lowered = self.lower_expression(&literal);
         self.expected_lambda_params_stack.pop();
         lowered.map(Some)
+    }
+
+    /// No constructor of its own, none inherited, and none its declarations
+    /// could supply once lowered.
+    fn class_lacks_constructor(&self, class: SymbolId) -> bool {
+        let has_ctor = |c: SymbolId| {
+            self.class_constructor_symbols.contains_key(&c)
+                || self.context.symbol_table.get_class_constructor(c).is_some()
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut current = Some(class);
+        while let Some(c) = current {
+            if !seen.insert(c) || has_ctor(c) {
+                return false;
+            }
+            current = self.parent_class_symbol(c);
+        }
+        let Some(index) = self.static_sig_index.as_ref() else {
+            return false;
+        };
+        let Some(name) = self.context.symbol_table.get_symbol(class).and_then(|s| {
+            self.context
+                .string_interner
+                .get(s.qualified_name.unwrap_or(s.name))
+        }) else {
+            return false;
+        };
+        index.borrow_mut().lacks_constructor(name)
     }
 
     pub(crate) fn has_array_access_metadata(&self, metadata: &[parser::Metadata]) -> bool {

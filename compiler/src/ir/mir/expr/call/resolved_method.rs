@@ -1026,11 +1026,19 @@ impl<'a> HirToMirContext<'a> {
                                         .as_ref()
                                         .and_then(|(params, _)| params.get(param_idx).cloned())
                                         .unwrap_or_else(|| actual_ty.clone());
-                                    let final_reg = self.maybe_box_for_extern_call(
+                                    let final_reg = match self.box_for_runtime_dynamic_param(
+                                        &runtime_name,
+                                        param_idx,
                                         reg,
-                                        &actual_ty,
-                                        &expected_ty,
-                                    )?;
+                                        arg.ty,
+                                    ) {
+                                        Some(boxed) => boxed,
+                                        None => self.maybe_box_for_extern_call(
+                                            reg,
+                                            &actual_ty,
+                                            &expected_ty,
+                                        )?,
+                                    };
                                     arg_regs.push(final_reg);
                                 }
                             }

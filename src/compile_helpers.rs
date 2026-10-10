@@ -54,6 +54,7 @@ pub fn compile_haxe_to_mir_with_cache(
         &[],
         enable_cache,
         cache_dir,
+        Vec::new(),
     )?;
     Ok((result.module, result.diagnostics))
 }
@@ -94,6 +95,7 @@ pub fn compile_haxe_to_mir_with_defines(
         extra_defines,
         true,
         None,
+        Vec::new(),
     )
 }
 
@@ -148,6 +150,7 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
     extra_defines: &[&str],
     enable_cache: bool,
     cache_dir: Option<PathBuf>,
+    resources: Vec<(String, Vec<u8>)>,
 ) -> Result<MirCompilationResult, String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
 
@@ -167,6 +170,7 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
         emit_safety_warnings: safety_warnings,
         extra_defines: extra_defines.iter().map(|s| s.to_string()).collect(),
         profile_typecheck,
+        resources: std::sync::Arc::new(resources),
         ..Default::default()
     };
     config.pipeline_config = config.pipeline_config.skip_analysis();

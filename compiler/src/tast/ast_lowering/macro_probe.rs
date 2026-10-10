@@ -4,7 +4,7 @@ use super::{AstLowering, LoweringError, LoweringResult};
 use crate::tast::{
     SymbolId, SymbolKind, TypeId, Visibility,
     core::TypeKind,
-    node::{BinaryOperator, TypedExpression, TypedExpressionKind},
+    node::{BinaryOperator, CastKind, TypedExpression, TypedExpressionKind},
 };
 use parser::{Expr, ExprKind};
 
@@ -23,6 +23,42 @@ impl AstLowering<'_> {
                 if *var_type == self.context.type_table.borrow().void_type() =>
             {
                 return Err(error("Variables of type Void are not allowed".to_string()));
+            }
+            TypedExpressionKind::VarDeclarationExpr {
+                var_type,
+                initializer,
+                ..
+            }
+            | TypedExpressionKind::FinalDeclarationExpr {
+                var_type,
+                initializer,
+                ..
+            } => {
+                let mut init: &TypedExpression = initializer;
+                while let TypedExpressionKind::Cast {
+                    expression,
+                    cast_kind: CastKind::Implicit,
+                    ..
+                } = &init.kind
+                {
+                    init = &**expression;
+                }
+                if !self.macro_probe_abstract_assignable(init.expr_type, *var_type) {
+                    let render = |id| {
+                        super::macro_defer::render_type(
+                            id,
+                            self.context.type_table,
+                            self.context.symbol_table,
+                            self.context.string_interner,
+                            0,
+                        )
+                    };
+                    return Err(error(format!(
+                        "{} should be {}",
+                        render(init.expr_type),
+                        render(*var_type)
+                    )));
+                }
             }
             TypedExpressionKind::FieldAccess {
                 object,
@@ -85,6 +121,41 @@ impl AstLowering<'_> {
             _ => {}
         }
         Ok(())
+    }
+
+    /// One abstract reaches another only through a cast either declares
+    /// (`to B` on the source, `from A` on the target); casts do not chain,
+    /// so `Kilometer to Float` and `Meter from Float` do not connect.
+    fn macro_probe_abstract_assignable(&self, from: TypeId, to: TypeId) -> bool {
+        let table = self.context.type_table.borrow();
+        let abstract_of = |id: TypeId| match table
+            .get(Self::resolve_alias_chain(&table, id))
+            .map(|ty| &ty.kind)
+        {
+            Some(TypeKind::Abstract { symbol_id, .. }) => Some(*symbol_id),
+            _ => None,
+        };
+        let (Some(source), Some(target)) = (abstract_of(from), abstract_of(to)) else {
+            return true;
+        };
+        if source == target {
+            return true;
+        }
+        let (Some((_, source_to)), Some((target_from, _))) = (
+            self.abstract_casts.get(&source),
+            self.abstract_casts.get(&target),
+        ) else {
+            return true;
+        };
+        // A cast over a type parameter or Dynamic admits anything.
+        let admits = |cast: TypeId, other: SymbolId| {
+            let cast = Self::resolve_alias_chain(&table, cast);
+            table.is_type_parameter(cast)
+                || matches!(table.get(cast).map(|ty| &ty.kind), Some(TypeKind::Dynamic))
+                || abstract_of(cast) == Some(other)
+        };
+        source_to.iter().any(|&t| admits(t, target))
+            || target_from.iter().any(|&t| admits(t, source))
     }
 
     fn macro_probe_is_any(&self, id: TypeId) -> bool {

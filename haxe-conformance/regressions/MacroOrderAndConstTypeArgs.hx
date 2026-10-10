@@ -36,7 +36,7 @@ class MacroOrderAndConstTypeArgs {
 	static function main() {
 		store(function(a:Array<Int>) return a[0] + a[1]);
 		check("stored lambda", load()([3, 4]), 7);
-		check("const argument", typeName((null : Sized<12>)), "Sized<12>");
+		check("const argument", typeName((null : Sized<12>)), "_MacroOrderAndConstTypeArgs.Sized<12>");
 		check("toComplexType", constArg(), true);
 		if (!failed)
 			Sys.println("CONFORMANCE_OK");

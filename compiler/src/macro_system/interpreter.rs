@@ -1282,6 +1282,29 @@ impl MacroInterpreter {
 
                 // Method call: base.field(args)
                 let base_val = self.eval_expr(base)?;
+
+                // `pop`/`shift` return the removed element, so the array they
+                // leave behind is written back here rather than below.
+                if let (ExprKind::Ident(var_name), MacroValue::Array(items), "pop" | "shift") =
+                    (&base.kind, &base_val, field.as_str())
+                {
+                    let mut rest = items.to_vec();
+                    let removed = if field.as_str() == "pop" {
+                        rest.pop()
+                    } else if rest.is_empty() {
+                        None
+                    } else {
+                        Some(rest.remove(0))
+                    };
+                    let rest = MacroValue::Array(Arc::new(rest));
+                    if !self.env.set(var_name, rest.clone())
+                        && !self.write_class_static(var_name, rest.clone())
+                    {
+                        self.env.define(var_name, rest);
+                    }
+                    return Ok(removed.unwrap_or(MacroValue::Null));
+                }
+
                 let result = self.method_call(&base_val, field, arg_vals, location)?;
 
                 // For mutating array methods (push, pop, splice, unshift, etc.),
@@ -2170,6 +2193,14 @@ impl MacroInterpreter {
                     };
                     Ok(Some(MacroValue::String(Arc::from(s))))
                 }
+                // Upstream: `Context.resolveType(c, Context.currentPos())`.
+                "toType" => match args.first() {
+                    None | Some(MacroValue::Null) => Ok(Some(MacroValue::Null)),
+                    Some(_) => match self.macro_context.as_mut() {
+                        Some(ctx) => ctx.dispatch("resolveType", args, location).map(Some),
+                        None => Err(MacroError::NeedsTyper { location }),
+                    },
+                },
                 _ => Ok(None),
             },
             _ => {

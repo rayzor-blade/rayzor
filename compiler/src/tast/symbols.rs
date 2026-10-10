@@ -625,6 +625,8 @@ pub struct SymbolTable {
     /// `class_type_params`: needed cross-file by `new Arc(value)` to
     /// recover the constructor signature for arg-type inference.
     class_constructor_symbols: BTreeMap<SymbolId, SymbolId>,
+    /// Module-private type → the path Haxe prints for it (`pack._Module.Name`).
+    private_type_paths: BTreeMap<SymbolId, InternedString>,
     /// Enhanced symbol resolution cache
     symbol_cache: Rc<SymbolResolutionCache>,
 }
@@ -649,6 +651,7 @@ impl SymbolTable {
             class_super_types: BTreeMap::new(),
             class_type_param_defaults: BTreeMap::new(),
             class_constructor_symbols: BTreeMap::new(),
+            private_type_paths: BTreeMap::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::new(1000)),
         }
     }
@@ -672,6 +675,7 @@ impl SymbolTable {
             class_super_types: BTreeMap::new(),
             class_type_param_defaults: BTreeMap::new(),
             class_constructor_symbols: BTreeMap::new(),
+            private_type_paths: BTreeMap::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::with_sizes(capacity, capacity / 2)),
         }
     }
@@ -1466,6 +1470,27 @@ impl SymbolTable {
     /// Look up a class's constructor SymbolId.
     pub fn get_class_constructor(&self, class_symbol: SymbolId) -> Option<SymbolId> {
         self.class_constructor_symbols.get(&class_symbol).copied()
+    }
+
+    /// Record that a type is private to its module, with the path Haxe prints for it.
+    pub fn set_private_type_path(&mut self, type_symbol: SymbolId, path: InternedString) {
+        self.private_type_paths.insert(type_symbol, path);
+    }
+
+    /// A type's path as Haxe prints it: the qualified name, or for a
+    /// module-private type `pack._Module.Name`.
+    pub fn display_type_path(
+        &self,
+        type_symbol: SymbolId,
+        interner: &super::StringInterner,
+    ) -> Option<String> {
+        if let Some(path) = self.private_type_paths.get(&type_symbol) {
+            return interner.get(*path).map(str::to_string);
+        }
+        let sym = self.get_symbol(type_symbol)?;
+        interner
+            .get(sym.qualified_name.unwrap_or(sym.name))
+            .map(str::to_string)
     }
 
     /// Get the variants of an enum

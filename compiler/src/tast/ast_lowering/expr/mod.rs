@@ -901,6 +901,13 @@ impl<'a> AstLowering<'a> {
                     operand: Box::new(operand_expr),
                 }
             }
+            ExprKind::Call { expr, args }
+                if args.is_empty()
+                    && matches!(&expr.kind, ExprKind::Ident(name) if name == "__resources__") =>
+            {
+                let table = self.resource_table_expr(expression.span);
+                return self.lower_expression(&table);
+            }
             ExprKind::Call { expr, args } => {
                 // Monomorph rewrite: `arr.push(e)` on an untyped empty array binds
                 // its element type from `e` (before the call lowers, so the
@@ -3650,6 +3657,7 @@ mod loops;
 mod operators;
 mod patterns;
 mod reify;
+mod resources;
 mod switch;
 
 impl<'a> AstLowering<'a> {

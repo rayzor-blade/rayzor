@@ -4351,9 +4351,10 @@ impl StdlibMapping {
             // enums with parameterised variants).
             map_method!(static "Type", "enumIndex" => "haxe_type_enum_index", params: 1, returns: primitive,
                 types: &[I64, I32] => I64),
-            // Type.enumEq(a, b):Bool — compiler injects enum type_id
+            // Type.enumEq(a, b):Bool — compiler injects enum type_id and the
+            // instantiation's String parameter mask
             map_method!(static "Type", "enumEq" => "haxe_type_enum_eq", params: 2, returns: primitive,
-                types: &[I64, I64, I32] => Bool),
+                types: &[I64, I64, I32, I64] => Bool),
             // Type.enumConstructor(e:EnumValue):String — takes (value, type_id), type_id injected by compiler
             map_method!(static "Type", "enumConstructor" => "haxe_type_enum_constructor", params: 1, returns: complex,
                 types: &[I64, I32] => PtrString),

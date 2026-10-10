@@ -139,7 +139,7 @@ fn assign_of(op: BinaryOp) -> Option<AssignOp> {
     })
 }
 
-fn unop_name(op: UnaryOp) -> (&'static str, bool) {
+pub(crate) fn unop_name(op: UnaryOp) -> (&'static str, bool) {
     match op {
         UnaryOp::Not => ("OpNot", false),
         UnaryOp::Neg => ("OpNeg", false),

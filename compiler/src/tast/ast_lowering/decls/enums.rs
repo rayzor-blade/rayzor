@@ -188,6 +188,16 @@ impl<'a> AstLowering<'a> {
                         return Ok(func_expr);
                     }
 
+                    // A GADT constructor (`C(p:Bool):E<Int>`) fixes its own
+                    // result type; the arguments do not bind it.
+                    if self.gadt_constructor_result(constructor_symbol, parent_enum) {
+                        if let Some(sym) = self.context.symbol_table.get_symbol(constructor_symbol)
+                        {
+                            func_expr.expr_type = sym.type_id;
+                        }
+                        return Ok(func_expr);
+                    }
+
                     // Generic enum - need to infer type arguments from constructor arguments
                     // println!(
                     //     "DEBUG: Generic enum with {} type parameters",
@@ -314,6 +324,28 @@ impl<'a> AstLowering<'a> {
             }
         } else {
             Ok(func_expr)
+        }
+    }
+
+    /// Whether a constructor's declared result is its enum instantiated with
+    /// no type parameter left, as a GADT constructor writes it.
+    fn gadt_constructor_result(&self, constructor: SymbolId, parent_enum: SymbolId) -> bool {
+        let Some(sym) = self.context.symbol_table.get_symbol(constructor) else {
+            return false;
+        };
+        let table = self.context.type_table.borrow();
+        let result = match table.get(sym.type_id).map(|t| &t.kind) {
+            Some(TypeKind::Function { return_type, .. }) => *return_type,
+            _ => sym.type_id,
+        };
+        match table.get(result).map(|t| &t.kind) {
+            Some(TypeKind::Enum {
+                symbol_id,
+                type_args,
+            }) if *symbol_id == parent_enum && !type_args.is_empty() => {
+                type_args.iter().all(|&a| !table.is_type_parameter(a))
+            }
+            _ => false,
         }
     }
 

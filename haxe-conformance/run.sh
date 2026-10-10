@@ -128,6 +128,26 @@ fi
 # A module any of these provides must be on the class path or the test fails as
 # if the name never existed.
 SRC_ROOT="$(cd "$SRC/../.." && pwd)"   # .../tests/unit/src
+# Upstream builds the unit suite with compile-each.hxml's `--resource` files,
+# and haxe.Resource lists exactly those. As a manifest line: absolute
+# `file@name` specs.
+UNIT_RESOURCES=$(python3 - "$SRC_ROOT/.." <<'PYRES'
+import json, os, sys
+root = os.path.abspath(sys.argv[1])
+try:
+    lines = open(os.path.join(root, 'compile-each.hxml'), encoding='utf-8').read().splitlines()
+except OSError:
+    lines = []
+specs = []
+for line in lines:
+    flag, _, spec = line.strip().partition(' ')
+    if flag in ('--resource', '-resource') and spec:
+        path, _, name = spec.partition('@')
+        specs.append('%s@%s' % (os.path.join(root, path), name or path))
+if specs:
+    print('resources = [%s]' % ', '.join(json.dumps(s) for s in specs))
+PYRES
+)
 cp "$SRC"/../*.hx "$SHARED/unit/" 2>/dev/null || true
 if [[ -d "$SRC/misc" ]]; then
   cp -R "$SRC"/misc/. "$SHARED/unit/issues/misc/" 2>/dev/null || true
@@ -367,7 +387,8 @@ targets = set(target_pkgs.split('|'))
 # What the compiler defines (parser/src/preprocessor.rs) and the test-only
 # defines no rayzor build sets. Anything else stays undecidable.
 defined = {'rayzor', 'sys', 'static', 'eval', 'target_unicode'}
-undefined = {'flash_test_swc', 'macro', 'utf16', 'target_utf16', 'interp', 'cppia'}
+undefined = {'flash_test_swc', 'macro', 'utf16', 'target_utf16', 'interp', 'cppia',
+             'hxcpp_smart_strings'}
 def branch_is_ours(cond):
     # We are none of the targets, so evaluate the condition with every target
     # name false and see what it says. `#if cpp` is dead, `#if !cpp` is LIVE --
@@ -424,7 +445,7 @@ for i in range(start, len(lines)):
         last = i
         break
 
-# Only the ENTRY class's OWN methods, and called the way they are declared.
+# Only the ENTRY class's OWN instance methods.
 # Scanning the whole file also picked up `function test*` on private sibling
 # classes, interfaces and externs in the same file and called them all on the
 # entry instance -- a program Haxe itself rejects, and which rayzor instead
@@ -440,15 +461,15 @@ for i in range(start, last):
     if not live[i] or depth_before != 1:
         continue
     m = re.search(r'\bfunction\s+(test[A-Za-z0-9_]*)\s*\(', code[i])
-    if not m or any(name == m.group(1) for name, _, _ in methods):
+    if not m or any(name == m.group(1) for name, _ in methods):
         continue
-    # A macro function runs at compile time; the runner never calls one.
-    if re.search(r'\bmacro\b', code[i][:m.start()]):
+    # utest runs instance methods only. A macro function runs at compile
+    # time; a static `test*` is a helper or a compile-only check.
+    if re.search(r'\b(macro|static)\b', code[i][:m.start()]):
         continue
-    is_static = re.search(r'\bstatic\b', code[i][:m.start()]) is not None
     # utest passes an Async to a method that takes one and waits on it.
     takes_async = re.match(r'\s*\w+\s*:\s*(utest\.)?Async\b', code[i][m.end():]) is not None
-    methods.append((m.group(1), is_static, takes_async))
+    methods.append((m.group(1), takes_async))
 if not methods:
     sys.exit(3)
 
@@ -456,10 +477,7 @@ if not methods:
 utest_case = re.search(r'extends\s+(utest\.Test|ThreadTestBase|TestCommandBase)\b', code[start]) is not None
 main = ['    public static function main():Void {',
         '        var inst = new %s();' % cls]
-for name, st, takes_async in methods:
-    if st:
-        main.append('        %s.%s();' % (cls, name))
-        continue
+for name, takes_async in methods:
     call = ('{ var a = new utest.Async(); inst.%s(a); a.wait(); }' % name) if takes_async \
         else 'inst.%s();' % name
     if utest_case:
@@ -561,6 +579,9 @@ PYGEN
   # class path compiles the siblings too.
   printf '[project]\nname = "conformance"\nentry = "%s%s.hx"\n\n[build]\nclass-paths = ["%s", "%s"]\n' \
     "${rel:+$rel/}" "$base" "$cp" "$SHARED" > "$d/rayzor.toml"
+  case "$suite" in
+    issues|features) [[ -n "$UNIT_RESOURCES" ]] && printf '%s\n' "$UNIT_RESOURCES" >> "$d/rayzor.toml" ;;
+  esac
   # Program arguments the generator found for this case, if any.
   local args_file="$d${rel:+/$rel}/$base.args.json"
   [[ -f "$args_file" ]] || args_file=""

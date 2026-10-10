@@ -34,6 +34,7 @@ impl Default for CompilationConfig {
             emit_safety_warnings: true,
             extra_defines: Vec::new(),
             profile_typecheck: false,
+            resources: Default::default(),
         }
     }
 }

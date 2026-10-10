@@ -350,6 +350,7 @@ pub fn cmd_run_wasm(
         &define_refs,
         !no_cache,
         None,
+        Vec::new(),
     )?;
 
     let _loaded_rpkgs = compile_inputs.loaded_rpkgs;

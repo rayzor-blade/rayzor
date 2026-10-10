@@ -1163,6 +1163,35 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
             },
         );
         view.insert("statics".to_string(), reference(array(statics)));
+        if let (TypeKind::Abstract { .. }, Some(symbol)) = (&kind, symbol) {
+            let unops = self
+                .lowering
+                .abstract_unops
+                .get(&symbol)
+                .cloned()
+                .unwrap_or_default();
+            let unops = unops
+                .iter()
+                .map(|(op, method)| {
+                    let (op, postfix) = crate::macro_system::expr_adt::unop_name(*op);
+                    object(BTreeMap::from([
+                        (
+                            "op".to_string(),
+                            V::Enum(Arc::from("Unop"), Arc::from(op), Arc::new(Vec::new())),
+                        ),
+                        ("postFix".to_string(), V::Bool(postfix)),
+                        (
+                            "field".to_string(),
+                            object(BTreeMap::from([(
+                                "name".to_string(),
+                                string(method.as_str()),
+                            )])),
+                        ),
+                    ]))
+                })
+                .collect();
+            view.insert("unops".to_string(), array(unops));
+        }
         Some(object(view))
     }
 
@@ -1682,9 +1711,7 @@ pub(super) fn render_type_constructor(
     };
     let name_of = |symbol_id| {
         symbol_table
-            .get_symbol(symbol_id)
-            .and_then(|sym| interner.get(sym.qualified_name.unwrap_or(sym.name)))
-            .map(|n| n.to_string())
+            .display_type_path(symbol_id, interner)
             .unwrap_or_else(|| "<unnamed>".to_string())
     };
     let form = |ctor: &str, path: String, args: &[TypeId]| {
@@ -1769,9 +1796,7 @@ pub(super) fn render_type(
     // A type in a package prints with its path, as TypeTools.toString does.
     let name_of = |symbol_id| {
         symbol_table
-            .get_symbol(symbol_id)
-            .and_then(|sym| interner.get(sym.qualified_name.unwrap_or(sym.name)))
-            .map(|n| n.to_string())
+            .display_type_path(symbol_id, interner)
             .unwrap_or_else(|| "<unnamed>".to_string())
     };
     let with_args = |base: String, args: &[TypeId]| {
