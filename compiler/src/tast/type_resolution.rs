@@ -1228,6 +1228,132 @@ pub fn create_anonymous_object_type(
     })
 }
 
+/// Whether `ty` is `haxe.PosInfos`, through `Null<>` and typedefs: the
+/// trailing optional parameter type a call site fills with its position.
+pub fn is_pos_infos(
+    type_table: &TypeTable,
+    symbol_table: &SymbolTable,
+    interner: &StringInterner,
+    ty: TypeId,
+) -> bool {
+    let named = |symbol: SymbolId| {
+        symbol_table
+            .get_symbol(symbol)
+            .and_then(|s| interner.get(s.name))
+            == Some("PosInfos")
+    };
+    let mut ty = ty;
+    for _ in 0..8 {
+        match type_table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+            Some(TypeKind::TypeAlias {
+                symbol_id,
+                target_type,
+                ..
+            }) => {
+                if named(*symbol_id) {
+                    return true;
+                }
+                ty = *target_type;
+            }
+            Some(TypeKind::Class { symbol_id, .. }) => return named(*symbol_id),
+            Some(TypeKind::Placeholder { name, .. }) => {
+                return matches!(interner.get(*name), Some("PosInfos" | "haxe.PosInfos"));
+            }
+            Some(TypeKind::Anonymous { fields }) => {
+                let mut names: Vec<&str> =
+                    fields.iter().filter_map(|f| interner.get(f.name)).collect();
+                names.sort_unstable();
+                return names
+                    == [
+                        "className",
+                        "customParams",
+                        "fileName",
+                        "lineNumber",
+                        "methodName",
+                    ];
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// A source path as `haxe.PosInfos.fileName` reports it: relative to the
+/// working directory when beneath it, as Haxe reports a file found through
+/// a relative class path.
+pub fn pos_infos_file_name(path: &str) -> String {
+    let file = std::path::Path::new(path);
+    if file.is_absolute()
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        let cwd = cwd.canonicalize().unwrap_or(cwd);
+        let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        if let Ok(relative) = file.strip_prefix(&cwd) {
+            return relative.to_string_lossy().replace('\\', "/");
+        }
+    }
+    path.strip_prefix("./").unwrap_or(path).to_string()
+}
+
+/// The `haxe.PosInfos` object a call at `location` passes for an omitted
+/// trailing `?pos:haxe.PosInfos`.
+pub fn pos_infos_literal(
+    type_table: &RefCell<TypeTable>,
+    interner: &StringInterner,
+    file_name: &str,
+    class_name: &str,
+    method_name: &str,
+    location: SourceLocation,
+) -> TypedExpression {
+    let (string, int) = {
+        let table = type_table.borrow();
+        (table.string_type(), table.int_type())
+    };
+    let expression = |kind, expr_type| TypedExpression {
+        expr_type,
+        kind,
+        usage: VariableUsage::Copy,
+        lifetime_id: crate::tast::LifetimeId::first(),
+        source_location: location,
+        metadata: ExpressionMetadata::default(),
+    };
+    let fields: Vec<TypedObjectField> = [
+        (
+            "fileName",
+            LiteralValue::String(file_name.to_string()),
+            string,
+        ),
+        (
+            "lineNumber",
+            LiteralValue::Int(i64::from(location.line)),
+            int,
+        ),
+        (
+            "className",
+            LiteralValue::String(class_name.to_string()),
+            string,
+        ),
+        (
+            "methodName",
+            LiteralValue::String(method_name.to_string()),
+            string,
+        ),
+    ]
+    .into_iter()
+    .map(|(name, value, ty)| TypedObjectField {
+        name: interner.intern(name),
+        value: expression(TypedExpressionKind::Literal { value }, ty),
+        source_location: location,
+    })
+    .collect();
+    let object_type = create_anonymous_object_type(
+        type_table,
+        fields.iter().map(|f| (f.name, f.value.expr_type)).collect(),
+    );
+    expression(TypedExpressionKind::ObjectLiteral { fields }, object_type)
+}
+
 /// Infer object literal type from fields
 pub fn infer_object_literal_type(
     type_table: &RefCell<TypeTable>,

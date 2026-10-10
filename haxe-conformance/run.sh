@@ -280,6 +280,10 @@ process_one() { # process_one <source> <result-file>
   # Upstream runs the sys suite from tests/sys: cases read `.` and `..` (named
   # `sys`), expect compile.hxml beside them, and write under temp/.
   case "$f" in "$SYS_SRC"/*) d="$RUN_ROOT/$base/sys" ;; esac
+  # Upstream compiles the unit suite with `-cp src`, so the file names its
+  # PosInfos report start `src/`.
+  local cp="."
+  case "$f" in "$FEATURE_SRC"/*) cp="src"; rel="src${rel:+/$rel}" ;; esac
   mkdir -p "$d${rel:+/$rel}"
   # Haxe applies an `import.hx` at a class-path root to every module beneath
   # it. The threads suite puts its utest imports there, which is why its cases
@@ -555,8 +559,8 @@ PYGEN
   # declare a forward reference and never compiled, so the reference becomes a
   # trap stub and the test dies on SIGTRAP with nothing said. A manifest with a
   # class path compiles the siblings too.
-  printf '[project]\nname = "conformance"\nentry = "%s%s.hx"\n\n[build]\nclass-paths = [".", "%s"]\n' \
-    "${rel:+$rel/}" "$base" "$SHARED" > "$d/rayzor.toml"
+  printf '[project]\nname = "conformance"\nentry = "%s%s.hx"\n\n[build]\nclass-paths = ["%s", "%s"]\n' \
+    "${rel:+$rel/}" "$base" "$cp" "$SHARED" > "$d/rayzor.toml"
   # Program arguments the generator found for this case, if any.
   local args_file="$d${rel:+/$rel}/$base.args.json"
   [[ -f "$args_file" ]] || args_file=""

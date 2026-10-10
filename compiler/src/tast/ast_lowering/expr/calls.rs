@@ -2127,6 +2127,8 @@ impl<'a> AstLowering<'a> {
             arg_exprs = placed;
         }
 
+        let arg_exprs = self.append_pos_infos(arg_exprs, expected_arg_types.as_deref(), expression);
+
         // Trailing arguments bound for a `...rest` parameter travel as one
         // `haxe.Rest<T>` array; a spread argument already is one.
         let arg_exprs = self.pack_rest_args(arg_exprs, expected_arg_types.as_deref(), expr);
@@ -5970,6 +5972,87 @@ impl<'a> AstLowering<'a> {
             }
             _ => ty,
         }
+    }
+
+    /// Arguments completed for a callee whose last formal is an omitted
+    /// `?pos:haxe.PosInfos`: Haxe passes the call site's position there, and
+    /// null for the optional formals before it.
+    pub(crate) fn append_pos_infos(
+        &self,
+        mut args: Vec<TypedExpression>,
+        formals: Option<&[TypeId]>,
+        call: &Expr,
+    ) -> Vec<TypedExpression> {
+        let Some(formals) = formals else {
+            return args;
+        };
+        let takes_pos = formals.last().is_some_and(|formal| {
+            crate::tast::type_resolution::is_pos_infos(
+                &self.context.type_table.borrow(),
+                &*self.context.symbol_table,
+                &*self.context.string_interner,
+                *formal,
+            )
+        });
+        if !takes_pos || args.len() >= formals.len() {
+            return args;
+        }
+        let location = self.context.create_location_from_span(call.span);
+        while args.len() + 1 < formals.len() {
+            args.push(TypedExpression {
+                kind: TypedExpressionKind::Null,
+                expr_type: self.context.type_table.borrow().dynamic_type(),
+                usage: VariableUsage::Copy,
+                lifetime_id: crate::tast::LifetimeId::first(),
+                source_location: location,
+                metadata: ExpressionMetadata::default(),
+            });
+        }
+        args.push(self.pos_infos_at(location));
+        args
+    }
+
+    /// The `haxe.PosInfos` of a call at `location` in the code lowering now.
+    pub(crate) fn pos_infos_at(&self, location: SourceLocation) -> TypedExpression {
+        let interner = &*self.context.string_interner;
+        let package = self
+            .context
+            .current_package
+            .and_then(|p| self.context.namespace_resolver.get_package(p))
+            .map(|p| {
+                p.full_path
+                    .iter()
+                    .filter_map(|s| interner.get(*s))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            })
+            .unwrap_or_default();
+        let class = self
+            .context
+            .class_context_stack
+            .last()
+            .and_then(|class| self.context.symbol_table.get_symbol(*class))
+            .and_then(|class| interner.get(class.name))
+            .map(|name| {
+                if package.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{package}.{name}")
+                }
+            })
+            .unwrap_or_default();
+        let method = self
+            .current_method_name
+            .and_then(|name| interner.get(name))
+            .unwrap_or_default();
+        crate::tast::type_resolution::pos_infos_literal(
+            self.context.type_table,
+            interner,
+            &self.pos_file_name,
+            &class,
+            method,
+            location,
+        )
     }
 
     pub(crate) fn pack_rest_args(

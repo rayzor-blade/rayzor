@@ -652,6 +652,7 @@ impl<'a> AstLowering<'a> {
             .any(|m| matches!(m, parser::Modifier::Static));
         let prev_static = self.in_static_method;
         self.in_static_method = is_static_method;
+        let prev_method_name = self.current_method_name.replace(function_name);
 
         // Pre-lower an explicit return-type annotation (cheap — `lower_type`
         // just resolves a type reference) so bare enum-variant identifiers
@@ -685,6 +686,7 @@ impl<'a> AstLowering<'a> {
 
         // Restore static method flag
         self.in_static_method = prev_static;
+        self.current_method_name = prev_method_name;
 
         // Process return type - if not specified, infer from body.
         // Reuse the pre-lowered annotation from above instead of calling

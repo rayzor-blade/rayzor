@@ -43,6 +43,7 @@ impl<'a> AstLowering<'a> {
         // FileMetadata::default() empty-string value and every E0382
         // dump prints `typed_file=` blank.
         typed_file.metadata.file_path = file.filename.clone();
+        self.pos_file_name = crate::tast::type_resolution::pos_infos_file_name(&file.filename);
         self.current_module_types = module_type_names(&file.declarations);
         let file_name = file
             .filename

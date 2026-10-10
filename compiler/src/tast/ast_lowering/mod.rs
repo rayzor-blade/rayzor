@@ -1618,6 +1618,10 @@ pub struct AstLowering<'a> {
     pub pending_usings: Vec<String>,
     /// Whether we're currently lowering a static method body (no `this` available)
     in_static_method: bool,
+    /// The method whose body is lowering, for `haxe.PosInfos.methodName`.
+    current_method_name: Option<InternedString>,
+    /// The file lowering, as `haxe.PosInfos.fileName` reports it.
+    pos_file_name: String,
     /// Set while a call's callee expression lowers: a bare method name there
     /// stays a direct binding rather than a bound closure value.
     lowering_callee: bool,

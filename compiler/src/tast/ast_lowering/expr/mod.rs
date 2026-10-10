@@ -1242,6 +1242,8 @@ impl<'a> AstLowering<'a> {
                     self.expected_arg_type_stack.pop();
                     arg_exprs.push(lowered?);
                 }
+                let arg_exprs =
+                    self.append_pos_infos(arg_exprs, ctor_params.as_deref(), expression);
                 let arg_exprs = self.pack_rest_args(arg_exprs, ctor_params.as_deref(), expression);
                 // An argument for an abstract-typed parameter goes through its `@:from`.
                 let arg_exprs: Vec<TypedExpression> = match &ctor_params {

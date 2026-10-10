@@ -336,8 +336,14 @@ impl<'a> AstLowering<'a> {
             if meta.name == "op" {
                 // @:op(A + B) - operator expression is the first parameter
                 if !meta.params.is_empty() {
-                    // Extract the operator expression as a string
-                    let operator_expr = self.expr_to_string(&meta.params[0]);
+                    // Extract the operator expression as a string; the call
+                    // operator `@:op(a())` reads as "a()".
+                    let operator_expr = match &meta.params[0].kind {
+                        parser::ExprKind::Call { expr, args } if args.is_empty() => {
+                            format!("{}()", self.expr_to_string(expr))
+                        }
+                        _ => self.expr_to_string(&meta.params[0]),
+                    };
 
                     // Store the operator expression and any additional parameters
                     let additional_params: Vec<String> = meta.params[1..]

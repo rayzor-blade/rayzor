@@ -89,6 +89,10 @@ pub struct TastToHirContext<'a> {
     class_operator_methods: BTreeMap<(SymbolId, String), Vec<SymbolId>>,
     commutative_operator_methods: std::collections::BTreeSet<SymbolId>,
     native_abstract_operators: std::collections::BTreeSet<SymbolId>,
+    /// The file, type and method whose code is lowering, for `haxe.PosInfos`.
+    pos_file_name: String,
+    pos_class: Option<SymbolId>,
+    pos_method: Option<SymbolId>,
 }
 
 #[derive(Debug)]
@@ -210,6 +214,9 @@ impl<'a> TastToHirContext<'a> {
             class_operator_methods: BTreeMap::new(),
             commutative_operator_methods: std::collections::BTreeSet::new(),
             native_abstract_operators: std::collections::BTreeSet::new(),
+            pos_file_name: String::new(),
+            pos_class: None,
+            pos_method: None,
         }
     }
 
@@ -610,6 +617,8 @@ impl<'a> TastToHirContext<'a> {
     pub fn lower_file(&mut self, file: &'a TypedFile) -> Result<HirModule, Vec<LoweringError>> {
         // Set current file for validation
         self.current_file = Some(file);
+        self.pos_file_name =
+            crate::tast::type_resolution::pos_infos_file_name(&file.metadata.file_path);
 
         // Lower imports
         for import in &file.imports {
@@ -645,6 +654,7 @@ impl<'a> TastToHirContext<'a> {
         }
 
         // Lower module-level functions
+        self.pos_class = None;
         for function in &file.functions {
             let hir_func = self.lower_function(function);
             self.module.functions.insert(function.symbol_id, hir_func);
@@ -664,6 +674,7 @@ impl<'a> TastToHirContext<'a> {
 
     /// Lower a class declaration
     fn lower_class(&mut self, class: &TypedClass) {
+        self.pos_class = Some(class.symbol_id);
         let mut hir_fields = Vec::new();
         let mut hir_methods = Vec::new();
         let mut hir_constructor = None;
@@ -943,6 +954,7 @@ impl<'a> TastToHirContext<'a> {
 
     /// Lower an abstract type
     fn lower_abstract(&mut self, abstract_decl: &TypedAbstract) {
+        self.pos_class = Some(abstract_decl.symbol_id);
         // Create type ID from symbol ID (simplified)
         let type_id = TypeId::from_raw(abstract_decl.symbol_id.as_raw());
 
@@ -1133,6 +1145,7 @@ impl<'a> TastToHirContext<'a> {
 
     /// Lower a function
     fn lower_function(&mut self, function: &TypedFunction) -> HirFunction {
+        let outer_method = self.pos_method.replace(function.symbol_id);
         let hir_body = if !function.body.is_empty() {
             let mut statements = self.param_default_guards(&function.parameters);
             let mut body = self.lower_block(&function.body);
@@ -1142,6 +1155,7 @@ impl<'a> TastToHirContext<'a> {
         } else {
             None
         };
+        self.pos_method = outer_method;
 
         // Check if this is the main function
         let main_name = self.string_interner.intern("main");
@@ -1305,7 +1319,9 @@ impl<'a> TastToHirContext<'a> {
         method: &TypedFunction,
         class_fields: &[crate::tast::node::TypedField],
     ) -> HirConstructor {
+        let outer_method = self.pos_method.replace(method.symbol_id);
         let mut body = self.lower_block(&method.body);
+        self.pos_method = outer_method;
 
         // Separate super() from source statements while preserving their order.
         let mut super_call = None;
@@ -1385,13 +1401,19 @@ impl<'a> TastToHirContext<'a> {
                 let is_mutable = matches!(mutability, Mutability::Mutable);
 
                 let var_name = self.get_symbol_name(*symbol_id);
+                let init = initializer.as_ref().map(|e| {
+                    match self.conversion_with_pos_infos(e, *var_type) {
+                        Some(converted) => self.lower_expression(&converted),
+                        None => self.lower_expression(e),
+                    }
+                });
                 HirStatement::Let {
                     pattern: HirPattern::Variable {
                         name: var_name,
                         symbol: *symbol_id,
                     },
                     type_hint: Some(*var_type),
-                    init: initializer.as_ref().map(|e| self.lower_expression(e)),
+                    init,
                     is_mutable,
                 }
             }
@@ -1796,6 +1818,9 @@ impl<'a> TastToHirContext<'a> {
                 }
             }
         }
+        if let Some(call) = self.call_with_pos_infos(expr) {
+            return self.lower_expression(&call);
+        }
         let kind = match &expr.kind {
             TypedExpressionKind::Literal { value } => {
                 HirExprKind::Literal(self.lower_literal(value))
@@ -2193,6 +2218,32 @@ impl<'a> TastToHirContext<'a> {
                 arguments,
                 ..
             } => {
+                // `f(args)` on an abstract value calls its `@:op(a())` method.
+                if let Some((method_symbol, owner, is_static, return_type)) =
+                    self.find_call_operator_method(function.expr_type, arguments.len())
+                {
+                    let mut call = expr.clone();
+                    call.expr_type = return_type;
+                    call.kind = if is_static {
+                        TypedExpressionKind::StaticMethodCall {
+                            class_symbol: owner,
+                            method_symbol,
+                            arguments: std::iter::once((**function).clone())
+                                .chain(arguments.iter().cloned())
+                                .collect(),
+                            type_arguments: Vec::new(),
+                        }
+                    } else {
+                        TypedExpressionKind::MethodCall {
+                            receiver: function.clone(),
+                            method_symbol,
+                            arguments: arguments.clone(),
+                            type_arguments: Vec::new(),
+                            is_optional: false,
+                        }
+                    };
+                    return self.lower_expression(&call);
+                }
                 // Try to inline static abstract method calls like Color.fromInt(1)
                 // where function is StaticFieldAccess(abstract_symbol, method_symbol)
                 if let TypedExpressionKind::StaticFieldAccess {
@@ -2991,6 +3042,9 @@ impl<'a> TastToHirContext<'a> {
                 cast_kind,
             } => {
                 use CastKind;
+                if let Some(converted) = self.conversion_with_pos_infos(expression, *target_type) {
+                    return self.lower_expression(&converted);
+                }
                 HirExprKind::Cast {
                     expr: Box::new(self.lower_expression(expression)),
                     target: *target_type,
@@ -6261,6 +6315,8 @@ impl<'a> TastToHirContext<'a> {
         result_type: TypeId,
         location: SourceLocation,
     ) -> HirExpr {
+        let completed = self.with_pos_infos(method, arguments, location);
+        let arguments = completed.as_deref().unwrap_or(arguments);
         let mut args = vec![self.lower_expression(receiver)];
         args.extend(arguments.iter().map(|a| self.lower_expression(a)));
         HirExpr::new(
@@ -6368,13 +6424,20 @@ impl<'a> TastToHirContext<'a> {
         };
         let mut args = vec![name_literal];
         args.extend(value.cloned());
-        args.extend(resolver.defaults.into_iter().map(|(ty, default)| {
-            default.unwrap_or_else(|| TypedExpression {
-                expr_type: ty,
-                kind: TypedExpressionKind::Null,
-                ..expr.clone()
-            })
-        }));
+        let last = resolver.defaults.len().saturating_sub(1);
+        for (i, (ty, default)) in resolver.defaults.into_iter().enumerate() {
+            args.push(default.unwrap_or_else(|| {
+                if i == last && self.is_pos_infos(ty) {
+                    self.pos_infos_at(expr.source_location)
+                } else {
+                    TypedExpression {
+                        expr_type: ty,
+                        kind: TypedExpressionKind::Null,
+                        ..expr.clone()
+                    }
+                }
+            }));
+        }
         let location = expr.source_location;
         if let Some(owner) = resolver.static_owner {
             // A static resolver takes the receiver as its first argument.
@@ -6474,11 +6537,8 @@ impl<'a> TastToHirContext<'a> {
                         .all(|p| p.is_optional || p.default_value.is_some())
             })
             .collect();
-        let method = resolvers
-            .iter()
-            .find(|m| m.parameters.len() == explicit(**m))
-            .or_else(|| resolvers.first())?;
-        let defaults = method.parameters[explicit(*method)..]
+        let method = Self::preferred_operator_method(&resolvers, explicit)?;
+        let defaults = method.parameters[explicit(method)..]
             .iter()
             .map(|p| (p.param_type, p.default_value.clone()))
             .collect();
@@ -6542,6 +6602,285 @@ impl<'a> TastToHirContext<'a> {
             .map(|m| m.symbol_id)
     }
 
+    fn is_pos_infos(&self, ty: TypeId) -> bool {
+        crate::tast::type_resolution::is_pos_infos(
+            &self.type_table.borrow(),
+            self.symbol_table,
+            &*self.string_interner,
+            ty,
+        )
+    }
+
+    /// The `haxe.PosInfos` of a call at `location` in the code lowering now.
+    fn pos_infos_at(&self, location: SourceLocation) -> TypedExpression {
+        let interner = &*self.string_interner;
+        let package = self
+            .current_file
+            .and_then(|f| f.metadata.package_name.as_deref())
+            .unwrap_or_default();
+        let class = self
+            .pos_class
+            .and_then(|class| self.symbol_table.get_symbol(class))
+            .and_then(|class| interner.get(class.name))
+            .map(|name| {
+                if package.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{package}.{name}")
+                }
+            })
+            .unwrap_or_default();
+        let method = self
+            .pos_method
+            .and_then(|method| self.symbol_table.get_symbol(method))
+            .and_then(|method| interner.get(method.name))
+            .unwrap_or_default();
+        crate::tast::type_resolution::pos_infos_literal(
+            self.type_table,
+            interner,
+            &self.pos_file_name,
+            &class,
+            method,
+            location,
+        )
+    }
+
+    /// `arguments` for a call of `method` completed with the call site's
+    /// `haxe.PosInfos`, when its omitted last parameter takes one; the
+    /// optional parameters before it pass null. None when nothing is omitted.
+    fn with_pos_infos(
+        &self,
+        method: SymbolId,
+        arguments: &[TypedExpression],
+        location: SourceLocation,
+    ) -> Option<Vec<TypedExpression>> {
+        let (count, last) = {
+            let table = self.type_table.borrow();
+            match &table
+                .get(self.symbol_table.get_symbol(method)?.type_id)?
+                .kind
+            {
+                TypeKind::Function { params, .. } => (params.len(), *params.last()?),
+                _ => return None,
+            }
+        };
+        if arguments.len() >= count || !self.is_pos_infos(last) {
+            return None;
+        }
+        let mut completed = arguments.to_vec();
+        let dynamic = self.type_table.borrow().dynamic_type();
+        while completed.len() + 1 < count {
+            completed.push(TypedExpression {
+                expr_type: dynamic,
+                kind: TypedExpressionKind::Null,
+                usage: VariableUsage::Copy,
+                lifetime_id: LifetimeId::first(),
+                source_location: location,
+                metadata: ExpressionMetadata::default(),
+            });
+        }
+        completed.push(self.pos_infos_at(location));
+        Some(completed)
+    }
+
+    /// A method call leaving out a trailing `?pos:haxe.PosInfos`, with the
+    /// call site's position passed for it.
+    fn call_with_pos_infos(&self, expr: &TypedExpression) -> Option<TypedExpression> {
+        let (method, arguments) = match &expr.kind {
+            TypedExpressionKind::MethodCall {
+                method_symbol,
+                arguments,
+                ..
+            }
+            | TypedExpressionKind::StaticMethodCall {
+                method_symbol,
+                arguments,
+                ..
+            } => (*method_symbol, arguments),
+            TypedExpressionKind::FunctionCall {
+                function,
+                arguments,
+                ..
+            } => match &function.kind {
+                TypedExpressionKind::StaticFieldAccess { field_symbol, .. } => {
+                    (*field_symbol, arguments)
+                }
+                TypedExpressionKind::Variable { symbol_id }
+                    if self
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .is_some_and(|s| s.kind == crate::tast::SymbolKind::Function) =>
+                {
+                    (*symbol_id, arguments)
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let completed = self.with_pos_infos(method, arguments, expr.source_location)?;
+        let mut call = expr.clone();
+        match &mut call.kind {
+            TypedExpressionKind::MethodCall { arguments, .. }
+            | TypedExpressionKind::StaticMethodCall { arguments, .. }
+            | TypedExpressionKind::FunctionCall { arguments, .. } => *arguments = completed,
+            _ => return None,
+        }
+        Some(call)
+    }
+
+    /// The abstract a type is, through typedefs.
+    fn abstract_symbol_of(&self, ty: TypeId) -> Option<SymbolId> {
+        let table = self.type_table.borrow();
+        let mut ty = ty;
+        for _ in 0..4 {
+            match table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                _ => break,
+            }
+        }
+        match table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Abstract { symbol_id, .. }) => Some(*symbol_id),
+            _ => None,
+        }
+    }
+
+    fn abstract_declaration(&self, abstract_symbol: SymbolId) -> Option<&'a TypedAbstract> {
+        self.current_file?
+            .abstracts
+            .iter()
+            .find(|a| a.symbol_id == abstract_symbol)
+            .or_else(|| self.imported_abstracts.get(&abstract_symbol).copied())
+    }
+
+    /// An abstract's `@:op(a())` method taking `arity` arguments besides the
+    /// receiver: (method, abstract, is static, return type).
+    fn find_call_operator_method(
+        &self,
+        callee_type: TypeId,
+        arity: usize,
+    ) -> Option<(SymbolId, SymbolId, bool, TypeId)> {
+        let abstract_symbol = self.abstract_symbol_of(callee_type)?;
+        let explicit = |m: &TypedFunction| arity + usize::from(m.is_static);
+        let candidates: Vec<&TypedFunction> = self
+            .abstract_declaration(abstract_symbol)?
+            .methods
+            .iter()
+            .filter(|m| {
+                !m.body.is_empty()
+                    && m.metadata
+                        .operator_metadata
+                        .iter()
+                        .any(|(op, _)| op == "a()")
+                    && explicit(*m) <= m.parameters.len()
+                    && m.parameters[explicit(*m)..]
+                        .iter()
+                        .all(|p| p.is_optional || p.default_value.is_some())
+            })
+            .collect();
+        let method = Self::preferred_operator_method(&candidates, explicit)?;
+        Some((
+            method.symbol_id,
+            abstract_symbol,
+            method.is_static,
+            method.return_type,
+        ))
+    }
+
+    /// The implicit `@:from` / `@:to` conversion of `value` to `target` as an
+    /// explicit call, when the conversion method takes a trailing
+    /// `?pos:haxe.PosInfos` that the conversion site fills.
+    fn conversion_with_pos_infos(
+        &self,
+        value: &TypedExpression,
+        target: TypeId,
+    ) -> Option<TypedExpression> {
+        let takes_pos = |m: &TypedFunction| {
+            m.parameters
+                .last()
+                .is_some_and(|p| self.is_pos_infos(p.param_type))
+        };
+        let same_type = |a: TypeId, b: TypeId| {
+            let table = self.type_table.borrow();
+            a == b || table.get(a).map(|t| &t.kind) == table.get(b).map(|t| &t.kind)
+        };
+        let source_abstract = self.abstract_symbol_of(value.expr_type);
+        let target_abstract = self.abstract_symbol_of(target);
+        if source_abstract == target_abstract {
+            return None;
+        }
+        if let Some(owner) = target_abstract
+            && let Some(from) = self.abstract_declaration(owner).and_then(|a| {
+                a.methods.iter().find(|m| {
+                    m.metadata.is_from_conversion
+                        && m.is_static
+                        && m.parameters.len() == 2
+                        && same_type(m.parameters[0].param_type, value.expr_type)
+                        && takes_pos(*m)
+                })
+            })
+        {
+            return Some(TypedExpression {
+                expr_type: target,
+                kind: TypedExpressionKind::StaticMethodCall {
+                    class_symbol: owner,
+                    method_symbol: from.symbol_id,
+                    arguments: vec![value.clone()],
+                    type_arguments: Vec::new(),
+                },
+                ..value.clone()
+            });
+        }
+        let owner = source_abstract?;
+        let to = self.abstract_declaration(owner)?.methods.iter().find(|m| {
+            m.metadata.is_to_conversion
+                && !m.is_static
+                && m.parameters.len() == 1
+                && same_type(m.return_type, target)
+                && takes_pos(*m)
+        })?;
+        Some(TypedExpression {
+            expr_type: target,
+            kind: TypedExpressionKind::MethodCall {
+                receiver: Box::new(value.clone()),
+                method_symbol: to.symbol_id,
+                arguments: Vec::new(),
+                type_arguments: Vec::new(),
+                is_optional: false,
+            },
+            ..value.clone()
+        })
+    }
+
+    /// Whether `method` takes `explicit` required arguments followed only by
+    /// optional parameters.
+    fn takes_explicit_arguments(method: &TypedFunction, explicit: usize) -> bool {
+        explicit <= method.parameters.len()
+            && method.parameters[..explicit]
+                .iter()
+                .all(|p| !p.is_optional && p.default_value.is_none())
+            && method.parameters[explicit..]
+                .iter()
+                .all(|p| p.is_optional || p.default_value.is_some())
+    }
+
+    /// The operator method a call with `explicit(method)` arguments binds:
+    /// an exact signature of required parameters, then one whose extra
+    /// parameters are optional (`?pos:haxe.PosInfos`), then any exact arity.
+    fn preferred_operator_method<'f>(
+        candidates: &[&'f TypedFunction],
+        explicit: impl Fn(&TypedFunction) -> usize,
+    ) -> Option<&'f TypedFunction> {
+        let required = |m: &TypedFunction| Self::takes_explicit_arguments(m, explicit(m));
+        let exact = |m: &TypedFunction| m.parameters.len() == explicit(m);
+        candidates
+            .iter()
+            .find(|&&m| exact(m) && required(m))
+            .or_else(|| candidates.iter().find(|&&m| required(m)))
+            .or_else(|| candidates.iter().find(|&&m| exact(m)))
+            .or_else(|| candidates.first())
+            .copied()
+    }
+
     fn find_array_access_method(
         &self,
         operand_type: TypeId,
@@ -6603,14 +6942,20 @@ impl<'a> TastToHirContext<'a> {
                     }
                 }
             }
-            // Any other name: a read takes one index, a write two.
+            // Any other name: a read takes one index, a write two, before
+            // any trailing optional parameters.
             let arity = if method_name == "set" { 2 } else { 1 };
-            if let Some(method) = abstract_def.methods.iter().find(|m| {
-                m.metadata.is_array_access
-                    && !m.body.is_empty()
-                    && !m.is_static
-                    && m.parameters.len() == arity
-            }) {
+            let candidates: Vec<&TypedFunction> = abstract_def
+                .methods
+                .iter()
+                .filter(|m| {
+                    m.metadata.is_array_access
+                        && !m.body.is_empty()
+                        && !m.is_static
+                        && (m.parameters.len() == arity || Self::takes_explicit_arguments(m, arity))
+                })
+                .collect();
+            if let Some(method) = Self::preferred_operator_method(&candidates, |_| arity) {
                 return Some((method.symbol_id, abstract_symbol));
             }
         }
@@ -6637,6 +6982,15 @@ impl<'a> TastToHirContext<'a> {
                     && matches!(
                         table.get(s.type_id).map(|t| &t.kind),
                         Some(TypeKind::Function { params, .. }) if params.len() == arity
+                            || (params.len() == arity + 1
+                                && params.last().is_some_and(|p| {
+                                    crate::tast::type_resolution::is_pos_infos(
+                                        &table,
+                                        self.symbol_table,
+                                        self.string_interner,
+                                        *p,
+                                    )
+                                }))
                     )
             })
             .map(|s| (s.id, abstract_symbol))
@@ -7151,6 +7505,8 @@ impl<'a> TastToHirContext<'a> {
         result_type: TypeId,
         source_location: SourceLocation,
     ) -> Option<HirExpr> {
+        let completed = self.with_pos_infos(method_symbol, arguments, source_location);
+        let arguments = completed.as_deref().unwrap_or(arguments);
         // Get the current file being processed
         if self.current_file.is_none() {
             return None;
