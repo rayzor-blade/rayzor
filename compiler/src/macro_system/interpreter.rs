@@ -230,6 +230,19 @@ impl MacroInterpreter {
     }
 
     /// Evaluate an expression, returning a MacroValue
+    /// A macro Type value as the text `Std.string` gives it; others unchanged.
+    fn type_as_text(&mut self, value: MacroValue) -> MacroValue {
+        match &value {
+            MacroValue::Type(id) => self
+                .macro_context
+                .as_mut()
+                .and_then(|ctx| ctx.format_type(*id, true))
+                .map(|s| MacroValue::String(Arc::from(s.as_str())))
+                .unwrap_or(value),
+            _ => value,
+        }
+    }
+
     pub fn eval_expr(&mut self, expr: &Expr) -> Result<MacroValue, MacroError> {
         let location = span_to_location(expr.span);
 
@@ -334,6 +347,12 @@ impl MacroInterpreter {
 
                 let left_val = self.eval_expr(left)?;
                 let right_val = self.eval_expr(right)?;
+                // A Type joined to a string prints as Std.string prints it.
+                let (left_val, right_val) = if *op == BinaryOp::Add {
+                    (self.type_as_text(left_val), self.type_as_text(right_val))
+                } else {
+                    (left_val, right_val)
+                };
                 ast_bridge::apply_binary_op(op, &left_val, &right_val, location)
             }
 

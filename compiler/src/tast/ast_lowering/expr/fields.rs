@@ -821,19 +821,43 @@ impl<'a> AstLowering<'a> {
         // But we can try to resolve it if the object is 'this'
         let field_symbol = match &obj_expr.kind {
             TypedExpressionKind::This { this_type } => {
-                // The current class, else the class `this` is (an abstract's
-                // `this` is its underlying value).
                 let this_type = *this_type;
-                self.context
-                    .class_context_stack
-                    .last()
-                    .copied()
-                    .and_then(|class_symbol| resolve_in_class(self, &class_symbol, field_name))
-                    .or_else(|| {
-                        let class_symbol = self.resolve_type_to_class_symbol(this_type)?;
-                        resolve_in_class(self, &class_symbol, field_name)
-                    })
-                    .unwrap_or_else(|| self.context.symbol_table.create_field(field_name))
+                let current = self.context.class_context_stack.last().copied();
+                let in_abstract = current.is_some_and(|class| {
+                    self.context
+                        .symbol_table
+                        .get_symbol(class)
+                        .is_some_and(|s| s.kind == crate::tast::symbols::SymbolKind::Abstract)
+                });
+                if in_abstract {
+                    // An abstract's `this` is its underlying value: that type's
+                    // members, then static extensions, then the abstract's own.
+                    let underlying = self
+                        .resolve_type_to_class_symbol(this_type)
+                        .filter(|class| Some(*class) != current)
+                        .and_then(|class| resolve_in_class(self, &class, field_name));
+                    match underlying {
+                        Some(symbol) => symbol,
+                        None if self
+                            .find_static_extension_method(field_name, this_type)
+                            .is_some() =>
+                        {
+                            self.context.symbol_table.create_field(field_name)
+                        }
+                        None => current
+                            .and_then(|class| resolve_in_class(self, &class, field_name))
+                            .unwrap_or_else(|| self.context.symbol_table.create_field(field_name)),
+                    }
+                } else {
+                    // The current class, else the class `this` is.
+                    current
+                        .and_then(|class_symbol| resolve_in_class(self, &class_symbol, field_name))
+                        .or_else(|| {
+                            let class_symbol = self.resolve_type_to_class_symbol(this_type)?;
+                            resolve_in_class(self, &class_symbol, field_name)
+                        })
+                        .unwrap_or_else(|| self.context.symbol_table.create_field(field_name))
+                }
             }
             TypedExpressionKind::Variable { symbol_id } => {
                 // If accessing field on a variable/parameter, try to resolve from its type

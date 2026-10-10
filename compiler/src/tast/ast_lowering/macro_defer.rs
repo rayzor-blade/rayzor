@@ -547,12 +547,14 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
     }
 
     fn type_std_string(&mut self, id: TypeId) -> String {
-        // `Std.string` on a macro Type value. Haxe prints the constructor
-        // form (`TInst(String,[])`); what the tests actually compare is two
-        // of these against each other, so the load-bearing property is that
-        // equal types render equal and distinct types render distinct — which
-        // the display form already provides.
-        self.type_display(id)
+        // `Std.string` on a macro Type value: the constructor form, `TInst(String,[])`.
+        render_type_constructor(
+            id,
+            self.lowering.context.type_table,
+            self.lowering.context.symbol_table,
+            self.lowering.context.string_interner,
+            0,
+        )
     }
 
     fn resolve_type_by_name(&mut self, name: &str) -> Result<TypeId, String> {
@@ -1408,6 +1410,95 @@ fn unify(
 /// The general error formatter is not reused here because it spells `Null<T>`
 /// as `T?` and Debug-dumps named types — both visible to tests that compare
 /// the string against a literal.
+/// A type as `Std.string` prints a macro Type: `TAbstract(Int,[])`,
+/// `TInst(Array,[TInst(String,[])])`; forms without one fall back to the
+/// display form.
+pub(super) fn render_type_constructor(
+    id: TypeId,
+    type_table: &std::cell::RefCell<crate::tast::TypeTable>,
+    symbol_table: &crate::tast::SymbolTable,
+    interner: &crate::tast::StringInterner,
+    depth: usize,
+) -> String {
+    use crate::tast::core::TypeKind;
+    if depth > 24 {
+        return "...".to_string();
+    }
+    let kind = match type_table.borrow().get(id) {
+        Some(t) => t.kind.clone(),
+        None => return "<invalid-type>".to_string(),
+    };
+    let name_of = |symbol_id| {
+        symbol_table
+            .get_symbol(symbol_id)
+            .and_then(|sym| interner.get(sym.qualified_name.unwrap_or(sym.name)))
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "<unnamed>".to_string())
+    };
+    let form = |ctor: &str, path: String, args: &[TypeId]| {
+        let args: Vec<String> = args
+            .iter()
+            .map(|&a| render_type_constructor(a, type_table, symbol_table, interner, depth + 1))
+            .collect();
+        format!("{ctor}({path},[{}])", args.join(","))
+    };
+    match kind {
+        TypeKind::Void => form("TAbstract", "Void".into(), &[]),
+        TypeKind::Int => form("TAbstract", "Int".into(), &[]),
+        TypeKind::Float => form("TAbstract", "Float".into(), &[]),
+        TypeKind::Bool => form("TAbstract", "Bool".into(), &[]),
+        TypeKind::String => form("TInst", "String".into(), &[]),
+        TypeKind::Class {
+            symbol_id,
+            type_args,
+        }
+        | TypeKind::Interface {
+            symbol_id,
+            type_args,
+        } => form("TInst", name_of(symbol_id), &type_args),
+        TypeKind::Enum {
+            symbol_id,
+            type_args,
+        } => form("TEnum", name_of(symbol_id), &type_args),
+        TypeKind::Abstract {
+            symbol_id,
+            type_args,
+            ..
+        } => form("TAbstract", name_of(symbol_id), &type_args),
+        TypeKind::TypeAlias {
+            symbol_id,
+            type_args,
+            ..
+        } => form("TType", name_of(symbol_id), &type_args),
+        TypeKind::Array { element_type } => form("TInst", "Array".into(), &[element_type]),
+        TypeKind::Map {
+            key_type,
+            value_type,
+        } => form("TAbstract", "Map".into(), &[key_type, value_type]),
+        TypeKind::Optional { inner_type } => form("TAbstract", "Null".into(), &[inner_type]),
+        TypeKind::Dynamic => "TDynamic(null)".to_string(),
+        TypeKind::Unknown => "TMono(null)".to_string(),
+        TypeKind::TypeParameter { symbol_id, .. } => form("TInst", name_of(symbol_id), &[]),
+        TypeKind::GenericInstance {
+            base_type,
+            type_args,
+            ..
+        } => {
+            let base =
+                render_type_constructor(base_type, type_table, symbol_table, interner, depth + 1);
+            match base.find("(") {
+                Some(open) if base.ends_with(",[])") => {
+                    let ctor = &base[..open];
+                    let path = base[open + 1..base.len() - 4].to_string();
+                    form(ctor, path, &type_args)
+                }
+                _ => base,
+            }
+        }
+        _ => render_type(id, type_table, symbol_table, interner, depth),
+    }
+}
+
 pub(super) fn render_type(
     id: TypeId,
     type_table: &std::cell::RefCell<crate::tast::TypeTable>,

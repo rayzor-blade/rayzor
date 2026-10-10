@@ -698,9 +698,35 @@ impl MacroContext {
         // the `storeTypedExpr(typeExpr(e))` idiom actually needs.
         let source = MacroValue::Expr(Arc::new(expr.clone()));
         obj.insert("__source__".to_string(), source.clone());
-        let typed_def = self.typed_field_access(expr).unwrap_or(source);
+        let typed_def = match self.typed_field_access(expr) {
+            Some(def) => def,
+            None => self.typed_binop(expr, location).unwrap_or(source),
+        };
         obj.insert("expr".to_string(), typed_def);
         Ok(MacroValue::Object(Arc::new(obj)))
+    }
+
+    /// `TBinop(op, e1, e2)` for a binary operation, each operand typed in turn.
+    fn typed_binop(&mut self, expr: &parser::Expr, location: SourceLocation) -> Option<MacroValue> {
+        let parser::ExprKind::Binary { left, op, right } = &expr.kind else {
+            return None;
+        };
+        // `is` reifies as EIs, not EBinop.
+        if matches!(op, parser::BinaryOp::Is) {
+            return None;
+        }
+        let MacroValue::Enum(_, _, payload) = super::expr_adt::def_of(&expr.kind, expr.span)?
+        else {
+            return None;
+        };
+        let op = payload.first()?.clone();
+        let left = self.type_expr(left, location).ok()?;
+        let right = self.type_expr(right, location).ok()?;
+        Some(MacroValue::Enum(
+            Arc::from("TypedExprDef"),
+            Arc::from("TBinop"),
+            Arc::new(vec![op, left, right]),
+        ))
     }
 
     /// `TField(e, access)` for a field read, the typed shape macros inspect:
