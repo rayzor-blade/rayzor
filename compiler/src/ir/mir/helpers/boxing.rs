@@ -23,10 +23,14 @@ use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
     /// Array slot kinds: zero is boxed, builtins use their runtime tag, and
-    /// references carry their type ID above kind 6. Kind 7 nests an array layout.
+    /// references carry their type ID above kind 6. Kind 7 nests an array layout;
+    /// kind 8 is an unboxed `Null<Int>`.
     pub(crate) fn erased_array_slot_layout(&self, ty: TypeId, depth: usize) -> u64 {
         if depth >= 8 {
             return 0;
+        }
+        if self.is_null_int_type(ty) {
+            return 8;
         }
         let ty = self.resolve_storage_type(ty);
         match self.type_table.get(ty).map(|t| &t.kind) {
@@ -2093,8 +2097,8 @@ impl<'a> HirToMirContext<'a> {
         )
     }
 
-    /// Whether an array type's elements are `Null<Int>`. Its slots hold boxes
-    /// (or null), as the runtime reads them.
+    /// Whether an array type's elements are `Null<Int>`. Its slots hold the
+    /// `NullInt` itself, so a non-null element shares `Array<Int>`'s layout.
     pub(crate) fn array_of_null_int(&self, array_ty: TypeId) -> bool {
         match self
             .type_table
@@ -2106,10 +2110,10 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// `reg` as the box an `Array<Null<Int>>` slot holds.
-    pub(crate) fn null_int_slot_box(&mut self, reg: IrId) -> Option<IrId> {
-        let value = self.to_null_int(reg)?;
-        self.null_int_to_dynamic(value)
+    /// A value of HIR type `ty` as the bits an `Array<Null<Int>>` slot holds.
+    pub(crate) fn null_int_slot_bits(&mut self, reg: IrId, ty: TypeId) -> Option<IrId> {
+        let value = self.to_null_int_typed(reg, ty)?;
+        self.builder.build_bitcast(value, IrType::I64)
     }
 
     /// Whether a type is held as `IrType::NullInt`. Only an Optional, an

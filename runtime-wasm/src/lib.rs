@@ -990,6 +990,13 @@ pub extern "C" fn haxe_null_int_to_dynamic(value: i64) -> i32 {
     haxe_box_int_ptr(value as i32)
 }
 
+/// An erased slot read as an unboxed `Null<Int>`; slots are i32 on wasm, so
+/// the value is the Int.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_null_int_from_slot(bits: i64) -> i64 {
+    bits
+}
+
 /// A Dynamic read as an unboxed `Null<Int>`: null or a null box is
 /// `NULL_INT`, a box gives its Int, a raw scalar is that Int. Same
 /// heuristic as `haxe_coerce_dynamic_to_int`.
@@ -2012,6 +2019,46 @@ pub extern "C" fn haxe_array_pop_i64(arr: i32) -> i32 {
         *h.add(2) = len - 1;
         val
     }
+}
+
+/// `haxe_array_set_i64` for an `Array<Null<Int>>`: an 8-byte slot keeps
+/// the whole value, `NULL_INT` included; holes read as 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_set_null_int(arr: i32, idx: i32, val: i64) -> i32 {
+    let result = haxe_array_set_i64(arr, idx, val as i32);
+    if arr != 0 && idx >= 0 {
+        unsafe {
+            let (data_ptr, len, _, elem_size) = read_array(arr);
+            if (idx as u32) < len && (elem_size == 0 || elem_size >= 8) {
+                *((data_ptr + idx as u32 * 8 + 4) as *mut i32) = (val >> 32) as i32;
+            }
+        }
+    }
+    result
+}
+
+/// `pop` of an `Array<Null<Int>>`: `NULL_INT` when empty.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_pop_null_int(arr: i32) -> i64 {
+    if arr == 0 || unsafe { read_array(arr).1 } == 0 {
+        return NULL_INT;
+    }
+    i64::from(haxe_array_pop_i64(arr))
+}
+
+/// `shift` of an `Array<Null<Int>>`: `NULL_INT` when empty.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_shift_null_int(arr: i32) -> i64 {
+    if arr == 0 || unsafe { read_array(arr).1 } == 0 {
+        return NULL_INT;
+    }
+    i64::from(haxe_array_shift(arr))
+}
+
+/// `resize` of an `Array<Null<Int>>`; new slots read as 0 here.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_resize_null_int(arr: i32, new_len: i32) {
+    haxe_array_resize(arr, new_len);
 }
 
 /// Pop the last element as a boxed pointer. Returns 0 if empty.

@@ -30,6 +30,8 @@ enum CallMethodSlots {
     Float,
     /// Dynamic or `Null<T>`: a box, or null.
     Boxed,
+    /// `Null<Int>`: the `NullInt` itself.
+    NullInt,
     /// Anything else: read as slot bits.
     Erased,
 }
@@ -69,11 +71,14 @@ impl<'a> HirToMirContext<'a> {
         else {
             return CallMethodSlots::Erased;
         };
+        if self.is_null_int_type(element) {
+            return CallMethodSlots::NullInt;
+        }
         match self.type_table.get(element).map(|t| &t.kind) {
             Some(TypeKind::Int | TypeKind::Bool) => CallMethodSlots::Int,
             Some(TypeKind::Float) => CallMethodSlots::Float,
             Some(TypeKind::Dynamic | TypeKind::Unknown | TypeKind::Optional { .. })
-                if matches!(self.convert_type(element), IrType::Ptr(_) | IrType::NullInt) =>
+                if matches!(self.convert_type(element), IrType::Ptr(_)) =>
             {
                 CallMethodSlots::Boxed
             }
@@ -94,8 +99,19 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Element `idx` of callMethod's arguments array as raw slot bits: a box
-    /// in a mixed array gives up its payload, anything else is read as is.
-    fn call_method_slot(&mut self, array: IrId, idx: usize) -> Option<IrId> {
+    /// in a mixed array gives up its payload, a `NullInt` its Int, anything
+    /// else is read as is.
+    fn call_method_slot(
+        &mut self,
+        array: IrId,
+        idx: usize,
+        slots: CallMethodSlots,
+    ) -> Option<IrId> {
+        if slots == CallMethodSlots::NullInt {
+            let raw = self.call_method_raw(array, idx)?;
+            let value = self.builder.build_bitcast(raw, IrType::NullInt)?;
+            return self.null_int_to_ir(value, &IrType::I64);
+        }
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let unbox = self.get_or_register_extern_function(
             "haxe_unbox_erased_return",
@@ -109,7 +125,8 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Element `idx` of callMethod's arguments array for a `Null<Int>`
-    /// parameter: an Int slot sign-extends, any other slot is a box or null.
+    /// parameter: an Int slot sign-extends, a `NullInt` slot is taken as is,
+    /// any other slot is a box or null.
     fn call_method_null_int(
         &mut self,
         array: IrId,
@@ -117,8 +134,10 @@ impl<'a> HirToMirContext<'a> {
         slots: CallMethodSlots,
     ) -> Option<IrId> {
         let raw = self.call_method_raw(array, idx)?;
-        if slots == CallMethodSlots::Int {
-            return self.to_null_int(raw);
+        match slots {
+            CallMethodSlots::Int => return self.to_null_int(raw),
+            CallMethodSlots::NullInt => return self.builder.build_bitcast(raw, IrType::NullInt),
+            _ => {}
         }
         let as_ptr = self
             .builder
@@ -146,6 +165,10 @@ impl<'a> HirToMirContext<'a> {
             return Some(None);
         }
         let raw = self.call_method_raw(array, idx)?;
+        if slots == CallMethodSlots::NullInt {
+            let value = self.builder.build_bitcast(raw, IrType::NullInt)?;
+            return Some(self.null_int_to_ir(value, target));
+        }
         let (value, ty) = match slots {
             CallMethodSlots::Int => (raw, IrType::I64),
             CallMethodSlots::Float => (self.builder.build_bitcast(raw, IrType::F64)?, IrType::F64),
@@ -204,9 +227,13 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder.switch_to_block(have);
         // A null in an array of boxes is a skipped argument, as in a direct call.
-        if slots == CallMethodSlots::Boxed {
+        if matches!(slots, CallMethodSlots::Boxed | CallMethodSlots::NullInt) {
             let raw = self.call_method_raw(array, idx)?;
-            let zero = self.builder.build_const(IrValue::I64(0))?;
+            let zero = if slots == CallMethodSlots::NullInt {
+                self.builder.build_const(IrValue::null_int())?
+            } else {
+                self.builder.build_const(IrValue::I64(0))?
+            };
             let given = self
                 .builder
                 .build_cmp(crate::ir::CompareOp::Ne, raw, zero)?;
@@ -385,7 +412,7 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 return Some(value);
                             }
-                            let raw_val = this.call_method_slot(args_array_ptr, idx)?;
+                            let raw_val = this.call_method_slot(args_array_ptr, idx, slots)?;
                             let coerced = match target_ty {
                                 IrType::I64 => Some(raw_val),
                                 IrType::F64 => this.builder.build_bitcast(raw_val, IrType::F64),
@@ -493,7 +520,7 @@ impl<'a> HirToMirContext<'a> {
                     {
                         return Some(value);
                     }
-                    let raw_val = this.call_method_slot(args_array_ptr, idx)?;
+                    let raw_val = this.call_method_slot(args_array_ptr, idx, slots)?;
                     Some(
                         this.coerce_from_i64(raw_val, *param_ty_id)
                             .unwrap_or(raw_val),

@@ -1381,6 +1381,8 @@ impl<'a> HirToMirContext<'a> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let idx64 = match self.builder.get_register_type(idx) {
             Some(IrType::I64) | Some(IrType::U64) => idx,
+            // A `Null<Int>` index is its Int: null reads as 0.
+            Some(IrType::NullInt) => self.null_int_to_ir(idx, &IrType::I64)?,
             Some(from) => self.builder.build_cast(idx, from, IrType::I64)?,
             None => idx,
         };
@@ -1390,8 +1392,10 @@ impl<'a> HirToMirContext<'a> {
         let in_bounds = self.builder.build_cmp(CompareOp::ULt, idx64, len)?;
 
         // Slots are always 8 bytes, so load the storage type and narrow after
-        // (Int→I32, Bool).
-        let (load_type, target_type) = {
+        // (Int→I32, Bool). A `Null<Int>` slot holds the `NullInt` itself.
+        let (load_type, target_type) = if self.is_null_int_type(ty) {
+            (IrType::NullInt, IrType::NullInt)
+        } else {
             let type_table = self.type_table;
             match type_table.get(ty).map(|ti| &ti.kind) {
                 Some(crate::tast::TypeKind::String) => {
@@ -1413,6 +1417,7 @@ impl<'a> HirToMirContext<'a> {
             }
         };
         let zero = match &load_type {
+            IrType::NullInt => self.builder.build_null_int()?,
             IrType::F64 => self.builder.build_const(IrValue::F64(0.0))?,
             IrType::Ptr(_) => {
                 let null = self.builder.build_const(IrValue::Null)?;
@@ -1439,13 +1444,6 @@ impl<'a> HirToMirContext<'a> {
         self.builder
             .add_phi_incoming(merge, value, check_block, zero)?;
 
-        // An `Array<Null<Int>>` slot holds a box or null; out of bounds is null.
-        if self.is_null_int_type(ty) {
-            let as_ptr = self
-                .builder
-                .build_bitcast(value, IrType::Ptr(Box::new(IrType::U8)))?;
-            return self.to_null_int(as_ptr);
-        }
         if load_type != target_type {
             self.builder.build_cast(value, load_type, target_type)
         } else {

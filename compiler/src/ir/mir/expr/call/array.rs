@@ -46,6 +46,12 @@ impl<'a> HirToMirContext<'a> {
             .get_symbol(*symbol)
             .and_then(|s| self.string_interner.get(s.name))
             .unwrap_or("?");
+        if *is_method
+            && Self::null_int_array_method(vname, args.len())
+            && self.array_of_null_int(args[0].ty)
+        {
+            return self.lower_null_int_array_call(vname, args);
+        }
         if matches!(vname, "contains" | "indexOf" | "lastIndexOf" | "remove")
             && *is_method
             && args.len() >= 2
@@ -199,21 +205,6 @@ impl<'a> HirToMirContext<'a> {
                     })
                     .unwrap_or((false, false))
             };
-            // An `Array<Null<Int>>` slot holds a box or null.
-            if self.array_of_null_int(args[0].ty) {
-                let arr = self.lower_expression(&args[0])?;
-                let value = self.lower_expression(&args[1])?;
-                let boxed = self.null_int_slot_box(value)?;
-                let slot = self.builder.build_bitcast(boxed, IrType::I64)?;
-                let push = self.get_or_register_extern_function(
-                    "haxe_array_push_i64",
-                    vec![IrType::Ptr(Box::new(IrType::I64)), IrType::I64],
-                    IrType::Void,
-                );
-                return self
-                    .builder
-                    .build_call_direct(push, vec![arr, slot], IrType::Void);
-            }
             // Dynamic string slots need a tag for value-based equality.
             if elem_is_dynamic && self.convert_type(args[1].ty) == IrType::String {
                 let arr = self.lower_expression(&args[0])?;
@@ -401,7 +392,10 @@ impl<'a> HirToMirContext<'a> {
                             })
                         })
                 });
-            let elem_tag: i32 = {
+            let null_int_elements = self.array_of_null_int(args[0].ty);
+            let elem_tag: i32 = if null_int_elements {
+                rayzor_runtime::type_system::ValueTag::NullInt as i32
+            } else {
                 let type_table = self.type_table;
                 type_table
                     .get(args[0].ty)
@@ -487,5 +481,143 @@ impl<'a> HirToMirContext<'a> {
         }
         *fell_through = true;
         None
+    }
+
+    /// The `Array<Null<Int>>` methods `lower_null_int_array_call` lowers, by
+    /// name and argument count (the receiver included).
+    fn null_int_array_method(name: &str, argc: usize) -> bool {
+        matches!(
+            (name, argc),
+            ("push" | "unshift" | "contains" | "remove" | "resize", 2)
+                | ("indexOf" | "lastIndexOf", 2 | 3)
+                | ("insert", 3)
+                | ("pop" | "shift" | "toString", 1)
+        )
+    }
+
+    /// An `Array<Null<Int>>` method: an element crosses as its slot bits, so
+    /// a search compares null with null and nothing else; `pop`/`shift` on
+    /// an empty array and slots opened by `resize` read as null, and
+    /// `toString` prints them as null.
+    fn lower_null_int_array_call(&mut self, name: &str, args: &[HirExpr]) -> Option<IrId> {
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        let arr = self.lower_expression(&args[0])?;
+        let element = |this: &mut Self, arg: &HirExpr| -> Option<IrId> {
+            let reg = this.lower_expression(arg)?;
+            this.null_int_slot_bits(reg, arg.ty)
+        };
+        let int_arg = |this: &mut Self, arg: &HirExpr, want: IrType| -> Option<IrId> {
+            let reg = this.lower_expression(arg)?;
+            if this.builder.get_register_type(reg) == Some(IrType::NullInt) {
+                return this.null_int_to_ir(reg, &want);
+            }
+            this.coerce_reg_to(reg, &want)
+        };
+        match name {
+            "push" => {
+                let bits = element(self, &args[1])?;
+                let push = self.get_or_register_extern_function(
+                    "haxe_array_push_i64",
+                    vec![IrType::Ptr(Box::new(IrType::I64)), IrType::I64],
+                    IrType::Void,
+                );
+                self.builder
+                    .build_call_direct(push, vec![arr, bits], IrType::Void);
+                // The new length, read from the header.
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let len_off = self.builder.build_const(IrValue::I64(8))?;
+                let len_ptr = self.builder.build_ptr_add(arr, len_off, ptr_u8)?;
+                let len = self.builder.build_load(len_ptr, IrType::I64)?;
+                self.builder.build_cast(len, IrType::I64, IrType::I32)
+            }
+            "pop" | "shift" => {
+                let runtime = if name == "pop" {
+                    "haxe_array_pop_null_int"
+                } else {
+                    "haxe_array_shift_null_int"
+                };
+                let function =
+                    self.get_or_register_extern_function(runtime, vec![ptr_void], IrType::NullInt);
+                self.builder
+                    .build_call_direct(function, vec![arr], IrType::NullInt)
+            }
+            "toString" => {
+                let string_ptr = IrType::Ptr(Box::new(IrType::String));
+                let function = self.get_or_register_extern_function(
+                    "haxe_array_to_string_i64",
+                    vec![ptr_void],
+                    string_ptr.clone(),
+                );
+                self.builder
+                    .build_call_direct(function, vec![arr], string_ptr)
+            }
+            "unshift" => {
+                let bits = element(self, &args[1])?;
+                let unshift = self.get_or_register_extern_function(
+                    "haxe_array_unshift",
+                    vec![ptr_void, IrType::I64],
+                    IrType::Void,
+                );
+                self.builder
+                    .build_call_direct(unshift, vec![arr, bits], IrType::Void)
+            }
+            "insert" => {
+                let pos = int_arg(self, &args[1], IrType::I32)?;
+                let bits = element(self, &args[2])?;
+                let insert = self.register_stdlib_mir_forward_ref(
+                    "array_insert",
+                    vec![ptr_void, IrType::I32, IrType::I64],
+                    IrType::Void,
+                );
+                self.builder
+                    .build_call_direct(insert, vec![arr, pos, bits], IrType::Void)
+            }
+            "resize" => {
+                let len = int_arg(self, &args[1], IrType::I64)?;
+                let resize = self.get_or_register_extern_function(
+                    "haxe_array_resize_null_int",
+                    vec![ptr_void, IrType::I64],
+                    IrType::Void,
+                );
+                self.builder
+                    .build_call_direct(resize, vec![arr, len], IrType::Void)
+            }
+            "remove" => {
+                let bits = element(self, &args[1])?;
+                let remove = self.get_or_register_extern_function(
+                    "haxe_array_remove_value",
+                    vec![ptr_void, IrType::I64],
+                    IrType::Bool,
+                );
+                self.builder
+                    .build_call_direct(remove, vec![arr, bits], IrType::Bool)
+            }
+            _ => {
+                // indexOf, lastIndexOf, contains.
+                let bits = element(self, &args[1])?;
+                let (runtime, default_from) = if name == "lastIndexOf" {
+                    ("haxe_array_last_index_of", i64::MAX)
+                } else {
+                    ("haxe_array_index_of", 0)
+                };
+                let from = match args.get(2) {
+                    Some(arg) => int_arg(self, arg, IrType::I64)?,
+                    None => self.builder.build_const(IrValue::I64(default_from))?,
+                };
+                let search = self.get_or_register_extern_function(
+                    runtime,
+                    vec![ptr_void, IrType::I64, IrType::I64],
+                    IrType::I64,
+                );
+                let index =
+                    self.builder
+                        .build_call_direct(search, vec![arr, bits, from], IrType::I64)?;
+                if name == "contains" {
+                    let zero = self.builder.build_const(IrValue::I64(0))?;
+                    return self.builder.build_cmp(CompareOp::Ge, index, zero);
+                }
+                self.builder.build_cast(index, IrType::I64, IrType::I32)
+            }
+        }
     }
 }

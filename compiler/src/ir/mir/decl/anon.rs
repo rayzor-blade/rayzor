@@ -23,6 +23,17 @@ use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
     pub(crate) fn anon_field_descriptor(&self, name: &str, ty: TypeId) -> String {
+        // A `Null<scalar>` slot holds a box or null, which Dynamic readers
+        // take as it is.
+        if let Some(TypeKind::Optional { inner_type }) = self
+            .type_table
+            .get(self.resolve_through_aliases(ty))
+            .map(|t| &t.kind)
+            && self.optional_inner_is_boxable_primitive(*inner_type)
+        {
+            let tag = rayzor_runtime::type_system::TYPE_DYNAMIC_TOKEN.0;
+            return format!("{name}:{tag}");
+        }
         let tag = self.runtime_type_id(ty);
         match self
             .type_table

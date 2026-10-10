@@ -155,6 +155,10 @@ register_symbol!(
     "haxe_array_set_null",
     crate::haxe_array::haxe_array_set_null
 );
+register_symbol!(
+    "haxe_array_set_null_int",
+    crate::haxe_array::haxe_array_set_null_int
+);
 register_symbol!("haxe_array_get_ptr", crate::haxe_array::haxe_array_get_ptr);
 
 // Modification
@@ -162,6 +166,10 @@ register_symbol!("haxe_array_push", crate::haxe_array::haxe_array_push);
 register_symbol!("haxe_array_pop", crate::haxe_array::haxe_array_pop);
 register_symbol!("haxe_array_pop_i64", crate::haxe_array::haxe_array_pop_i64);
 register_symbol!("haxe_array_pop_ptr", crate::haxe_array::haxe_array_pop_ptr);
+register_symbol!(
+    "haxe_array_pop_null_int",
+    crate::haxe_array::haxe_array_pop_null_int
+);
 register_symbol!("haxe_array_insert", crate::haxe_array::haxe_array_insert);
 register_symbol!("haxe_array_remove", crate::haxe_array::haxe_array_remove);
 register_symbol!(
@@ -225,8 +233,16 @@ register_symbol!(
     "haxe_array_shift_ptr",
     crate::haxe_array::haxe_array_shift_ptr
 );
+register_symbol!(
+    "haxe_array_shift_null_int",
+    crate::haxe_array::haxe_array_shift_null_int
+);
 register_symbol!("haxe_array_unshift", crate::haxe_array::haxe_array_unshift);
 register_symbol!("haxe_array_resize", crate::haxe_array::haxe_array_resize);
+register_symbol!(
+    "haxe_array_resize_null_int",
+    crate::haxe_array::haxe_array_resize_null_int
+);
 
 // String representation
 register_symbol!(
@@ -532,6 +548,10 @@ register_symbol!(
 register_symbol!(
     "haxe_string_char_code_at_ptr",
     crate::haxe_sys::haxe_string_char_code_at_ptr
+);
+register_symbol!(
+    "haxe_string_char_code_at_null_int",
+    crate::haxe_sys::haxe_string_char_code_at_null_int
 );
 register_symbol!(
     "haxe_string_index_of_ptr",
@@ -1121,6 +1141,10 @@ register_symbol!(
 register_symbol!(
     "haxe_null_int_from_dynamic",
     crate::type_system::haxe_null_int_from_dynamic
+);
+register_symbol!(
+    "haxe_null_int_from_slot",
+    crate::type_system::haxe_null_int_from_slot
 );
 register_symbol!(
     "haxe_null_int_to_string",

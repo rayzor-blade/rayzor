@@ -130,8 +130,17 @@ impl<'a> HirToMirContext<'a> {
             })
         };
         let elem_iface_sym = element_type_id.and_then(|et| self.get_interface_symbol(et));
-        // An `Array<Null<Int>>` slot holds a box or null.
-        let null_int_elements = element_type_id.is_some_and(|et| self.is_null_int_type(et));
+        // An `Array<Null<Int>>` slot holds the `NullInt` itself. Int elements
+        // beside a null or a `Null<Int>` take that layout too: `[1, null]` is
+        // an `Array<Null<Int>>` even where it was typed `Array<Int>`, and an
+        // `Array<Int>` reads a non-null slot the same way.
+        let null_int_elements = element_type_id.is_some_and(|et| {
+            self.is_null_int_type(et)
+                || (self.optional_inner_is_null_int(et)
+                    && elements.iter().any(|e| {
+                        matches!(e.kind, HirExprKind::Null) || self.is_null_int_type(e.ty)
+                    }))
+        });
         // An `Array<Dynamic>` holds references as boxes. Scalars stay raw: the
         // reflection helpers and erased-generic readers take them that way.
         let dynamic_elements = element_type_id.is_some_and(|et| {
@@ -345,7 +354,7 @@ impl<'a> HirToMirContext<'a> {
                             v
                         };
                         let v = if null_int_elements {
-                            self.null_int_slot_box(v)?
+                            self.null_int_slot_bits(v, elem.ty)?
                         } else {
                             v
                         };
@@ -1041,13 +1050,42 @@ impl<'a> HirToMirContext<'a> {
 
         let total_field_count = named_fields.len();
 
+        // Map field name → declared target type (from the anon typedef), so a
+        // class value assigned to an interface-typed field is wrapped in the
+        // interface fat pointer (invariant: interface-typed anon fields hold a
+        // fat pointer, never a raw class object).
+        let field_target_types: BTreeMap<String, TypeId> = {
+            let type_table = self.type_table;
+            match type_table.get(resolved_ty).map(|t| &t.kind) {
+                Some(TypeKind::Anonymous {
+                    fields: anon_fields,
+                }) => anon_fields
+                    .iter()
+                    .filter_map(|af| {
+                        self.string_interner
+                            .get(af.name)
+                            .map(|n| (n.to_string(), af.type_id))
+                    })
+                    .collect(),
+                _ => BTreeMap::new(),
+            }
+        };
+
         // Build shape descriptor string: "name1:type_id1,name2:type_id2,..."
         // Type IDs: 0=Void, 1=Null, 2=Bool, 3=Int, 4=Float, 5=String
         let descriptor = {
             let mut parts = Vec::with_capacity(named_fields.len());
             for (name, source) in &named_fields {
                 parts.push(match source {
-                    Some(orig_idx) => self.anon_field_descriptor(name, fields[*orig_idx].1.ty),
+                    // A `Null<Int>` target holds the box the store below makes.
+                    Some(orig_idx) => {
+                        let ty = field_target_types
+                            .get(name)
+                            .copied()
+                            .filter(|t| self.is_null_int_type(*t))
+                            .unwrap_or(fields[*orig_idx].1.ty);
+                        self.anon_field_descriptor(name, ty)
+                    }
                     None => format!("{name}:1"),
                 });
             }
@@ -1084,27 +1122,6 @@ impl<'a> HirToMirContext<'a> {
             vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32, IrType::I64],
             IrType::Void,
         );
-
-        // Map field name → declared target type (from the anon typedef), so a
-        // class value assigned to an interface-typed field is wrapped in the
-        // interface fat pointer (invariant: interface-typed anon fields hold a
-        // fat pointer, never a raw class object).
-        let field_target_types: BTreeMap<String, TypeId> = {
-            let type_table = self.type_table;
-            match type_table.get(resolved_ty).map(|t| &t.kind) {
-                Some(TypeKind::Anonymous {
-                    fields: anon_fields,
-                }) => anon_fields
-                    .iter()
-                    .filter_map(|af| {
-                        self.string_interner
-                            .get(af.name)
-                            .map(|n| (n.to_string(), af.type_id))
-                    })
-                    .collect(),
-                _ => BTreeMap::new(),
-            }
-        };
 
         // Field values are evaluated in source order; the stores below go by
         // sorted index.
@@ -1288,6 +1305,11 @@ impl<'a> HirToMirContext<'a> {
                                     vec![expr_val],
                                     string_ptr_ty.clone(),
                                 )?
+                            }
+                            Some(TypeKind::Array { element_type })
+                                if self.is_null_int_type(*element_type) =>
+                            {
+                                self.build_array_to_string(expr_val, *element_type)?
                             }
                             Some(TypeKind::Array { .. }) => {
                                 // Array<T> → haxe_array_to_string

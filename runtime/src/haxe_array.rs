@@ -400,6 +400,35 @@ pub extern "C" fn haxe_array_set_null(arr: *mut HaxeArray, index: usize) -> bool
     }
 }
 
+/// Fill slots `from..to` with `NULL_INT`, the null of an `Array<Null<Int>>`.
+unsafe fn fill_null_int(arr: *mut HaxeArray, from: usize, to: usize) {
+    unsafe {
+        let arr_ref = &mut *arr;
+        if arr_ref.elem_size != 8 {
+            return;
+        }
+        let data = arr_ref.ptr as *mut i64;
+        for i in from..to.min(arr_ref.len) {
+            *data.add(i) = crate::type_system::NULL_INT;
+        }
+    }
+}
+
+/// `haxe_array_set_i64` for an `Array<Null<Int>>`: slots a store past the
+/// end opens read as null.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_set_null_int(arr: *mut HaxeArray, index: usize, value: i64) -> bool {
+    if arr.is_null() {
+        return false;
+    }
+    let old_len = unsafe { (*arr).len };
+    let stored = haxe_array_set_i64(arr, index, value);
+    if stored && index > old_len {
+        unsafe { fill_null_int(arr, old_len, index) };
+    }
+    stored
+}
+
 /// Get pointer to element (for direct access)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_get_ptr(arr: *const HaxeArray, index: usize) -> *mut u8 {
@@ -617,6 +646,15 @@ pub extern "C" fn haxe_array_pop_ptr(arr: *mut HaxeArray) -> *mut u8 {
             *(elem_ptr as *const *mut u8)
         }
     }
+}
+
+/// `pop` of an `Array<Null<Int>>`: `NULL_INT` when empty.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_pop_null_int(arr: *mut HaxeArray) -> i64 {
+    if arr.is_null() || unsafe { (*arr).len } == 0 {
+        return crate::type_system::NULL_INT;
+    }
+    haxe_array_pop_i64(arr)
 }
 
 /// Insert element at index
@@ -1048,6 +1086,8 @@ pub extern "C" fn haxe_array_join_typed(
                     .filter(|d| d.type_id == crate::type_system::TYPE_STRING)
                     .map(|d| d.value_ptr as *mut HaxeString)
                     .unwrap_or(value as *mut HaxeString)
+            } else if elem_tag == 1 && value == crate::type_system::NULL_INT {
+                crate::haxe_sys::haxe_null_int_to_string(value)
             } else {
                 crate::haxe_sys::haxe_value_to_string_by_tag(value, elem_tag)
             };
@@ -1421,6 +1461,15 @@ pub extern "C" fn haxe_array_shift_ptr(arr: *mut HaxeArray) -> *mut u8 {
     }
 }
 
+/// `shift` of an `Array<Null<Int>>`: `NULL_INT` when empty.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_shift_null_int(arr: *mut HaxeArray) -> i64 {
+    if arr.is_null() || unsafe { (*arr).len } == 0 {
+        return crate::type_system::NULL_INT;
+    }
+    haxe_array_shift(arr)
+}
+
 /// unshift: add element at the beginning of the array
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_unshift(arr: *mut HaxeArray, value: i64) {
@@ -1626,6 +1675,17 @@ pub extern "C" fn haxe_array_resize(arr: *mut HaxeArray, new_len: i64) {
     }
 }
 
+/// `resize` of an `Array<Null<Int>>`: new slots read as null.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_resize_null_int(arr: *mut HaxeArray, new_len: i64) {
+    if arr.is_null() || new_len < 0 {
+        return;
+    }
+    let old_len = unsafe { (*arr).len };
+    haxe_array_resize(arr, new_len);
+    unsafe { fill_null_int(arr, old_len, new_len as usize) };
+}
+
 /// toString for an Array whose elements are all `f64` — `Array<Float>`
 /// or `Array<rayzor.Double>`. Renders each 8-byte slot via the standard
 /// `Std.string(f64)` formatter rather than the generic
@@ -1638,10 +1698,19 @@ pub extern "C" fn haxe_array_resize(arr: *mut HaxeArray, new_len: i64) {
 ///
 /// The untyped formatter has to guess what a raw slot holds and reads 0 as
 /// `null`, so `[0, 2, 4]` printed `[null, 2, 4]`. When the element type is
-/// known there is nothing to guess.
+/// known there is nothing to guess. `NULL_INT` is never a sign-extended Int:
+/// it is the null a `[1, null]` literal stores.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_to_string_i64(arr: *const HaxeArray) -> *mut HaxeString {
-    unsafe { array_to_string_typed(arr, |v| v.to_string()) }
+    unsafe {
+        array_to_string_typed(arr, |v| {
+            if v == crate::type_system::NULL_INT {
+                "null".to_string()
+            } else {
+                v.to_string()
+            }
+        })
+    }
 }
 
 /// `toString` for an array whose element type is statically `Bool`.
@@ -1998,7 +2067,11 @@ pub(crate) fn box_erased_array_slot(value: u64, layout: u64) -> *mut u8 {
     use crate::type_system::*;
     match layout & 0xff {
         2 => haxe_box_bool_ptr(value != 0),
+        // `NULL_INT` is never a sign-extended Int: an `Array<Int>` typed
+        // `[1, null]` literal holds it for its null.
+        3 if value as i64 == NULL_INT => std::ptr::null_mut(),
         3 => haxe_box_int_ptr(value as i64),
+        8 => haxe_null_int_to_dynamic(value as i64),
         4 => haxe_box_float_ptr(f64::from_bits(value)),
         5 if value != 0 => haxe_box_reference_ptr(value as *mut u8, TYPE_STRING.0),
         6 if value != 0 => haxe_box_reference_ptr(value as *mut u8, (layout >> 8) as u32),
@@ -2033,7 +2106,49 @@ pub extern "C" fn haxe_array_set_erased(array: *mut u8, index: i64, value: *mut 
             3 => haxe_array_set_i64(array, index, haxe_coerce_dynamic_to_int(value)),
             4 => haxe_array_set_f64(array, index, haxe_unbox_float_ptr(value)),
             5..=7 => haxe_array_set_i64(array, index, haxe_unbox_reference_ptr(value) as i64),
+            8 => haxe_array_set_null_int(array, index, haxe_null_int_from_dynamic(value)),
             _ => haxe_array_set_i64(array, index, value as i64),
         }
+    }
+}
+
+#[cfg(test)]
+mod null_int_tests {
+    use super::*;
+    use crate::type_system::NULL_INT;
+
+    fn slots(arr: &HaxeArray) -> Vec<i64> {
+        (0..arr.len)
+            .map(|i| unsafe { *(arr.ptr as *const i64).add(i) })
+            .collect()
+    }
+
+    #[test]
+    fn holes_pops_and_resizes_read_as_null() {
+        let mut arr = HaxeArray {
+            ptr: ptr::null_mut(),
+            len: 0,
+            cap: 0,
+            elem_size: 0,
+            flags: 0,
+        };
+        haxe_array_new(&mut arr, 8);
+        assert!(haxe_array_set_null_int(&mut arr, 2, 5));
+        assert_eq!(slots(&arr), [NULL_INT, NULL_INT, 5]);
+        haxe_array_resize_null_int(&mut arr, 4);
+        assert_eq!(slots(&arr), [NULL_INT, NULL_INT, 5, NULL_INT]);
+        assert_eq!(haxe_array_shift_null_int(&mut arr), NULL_INT);
+        assert_eq!(haxe_array_pop_null_int(&mut arr), NULL_INT);
+        assert_eq!(haxe_array_pop_null_int(&mut arr), 5);
+        assert_eq!(haxe_array_pop_null_int(&mut arr), NULL_INT);
+        assert_eq!(haxe_array_pop_null_int(&mut arr), NULL_INT);
+        assert_eq!(haxe_array_shift_null_int(&mut arr), NULL_INT);
+    }
+
+    #[test]
+    fn null_int_slots_box_as_null_or_int() {
+        assert!(box_erased_array_slot(NULL_INT as u64, 8).is_null());
+        let boxed = box_erased_array_slot(-4i64 as u64, 8);
+        assert_eq!(crate::type_system::haxe_unbox_int_ptr(boxed), -4);
     }
 }

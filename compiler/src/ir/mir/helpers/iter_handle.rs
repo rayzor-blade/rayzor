@@ -1218,7 +1218,7 @@ impl<'a> HirToMirContext<'a> {
     pub(super) fn iter_elem_from_i64(&mut self, value: IrId, target: &IrType) -> Option<IrId> {
         match target {
             IrType::I64 => Some(value),
-            // A `Null<Int>` slot holds a box or null.
+            // A box, null, a raw Int or an `Array<Null<Int>>` slot's `NullInt`.
             IrType::NullInt => {
                 let as_ptr = self
                     .builder
@@ -1244,6 +1244,10 @@ impl<'a> HirToMirContext<'a> {
         ty: TypeId,
         target: &IrType,
     ) -> Option<IrId> {
+        // An `Array<Null<Int>>` slot holds the `NullInt` itself.
+        if self.is_null_int_type(ty) {
+            return self.builder.build_bitcast(value, IrType::NullInt);
+        }
         let generic_target = self.convert_type_or_type_var(ty, &self.current_type_param_names());
         let target = if matches!(generic_target, IrType::TypeVar(_)) {
             &generic_target

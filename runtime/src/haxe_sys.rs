@@ -353,8 +353,9 @@ fn format_array_slot(val: i64) -> String {
     // came from a `null` literal that the compiler stored as a raw
     // null pointer. Showing `null` here instead of `0` is right almost
     // every time; pure `Array<Int>` containing literal `0` is rare and
-    // its formatting is a known compromise of this heuristic.
-    if val == 0 {
+    // its formatting is a known compromise of this heuristic. `NULL_INT`
+    // is an `Array<Null<Int>>` null.
+    if val == 0 || val == crate::type_system::NULL_INT {
         return "null".to_string();
     }
 
@@ -848,6 +849,15 @@ pub extern "C" fn haxe_string_char_code_at_ptr(s: *const HaxeString, index: i64)
             return -1; // null
         }
         *s_ref.ptr.add(index as usize) as i64
+    }
+}
+
+/// `String.charCodeAt` as an unboxed `Null<Int>`: `NULL_INT` out of range.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_string_char_code_at_null_int(s: *const HaxeString, index: i32) -> i64 {
+    match haxe_string_char_code_at_ptr(s, i64::from(index)) {
+        -1 => crate::type_system::NULL_INT,
+        code => code,
     }
 }
 

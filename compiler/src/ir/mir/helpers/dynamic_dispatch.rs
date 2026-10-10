@@ -303,10 +303,13 @@ impl<'a> HirToMirContext<'a> {
             arg_regs.push(self.maybe_box_for_extern_call(*reg, &actual, &ptr_u8)?);
         }
         let param_types: Vec<IrType> = arg_regs.iter().map(|_| ptr_u8.clone()).collect();
-        let ret = if call.has_return {
-            ptr_u8.clone()
-        } else {
+        // A `Null<Int>` comes back unboxed, not as a pointer.
+        let ret = if !call.has_return {
             IrType::Void
+        } else if call.return_type == Some(crate::stdlib::IrTypeDescriptor::NullInt) {
+            IrType::NullInt
+        } else {
+            ptr_u8.clone()
         };
         let func = self.get_or_register_extern_function(runtime_name, param_types, ret.clone());
         self.builder.build_call_direct(func, arg_regs, ret)

@@ -377,6 +377,7 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         // (boxing retains).
         "haxe_string_length"
         | "haxe_string_char_code_at_ptr"
+        | "haxe_string_char_code_at_null_int"
         | "haxe_string_compare"
         | "haxe_string_index_of_ptr"
         | "haxe_string_last_index_of_ptr"

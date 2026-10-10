@@ -1519,6 +1519,14 @@ impl<'a> AstLowering<'a> {
                                 .borrow_mut()
                                 .create_function_type(vec![int_type], string_type))
                         }
+                        "charCodeAt" => {
+                            // charCodeAt(index: Int): Null<Int>
+                            let int_type = type_table.int_type();
+                            drop(type_table);
+                            let mut table = self.context.type_table.borrow_mut();
+                            let code = table.create_optional_type(int_type);
+                            Ok(table.create_function_type(vec![int_type], code))
+                        }
                         "toUpperCase" | "toLowerCase" | "toString" | "trim" => {
                             // toUpperCase(): String, toLowerCase(): String, toString(): String, trim(): String
                             let string_type = type_table.string_type();

@@ -465,7 +465,7 @@ impl<'a> HirToMirContext<'a> {
                                         // Resolve generic T from the receiver's type args to
                                         // unbox: Channel<Int>.tryReceive() returns Ptr(U8)
                                         // where the caller expects I32.
-                                        // An `Array<Null<Int>>` element is its slot: a box or null.
+                                        // An `Array<Null<Int>>` element is its slot's `NullInt`.
                                         let null_int_element = !args.is_empty()
                                             && self.array_of_null_int(args[0].ty)
                                             && self.is_null_int_type(expr.ty);
@@ -602,10 +602,15 @@ impl<'a> HirToMirContext<'a> {
                                     let param_types: Vec<_> =
                                         arg_regs.iter().map(|_| ptr_u8.clone()).collect();
 
-                                    let return_type = if has_return {
-                                        ptr_u8.clone()
-                                    } else {
+                                    // A `Null<Int>` comes back unboxed, not as a pointer.
+                                    let return_type = if !has_return {
                                         IrType::Void
+                                    } else if runtime_call.return_type
+                                        == Some(IrTypeDescriptor::NullInt)
+                                    {
+                                        IrType::NullInt
+                                    } else {
+                                        ptr_u8.clone()
                                     };
 
                                     let extern_func_id = self.get_or_register_extern_function(

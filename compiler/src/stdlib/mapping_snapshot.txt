@@ -107,7 +107,7 @@ Std random static=true ctor=false params=1 -> haxe_std_random
 Std string static=true ctor=false params=1 -> haxe_std_string_ptr
 String cca static=false ctor=false params=1 -> haxe_string_char_code_at_ptr
 String charAt static=false ctor=false params=1 -> String_charAt
-String charCodeAt static=false ctor=false params=1 -> haxe_string_char_code_at_ptr
+String charCodeAt static=false ctor=false params=1 -> haxe_string_char_code_at_null_int
 String concat static=false ctor=false params=1 -> haxe_string_concat
 String fromCharCode static=true ctor=false params=1 -> haxe_string_from_char_code
 String indexOf static=false ctor=false params=1 -> String_indexOf

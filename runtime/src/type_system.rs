@@ -3018,16 +3018,27 @@ pub extern "C" fn haxe_null_int_to_dynamic(value: i64) -> *mut u8 {
 
 /// A Dynamic read as an unboxed `Null<Int>`: null or a null box is
 /// `NULL_INT`, a box gives its number as an Int, and a raw scalar in the
-/// pointer slot keeps its low 32 bits.
+/// pointer slot keeps its low 32 bits. An erased slot read out of an
+/// `Array<Null<Int>>` may hold `NULL_INT` itself, which is never a box.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_null_int_from_dynamic(ptr: *mut u8) -> i64 {
-    if haxe_dynamic_is_null(ptr) {
+    if ptr as usize as u64 == NULL_INT as u64 || haxe_dynamic_is_null(ptr) {
         return NULL_INT;
     }
     match dynamic_value_if_boxed(ptr) {
         Some(d) => haxe_unbox_int(d) as i32 as i64,
         None => ptr as usize as i32 as i64,
     }
+}
+
+/// An erased slot read as an unboxed `Null<Int>`: `NULL_INT` is null, a
+/// value in the i32 range is that Int (0 included), anything else a box.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_null_int_from_slot(bits: i64) -> i64 {
+    if bits == NULL_INT || i32::try_from(bits).is_ok() {
+        return bits;
+    }
+    haxe_null_int_from_dynamic(bits as usize as *mut u8)
 }
 
 /// A Dynamic read as a condition: null and a false or zero box are false,
@@ -5091,6 +5102,10 @@ mod null_int_tests {
         assert_eq!(haxe_null_int_from_dynamic(std::ptr::null_mut()), NULL_INT);
         let null_box = Box::into_raw(Box::new(haxe_box_null())) as *mut u8;
         assert_eq!(haxe_null_int_from_dynamic(null_box), NULL_INT);
+        assert_eq!(
+            haxe_null_int_from_dynamic(NULL_INT as usize as *mut u8),
+            NULL_INT
+        );
     }
 
     // Zero is a value, not null: the distinction the unboxed form exists for.
@@ -5124,19 +5139,24 @@ mod null_int_tests {
     }
 
     #[test]
-    fn parse_int_returns_null_int() {
-        let parse = |s: &str| {
-            haxe_std_parse_int_null_int(crate::haxe_sys::haxe_string_from_string(
-                s.as_ptr(),
-                s.len(),
-            ))
-        };
+    fn producers_return_null_int() {
+        use crate::haxe_sys::{haxe_string_char_code_at_null_int, haxe_string_from_string};
+        let parse =
+            |s: &str| haxe_std_parse_int_null_int(haxe_string_from_string(s.as_ptr(), s.len()));
         assert_eq!(parse("42"), 42);
         assert_eq!(parse("-7"), -7);
         assert_eq!(parse("0"), 0);
         assert_eq!(parse("x"), NULL_INT);
         assert_eq!(parse(""), NULL_INT);
         assert_eq!(haxe_std_parse_int_null_int(std::ptr::null()), NULL_INT);
+        let abc = haxe_string_from_string(b"abc".as_ptr(), 3);
+        assert_eq!(haxe_string_char_code_at_null_int(abc, 1), 98);
+        assert_eq!(haxe_string_char_code_at_null_int(abc, 3), NULL_INT);
+        assert_eq!(haxe_string_char_code_at_null_int(abc, -1), NULL_INT);
+        assert_eq!(
+            haxe_string_char_code_at_null_int(std::ptr::null(), 0),
+            NULL_INT
+        );
     }
 
     #[test]

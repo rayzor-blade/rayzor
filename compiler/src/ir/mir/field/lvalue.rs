@@ -1009,7 +1009,8 @@ impl<'a> HirToMirContext<'a> {
             let elem = self.type_table.dynamic_type();
             return self.load_vec_index_with_regs(&class, obj_reg, idx_reg, elem);
         }
-        // An `Array<Null<Int>>` element reads by its own type: its slot is a box.
+        // An `Array<Null<Int>>` element reads by its own type: its slot holds
+        // the `NullInt`.
         let null_int_element = match self
             .type_table
             .get(self.resolve_through_aliases(object_ty))
@@ -1078,6 +1079,10 @@ impl<'a> HirToMirContext<'a> {
             let idx_ty = self.builder.get_register_type(idx_reg);
             match idx_ty {
                 Some(IrType::I64) => idx_reg,
+                // A `Null<Int>` index is its Int: null reads as 0.
+                Some(IrType::NullInt) => self
+                    .null_int_to_ir(idx_reg, &IrType::I64)
+                    .unwrap_or(idx_reg),
                 Some(IrType::I32) => self
                     .builder
                     .build_cast(idx_reg, IrType::I32, IrType::I64)
@@ -1146,12 +1151,26 @@ impl<'a> HirToMirContext<'a> {
                     Some(TypeKind::Dynamic)
                 )
         );
-        // An `Array<Null<Int>>` slot holds a box or null.
-        let value = if self.array_of_null_int(object_ty) {
-            self.null_int_slot_box(value).unwrap_or(value)
-        } else {
-            value
-        };
+        // An `Array<Null<Int>>` slot holds the `NullInt`; a store past the end
+        // opens slots that read as null.
+        if self.array_of_null_int(object_ty) {
+            let value = match self.pending_store_value_ty {
+                Some(ty) => self.to_null_int_typed(value, ty),
+                None => self.to_null_int(value),
+            }
+            .unwrap_or(value);
+            let setter = self.get_or_register_extern_function(
+                "haxe_array_set_null_int",
+                vec![
+                    IrType::Ptr(Box::new(IrType::Void)),
+                    IrType::I64,
+                    IrType::NullInt,
+                ],
+                IrType::Bool,
+            );
+            self.build_array_store(obj_reg, idx_i64, value, IrType::NullInt, setter);
+            return;
+        }
         let mut value = value;
         let mut value_ir_type = self.builder.get_register_type(value);
         let raw_string = match &value_ir_type {
@@ -1213,6 +1232,10 @@ impl<'a> HirToMirContext<'a> {
                 );
                 let value_i64 = match value_ir_type.clone() {
                     Some(IrType::I64) => value,
+                    // Any other array holds a `Null<Int>` as its Int.
+                    Some(IrType::NullInt) => {
+                        self.null_int_to_ir(value, &IrType::I64).unwrap_or(value)
+                    }
                     Some(IrType::I32) => self
                         .builder
                         .build_cast(value, IrType::I32, IrType::I64)

@@ -907,6 +907,9 @@ impl<'a> HirToMirContext<'a> {
     /// The array formatter for a statically known element type; the untyped
     /// one guesses what each raw slot holds and reads a zero as `null`.
     pub(crate) fn array_to_string_fn(&self, element_type: TypeId) -> &'static str {
+        if self.is_null_int_type(element_type) {
+            return "haxe_array_to_string_i64";
+        }
         let mut ty = element_type;
         for _ in 0..4 {
             match self.type_table.get(ty).map(|t| &t.kind) {

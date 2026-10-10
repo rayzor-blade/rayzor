@@ -3249,6 +3249,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         let kind = match name.as_str() {
             "haxe_string_char_code_at" => "char_code_at",
             "haxe_string_char_code_at_ptr" => "char_code_at",
+            "haxe_string_char_code_at_null_int" => "char_code_at_null_int",
             "haxe_string_from_char_code" => "from_char_code",
             _ => continue,
         };
@@ -3265,6 +3266,14 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let idx = val_i32(&params[1]) as usize;
                             let val = s.as_bytes().get(idx).copied().unwrap_or(0) as i32;
                             results[0] = ret_int(val, &rt);
+                        }
+                        "char_code_at_null_int" => {
+                            let s = read_haxe_string(&mut caller, val_i32(&params[0]));
+                            let val = usize::try_from(val_i32(&params[1]))
+                                .ok()
+                                .and_then(|idx| s.as_bytes().get(idx).copied())
+                                .map(i32::from);
+                            results[0] = ret_null_int(val, &rt);
                         }
                         "from_char_code" => {
                             let code = val_i32(&params[0]);

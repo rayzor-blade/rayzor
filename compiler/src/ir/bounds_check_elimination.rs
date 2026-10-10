@@ -96,7 +96,7 @@ impl OptimizationPass for BoundsCheckEliminationPass {
                     || ef.name == "haxe_array_insert"
                     || ef.name == "haxe_array_remove"
                     || ef.name == "haxe_array_splice"
-                    || ef.name == "haxe_array_resize"
+                    || ef.name.starts_with("haxe_array_resize")
             })
             .map(|(&id, _)| id)
             .collect();

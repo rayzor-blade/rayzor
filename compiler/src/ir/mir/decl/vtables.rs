@@ -929,13 +929,19 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         if *kind == SlotKind::NullInt {
-            // The slot or Dynamic holds a box, null, or a raw Int.
-            let as_ptr = if shape == EntryShape::Slot {
-                self.builder.build_bitcast(reg, ptr_u8)?
-            } else {
-                reg
-            };
-            return self.to_null_int(as_ptr);
+            // A slot holds the `NullInt` bits or an Int, where 0 is a value; a
+            // Dynamic holds a box or null.
+            if shape == EntryShape::Slot {
+                let from_slot = self.get_or_register_extern_function(
+                    "haxe_null_int_from_slot",
+                    vec![IrType::I64],
+                    IrType::NullInt,
+                );
+                return self
+                    .builder
+                    .build_call_direct(from_slot, vec![reg], IrType::NullInt);
+            }
+            return self.to_null_int(reg);
         }
         match shape {
             EntryShape::Slot => match kind {
@@ -1003,12 +1009,13 @@ impl<'a> HirToMirContext<'a> {
         shape: EntryShape,
     ) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        // A slot result is an array element, which holds the `NullInt` itself.
         if let (Some(r), SlotKind::NullInt) = (result, kind) {
-            let boxed = self.null_int_to_dynamic(r)?;
+            let r = self.to_null_int(r)?;
             return if shape == EntryShape::Slot {
-                self.builder.build_bitcast(boxed, IrType::I64)
+                self.builder.build_bitcast(r, IrType::I64)
             } else {
-                Some(boxed)
+                self.null_int_to_dynamic(r)
             };
         }
         match shape {

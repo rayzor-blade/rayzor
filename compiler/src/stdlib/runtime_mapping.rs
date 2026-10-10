@@ -1825,10 +1825,10 @@ impl StdlibMapping {
             // Uses MIR wrapper that forwards to haxe_string_char_at_ptr
             map_method!(instance "String", "charAt" => "String_charAt", params: 1, mir_wrapper,
                 types: &[PtrString, I32] => PtrString),
-            // charCodeAt returns Null<Int> (-1 for out of bounds, which we represent as i32)
-            map_method!(instance "String", "charCodeAt" => "haxe_string_char_code_at_ptr", params: 1, returns: primitive,
-                types: &[PtrString, I32] => I32),
-            // cca is an internal alias for charCodeAt used in StringTools.unsafeCodeAt
+            // charCodeAt returns Null<Int>: null out of range
+            map_method!(instance "String", "charCodeAt" => "haxe_string_char_code_at_null_int", params: 1, returns: primitive,
+                types: &[PtrString, I32] => NullInt),
+            // cca backs StringTools.fastCodeAt/unsafeCodeAt: a raw Int, -1 out of range
             map_method!(instance "String", "cca" => "haxe_string_char_code_at_ptr", params: 1, returns: primitive,
                 types: &[PtrString, I32] => I32),
             // Search operations
