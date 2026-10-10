@@ -1729,6 +1729,29 @@ impl<'a> HirToMirContext<'a> {
         // source-shaped fat ptr, and the wider interface's slot reads would run
         // off the end of the source vtable.
         let mut registered_iface_pairs: BTreeSet<(i64, i64)> = BTreeSet::new();
+        // An eager vtable lists only the methods its class declares; inherited
+        // implementations complete it so every slot is registered.
+        let incomplete: Vec<(SymbolId, SymbolId)> = self
+            .interface_vtables
+            .iter()
+            .filter(|((_, iface), methods)| {
+                self.resolve_interface_method_names(*iface)
+                    .is_some_and(|names| names.len() != methods.len())
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for (class_sym, iface_sym) in incomplete {
+            let Some(names) = self.resolve_interface_method_names(iface_sym) else {
+                continue;
+            };
+            if let Some(full) = names
+                .iter()
+                .map(|name| self.resolve_class_method_symbol(class_sym, *name))
+                .collect::<Option<Vec<_>>>()
+            {
+                self.interface_vtables.insert((class_sym, iface_sym), full);
+            }
+        }
         let interface_vtables = self.interface_vtables.clone();
         for ((class_sym, iface_sym), methods) in &interface_vtables {
             // These ids must match the ones the cast emit sites and the runtime

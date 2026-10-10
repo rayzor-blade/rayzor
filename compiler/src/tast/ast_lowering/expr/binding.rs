@@ -614,7 +614,7 @@ impl<'a> AstLowering<'a> {
     pub(crate) fn scan_map_ctor_uses(
         &self,
         elements: &[BlockElement],
-    ) -> BTreeMap<String, (Expr, Expr)> {
+    ) -> BTreeMap<(String, usize), (Expr, Expr)> {
         let mut uses = BTreeMap::new();
         for (i, elem) in elements.iter().enumerate() {
             let BlockElement::Expr(e) = elem else {
@@ -631,12 +631,16 @@ impl<'a> AstLowering<'a> {
             if !is_bare_new_map(init) {
                 continue;
             }
-            let found = elements[i + 1..].iter().find_map(|later| match later {
-                BlockElement::Expr(le) => first_map_use(le, name),
-                _ => None,
-            });
+            // Uses end where a later declaration of the same name shadows this one.
+            let found = elements[i + 1..]
+                .iter()
+                .take_while(|later| !redeclares(later, name))
+                .find_map(|later| match later {
+                    BlockElement::Expr(le) => first_map_use(le, name),
+                    _ => None,
+                });
             if let Some((k, v)) = found {
-                uses.insert(name.clone(), (k.clone(), v.clone()));
+                uses.insert((name.clone(), init.span.start), (k.clone(), v.clone()));
             }
         }
         uses
@@ -671,7 +675,11 @@ impl<'a> AstLowering<'a> {
         if !is_bare_new_map(init) {
             return None;
         }
-        let (k, v) = self.map_first_uses.last()?.get(var_name)?.clone();
+        let (k, v) = self
+            .map_first_uses
+            .last()?
+            .get(&(var_name.to_string(), init.span.start))?
+            .clone();
         let kt = self.peek_map_operand_type(&k)?;
         let vt = self.peek_map_operand_type(&v)?;
         self.resolve_multitype_map_to_concrete(&[kt, vt])
@@ -701,6 +709,12 @@ impl<'a> AstLowering<'a> {
         );
         concrete.then_some(ty)
     }
+}
+
+/// Whether `e` declares a local named `name`.
+fn redeclares(e: &BlockElement, name: &str) -> bool {
+    matches!(e, BlockElement::Expr(x) if matches!(&x.kind,
+        ExprKind::Var { name: n, .. } | ExprKind::Final { name: n, .. } if n == name))
 }
 
 fn is_bare_new_map(e: &Expr) -> bool {

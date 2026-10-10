@@ -3089,6 +3089,15 @@ impl<'a> AstLowering<'a> {
                 // Just lower the inner expression, the "untyped" is more of a compiler hint
                 self.lower_expression(expr)?.kind
             }
+            ExprKind::MacroType(ty) => {
+                // Outside a macro body, `macro : T` is a ComplexType built at run time.
+                match Self::runtime_type_reification(ty, expression.span) {
+                    Some(built) => return self.lower_expression(&built),
+                    None => TypedExpressionKind::Literal {
+                        value: LiteralValue::String("unhandled_expression".to_string()),
+                    },
+                }
+            }
             ExprKind::Macro(expr) => {
                 // Outside a macro body, `macro e` is a value built at run time.
                 if let Some(built) = Self::runtime_reification(expr) {

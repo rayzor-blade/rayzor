@@ -650,6 +650,7 @@ impl<'a> AstLowering<'a> {
             }
             TypeDeclaration::Typedef(typedef_decl) => {
                 let typedef_name = self.context.intern_string(&typedef_decl.name);
+                self.record_type_usings(typedef_name, &typedef_decl.meta);
 
                 // Check if this typedef already exists in the root scope
                 if self

@@ -1593,7 +1593,7 @@ pub struct AstLowering<'a> {
     /// Per enclosing block: the first `x.set(k, v)` / `x[k] = v` found after an
     /// unannotated `var x = new Map()`, which binds the map's K and V the way
     /// the first push binds an empty array's element.
-    map_first_uses: Vec<std::collections::BTreeMap<String, (parser::Expr, parser::Expr)>>,
+    map_first_uses: Vec<std::collections::BTreeMap<(String, usize), (parser::Expr, parser::Expr)>>,
     /// Active 'using' modules for static extension resolution
     /// Maps module name (e.g., "StringTools") to class symbol ID
     using_modules: Vec<(InternedString, SymbolId)>,

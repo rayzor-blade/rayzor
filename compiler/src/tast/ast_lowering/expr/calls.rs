@@ -945,6 +945,31 @@ impl<'a> AstLowering<'a> {
         };
         // Type-specific extensions include inherited class and interface metadata.
         let mut type_using_names: Vec<InternedString> = Vec::new();
+        // A typedef's `@:using` extends values declared with it, nearest alias first.
+        {
+            let tt = self.context.type_table.borrow();
+            let mut ty = receiver_type;
+            let mut seen = std::collections::BTreeSet::new();
+            while seen.insert(ty) {
+                let Some(TypeKind::TypeAlias {
+                    symbol_id,
+                    target_type,
+                    ..
+                }) = tt.get(ty).map(|t| &t.kind)
+                else {
+                    break;
+                };
+                if let Some(names) = self
+                    .context
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|s| self.type_usings.get(&s.name))
+                {
+                    type_using_names.extend(names.iter().copied());
+                }
+                ty = *target_type;
+            }
+        }
         let mut queue: std::collections::VecDeque<_> = self
             .resolve_type_to_class_symbol(receiver_type)
             .into_iter()

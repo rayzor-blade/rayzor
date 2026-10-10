@@ -10,6 +10,11 @@ impl<'a> AstLowering<'a> {
     pub(crate) fn runtime_reification(e: &Expr) -> Option<Expr> {
         Reifier { span: e.span }.expr(e)
     }
+
+    /// The construction expression for `macro : t`.
+    pub(crate) fn runtime_type_reification(t: &parser::Type, span: Span) -> Option<Expr> {
+        Reifier { span }.complex_type(t)
+    }
 }
 
 struct Reifier {
@@ -311,7 +316,7 @@ impl Reifier {
         }
     }
 
-    fn type_path(&self, path: &parser::TypePath, params: &[parser::Type]) -> Option<Expr> {
+    fn type_args(&self, params: &[parser::Type]) -> Option<Expr> {
         let params = params
             .iter()
             .map(|p| match p {
@@ -321,6 +326,11 @@ impl Reifier {
                 other => Some(self.ctor("TypeParam", "TPType", vec![self.complex_type(other)?])),
             })
             .collect::<Option<Vec<_>>>()?;
+        Some(self.array(params))
+    }
+
+    fn type_path(&self, path: &parser::TypePath, params: &[parser::Type]) -> Option<Expr> {
+        let params = self.type_args(params)?;
         Some(self.typed(
             "TypePath",
             vec![
@@ -329,7 +339,7 @@ impl Reifier {
                     self.array(path.package.iter().map(|p| self.string(p)).collect()),
                 ),
                 ("name", self.string(&path.name)),
-                ("params", self.array(params)),
+                ("params", params),
                 (
                     "sub",
                     match &path.sub {
@@ -369,6 +379,35 @@ impl Reifier {
 
     fn complex_type(&self, t: &parser::Type) -> Option<Expr> {
         Some(match t {
+            // `$t` splices a ComplexType value; `$tp<P>` a TypePath given parameters.
+            parser::Type::Path { path, params, .. }
+                if path.package.is_empty() && path.sub.is_none() && path.name.starts_with('$') =>
+            {
+                let var = self.ident(&path.name[1..]);
+                if params.is_empty() {
+                    return Some(var);
+                }
+                let field = |name: &str| {
+                    self.mk(ExprKind::Field {
+                        expr: Box::new(var.clone()),
+                        field: name.to_string(),
+                        is_optional: false,
+                    })
+                };
+                self.ctor(
+                    "ComplexType",
+                    "TPath",
+                    vec![self.typed(
+                        "TypePath",
+                        vec![
+                            ("pack", field("pack")),
+                            ("name", field("name")),
+                            ("params", self.type_args(params)?),
+                            ("sub", field("sub")),
+                        ],
+                    )],
+                )
+            }
             parser::Type::Path { path, params, .. } => {
                 self.ctor("ComplexType", "TPath", vec![self.type_path(path, params)?])
             }

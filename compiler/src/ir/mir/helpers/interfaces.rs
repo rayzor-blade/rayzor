@@ -184,15 +184,8 @@ impl<'a> HirToMirContext<'a> {
                 let entries: Vec<Option<SymbolId>> = method_names
                     .iter()
                     .map(|mname| {
-                        let s = self
-                            .class_method_symbols
-                            .get(&(class_symbol, *mname))
-                            .copied()
-                            .or_else(|| {
-                                self.class_method_by_name
-                                    .get(&(class_symbol, *mname))
-                                    .copied()
-                            });
+                        // An inherited implementation fills the slot as well.
+                        let s = self.resolve_class_method_symbol(class_symbol, *mname);
                         if s.is_none() {
                             all_resolved = false;
                         }
