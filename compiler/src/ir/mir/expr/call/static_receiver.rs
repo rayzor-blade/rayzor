@@ -251,6 +251,12 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
+                    // A `Null<Int>` result meets the call site's declared type.
+                    if actual_return_type == IrType::NullInt {
+                        return call_result.map(|reg| {
+                            self.reconcile_extern_return(reg, &actual_return_type, &result_type)
+                        });
+                    }
                     return call_result;
                 }
             }

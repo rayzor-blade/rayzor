@@ -3121,6 +3121,18 @@ pub extern "C" fn haxe_std_parse_int_box(
     }
 }
 
+/// `Std.parseInt` as an unboxed `Null<Int>`: the Int, or `NULL_INT` when the
+/// string holds no number.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_std_parse_int_null_int(
+    str_ptr: *const crate::haxe_string::HaxeString,
+) -> i64 {
+    match haxe_std_parse_int(str_ptr) {
+        i64::MIN => NULL_INT,
+        value => value as i32 as i64,
+    }
+}
+
 /// Parse a String to a Float
 /// Implements Std.parseFloat(x:String):Float
 /// Returns NaN if parsing fails
@@ -5109,6 +5121,22 @@ mod null_int_tests {
             tag,
             haxe_box_int_ptr(0)
         ));
+    }
+
+    #[test]
+    fn parse_int_returns_null_int() {
+        let parse = |s: &str| {
+            haxe_std_parse_int_null_int(crate::haxe_sys::haxe_string_from_string(
+                s.as_ptr(),
+                s.len(),
+            ))
+        };
+        assert_eq!(parse("42"), 42);
+        assert_eq!(parse("-7"), -7);
+        assert_eq!(parse("0"), 0);
+        assert_eq!(parse("x"), NULL_INT);
+        assert_eq!(parse(""), NULL_INT);
+        assert_eq!(haxe_std_parse_int_null_int(std::ptr::null()), NULL_INT);
     }
 
     #[test]

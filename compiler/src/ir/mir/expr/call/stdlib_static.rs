@@ -270,9 +270,19 @@ impl<'a> HirToMirContext<'a> {
                                 let result = self.builder.build_call_direct(
                                     runtime_func_id,
                                     final_arg_regs,
-                                    expected_return_type,
+                                    expected_return_type.clone(),
                                 );
                                 debug!("[STATIC METHOD] Generated call, result: {:?}", result);
+                                // A `Null<Int>` result meets the call site's declared type.
+                                if expected_return_type == IrType::NullInt {
+                                    return result.map(|reg| {
+                                        self.reconcile_extern_return(
+                                            reg,
+                                            &expected_return_type,
+                                            &result_type,
+                                        )
+                                    });
+                                }
                                 return result;
                             }
                         }
@@ -457,11 +467,22 @@ impl<'a> HirToMirContext<'a> {
                             expected_return_type.clone(),
                         );
 
-                        return self.builder.build_call_direct(
+                        let result = self.builder.build_call_direct(
                             runtime_func_id,
                             final_arg_regs,
-                            expected_return_type,
+                            expected_return_type.clone(),
                         );
+                        // A `Null<Int>` result meets the call site's declared type.
+                        if expected_return_type == IrType::NullInt {
+                            return result.map(|reg| {
+                                self.reconcile_extern_return(
+                                    reg,
+                                    &expected_return_type,
+                                    &result_type,
+                                )
+                            });
+                        }
+                        return result;
                     }
                 }
             }

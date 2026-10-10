@@ -1053,6 +1053,16 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         }
     }
 
+    /// An unboxed `Null<Int>` result: the Int, or `NULL_INT` (1 << 32) for
+    /// null in an i64 slot.
+    fn ret_null_int(val: Option<i32>, ty: &ValType) -> Val {
+        match (val, ty) {
+            (Some(v), _) => ret_int(v, ty),
+            (None, ValType::I64) => Val::I64(1 << 32),
+            (None, _) => ret_int(0, ty),
+        }
+    }
+
     fn ret_f32(val: f32, ty: &ValType) -> Val {
         match ty {
             ValType::F64 => Val::F64((val as f64).to_bits()),
@@ -3289,6 +3299,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         let kind = match name.as_str() {
             "haxe_std_int" => "int",
             "haxe_std_parse_int" => "parse_int",
+            "haxe_std_parse_int_null_int" => "parse_int_null_int",
             "haxe_std_parse_float" => "parse_float",
             "haxe_std_string" => "string",
             "haxe_std_string_ptr" => "string_ptr",
@@ -3323,6 +3334,11 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let trimmed = s.trim();
                             let parsed: i32 = trimmed.parse::<i64>().map(|v| v as i32).unwrap_or(0);
                             results[0] = ret_int(parsed, &rt);
+                        }
+                        "parse_int_null_int" => {
+                            let s = read_haxe_string(&mut caller, val_i32(&params[0]));
+                            let parsed = s.trim().parse::<i64>().ok().map(|v| v as i32);
+                            results[0] = ret_null_int(parsed, &rt);
                         }
                         "parse_float" => {
                             let s = read_haxe_string(&mut caller, val_i32(&params[0]));

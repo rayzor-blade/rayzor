@@ -72,6 +72,8 @@ pub enum IrTypeDescriptor {
     VecI32x8,
     /// SIMD vector: 32 × i8 (256-bit, LLVM backend only)
     VecI8x32,
+    /// Unboxed `Null<Int>`: an i64, `NULL_INT` for null
+    NullInt,
 }
 
 impl IrTypeDescriptor {
@@ -97,6 +99,7 @@ impl IrTypeDescriptor {
             IrTypeDescriptor::VecI8x16 => IrType::vector(IrType::I8, 16),
             IrTypeDescriptor::VecI32x8 => IrType::vector(IrType::I32, 8),
             IrTypeDescriptor::VecI8x32 => IrType::vector(IrType::I8, 32),
+            IrTypeDescriptor::NullInt => IrType::NullInt,
         }
     }
 }
@@ -2150,8 +2153,8 @@ impl StdlibMapping {
             map_method!(static "Std", "int" => "haxe_std_int", params: 1, returns: primitive,
                 types: &[F64] => I64),
             // Std.parseInt(x: String) -> Null<Int>
-            map_method!(static "Std", "parseInt" => "haxe_std_parse_int_box", params: 1, returns: complex,
-                types: &[PtrVoid] => PtrVoid),
+            map_method!(static "Std", "parseInt" => "haxe_std_parse_int_null_int", params: 1, returns: primitive,
+                types: &[PtrVoid] => NullInt),
             // Std.parseFloat(x: String) -> Float
             map_method!(static "Std", "parseFloat" => "haxe_std_parse_float", params: 1, returns: primitive,
                 types: &[PtrVoid] => F64),

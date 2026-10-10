@@ -1111,6 +1111,10 @@ register_symbol!(
     crate::type_system::haxe_std_parse_int_box
 );
 register_symbol!(
+    "haxe_std_parse_int_null_int",
+    crate::type_system::haxe_std_parse_int_null_int
+);
+register_symbol!(
     "haxe_null_int_to_dynamic",
     crate::type_system::haxe_null_int_to_dynamic
 );
