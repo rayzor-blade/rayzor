@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1791702296,"nonce":"XXgxUAwHEDW2Na2YWvfZ4E7BeNI=","message":"Fixed in e84a647d57fc702d226e5720004cc4307eaa594e (Issue4799, Issue6063 pass). Not done: macro TFun view args as {name,opt,t}; method types carry no labels; Void -\u003e X prints (Void) -\u003e X.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1791702296,"nonce":"w42TvpT9di+YOAsnZCcosB3eBbg=","status":2}]}
