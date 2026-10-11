@@ -2218,7 +2218,8 @@ pub extern "C" fn haxe_trace_enum(type_id: i64, discriminant: i64) {
 /// The enum each enum-typed constructor argument holds, by enum id, variant
 /// index and argument index: a tag-only enum's argument is a bare
 /// discriminant, so only this names it.
-static ENUM_PARAM_ENUMS: RwLock<Option<HashMap<(u32, usize, usize), u32>>> = RwLock::new(None);
+type EnumParamEnums = HashMap<(u32, usize, usize), u32>;
+static ENUM_PARAM_ENUMS: RwLock<Option<EnumParamEnums>> = RwLock::new(None);
 
 /// Record the enums of `enum_id`'s constructor arguments, as
 /// `(variant index, argument index, argument's enum id)`.
