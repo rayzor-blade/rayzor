@@ -16,7 +16,17 @@ impl<'a, 'b> RdParser<'a, 'b> {
             while self.stream.eat(TokenKind::Arrow).is_some() {
                 params.push(self.parse_basic_type()?);
             }
-            let ret = params.pop().unwrap();
+            // `Int -> (a:Int) -> Void` continues into the arrow function on
+            // its right: one function of both arguments, as Haxe reads it.
+            let ret = match params.pop().unwrap() {
+                Type::Function {
+                    params: tail, ret, ..
+                } => {
+                    params.extend(tail);
+                    *ret
+                }
+                ret => ret,
+            };
             let span = params
                 .first()
                 .map(|p| p.span())
@@ -89,7 +99,8 @@ impl<'a, 'b> RdParser<'a, 'b> {
         //   `() -> Void`                     — function type, no arguments
         //
         // As in haxe's AST, a lone argument keeps its parentheses
-        // (`TParent`) and a named one is `Type::Named`.
+        // (`TParent`) and a named one is `Type::Named`. A lone unnamed one is
+        // an old-style argument: `parse_type` chains the arrows after it.
         if self.stream.at(TokenKind::LParen) {
             self.stream.advance();
 
@@ -97,6 +108,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
             if self.stream.eat(TokenKind::RParen).is_some() {
                 self.stream.expect(TokenKind::Arrow)?;
                 let ret = self.parse_basic_type()?;
+                self.reject_arrow_after_return()?;
                 let span = self.stream.span_from(start);
                 return Ok(Type::Function {
                     params: vec![],
@@ -113,12 +125,13 @@ impl<'a, 'b> RdParser<'a, 'b> {
             self.stream.expect(TokenKind::RParen)?;
 
             if params.len() == 1 {
+                let named = matches!(params[0], Type::Named { .. });
                 let inner = params.pop().unwrap();
                 let parenthesised = Type::Parenthesis {
                     inner: Box::new(inner),
                     span: self.stream.span_from(start),
                 };
-                if self.stream.eat(TokenKind::Arrow).is_none() {
+                if !named || self.stream.eat(TokenKind::Arrow).is_none() {
                     return Ok(parenthesised);
                 }
                 params.push(parenthesised);
@@ -130,6 +143,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
             }
 
             let ret = self.parse_basic_type()?;
+            self.reject_arrow_after_return()?;
             let span = self.stream.span_from(start);
             return Ok(Type::Function {
                 params,
@@ -145,6 +159,18 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
         // Named type: `Int`, `Array<Int>`, `com.example.MyClass`
         self.parse_named_type(start)
+    }
+
+    /// A function type with a parenthesised argument list has one return
+    /// type: `(a:Int) -> Int -> Int` does not parse, as in Haxe.
+    fn reject_arrow_after_return(&mut self) -> Result<(), ParseError> {
+        if self.stream.at(TokenKind::Arrow) {
+            return Err(ParseError::new(
+                "unexpected '->': parenthesise a function return type",
+                self.stream.peek().span,
+            ));
+        }
+        Ok(())
     }
 
     /// Parse one entry inside a parenthesised arrow parameter list:

@@ -75,6 +75,10 @@ pub enum TypeKind {
         return_type: TypeId,
         /// Function effects (throw, async, etc.)
         effects: FunctionEffects,
+        /// Argument names and `?` flags as written, one per param; empty when
+        /// none is named or optional. They make a distinct TypeId so they can
+        /// print, and take no part in compatibility.
+        labels: Vec<FunctionArgLabel>,
     },
 
     // === Collection Types ===
@@ -244,6 +248,14 @@ impl Default for Mutability {
     fn default() -> Self {
         Self::Immutable
     }
+}
+
+/// One function-type argument's name and `?`: the `?a` of `(?a:Int) -> Void`.
+/// An optional argument's param type is the `Null<T>` its `?` wraps it in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct FunctionArgLabel {
+    pub name: Option<InternedString>,
+    pub optional: bool,
 }
 
 /// Anonymous type field
@@ -802,10 +814,12 @@ impl TypeTable {
                 params,
                 return_type,
                 effects,
+                labels,
             } => {
                 params.hash(&mut hasher);
                 return_type.hash(&mut hasher);
                 effects.hash(&mut hasher);
+                labels.hash(&mut hasher);
             }
             TypeKind::Array { element_type } => {
                 element_type.hash(&mut hasher);
@@ -959,6 +973,7 @@ impl TypeTable {
             params,
             return_type,
             effects: FunctionEffects::default(),
+            labels: Vec::new(),
         });
         self.type_cache.insert(cache_key, type_id);
         type_id
@@ -971,10 +986,26 @@ impl TypeTable {
         return_type: TypeId,
         effects: FunctionEffects,
     ) -> TypeId {
+        self.create_labelled_function_type(params, return_type, effects, Vec::new())
+    }
+
+    /// Create a function type whose arguments carry names or `?` flags. With
+    /// none, it is the unlabelled type, so `(Int) -> Void` keeps one id.
+    pub fn create_labelled_function_type(
+        &mut self,
+        params: Vec<TypeId>,
+        return_type: TypeId,
+        effects: FunctionEffects,
+        mut labels: Vec<FunctionArgLabel>,
+    ) -> TypeId {
+        if labels.len() != params.len() || labels.iter().all(|l| *l == Default::default()) {
+            labels.clear();
+        }
         self.intern_type(TypeKind::Function {
             params,
             return_type,
             effects,
+            labels,
         })
     }
 

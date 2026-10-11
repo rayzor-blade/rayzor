@@ -2067,11 +2067,6 @@ fn unify(
     }
 }
 
-/// The source-level spelling of a type, the way `haxe.macro.TypeTools.toString`
-/// prints it: named types by name, `Null<T>` written out, functions arrow-form.
-/// The general error formatter is not reused here because it spells `Null<T>`
-/// as `T?` and Debug-dumps named types — both visible to tests that compare
-/// the string against a literal.
 /// A type as `Std.string` prints a macro Type: `TAbstract(Int,[])`,
 /// `TInst(Array,[TInst(String,[])])`; forms without one fall back to the
 /// display form.
@@ -2155,16 +2150,36 @@ pub(super) fn render_type_constructor(
                 _ => base,
             }
         }
-        _ => render_type(id, type_table, symbol_table, interner, depth),
+        // Without argument labels: declared functions carry none yet, and
+        // `typedAs` compares a method's string with an annotation's.
+        _ => render_type_as(id, type_table, symbol_table, interner, depth, false),
     }
 }
 
+/// The source-level spelling of a type, the way `haxe.macro.TypeTools.toString`
+/// prints it: named types by name, `Null<T>` written out, functions arrow-form.
+/// The general error formatter is not reused here because it spells `Null<T>`
+/// as `T?` and Debug-dumps named types — both visible to tests that compare
+/// the string against a literal.
 pub(super) fn render_type(
     id: TypeId,
     type_table: &std::cell::RefCell<crate::tast::TypeTable>,
     symbol_table: &crate::tast::SymbolTable,
     interner: &crate::tast::StringInterner,
     depth: usize,
+) -> String {
+    render_type_as(id, type_table, symbol_table, interner, depth, true)
+}
+
+/// `render_type`, with function-type argument names and `?` flags printed
+/// when `labels` is set.
+fn render_type_as(
+    id: TypeId,
+    type_table: &std::cell::RefCell<crate::tast::TypeTable>,
+    symbol_table: &crate::tast::SymbolTable,
+    interner: &crate::tast::StringInterner,
+    depth: usize,
+    labels: bool,
 ) -> String {
     use crate::tast::core::TypeKind;
     if depth > 24 {
@@ -2186,7 +2201,7 @@ pub(super) fn render_type(
         } else {
             let rendered: Vec<String> = args
                 .iter()
-                .map(|&a| render_type(a, type_table, symbol_table, interner, depth + 1))
+                .map(|&a| render_type_as(a, type_table, symbol_table, interner, depth + 1, labels))
                 .collect();
             format!("{}<{}>", base, rendered.join(", "))
         }
@@ -2227,34 +2242,96 @@ pub(super) fn render_type(
         TypeKind::Function {
             params,
             return_type,
+            labels: arg_labels,
             ..
         } => {
-            let ret = render_type(return_type, type_table, symbol_table, interner, depth + 1);
-            if params.is_empty() {
-                format!("() -> {}", ret)
-            } else {
-                let ps: Vec<String> = params
-                    .iter()
-                    .map(|&p| render_type(p, type_table, symbol_table, interner, depth + 1))
-                    .collect();
-                format!("({}) -> {}", ps.join(", "), ret)
+            // Haxe's `s_type`: a lone unnamed argument goes without
+            // parentheses; a function-typed part, and `Void` as an argument,
+            // inside them.
+            let part = |t: TypeId, argument: bool| {
+                let text = render_type_as(t, type_table, symbol_table, interner, depth + 1, labels);
+                let wrap = match type_table.borrow().get(t).map(|t| &t.kind) {
+                    Some(TypeKind::Function { .. }) => true,
+                    Some(TypeKind::Void) => argument,
+                    _ => false,
+                };
+                if wrap { format!("({text})") } else { text }
+            };
+            let mut named = false;
+            let args: Vec<String> = params
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| {
+                    let label = arg_labels
+                        .get(i)
+                        .copied()
+                        .filter(|_| labels)
+                        .unwrap_or_default();
+                    // The `Null<T>` a `?` wrapped the argument in prints as the `?`.
+                    let p = match type_table.borrow().get(p).map(|t| &t.kind) {
+                        Some(TypeKind::Optional { inner_type }) if label.optional => *inner_type,
+                        _ => p,
+                    };
+                    let opt = if label.optional { "?" } else { "" };
+                    match label.name.and_then(|n| interner.get(n)) {
+                        Some(name) => {
+                            named = true;
+                            format!("{opt}{name} : {}", part(p, true))
+                        }
+                        None => format!("{opt}{}", part(p, true)),
+                    }
+                })
+                .collect();
+            let ret = part(return_type, false);
+            match args.as_slice() {
+                [] => format!("() -> {ret}"),
+                [only] if !named => format!("{only} -> {ret}"),
+                _ => format!("({}) -> {ret}", args.join(", ")),
             }
         }
         TypeKind::Array { element_type } => format!(
             "Array<{}>",
-            render_type(element_type, type_table, symbol_table, interner, depth + 1)
+            render_type_as(
+                element_type,
+                type_table,
+                symbol_table,
+                interner,
+                depth + 1,
+                labels
+            )
         ),
         TypeKind::Map {
             key_type,
             value_type,
         } => format!(
             "Map<{}, {}>",
-            render_type(key_type, type_table, symbol_table, interner, depth + 1),
-            render_type(value_type, type_table, symbol_table, interner, depth + 1)
+            render_type_as(
+                key_type,
+                type_table,
+                symbol_table,
+                interner,
+                depth + 1,
+                labels
+            ),
+            render_type_as(
+                value_type,
+                type_table,
+                symbol_table,
+                interner,
+                depth + 1,
+                labels
+            )
         ),
         TypeKind::Optional { inner_type } => format!(
             "Null<{}>",
-            render_type(inner_type, type_table, symbol_table, interner, depth + 1)
+            render_type_as(
+                inner_type,
+                type_table,
+                symbol_table,
+                interner,
+                depth + 1,
+                labels
+            )
         ),
         TypeKind::Placeholder { name } => interner
             .get(name)
@@ -2274,7 +2351,14 @@ pub(super) fn render_type(
                     format!(
                         "{} : {}",
                         name,
-                        render_type(f.type_id, type_table, symbol_table, interner, depth + 1)
+                        render_type_as(
+                            f.type_id,
+                            type_table,
+                            symbol_table,
+                            interner,
+                            depth + 1,
+                            labels
+                        )
                     )
                 })
                 .collect();
@@ -2289,7 +2373,14 @@ pub(super) fn render_type(
             type_args,
             ..
         } => with_args(
-            render_type(base_type, type_table, symbol_table, interner, depth + 1),
+            render_type_as(
+                base_type,
+                type_table,
+                symbol_table,
+                interner,
+                depth + 1,
+                labels,
+            ),
             &type_args,
         ),
         other => format!("{:?}", other),

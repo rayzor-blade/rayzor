@@ -335,6 +335,7 @@ impl<'a> AstLowering<'a> {
                         params,
                         return_type,
                         effects,
+                        ..
                     }) if *return_type == dynamic_type => Some((params.clone(), effects.clone())),
                     _ => None,
                 }
@@ -4244,6 +4245,7 @@ impl<'a> AstLowering<'a> {
                 params,
                 return_type,
                 effects,
+                labels,
             }) => {
                 let p = sub(&params);
                 let r = self.substitute_type_bindings(return_type, bindings, expand_bindings);
@@ -4254,6 +4256,7 @@ impl<'a> AstLowering<'a> {
                     params: p,
                     return_type: r,
                     effects,
+                    labels,
                 }
             }
             Some(TypeKind::Anonymous { fields }) => {

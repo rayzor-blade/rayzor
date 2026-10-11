@@ -41,6 +41,33 @@ fn constant_argument_spelling(value: &Expr) -> Option<String> {
 }
 
 impl<'a> AstLowering<'a> {
+    /// A function-type argument's name and `?`, read through the parentheses
+    /// of a lone argument: `(?a:String) -> Void` is `?a`, `?Int -> Void` `?`.
+    fn function_arg_label(&mut self, mut arg: &Type) -> FunctionArgLabel {
+        let mut optional = false;
+        loop {
+            match arg {
+                Type::Parenthesis { inner, .. } => arg = &**inner,
+                Type::Optional { inner, .. } if !optional => {
+                    optional = true;
+                    arg = &**inner;
+                }
+                Type::Named { name, .. } => {
+                    return FunctionArgLabel {
+                        name: Some(self.context.intern_string(name)),
+                        optional,
+                    };
+                }
+                _ => {
+                    return FunctionArgLabel {
+                        name: None,
+                        optional,
+                    };
+                }
+            }
+        }
+    }
+
     /// Lower a type annotation
     pub(crate) fn lower_type(&mut self, type_annotation: &Type) -> LoweringResult<TypeId> {
         match type_annotation {
@@ -597,6 +624,10 @@ impl<'a> AstLowering<'a> {
                     .iter()
                     .map(|param| self.lower_type(param))
                     .collect::<Result<Vec<_>, _>>()?;
+                let labels = params
+                    .iter()
+                    .map(|param| self.function_arg_label(param))
+                    .collect();
 
                 let return_type_id = self.lower_type(ret)?;
 
@@ -612,13 +643,11 @@ impl<'a> AstLowering<'a> {
                     is_send: true,
                 };
 
-                Ok(self.context.type_table.borrow_mut().create_type(
-                    crate::tast::core::TypeKind::Function {
-                        params: param_types,
-                        return_type: return_type_id,
-                        effects,
-                    },
-                ))
+                Ok(self
+                    .context
+                    .type_table
+                    .borrow_mut()
+                    .create_labelled_function_type(param_types, return_type_id, effects, labels))
             }
             Type::Anonymous { fields, .. } => {
                 // Create proper anonymous type with fields

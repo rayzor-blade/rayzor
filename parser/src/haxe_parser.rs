@@ -56,6 +56,26 @@ pub fn parse_haxe_file(file_name: &str, input: &str, recovery: bool) -> Result<H
     parse_haxe_file_with_debug(file_name, input, recovery, false)
 }
 
+/// Parse with the recursive descent parser alone: a syntax error is an
+/// error, never a partial file from the legacy parser.
+pub fn parse_haxe_file_strict(file_name: &str, input: &str) -> Result<HaxeFile, String> {
+    let preprocessed =
+        crate::preprocessor::preprocess(input, &crate::preprocessor::PreprocessorConfig::default());
+    crate::rd::rd_parse(
+        &preprocessed,
+        file_name,
+        is_import_hx_file(file_name),
+        false,
+    )
+    .map_err(|errors| {
+        errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
+
 /// Parse a complete Haxe file with debug flag for preserving source input
 pub fn parse_haxe_file_with_debug(
     file_name: &str,

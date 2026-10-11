@@ -852,7 +852,9 @@ impl MacroContext {
         // Wrap in a class/function context so the parser can handle it
         let wrapper = format!("{PARSE_PREFIX}{code}; }} }}");
 
-        let file = parser::parse_haxe_file("__macro_parse__", &wrapper, false).map_err(|e| {
+        // Haxe reports a syntax error here; the legacy parser's partial
+        // result would hide it.
+        let file = parser::parse_haxe_file_strict("__macro_parse__", &wrapper).map_err(|e| {
             MacroError::ContextError {
                 method: "parse".to_string(),
                 message: format!("parse error: {:?}", e),

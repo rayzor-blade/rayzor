@@ -463,6 +463,7 @@ impl CompilationUnit {
                 params: param_types,
                 return_type,
                 effects: crate::tast::core::FunctionEffects::default(),
+                labels: Vec::new(),
             });
 
         // Resolve native_name from the cached `@:native` metadata before we
