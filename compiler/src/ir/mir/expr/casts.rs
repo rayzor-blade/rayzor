@@ -143,8 +143,24 @@ impl<'a> HirToMirContext<'a> {
                 self.type_table.get(inner_source_storage).map(|ty| &ty.kind),
                 Some(TypeKind::Dynamic)
             );
-            if inner_target_is_dynamic && inner_source_is_abstract && !inner_source_stores_dynamic {
-                // abstract → dynamic → underlying is an identity.
+            let target_storage = self.resolve_storage_type(*target);
+            let unchecked_array_view = !*is_checked
+                && matches!(
+                    self.type_table.get(target_type).map(|ty| &ty.kind),
+                    Some(TypeKind::Abstract { .. })
+                )
+                && matches!(
+                    (
+                        self.type_table.get(inner_source_storage).map(|ty| &ty.kind),
+                        self.type_table.get(target_storage).map(|ty| &ty.kind),
+                    ),
+                    (Some(TypeKind::Array { .. }), Some(TypeKind::Array { .. }))
+                );
+            if inner_target_is_dynamic
+                && (inner_source_is_abstract || unchecked_array_view)
+                && !inner_source_stores_dynamic
+            {
+                // An unchecked abstract view retains the underlying storage.
                 return self.lower_expression(inner_expr);
             }
         }

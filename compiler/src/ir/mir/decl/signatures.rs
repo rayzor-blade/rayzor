@@ -155,6 +155,11 @@ impl<'a> HirToMirContext<'a> {
     ) {
         self.record_param_ownership(symbol_id, hir_func);
         self.record_consume_method(symbol_id, hir_func);
+        let class_type_params = if this_type.is_some() {
+            class_type_params
+        } else {
+            &[]
+        };
         let mut signature =
             self.build_function_signature_with_class_type_params(hir_func, class_type_params);
 
