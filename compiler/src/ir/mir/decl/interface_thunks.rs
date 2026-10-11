@@ -58,7 +58,7 @@ impl<'a> HirToMirContext<'a> {
         &mut self,
         interface: SymbolId,
         name: InternedString,
-        arguments: &mut [IrId],
+        arguments: &mut Vec<IrId>,
         types: &[TypeId],
     ) -> Option<Vec<IrType>> {
         let formals = self
@@ -71,6 +71,26 @@ impl<'a> HirToMirContext<'a> {
                 *arg = self.adapt_interface_slot_value(*arg, *source, *target)?;
             }
             params.push(self.builder.get_register_type(*arg).unwrap_or(IrType::I64));
+        }
+        // Omitted trailing arguments: null for a `Null<Int>`, whose default
+        // the implementation applies, else the zero of the slot's type.
+        let supplied = arguments.len().saturating_sub(1);
+        for formal in formals.iter().skip(supplied) {
+            let ty = self.convert_type(*formal);
+            let value = match &ty {
+                IrType::NullInt => self.builder.build_null_int()?,
+                IrType::I32 => self.builder.build_const(IrValue::I32(0))?,
+                IrType::F64 => self.builder.build_const(IrValue::F64(0.0))?,
+                IrType::F32 => self.builder.build_const(IrValue::F32(0.0))?,
+                IrType::Bool => self.builder.build_const(IrValue::Bool(false))?,
+                IrType::I64 => self.builder.build_const(IrValue::I64(0))?,
+                other => {
+                    let null = self.builder.build_const(IrValue::Null)?;
+                    self.builder.build_bitcast(null, other.clone())?
+                }
+            };
+            arguments.push(value);
+            params.push(ty);
         }
         Some(params)
     }

@@ -517,6 +517,9 @@ pub struct HirToMirContext<'a> {
     /// default may name a preceding parameter (`b:Int = a`), which at the
     /// call site is the argument already lowered for it.
     function_param_symbols: BTreeMap<IrFunctionId, Vec<SymbolId>>,
+    /// Functions whose body applies its own defaults to a null `Null<Int>`
+    /// parameter, so an omitted one is passed as null.
+    functions_applying_defaults: BTreeSet<IrFunctionId>,
 
     /// Constructor param counts from import modules (for BLADE-cached constructors).
     /// fill_default_args uses this when the constructor isn't in the local module yet.
@@ -1489,6 +1492,7 @@ impl<'a> HirToMirContext<'a> {
             virtual_dispatch_info: BTreeMap::new(),
             function_param_defaults: BTreeMap::new(),
             function_param_symbols: BTreeMap::new(),
+            functions_applying_defaults: BTreeSet::new(),
             external_constructor_param_counts: BTreeMap::new(),
             external_function_param_types: BTreeMap::new(),
             function_param_hir_types: BTreeMap::new(),

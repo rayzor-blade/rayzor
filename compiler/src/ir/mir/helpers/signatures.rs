@@ -199,9 +199,19 @@ impl<'a> HirToMirContext<'a> {
 
         let supplied_regs: Vec<IrId> = arg_regs[offset..].to_vec();
         let mut rebound: Vec<IrId> = arg_regs[..offset].to_vec();
+        let callee_applies = self.functions_applying_defaults.contains(&func_id);
         for (p_idx, slot) in plan.iter().enumerate() {
             match slot {
                 Some(a_idx) => rebound.push(supplied_regs[*a_idx]),
+                // A skipped `Null<Int>` is null, as when it is left off the end.
+                None if self.convert_type(param_types[p_idx]) == IrType::NullInt
+                    && (callee_applies || !matches!(defaults.get(p_idx), Some(Some(_)))) =>
+                {
+                    let Some(reg) = self.builder.build_null_int() else {
+                        return;
+                    };
+                    rebound.push(reg);
+                }
                 None => {
                     let reg = match defaults.get(p_idx) {
                         Some(Some(default_expr)) => {
@@ -498,7 +508,22 @@ impl<'a> HirToMirContext<'a> {
                 .get(&func_id)
                 .cloned()
                 .unwrap_or_default();
+            let callee_applies = self.functions_applying_defaults.contains(&func_id);
             for i in user_arg_count..defaults.len() {
+                let null_int_formal = self
+                    .function_param_hir_types
+                    .get(&func_id)
+                    .and_then(|types| types.get(i))
+                    .is_some_and(|ty| self.convert_type(*ty) == IrType::NullInt);
+                // An omitted `Null<Int>` is null when it has no default, or
+                // when the callee applies its own: a virtual call then gets
+                // the default of the receiver's class.
+                if null_int_formal && (callee_applies || defaults[i].is_none()) {
+                    if let Some(reg) = self.builder.build_null_int() {
+                        arg_regs.push(reg);
+                    }
+                    continue;
+                }
                 if let Some(ref default_expr) = defaults[i] {
                     if let Some(reg) = self.lower_param_default(
                         default_expr,
