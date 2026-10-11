@@ -134,6 +134,15 @@ impl IrType {
         }))
     }
 
+    /// A generic argument whose value is already a Dynamic box.
+    pub fn dynamic_ptr() -> Self {
+        Self::Ptr(Box::new(Self::Opaque {
+            name: "__haxe_dynamic".to_owned(),
+            size: 0,
+            align: 8,
+        }))
+    }
+
     /// Create a new type parameter (alias for TypeVar)
     pub fn type_param(name: impl Into<String>) -> Self {
         IrType::TypeVar(name.into())
@@ -210,6 +219,9 @@ impl IrType {
             }
             IrType::Ptr(inner) if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_enum") => {
                 ValueTag::Enum
+            }
+            IrType::Ptr(inner) if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_dynamic") => {
+                ValueTag::Dynamic
             }
             IrType::Ptr(_) => ValueTag::Reference,
             IrType::Function { .. } => ValueTag::Function,

@@ -22,6 +22,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    pub(crate) fn class_hint(&self, register: IrId) -> Option<&String> {
+        self.register_class_hints
+            .get(&(self.builder.current_function?, register))
+    }
+
+    pub(crate) fn set_class_hint(&mut self, register: IrId, class_name: String) {
+        if let Some(function) = self.builder.current_function {
+            self.register_class_hints
+                .insert((function, register), class_name);
+        }
+    }
+
     /// Qualified name of a class symbol, the only identity stable across
     /// compilation contexts.
     pub(crate) fn class_qualified_name(&self, symbol: SymbolId) -> Option<String> {
@@ -702,7 +714,7 @@ impl<'a> HirToMirContext<'a> {
             return Some(sid);
         }
         // 1) Register-level class hint (set on raw `new C()` object pointers).
-        if let Some(name) = self.register_class_hints.get(&arg_reg).cloned() {
+        if let Some(name) = self.class_hint(arg_reg).cloned() {
             if let Some(sid) = self.lookup_class_symbol_by_name(&name) {
                 return Some(sid);
             }
@@ -711,7 +723,7 @@ impl<'a> HirToMirContext<'a> {
         //    or its monomorphized-type record.
         if let HirExprKind::Variable { symbol, .. } = &arg_expr.kind {
             if let Some(sym_reg) = self.symbol_map.get(symbol).copied() {
-                if let Some(name) = self.register_class_hints.get(&sym_reg).cloned() {
+                if let Some(name) = self.class_hint(sym_reg).cloned() {
                     if let Some(sid) = self.lookup_class_symbol_by_name(&name) {
                         return Some(sid);
                     }
@@ -1042,8 +1054,7 @@ impl<'a> HirToMirContext<'a> {
                         .and_then(|qn| self.string_interner.get(qn))
                         .or_else(|| self.string_interner.get(sym.name))
                         .unwrap_or("?");
-                    self.register_class_hints
-                        .insert(result_reg, name.to_string());
+                    self.set_class_hint(result_reg, name.to_string());
                 }
             }
         }

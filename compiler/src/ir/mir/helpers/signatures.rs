@@ -182,12 +182,21 @@ impl<'a> HirToMirContext<'a> {
     /// Whether `func`'s body defaults `param` itself (an async body is
     /// rewritten into a closure and keeps the declared type).
     pub(crate) fn param_defaulted_in_body(&self, func: &HirFunction, param: &HirParam) -> bool {
-        func.body.is_some() && !func.is_async && self.param_defaults_in_callee(param)
+        func.body.is_some() && self.param_uses_defaulted_int_abi(func, param)
+    }
+
+    /// Abstract declarations and implementations share the defaulted parameter slot.
+    pub(crate) fn param_uses_defaulted_int_abi(
+        &self,
+        func: &HirFunction,
+        param: &HirParam,
+    ) -> bool {
+        !func.is_async && self.param_defaults_in_callee(param)
     }
 
     /// A parameter's type in `func`'s signature.
     pub(crate) fn param_ir_type(&self, func: &HirFunction, param: &HirParam) -> IrType {
-        if self.param_defaulted_in_body(func, param) {
+        if self.param_uses_defaulted_int_abi(func, param) {
             IrType::NullInt
         } else {
             self.convert_type(param.ty)

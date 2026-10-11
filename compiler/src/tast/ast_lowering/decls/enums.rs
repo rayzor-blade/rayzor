@@ -524,46 +524,27 @@ impl<'a> AstLowering<'a> {
         enum_symbol: SymbolId,
     ) -> LoweringResult<TypedEnumVariant> {
         let variant_name = self.context.intern_string(&variant.name);
-        // Reuse pre-registered variant symbol if it exists AND belongs to the same
-        // parent enum. Without this check, name collisions (e.g., Result.Error vs
-        // haxe.io.Error enum type) cause the wrong symbol to be reused.
-        let variant_symbol = if let Some(existing) = self
+        // Constructor identity belongs to its enum even when another enum
+        // occupies the bare name in the root scope.
+        let existing = self
             .context
             .symbol_table
-            .lookup_symbol(ScopeId::first(), variant_name)
-        {
-            if existing.kind == crate::tast::symbols::SymbolKind::EnumVariant {
-                // Verify it belongs to the same parent enum
-                let is_same_parent = self
-                    .context
-                    .symbol_table
-                    .find_parent_enum_for_constructor(existing.id)
-                    .map(|p| p == enum_symbol)
-                    .unwrap_or(false);
-                if is_same_parent {
-                    existing.id
-                } else {
-                    self.context.symbol_table.create_enum_variant_in_scope(
-                        variant_name,
-                        ScopeId::first(),
-                        enum_symbol,
-                    )
-                }
-            } else {
-                // Name collision with non-variant symbol (e.g., enum type) — create fresh variant
-                self.context.symbol_table.create_enum_variant_in_scope(
-                    variant_name,
-                    ScopeId::first(),
-                    enum_symbol,
-                )
-            }
-        } else {
+            .get_enum_variants(enum_symbol)
+            .and_then(|variants| {
+                variants.iter().copied().find(|id| {
+                    self.context
+                        .symbol_table
+                        .get_symbol(*id)
+                        .is_some_and(|symbol| symbol.name == variant_name)
+                })
+            });
+        let variant_symbol = existing.unwrap_or_else(|| {
             self.context.symbol_table.create_enum_variant_in_scope(
                 variant_name,
                 ScopeId::first(),
                 enum_symbol,
             )
-        };
+        });
 
         let flags = self.extract_metadata_flags(&variant.meta, variant_symbol);
         self.context

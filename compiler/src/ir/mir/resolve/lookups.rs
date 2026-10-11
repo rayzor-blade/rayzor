@@ -103,7 +103,7 @@ impl<'a> HirToMirContext<'a> {
             // Runtime-backed types whose stdlib class is never loaded as HIR
             // (ArrayIterator, ArrayKeyValueIterator) only exist as register hints.
             if let Some(reg) = self.symbol_map.get(symbol) {
-                if let Some(hint) = self.register_class_hints.get(reg) {
+                if let Some(hint) = self.class_hint(*reg) {
                     return Some(hint.clone());
                 }
             }
@@ -273,7 +273,7 @@ impl<'a> HirToMirContext<'a> {
         if let Some(&class_sym) = self.ir_to_drop_class.get(&ir_id) {
             return Some(class_sym);
         }
-        let class_name = self.register_class_hints.get(&ir_id)?;
+        let class_name = self.class_hint(ir_id)?;
         for &class_sym in &self.derive_drop_classes {
             if let Some(symbol) = self.symbol_table.get_symbol(class_sym) {
                 let sym_name = self.string_interner.get(symbol.name);
@@ -1991,26 +1991,35 @@ impl<'a> HirToMirContext<'a> {
                 Some(TypeKind::Abstract {
                     symbol_id,
                     underlying,
-                    ..
+                    type_args,
                 }) => {
                     let Some(inner) = underlying
                         .or_else(|| self.type_table.resolve_abstract_underlying(*symbol_id))
                     else {
                         break;
                     };
+                    let inner = self
+                        .substitute_abstract_type_arg(*symbol_id, inner, type_args)
+                        .unwrap_or(inner);
                     current = self.resolve_through_aliases(inner);
                 }
-                Some(TypeKind::Class { symbol_id, .. })
-                    if self
-                        .symbol_table
-                        .get_symbol(*symbol_id)
-                        .is_some_and(|s| s.kind == crate::tast::symbols::SymbolKind::Abstract) =>
+                Some(TypeKind::Class {
+                    symbol_id,
+                    type_args,
+                    ..
+                }) if self
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .is_some_and(|s| s.kind == crate::tast::symbols::SymbolKind::Abstract) =>
                 {
                     // A forward declaration keeps its Class handle after the abstract lowers.
                     let Some(inner) = self.type_table.resolve_abstract_underlying(*symbol_id)
                     else {
                         break;
                     };
+                    let inner = self
+                        .substitute_abstract_type_arg(*symbol_id, inner, type_args)
+                        .unwrap_or(inner);
                     current = self.resolve_through_aliases(inner);
                 }
                 _ => break,

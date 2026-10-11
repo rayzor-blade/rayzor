@@ -317,7 +317,7 @@ impl<'a> HirToMirContext<'a> {
         self.fill_default_args(ctor_id, &mut args, true);
         self.builder.build_call_direct(ctor_id, args, IrType::Void);
 
-        self.register_class_hints.insert(obj_ptr, class_name_str);
+        self.set_class_hint(obj_ptr, class_name_str);
 
         Some(obj_ptr)
     }

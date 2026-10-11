@@ -165,17 +165,13 @@ impl<'a> HirToMirContext<'a> {
         field_ty: TypeId,
     ) -> Option<IrId> {
         // Receiver class hint: register-level first, then the object variable.
-        let hint = self
-            .register_class_hints
-            .get(&obj_reg)
-            .cloned()
-            .or_else(|| {
-                if let HirExprKind::Variable { symbol, .. } = object_kind {
-                    self.monomorphized_var_types.get(symbol).cloned()
-                } else {
-                    None
-                }
-            })?;
+        let hint = self.class_hint(obj_reg).cloned().or_else(|| {
+            if let HirExprKind::Variable { symbol, .. } = object_kind {
+                self.monomorphized_var_types.get(symbol).cloned()
+            } else {
+                None
+            }
+        })?;
         let field_name = self
             .symbol_table
             .get_symbol(field)

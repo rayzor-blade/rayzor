@@ -1645,6 +1645,11 @@ impl<'a> HirToMirContext<'a> {
                 continue;
             };
             let (field_ty, is_final) = (field_sym.type_id, field_sym.is_final());
+            let storage_ty = if self.is_int64_type(field_ty) {
+                field_ty
+            } else {
+                self.resolve_storage_type(field_ty)
+            };
             let Some(name) = field_sym
                 .native_name
                 .or(Some(field_sym.name))
@@ -1679,13 +1684,13 @@ impl<'a> HirToMirContext<'a> {
                                 .clone();
                             (
                                 this.builder.build_call_direct(f, Vec::new(), ret)?,
-                                field_ty,
+                                storage_ty,
                             )
                         }
                         None => {
                             let gid = global?;
                             let ty = this.builder.module.globals.get(&gid)?.ty.clone();
-                            (this.builder.build_load_global(gid, ty)?, field_ty)
+                            (this.builder.build_load_global(gid, ty)?, storage_ty)
                         }
                     };
                     let dynamic = this.type_table.dynamic_type();
@@ -1701,7 +1706,7 @@ impl<'a> HirToMirContext<'a> {
                 self.static_accessor_thunk(&name, true, |this, value| {
                     let dynamic = this.type_table.dynamic_type();
                     let raw = this
-                        .maybe_unbox_value(value, dynamic, field_ty)
+                        .maybe_unbox_value(value, dynamic, storage_ty)
                         .unwrap_or(value);
                     match set_fn {
                         Some(f) => {

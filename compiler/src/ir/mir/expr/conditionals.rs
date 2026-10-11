@@ -22,6 +22,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    fn box_conditional_arm(&mut self, value: IrId, ty: TypeId, ir: IrType) -> Option<IrId> {
+        if let Some(TypeKind::TypeParameter { symbol_id, .. }) = self
+            .type_table
+            .get(self.resolve_through_aliases(ty))
+            .map(|t| &t.kind)
+            && let Some(boxed) = self.box_type_param_for_dynamic(value, *symbol_id)
+        {
+            return Some(boxed);
+        }
+        self.box_primitive_to_dynamic(value, ir)
+    }
+
     /// Give each conditional arm the result's raw or boxed representation.
     pub(crate) fn convert_dynamic_if_result(
         &mut self,
@@ -927,14 +939,14 @@ impl<'a> HirToMirContext<'a> {
                 } else if then_is_ptr && else_is_prim {
                     // Box the else value (primitive) to match the then pointer
                     self.builder.switch_to_block(else_end_block);
-                    let boxed = self.box_primitive_to_dynamic(ev, else_rty.unwrap());
+                    let boxed = self.box_conditional_arm(ev, else_expr.ty, else_rty.unwrap());
                     if let Some(b) = boxed {
                         else_val = Some(b);
                     }
                 } else if else_is_ptr && then_is_prim {
                     // Box the then value (primitive) to match the else pointer
                     self.builder.switch_to_block(then_end_block);
-                    let boxed = self.box_primitive_to_dynamic(tv, then_rty.unwrap());
+                    let boxed = self.box_conditional_arm(tv, then_expr.ty, then_rty.unwrap());
                     if let Some(b) = boxed {
                         then_val = Some(b);
                     }

@@ -81,6 +81,49 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn lower_call(&mut self, expr: &HirExpr) -> Option<IrId> {
+        let result = self.lower_call_inner(expr)?;
+        let HirExprKind::Call { callee, .. } = &expr.kind else {
+            return Some(result);
+        };
+        let symbol = match callee.kind {
+            HirExprKind::Variable { symbol, .. } => symbol,
+            HirExprKind::Field { field, .. } => field,
+            _ => return Some(result),
+        };
+        if self.callee_returns_type_param(symbol)
+            && matches!(
+                self.type_table
+                    .get(self.resolve_storage_type(expr.ty))
+                    .map(|ty| &ty.kind),
+                Some(TypeKind::Dynamic)
+            )
+        {
+            let bits = self.coerce_reg_to(result, &IrType::I64)?;
+            let tag = self.builder.build_const(IrValue::I32(
+                rayzor_runtime::type_system::ValueTag::Reference as i32,
+            ))?;
+            let ptr = IrType::Ptr(Box::new(IrType::U8));
+            let box_fn = self.get_or_register_extern_function(
+                "haxe_box_typed_ptr",
+                vec![IrType::I64, IrType::I32],
+                ptr.clone(),
+            );
+            let boxed = self
+                .builder
+                .build_call_direct(box_fn, vec![bits, tag], ptr)?;
+            self.boxed_value_regs.insert(boxed);
+            return Some(boxed);
+        }
+        if self.callee_returns_type_param(symbol) && self.resolve_enum_symbol(expr.ty).is_some() {
+            let raw = self.unbox_generic_value(result, expr.ty)?;
+            return self
+                .builder
+                .build_bitcast(raw, self.convert_type_arg(expr.ty));
+        }
+        Some(result)
+    }
+
+    fn lower_call_inner(&mut self, expr: &HirExpr) -> Option<IrId> {
         let HirExprKind::Call {
             callee,
             args,

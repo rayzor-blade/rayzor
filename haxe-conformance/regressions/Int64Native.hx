@@ -24,6 +24,10 @@ class Int64Native {
         check("Std.string", Std.string(a), "47");
         check("big", Int64.toStr(Int64.make(1, 0)), "4294967296");
         check("negative", Int64.toStr(Int64.make(-1, -1)), "-1");
+        if (a.toFloat() != 47.0 || Int64.make(1, 0).toFloat() != 4294967296.0)
+            throw "Int64 float conversion";
+        if (Int64.make(-1, -1).toFloat() != -1.0)
+            throw "negative Int64 float conversion";
         var x:haxe.Int32 = 7;
         var s = "";
         s = x + s;

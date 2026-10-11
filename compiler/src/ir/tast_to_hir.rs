@@ -8591,6 +8591,91 @@ impl<'a> TastToHirContext<'a> {
     /// Deeply inline an expression, replacing `this` and parameters with concrete HIR expressions
     /// The `expected_type` parameter is used to fix type information for expressions like `new Abstract(...)`
     /// which may have incorrect type IDs in the TAST.
+    /// Keep the receiver's type arguments when an abstract body reads `this`
+    /// as its underlying type, including nested types such as StringMap<T>.
+    fn abstract_inline_type(&self, ty: TypeId, receiver: TypeId) -> TypeId {
+        let bindings = {
+            let table = self.type_table.borrow();
+            let mut receiver = receiver;
+            for _ in 0..16 {
+                match table.get(receiver).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => receiver = *target_type,
+                    _ => break,
+                }
+            }
+            let Some(TypeKind::Abstract {
+                symbol_id,
+                type_args,
+                ..
+            }) = table.get(receiver).map(|t| &t.kind)
+            else {
+                return ty;
+            };
+            let Some(parameters) = self.symbol_table.get_class_type_params(*symbol_id) else {
+                return ty;
+            };
+            parameters
+                .iter()
+                .zip(type_args)
+                .filter_map(|(param, arg)| match table.get(*param).map(|t| &t.kind) {
+                    Some(TypeKind::TypeParameter { symbol_id, .. }) => Some((*symbol_id, *arg)),
+                    _ => None,
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        self.bind_inline_type(ty, &bindings, 0)
+    }
+
+    fn bind_inline_type(
+        &self,
+        ty: TypeId,
+        bindings: &BTreeMap<SymbolId, TypeId>,
+        depth: usize,
+    ) -> TypeId {
+        if bindings.is_empty() || depth >= 32 {
+            return ty;
+        }
+        let Some(mut kind) = self.type_table.borrow().get(ty).map(|t| t.kind.clone()) else {
+            return ty;
+        };
+        let original = kind.clone();
+        let sub = |ty| self.bind_inline_type(ty, bindings, depth + 1);
+        match &mut kind {
+            TypeKind::TypeParameter { symbol_id, .. } => {
+                return bindings.get(symbol_id).copied().unwrap_or(ty);
+            }
+            TypeKind::Class { type_args, .. }
+            | TypeKind::Interface { type_args, .. }
+            | TypeKind::Enum { type_args, .. }
+            | TypeKind::Abstract { type_args, .. }
+            | TypeKind::TypeAlias { type_args, .. }
+            | TypeKind::GenericInstance { type_args, .. } => {
+                type_args.iter_mut().for_each(|arg| *arg = sub(*arg));
+            }
+            TypeKind::Array { element_type } => *element_type = sub(*element_type),
+            TypeKind::Optional { inner_type } => *inner_type = sub(*inner_type),
+            TypeKind::Function {
+                params,
+                return_type,
+                ..
+            } => {
+                params.iter_mut().for_each(|param| *param = sub(*param));
+                *return_type = sub(*return_type);
+            }
+            TypeKind::Anonymous { fields } => {
+                fields
+                    .iter_mut()
+                    .for_each(|field| field.type_id = sub(field.type_id));
+            }
+            _ => return ty,
+        }
+        if kind == original {
+            ty
+        } else {
+            self.type_table.borrow_mut().create_type(kind)
+        }
+    }
+
     fn inline_expression_deep(
         &mut self,
         expr: &TypedExpression,
@@ -8598,6 +8683,7 @@ impl<'a> TastToHirContext<'a> {
         param_map: &BTreeMap<SymbolId, HirExpr>,
         expected_type: TypeId,
     ) -> HirExpr {
+        let expression_type = self.abstract_inline_type(expr.expr_type, this_replacement.ty);
         let kind_name = match &expr.kind {
             TypedExpressionKind::Literal { .. } => "Literal",
             TypedExpressionKind::Variable { .. } => "Variable",
@@ -8616,8 +8702,8 @@ impl<'a> TastToHirContext<'a> {
             // A type parameter (`abstract W<T>(T)`) keeps the receiver's type.
             TypedExpressionKind::This { .. } => {
                 let mut receiver = this_replacement.clone();
-                if !self.is_type_parameter(expr.expr_type) {
-                    receiver.ty = expr.expr_type;
+                if !self.is_type_parameter(expression_type) {
+                    receiver.ty = expression_type;
                 }
                 receiver
             }
@@ -8634,8 +8720,8 @@ impl<'a> TastToHirContext<'a> {
                     // An implicit receiver the typer spelled as the `this`
                     // variable (a bare `get(0)` inside the abstract).
                     let mut receiver = this_replacement.clone();
-                    if !self.is_type_parameter(expr.expr_type) {
-                        receiver.ty = expr.expr_type;
+                    if !self.is_type_parameter(expression_type) {
+                        receiver.ty = expression_type;
                     }
                     receiver
                 } else {
@@ -8708,7 +8794,8 @@ impl<'a> TastToHirContext<'a> {
                 if matches!(inner_receiver.kind, TypedExpressionKind::This { .. })
                     && inner_receiver.expr_type.is_valid()
                 {
-                    lowered_receiver.ty = inner_receiver.expr_type;
+                    lowered_receiver.ty =
+                        self.abstract_inline_type(inner_receiver.expr_type, this_replacement.ty);
                 }
                 let lowered_args: Vec<HirExpr> = arguments
                     .iter()
@@ -8730,7 +8817,7 @@ impl<'a> TastToHirContext<'a> {
                                 symbol: *method_symbol,
                                 capture_mode: None,
                             },
-                            expr.expr_type,
+                            expression_type,
                             self.current_lifetime,
                             expr.source_location,
                         )),
@@ -8738,7 +8825,7 @@ impl<'a> TastToHirContext<'a> {
                         args: call_args,
                         is_method: true,
                     },
-                    expr.expr_type,
+                    expression_type,
                     self.current_lifetime,
                     expr.source_location,
                 )
@@ -8784,7 +8871,7 @@ impl<'a> TastToHirContext<'a> {
                                     lhs: Box::new(target),
                                     rhs: Box::new(lowered_right),
                                 },
-                                expr.expr_type,
+                                expression_type,
                                 self.current_lifetime,
                                 expr.source_location,
                             )
@@ -8794,7 +8881,7 @@ impl<'a> TastToHirContext<'a> {
                         statements.push(HirStatement::Assign { lhs, rhs, op: None });
                         return HirExpr::new(
                             HirExprKind::Block(HirBlock::new(statements, self.current_scope)),
-                            expr.expr_type,
+                            expression_type,
                             self.current_lifetime,
                             expr.source_location,
                         );
@@ -8806,7 +8893,7 @@ impl<'a> TastToHirContext<'a> {
                         lhs: Box::new(lowered_left),
                         rhs: Box::new(lowered_right),
                     },
-                    expr.expr_type,
+                    expression_type,
                     self.current_lifetime,
                     expr.source_location,
                 )
@@ -8826,7 +8913,7 @@ impl<'a> TastToHirContext<'a> {
                         op: self.convert_unary_op(operator),
                         operand: Box::new(lowered_operand),
                     },
-                    expr.expr_type,
+                    expression_type,
                     self.current_lifetime,
                     expr.source_location,
                 )
@@ -8866,7 +8953,7 @@ impl<'a> TastToHirContext<'a> {
                         then_expr: Box::new(then_expr),
                         else_expr: Box::new(else_expr),
                     },
-                    expr.expr_type,
+                    expression_type,
                     self.current_lifetime,
                     expr.source_location,
                 )
@@ -8891,7 +8978,7 @@ impl<'a> TastToHirContext<'a> {
                         })
                         .collect(),
                 },
-                expr.expr_type,
+                expression_type,
                 self.current_lifetime,
                 expr.source_location,
             ),
@@ -8909,7 +8996,7 @@ impl<'a> TastToHirContext<'a> {
                         })
                         .collect(),
                 },
-                expr.expr_type,
+                expression_type,
                 self.current_lifetime,
                 expr.source_location,
             ),
@@ -8978,7 +9065,7 @@ impl<'a> TastToHirContext<'a> {
                         args: lowered_args,
                         class_name,
                     },
-                    expected_type, // Use expected_type instead of expr.expr_type
+                    expected_type, // Use expected_type instead of expression_type
                     self.current_lifetime,
                     expr.source_location,
                 )
@@ -9081,7 +9168,7 @@ impl<'a> TastToHirContext<'a> {
                         is_safe,
                         is_checked: matches!(cast_kind, CastKind::Explicit),
                     },
-                    expr.expr_type,
+                    expression_type,
                     self.current_lifetime,
                     expr.source_location,
                 )
@@ -9137,7 +9224,7 @@ impl<'a> TastToHirContext<'a> {
                     };
                     return HirExpr::new(
                         kind,
-                        expr.expr_type,
+                        expression_type,
                         self.current_lifetime,
                         expr.source_location,
                     );
@@ -9152,7 +9239,7 @@ impl<'a> TastToHirContext<'a> {
                     .symbol_table
                     .get_symbol(*method_symbol)
                     .map(|s| s.type_id)
-                    .unwrap_or(expr.expr_type);
+                    .unwrap_or(expression_type);
 
                 HirExpr::new(
                     HirExprKind::Call {
@@ -9181,7 +9268,7 @@ impl<'a> TastToHirContext<'a> {
                         args: lowered_args,
                         is_method: false,
                     },
-                    expr.expr_type,
+                    expression_type,
                     self.current_lifetime,
                     expr.source_location,
                 )
@@ -9213,7 +9300,7 @@ impl<'a> TastToHirContext<'a> {
                         object: Box::new(lowered_object),
                         field: *field_symbol,
                     },
-                    expr.expr_type,
+                    expression_type,
                     self.current_lifetime,
                     expr.source_location,
                 )
@@ -9263,7 +9350,7 @@ impl<'a> TastToHirContext<'a> {
                             };
                             HirExpr::new(
                                 HirExprKind::Block(block),
-                                expr.expr_type,
+                                expression_type,
                                 self.current_lifetime,
                                 expr.source_location,
                             )
@@ -9311,7 +9398,7 @@ impl<'a> TastToHirContext<'a> {
                             then_expr: Box::new(case_body),
                             else_expr: Box::new(current_expr),
                         },
-                        expr.expr_type,
+                        expression_type,
                         self.current_lifetime,
                         expr.source_location,
                     );
@@ -9340,7 +9427,7 @@ impl<'a> TastToHirContext<'a> {
                         object: Box::new(object),
                         index: Box::new(index),
                     },
-                    expr.expr_type,
+                    expression_type,
                     self.current_lifetime,
                     expr.source_location,
                 )

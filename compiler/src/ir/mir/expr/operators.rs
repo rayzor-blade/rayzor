@@ -1724,6 +1724,30 @@ impl<'a> HirToMirContext<'a> {
                     } else {
                         rhs_reg = coerce_dyn(self, rhs_reg)?;
                     }
+                    // A Dynamic operand can already be a raw scalar.
+                    if let (Some(left), Some(right)) = (
+                        self.builder.get_register_type(lhs_reg),
+                        self.builder.get_register_type(rhs_reg),
+                    ) && (left.is_integer() || left.is_float())
+                        && (right.is_integer() || right.is_float())
+                    {
+                        let target = if left.is_float()
+                            || right.is_float()
+                            || matches!(op, HirBinaryOp::Div)
+                        {
+                            IrType::F64
+                        } else if left != right {
+                            IrType::I64
+                        } else {
+                            left.clone()
+                        };
+                        if left != target {
+                            lhs_reg = self.builder.build_cast(lhs_reg, left, target.clone())?;
+                        }
+                        if right != target {
+                            rhs_reg = self.builder.build_cast(rhs_reg, right, target)?;
+                        }
+                    }
                     let mir_op = self.convert_binary_op_to_mir(*op);
                     let result_reg = match mir_op {
                         MirBinaryOp::Binary(arith_op) => {

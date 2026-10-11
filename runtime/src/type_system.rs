@@ -27,12 +27,35 @@
 //!    ```
 
 use log::debug;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Once, RwLock};
 
 /// Ensures primitive types are registered exactly once
 static INIT_PRIMITIVES: Once = Once::new();
+
+thread_local! {
+    static STRINGIFYING: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+}
+
+/// Tracks payloads on the active formatting path, allowing shared references.
+pub(crate) struct StringifyGuard(usize);
+
+impl StringifyGuard {
+    pub(crate) fn enter(ptr: *const u8) -> Option<Self> {
+        STRINGIFYING.with(|active| {
+            let inserted = active.borrow_mut().insert(ptr as usize);
+            inserted.then(|| Self(ptr as usize))
+        })
+    }
+}
+
+impl Drop for StringifyGuard {
+    fn drop(&mut self) {
+        STRINGIFYING.with(|active| active.borrow_mut().remove(&self.0));
+    }
+}
 
 /// Runtime type identifier
 ///
@@ -177,6 +200,8 @@ pub enum ValueTag {
     NullInt = 10,
     /// A payload enum's cell, which names its enum in its pad word.
     Enum = 11,
+    /// An already boxed Dynamic value bound to a generic parameter.
+    Dynamic = 12,
 }
 
 impl ValueTag {
@@ -192,6 +217,7 @@ impl ValueTag {
             9 => Some(ValueTag::Function),
             10 => Some(ValueTag::NullInt),
             11 => Some(ValueTag::Enum),
+            12 => Some(ValueTag::Dynamic),
             _ => None,
         }
     }
@@ -1282,6 +1308,12 @@ pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32, string_params:
     if a == b {
         return true;
     }
+    let (a, enum_a) = resolve_dynamic_enum(a, type_id);
+    let (b, enum_b) = resolve_dynamic_enum(b, type_id);
+    if enum_a == 0 || enum_a != enum_b {
+        return false;
+    }
+    let type_id = enum_a as i32;
     if type_id <= 0 {
         return false;
     }
@@ -1526,6 +1558,11 @@ fn create_enum_value_from_slots(
                     }
                     (ParamType::Float, TYPE_FLOAT) => haxe_unbox_float(dynamic).to_bits() as i64,
                     (ParamType::Anon | ParamType::Object, crate::anon_object::TYPE_ANON_OBJECT) => {
+                        dynamic.value_ptr as i64
+                    }
+                    (ParamType::Anon | ParamType::Object | ParamType::Array, _)
+                        if is_reference_box(val as *mut u8) =>
+                    {
                         dynamic.value_ptr as i64
                     }
                     (_, TYPE_NULL) => 0,
@@ -2135,6 +2172,12 @@ pub(crate) fn enum_is_boxed(type_id: u32) -> bool {
 /// discriminant is never misread as a pointer.
 fn resolve_dynamic_enum(value: i64, type_id: i32) -> (i64, u32) {
     if type_id != 0 {
+        if is_reference_box(value as *mut u8)
+            && let Some(dynamic) = dynamic_box_at(value as *mut u8)
+            && dynamic.type_id.0 == type_id as u32
+        {
+            return (dynamic.value_ptr as i64, type_id as u32);
+        }
         return (value, type_id as u32);
     }
     if let Some(reflected_type) = ENUM_VALUE_TYPES
@@ -2266,6 +2309,9 @@ fn format_enum_boxed(type_id: u32, ptr: *const u8) -> String {
     if ptr.is_null() {
         return "null".to_string();
     }
+    let Some(_guard) = StringifyGuard::enter(ptr) else {
+        return "<...>".to_string();
+    };
     unsafe {
         let tag = *(ptr as *const i32);
         let Some(variant_info) = get_enum_variant_info(TypeId(type_id), tag as i64) else {
@@ -2590,6 +2636,12 @@ unsafe extern "C" fn function_to_string(_value_ptr: *const u8) -> StringPtr {
 }
 
 unsafe extern "C" fn anon_object_to_string(value_ptr: *const u8) -> StringPtr {
+    let Some(_guard) = StringifyGuard::enter(value_ptr) else {
+        return StringPtr {
+            ptr: b"<...>".as_ptr(),
+            len: 5,
+        };
+    };
     unsafe {
         // A structure with a `toString` function prints as what it returns.
         let name = "toString";
@@ -2704,6 +2756,9 @@ fn array_text_with_layout(value_ptr: *const u8, layout: u64) -> String {
     if value_ptr.is_null() {
         return "null".to_string();
     }
+    let Some(_guard) = StringifyGuard::enter(value_ptr) else {
+        return "<...>".to_string();
+    };
     unsafe {
         let arr = &*(value_ptr as *const crate::haxe_array::HaxeArray);
         let mut buf = String::from("[");
@@ -3622,9 +3677,15 @@ pub extern "C" fn haxe_iter_handle_from_dynamic(
     next_fn: i64,
     iterator_tag: u32,
 ) -> *mut u8 {
-    let Some(d) = dynamic_box_at(ptr).filter(|d| d.tag_is_known()) else {
+    let Some(d) = dynamic_box_at(ptr) else {
         return std::ptr::null_mut();
     };
+    if crate::iter_handle::is_handle(ptr as i64) {
+        return ptr;
+    }
+    if !d.tag_is_known() {
+        return std::ptr::null_mut();
+    }
     let iterator_slot = if d.type_id == TYPE_ARRAY {
         iterator_fn
     } else if d.type_id.0 == iterator_tag {
@@ -3682,29 +3743,41 @@ pub extern "C" fn haxe_unbox_if_tag(ptr: *mut u8, tag: u32) -> *mut u8 {
 /// Unwrap the return of an erased generic method to the bits the caller's T
 /// expects, or pass a non-box through unchanged.
 ///
-/// Two producers box `Null<T>` in two LAYOUTS. `haxe_box_int_ptr` puts the
-/// stored bits in a heap cell behind an Int tag, so the pointer is the cell's
-/// contents. `haxe_box_typed_ptr` with a Reference tag stores the pointer
-/// directly under type_id 0. Both must come out as the same value. Tag 0 is
-/// never a real type, so it identifies the second shape unambiguously; any
-/// other unrecognised first word means the slot was never a box.
+/// Scalar boxes store their bits in a separate cell. Reference boxes carry
+/// the payload directly and identify themselves with the reference-box mark.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_erased_return(ptr: *mut u8) -> i64 {
     if ptr.is_null() {
         return 0;
     }
+    if stamped_enum_cell_type(ptr as i64).is_some() {
+        return ptr as i64;
+    }
     if let Some(d) = dynamic_box_at(ptr) {
+        if is_reference_box(ptr) {
+            return d.value_ptr as i64;
+        }
         if d.type_id == TYPE_INT || d.type_id == TYPE_BOOL {
             return haxe_unbox_int(d);
         }
         if d.type_id == TYPE_FLOAT {
             return haxe_unbox_float(d).to_bits() as i64;
         }
-        if d.type_id.0 == 0 || d.type_id == TYPE_STRING {
+        if d.type_id == TYPE_STRING {
             return d.value_ptr as i64;
         }
     }
     ptr as usize as i64
+}
+
+/// A generic Dynamic keeps its box; concrete type arguments consume its payload.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_unbox_generic_return(ptr: *mut u8, type_tag: i32) -> i64 {
+    if type_tag == ValueTag::Dynamic as i32 {
+        ptr as i64
+    } else {
+        haxe_unbox_erased_return(ptr)
+    }
 }
 
 /// Safely coerce a Dynamic-typed value to a float.
@@ -3963,7 +4036,7 @@ pub extern "C" fn haxe_dynamic_equals_typed(raw: i64, type_tag: i32, other: *mut
     }
     // Reference/Dynamic, and the placeholder a monomorphisation never filled
     // in, both leave `raw` pointer-shaped: neither side is a described value.
-    if type_tag == 6 || type_tag == 0 {
+    if type_tag == 6 || type_tag == 12 || type_tag == 0 {
         return haxe_dynamic_equals(raw as *mut u8, other);
     }
 
@@ -4029,6 +4102,7 @@ pub extern "C" fn haxe_unbox_bool_ptr(ptr: *mut u8) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
     match ValueTag::from_i32(type_tag) {
+        Some(ValueTag::Dynamic) => value as *mut u8,
         Some(ValueTag::Interface) => {
             let object = haxe_iface_identity(value as *mut u8);
             haxe_box_typed_ptr(object as i64, ValueTag::Reference as i32)
@@ -4082,10 +4156,18 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
             {
                 return haxe_box_reference_ptr(p, type_id);
             }
+            if crate::anon_object::is_anon_handle(p) {
+                return haxe_box_reference_ptr(p, crate::anon_object::TYPE_ANON_OBJECT.0);
+            }
             // A `T` bound to Dynamic already holds a box.
             let builtin_box = || {
-                dynamic_box_at(p)
-                    .is_some_and(|d| (TYPE_NULL.0..=TYPE_ARRAY.0).contains(&d.type_id.0))
+                dynamic_box_at(p).is_some_and(|d| {
+                    (TYPE_NULL.0..=TYPE_ARRAY.0).contains(&d.type_id.0)
+                        || matches!(
+                            d.type_id,
+                            TYPE_FUNCTION | TYPE_DYNAMIC_TOKEN | TYPE_CLASS_TOKEN | TYPE_ENUM_TOKEN
+                        )
+                })
             };
             if is_reference_box(p) || builtin_box() {
                 return p;
@@ -4177,19 +4259,25 @@ pub extern "C" fn haxe_unbox_reference_ptr(ptr: *mut u8) -> *mut u8 {
         );
         return std::ptr::null_mut();
     }
-    if is_raw_class_instance(ptr) {
+    if is_raw_class_instance(ptr)
+        || stamped_enum_cell_type(ptr as i64).is_some()
+        || crate::anon_object::is_anon_handle(ptr)
+    {
         return ptr;
     }
-    unsafe {
-        let dynamic_ptr = ptr as *const DynamicValue;
-        let dynamic = *dynamic_ptr;
-        dynamic.value_ptr
+    match dynamic_box_at(ptr) {
+        Some(dynamic)
+            if is_reference_box(ptr) || (dynamic.type_id.0 != 0 && dynamic.tag_is_builtin()) =>
+        {
+            dynamic.value_ptr
+        }
+        _ => ptr,
     }
 }
 
 /// A class instance that reached a Dynamic slot unboxed: its i64 header
 /// names a class, where a box over one carries the mark in its high half.
-fn is_raw_class_instance(ptr: *mut u8) -> bool {
+pub(crate) fn is_raw_class_instance(ptr: *mut u8) -> bool {
     let addr = ptr as usize;
     if addr <= u32::MAX as usize || (addr & 7) != 0 || (addr >> 47) != 0 {
         return false;
@@ -5182,6 +5270,181 @@ pub extern "C" fn haxe_meta_get_statics(type_id: i64) -> *mut u8 {
 mod value_tag_tests {
     use super::*;
 
+    #[test]
+    fn erased_reference_boxing_preserves_function_boxes() {
+        let mut closure = [0i64; 2];
+        let boxed = haxe_box_function_ptr(closure.as_mut_ptr().cast());
+        let returned = haxe_box_typed_ptr(boxed as i64, ValueTag::Reference as i32);
+        assert_eq!(returned, boxed);
+        assert!(crate::reflect::haxe_reflect_is_function(returned));
+        assert_eq!(
+            haxe_unbox_generic_return(returned, ValueTag::Dynamic as i32),
+            boxed as i64
+        );
+    }
+
+    #[test]
+    fn recursive_stringification_releases_its_active_path() {
+        let object = crate::anon_object::rayzor_anon_new(crate::anon_object::DYNAMIC_SHAPE, 0);
+        let boxed = haxe_box_reference_ptr(object, crate::anon_object::TYPE_ANON_OBJECT.0);
+        crate::anon_object::rayzor_anon_set_field(object, b"rec".as_ptr(), 3, boxed);
+        for _ in 0..2 {
+            let text = unsafe { anon_object_to_string(object) };
+            let bytes = unsafe { std::slice::from_raw_parts(text.ptr, text.len) };
+            assert_eq!(bytes, b"{rec: <...>}");
+        }
+        let mut array = crate::haxe_array::HaxeArray {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+            elem_size: 8,
+            flags: 0,
+        };
+        crate::haxe_array::haxe_array_new(&mut array, 8);
+        let ptr = (&mut array as *mut crate::haxe_array::HaxeArray).cast();
+        let boxed = haxe_box_array_ptr(ptr, 0);
+        crate::haxe_array::haxe_array_push_i64(&mut array, boxed as i64);
+        assert_eq!(array_text_with_layout(ptr, 0), "[<...>]");
+        assert_eq!(array_text_with_layout(ptr, 0), "[<...>]");
+    }
+
+    #[test]
+    fn erased_return_opens_scalar_and_reference_boxes() {
+        assert_eq!(haxe_unbox_erased_return(haxe_box_int_ptr(-7)), -7);
+        assert_eq!(haxe_unbox_erased_return(haxe_box_bool_ptr(true)), 1);
+        assert_eq!(
+            haxe_unbox_erased_return(haxe_box_float_ptr(1.5)),
+            1.5f64.to_bits() as i64
+        );
+        let mut object = [0x1234_5678i64, 99];
+        let ptr = object.as_mut_ptr().cast::<u8>();
+        assert_eq!(haxe_unbox_erased_return(ptr), ptr as i64);
+        assert_eq!(
+            haxe_unbox_erased_return(haxe_box_reference_ptr(ptr, object[0] as u32)),
+            ptr as i64
+        );
+        let mut empty = [0i64, 0, 0, 8, 0];
+        let ptr = empty.as_mut_ptr().cast::<u8>();
+        assert_eq!(haxe_unbox_erased_return(ptr), ptr as i64);
+        assert_eq!(haxe_unbox_reference_ptr(ptr), ptr);
+        let mut nonempty = [0x3_0000_0100i64, 2, 2, 8, 0];
+        let ptr = nonempty.as_mut_ptr().cast::<u8>();
+        assert_eq!(haxe_unbox_reference_ptr(ptr), ptr);
+        let string = unsafe { alloc_haxe_string("raw string") };
+        assert_eq!(haxe_unbox_reference_ptr(string), string);
+        assert_eq!(
+            haxe_unbox_reference_ptr(haxe_box_haxestring_ptr(string)),
+            string
+        );
+    }
+
+    #[test]
+    fn generic_dynamic_returns_keep_their_boxes() {
+        let boxed = haxe_box_float_ptr(1.5);
+        assert_eq!(
+            haxe_unbox_generic_return(boxed, ValueTag::Dynamic as i32),
+            boxed as i64
+        );
+        assert_eq!(
+            haxe_unbox_generic_return(boxed, ValueTag::Float as i32),
+            1.5f64.to_bits() as i64
+        );
+    }
+
+    #[test]
+    fn dynamic_enum_equality_compares_boxed_payloads() {
+        let type_id = 0x7331_0502;
+        register_enum_from_mir(
+            type_id,
+            "DynamicEqualityEnum",
+            &[("Payload".to_owned(), 1, vec![ParamType::Int])],
+        );
+        let mut left = [i64::from(type_id) << 32, 9];
+        let mut right = [i64::from(type_id) << 32, 9];
+        let left = left.as_mut_ptr().cast::<u8>();
+        let right = right.as_mut_ptr().cast::<u8>();
+        let boxed_left = haxe_box_reference_ptr(left, type_id);
+        let boxed_right = haxe_box_reference_ptr(right, type_id);
+        assert!(haxe_type_enum_eq(
+            boxed_left as i64,
+            boxed_right as i64,
+            0,
+            0
+        ));
+        assert!(haxe_type_enum_eq(boxed_left as i64, right as i64, 0, 0));
+        assert!(haxe_type_enum_eq(
+            boxed_left as i64,
+            right as i64,
+            type_id as i32,
+            0
+        ));
+        assert_eq!(haxe_type_enum_index(boxed_left as i64, type_id as i32), 0);
+        unsafe { *right.cast::<i64>().add(1) = 10 };
+        assert!(!haxe_type_enum_eq(
+            boxed_left as i64,
+            boxed_right as i64,
+            0,
+            0
+        ));
+    }
+
+    #[test]
+    fn reference_unboxing_preserves_raw_enum_and_anon_values() {
+        let type_id = 0x7331_0501;
+        register_enum_from_mir(
+            type_id,
+            "ReferenceUnboxingEnum",
+            &[("Payload".to_owned(), 1, vec![ParamType::Int])],
+        );
+        let mut cell = [i64::from(type_id) << 32, 9];
+        let ptr = cell.as_mut_ptr().cast::<u8>();
+        assert_eq!(haxe_unbox_reference_ptr(ptr), ptr);
+        assert_eq!(haxe_unbox_erased_return(ptr), ptr as i64);
+        assert_eq!(
+            haxe_unbox_reference_ptr(haxe_box_reference_ptr(ptr, type_id)),
+            ptr
+        );
+        let anon = crate::anon_object::rayzor_anon_new(0, 0);
+        assert_eq!(haxe_unbox_reference_ptr(anon), anon);
+        let typed = haxe_box_typed_ptr(anon as i64, ValueTag::Reference as i32);
+        assert_eq!(
+            dynamic_box_at(typed).unwrap().type_id,
+            crate::anon_object::TYPE_ANON_OBJECT
+        );
+        assert_eq!(
+            haxe_unbox_reference_ptr(haxe_box_reference_ptr(anon, 6)),
+            anon
+        );
+    }
+
+    #[test]
+    fn reflected_enum_creation_unboxes_marked_object_arguments() {
+        let anon = crate::anon_object::rayzor_anon_new(0, 0);
+        for tag in [0, crate::anon_object::TYPE_ANON_OBJECT.0] {
+            let boxed = haxe_box_reference_ptr(anon, tag);
+            let cell =
+                create_enum_value_from_slots(0, 1, &[ParamType::Object], &[boxed as i64], true);
+            assert_eq!(unsafe { *(cell as *const i64).add(1) }, anon as i64);
+        }
+    }
+
+    #[test]
+    fn erased_iterator_keeps_its_existing_handle() {
+        let mut handle = [0x52_5A_49_54_45_52_00_01i64, 0, 0, 0, 0, 0];
+        let ptr = handle.as_mut_ptr().cast::<u8>();
+        assert_eq!(
+            haxe_iter_handle_from_dynamic(ptr, handle[0], 0, 0, 0, 0),
+            ptr
+        );
+    }
+
+    #[test]
+    fn erased_iterator_rejects_scalar_bits() {
+        for bits in [0, 42, u32::MAX as u64, 1.5f64.to_bits()] {
+            assert!(haxe_iter_handle_from_dynamic(bits as *mut u8, 0, 0, 0, 0, 0).is_null());
+        }
+    }
+
     // The discriminants are the wire format between the compiler's
     // `IrType::value_tag` and the two runtime entry points that take a
     // `type_tag`. Changing one without the other silently misreads values.
@@ -5198,6 +5461,8 @@ mod value_tag_tests {
         assert_eq!(ValueTag::from_i32(10), Some(ValueTag::NullInt));
         assert_eq!(ValueTag::Enum as i32, 11);
         assert_eq!(ValueTag::from_i32(11), Some(ValueTag::Enum));
+        assert_eq!(ValueTag::Dynamic as i32, 12);
+        assert_eq!(ValueTag::from_i32(12), Some(ValueTag::Dynamic));
     }
 
     // ValueTag and TypeId are different spaces. Where they collide, a reader

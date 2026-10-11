@@ -463,6 +463,9 @@ pub extern "C" fn haxe_dynamic_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
     if let Some(class) = class_token_of(obj) {
         return type_value_field(class, field);
     }
+    if crate::type_system::is_raw_class_instance(obj) {
+        return haxe_reflect_field(obj, field);
+    }
     // A raw anonymous-object handle starts with an Arc pointer. Its low word
     // can look like a user type ID, but only registered IDs name Dynamic boxes.
     let tag = unsafe { std::ptr::read_unaligned(obj as *const u32) };
@@ -931,7 +934,9 @@ pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i
             }
         }
         5 => {
-            // String comparison — i64 values are HaxeString pointers
+            // Erased generic slots can carry a raw string or a box of its pointer.
+            let a = crate::type_system::haxe_unbox_erased_return(a as *mut u8);
+            let b = crate::type_system::haxe_unbox_erased_return(b as *mut u8);
             if a == 0 && b == 0 {
                 return 0;
             }
@@ -956,7 +961,7 @@ pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i
         // Reference or Dynamic. The compiler emits this tag for every operand
         // that lowers to a pointer, and cannot tell a boxed DynamicValue from a
         // class instance -- both are Ptr in MIR.
-        6 => compare_reference_slot(a, b),
+        6 | 12 => compare_reference_slot(a, b),
         8 => {
             let a = crate::type_system::haxe_iface_identity(a as *mut u8) as i64;
             let b = crate::type_system::haxe_iface_identity(b as *mut u8) as i64;
@@ -1411,6 +1416,51 @@ pub extern "C" fn haxe_string_from_value_type(value: i64) -> *mut crate::haxe_st
 mod tests {
     use super::*;
     use crate::type_system::{haxe_box_float_ptr, haxe_box_function_ptr, haxe_box_int_ptr};
+
+    #[test]
+    fn typed_string_comparison_accepts_erased_boxes() {
+        let raw = crate::haxe_sys::haxe_string_literal(b"held".as_ptr(), 4).cast::<u8>();
+        let later = crate::haxe_sys::haxe_string_literal(b"later".as_ptr(), 5).cast::<u8>();
+        for value in [
+            raw,
+            crate::type_system::haxe_box_haxestring_ptr(raw),
+            crate::type_system::haxe_box_reference_ptr(raw, 0),
+            haxe_box_int_ptr(raw as i64),
+        ] {
+            assert_eq!(haxe_reflect_compare_typed(raw as i64, value as i64, 5), 0);
+            assert_eq!(
+                haxe_reflect_compare_typed(value as i64, later as i64, 5),
+                -1
+            );
+            assert_eq!(haxe_reflect_compare_typed(later as i64, value as i64, 5), 1);
+            assert_eq!(haxe_reflect_compare_typed(0, value as i64, 5), -1);
+        }
+    }
+
+    #[test]
+    fn dynamic_field_accepts_raw_and_boxed_class_instances() {
+        let type_id = 0x7331_0503;
+        crate::type_system::register_class_from_mir(
+            type_id,
+            "DynamicFieldClass",
+            None,
+            &["value".to_owned()],
+            &[ParamType::Int],
+            &[],
+        );
+        let mut object = [i64::from(type_id), 42];
+        let raw = object.as_mut_ptr().cast::<u8>();
+        let name = crate::haxe_sys::haxe_string_literal(b"value".as_ptr(), 5).cast();
+        for object in [
+            raw,
+            crate::type_system::haxe_box_reference_ptr(raw, type_id),
+        ] {
+            assert_eq!(
+                crate::type_system::haxe_unbox_int_ptr(haxe_dynamic_field(object, name)),
+                42
+            );
+        }
+    }
 
     unsafe extern "C" fn dummy_to_string(_ptr: *const u8) -> crate::type_system::StringPtr {
         crate::type_system::StringPtr {

@@ -150,6 +150,13 @@ impl<'a> HirToMirContext<'a> {
             let target_is_dyn = matches!(
                 type_table.get(target_ty).map(|t| &t.kind),
                 Some(TypeKind::Dynamic)
+            ) || matches!(
+                type_table.get(target_ty).map(|t| &t.kind),
+                Some(TypeKind::Optional { inner_type })
+                    if matches!(
+                        type_table.get(self.resolve_storage_type(*inner_type)).map(|t| &t.kind),
+                        Some(TypeKind::Dynamic)
+                    )
             ) || (target_is_optional_scalar && value_is_scalar);
             (target_is_dyn, value_kind)
         };
@@ -1581,7 +1588,7 @@ impl<'a> HirToMirContext<'a> {
                 | Some(TypeKind::Abstract { type_args, .. })
                     if type_args.len() == 1 =>
                 {
-                    Some(self.convert_type(type_args[0]))
+                    Some(type_args[0])
                 }
                 Some(TypeKind::Class { type_args, .. })
                 | Some(TypeKind::GenericInstance { type_args, .. })
@@ -1600,18 +1607,32 @@ impl<'a> HirToMirContext<'a> {
                         None
                         | Some(
                             TypeKind::TypeParameter { .. }
-                            | TypeKind::Dynamic
                             | TypeKind::Unknown
                             | TypeKind::Placeholder { .. },
                         ) => None,
-                        Some(_) => Some(self.convert_type(ty)),
+                        Some(_) => Some(ty),
                     }
                 }
                 _ => None,
             }
         };
-        let Some(target) = resolved else {
+        let Some(resolved) = resolved else {
             return Some(call_result);
+        };
+        // A Dynamic caller consumes the box itself; concrete callers consume
+        // its payload with the caller's type, including the enum marker.
+        if matches!(
+            self.type_table
+                .get(self.resolve_storage_type(resolved))
+                .map(|ty| &ty.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            return Some(call_result);
+        }
+        let target = if self.resolve_enum_symbol(resolved).is_some() {
+            self.convert_type_arg(resolved)
+        } else {
+            self.convert_type(resolved)
         };
         let shape_as_scalar = matches!(
             target,
@@ -1621,15 +1642,7 @@ impl<'a> HirToMirContext<'a> {
         if !shape_as_scalar && !shape_as_pointer {
             return Some(call_result);
         }
-        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-        let unbox = self.get_or_register_extern_function(
-            "haxe_unbox_erased_return",
-            vec![ptr_u8],
-            IrType::I64,
-        );
-        let bits = self
-            .builder
-            .build_call_direct(unbox, vec![call_result], IrType::I64)?;
+        let bits = self.unbox_generic_value(call_result, resolved)?;
         match target {
             IrType::I64 => Some(bits),
             IrType::I32 | IrType::Bool => self.builder.build_cast(bits, IrType::I64, target),
@@ -1643,6 +1656,30 @@ impl<'a> HirToMirContext<'a> {
             IrType::String => self.builder.build_cast(bits, IrType::I64, IrType::String),
             other => self.builder.build_bitcast(bits, other),
         }
+    }
+
+    /// Resolve the payload representation when an enclosing generic binds T.
+    pub(crate) fn unbox_generic_value(&mut self, value: IrId, ty: TypeId) -> Option<IrId> {
+        let name = self
+            .resolve_type_param_name(self.resolve_through_aliases(ty))
+            .filter(|name| self.current_type_param_names().contains(name));
+        let tag = self
+            .builder
+            .build_const(IrValue::I32(self.convert_type_arg(ty).value_tag() as i32))?;
+        if let Some(name) = name
+            && let Some(function) = self.builder.current_function_mut()
+        {
+            function.type_param_tag_fixups.push((tag, name));
+        }
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let value = self.coerce_reg_to(value, &ptr)?;
+        let unbox = self.get_or_register_extern_function(
+            "haxe_unbox_generic_return",
+            vec![ptr, IrType::I32],
+            IrType::I64,
+        );
+        self.builder
+            .build_call_direct(unbox, vec![value, tag], IrType::I64)
     }
 
     pub(crate) fn maybe_unbox_for_extern_return(

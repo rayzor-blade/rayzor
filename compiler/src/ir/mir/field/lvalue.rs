@@ -659,7 +659,7 @@ impl<'a> HirToMirContext<'a> {
         let receiver_is_dynamic = matches!(
             self.type_table.get(object.ty).map(|t| &t.kind),
             Some(TypeKind::Dynamic)
-        ) && !self.register_class_hints.contains_key(&obj_reg)
+        ) && self.class_hint(obj_reg).is_none()
             && !matches!(&object.kind, HirExprKind::Variable { symbol, .. }
                 if self.monomorphized_var_types.contains_key(symbol));
 

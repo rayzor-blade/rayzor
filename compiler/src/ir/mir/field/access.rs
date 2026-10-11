@@ -898,6 +898,15 @@ impl<'a> HirToMirContext<'a> {
 
                         // Coerce with the struct's field type; the expression-level
                         // type may be Dynamic.
+                        if self
+                            .resolve_enum_symbol(actual_field_ty)
+                            .is_some_and(|symbol| self.enum_is_boxed(symbol))
+                        {
+                            let value = self.unbox_generic_value(raw_val, actual_field_ty)?;
+                            return self
+                                .builder
+                                .build_bitcast(value, self.convert_type_arg(actual_field_ty));
+                        }
                         return self.coerce_from_i64(raw_val, actual_field_ty);
                     }
                 }
@@ -1013,7 +1022,7 @@ impl<'a> HirToMirContext<'a> {
                 // Derive-trait returns (e.g. clone()) leave the receiver's HIR type
                 // Dynamic but set a class hint on the register.
                 let found_result = found_result.or_else(|| {
-                    let class_hint = self.register_class_hints.get(&obj)?;
+                    let class_hint = self.class_hint(obj)?;
                     for (sym_id, fields) in &self.class_instance_fields {
                         let sym_name = self
                             .symbol_table
@@ -1607,7 +1616,7 @@ impl<'a> HirToMirContext<'a> {
         {
             // Skip raw_anon path if variable has a class hint (e.g., from @:derive(Clone))
             if self.raw_anon_symbols.contains(obj_sym)
-                && !self.register_class_hints.contains_key(&obj_reg)
+                && self.class_hint(obj_reg).is_none()
                 && !self.monomorphized_var_types.contains_key(obj_sym)
             {
                 return self.raw_anon_reflect_field_read(obj_reg, *field, expr.ty);
@@ -1631,17 +1640,13 @@ impl<'a> HirToMirContext<'a> {
             // variable's tracked stdlib class (`monomorphized_var_types`,
             // set by `detect_stdlib_class_from_call` for factory results
             // like `Bytes.ofString`).
-            let hint_name: Option<String> = self
-                .register_class_hints
-                .get(&obj_reg)
-                .cloned()
-                .or_else(|| {
-                    if let HirExprKind::Variable { symbol, .. } = &object.kind {
-                        self.monomorphized_var_types.get(symbol).cloned()
-                    } else {
-                        None
-                    }
-                });
+            let hint_name: Option<String> = self.class_hint(obj_reg).cloned().or_else(|| {
+                if let HirExprKind::Variable { symbol, .. } = &object.kind {
+                    self.monomorphized_var_types.get(symbol).cloned()
+                } else {
+                    None
+                }
+            });
             from_symbol
                 .or_else(|| self.find_class_type_by_name(hint_name.as_deref()?))
                 .unwrap_or(receiver_ty)
@@ -1659,7 +1664,7 @@ impl<'a> HirToMirContext<'a> {
                     .map_or(false, |t| matches!(t.kind, TypeKind::Dynamic))
             };
             if is_dynamic {
-                if let Some(class_hint) = self.register_class_hints.get(&obj_reg).cloned() {
+                if let Some(class_hint) = self.class_hint(obj_reg).cloned() {
                     let class_type = self.find_class_type_by_name(&class_hint);
                     class_type.unwrap_or(receiver_ty)
                 } else {

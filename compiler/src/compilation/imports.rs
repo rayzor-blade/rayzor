@@ -662,7 +662,7 @@ impl CompilationUnit {
         // and causes non-deterministic import base offsets, leading to different function
         // IDs, different inlining decisions, and ultimately wrong optimized MIR.
         let mut all_files: BTreeMap<String, (PathBuf, String, Vec<String>)> = BTreeMap::new();
-        let mut interface_headers = Vec::new();
+        let mut type_headers = Vec::new();
         // Which files each file CONSTRUCTS, split off from its dependencies:
         // a cycle is broken by emitting the constructed class first.
         let mut constructs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -674,7 +674,8 @@ impl CompilationUnit {
             to_process.push_back(name.clone());
         }
         let mut visited: BTreeSet<String> = BTreeSet::new();
-        let mut discovered_paths = BTreeSet::new();
+        let mut discovered_paths: BTreeMap<PathBuf, String> = BTreeMap::new();
+        let mut file_aliases = BTreeMap::new();
 
         let t_discover = profile_timer(self.config.profile_typecheck);
         while let Some(qualified_path) = to_process.pop_front() {
@@ -721,12 +722,15 @@ impl CompilationUnit {
                 continue; // Skip unresolvable
             };
 
-            // Deduplicate by file path — the same file can appear under different
-            // qualified names (e.g., "BalancedTree" and "haxe.ds.BalancedTree")
+            // Import spellings of one source file share its dependency node.
             let file_path_str = file_path.to_string_lossy().to_string();
-            if !discovered_paths.insert(source_file_identity(&file_path_str)) {
+            let identity = source_file_identity(&file_path_str);
+            if let Some(name) = discovered_paths.get(&identity) {
+                file_aliases.insert(qualified_path, name.clone());
                 continue;
             }
+            discovered_paths.insert(identity, qualified_path.clone());
+            file_aliases.insert(qualified_path.clone(), qualified_path.clone());
 
             // Read and parse to extract imports
             let source = match std::fs::read_to_string(&file_path) {
@@ -751,16 +755,19 @@ impl CompilationUnit {
                     // Indexed here, before anything lowers: a base class needs
                     // to know which of its methods a later file overrides.
                     self.static_sig_index.borrow_mut().index_file(&ast);
-                    // Interface identity must exist before bodies in an import
-                    // cycle resolve their annotated receivers.
+                    // Type identities precede bodies that resolve module subtypes.
                     let mut headers = ast.clone();
-                    headers
-                        .declarations
-                        .retain(|decl| matches!(decl, parser::TypeDeclaration::Interface(_)));
+                    headers.declarations.retain(|decl| {
+                        matches!(
+                            decl,
+                            parser::TypeDeclaration::Interface(_)
+                                | parser::TypeDeclaration::Enum(_)
+                        )
+                    });
                     headers.module_fields.clear();
                     if !headers.declarations.is_empty() {
                         self.pre_register_ast_file_types(&headers)?;
-                        interface_headers.push(headers);
+                        type_headers.push(headers);
                     }
                     let mut deps = Self::extract_all_dependencies(&ast);
                     deps.extend(Self::enclosing_package_candidates(&ast, &[]));
@@ -813,8 +820,8 @@ impl CompilationUnit {
 
         // Method declarations supply the slot ABI to implementations that
         // compile before the interface's module in a circular import.
-        for headers in &interface_headers {
-            self.predeclare_interface_signatures(headers)?;
+        for headers in &type_headers {
+            self.predeclare_import_signatures(headers)?;
         }
 
         // Step 2: Topological sort using Kahn's algorithm
@@ -831,6 +838,13 @@ impl CompilationUnit {
                 Some((short.to_string(), qn.clone()))
             })
             .collect();
+        let resolve_dependency = |dep: &String| {
+            file_aliases
+                .get(dep)
+                .or_else(|| bare_to_qualified.get(dep))
+                .filter(|name| all_files.contains_key(*name))
+                .cloned()
+        };
 
         for (name, (_, _, deps)) in &all_files {
             in_degree.entry(name.clone()).or_insert(0);
@@ -839,12 +853,7 @@ impl CompilationUnit {
                 if dep == name {
                     continue;
                 }
-                // Check both qualified name ("sim.Point2D") and bare name ("Point2D")
-                let resolved_dep = if all_files.contains_key(dep) {
-                    Some(dep.clone())
-                } else {
-                    bare_to_qualified.get(dep).cloned()
-                };
+                let resolved_dep = resolve_dependency(dep);
                 if let Some(resolved) = resolved_dep {
                     if resolved != *name {
                         graph
@@ -907,11 +916,7 @@ impl CompilationUnit {
                         .map(|(_, _, deps)| {
                             deps.iter()
                                 .filter_map(|d| {
-                                    let resolved = if all_files.contains_key(d) {
-                                        Some(d.clone())
-                                    } else {
-                                        bare_to_qualified.get(d).cloned()
-                                    };
+                                    let resolved = resolve_dependency(d);
                                     resolved.filter(|r| {
                                         r != name
                                             && !in_order.contains(r)
@@ -967,11 +972,7 @@ impl CompilationUnit {
                                 .get(name)
                                 .map(|cs| {
                                     cs.iter().any(|c| {
-                                        let r = if all_files.contains_key(c) {
-                                            Some(c.clone())
-                                        } else {
-                                            bare_to_qualified.get(c).cloned()
-                                        };
+                                        let r = resolve_dependency(c);
                                         r.is_some_and(|r| r != *name && stuck.contains_key(&r))
                                     })
                                 })

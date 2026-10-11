@@ -221,8 +221,25 @@ impl<'a> HirToMirContext<'a> {
     /// pointer so a generic body's by-tag helpers can name the value.
     pub(crate) fn convert_type_arg(&self, type_id: TypeId) -> IrType {
         let resolved = self.resolve_through_aliases(type_id);
+        if matches!(
+            self.type_table
+                .get(self.resolve_storage_type(resolved))
+                .map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            return IrType::dynamic_ptr();
+        }
+        if let Some(name) = self.resolve_type_param_name(resolved)
+            && self.current_type_param_names().contains(&name)
+        {
+            return IrType::TypeVar(name);
+        }
+        let enum_type = match self.type_table.get(resolved).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => self.resolve_through_aliases(*inner_type),
+            _ => resolved,
+        };
         if let Some(crate::tast::TypeKind::Enum { symbol_id, .. }) =
-            self.type_table.get(resolved).map(|t| &t.kind)
+            self.type_table.get(enum_type).map(|t| &t.kind)
         {
             if self.enum_is_boxed(*symbol_id) {
                 return IrType::enum_ptr();
@@ -1207,8 +1224,7 @@ impl<'a> HirToMirContext<'a> {
                 // Ptr(Void) could be Array, Class or DynBox; the class hint is
                 // the only thing that identifies an Array here.
                 let is_array = self
-                    .register_class_hints
-                    .get(&value)
+                    .class_hint(value)
                     .map(|h| h == "Array")
                     .unwrap_or(false);
                 if is_array {

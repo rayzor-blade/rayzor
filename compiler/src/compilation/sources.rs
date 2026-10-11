@@ -178,7 +178,7 @@ impl CompilationUnit {
         Ok(())
     }
 
-    pub(crate) fn predeclare_interface_signatures(
+    pub(crate) fn predeclare_import_signatures(
         &mut self,
         file: &parser::HaxeFile,
     ) -> Result<(), String> {
@@ -197,7 +197,7 @@ impl CompilationUnit {
         lowering
             .lower_file(file)
             .map(|_| ())
-            .map_err(|e| format!("Interface signature error in {}: {:?}", file.filename, e))
+            .map_err(|e| format!("Import signature error in {}: {:?}", file.filename, e))
     }
 
     /// Register only enum declarations from source into the symbol table.

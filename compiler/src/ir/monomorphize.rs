@@ -289,6 +289,10 @@ impl Monomorphizer {
                 let dbg_mono = std::env::var("RAYZOR_DUMP_MONO").is_ok();
                 // Use explicit type_args if available
                 if !type_args.is_empty() {
+                    // A template's call binds only after the caller is specialized.
+                    if type_args.iter().any(contains_type_param) {
+                        return None;
+                    }
                     if dbg_mono {
                         if let Some(c) = module.functions.get(func_id) {
                             eprintln!(
@@ -1113,6 +1117,30 @@ impl Default for Monomorphizer {
     }
 }
 
+fn contains_type_param(ty: &IrType) -> bool {
+    match ty {
+        IrType::TypeVar(_) => true,
+        IrType::Ptr(inner)
+        | IrType::Ref(inner)
+        | IrType::Array(inner, _)
+        | IrType::Slice(inner) => contains_type_param(inner),
+        IrType::Vector { element, .. } => contains_type_param(element),
+        IrType::Function {
+            params,
+            return_type,
+            ..
+        } => params.iter().any(contains_type_param) || contains_type_param(return_type),
+        IrType::Struct { fields, .. } => fields.iter().any(|field| contains_type_param(&field.ty)),
+        IrType::Union { variants, .. } => variants
+            .iter()
+            .any(|variant| variant.fields.iter().any(contains_type_param)),
+        IrType::Generic { base, type_args } => {
+            contains_type_param(base) || type_args.iter().any(contains_type_param)
+        }
+        _ => false,
+    }
+}
+
 /// Whether a generic function's body still depends on its type parameters.
 ///
 /// A template is stubbed because its body cannot be compiled until the
@@ -1273,5 +1301,110 @@ mod tests {
     fn unbound_variable_with_a_tag_stays_on_the_template() {
         let (_, callee) = call_result_only_generic(true);
         assert_eq!(callee, IrFunctionId(0));
+    }
+
+    #[test]
+    fn generic_call_binds_after_modules_are_merged() {
+        use crate::ir::{CallingConvention, IrTypeParam};
+        use crate::tast::SymbolId;
+
+        let signature = |name: Option<&str>| IrFunctionSignature {
+            parameters: Vec::new(),
+            return_type: IrType::I32,
+            calling_convention: CallingConvention::Haxe,
+            can_throw: false,
+            type_params: name
+                .into_iter()
+                .map(|name| IrTypeParam {
+                    name: name.into(),
+                    constraints: Vec::new(),
+                })
+                .collect(),
+            uses_sret: false,
+        };
+        let call = |dest, func_id, ty| IrInstruction::CallDirect {
+            dest: Some(dest),
+            func_id,
+            args: Vec::new(),
+            arg_ownership: Vec::new(),
+            type_args: vec![ty],
+            is_tail_call: false,
+        };
+        let mut leaf = IrFunction::new(
+            IrFunctionId(0),
+            SymbolId::from_raw(1),
+            "tag".into(),
+            signature(Some("T")),
+        );
+        let tag = leaf.alloc_reg();
+        leaf.register_types.insert(tag, IrType::I32);
+        leaf.type_param_tag_fixups.push((tag, "T".into()));
+        let block = leaf.cfg.blocks.get_mut(&leaf.cfg.entry_block).unwrap();
+        block.instructions.push(IrInstruction::Const {
+            dest: tag,
+            value: IrValue::I32(0),
+        });
+        block.terminator = IrTerminator::Return { value: Some(tag) };
+        let mut relay = IrFunction::new(
+            IrFunctionId(1),
+            SymbolId::from_raw(2),
+            "relay".into(),
+            signature(Some("U")),
+        );
+        let result = relay.alloc_reg();
+        relay.register_types.insert(result, IrType::I32);
+        let block = relay.cfg.blocks.get_mut(&relay.cfg.entry_block).unwrap();
+        block
+            .instructions
+            .push(call(result, leaf.id, IrType::TypeVar("U".into())));
+        block.terminator = IrTerminator::Return {
+            value: Some(result),
+        };
+
+        let mut module = IrModule::new("imports".into(), "imports.hx".into());
+        module.add_function(leaf);
+        module.add_function(relay);
+        Monomorphizer::new().monomorphize_module(&mut module);
+        assert_eq!(module.functions.len(), 2);
+
+        let mut entry = IrFunction::new(
+            module.alloc_function_id(),
+            SymbolId::from_raw(3),
+            "entry".into(),
+            signature(None),
+        );
+        let entry_id = entry.id;
+        let result = entry.alloc_reg();
+        entry.register_types.insert(result, IrType::I32);
+        let block = entry.cfg.blocks.get_mut(&entry.cfg.entry_block).unwrap();
+        block
+            .instructions
+            .push(call(result, IrFunctionId(1), IrType::enum_ptr()));
+        block.terminator = IrTerminator::Return {
+            value: Some(result),
+        };
+        module.add_function(entry);
+        Monomorphizer::new().monomorphize_module(&mut module);
+
+        let callee = |id| {
+            let function = &module.functions[&id];
+            match &function.cfg.blocks[&function.cfg.entry_block].instructions[0] {
+                IrInstruction::CallDirect { func_id, .. } => *func_id,
+                other => panic!("expected direct call, got {other:?}"),
+            }
+        };
+        let relay_instance = callee(entry_id);
+        assert_ne!(relay_instance, IrFunctionId(1));
+        let tag_instance = &module.functions[&callee(relay_instance)];
+        assert!(tag_instance.signature.type_params.is_empty());
+        assert!(tag_instance.type_param_tag_fixups.is_empty());
+        assert!(matches!(
+            &tag_instance.cfg.blocks[&tag_instance.cfg.entry_block].instructions[0],
+            IrInstruction::Const {
+                value: IrValue::I32(11),
+                ..
+            }
+        ));
+        assert_eq!(callee(IrFunctionId(1)), IrFunctionId(0));
     }
 }

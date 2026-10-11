@@ -37,7 +37,7 @@ impl<'a> HirToMirContext<'a> {
             self.type_table.get(receiver.ty).map(|t| &t.kind),
             Some(TypeKind::Dynamic)
         );
-        if !let_boxed && (!is_dynamic || self.register_class_hints.contains_key(&reg)) {
+        if !let_boxed && (!is_dynamic || self.class_hint(reg).is_some()) {
             return reg;
         }
         if !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_))) {

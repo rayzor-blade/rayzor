@@ -224,7 +224,7 @@ impl<'a> HirToMirContext<'a> {
                             if let Some(hint) =
                                 self.static_factory_return_class(sc_class_name, sc_method_name)
                             {
-                                self.register_class_hints.insert(reg, hint);
+                                self.set_class_hint(reg, hint);
                             }
                         }
                     }

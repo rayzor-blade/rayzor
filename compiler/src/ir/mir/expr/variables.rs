@@ -328,8 +328,8 @@ impl<'a> HirToMirContext<'a> {
                         let cast_reg = self.builder.build_cast(reg, actual_type, expected_type);
                         // Propagate class hint from source to cast register
                         if let Some(cast_id) = cast_reg {
-                            if let Some(hint) = self.register_class_hints.get(&reg).cloned() {
-                                self.register_class_hints.insert(cast_id, hint);
+                            if let Some(hint) = self.class_hint(reg).cloned() {
+                                self.set_class_hint(cast_id, hint);
                             }
                         }
                         cast_reg

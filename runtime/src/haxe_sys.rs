@@ -637,7 +637,9 @@ pub extern "C" fn haxe_value_to_string_by_tag(value: i64, type_tag: i32) -> *mut
         Some(ValueTag::Bool) => haxe_string_from_bool(value != 0),
         // reinterpret i64 bits as f64
         Some(ValueTag::Float) => haxe_string_from_float(f64::from_bits(value as u64)),
-        Some(ValueTag::Reference) => crate::type_system::haxe_std_string_ptr(value as *mut u8),
+        Some(ValueTag::Reference | ValueTag::Dynamic) => {
+            crate::type_system::haxe_std_string_ptr(value as *mut u8)
+        }
         Some(ValueTag::Enum) => match crate::type_system::stamped_enum_cell_type(value) {
             Some(type_id) => {
                 crate::type_system::haxe_enum_to_string_boxed(type_id, value as *const u8)

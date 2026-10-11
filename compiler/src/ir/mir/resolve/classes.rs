@@ -44,6 +44,8 @@ impl<'a> HirToMirContext<'a> {
                     // Array's id can name some other class.
                     Some(
                         TypeKind::Array { .. }
+                        | TypeKind::Map { .. }
+                        | TypeKind::Enum { .. }
                         | TypeKind::Interface { .. }
                         | TypeKind::String
                         | TypeKind::Int
@@ -179,9 +181,9 @@ impl<'a> HirToMirContext<'a> {
             .class_key(dispatching_class)
             .and_then(|key| self.stdlib_mapping.return_class(key, method))
         {
-            self.register_class_hints.insert(result, class.to_string());
+            self.set_class_hint(result, class.to_string());
         } else if let Some(class) = self.static_factory_return_class(dispatching_class, method) {
-            self.register_class_hints.insert(result, class);
+            self.set_class_hint(result, class);
         } else {
             self.set_class_hint_for_return(result, return_type);
         }

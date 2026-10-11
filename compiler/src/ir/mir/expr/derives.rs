@@ -357,7 +357,7 @@ impl<'a> HirToMirContext<'a> {
         if let Some(sym) = self.symbol_table.get_symbol(class_sym) {
             let name = self.string_interner.get(sym.name).unwrap_or("").to_string();
             if !name.is_empty() {
-                self.register_class_hints.insert(new_ptr, name);
+                self.set_class_hint(new_ptr, name);
             }
         }
 
@@ -579,7 +579,7 @@ impl<'a> HirToMirContext<'a> {
         if let Some(sym) = self.symbol_table.get_symbol(class_sym) {
             let name = self.string_interner.get(sym.name).unwrap_or("").to_string();
             if !name.is_empty() {
-                self.register_class_hints.insert(new_ptr, name);
+                self.set_class_hint(new_ptr, name);
             }
         }
 

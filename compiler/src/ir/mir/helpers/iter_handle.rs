@@ -698,7 +698,7 @@ impl<'a> HirToMirContext<'a> {
 
     /// The stdlib iterator a register's class hint names.
     fn iter_source_from_hint(&mut self, value_reg: IrId) -> Option<IterSource> {
-        let hint = self.register_class_hints.get(&value_reg).cloned()?;
+        let hint = self.class_hint(value_reg).cloned()?;
         let key = self.stdlib_mapping.class_key(&hint)?;
         let (_, hn) = self.stdlib_mapping.find_by_name(key, "hasNext")?;
         let has_next = hn.runtime_name.to_string();

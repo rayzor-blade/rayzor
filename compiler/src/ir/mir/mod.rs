@@ -290,11 +290,11 @@ pub struct HirToMirContext<'a> {
     /// This is needed because extern generic classes don't have proper TypeIds in the type table
     monomorphized_var_types: BTreeMap<SymbolId, String>,
 
-    /// Mapping from result register IrIds to the stdlib class they belong to.
+    /// Mapping from function-local result registers to their stdlib classes.
     /// Used to disambiguate method calls on TypeParameter receivers when multiple
     /// stdlib classes have the same method name (e.g., Arc.get vs MutexGuard.get).
     /// Set by the Dynamic/TypeParameter method dispatch handler after MIR wrapper calls.
-    register_class_hints: BTreeMap<IrId, String>,
+    register_class_hints: BTreeMap<(IrFunctionId, IrId), String>,
 
     /// Result registers from cross-context interface method calls whose
     /// HIR result type was `Dynamic` (because TAST couldn't resolve the

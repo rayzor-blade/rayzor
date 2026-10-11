@@ -355,8 +355,7 @@ impl<'a> HirToMirContext<'a> {
                     .builder
                     .build_call_direct(wrapper_func_id, arg_regs, result_type);
                 if let Some(reg) = result {
-                    self.register_class_hints
-                        .insert(reg, class_name.to_string());
+                    self.set_class_hint(reg, class_name.to_string());
                 }
                 return result;
             }
@@ -975,8 +974,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         if let Some(class_name) = final_class_name {
-            self.register_class_hints
-                .insert(obj_ptr, class_name.to_string());
+            self.set_class_hint(obj_ptr, class_name.to_string());
         }
         Some(obj_ptr)
     }

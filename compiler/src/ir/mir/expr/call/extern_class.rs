@@ -73,7 +73,7 @@ impl<'a> HirToMirContext<'a> {
                     {
                         self.symbol_map
                             .get(recv_sym)
-                            .and_then(|reg| self.register_class_hints.get(reg).cloned())
+                            .and_then(|reg| self.class_hint(*reg).cloned())
                     } else {
                         None
                     }

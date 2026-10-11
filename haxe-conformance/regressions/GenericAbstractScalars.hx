@@ -24,6 +24,10 @@ class GenericAbstractScalars {
         var second:TaggedNumber<Bool, Float> = 4.75;
         second.advance();
         check(second == 5.75, "second generic parameter local storage");
+        Reflect.setField(GenericAbstractScalars, "stored", 12.75);
+        check(Reflect.field(GenericAbstractScalars, "stored") == 12.75, "generic abstract reflected storage");
+        stored.advance();
+        check(stored == 13.75, "generic abstract reflected update");
         Sys.println("CONFORMANCE_OK");
     }
 }

@@ -134,8 +134,7 @@ impl<'a> HirToMirContext<'a> {
 
                             // Class receivers unwrap their boxes; abstract receivers
                             // keep the representation of their underlying storage.
-                            let has_class_hint =
-                                self.register_class_hints.contains_key(&receiver_reg);
+                            let has_class_hint = self.class_hint(receiver_reg).is_some();
                             let should_unbox = !has_class_hint
                                 && !self.method_uses_dynamic_storage(*symbol, func_id);
                             let actual_receiver = if should_unbox {
@@ -681,8 +680,7 @@ impl<'a> HirToMirContext<'a> {
 
                                     // A class hint marks a raw pointer. Dynamic-backed
                                     // abstract methods receive the box itself.
-                                    let has_class_hint =
-                                        self.register_class_hints.contains_key(&receiver_reg);
+                                    let has_class_hint = self.class_hint(receiver_reg).is_some();
                                     let receiver_mir_type =
                                         self.builder.get_register_type(receiver_reg);
                                     let should_unbox = !has_class_hint

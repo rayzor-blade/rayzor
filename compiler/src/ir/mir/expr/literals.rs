@@ -1190,20 +1190,12 @@ impl<'a> HirToMirContext<'a> {
                     let erased_target = field_target_types
                         .get(field_name)
                         .and_then(|t| self.type_table.get(*t))
-                        .map(|t| match &t.kind {
-                            TypeKind::TypeParameter { .. } => true,
-                            TypeKind::Optional { inner_type, .. } => self
-                                .type_table
-                                .get(*inner_type)
-                                .map(|i| matches!(i.kind, TypeKind::TypeParameter { .. }))
-                                .unwrap_or(false),
-                            _ => false,
-                        })
+                        .map(|t| matches!(t.kind, TypeKind::TypeParameter { .. }))
                         .unwrap_or(false);
                     let boxed_source = self
                         .type_table
                         .get(field_val_ty)
-                        .map(|t| matches!(t.kind, TypeKind::Optional { .. }))
+                        .map(|t| matches!(t.kind, TypeKind::Optional { .. } | TypeKind::Dynamic))
                         .unwrap_or(false);
                     let null_int_target = field_target_types
                         .get(field_name)
@@ -1217,14 +1209,7 @@ impl<'a> HirToMirContext<'a> {
                     {
                         self.null_int_to_ir(field_val, &IrType::I64)?
                     } else if erased_target && boxed_source {
-                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                        let unbox_id = self.get_or_register_extern_function(
-                            "haxe_unbox_scalar_or_addr",
-                            vec![ptr_u8],
-                            IrType::I64,
-                        );
-                        self.builder
-                            .build_call_direct(unbox_id, vec![field_val], IrType::I64)?
+                        self.unbox_generic_value(field_val, *field_target_types.get(field_name)?)?
                     } else {
                         self.coerce_to_i64(field_val, field_val_ty)?
                     };

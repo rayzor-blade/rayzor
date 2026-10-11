@@ -1594,7 +1594,25 @@ impl<'a> AstLowering<'a> {
             let imported = self.imported_from_methods(abstract_symbol);
             self.abstract_from_methods.insert(abstract_symbol, imported);
         }
-        let candidates = self.abstract_from_methods[&abstract_symbol].clone();
+        // Method bodies can refine their forward signatures and generic parameters.
+        let candidates: Vec<_> = {
+            let table = self.context.type_table.borrow();
+            self.abstract_from_methods[&abstract_symbol]
+                .iter()
+                .map(|&(method, param)| {
+                    let current = self
+                        .context
+                        .symbol_table
+                        .get_symbol(method)
+                        .and_then(|symbol| table.get(symbol.type_id))
+                        .and_then(|ty| match &ty.kind {
+                            TypeKind::Function { params, .. } => params.first().copied(),
+                            _ => None,
+                        });
+                    (method, current.unwrap_or(param))
+                })
+                .collect()
+        };
         if candidates.is_empty() {
             return arg;
         }
@@ -3963,6 +3981,15 @@ impl<'a> AstLowering<'a> {
                             }
                             _ => return_type,
                         };
+                        let return_type = match &kind {
+                            TypedExpressionKind::StaticMethodCall { type_arguments, .. } => self
+                                .return_type_with_type_args(
+                                    method_symbol,
+                                    type_arguments,
+                                    return_type,
+                                ),
+                            _ => return_type,
+                        };
                         let usage = VariableUsage::Copy;
                         let lifetime_id = self.assign_lifetime(&kind, &return_type);
                         let metadata = self.analyze_expression_metadata(&kind);
@@ -5114,10 +5141,28 @@ impl<'a> AstLowering<'a> {
     /// Dynamic where the variable sits: `T` or `Array<T>` against Dynamic.
     fn dynamic_bound_var(&self, declared: TypeId, actual: TypeId, depth: u32) -> Option<SymbolId> {
         use crate::tast::core::TypeKind;
+        if depth > 8 {
+            return None;
+        }
         let tt = self.context.type_table.borrow();
         let (d, a) = (&tt.get(declared)?.kind, &tt.get(actual)?.kind);
         match (d, a) {
             (TypeKind::TypeParameter { symbol_id, .. }, TypeKind::Dynamic) => Some(*symbol_id),
+            (
+                TypeKind::Optional {
+                    inner_type: declared,
+                },
+                TypeKind::Optional { inner_type: actual },
+            ) => {
+                let (declared, actual) = (*declared, *actual);
+                drop(tt);
+                self.dynamic_bound_var(declared, actual, depth + 1)
+            }
+            (TypeKind::Optional { inner_type }, _) => {
+                let declared = *inner_type;
+                drop(tt);
+                self.dynamic_bound_var(declared, actual, depth + 1)
+            }
             (TypeKind::Array { element_type }, TypeKind::Dynamic) if depth == 0 => {
                 match tt.get(*element_type).map(|t| &t.kind) {
                     Some(TypeKind::TypeParameter { symbol_id, .. }) => Some(*symbol_id),

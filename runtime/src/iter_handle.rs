@@ -39,7 +39,7 @@ unsafe fn call_closure(record: u64, args: &[i64]) -> i64 {
 pub(crate) const ITER_SOURCE_ARRAY: i64 = 1;
 pub(crate) const ITER_SOURCE_ARRAY_BOX: i64 = 2;
 
-fn is_handle(value: i64) -> bool {
+pub(crate) fn is_handle(value: i64) -> bool {
     value >= 0x1000 && value & 7 == 0 && unsafe { *(value as *const i64) } == ITER_HANDLE_TAG
 }
 

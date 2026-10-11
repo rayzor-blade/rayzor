@@ -109,7 +109,7 @@ impl<'a> HirToMirContext<'a> {
             let defaulted_ints: Vec<bool> = hir_func
                 .params
                 .iter()
-                .map(|p| self.param_defaulted_in_body(hir_func, p))
+                .map(|p| self.param_uses_defaulted_int_abi(hir_func, p))
                 .collect();
             if defaulted_ints.contains(&true) {
                 self.callee_defaulted_ints.insert(func_id, defaulted_ints);
@@ -287,7 +287,7 @@ impl<'a> HirToMirContext<'a> {
             let defaulted_ints: Vec<bool> = hir_func
                 .params
                 .iter()
-                .map(|p| self.param_defaulted_in_body(hir_func, p))
+                .map(|p| self.param_uses_defaulted_int_abi(hir_func, p))
                 .collect();
             if defaulted_ints.contains(&true) {
                 self.callee_defaulted_ints.insert(func_id, defaulted_ints);

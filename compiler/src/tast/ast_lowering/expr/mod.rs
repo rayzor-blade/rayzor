@@ -1887,7 +1887,12 @@ impl<'a> AstLowering<'a> {
                 self.expected_arg_type_stack.push(element_hint);
                 let lowered = elements
                     .iter()
-                    .map(|elem| self.lower_value_expression(elem))
+                    .map(|elem| {
+                        self.lower_value_expression(elem).map(|value| {
+                            let value = self.coerce_arg_via_abstract_to(value, element_hint);
+                            self.coerce_arg_via_abstract_from(value, element_hint)
+                        })
+                    })
                     .collect::<Result<Vec<_>, _>>();
                 self.expected_arg_type_stack.pop();
                 self.context.expected_new_type_hint = previous_hint;
@@ -2175,8 +2180,16 @@ impl<'a> AstLowering<'a> {
             ExprKind::Object(fields) => {
                 // Object literal
                 let expected = self.expected_arg_type_stack.last().copied().flatten();
+                let target_fields = expected
+                    .and_then(|ty| self.structure_fields(ty))
+                    .unwrap_or_default();
                 let mut typed_fields = Vec::with_capacity(fields.len());
                 for field in fields {
+                    let field_name = self.context.intern_string(&field.name);
+                    let target = target_fields
+                        .iter()
+                        .find(|target| target.name == field_name)
+                        .map(|target| target.type_id);
                     // A function literal takes its untyped parameters from the
                     // expected structure's field, as a call argument does.
                     let lambda_hint = matches!(
@@ -2185,15 +2198,21 @@ impl<'a> AstLowering<'a> {
                     )
                     .then(|| expected.and_then(|t| self.expected_field_params(t, &field.name)))
                     .flatten();
+                    let previous_hint = self.context.expected_new_type_hint;
+                    self.context.expected_new_type_hint = target;
+                    self.expected_arg_type_stack.push(target);
                     let value = if lambda_hint.is_some() {
                         self.expected_lambda_params_stack.push(lambda_hint);
                         let value = self.lower_expression(&field.expr);
                         self.expected_lambda_params_stack.pop();
-                        value?
+                        value
                     } else {
-                        self.lower_value_expression(&field.expr)?
+                        self.lower_value_expression(&field.expr)
                     };
-                    let field_name = self.context.intern_string(&field.name);
+                    self.expected_arg_type_stack.pop();
+                    self.context.expected_new_type_hint = previous_hint;
+                    let value = self.coerce_arg_via_abstract_to(value?, target);
+                    let value = self.coerce_arg_via_abstract_from(value, target);
                     typed_fields.push(TypedObjectField {
                         name: field_name,
                         value,
@@ -2734,22 +2753,16 @@ impl<'a> AstLowering<'a> {
                     }
                 }
 
-                // Check for implicit @:from conversion (e.g., array literal → abstract type)
-                // Array/object literals assigned to abstract types need an explicit Cast node
-                // so the MIR Cast handler can look up and call the @:from conversion function.
-                // Simple literals (int, float, string) and variables are handled by the
-                // MIR Let handler's maybe_abstract_from_convert() instead.
+                // Resolve literal @:from conversions while their source type arguments exist.
+                // The cast retains the declared storage type for MIR lowering.
                 if let (Some(init_expr), Some(target_ty)) = (expr.as_ref(), declared_type) {
                     let needs_cast = self.is_abstract_type(target_ty)
                         && matches!(&init_expr.kind, ExprKind::Array(_) | ExprKind::Object(_));
                     if needs_cast {
                         // Lower the initializer, then wrap in an implicit cast to the abstract type
                         let array_expr = self.lower_expression(init_expr)?;
-                        let array_expr = if matches!(init_expr.kind, ExprKind::Object(_)) {
-                            self.coerce_arg_via_abstract_from(array_expr, Some(target_ty))
-                        } else {
-                            array_expr
-                        };
+                        let array_expr =
+                            self.coerce_arg_via_abstract_from(array_expr, Some(target_ty));
                         let cast_expr = TypedExpression {
                             kind: TypedExpressionKind::Cast {
                                 expression: Box::new(array_expr),

@@ -233,7 +233,7 @@ impl<'a> HirToMirContext<'a> {
                             // Fallback: carry the register's class hint (set by
                             // Dynamic/TypeParameter dispatch) onto the variable so chained
                             // calls disambiguate: `var g = mutex.lock(); g.get(); g.unlock();`
-                            if let Some(class_hint) = self.register_class_hints.get(&value_reg) {
+                            if let Some(class_hint) = self.class_hint(value_reg) {
                                 self.monomorphized_var_types
                                     .insert(*symbol, class_hint.clone());
                             }
@@ -850,11 +850,26 @@ impl<'a> HirToMirContext<'a> {
                         // raw into a Dynamic field reads back as a bogus Dynamic pointer.
                         let lhs_target_ty: Option<TypeId> = match lhs {
                             HirLValue::Variable(sym) => self.declared_symbol_type(*sym),
-                            HirLValue::Field { field, .. } => self
-                                .symbol_table
-                                .get_symbol(*field)
-                                .map(|s| s.type_id)
-                                .filter(|t| *t != TypeId::invalid()),
+                            HirLValue::Field { object, field } => {
+                                let field_symbol = self.symbol_table.get_symbol(*field);
+                                let receiver_field = match self
+                                    .type_table
+                                    .get(self.resolve_storage_type(object.ty))
+                                    .map(|t| &t.kind)
+                                {
+                                    Some(TypeKind::Anonymous { fields }) => field_symbol
+                                        .and_then(|symbol| {
+                                            fields.iter().find(|f| f.name == symbol.name)
+                                        })
+                                        .map(|f| f.type_id),
+                                    _ => None,
+                                };
+                                receiver_field.or_else(|| {
+                                    field_symbol
+                                        .map(|s| s.type_id)
+                                        .filter(|t| *t != TypeId::invalid())
+                                })
+                            }
                             _ => None,
                         };
                         // Recover the concrete type of an interface-call RHS, which TAST
@@ -973,10 +988,7 @@ impl<'a> HirToMirContext<'a> {
                             let tgt_ir_opt: Option<IrType> = match lhs {
                                 HirLValue::Variable(sym) => {
                                     let from_symbol = self
-                                        .symbol_table
-                                        .get_symbol(*sym)
-                                        .map(|s| s.type_id)
-                                        .filter(|t| *t != TypeId::invalid())
+                                        .declared_symbol_type(*sym)
                                         .map(|t| self.convert_type(t));
                                     from_symbol.or_else(|| {
                                         self.symbol_map

@@ -1832,6 +1832,11 @@ pub extern "C" fn haxe_array_to_string(arr: *const HaxeArray) -> *mut HaxeString
             return result_ptr;
         }
 
+        let Some(_guard) = crate::type_system::StringifyGuard::enter(arr.cast()) else {
+            crate::haxe_string::haxe_string_from_bytes(result_ptr, b"<...>".as_ptr(), 5);
+            return result_ptr;
+        };
+
         let arr_ref = &*arr;
 
         // Build string representation

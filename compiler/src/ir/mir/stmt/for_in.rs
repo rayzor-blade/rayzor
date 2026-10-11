@@ -599,8 +599,7 @@ impl<'a> HirToMirContext<'a> {
         // Use register class hints to find the iterator class and resolve via stdlib mappings.
         if class_sym.is_none() {
             if let Some(class_hint) = self
-                .register_class_hints
-                .get(&obj_reg)
+                .class_hint(obj_reg)
                 .and_then(|hint| self.stdlib_mapping.class_key(hint))
             {
                 let hn_mapping = self.stdlib_mapping.find_by_name(class_hint, "hasNext");

@@ -500,7 +500,7 @@ impl<'a> HirToMirContext<'a> {
 
         // Track Drop class association for @:derive(Drop)
         if !self.derive_drop_classes.is_empty() {
-            if let Some(class_name) = self.register_class_hints.get(&ir_id).cloned() {
+            if let Some(class_name) = self.class_hint(ir_id).cloned() {
                 for &class_sym in &self.derive_drop_classes {
                     if let Some(symbol_info) = self.symbol_table.get_symbol(class_sym) {
                         if self.string_interner.get(symbol_info.name) == Some(class_name.as_str()) {
