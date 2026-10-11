@@ -1394,6 +1394,83 @@ impl<'a> AstLowering<'a> {
             })
     }
 
+    /// The conversion methods of an abstract declared in another module, read
+    /// from the shared symbol table: the members its declaration flagged, in
+    /// its member scope. Abstracts the backend converts natively are left out.
+    fn imported_conversion_methods(
+        &self,
+        abstract_symbol: SymbolId,
+        flag: crate::tast::symbols::SymbolFlags,
+    ) -> Vec<(SymbolId, InternedString, TypeId)> {
+        let Some(owner) = self.context.symbol_table.get_symbol(abstract_symbol) else {
+            return Vec::new();
+        };
+        let native = crate::tast::core::is_haxe_std_type(
+            owner,
+            &*self.context.string_interner,
+            &[
+                "Int64", "Int32", "UInt", "Map", "Rest", "Vector", "Any", "Single",
+            ],
+        );
+        let scope = owner.scope_id;
+        if native
+            || scope == crate::tast::ScopeId::first()
+            || scope == crate::tast::ScopeId::invalid()
+        {
+            return Vec::new();
+        }
+        self.context
+            .symbol_table
+            .find_symbols(|symbol| symbol.scope_id == scope && symbol.flags.contains(flag))
+            .into_iter()
+            .map(|symbol| (symbol.id, symbol.name, symbol.type_id))
+            .collect()
+    }
+
+    /// An imported abstract's `@:from` methods: (method, parameter type).
+    fn imported_from_methods(&self, abstract_symbol: SymbolId) -> Vec<(SymbolId, TypeId)> {
+        use crate::tast::core::TypeKind;
+        use crate::tast::symbols::SymbolFlags;
+        let methods =
+            self.imported_conversion_methods(abstract_symbol, SymbolFlags::FROM_CONVERSION);
+        let table = self.context.type_table.borrow();
+        methods
+            .into_iter()
+            .filter_map(|(method, _, ty)| match table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Function { params, .. }) => params.first().map(|p| (method, *p)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The types an imported abstract's `@:to` methods return; an
+    /// unannotated `toString` returns String.
+    fn imported_to_conversion_types(&self, abstract_symbol: SymbolId) -> Vec<TypeId> {
+        use crate::tast::core::TypeKind;
+        use crate::tast::symbols::SymbolFlags;
+        let methods = self.imported_conversion_methods(abstract_symbol, SymbolFlags::TO_CONVERSION);
+        let table = self.context.type_table.borrow();
+        methods
+            .into_iter()
+            .filter_map(|(_, name, ty)| match table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Function { return_type, .. }) => {
+                    let unannotated = matches!(
+                        table.get(*return_type).map(|t| &t.kind),
+                        Some(TypeKind::Dynamic)
+                    );
+                    if unannotated && self.context.string_interner.get(name) == Some("toString") {
+                        Some(table.string_type())
+                    } else if unannotated {
+                        None
+                    } else {
+                        Some(*return_type)
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn coerce_arg_via_abstract_from(
         &mut self,
         arg: TypedExpression,
@@ -1445,9 +1522,14 @@ impl<'a> AstLowering<'a> {
         if arg_is_same_abstract {
             return arg;
         }
-        let Some(candidates) = self.abstract_from_methods.get(&abstract_symbol) else {
+        if !self.abstract_from_methods.contains_key(&abstract_symbol) {
+            let imported = self.imported_from_methods(abstract_symbol);
+            self.abstract_from_methods.insert(abstract_symbol, imported);
+        }
+        let candidates = self.abstract_from_methods[&abstract_symbol].clone();
+        if candidates.is_empty() {
             return arg;
-        };
+        }
         // Bind generic source parameters before checking the conversion's source.
         let pick = {
             candidates
@@ -1779,12 +1861,20 @@ impl<'a> AstLowering<'a> {
         let Some(abstract_symbol) = self.abstract_symbol_of(arg.expr_type) else {
             return arg;
         };
+        if !self.abstract_casts.contains_key(&abstract_symbol)
+            && !self.imported_to_types.contains_key(&abstract_symbol)
+        {
+            let to_types = self.imported_to_conversion_types(abstract_symbol);
+            self.imported_to_types.insert(abstract_symbol, to_types);
+        }
         let converts = {
             let tt = self.context.type_table.borrow();
             let formal_kind = tt.get(formal_ty).map(|ti| &ti.kind);
             self.abstract_casts
                 .get(&abstract_symbol)
-                .is_some_and(|(_, to_types)| {
+                .map(|(_, to_types)| to_types)
+                .or_else(|| self.imported_to_types.get(&abstract_symbol))
+                .is_some_and(|to_types| {
                     to_types
                         .iter()
                         .any(|&t| t == formal_ty || tt.get(t).map(|ti| &ti.kind) == formal_kind)

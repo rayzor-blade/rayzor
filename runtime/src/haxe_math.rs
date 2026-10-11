@@ -54,10 +54,16 @@ pub extern "C" fn haxe_math_ceil(x: f64) -> i32 {
     x.ceil() as i32
 }
 
-/// Round to nearest integer
+/// Round to nearest integer, halves toward positive infinity.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_round(x: f64) -> i32 {
-    x.round() as i32
+    round_half_up(x) as i32
+}
+
+/// `floor(x + 0.5)` without the rounding error of the addition.
+fn round_half_up(x: f64) -> f64 {
+    let down = x.floor();
+    if x - down >= 0.5 { down + 1.0 } else { down }
 }
 
 /// Floor, keeping the Float type (Haxe's Math.ffloor)
@@ -72,10 +78,10 @@ pub extern "C" fn haxe_math_fceil(x: f64) -> f64 {
     x.ceil()
 }
 
-/// Round to nearest integer, keeping the Float type (Haxe's Math.fround)
+/// Round to nearest integer, halves up, keeping the Float type (Haxe's Math.fround)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_fround(x: f64) -> f64 {
-    x.round()
+    round_half_up(x)
 }
 
 // ============================================================================

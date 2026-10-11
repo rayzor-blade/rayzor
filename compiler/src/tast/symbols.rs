@@ -360,6 +360,11 @@ impl SymbolFlags {
     pub const ARRAY_ACCESS: Self = Self(1 << 26);
     /// A receiver method with no declaration, retained for later resolution.
     pub const METHOD_PLACEHOLDER: Self = Self(1 << 27);
+    /// A static `@:from` method of an abstract: the implicit conversion a
+    /// call site in another module applies.
+    pub const FROM_CONVERSION: Self = Self(1 << 28);
+    /// An instance `@:to` method of an abstract, read the same way.
+    pub const TO_CONVERSION: Self = Self(1 << 29);
 
     pub const fn is_wasm_export(self) -> bool {
         self.contains(Self::WASM_EXPORT)

@@ -1415,6 +1415,55 @@ impl<'a> HirToMirContext<'a> {
         method_func_id: IrFunctionId,
         method_sig: IrFunctionSignature,
     ) -> Option<IrFunctionId> {
+        self.build_method_ref_thunk(method_func_id, method_sig, false)
+    }
+
+    /// A method value of a runtime-mapped extern (`map.keys`): a closure over
+    /// the receiver whose thunk calls the mapping's dispatch adapter. Only
+    /// methods without arguments are bound this way.
+    pub(crate) fn mapped_method_ref_thunk(
+        &mut self,
+        receiver_ty: TypeId,
+        method_symbol: SymbolId,
+    ) -> Option<IrFunctionId> {
+        let class_fqn = self.class_qualified_name_of_type(receiver_ty)?;
+        let method = self
+            .symbol_table
+            .get_symbol(method_symbol)
+            .and_then(|s| self.string_interner.get(s.name))?
+            .to_string();
+        let key = self.stdlib_mapping.class_key(&class_fqn)?;
+        let (sig, call) = self.stdlib_mapping.find_by_name(key, &method)?;
+        if sig.is_static || sig.is_constructor || call.param_count != 0 {
+            return None;
+        }
+        let dispatch = self.ensure_extern_mapped_dispatch_thunk(
+            &class_fqn,
+            &method,
+            call.runtime_name,
+            0,
+            "erased",
+        )?;
+        // The adapter takes `(env, this)`; the closure supplies its own env
+        // and the receiver it captured.
+        let mut dispatch_sig = self
+            .builder
+            .module
+            .functions
+            .get(&dispatch)?
+            .signature
+            .clone();
+        dispatch_sig.parameters.remove(0);
+        self.build_method_ref_thunk(dispatch, dispatch_sig, true)
+    }
+
+    /// `pass_env` forwards the closure env ahead of the receiver.
+    fn build_method_ref_thunk(
+        &mut self,
+        method_func_id: IrFunctionId,
+        method_sig: IrFunctionSignature,
+        pass_env: bool,
+    ) -> Option<IrFunctionId> {
         if let Some(cached) = self.method_ref_thunks.get(&method_func_id) {
             return Some(*cached);
         }
@@ -1513,7 +1562,10 @@ impl<'a> HirToMirContext<'a> {
             return None;
         };
 
-        let mut call_args: Vec<IrId> = Vec::with_capacity(1 + forward_regs.len());
+        let mut call_args: Vec<IrId> = Vec::with_capacity(2 + forward_regs.len());
+        if pass_env {
+            call_args.push(env_reg);
+        }
         call_args.push(this_arg);
         call_args.extend(forward_regs);
 

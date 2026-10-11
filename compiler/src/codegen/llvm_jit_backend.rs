@@ -1457,13 +1457,13 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             "haxe_math_abs" => "llvm.fabs.f64",
             "haxe_math_floor" => "llvm.floor.f64",
             "haxe_math_ceil" => "llvm.ceil.f64",
-            "haxe_math_round" => "llvm.round.f64",
+            "haxe_math_round" => "llvm.floor.f64",
             "haxe_math_sin" => "llvm.sin.f64",
             "haxe_math_cos" => "llvm.cos.f64",
             "haxe_math_exp" => "llvm.exp.f64",
             "haxe_math_log" => "llvm.log.f64",
             "haxe_math_pow" => "llvm.pow.f64",
-            "haxe_math_fround" => "llvm.round.f64",
+            "haxe_math_fround" => "llvm.floor.f64",
             "haxe_math_ffloor" => "llvm.floor.f64",
             "haxe_math_fceil" => "llvm.ceil.f64",
             _ => return Ok(None),
@@ -1509,6 +1509,35 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("Intrinsic returned void unexpectedly")?;
+
+        // Haxe rounds halves toward positive infinity: `floor(x)`, plus one
+        // when the fraction it dropped is at least a half.
+        let result = match (func_name, params.first()) {
+            (
+                "haxe_math_round" | "haxe_math_fround",
+                Some(inkwell::values::BasicMetadataValueEnum::FloatValue(x)),
+            ) => {
+                let down = result.into_float_value();
+                let frac = builder
+                    .build_float_sub(*x, down, "frac")
+                    .map_err(|e| format!("Failed to build round: {}", e))?;
+                let up = builder
+                    .build_float_compare(
+                        FloatPredicate::OGE,
+                        frac,
+                        f64_type.const_float(0.5),
+                        "half_up",
+                    )
+                    .map_err(|e| format!("Failed to build round: {}", e))?;
+                let next = builder
+                    .build_float_add(down, f64_type.const_float(1.0), "next")
+                    .map_err(|e| format!("Failed to build round: {}", e))?;
+                builder
+                    .build_select(up, next, down, "round")
+                    .map_err(|e| format!("Failed to build round: {}", e))?
+            }
+            _ => result,
+        };
 
         // `Math.floor`/`ceil`/`round` return `Int`, so the wrapper is narrower
         // than the intrinsic it calls. Convert rather than return an f64 from

@@ -448,6 +448,12 @@ impl<'a> AstLowering<'a> {
                     if let Some(methods) = self.class_methods.get_mut(&abstract_symbol) {
                         methods.push((method_name, sym, is_static));
                     }
+                    if !is_static && field.meta.iter().any(|m| m.name == ":to" || m.name == "to") {
+                        self.context.symbol_table.add_symbol_flags(
+                            sym,
+                            crate::tast::symbols::SymbolFlags::TO_CONVERSION,
+                        );
+                    }
                     // A static `@:from` method IS the implicit conversion: a
                     // call site whose argument matches its parameter must wrap
                     // the argument in a call to it. Record symbol + parameter
@@ -468,6 +474,10 @@ impl<'a> AstLowering<'a> {
                                 .entry(abstract_symbol)
                                 .or_default()
                                 .push((sym, param_ty));
+                            self.context.symbol_table.add_symbol_flags(
+                                sym,
+                                crate::tast::symbols::SymbolFlags::FROM_CONVERSION,
+                            );
                         }
                     }
                 }

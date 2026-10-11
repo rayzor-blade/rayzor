@@ -2839,7 +2839,24 @@ impl CraneliftBackend {
                         "haxe_math_abs" => builder.ins().fabs(float_arg),
                         "haxe_math_floor" => builder.ins().floor(float_arg),
                         "haxe_math_ceil" => builder.ins().ceil(float_arg),
-                        "haxe_math_round" => builder.ins().nearest(float_arg),
+                        // Haxe rounds halves toward positive infinity.
+                        "haxe_math_round" => {
+                            let down = builder.ins().floor(float_arg);
+                            let frac = builder.ins().fsub(float_arg, down);
+                            let (half, one) =
+                                if builder.func.dfg.value_type(float_arg) == types::F32 {
+                                    (builder.ins().f32const(0.5), builder.ins().f32const(1.0))
+                                } else {
+                                    (builder.ins().f64const(0.5), builder.ins().f64const(1.0))
+                                };
+                            let up = builder.ins().fcmp(
+                                cranelift_codegen::ir::condcodes::FloatCC::GreaterThanOrEqual,
+                                frac,
+                                half,
+                            );
+                            let next = builder.ins().fadd(down, one);
+                            builder.ins().select(up, next, down)
+                        }
                         _ => unreachable!(),
                     };
                     // floor/ceil/round return `Int` in Haxe (runtime signature

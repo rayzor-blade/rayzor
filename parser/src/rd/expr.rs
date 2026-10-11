@@ -1515,7 +1515,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let mut i = 0;
 
         while i < bytes.len() {
-            if bytes[i] == b'$' && i + 1 < bytes.len() {
+            if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'$') {
+                // `$$` is a literal `$`.
+                current.push('$');
+                i += 2;
+            } else if bytes[i] == b'$' && i + 1 < bytes.len() {
                 // Flush literal
                 if !current.is_empty() {
                     parts.push(StringPart::Literal(unescape_string(&std::mem::take(
@@ -1594,8 +1598,17 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 current.push(bytes[i + 1] as char);
                 i += 2;
             } else {
-                current.push(bytes[i] as char);
-                i += 1;
+                // Copy a whole character, not one byte of it.
+                match inner.get(i..).and_then(|rest| rest.chars().next()) {
+                    Some(ch) => {
+                        current.push(ch);
+                        i += ch.len_utf8();
+                    }
+                    None => {
+                        current.push(bytes[i] as char);
+                        i += 1;
+                    }
+                }
             }
         }
 

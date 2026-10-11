@@ -1323,23 +1323,8 @@ impl<'a> HirToMirContext<'a> {
                                     string_ptr_ty.clone(),
                                 )?
                             }
-                            Some(TypeKind::Array { element_type })
-                                if self.is_null_int_type(*element_type) =>
-                            {
+                            Some(TypeKind::Array { element_type }) => {
                                 self.build_array_to_string(expr_val, *element_type)?
-                            }
-                            Some(TypeKind::Array { .. }) => {
-                                // Array<T> → haxe_array_to_string
-                                let conv_fn = self.get_or_register_extern_function(
-                                    "haxe_array_to_string",
-                                    vec![IrType::Ptr(Box::new(IrType::Void))],
-                                    string_ptr_ty.clone(),
-                                );
-                                self.builder.build_call_direct(
-                                    conv_fn,
-                                    vec![expr_val],
-                                    string_ptr_ty.clone(),
-                                )?
                             }
                             _ => {
                                 // Fallback: treat as int (prints raw i64 value)

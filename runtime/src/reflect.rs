@@ -802,11 +802,12 @@ pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
         let dv_a = *(a as *const DynamicValue);
         let dv_b = *(b as *const DynamicValue);
 
-        // Int × Int
-        if dv_a.type_id == TYPE_INT && dv_b.type_id == TYPE_INT {
-            let va = *(dv_a.value_ptr as *const i64);
-            let vb = *(dv_b.value_ptr as *const i64);
-            return (va - vb).signum();
+        // Int × Int, either side possibly an Int64
+        if let (Some(va), Some(vb)) = (
+            crate::type_system::boxed_integer_value(dv_a),
+            crate::type_system::boxed_integer_value(dv_b),
+        ) {
+            return va.cmp(&vb) as i64;
         }
 
         // Float × Float
@@ -892,7 +893,7 @@ pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i
             {
                 return (a_id as i64 - b_id as i64).signum();
             }
-            (a - b).signum()
+            a.cmp(&b) as i64
         }
         2 => {
             // Bool comparison

@@ -2667,15 +2667,32 @@ unsafe extern "C" fn array_to_string(value_ptr: *const u8) -> StringPtr {
 }
 
 fn array_to_string_with_layout(value_ptr: *const u8, layout: u64) -> StringPtr {
+    if value_ptr.is_null() {
+        let s = "null";
+        return StringPtr {
+            ptr: s.as_ptr(),
+            len: s.len(),
+        };
+    }
+    let s_static = Box::leak(array_text_with_layout(value_ptr, layout).into_boxed_str());
+    StringPtr {
+        ptr: s_static.as_ptr(),
+        len: s_static.len(),
+    }
+}
+
+/// `Std.string` of an array whose slots `layout` describes, as a HaxeString.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_to_string_layout(arr: *const u8, layout: u64) -> *mut u8 {
+    unsafe { alloc_haxe_string(&array_text_with_layout(arr, layout)) }
+}
+
+/// `[e0,e1,...]` for a HaxeArray whose slots `layout` describes.
+fn array_text_with_layout(value_ptr: *const u8, layout: u64) -> String {
+    if value_ptr.is_null() {
+        return "null".to_string();
+    }
     unsafe {
-        // value_ptr is a HaxeArray pointer — format as [e0, e1, ...]
-        if value_ptr.is_null() {
-            let s = "null";
-            return StringPtr {
-                ptr: s.as_ptr(),
-                len: s.len(),
-            };
-        }
         let arr = &*(value_ptr as *const crate::haxe_array::HaxeArray);
         let mut buf = String::from("[");
         for i in 0..arr.len {
@@ -2706,11 +2723,7 @@ fn array_to_string_with_layout(value_ptr: *const u8, layout: u64) -> StringPtr {
             }
         }
         buf.push(']');
-        let s_static = Box::leak(buf.into_boxed_str());
-        StringPtr {
-            ptr: s_static.as_ptr(),
-            len: s_static.len(),
-        }
+        buf
     }
 }
 
@@ -3411,6 +3424,20 @@ pub extern "C" fn haxe_box_int64_ptr(value: i64) -> *mut u8 {
     let payload =
         Box::into_raw(Box::new([type_id as i64, value >> 32, value as i32 as i64])) as *mut u8;
     haxe_box_reference_ptr(payload, type_id)
+}
+
+/// The integer a box holds: an Int, or an Int64 object.
+pub(crate) fn boxed_integer_value(dynamic: DynamicValue) -> Option<i64> {
+    if dynamic.value_ptr.is_null() {
+        return None;
+    }
+    if dynamic.type_id == TYPE_INT {
+        Some(unsafe { *(dynamic.value_ptr as *const i64) })
+    } else if dynamic.type_id.0 == stable_class_type_id("haxe.___Int64") {
+        Some(unsafe { int64_from_object(dynamic.value_ptr) })
+    } else {
+        None
+    }
 }
 
 unsafe fn int64_from_object(obj: *const u8) -> i64 {

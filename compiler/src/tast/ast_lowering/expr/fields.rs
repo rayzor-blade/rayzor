@@ -520,6 +520,41 @@ impl<'a> AstLowering<'a> {
                                         });
                                     }
                                 }
+                            } else if symbol.kind == crate::tast::symbols::SymbolKind::Abstract {
+                                // `pkg.Module.Abstract.value`: a static of the abstract.
+                                let field_symbol =
+                                    self.class_fields.get(&symbol_id).and_then(|fields| {
+                                        fields
+                                            .iter()
+                                            .find(|(name, _, _)| *name == field_name_interned)
+                                            .map(|(_, field_symbol, _)| *field_symbol)
+                                    });
+                                if let Some(field_symbol) = field_symbol {
+                                    let expr_type = self
+                                        .context
+                                        .symbol_table
+                                        .get_symbol(field_symbol)
+                                        .map(|s| s.type_id)
+                                        .unwrap_or_else(|| {
+                                            self.context.type_table.borrow().dynamic_type()
+                                        });
+                                    let kind = TypedExpressionKind::StaticFieldAccess {
+                                        class_symbol: symbol_id,
+                                        field_symbol,
+                                    };
+                                    let lifetime_id = self.assign_lifetime(&kind, &expr_type);
+                                    let metadata = self.analyze_expression_metadata(&kind);
+                                    return Ok(TypedExpression {
+                                        expr_type,
+                                        kind,
+                                        usage: VariableUsage::Copy,
+                                        lifetime_id,
+                                        source_location: self
+                                            .context
+                                            .create_location_from_span(expression.span),
+                                        metadata,
+                                    });
+                                }
                             } else if symbol.kind == crate::tast::symbols::SymbolKind::Enum {
                                 // Found an enum! Look up the variant by field name
                                 if let Some(variants) =

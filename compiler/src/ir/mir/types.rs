@@ -898,6 +898,20 @@ impl<'a> HirToMirContext<'a> {
                 .builder
                 .build_call_direct(func, vec![array, tid, boxed], string_ptr);
         }
+        // Nested arrays print through their slot layout; the untyped
+        // formatter cannot tell an inner array from an integer.
+        let layout = self.erased_array_slot_layout(element_type, 0);
+        if layout & 0xff == 7 && self.array_to_string_fn(element_type) == "haxe_array_to_string" {
+            let func = self.get_or_register_extern_function(
+                "haxe_array_to_string_layout",
+                vec![ptr_void, IrType::U64],
+                string_ptr.clone(),
+            );
+            let layout = self.builder.build_const(IrValue::U64(layout))?;
+            return self
+                .builder
+                .build_call_direct(func, vec![array, layout], string_ptr);
+        }
         let func = self.get_or_register_extern_function(
             self.array_to_string_fn(element_type),
             vec![ptr_void],

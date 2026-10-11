@@ -544,6 +544,46 @@ pub extern "C" fn haxe_string_split_array(
             s_ref.len, delim_ref.len
         );
 
+        // An empty delimiter splits into single characters.
+        if delim_ref.len == 0 {
+            let bytes = if s_ref.ptr.is_null() {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(s_ref.ptr, s_ref.len)
+            };
+            let mut bounds: Vec<usize> = match std::str::from_utf8(bytes) {
+                Ok(text) => text.char_indices().map(|(i, _)| i).collect(),
+                Err(_) => (0..bytes.len()).collect(),
+            };
+            let count = bounds.len();
+            bounds.push(bytes.len());
+            let data_ptr = if count == 0 {
+                ptr::null_mut()
+            } else {
+                alloc(Layout::from_size_align_unchecked(count * 8, 8))
+            };
+            if count != 0 && data_ptr.is_null() {
+                panic!("Failed to allocate memory for string split array");
+            }
+            let slots = data_ptr as *mut i64;
+            for (i, pair) in bounds.windows(2).enumerate() {
+                let part = Box::into_raw(Box::new(HaxeString {
+                    ptr: ptr::null_mut(),
+                    len: 0,
+                    cap: 0,
+                }));
+                haxe_string_substring(part, s, pair[0], pair[1]);
+                *slots.add(i) = part as i64;
+            }
+            return Box::into_raw(Box::new(HaxeArray {
+                ptr: data_ptr,
+                len: count,
+                cap: count,
+                elem_size: 8,
+                flags: 0,
+            }));
+        }
+
         // Count occurrences
         let mut count = 1;
         let mut pos = 0;

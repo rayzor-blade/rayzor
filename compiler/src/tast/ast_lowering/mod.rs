@@ -1751,6 +1751,9 @@ pub struct AstLowering<'a> {
     /// The clause form (`from Y`) is representation compatibility and needs no
     /// call; the method form is a real conversion the call site must invoke.
     pub(crate) abstract_from_methods: BTreeMap<SymbolId, Vec<(SymbolId, TypeId)>>,
+    /// What each abstract declared in another module converts to through its
+    /// `@:to` methods, read once from the symbol table.
+    pub(crate) imported_to_types: BTreeMap<SymbolId, Vec<TypeId>>,
     /// Every `enum abstract` declared so far; its values type as the abstract.
     pub(crate) enum_abstracts: std::collections::BTreeSet<SymbolId>,
     /// Each abstract's `@:op(A!)` method: (name, is_static).

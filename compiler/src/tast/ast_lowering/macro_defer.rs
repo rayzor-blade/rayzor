@@ -684,6 +684,53 @@ impl AstLowering<'_> {
 }
 
 impl DeferredMacroTyper<'_, '_> {
+    /// A forward-declared type the typer left as a named placeholder, as the
+    /// type that name resolves to at the call site.
+    fn resolve_placeholder(&mut self, ty: TypeId) -> TypeId {
+        use crate::tast::core::TypeKind;
+        let name = match self
+            .lowering
+            .context
+            .type_table
+            .borrow()
+            .get(ty)
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Placeholder { name }) => *name,
+            _ => return ty,
+        };
+        let Some(name) = self
+            .lowering
+            .context
+            .string_interner
+            .get(name)
+            .map(str::to_string)
+        else {
+            return ty;
+        };
+        match self.resolve_type_by_name(&name) {
+            Ok(resolved)
+                if matches!(
+                    self.lowering
+                        .context
+                        .type_table
+                        .borrow()
+                        .get(resolved)
+                        .map(|t| &t.kind),
+                    Some(
+                        TypeKind::Class { .. }
+                            | TypeKind::Interface { .. }
+                            | TypeKind::Enum { .. }
+                            | TypeKind::Abstract { .. }
+                    )
+                ) =>
+            {
+                resolved
+            }
+            _ => ty,
+        }
+    }
+
     /// An `@:overload` signature as a `ClassField`. Its type is a `TFun` over
     /// `{name, opt, t}` args, as haxe builds it; a function TypeId has no
     /// argument names.
@@ -849,6 +896,7 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                     }
                 }
                 let ty = self.lowering.safe_chain_type(&typed);
+                let ty = self.resolve_placeholder(ty);
                 // `a ?? b` where `b` never completes is `a` without its Null.
                 let mut inner = expr;
                 while let parser::ExprKind::Paren(e) = &inner.kind {

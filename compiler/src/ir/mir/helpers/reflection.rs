@@ -317,6 +317,10 @@ impl<'a> HirToMirContext<'a> {
     fn reflect_compare_operand_tag(&self, first: &HirExpr) -> Option<Result<i32, String>> {
         use crate::tast::core::TypeKind;
         let type_table = self.type_table;
+        // An Int64 is a native i64 in its register.
+        if self.is_int64_type(first.ty) {
+            return Some(Ok(1));
+        }
         debug!(
             "[REFLECT_COMPARE_TYPE] arg ty={:?}, type_info={:?}",
             first.ty,

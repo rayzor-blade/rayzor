@@ -1710,7 +1710,7 @@ impl<'a> TastToHirContext<'a> {
                 // Default: normal assignment
                 HirStatement::Assign {
                     lhs: self.lower_lvalue(target),
-                    rhs: self.lower_expression(value),
+                    rhs: self.lower_assigned_value(target, value),
                     op: None,
                 }
             }
@@ -2945,7 +2945,7 @@ impl<'a> TastToHirContext<'a> {
                         let target = self.bind_assignment_target(left, &mut statements);
                         statements.push(HirStatement::Assign {
                             lhs: self.lower_lvalue(&target),
-                            rhs: self.lower_expression(right),
+                            rhs: self.lower_assigned_value(&target, right),
                             op: None,
                         });
                         HirExprKind::Block(HirBlock::new(statements, self.current_scope))
@@ -4395,6 +4395,51 @@ impl<'a> TastToHirContext<'a> {
                 HirLValue::Variable(SymbolId::invalid())
             }
         }
+    }
+
+    /// The right side of an assignment. In a method of an abstract over
+    /// Dynamic, `this` holds a box as Dynamic does, so a typed value assigned
+    /// to it converts through the abstract.
+    fn lower_assigned_value(
+        &mut self,
+        target: &TypedExpression,
+        value: &TypedExpression,
+    ) -> HirExpr {
+        let rhs = self.lower_expression(value);
+        if !matches!(target.kind, TypedExpressionKind::This { .. }) {
+            return rhs;
+        }
+        let Some(abstract_ty) = self
+            .pos_class
+            .and_then(|class| self.symbol_table.get_symbol(class))
+            .map(|class| class.type_id)
+        else {
+            return rhs;
+        };
+        let boxes = {
+            let table = self.type_table.borrow();
+            let is_dynamic =
+                |ty: TypeId| matches!(table.get(ty).map(|t| &t.kind), Some(TypeKind::Dynamic));
+            matches!(
+                table.get(abstract_ty).map(|t| &t.kind),
+                Some(TypeKind::Abstract { underlying: Some(underlying), .. })
+                    if is_dynamic(*underlying)
+            ) && !is_dynamic(value.expr_type)
+        };
+        if !boxes {
+            return rhs;
+        }
+        HirExpr::new(
+            HirExprKind::Cast {
+                expr: Box::new(rhs),
+                target: abstract_ty,
+                is_safe: true,
+                is_checked: false,
+            },
+            abstract_ty,
+            self.current_lifetime,
+            value.source_location,
+        )
     }
 
     fn lower_literal(&mut self, lit: &LiteralValue) -> HirLiteral {
@@ -7657,7 +7702,31 @@ impl<'a> TastToHirContext<'a> {
             lifetime: crate::tast::LifetimeId::invalid(),
             source_location: SourceLocation::unknown(),
         };
-        let computed = self.inline_expression_deep(value, &placeholder, &param_map, underlying);
+        let stores_box = {
+            let table = self.type_table.borrow();
+            let is_dynamic =
+                |ty: TypeId| matches!(table.get(ty).map(|t| &t.kind), Some(TypeKind::Dynamic));
+            is_dynamic(underlying) && !is_dynamic(value.expr_type)
+        };
+        let computed = if stores_box {
+            // An abstract over Dynamic holds a box: build the value as itself,
+            // then convert it through the abstract.
+            let computed =
+                self.inline_expression_deep(value, &placeholder, &param_map, value.expr_type);
+            HirExpr::new(
+                HirExprKind::Cast {
+                    expr: Box::new(computed),
+                    target: class_type,
+                    is_safe: true,
+                    is_checked: false,
+                },
+                class_type,
+                self.current_lifetime,
+                value.source_location,
+            )
+        } else {
+            self.inline_expression_deep(value, &placeholder, &param_map, underlying)
+        };
         // Compute with the underlying type, then expose the constructed abstract.
         Some(HirExpr::new(
             HirExprKind::Block(HirBlock::with_expr(
@@ -7720,11 +7789,14 @@ impl<'a> TastToHirContext<'a> {
             }
             match table.get(ty).map(|t| &t.kind) {
                 Some(TypeKind::Abstract { symbol_id, .. }) => (Some(*symbol_id), true),
+                // A String's methods are String's own, whatever an abstract
+                // over String in this file declares under the same name.
                 Some(
                     TypeKind::Class { .. }
                     | TypeKind::Interface { .. }
                     | TypeKind::Enum { .. }
-                    | TypeKind::Anonymous { .. },
+                    | TypeKind::Anonymous { .. }
+                    | TypeKind::String,
                 ) => (None, true),
                 _ => (None, false),
             }
@@ -7786,7 +7858,12 @@ impl<'a> TastToHirContext<'a> {
         ) {
             return Some(inlined);
         }
+        let writes_this = method.body.iter().any(Self::statement_writes_this)
+            || matches!(method.body.as_slice(), [TypedStatement::Expression { expression, .. }]
+                if matches!(&expression.kind, TypedExpressionKind::Block { statements, .. }
+                    if statements.iter().any(Self::statement_writes_this)));
         if imported
+            && !writes_this
             && !matches!(
                 self.string_interner.get(method.name),
                 Some("hasNext" | "next")
@@ -7825,6 +7902,7 @@ impl<'a> TastToHirContext<'a> {
 
         // Lower the receiver once
         let lowered_receiver = self.lower_expression(receiver);
+        let lowered_receiver = self.abstract_inline_receiver(lowered_receiver, writes_this);
 
         // Extract the return expression from the method body.
         // The body may be structured as:
@@ -7955,6 +8033,65 @@ impl<'a> TastToHirContext<'a> {
         ))
     }
 
+    /// Whether an abstract method statement assigns, increments or decrements
+    /// `this`, directly or as the value it returns.
+    fn statement_writes_this(statement: &TypedStatement) -> bool {
+        match statement {
+            TypedStatement::Assignment { target, .. } => {
+                matches!(target.kind, TypedExpressionKind::This { .. })
+            }
+            TypedStatement::Expression { expression, .. } => {
+                Self::expression_writes_this(expression)
+            }
+            TypedStatement::Return {
+                value: Some(value), ..
+            } => Self::expression_writes_this(value),
+            _ => false,
+        }
+    }
+
+    fn expression_writes_this(expression: &TypedExpression) -> bool {
+        let is_this = |e: &TypedExpression| matches!(e.kind, TypedExpressionKind::This { .. });
+        match &expression.kind {
+            TypedExpressionKind::BinaryOp { left, operator, .. } => {
+                is_this(left)
+                    && (*operator == BinaryOperator::Assign
+                        || Self::compound_assignment_operator(operator).is_some())
+            }
+            TypedExpressionKind::UnaryOp { operand, operator } => {
+                is_this(operand)
+                    && matches!(
+                        operator,
+                        UnaryOperator::PreInc
+                            | UnaryOperator::PostInc
+                            | UnaryOperator::PreDec
+                            | UnaryOperator::PostDec
+                    )
+            }
+            TypedExpressionKind::Return { value: Some(value) } => {
+                Self::expression_writes_this(value)
+            }
+            _ => false,
+        }
+    }
+
+    /// The receiver an inlined abstract body substitutes for `this`. Inside the
+    /// abstract's own methods `this` is the variable bound to symbol 0, so a
+    /// body that writes `this` rebinds it rather than a copy.
+    fn abstract_inline_receiver(&self, receiver: HirExpr, writes_this: bool) -> HirExpr {
+        if writes_this && matches!(receiver.kind, HirExprKind::This) {
+            HirExpr {
+                kind: HirExprKind::Variable {
+                    symbol: SymbolId::from_raw(0),
+                    capture_mode: None,
+                },
+                ..receiver
+            }
+        } else {
+            receiver
+        }
+    }
+
     /// Expand a straight-line inline body with fresh locals and a trailing value.
     /// Substituting the receiver keeps writes to `this` on the caller's lvalue.
     fn inline_abstract_statements(
@@ -7982,34 +8119,7 @@ impl<'a> TastToHirContext<'a> {
         if body.is_empty() {
             return None;
         }
-        if require_receiver_write
-            && !body.iter().any(|statement| {
-                let is_this =
-                    |e: &TypedExpression| matches!(e.kind, TypedExpressionKind::This { .. });
-                match statement {
-                    TypedStatement::Assignment { target, .. } => is_this(target),
-                    TypedStatement::Expression { expression, .. } => match &expression.kind {
-                        TypedExpressionKind::BinaryOp { left, operator, .. } => {
-                            is_this(left)
-                                && (*operator == BinaryOperator::Assign
-                                    || Self::compound_assignment_operator(operator).is_some())
-                        }
-                        TypedExpressionKind::UnaryOp { operand, operator } => {
-                            is_this(operand)
-                                && matches!(
-                                    operator,
-                                    UnaryOperator::PreInc
-                                        | UnaryOperator::PostInc
-                                        | UnaryOperator::PreDec
-                                        | UnaryOperator::PostDec
-                                )
-                        }
-                        _ => false,
-                    },
-                    _ => false,
-                }
-            })
-        {
+        if require_receiver_write && !body.iter().any(Self::statement_writes_this) {
             return None;
         }
         // Single value returns retain the expression inliner's type handling.
@@ -8066,6 +8176,10 @@ impl<'a> TastToHirContext<'a> {
         }
         let mut statements = Vec::new();
         let lowered_receiver = self.lower_expression(receiver);
+        let lowered_receiver = self.abstract_inline_receiver(
+            lowered_receiver,
+            body.iter().any(Self::statement_writes_this),
+        );
         let this = if matches!(
             lowered_receiver.kind,
             HirExprKind::Variable { .. } | HirExprKind::Field { .. } | HirExprKind::Index { .. }

@@ -766,7 +766,9 @@ pub extern "C" fn haxe_math_ceil(x: f64) -> f64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_round(x: f64) -> f64 {
-    libm::round(x)
+    // Halves round toward positive infinity.
+    let down = libm::floor(x);
+    if x - down >= 0.5 { down + 1.0 } else { down }
 }
 
 #[unsafe(no_mangle)]
@@ -2379,6 +2381,13 @@ pub extern "C" fn haxe_array_to_string(arr: i32) -> i32 {
         haxe_string_from_bytes(out, buf, pos as i32);
     }
     out
+}
+
+/// `Std.string` of an array with a known slot layout; wasm slots carry no
+/// layout, so this is the untyped formatter.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_to_string_layout(arr: i32, _layout: i64) -> i32 {
+    haxe_array_to_string(arr)
 }
 
 /// Join array elements with a separator string. Returns new HaxeString*.

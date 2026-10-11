@@ -105,6 +105,7 @@ impl<'a> AstLowering<'a> {
             var_init_expected: None,
             abstract_casts: BTreeMap::new(),
             abstract_from_methods: BTreeMap::new(),
+            imported_to_types: BTreeMap::new(),
             enum_abstracts: std::collections::BTreeSet::new(),
             abstract_postfix_not: BTreeMap::new(),
             abstract_unops: BTreeMap::new(),

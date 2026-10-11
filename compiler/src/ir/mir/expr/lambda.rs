@@ -524,11 +524,14 @@ impl<'a> HirToMirContext<'a> {
             Some(&id) => self.ensure_method_ref_thunk(id)?,
             // A method compiled in another module: its parameter types were
             // recorded at import, its return type is the symbol's.
-            None => {
-                let id = *self.external_function_map.get(&method_symbol)?;
-                let sig = self.external_method_signature(id, method_symbol)?;
-                self.ensure_method_ref_thunk_with_sig(id, sig)?
-            }
+            None => match self.external_function_map.get(&method_symbol) {
+                Some(&id) => {
+                    let sig = self.external_method_signature(id, method_symbol)?;
+                    self.ensure_method_ref_thunk_with_sig(id, sig)?
+                }
+                // A runtime-mapped extern method has no function of its own.
+                None => self.mapped_method_ref_thunk(receiver.ty, method_symbol)?,
+            },
         };
         let method_ty = self
             .symbol_table
