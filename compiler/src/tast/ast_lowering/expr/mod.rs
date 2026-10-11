@@ -1055,10 +1055,12 @@ impl<'a> AstLowering<'a> {
                             // A closure reads or writes it as Dynamic; storing
                             // the assigned type raw would break that access.
                             self.null_inferred.remove(symbol_id);
+                            self.macro_source_types.remove(symbol_id);
                         } else if self.null_inferred.contains(symbol_id) {
                             if let Some(t) = self.null_local_binding(value_expr.expr_type) {
                                 self.context.symbol_table.update_symbol_type(*symbol_id, t);
                                 self.null_inferred.remove(symbol_id);
+                                self.macro_source_types.remove(symbol_id);
                             }
                         }
                     }
@@ -1995,6 +1997,10 @@ impl<'a> AstLowering<'a> {
                     self.enum_abstract_value_type(&discriminant)
                         .unwrap_or(discriminant.expr_type),
                 );
+                if let Err(error) = self.type_switch_subject_from_cases(&discriminant, cases) {
+                    self.context.switch_discriminant_type = prev_switch_type;
+                    return Err(error);
+                }
 
                 // Check if this is a switch expression or switch statement
                 // In a switch expression, all cases must have expression values
@@ -2810,7 +2816,8 @@ impl<'a> AstLowering<'a> {
                     });
                     self.expected_lambda_params_stack.push(lambda_hint);
                     self.expected_arg_type_stack.push(declared_type);
-                    let prev_expected = self.enter_var_init(init_expr, declared_type);
+                    let prev_expected =
+                        self.enter_var_init(init_expr, declared_type, type_hint.as_ref());
                     let result = self.lower_value_expression(init_expr);
                     self.var_init_expected = prev_expected;
                     self.expected_arg_type_stack.pop();
@@ -2899,6 +2906,14 @@ impl<'a> AstLowering<'a> {
                 {
                     self.null_inferred.insert(var_symbol);
                     self.null_decl_depth.insert(var_symbol, self.closure_depth);
+                }
+                if let Some(init_expr) = expr {
+                    self.record_macro_local_views(
+                        var_symbol,
+                        init_expr,
+                        &initializer,
+                        declared_type,
+                    );
                 }
 
                 if let Some(owner) = self.class_value_owner(&initializer) {
@@ -3023,7 +3038,8 @@ impl<'a> AstLowering<'a> {
                     self.context.expected_new_type_hint = declared_type.or(map_hint);
                     self.expected_lambda_params_stack.push(lambda_hint);
                     self.expected_arg_type_stack.push(declared_type);
-                    let prev_expected = self.enter_var_init(init_expr, declared_type);
+                    let prev_expected =
+                        self.enter_var_init(init_expr, declared_type, type_hint.as_ref());
                     let result = self.lower_value_expression(init_expr);
                     self.var_init_expected = prev_expected;
                     self.expected_arg_type_stack.pop();
@@ -3082,6 +3098,14 @@ impl<'a> AstLowering<'a> {
                 {
                     let loc = self.context.span_to_location(&expression.span);
                     self.empty_array_inferred.insert(var_symbol, loc);
+                }
+                if let Some(init_expr) = expr {
+                    self.record_macro_local_views(
+                        var_symbol,
+                        init_expr,
+                        &initializer,
+                        declared_type,
+                    );
                 }
 
                 if let Some(owner) = self.class_value_owner(&initializer) {

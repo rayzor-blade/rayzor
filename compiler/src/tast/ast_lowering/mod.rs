@@ -1628,9 +1628,12 @@ pub struct AstLowering<'a> {
     null_read_in_closure: std::collections::BTreeSet<SymbolId>,
     /// The closure depth each of them is declared at.
     null_decl_depth: std::collections::BTreeMap<SymbolId, usize>,
-    /// Locals represented as Dynamic where the source types them as a type
-    /// parameter; macro typing reports the source type.
+    /// Locals whose source type differs from their runtime representation;
+    /// macro typing reports the source type.
     macro_source_types: std::collections::BTreeMap<SymbolId, TypeId>,
+    /// Closures whose result is a still-untyped `var x = null` local: the
+    /// closure's symbol and that local's.
+    null_returning_closures: std::collections::BTreeMap<SymbolId, SymbolId>,
     /// Typedefs declared as a structure extension or intersection, with the
     /// types they are built from (a macro's `AExtend` status).
     alias_extensions: BTreeMap<SymbolId, Vec<TypeId>>,

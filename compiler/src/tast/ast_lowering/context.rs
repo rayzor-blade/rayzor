@@ -59,6 +59,7 @@ impl<'a> AstLowering<'a> {
             null_read_in_closure: std::collections::BTreeSet::new(),
             null_decl_depth: std::collections::BTreeMap::new(),
             macro_source_types: std::collections::BTreeMap::new(),
+            null_returning_closures: std::collections::BTreeMap::new(),
             alias_extensions: BTreeMap::new(),
             closure_depth: 0,
             rest_symbol_cache: None,

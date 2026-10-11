@@ -31,10 +31,226 @@ impl AstLowering<'_> {
         &mut self,
         init: &parser::Expr,
         declared: Option<TypeId>,
+        hint: Option<&parser::Type>,
     ) -> Option<((usize, usize), TypeId)> {
+        let declared = hint.and_then(|h| self.dynamic_of_view(h)).or(declared);
         let expected = declared.unwrap_or_else(|| self.context.type_table.borrow().unknown_type());
         self.var_init_expected
             .replace(((init.span.start, init.span.end), expected))
+    }
+
+    /// `Dynamic<T>` as macro typing sees it: a Dynamic carrying its
+    /// parameter. The annotation itself lowers to plain Dynamic.
+    pub(crate) fn dynamic_of_view(&mut self, hint: &parser::Type) -> Option<TypeId> {
+        let parser::Type::Path { path, params, .. } = hint else {
+            return None;
+        };
+        let std_types = path.package.is_empty() || path.package == ["StdTypes"];
+        if path.name != "Dynamic" || !std_types || path.sub.is_some() || params.len() != 1 {
+            return None;
+        }
+        let errors = (self.collected_errors.len(), self.context.errors.len());
+        let value = self.lower_type(&params[0]);
+        self.collected_errors.truncate(errors.0);
+        self.context.errors.truncate(errors.1);
+        let value = value.ok()?;
+        let mut table = self.context.type_table.borrow_mut();
+        let dynamic = table.dynamic_type();
+        Some(table.create_generic_instance(dynamic, vec![value]))
+    }
+
+    /// What macro typing sees for a declared local beyond its runtime type:
+    /// a closure handing back an untyped `var x = null` local, that local
+    /// once an annotated declaration binds it through such a closure's
+    /// result, or a call result typed by its callee's constraints.
+    pub(crate) fn record_macro_local_views(
+        &mut self,
+        local: crate::tast::SymbolId,
+        init: &parser::Expr,
+        typed: &crate::tast::TypedExpression,
+        declared: Option<TypeId>,
+    ) {
+        use crate::tast::core::TypeKind;
+        let Some(declared) = declared else {
+            if let Some(name) = closure_result_name(init) {
+                let name = self.context.intern_string(name);
+                if let Some(result) = self.resolve_symbol_in_scope_hierarchy(name)
+                    && self.null_inferred.contains(&result)
+                {
+                    self.null_returning_closures.insert(local, result);
+                }
+            } else if let Some(view) = self.constrained_return_view(typed) {
+                self.macro_source_types.insert(local, view);
+            }
+            return;
+        };
+        // `var s:T = f(..)` binds the local `f` returns to `Null<T>`.
+        let parser::ExprKind::Call { expr: callee, .. } = &init.kind else {
+            return;
+        };
+        let parser::ExprKind::Ident(name) = &callee.kind else {
+            return;
+        };
+        let name = self.context.intern_string(name);
+        let Some(result) = self
+            .resolve_symbol_in_scope_hierarchy(name)
+            .and_then(|closure| self.null_returning_closures.get(&closure).copied())
+        else {
+            return;
+        };
+        if !self.null_inferred.contains(&result) || self.macro_source_types.contains_key(&result) {
+            return;
+        }
+        let kind = self
+            .context
+            .type_table
+            .borrow()
+            .get(declared)
+            .map(|t| t.kind.clone());
+        let view = match kind {
+            Some(TypeKind::Optional { .. }) => declared,
+            None
+            | Some(TypeKind::Dynamic | TypeKind::Unknown | TypeKind::Error | TypeKind::Void) => {
+                return;
+            }
+            Some(_) => self
+                .context
+                .type_table
+                .borrow_mut()
+                .create_optional_type(declared),
+        };
+        self.macro_source_types.insert(result, view);
+    }
+
+    /// A call whose result is one of its callee's own type parameters that
+    /// the arguments leave unbound: that parameter's structure constraints,
+    /// with the parameters the arguments do bind substituted, merged into
+    /// one structure.
+    fn constrained_return_view(&mut self, call: &crate::tast::TypedExpression) -> Option<TypeId> {
+        use crate::tast::TypedExpressionKind as K;
+        use crate::tast::core::TypeKind;
+        if !self
+            .context
+            .type_table
+            .borrow()
+            .is_type_parameter(call.expr_type)
+        {
+            return None;
+        }
+        let (owner, method, arguments) = match &call.kind {
+            K::StaticMethodCall {
+                class_symbol,
+                method_symbol,
+                arguments,
+                ..
+            } => (*class_symbol, *method_symbol, arguments),
+            K::FunctionCall {
+                function,
+                arguments,
+                ..
+            } => match &function.kind {
+                K::StaticFieldAccess {
+                    class_symbol,
+                    field_symbol,
+                } => (*class_symbol, *field_symbol, arguments),
+                K::Variable {
+                    symbol_id: field_symbol,
+                }
+                | K::FieldAccess { field_symbol, .. } => (
+                    *self.context.class_context_stack.last()?,
+                    *field_symbol,
+                    arguments,
+                ),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let method = self.context.symbol_table.get_symbol(method)?;
+        if matches!(
+            method.kind,
+            crate::tast::SymbolKind::Variable | crate::tast::SymbolKind::Parameter
+        ) {
+            return None;
+        }
+        let name = method.name;
+        let sig = self.resolve_declared_method_sig(owner, name, true)?;
+        let bare = |t: &parser::Type| match t {
+            parser::Type::Path { path, params, .. }
+                if path.package.is_empty() && path.sub.is_none() && params.is_empty() =>
+            {
+                Some(path.name.clone())
+            }
+            _ => None,
+        };
+        let returned = bare(sig.return_type.as_ref()?)?;
+        let constraints = &sig
+            .type_params
+            .iter()
+            .find(|tp| tp.name == returned)?
+            .constraints;
+        if constraints.is_empty() {
+            return None;
+        }
+        // Each of the callee's parameters is what the argument declared as
+        // it is; the rest stay unknown rather than resolve to outer names.
+        let unknown = self.context.type_table.borrow().unknown_type();
+        let mut scope = std::collections::BTreeMap::new();
+        for tp in &sig.type_params {
+            let bound = sig
+                .params
+                .iter()
+                .zip(arguments.iter())
+                .find_map(|(hint, mut arg)| {
+                    if hint.as_ref().and_then(bare).as_deref() != Some(tp.name.as_str()) {
+                        return None;
+                    }
+                    while let K::Cast {
+                        expression,
+                        cast_kind: crate::tast::node::CastKind::Implicit,
+                        ..
+                    } = &arg.kind
+                    {
+                        arg = &**expression;
+                    }
+                    Some(arg.expr_type)
+                });
+            scope.insert(
+                self.context.intern_string(&tp.name),
+                bound.unwrap_or(unknown),
+            );
+        }
+        let errors = (self.collected_errors.len(), self.context.errors.len());
+        self.context.push_type_parameters(scope);
+        let lowered: Vec<_> = constraints.iter().map(|c| self.lower_type(c)).collect();
+        self.context.pop_type_parameters();
+        self.collected_errors.truncate(errors.0);
+        self.context.errors.truncate(errors.1);
+        let mut fields: Vec<crate::tast::core::AnonymousField> = Vec::new();
+        for constraint in lowered {
+            let constraint = constraint.ok()?;
+            let more = {
+                let table = self.context.type_table.borrow();
+                match table
+                    .get(Self::resolve_alias_chain(&table, constraint))
+                    .map(|t| &t.kind)
+                {
+                    Some(TypeKind::Anonymous { fields }) => fields.clone(),
+                    _ => return None,
+                }
+            };
+            for field in more {
+                match fields.iter_mut().find(|f| f.name == field.name) {
+                    Some(existing) => *existing = field,
+                    None => fields.push(field),
+                }
+            }
+        }
+        Some(
+            self.context
+                .type_table
+                .borrow_mut()
+                .create_type(TypeKind::Anonymous { fields }),
+        )
     }
 
     /// The types `{>A, >B, ..}` or `A & B` is built from, in source order: an
@@ -826,6 +1042,46 @@ impl DeferredMacroTyper<'_, '_> {
         table.create_abstract_type(symbol_id, underlying, vec![unknown; params])
     }
 
+    /// A call result's type with each type parameter not in scope at the
+    /// call replaced by a monomorph, as Haxe instantiates an unbound one.
+    fn unbind_foreign_parameters(&mut self, id: TypeId, depth: usize) -> TypeId {
+        use crate::tast::core::TypeKind;
+        if depth > 16 {
+            return id;
+        }
+        let param = match self
+            .lowering
+            .context
+            .type_table
+            .borrow()
+            .get(id)
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::TypeParameter { symbol_id, .. }) => Some(*symbol_id),
+            _ => None,
+        };
+        if let Some(symbol) = param {
+            let in_scope = self
+                .lowering
+                .context
+                .symbol_table
+                .get_symbol(symbol)
+                .and_then(|s| self.lowering.context.resolve_type_parameter(s.name))
+                .is_some();
+            return if in_scope {
+                id
+            } else {
+                self.lowering.context.type_table.borrow().unknown_type()
+            };
+        }
+        let children = self.type_children(id);
+        let unbound: Vec<TypeId> = children
+            .iter()
+            .map(|&child| self.unbind_foreign_parameters(child, depth + 1))
+            .collect();
+        self.rebuild_type(id, &unbound)
+    }
+
     fn definition_parameters(&self, symbol: crate::tast::SymbolId) -> Vec<TypeId> {
         if let Some(params) = self
             .lowering
@@ -897,6 +1153,14 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 }
                 let ty = self.lowering.safe_chain_type(&typed);
                 let ty = self.resolve_placeholder(ty);
+                let ty = match typed.kind {
+                    crate::tast::TypedExpressionKind::FunctionCall { .. }
+                    | crate::tast::TypedExpressionKind::MethodCall { .. }
+                    | crate::tast::TypedExpressionKind::StaticMethodCall { .. } => {
+                        self.unbind_foreign_parameters(ty, 0)
+                    }
+                    _ => ty,
+                };
                 // `a ?? b` where `b` never completes is `a` without its Null.
                 let mut inner = expr;
                 while let parser::ExprKind::Paren(e) = &inner.kind {
@@ -1290,6 +1554,23 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 vec![args_of(&params), V::Type(return_type)],
             ),
             TypeKind::Dynamic => ("TDynamic".to_string(), vec![V::Null]),
+            TypeKind::GenericInstance {
+                base_type,
+                type_args,
+                ..
+            } if type_args.len() == 1
+                && matches!(
+                    self.lowering
+                        .context
+                        .type_table
+                        .borrow()
+                        .get(base_type)
+                        .map(|t| &t.kind),
+                    Some(TypeKind::Dynamic)
+                ) =>
+            {
+                ("TDynamic".to_string(), vec![V::Type(type_args[0])])
+            }
             TypeKind::Anonymous { .. } => ("TAnonymous".to_string(), vec![V::Type(id)]),
             TypeKind::Placeholder { .. } | TypeKind::Unknown => {
                 ("TMono".to_string(), vec![V::Null])
@@ -1804,6 +2085,27 @@ fn import_from_source(source: &str, span: parser::Span) -> parser::Import {
     parser::Import { path, mode, span }
 }
 
+/// The local a function literal's body is nothing but a read of:
+/// `function(..) return x`, `(..) -> x`.
+fn closure_result_name(init: &parser::Expr) -> Option<&str> {
+    let mut body = match &init.kind {
+        parser::ExprKind::Function(f) => f.body.as_deref()?,
+        parser::ExprKind::Arrow { expr, .. } => &**expr,
+        _ => return None,
+    };
+    loop {
+        body = match &body.kind {
+            parser::ExprKind::Block(elements) => match elements.as_slice() {
+                [parser::BlockElement::Expr(e)] => e,
+                _ => return None,
+            },
+            parser::ExprKind::Return(Some(e)) | parser::ExprKind::Paren(e) => &**e,
+            parser::ExprKind::Ident(name) => return Some(name),
+            _ => return None,
+        };
+    }
+}
+
 /// Follow monomorph bindings to the representative.
 fn resolve_bound(bindings: &std::collections::BTreeMap<TypeId, TypeId>, mut id: TypeId) -> TypeId {
     let mut hops = 0;
@@ -1895,8 +2197,15 @@ fn unify(
         return false;
     };
 
-    // Dynamic unifies with anything, in either direction.
-    if matches!(ka, TypeKind::Dynamic) || matches!(kb, TypeKind::Dynamic) {
+    // Dynamic, `Dynamic<T>` included, unifies with anything, in either direction.
+    let dynamic = |kind: &TypeKind| match kind {
+        TypeKind::Dynamic => true,
+        TypeKind::GenericInstance { base_type, .. } => {
+            matches!(kind_of(*base_type), Some(TypeKind::Dynamic))
+        }
+        _ => false,
+    };
+    if dynamic(&ka) || dynamic(&kb) {
         return true;
     }
 
@@ -2134,6 +2443,27 @@ pub(super) fn render_type_constructor(
         TypeKind::Dynamic => "TDynamic(null)".to_string(),
         TypeKind::Unknown => "TMono(null)".to_string(),
         TypeKind::TypeParameter { symbol_id, .. } => form("TInst", name_of(symbol_id), &[]),
+        TypeKind::GenericInstance {
+            base_type,
+            type_args,
+            ..
+        } if type_args.len() == 1
+            && matches!(
+                type_table.borrow().get(base_type).map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            ) =>
+        {
+            format!(
+                "TDynamic({})",
+                render_type_constructor(
+                    type_args[0],
+                    type_table,
+                    symbol_table,
+                    interner,
+                    depth + 1
+                )
+            )
+        }
         TypeKind::GenericInstance {
             base_type,
             type_args,

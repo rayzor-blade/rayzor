@@ -325,6 +325,11 @@ impl<'a> AstLowering<'a> {
     /// `TClass(haxe.ds.List)` compare against that type's value. Enum
     /// constructors and locals keep their meaning.
     fn names_type(&mut self, name: &str) -> bool {
+        self.pattern_type_symbol(name).is_some()
+    }
+
+    /// The type a case name resolves to, if it names one.
+    fn pattern_type_symbol(&mut self, name: &str) -> Option<crate::tast::SymbolId> {
         let symbol = if let Some((package, last)) = name.rsplit_once('.') {
             let package = package
                 .split('.')
@@ -340,14 +345,116 @@ impl<'a> AstLowering<'a> {
                 .or_else(|| self.resolve_symbol_in_scope_hierarchy(last))
         } else {
             if self.names_enum_variant(name) {
-                return false;
+                return None;
             }
             let interned = self.context.intern_string(name);
             self.resolve_symbol_in_scope_hierarchy(interned)
         };
-        symbol
-            .and_then(|s| self.context.symbol_table.get_symbol(s))
-            .is_some_and(|s| s.kind.is_type() && s.kind != crate::tast::SymbolKind::TypeParameter)
+        symbol.filter(|&s| {
+            self.context.symbol_table.get_symbol(s).is_some_and(|s| {
+                s.kind.is_type() && s.kind != crate::tast::SymbolKind::TypeParameter
+            })
+        })
+    }
+
+    /// `switch (x)` over an untyped `var x = null` local whose cases name
+    /// types binds x to `Null<Class<?>>`, or `Null<Enum<?>>` when they name
+    /// enums; a probe rejects a mix. Recorded for macro typing only.
+    pub(crate) fn type_switch_subject_from_cases(
+        &mut self,
+        subject: &TypedExpression,
+        cases: &[parser::Case],
+    ) -> LoweringResult<()> {
+        fn names(pattern: &parser::Pattern, out: &mut Vec<String>) {
+            fn path(e: &Expr) -> Option<String> {
+                match &e.kind {
+                    ExprKind::Ident(name) => Some(name.clone()),
+                    ExprKind::Field { expr, field, .. } => Some(format!("{}.{field}", path(expr)?)),
+                    _ => None,
+                }
+            }
+            match pattern {
+                parser::Pattern::Var(name) => out.push(name.clone()),
+                parser::Pattern::Const(e) => out.extend(path(e)),
+                parser::Pattern::Or(items) => {
+                    for item in items {
+                        names(item, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let TypedExpressionKind::Variable { symbol_id } = subject.kind else {
+            return Ok(());
+        };
+        if !self.null_inferred.contains(&symbol_id) {
+            return Ok(());
+        }
+        let mut named = Vec::new();
+        for pattern in cases.iter().flat_map(|case| &case.patterns) {
+            names(pattern, &mut named);
+        }
+        let mut enums = Vec::new();
+        for name in named {
+            if let Some(symbol) = self.pattern_type_symbol(&name) {
+                enums.push(
+                    self.context
+                        .symbol_table
+                        .get_symbol(symbol)
+                        .is_some_and(|s| s.kind == crate::tast::SymbolKind::Enum),
+                );
+            }
+        }
+        let Some(&first) = enums.first() else {
+            return Ok(());
+        };
+        let wrapped = |this: &mut Self, is_enum: bool| {
+            let span = parser::Span::default();
+            let ty = Type::Path {
+                path: parser::TypePath {
+                    package: Vec::new(),
+                    name: if is_enum { "Enum" } else { "Class" }.to_string(),
+                    sub: None,
+                },
+                params: vec![Type::Wildcard { span }],
+                span,
+            };
+            let errors = (this.collected_errors.len(), this.context.errors.len());
+            let lowered = this.lower_type(&ty);
+            this.collected_errors.truncate(errors.0);
+            this.context.errors.truncate(errors.1);
+            lowered.ok()
+        };
+        let Some(bound) = wrapped(self, first) else {
+            return Ok(());
+        };
+        let bound = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_optional_type(bound);
+        if enums.iter().any(|&is_enum| is_enum != first) {
+            if self.macro_probe_depth > 0
+                && let Some(other) = wrapped(self, !first)
+            {
+                let render = |id| {
+                    super::super::macro_defer::render_type(
+                        id,
+                        self.context.type_table,
+                        self.context.symbol_table,
+                        self.context.string_interner,
+                        0,
+                    )
+                };
+                return Err(LoweringError::SemanticError {
+                    message: format!("{} should be {}", render(other), render(bound)),
+                    location: subject.source_location,
+                });
+            }
+            return Ok(());
+        }
+        self.macro_source_types.insert(symbol_id, bound);
+        Ok(())
     }
 
     /// Whether a type name appears where the ordinary matcher would capture.

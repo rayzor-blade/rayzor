@@ -100,6 +100,9 @@ impl AstLowering<'_> {
                         .unwrap_or("");
                     return Err(error(format!("Any has no field {field}")));
                 }
+                if let Some(message) = self.macro_probe_missing_field(object, *field_symbol) {
+                    return Err(error(message));
+                }
                 self.macro_probe_member_access(*field_symbol, expression)?;
             }
             TypedExpressionKind::StaticFieldAccess { field_symbol, .. } => {
@@ -156,6 +159,47 @@ impl AstLowering<'_> {
             _ => {}
         }
         Ok(())
+    }
+
+    /// A read of a field a structure does not declare. A local's macro view
+    /// stands in for its runtime type; an empty structure is left alone.
+    fn macro_probe_missing_field(
+        &self,
+        object: &TypedExpression,
+        field: SymbolId,
+    ) -> Option<String> {
+        let mut ty = match &object.kind {
+            TypedExpressionKind::Variable { symbol_id } => self
+                .macro_source_types
+                .get(symbol_id)
+                .copied()
+                .unwrap_or(object.expr_type),
+            _ => object.expr_type,
+        };
+        let name = self.context.symbol_table.get_symbol(field)?.name;
+        let table = self.context.type_table.borrow();
+        for _ in 0..8 {
+            ty = Self::resolve_alias_chain(&table, ty);
+            match table.get(ty).map(|t| &t.kind)? {
+                TypeKind::Optional { inner_type } => ty = *inner_type,
+                TypeKind::Anonymous { fields } => {
+                    if fields.is_empty() || fields.iter().any(|f| f.name == name) {
+                        return None;
+                    }
+                    let shown = super::macro_defer::render_type(
+                        ty,
+                        self.context.type_table,
+                        self.context.symbol_table,
+                        self.context.string_interner,
+                        0,
+                    );
+                    let field = self.context.string_interner.get(name)?;
+                    return Some(format!("{shown} has no field {field}"));
+                }
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// `({..} : {..})`: the literal must supply every required field of the
