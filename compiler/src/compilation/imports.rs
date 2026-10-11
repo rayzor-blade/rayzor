@@ -746,7 +746,8 @@ impl CompilationUnit {
                 false,
                 &self.preprocessor_config(),
             ) {
-                Ok(ast) => {
+                Ok(mut ast) => {
+                    crate::tast::ast_lowering::module_statics::desugar(&mut ast);
                     // Indexed here, before anything lowers: a base class needs
                     // to know which of its methods a later file overrides.
                     self.static_sig_index.borrow_mut().index_file(&ast);

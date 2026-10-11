@@ -308,6 +308,9 @@ impl<'a> AstLowering<'a> {
     }
 
     fn lower_expression_unnested(&mut self, expression: &Expr) -> LoweringResult<TypedExpression> {
+        if let Some(qualified) = self.qualify_module_static(expression) {
+            return self.lower_expression_unnested(&qualified);
+        }
         let kind = match &expression.kind {
             ExprKind::Int(value) => TypedExpressionKind::Literal {
                 value: LiteralValue::Int(*value),

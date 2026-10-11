@@ -10,9 +10,10 @@ impl CompilationUnit {
         source: &str,
     ) -> Result<parser::HaxeFile, String> {
         let config = self.preprocessor_config();
-        let file = parser::haxe_parser::parse_haxe_file_with_config(
+        let mut file = parser::haxe_parser::parse_haxe_file_with_config(
             filename, source, true, true, &config,
         )?;
+        crate::tast::ast_lowering::module_statics::desugar(&mut file);
         // Every canonical parse feeds the static-signature index so call
         // sites can type not-yet-lowered statics from their declarations.
         {
@@ -51,14 +52,16 @@ impl CompilationUnit {
         }
         let mut config = self.preprocessor_config();
         config.defines.insert("macro".to_string());
-        let parsed = parser::haxe_parser::parse_haxe_file_with_config(
+        let mut parsed = parser::haxe_parser::parse_haxe_file_with_config(
             &file.filename,
             source,
             true,
             true,
             &config,
-        );
-        parsed.ok()
+        )
+        .ok()?;
+        crate::tast::ast_lowering::module_statics::desugar(&mut parsed);
+        Some(parsed)
     }
 
     /// Load standard library files

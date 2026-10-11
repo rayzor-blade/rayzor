@@ -1117,7 +1117,10 @@ impl StaticSigIndex {
                 .ok()
             });
         match parsed {
-            Some(file) => self.index_file(&file),
+            Some(mut file) => {
+                crate::tast::ast_lowering::module_statics::desugar(&mut file);
+                self.index_file(&file);
+            }
             None => {
                 self.parse_misses.insert(name.to_string());
             }

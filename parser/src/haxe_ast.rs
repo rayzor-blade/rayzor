@@ -96,6 +96,14 @@ pub enum ModuleFieldKind {
         type_hint: Option<Type>,
         expr: Option<Expr>,
     },
+    /// Property: `var x(get, set):Int;`
+    Property {
+        name: String,
+        type_hint: Option<Type>,
+        getter: PropertyAccess,
+        setter: PropertyAccess,
+        expr: Option<Expr>,
+    },
     /// Function: `function foo():Void {}`
     Function(Function),
 }

@@ -16,6 +16,19 @@ use tracing::warn;
 
 impl<'a> AstLowering<'a> {
     pub fn lower_file(&mut self, file: &HaxeFile) -> LoweringResult<TypedFile> {
+        // A file parsed outside `CompilationUnit::parse_file`, which
+        // pre-registers its declarations here, still holds its module fields.
+        let with_statics = file
+            .module_fields
+            .iter()
+            .any(|f| !f.modifiers.contains(&Modifier::Macro))
+            .then(|| {
+                let mut file = file.clone();
+                super::module_statics::desugar(&mut file);
+                file
+            });
+        let file = with_statics.as_ref().unwrap_or(file);
+        self.module_statics = super::module_statics::fields_by_name(file);
         let desugared = super::dynamic_methods::desugar(file);
         self.unknown_return_slots = desugared
             .as_ref()
@@ -235,8 +248,9 @@ impl<'a> AstLowering<'a> {
         module_field: &ModuleField,
     ) -> LoweringResult<TypedModuleField> {
         let field_name = match &module_field.kind {
-            parser::ModuleFieldKind::Var { name, .. } => name.clone(),
-            parser::ModuleFieldKind::Final { name, .. } => name.clone(),
+            parser::ModuleFieldKind::Var { name, .. }
+            | parser::ModuleFieldKind::Final { name, .. }
+            | parser::ModuleFieldKind::Property { name, .. } => name.clone(),
             parser::ModuleFieldKind::Function(func) => func.name.clone(),
         };
 
@@ -287,6 +301,12 @@ impl<'a> AstLowering<'a> {
                 name: _,
                 type_hint,
                 expr,
+            }
+            | parser::ModuleFieldKind::Property {
+                name: _,
+                type_hint,
+                expr,
+                ..
             } => {
                 let declared = match type_hint {
                     Some(type_hint) => Some(self.lower_type(type_hint)?),
@@ -792,7 +812,9 @@ mod fields;
 mod registration;
 
 /// The bare names of the types a module declares, through `#if` blocks.
-fn module_type_names(decls: &[parser::TypeDeclaration]) -> std::collections::BTreeSet<String> {
+pub(super) fn module_type_names(
+    decls: &[parser::TypeDeclaration],
+) -> std::collections::BTreeSet<String> {
     use parser::TypeDeclaration as D;
     let mut names = std::collections::BTreeSet::new();
     for decl in decls {

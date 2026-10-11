@@ -809,24 +809,40 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let has_final_modifier = modifiers.iter().any(|m| matches!(m, Modifier::Final));
 
         let kind = if self.stream.at(TokenKind::KwVar) {
-            self.stream.advance();
-            let name = self.stream.current_text().to_string();
-            self.stream.advance();
-            let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
-                Some(self.parse_type()?)
-            } else {
-                None
-            };
-            let expr = if self.stream.eat(TokenKind::Assign).is_some() {
-                Some(self.parse_expression()?)
-            } else {
-                None
-            };
-            self.stream.eat(TokenKind::Semicolon);
-            ModuleFieldKind::Var {
-                name,
-                type_hint,
-                expr,
+            // As a class field: `var x(get, set):T` is a property.
+            match self.parse_var_or_property_field()? {
+                ClassFieldKind::Property {
+                    name,
+                    type_hint,
+                    getter,
+                    setter,
+                    expr,
+                } => ModuleFieldKind::Property {
+                    name,
+                    type_hint,
+                    getter,
+                    setter,
+                    expr,
+                },
+                ClassFieldKind::Var {
+                    name,
+                    type_hint,
+                    expr,
+                } => ModuleFieldKind::Var {
+                    name,
+                    type_hint,
+                    expr,
+                },
+                ClassFieldKind::Final {
+                    name,
+                    type_hint,
+                    expr,
+                } => ModuleFieldKind::Final {
+                    name,
+                    type_hint,
+                    expr,
+                },
+                ClassFieldKind::Function(function) => ModuleFieldKind::Function(function),
             }
         } else if self.stream.at(TokenKind::KwFinal)
             || (has_final_modifier && self.stream.at(TokenKind::Ident))

@@ -253,6 +253,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 | TokenKind::KwInline
                 | TokenKind::KwExtern
                 | TokenKind::KwOverride
+                | TokenKind::KwDynamic
                 | TokenKind::KwMacro => {
                     i += 1;
                 }

@@ -1345,6 +1345,49 @@ impl MacroContext {
                 let type_def = value_to_defined_type(args.first(), location)?;
                 self.define_type(type_def, location)
             }
+            // `Context.defineModule(path, types)`: the module's `TDField`
+            // entries become statics of a class named after the module, or
+            // `<Module>_Fields_` beside a type of that name.
+            "defineModule" => {
+                let path = arg_as_string(args, 0, "defineModule", location)?;
+                let mut pack: Vec<String> = path.split('.').map(str::to_string).collect();
+                let module = pack.pop().unwrap_or_default();
+                let types: &[MacroValue] = match args.get(1) {
+                    Some(MacroValue::Array(types)) => types.as_slice(),
+                    _ => &[],
+                };
+                let mut statics = Vec::new();
+                let mut module_type = false;
+                for value in types {
+                    let mut defined = value_to_defined_type(Some(value), location)?;
+                    if is_module_field(value) {
+                        statics.append(&mut defined.field_values);
+                        continue;
+                    }
+                    if defined.pack.is_empty() {
+                        defined.pack = pack.clone();
+                    }
+                    module_type |= defined.name == module;
+                    self.define_type(defined, location)?;
+                }
+                if !statics.is_empty() {
+                    let module = DefinedType {
+                        pack,
+                        name: if module_type {
+                            format!("{module}_Fields_")
+                        } else {
+                            module
+                        },
+                        kind: DefinedTypeKind::Class,
+                        fields: statics.iter().filter_map(value_to_build_field).collect(),
+                        field_values: statics,
+                        type_params: Vec::new(),
+                        pos: location,
+                    };
+                    self.define_type(module, location)?;
+                }
+                Ok(MacroValue::Null)
+            }
             "getPosInfos" => {
                 if let Some(MacroValue::Position(pos)) = args.first() {
                     Ok(self.get_pos_infos(pos))
@@ -1703,6 +1746,12 @@ pub(crate) fn named_position_string(pos: &SourceLocation) -> Option<String> {
     })
 }
 
+/// Whether a type definition value is a module-level field (`TDField`).
+fn is_module_field(value: &MacroValue) -> bool {
+    matches!(value, MacroValue::Object(obj)
+        if matches!(obj.get("kind"), Some(MacroValue::Enum(_, variant, _)) if &**variant == "TDField"))
+}
+
 /// Convert a MacroValue (Object) to a DefinedType
 fn value_to_defined_type(
     value: Option<&MacroValue>,
@@ -1760,9 +1809,32 @@ fn value_to_defined_type(
     };
 
     // Extract fields (simplified — full implementation in Phase 6)
-    let field_values: Vec<MacroValue> = match obj.get("fields") {
-        Some(MacroValue::Array(arr)) => arr.iter().cloned().collect(),
-        _ => Vec::new(),
+    let field_values: Vec<MacroValue> = match obj.get("kind") {
+        // `TDField(kind, ?access)`: a module-level field, kept as a public
+        // static of the same name on the type standing for its module.
+        Some(MacroValue::Enum(_, variant, payload)) if &**variant == "TDField" => {
+            let mut access = vec![
+                MacroValue::from_str("Public"),
+                MacroValue::from_str("Static"),
+            ];
+            if let Some(MacroValue::Array(extra)) = payload.get(1) {
+                access.extend(extra.iter().cloned());
+            }
+            let mut field = BTreeMap::new();
+            field.insert("name".to_string(), MacroValue::from_str(&name));
+            field.insert(
+                "kind".to_string(),
+                payload.first().cloned().unwrap_or(MacroValue::Null),
+            );
+            field.insert("access".to_string(), MacroValue::Array(Arc::new(access)));
+            field.insert("meta".to_string(), MacroValue::Array(Arc::new(Vec::new())));
+            field.insert("doc".to_string(), MacroValue::Null);
+            vec![MacroValue::Object(Arc::new(field))]
+        }
+        _ => match obj.get("fields") {
+            Some(MacroValue::Array(arr)) => arr.iter().cloned().collect(),
+            _ => Vec::new(),
+        },
     };
     let fields = field_values
         .iter()
