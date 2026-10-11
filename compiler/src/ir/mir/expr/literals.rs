@@ -1096,10 +1096,12 @@ impl<'a> HirToMirContext<'a> {
                 parts.push(match source {
                     // A `Null<Int>` target holds the box the store below makes.
                     Some(orig_idx) => {
-                        let ty = field_target_types
-                            .get(name)
-                            .copied()
-                            .filter(|t| self.is_null_int_type(*t))
+                        let target = field_target_types.get(name).copied();
+                        let ty = target
+                            .filter(|t| {
+                                self.is_null_int_type(*t)
+                                    || matches!(fields[*orig_idx].1.kind, HirExprKind::Null)
+                            })
                             .unwrap_or(fields[*orig_idx].1.ty);
                         self.anon_field_descriptor(name, ty)
                     }

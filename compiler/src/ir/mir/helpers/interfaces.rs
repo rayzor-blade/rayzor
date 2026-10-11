@@ -150,6 +150,25 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// `wrap_in_interface_fat_ptr` for a cast: a null object casts to a null
+    /// interface, not to a fat pointer around null.
+    pub(crate) fn wrap_in_interface_fat_ptr_or_null(
+        &mut self,
+        obj_reg: IrId,
+        class_symbol: SymbolId,
+        interface_symbol: SymbolId,
+    ) -> Option<IrId> {
+        let wrapped = self.wrap_in_interface_fat_ptr(obj_reg, class_symbol, interface_symbol)?;
+        let obj_bits = match self.builder.get_register_type(obj_reg) {
+            Some(IrType::Ptr(_)) => self.builder.build_bitcast(obj_reg, IrType::I64)?,
+            _ => obj_reg,
+        };
+        let zero = self.builder.build_const(IrValue::I64(0))?;
+        let is_null = self.builder.build_cmp(CompareOp::Eq, obj_bits, zero)?;
+        let null = self.builder.build_const(IrValue::Null)?;
+        self.builder.build_select(is_null, null, wrapped)
+    }
+
     pub(crate) fn wrap_in_interface_fat_ptr(
         &mut self,
         obj_reg: IrId,

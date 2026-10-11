@@ -334,8 +334,10 @@ impl<'a> HirToMirContext<'a> {
             // Only a generic callee is given type arguments; an imported one
             // may not show its type parameters until the modules merge.
             if !type_args.is_empty() {
-                let ir_type_args: Vec<IrType> =
-                    type_args.iter().map(|t| self.convert_type(*t)).collect();
+                let ir_type_args: Vec<IrType> = type_args
+                    .iter()
+                    .map(|t| self.convert_type_arg(*t))
+                    .collect();
                 let result = self.builder.build_call_direct_with_type_args(
                     func_id,
                     arg_regs,

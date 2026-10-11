@@ -1261,6 +1261,15 @@ impl<'a> AstLowering<'a> {
                         .collect(),
                     None => arg_exprs,
                 };
+                if params.is_empty()
+                    && let Some(built) = self.multitype_construction(
+                        base_class_type_id,
+                        &arg_exprs,
+                        self.context.span_to_location(&expression.span),
+                    )
+                {
+                    return Ok(built);
+                }
 
                 // If the call site omitted explicit `<...>` params (e.g.
                 // `var m:Map<String,Int> = new Map();`), borrow them from

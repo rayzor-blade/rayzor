@@ -509,7 +509,7 @@ impl<'a> HirToMirContext<'a> {
                         || self.interface_method_names.contains_key(&tgt_sym)
                 }) {
                     // In-context (or forwardable) class symbol available.
-                    match self.wrap_in_interface_fat_ptr(value_reg, src_sym, tgt_sym) {
+                    match self.wrap_in_interface_fat_ptr_or_null(value_reg, src_sym, tgt_sym) {
                         Some(fat_ptr) => {
                             self.interface_wrapped_args.insert(fat_ptr);
                             Some(fat_ptr)
@@ -610,7 +610,7 @@ impl<'a> HirToMirContext<'a> {
                     || (!class_known_here && self.interface_method_names.contains_key(&tgt_sym));
                 if known_implements {
                     let value_reg = self.lower_expression(expr)?;
-                    match self.wrap_in_interface_fat_ptr(value_reg, src_sym, tgt_sym) {
+                    match self.wrap_in_interface_fat_ptr_or_null(value_reg, src_sym, tgt_sym) {
                         Some(fat_ptr) => {
                             self.interface_wrapped_args.insert(fat_ptr);
                             Some(fat_ptr)

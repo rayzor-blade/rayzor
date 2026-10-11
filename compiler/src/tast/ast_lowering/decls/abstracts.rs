@@ -454,6 +454,15 @@ impl<'a> AstLowering<'a> {
                             crate::tast::symbols::SymbolFlags::TO_CONVERSION,
                         );
                     }
+                    if is_static
+                        && field.meta.iter().any(|m| m.name == ":to" || m.name == "to")
+                        && abstract_decl.meta.iter().any(|m| m.name == ":multiType")
+                    {
+                        self.context.symbol_table.add_symbol_flags(
+                            sym,
+                            crate::tast::symbols::SymbolFlags::MULTI_TYPE_TO,
+                        );
+                    }
                     // A static `@:from` method IS the implicit conversion: a
                     // call site whose argument matches its parameter must wrap
                     // the argument in a call to it. Record symbol + parameter

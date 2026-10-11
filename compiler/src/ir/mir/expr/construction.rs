@@ -876,7 +876,8 @@ impl<'a> HirToMirContext<'a> {
                         };
                     }
                 }
-                let converted: Vec<IrType> = ta_ids.iter().map(|&t| self.convert_type(t)).collect();
+                let converted: Vec<IrType> =
+                    ta_ids.iter().map(|&t| self.convert_type_arg(t)).collect();
                 // Only request specialization when every arg is concrete; an
                 // unresolved TypeVar means we're still inside a generic
                 // context and the enclosing instantiation handles it.

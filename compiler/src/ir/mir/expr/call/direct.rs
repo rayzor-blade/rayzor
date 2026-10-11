@@ -331,7 +331,7 @@ impl<'a> HirToMirContext<'a> {
                                         Some(
                                             type_args
                                                 .iter()
-                                                .map(|&ta| self.convert_type(ta))
+                                                .map(|&ta| self.convert_type_arg(ta))
                                                 .collect::<Vec<_>>(),
                                         )
                                     }
@@ -460,7 +460,7 @@ impl<'a> HirToMirContext<'a> {
                         );
                         let converted_hir_type_args = type_args
                             .iter()
-                            .map(|ty| self.convert_type(*ty))
+                            .map(|ty| self.convert_type_arg(*ty))
                             .collect::<Vec<_>>();
                         let result = if converted_hir_type_args.is_empty() {
                             self.builder

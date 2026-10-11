@@ -594,11 +594,15 @@ impl<'a> AstLowering<'a> {
         // fallback (Strategy 4) fires for typedef'd receivers — e.g.
         // `this.bytes.sub(...)` where `bytes:haxe.io.Bytes` resolves to a
         // BLADE phantom Class with no methods and the real `rayzor.Bytes`
-        // class holds the method elsewhere.
-        if let Some(class_symbol) = self.resolve_type_to_class_symbol(receiver.expr_type) {
+        // class holds the method elsewhere. An inherited method is declared by
+        // an ancestor, whatever the receiver expression is.
+        let mut current = self.resolve_type_to_class_symbol(receiver.expr_type);
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(class_symbol) = current.filter(|class| seen.insert(*class)) {
             if let Some(found) = self.resolve_class_method_symbol(class_symbol, method_name) {
                 return found;
             }
+            current = self.parent_class_symbol(class_symbol);
         }
 
         // Last resort: scan ALL class_methods for a match by name.
@@ -1428,6 +1432,69 @@ impl<'a> AstLowering<'a> {
             .collect()
     }
 
+    /// `new A(args)` on a `@:multiType` abstract: its static `@:to` taking the
+    /// underlying value and then the constructor's arguments builds the value.
+    /// `Map` chooses by key type before this and is never matched here.
+    pub(crate) fn multitype_construction(
+        &self,
+        abstract_type: TypeId,
+        arguments: &[TypedExpression],
+        location: crate::tast::SourceLocation,
+    ) -> Option<TypedExpression> {
+        use crate::tast::core::TypeKind;
+        let abstract_symbol = {
+            let table = self.context.type_table.borrow();
+            match table
+                .get(Self::resolve_alias_chain(&table, abstract_type))
+                .map(|t| &t.kind)
+            {
+                Some(TypeKind::Abstract { symbol_id, .. }) => *symbol_id,
+                _ => return None,
+            }
+        };
+        let methods = self.imported_conversion_methods(
+            abstract_symbol,
+            crate::tast::symbols::SymbolFlags::MULTI_TYPE_TO,
+        );
+        let (method_symbol, underlying) = {
+            let table = self.context.type_table.borrow();
+            methods.into_iter().find_map(|(method, _, ty)| {
+                match table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Function { params, .. })
+                        if params.len() == arguments.len() + 1 =>
+                    {
+                        Some((method, params[0]))
+                    }
+                    _ => None,
+                }
+            })?
+        };
+        let null = TypedExpression {
+            kind: crate::tast::node::TypedExpressionKind::Null,
+            expr_type: underlying,
+            usage: crate::tast::node::VariableUsage::Copy,
+            lifetime_id: crate::tast::LifetimeId::first(),
+            source_location: location,
+            metadata: crate::tast::node::ExpressionMetadata::default(),
+        };
+        let mut call_arguments = Vec::with_capacity(arguments.len() + 1);
+        call_arguments.push(null);
+        call_arguments.extend(arguments.iter().cloned());
+        Some(TypedExpression {
+            expr_type: abstract_type,
+            kind: crate::tast::node::TypedExpressionKind::StaticMethodCall {
+                class_symbol: abstract_symbol,
+                method_symbol,
+                arguments: call_arguments,
+                type_arguments: Vec::new(),
+            },
+            usage: crate::tast::node::VariableUsage::Copy,
+            lifetime_id: crate::tast::LifetimeId::first(),
+            source_location: location,
+            metadata: crate::tast::node::ExpressionMetadata::default(),
+        })
+    }
+
     /// An imported abstract's `@:from` methods: (method, parameter type).
     fn imported_from_methods(&self, abstract_symbol: SymbolId) -> Vec<(SymbolId, TypeId)> {
         use crate::tast::core::TypeKind;
@@ -1553,6 +1620,31 @@ impl<'a> AstLowering<'a> {
                             return true;
                         }
                         (Some(TypeKind::Function { .. }), Some(TypeKind::Function { .. })) => {}
+                        // `fromArray<K>(a:Array<K>)`: K binds from the argument,
+                        // and the elements must then agree exactly.
+                        (Some(TypeKind::Array { .. }), Some(TypeKind::Array { .. })) => {
+                            let mut bindings = Vec::new();
+                            self.unify_type_args(*param_ty, arg.expr_type, 0, &mut bindings);
+                            let source = self.substitute_alias_args(*param_ty, &bindings);
+                            let table = self.context.type_table.borrow();
+                            let element = |ty| match table
+                                .get(Self::resolve_alias_chain(&table, ty))
+                                .map(|t| &t.kind)
+                            {
+                                Some(TypeKind::Array { element_type }) => {
+                                    Some(Self::resolve_alias_chain(&table, *element_type))
+                                }
+                                _ => None,
+                            };
+                            return match (element(source), element(arg.expr_type)) {
+                                (Some(s), Some(a)) => {
+                                    s == a
+                                        || table.get(s).map(|t| &t.kind)
+                                            == table.get(a).map(|t| &t.kind)
+                                }
+                                _ => false,
+                            };
+                        }
                         (
                             Some(TypeKind::Anonymous { fields: source }),
                             Some(TypeKind::Anonymous { fields: actual }),
@@ -5449,6 +5541,54 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// A structure's method `name` matched against `Array<element>`'s method of
+    /// that name: the positions where Array's signature writes `T`, either as
+    /// an argument or as a callback's argument, bind against the element.
+    fn unify_array_method_elements(
+        &self,
+        name: InternedString,
+        method: TypeId,
+        element: TypeId,
+        depth: u32,
+        out: &mut Vec<(SymbolId, TypeId)>,
+        bind_parameters: bool,
+    ) {
+        use crate::tast::core::TypeKind;
+        // (argument index, callback arity); arity 0 means the argument is T.
+        let (index, callback_arity) = match self.context.string_interner.get(name) {
+            Some("map" | "filter") => (0, 1),
+            Some("sort") => (0, 2),
+            Some("push" | "unshift" | "remove" | "contains" | "indexOf" | "lastIndexOf") => (0, 0),
+            Some("insert") => (1, 0),
+            _ => return,
+        };
+        let formal = {
+            let tt = self.context.type_table.borrow();
+            let Some(TypeKind::Function { params, .. }) = tt.get(method).map(|t| &t.kind) else {
+                return;
+            };
+            let Some(&formal) = params.get(index) else {
+                return;
+            };
+            if callback_arity == 0 {
+                vec![formal]
+            } else {
+                match tt
+                    .get(Self::resolve_alias_chain(&tt, formal))
+                    .map(|t| &t.kind)
+                {
+                    Some(TypeKind::Function { params, .. }) if params.len() == callback_arity => {
+                        params.clone()
+                    }
+                    _ => return,
+                }
+            }
+        };
+        for formal in formal {
+            self.unify_type_args_inner(formal, element, depth + 1, out, bind_parameters);
+        }
+    }
+
     /// Walk a declared type and the actual beside it, recording what each
     /// type variable met. Structural, so `Array<T>` against `Array<Int>`
     /// reaches T, and `Iterable<T>` against `{ iterator: f }` reaches T
@@ -5567,8 +5707,19 @@ impl<'a> AstLowering<'a> {
                     }
                 }
             }
-            // A structure against an array: `iterator()` yields its elements.
+            // A structure against an array: `iterator()` yields its elements,
+            // and Array's own methods take them where `Array<T>` writes T.
             (TypeKind::Anonymous { fields: df }, TypeKind::Array { element_type }) => {
+                for f in df {
+                    self.unify_array_method_elements(
+                        f.name,
+                        f.type_id,
+                        *element_type,
+                        depth + 1,
+                        out,
+                        bind_parameters,
+                    );
+                }
                 if let Some(f) = df
                     .iter()
                     .find(|f| self.context.string_interner.get(f.name) == Some("iterator"))

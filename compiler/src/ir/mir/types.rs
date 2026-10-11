@@ -217,6 +217,20 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
+    /// The IR type a type argument binds. A payload enum binds as its cell
+    /// pointer so a generic body's by-tag helpers can name the value.
+    pub(crate) fn convert_type_arg(&self, type_id: TypeId) -> IrType {
+        let resolved = self.resolve_through_aliases(type_id);
+        if let Some(crate::tast::TypeKind::Enum { symbol_id, .. }) =
+            self.type_table.get(resolved).map(|t| &t.kind)
+        {
+            if self.enum_is_boxed(*symbol_id) {
+                return IrType::enum_ptr();
+            }
+        }
+        self.convert_type(type_id)
+    }
+
     pub(crate) fn convert_type(&self, type_id: TypeId) -> IrType {
         use crate::tast::TypeKind;
 

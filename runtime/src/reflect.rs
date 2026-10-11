@@ -127,6 +127,12 @@ unsafe fn unwrap_anon_dynamic(ptr: *mut u8) -> *mut u8 {
             if !dv.value_ptr.is_null() {
                 ptr = dv.value_ptr;
             }
+        } else if crate::type_system::is_reference_box(ptr)
+            && let Some(dv) = crate::type_system::dynamic_box_at(ptr)
+            && anon_object::is_anon_handle(dv.value_ptr)
+        {
+            // A box typed by an erased parameter still holds a handle.
+            ptr = dv.value_ptr;
         }
         crate::type_system::class_box_instance(ptr).unwrap_or(ptr)
     }
@@ -864,6 +870,17 @@ pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
             let va = *(dv_a.value_ptr as *const bool) as i64;
             let vb = *(dv_b.value_ptr as *const bool) as i64;
             return va - vb;
+        }
+
+        // Two references of one kind are equal only when they are the same
+        // object, else ordered by address.
+        if dv_a.type_id == dv_b.type_id
+            && !matches!(
+                dv_a.type_id,
+                TYPE_INT | TYPE_FLOAT | TYPE_BOOL | TYPE_STRING
+            )
+        {
+            return (dv_a.value_ptr as usize).cmp(&(dv_b.value_ptr as usize)) as i64;
         }
 
         // Mismatched or unhandled types

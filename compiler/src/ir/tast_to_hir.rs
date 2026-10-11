@@ -3123,17 +3123,22 @@ impl<'a> TastToHirContext<'a> {
                     .map(|f| (f.name.clone(), self.lower_expression(&f.value)))
                     .collect(),
             },
-            TypedExpressionKind::MapLiteral { entries } => HirExprKind::Map {
-                entries: entries
-                    .iter()
-                    .map(|entry| {
-                        (
-                            self.lower_expression(&entry.key),
-                            self.lower_expression(&entry.value),
-                        )
-                    })
-                    .collect(),
-            },
+            TypedExpressionKind::MapLiteral { entries } => {
+                if let Some(built) = self.class_map_literal(expr, entries) {
+                    return built;
+                }
+                HirExprKind::Map {
+                    entries: entries
+                        .iter()
+                        .map(|entry| {
+                            (
+                                self.lower_expression(&entry.key),
+                                self.lower_expression(&entry.value),
+                            )
+                        })
+                        .collect(),
+                }
+            }
             TypedExpressionKind::Block {
                 statements,
                 scope_id,
@@ -6623,6 +6628,80 @@ impl<'a> TastToHirContext<'a> {
         Some(self.lower_expression(&call))
     }
 
+    /// `[k => v, ...]` typed `EnumValueMap`: the class, built as `new Map<K, V>()`
+    /// builds it and filled through its `set`, so every map of that type is one.
+    fn class_map_literal(
+        &mut self,
+        expr: &TypedExpression,
+        entries: &[TypedMapEntry],
+    ) -> Option<HirExpr> {
+        let set = self.class_map_access_method(expr.expr_type, "set")?;
+        let (class_symbol, type_arguments) = match self
+            .type_table
+            .borrow()
+            .get(expr.expr_type)
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Class {
+                symbol_id,
+                type_args,
+            }) => (*symbol_id, type_args.clone()),
+            _ => return None,
+        };
+        let class_name = self
+            .symbol_table
+            .get_symbol(class_symbol)
+            .map(|s| s.qualified_name.unwrap_or(s.name));
+        let construction = TypedExpression {
+            kind: TypedExpressionKind::New {
+                class_type: expr.expr_type,
+                type_arguments,
+                arguments: Vec::new(),
+                class_name,
+            },
+            ..expr.clone()
+        };
+        let location = expr.source_location;
+        let mut statements = Vec::with_capacity(entries.len() + 1);
+        let constructed = self.lower_expression(&construction);
+        let map = self.bind_hir_operand(constructed, &mut statements);
+        let void = self.get_void_type();
+        for entry in entries {
+            let args = vec![
+                map.clone(),
+                self.lower_expression(&entry.key),
+                self.lower_expression(&entry.value),
+            ];
+            let callee = HirExpr::new(
+                HirExprKind::Variable {
+                    symbol: set,
+                    capture_mode: None,
+                },
+                void,
+                self.current_lifetime,
+                location,
+            );
+            statements.push(HirStatement::Expr(HirExpr::new(
+                HirExprKind::Call {
+                    target: CallTarget::Method { method: set },
+                    callee: Box::new(callee),
+                    type_args: Vec::new(),
+                    args,
+                    is_method: true,
+                },
+                void,
+                self.current_lifetime,
+                location,
+            )));
+        }
+        Some(HirExpr::new(
+            HirExprKind::Block(HirBlock::with_expr(statements, map, self.current_scope)),
+            expr.expr_type,
+            self.current_lifetime,
+            location,
+        ))
+    }
+
     /// Find a method with @:arrayAccess metadata for array access operations
     /// Returns (method_symbol, abstract_symbol) if found
     /// method_name should be "get" for read access or "set" for write access
@@ -7884,9 +7963,22 @@ impl<'a> TastToHirContext<'a> {
 
         let mut param_map: BTreeMap<SymbolId, HirExpr> = BTreeMap::new();
 
-        // Map parameters to arguments
-        if method.parameters.len() == arguments.len() {
-            for (param, lowered_arg) in method.parameters.iter().zip(lowered_arguments) {
+        // Map parameters to arguments. Trailing optional parameters the call
+        // leaves out take their default, or null.
+        let omits_optional = method.parameters.len() > arguments.len()
+            && method.parameters[arguments.len()..]
+                .iter()
+                .all(|p| p.is_optional || p.default_value.is_some());
+        if method.parameters.len() == arguments.len() || omits_optional {
+            let mut lowered_arguments = lowered_arguments.into_iter();
+            for param in &method.parameters {
+                let lowered_arg = match lowered_arguments.next() {
+                    Some(arg) => arg,
+                    None => match &param.default_value {
+                        Some(default) => self.lower_expression(default),
+                        None => self.make_null_literal(),
+                    },
+                };
                 let arg = self.coerce_parameter_argument(
                     lowered_arg,
                     param.param_type,
@@ -7895,11 +7987,7 @@ impl<'a> TastToHirContext<'a> {
                 );
                 param_map.insert(param.symbol_id, arg);
             }
-        } else {
-            // println!("DEBUG: Parameter count mismatch: method has {} params, call has {} args",
-            //     method.parameters.len(), arguments.len());
         }
-        // println!("DEBUG: param_map has {} entries", param_map.len());
 
         // Lower the receiver once
         let lowered_receiver = self.lower_expression(receiver);

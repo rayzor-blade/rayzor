@@ -365,6 +365,9 @@ impl SymbolFlags {
     pub const FROM_CONVERSION: Self = Self(1 << 28);
     /// An instance `@:to` method of an abstract, read the same way.
     pub const TO_CONVERSION: Self = Self(1 << 29);
+    /// A static `@:to` method of a `@:multiType` abstract: what `new` on the
+    /// abstract calls, with the underlying value first.
+    pub const MULTI_TYPE_TO: Self = Self(1 << 30);
 
     pub const fn is_wasm_export(self) -> bool {
         self.contains(Self::WASM_EXPORT)

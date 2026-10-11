@@ -175,7 +175,7 @@ impl<'a> HirToMirContext<'a> {
 
         let converted_hir_type_args: Vec<IrType> = hir_type_args
             .iter()
-            .map(|&ty_id| self.convert_type(ty_id))
+            .map(|&ty_id| self.convert_type_arg(ty_id))
             .collect();
 
         debug!(
@@ -864,7 +864,7 @@ impl<'a> HirToMirContext<'a> {
                         if !class_type_args.is_empty() {
                             class_type_args
                                 .iter()
-                                .map(|&ty_id| self.convert_type(ty_id))
+                                .map(|&ty_id| self.convert_type_arg(ty_id))
                                 .collect::<Vec<_>>()
                         } else {
                             // Infer method's own type params from argument types
@@ -879,7 +879,8 @@ impl<'a> HirToMirContext<'a> {
                                         {
                                             if let IrType::TypeVar(ref name) = sig_param.ty {
                                                 if name == &type_param.name && i < args.len() {
-                                                    let arg_type = self.convert_type(args[i].ty);
+                                                    let arg_type =
+                                                        self.convert_type_arg(args[i].ty);
                                                     inferred.push(arg_type);
                                                     found = true;
                                                     break;
@@ -891,7 +892,7 @@ impl<'a> HirToMirContext<'a> {
                                             && args.len() > 1
                                         {
                                             // Single type param, infer from first non-this arg
-                                            let arg_type = self.convert_type(args[1].ty);
+                                            let arg_type = self.convert_type_arg(args[1].ty);
                                             inferred.push(arg_type);
                                         }
                                     }
@@ -1226,7 +1227,8 @@ impl<'a> HirToMirContext<'a> {
                                         if let IrType::TypeVar(ref name) = sig_param.ty {
                                             if name == &type_param.name && i < call_args.len() {
                                                 // Use the concrete type of the corresponding argument
-                                                let arg_type = self.convert_type(call_args[i].ty);
+                                                let arg_type =
+                                                    self.convert_type_arg(call_args[i].ty);
                                                 debug!(
                                                     "[TYPE INFERENCE] Inferred {}={:?} from arg {}",
                                                     type_param.name, arg_type, i
@@ -1243,7 +1245,7 @@ impl<'a> HirToMirContext<'a> {
                                         if func.signature.type_params.len() == 1
                                             && !call_args.is_empty()
                                         {
-                                            let arg_type = self.convert_type(call_args[0].ty);
+                                            let arg_type = self.convert_type_arg(call_args[0].ty);
                                             debug!(
                                                 "[TYPE INFERENCE] Fallback: Inferred {}={:?} from first arg",
                                                 type_param.name, arg_type

@@ -331,9 +331,20 @@ pub extern "C" fn rayzor_anon_get_field_by_index(ptr: *mut u8, index: u32) -> u6
         let arc_ref = borrow_arc(ptr);
         match &arc_ref.data {
             AnonData::Inline(fields) => fields.get(index as usize).copied().unwrap_or(0),
-            AnonData::Map(_) => 0,
+            AnonData::Map(map) => map_nth_value(map, index as usize).unwrap_or(0),
         }
     }
+}
+
+/// The value of the `index`th field in name order, the order a typed reader
+/// numbers a structure's fields in.
+fn map_nth_value(map: &HashMap<String, (u32, u64, u64)>, index: usize) -> Option<u64> {
+    let mut names: Vec<&String> = map.keys().collect();
+    names.sort();
+    names
+        .get(index)
+        .and_then(|name| map.get(*name))
+        .map(|&(_, value, _)| value)
 }
 
 /// Set field by index with COW (optimized path for known shapes)
@@ -670,13 +681,11 @@ fn box_value_as_dynamic(type_id: u32, value: u64) -> *mut u8 {
             crate::type_system::haxe_box_reference_ptr(value as *mut u8, TYPE_STRING.0)
         }
         t if t == TYPE_NULL => std::ptr::null_mut(),
-        // A reference slot holding 0 is null; an enum's 0 is its first value.
-        _ if value == 0
-            && !crate::type_system::get_type_info(TypeId(type_id))
-                .is_some_and(|t| t.enum_info.is_some()) =>
-        {
-            std::ptr::null_mut()
+        // An enum slot holds a discriminant or a cell; 0 is null only for a cell.
+        t if crate::type_system::get_type_info(t).is_some_and(|i| i.enum_info.is_some()) => {
+            crate::type_system::box_enum_slot(value, type_id)
         }
+        _ if value == 0 => std::ptr::null_mut(),
         _ => {
             // Object or anon type — the value is a pointer
             crate::type_system::haxe_box_reference_ptr(value as *mut u8, type_id)

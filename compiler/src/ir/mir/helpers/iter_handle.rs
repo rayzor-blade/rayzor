@@ -16,6 +16,8 @@
 //! [16] iterator  returns obj's iterator; null when obj already IS the iterator
 //! [24] hasNext   on the iterator that slot 16 returns
 //! [32] next      on that same iterator
+//! [40] source    ITER_SOURCE_ARRAY when obj is an array, ITER_SOURCE_ARRAY_BOX
+//!                when it is a Dynamic box holding one, else 0
 //! ```
 //!
 //! Slots 24 and 32 describe the iterator slot 16 produces, which is why the
@@ -34,8 +36,12 @@ use super::*;
 /// else that can arrive in a protocol-typed slot.
 pub(crate) const ITER_HANDLE_TAG: i64 = 0x52_5A_49_54_45_52_00_01;
 
-/// Total bytes: tag, object, and three entry points.
-const ITER_HANDLE_SIZE: u64 = 40;
+/// Slot 40 of a handle over a raw array, which is what `Std.string` of the
+/// handle prints. The runtime reads the same values (`iter_handle.rs`).
+const ITER_SOURCE_ARRAY: i64 = 1;
+
+/// Total bytes: tag, object, three entry points and the source.
+const ITER_HANDLE_SIZE: u64 = 48;
 
 /// Which protocol a type names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -549,6 +555,13 @@ impl<'a> HirToMirContext<'a> {
         self.store_handle_slot_value(handle, 24, hn)?;
         let nx = self.builder.build_function_ref(next_fn)?;
         self.store_handle_slot_value(handle, 32, nx)?;
+        let array_source = if matches!(source, IterSource::Array) {
+            ITER_SOURCE_ARRAY
+        } else {
+            0
+        };
+        let array_source = self.builder.build_const(IrValue::I64(array_source))?;
+        self.store_handle_slot_value(handle, 40, array_source)?;
 
         self.iter_handle_regs.insert(handle);
         Some(handle)
@@ -1431,6 +1444,7 @@ impl<'a> HirToMirContext<'a> {
                 self.store_handle_slot_value(child, 16, none)?;
                 self.store_handle_slot_value(child, 24, hn)?;
                 self.store_handle_slot_value(child, 32, nx)?;
+                self.store_handle_slot_value(child, 40, none)?;
                 self.iter_handle_regs.insert(child);
                 let child_i = self
                     .builder

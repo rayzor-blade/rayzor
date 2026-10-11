@@ -244,7 +244,7 @@ pub extern "C" fn haxe_trace_typed(value: i64, type_tag: i32) {
                 haxe_trace_string_struct(value as *const HaxeString);
             }
         }
-        8 => haxe_trace_string_struct(haxe_value_to_string_by_tag(value, type_tag)),
+        8 | 11 => haxe_trace_string_struct(haxe_value_to_string_by_tag(value, type_tag)),
         10 if value == crate::type_system::NULL_INT => print_with_prefix("null"),
         _ => haxe_trace_int(value), // fallback
     }
@@ -638,6 +638,13 @@ pub extern "C" fn haxe_value_to_string_by_tag(value: i64, type_tag: i32) -> *mut
         // reinterpret i64 bits as f64
         Some(ValueTag::Float) => haxe_string_from_float(f64::from_bits(value as u64)),
         Some(ValueTag::Reference) => crate::type_system::haxe_std_string_ptr(value as *mut u8),
+        Some(ValueTag::Enum) => match crate::type_system::stamped_enum_cell_type(value) {
+            Some(type_id) => {
+                crate::type_system::haxe_enum_to_string_boxed(type_id, value as *const u8)
+                    as *mut HaxeString
+            }
+            None => crate::type_system::haxe_std_string_ptr(value as *mut u8),
+        },
         Some(ValueTag::Interface) => {
             let object = crate::type_system::haxe_iface_identity(value as *mut u8);
             crate::type_system::haxe_std_string_ptr(object)
@@ -4669,6 +4676,22 @@ pub struct HaxeObjectMap {
     map: HashMap<u64, u64>,
 }
 
+/// A key's identity: a box of an enum value is its cell or discriminant, a
+/// box of an anonymous object its handle.
+fn objectmap_key(key: u64) -> u64 {
+    let Some(boxed) = crate::type_system::dynamic_box_at(key as *mut u8) else {
+        return key;
+    };
+    if boxed.type_id == crate::anon_object::TYPE_ANON_OBJECT && !boxed.value_ptr.is_null() {
+        return boxed.value_ptr as u64;
+    }
+    // A tag-only enum's discriminant is shared by every enum, so only a cell
+    // names its value.
+    crate::type_system::enum_box_slot(&boxed)
+        .filter(|_| crate::type_system::enum_is_boxed(boxed.type_id.0))
+        .map_or(key, |slot| slot as u64)
+}
+
 /// Create a new ObjectMap
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_new() -> *mut HaxeObjectMap {
@@ -4686,7 +4709,7 @@ pub extern "C" fn haxe_objectmap_set(map_ptr: *mut HaxeObjectMap, key: u64, valu
     }
     unsafe {
         let map = &mut *map_ptr;
-        map.map.insert(key, value);
+        map.map.insert(objectmap_key(key), value);
     }
 }
 
@@ -4699,7 +4722,7 @@ pub extern "C" fn haxe_objectmap_get(map_ptr: *mut HaxeObjectMap, key: u64) -> u
     }
     unsafe {
         let map = &*map_ptr;
-        map.map.get(&key).copied().unwrap_or(0)
+        map.map.get(&objectmap_key(key)).copied().unwrap_or(0)
     }
 }
 
@@ -4711,7 +4734,7 @@ pub extern "C" fn haxe_objectmap_exists(map_ptr: *mut HaxeObjectMap, key: u64) -
     }
     unsafe {
         let map = &*map_ptr;
-        map.map.contains_key(&key)
+        map.map.contains_key(&objectmap_key(key))
     }
 }
 
@@ -4724,7 +4747,7 @@ pub extern "C" fn haxe_objectmap_remove(map_ptr: *mut HaxeObjectMap, key: u64) -
     }
     unsafe {
         let map = &mut *map_ptr;
-        map.map.remove(&key).is_some()
+        map.map.remove(&objectmap_key(key)).is_some()
     }
 }
 

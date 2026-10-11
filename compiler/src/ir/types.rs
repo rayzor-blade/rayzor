@@ -124,6 +124,16 @@ impl IrType {
         }))
     }
 
+    /// A payload enum bound to a type parameter: a pointer to its cell, kept
+    /// distinct so by-tag helpers read the cell rather than its address.
+    pub fn enum_ptr() -> Self {
+        Self::Ptr(Box::new(Self::Opaque {
+            name: "__haxe_enum".to_owned(),
+            size: 0,
+            align: 8,
+        }))
+    }
+
     /// Create a new type parameter (alias for TypeVar)
     pub fn type_param(name: impl Into<String>) -> Self {
         IrType::TypeVar(name.into())
@@ -197,6 +207,9 @@ impl IrType {
             IrType::Ptr(inner) if matches!(**inner, IrType::String) => ValueTag::String,
             IrType::Ptr(inner) if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_interface") => {
                 ValueTag::Interface
+            }
+            IrType::Ptr(inner) if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_enum") => {
+                ValueTag::Enum
             }
             IrType::Ptr(_) => ValueTag::Reference,
             IrType::Function { .. } => ValueTag::Function,

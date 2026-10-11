@@ -34,8 +34,28 @@ unsafe fn call_closure(record: u64, args: &[i64]) -> i64 {
     }
 }
 
+/// Slot 40 of a handle: its object is a raw `HaxeArray`, or a Dynamic box
+/// holding one.
+pub(crate) const ITER_SOURCE_ARRAY: i64 = 1;
+pub(crate) const ITER_SOURCE_ARRAY_BOX: i64 = 2;
+
 fn is_handle(value: i64) -> bool {
     value >= 0x1000 && value & 7 == 0 && unsafe { *(value as *const i64) } == ITER_HANDLE_TAG
+}
+
+/// The array a handle was built over, and whether it is boxed; `None` for
+/// anything else, including a handle over a non-array.
+pub(crate) fn handle_array_source(value: *mut u8) -> Option<(*mut u8, bool)> {
+    let value = value as i64;
+    if !is_handle(value) {
+        return None;
+    }
+    let obj = unsafe { *((value + 8) as *const i64) } as *mut u8;
+    match unsafe { *((value + 40) as *const i64) } {
+        ITER_SOURCE_ARRAY => Some((obj, false)),
+        ITER_SOURCE_ARRAY_BOX => Some((obj, true)),
+        _ => None,
+    }
 }
 
 /// The iterator a handle iterates: its object, made an iterator once through

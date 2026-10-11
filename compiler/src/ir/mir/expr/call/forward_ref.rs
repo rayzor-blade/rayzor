@@ -83,7 +83,7 @@ impl<'a> HirToMirContext<'a> {
 
                             let type_args = type_args
                                 .iter()
-                                .map(|ty| self.convert_type(*ty))
+                                .map(|ty| self.convert_type_arg(*ty))
                                 .collect::<Vec<_>>();
                             return if type_args.is_empty() {
                                 self.builder.build_call_direct(
@@ -130,7 +130,7 @@ impl<'a> HirToMirContext<'a> {
 
                         let type_args = type_args
                             .iter()
-                            .map(|ty| self.convert_type(*ty))
+                            .map(|ty| self.convert_type_arg(*ty))
                             .collect::<Vec<_>>();
                         return if type_args.is_empty() {
                             self.builder

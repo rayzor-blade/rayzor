@@ -397,11 +397,12 @@ impl<'a> HirToMirContext<'a> {
             // the path still falls through to it.
             if let Some(fallthrough_block) = next_test_block {
                 self.builder.switch_to_block(fallthrough_block);
-                tc_fallthrough = Some(fallthrough_block);
                 if finally_block.is_none() {
                     self.rethrow_current(exception_id, exc_type_id);
+                } else {
+                    tc_fallthrough = Some(fallthrough_block);
+                    self.builder.build_branch(after_catch_target);
                 }
-                self.builder.build_branch(after_catch_target);
             }
         } else {
             // No catch clauses — go straight to finally or continuation.
@@ -557,6 +558,8 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Raise the exception being handled again, to the enclosing handler.
+    /// The throw does not return, so the block ends unreachable rather than
+    /// joining the continuation.
     fn rethrow_current(&mut self, exception: IrId, type_id: IrId) {
         let throw_fn = self.get_or_register_extern_function(
             "rayzor_throw_typed",
@@ -565,6 +568,7 @@ impl<'a> HirToMirContext<'a> {
         );
         self.builder
             .build_call_direct(throw_fn, vec![exception, type_id], IrType::Void);
+        self.builder.build_unreachable();
     }
 
     pub(crate) fn lower_try_catch_expr(&mut self, expr: &HirExpr) -> Option<IrId> {

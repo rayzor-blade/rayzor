@@ -341,7 +341,7 @@ impl<'a> HirToMirContext<'a> {
                 vec![ptr_void.clone(), IrType::I32],
                 vec![obj_reg],
             ),
-            "ObjectMap" | "EnumValueMap" | "WeakMap" => (
+            "ObjectMap" | "WeakMap" => (
                 "haxe_objectmap_to_string_typed",
                 vec![ptr_void.clone(), IrType::I32, IrType::I32],
                 vec![obj_reg],
@@ -486,6 +486,9 @@ impl<'a> HirToMirContext<'a> {
         if let Some(rendered) = self.try_lower_map_to_string(obj_reg, type_id) {
             return Some(Some(rendered));
         }
+        if let Some(rendered) = self.call_inherited_tostring(obj_reg, class_symbol, type_id) {
+            return Some(Some(rendered));
+        }
         // Fallback for stdlib classes (StringMap, IntMap, Date, Bytes): a toString()
         // registered in stdlib_mapping, looked up under the class's key.
         let class_name = self
@@ -521,6 +524,58 @@ impl<'a> HirToMirContext<'a> {
         }
 
         Some(None) // No toString() found
+    }
+
+    /// The nearest compiled ancestor's `toString`, called on the instance with
+    /// the receiver's type arguments, as `x.toString()` calls it.
+    fn call_inherited_tostring(
+        &mut self,
+        obj_reg: IrId,
+        class_symbol: SymbolId,
+        type_id: TypeId,
+    ) -> Option<IrId> {
+        let name = self.string_interner.intern("toString");
+        let mut seen = BTreeSet::new();
+        let mut current = self.class_parent_map.get(&class_symbol).copied();
+        let method = loop {
+            let class = current.filter(|class| seen.insert(*class))?;
+            let is_extern = self
+                .symbol_table
+                .get_symbol(class)
+                .is_some_and(|s| s.flags.contains(SymbolFlags::EXTERN));
+            if is_extern {
+                return None;
+            }
+            if let Some(&method) = self.class_method_symbols.get(&(class, name)) {
+                break method;
+            }
+            current = self.class_parent_map.get(&class).copied();
+        };
+        let func_id = self
+            .function_map
+            .get(&method)
+            .or_else(|| self.external_function_map.get(&method))
+            .copied()?;
+        let receiver_args = match self.type_table.get(type_id).map(|t| &t.kind) {
+            Some(TypeKind::Class { type_args, .. }) => type_args.clone(),
+            _ => Vec::new(),
+        };
+        let type_args: Vec<IrType> = receiver_args
+            .iter()
+            .map(|&arg| self.convert_type_arg(arg))
+            .collect();
+        let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+        if type_args.is_empty() {
+            self.builder
+                .build_call_direct(func_id, vec![obj_reg], string_ptr_ty)
+        } else {
+            self.builder.build_call_direct_with_type_args(
+                func_id,
+                vec![obj_reg],
+                string_ptr_ty,
+                type_args,
+            )
+        }
     }
 
     /// Try to apply an abstract @:from conversion in a Cast expression.

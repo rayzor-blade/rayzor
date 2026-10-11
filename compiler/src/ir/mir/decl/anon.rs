@@ -34,6 +34,15 @@ impl<'a> HirToMirContext<'a> {
             let tag = rayzor_runtime::type_system::TYPE_DYNAMIC_TOKEN.0;
             return format!("{name}:{tag}");
         }
+        // Any other `Null<T>` slot is a `T` slot that may hold null.
+        let ty = match self
+            .type_table
+            .get(self.resolve_through_aliases(ty))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Optional { inner_type }) => *inner_type,
+            _ => ty,
+        };
         let tag = self.runtime_type_id(ty);
         match self
             .type_table

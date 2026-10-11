@@ -94,7 +94,7 @@ fn registered_enum_cell_type(value: i64) -> Option<u32> {
 /// The enum of a boxed enum cell, read from the type id in its pad word. The
 /// tag must be a variant of that enum, so a pointer to anything else is not
 /// taken for a cell.
-fn stamped_enum_cell_type(value: i64) -> Option<u32> {
+pub(crate) fn stamped_enum_cell_type(value: i64) -> Option<u32> {
     let addr = value as usize;
     if addr <= u32::MAX as usize || (addr & 7) != 0 || (addr >> 47) != 0 {
         return None;
@@ -175,6 +175,8 @@ pub enum ValueTag {
     Function = 9,
     /// Unboxed `Null<Int>`: `NULL_INT` is null, anything else an Int.
     NullInt = 10,
+    /// A payload enum's cell, which names its enum in its pad word.
+    Enum = 11,
 }
 
 impl ValueTag {
@@ -189,6 +191,7 @@ impl ValueTag {
             8 => Some(ValueTag::Interface),
             9 => Some(ValueTag::Function),
             10 => Some(ValueTag::NullInt),
+            11 => Some(ValueTag::Enum),
             _ => None,
         }
     }
@@ -1522,6 +1525,9 @@ fn create_enum_value_from_slots(
                         haxe_unbox_int(dynamic)
                     }
                     (ParamType::Float, TYPE_FLOAT) => haxe_unbox_float(dynamic).to_bits() as i64,
+                    (ParamType::Anon | ParamType::Object, crate::anon_object::TYPE_ANON_OBJECT) => {
+                        dynamic.value_ptr as i64
+                    }
                     (_, TYPE_NULL) => 0,
                     _ => val,
                 };
@@ -2112,7 +2118,7 @@ pub extern "C" fn haxe_std_downcast(value_ptr: *mut u8, expected_type_id: i64) -
 /// This helper inspects [`EnumInfo`] to make the same decision at
 /// runtime, used by `Type.enumIndex` / `enumConstructor` /
 /// `enumParameters` to dereference `value` correctly.
-fn enum_is_boxed(type_id: u32) -> bool {
+pub(crate) fn enum_is_boxed(type_id: u32) -> bool {
     let guard = TYPE_REGISTRY.read().unwrap();
     guard
         .as_ref()
@@ -2926,6 +2932,11 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
     {
         return haxe_enum_to_string_boxed(type_id, dynamic_ptr) as *mut HaxeString;
     }
+    // A payload enum's cell names its enum in its pad word; read as a box, its
+    // variant index would pass for a builtin tag.
+    if let Some(type_id) = stamped_enum_cell_type(dynamic_ptr as i64) {
+        return haxe_enum_to_string_boxed(type_id, dynamic_ptr) as *mut HaxeString;
+    }
 
     // A Dynamic slot holding an erased primitive carries the VALUE, not a box:
     // an array element, an iterator yield, a `Map.get` result. Reading one as a
@@ -2934,6 +2945,15 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
     let Some(dynamic) = dynamic_box_at(dynamic_ptr) else {
         return crate::haxe_sys::haxe_string_from_int(dynamic_ptr as usize as i64);
     };
+
+    // An `Iterable` built over an array prints as that array.
+    if let Some((array, boxed)) = crate::iter_handle::handle_array_source(dynamic_ptr) {
+        return if boxed {
+            haxe_std_string_ptr(array)
+        } else {
+            crate::haxe_array::haxe_array_to_string(array as *const crate::haxe_array::HaxeArray)
+        };
+    }
 
     // An enum in a box: a tag-only one carries its discriminant, one with
     // parameters a pointer to its cell.
@@ -3589,7 +3609,8 @@ pub extern "C" fn haxe_unbox_scalar_or_addr(ptr: *mut u8) -> i64 {
 
 /// An iteration handle for a Dynamic, or null when its box holds nothing
 /// iterable. The layout is the compiler's (`iter_handle.rs`): the tag, the
-/// object, then `iterator`, `hasNext` and `next` entry points. An array
+/// object, then `iterator`, `hasNext` and `next` entry points, then the
+/// source, which says the object is a boxed array. An array
 /// iterates through `iterator_fn`; a value tagged `iterator_tag` (an array
 /// iterator) is the iterator already, and slot 16 is left null to say so.
 #[unsafe(no_mangle)]
@@ -3611,7 +3632,7 @@ pub extern "C" fn haxe_iter_handle_from_dynamic(
     } else {
         return std::ptr::null_mut();
     };
-    let words: Box<[i64; 5]> = Box::new([
+    let words: Box<[i64; 6]> = Box::new([
         handle_tag,
         if d.type_id == TYPE_ARRAY {
             ptr as i64
@@ -3621,6 +3642,11 @@ pub extern "C" fn haxe_iter_handle_from_dynamic(
         iterator_slot,
         has_next_fn,
         next_fn,
+        if d.type_id == TYPE_ARRAY {
+            crate::iter_handle::ITER_SOURCE_ARRAY_BOX
+        } else {
+            0
+        },
     ]);
     Box::into_raw(words) as *mut u8
 }
@@ -3951,7 +3977,7 @@ pub extern "C" fn haxe_dynamic_equals_typed(raw: i64, type_tag: i32, other: *mut
 
     unsafe {
         match type_tag {
-            1 | 3 => match d.type_id {
+            1 | 3 | 11 => match d.type_id {
                 TYPE_INT => *(d.value_ptr as *const i64) == raw,
                 TYPE_FLOAT => *(d.value_ptr as *const f64) == raw as f64,
                 // An enum is I64 too.
@@ -4039,7 +4065,7 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
         }
         // A class instance carries its id in its header; any other pointer
         // (array, anon) has no header to read and boxes untyped.
-        Some(ValueTag::Reference) => {
+        Some(ValueTag::Reference | ValueTag::Enum) => {
             let p = value as *mut u8;
             // `Null<T>` over a reference is the reference: its null is null.
             if p.is_null() {
@@ -4083,7 +4109,7 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
 const REFERENCE_BOX_MARK: u32 = 0x5258_4258;
 
 /// Whether `obj` is a box made by `haxe_box_reference_ptr`.
-fn is_reference_box(obj: *mut u8) -> bool {
+pub(crate) fn is_reference_box(obj: *mut u8) -> bool {
     let addr = obj as usize;
     if addr <= u32::MAX as usize || (addr & 7) != 0 || (addr >> 47) != 0 {
         return false;
@@ -4405,6 +4431,9 @@ pub unsafe fn box_class_field_as_dynamic(value: u64, ty: ParamType) -> *mut u8 {
             let p = value as *mut u8;
             if p.is_null() {
                 return std::ptr::null_mut();
+            }
+            if crate::anon_object::is_anon_handle(p) {
+                return haxe_box_reference_ptr(p, crate::anon_object::TYPE_ANON_OBJECT.0);
             }
             let inner_type_id = haxe_object_get_type_id(p as *const u8) as u32;
             // A non-class pointer (e.g. an Array, HaxeString) won't
@@ -5167,6 +5196,8 @@ mod value_tag_tests {
         assert_eq!(ValueTag::Function as i32, 9);
         assert_eq!(ValueTag::NullInt as i32, 10);
         assert_eq!(ValueTag::from_i32(10), Some(ValueTag::NullInt));
+        assert_eq!(ValueTag::Enum as i32, 11);
+        assert_eq!(ValueTag::from_i32(11), Some(ValueTag::Enum));
     }
 
     // ValueTag and TypeId are different spaces. Where they collide, a reader
