@@ -129,6 +129,9 @@ impl<'a> HirToMirContext<'a> {
                 Some(TypeKind::Class { .. }) => return IrFieldShape::Class,
                 Some(TypeKind::Array { .. }) => return IrFieldShape::Array,
                 Some(TypeKind::Anonymous { .. }) => return IrFieldShape::Anonymous,
+                Some(TypeKind::Enum { .. }) => {
+                    return IrFieldShape::Enum(self.runtime_type_id(cur));
+                }
                 Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
                 Some(TypeKind::Optional { inner_type }) => {
                     if self.optional_inner_is_null_int(*inner_type) {

@@ -6088,6 +6088,7 @@ impl CraneliftBackend {
                         &static_fields,
                         &typedef.instance_methods,
                     );
+                    Self::register_field_enums(rtti_key, fields);
                 }
             }
         }
@@ -6161,6 +6162,28 @@ impl CraneliftBackend {
         }
     }
 
+    /// Record which constructor arguments of an enum hold values of another
+    /// enum, keyed by variant and argument position, so printing names them.
+    pub fn register_variant_param_enums(rtti_key: u32, variants: &[crate::ir::IrEnumVariant]) {
+        let params: Vec<(usize, usize, u32)> = variants
+            .iter()
+            .enumerate()
+            .flat_map(|(v, variant)| {
+                variant
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(p, field)| match field.shape {
+                        crate::ir::IrFieldShape::Enum(id) => Some((v, p, id)),
+                        _ => None,
+                    })
+            })
+            .collect();
+        if !params.is_empty() {
+            rayzor_runtime::type_system::register_enum_param_enums(rtti_key, &params);
+        }
+    }
+
     /// Register enum RTTI by walking MIR module type definitions directly.
     /// This avoids generating __init__ code that calls runtime functions via FFI.
     pub fn register_enum_rtti_from_modules(modules: &[std::sync::Arc<crate::ir::IrModule>]) {
@@ -6188,6 +6211,7 @@ impl CraneliftBackend {
                         .map(|h| h as u32)
                         .unwrap_or(typedef.type_id.0);
                     register_enum_from_mir(rtti_key, &typedef.name, &variant_data);
+                    Self::register_variant_param_enums(rtti_key, variants);
                     debug!(
                         "Registered enum RTTI '{}' (type_id={}) with {} variants",
                         typedef.name,
@@ -6196,6 +6220,22 @@ impl CraneliftBackend {
                     );
                 }
             }
+        }
+    }
+
+    /// Record which instance fields of a class hold enum values, so
+    /// reflection boxes them under their enum.
+    pub fn register_field_enums(rtti_key: u32, fields: &[crate::ir::IrField]) {
+        let enum_ids: Vec<u32> = fields
+            .iter()
+            .filter(|f| f.name != "__type_id")
+            .map(|f| match f.shape {
+                crate::ir::IrFieldShape::Enum(id) => id,
+                _ => 0,
+            })
+            .collect();
+        if enum_ids.iter().any(|id| *id != 0) {
+            rayzor_runtime::type_system::register_class_field_enums(rtti_key, &enum_ids);
         }
     }
 

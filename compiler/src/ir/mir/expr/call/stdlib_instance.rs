@@ -562,6 +562,26 @@ impl<'a> HirToMirContext<'a> {
                                         // Tag the result register with its class so later calls
                                         // on the value disambiguate: Mutex.lock() yields a
                                         // MutexGuard, which then resolves .get()/.unlock().
+                                        // Through a Dynamic receiver a new Array comes
+                                        // back as a Dynamic, which is a box.
+                                        let returns_new_array = matches!(
+                                            (class_name, method_name),
+                                            ("Array", "map" | "filter")
+                                        );
+                                        let expr_is_dynamic = matches!(
+                                            self.type_table.get(expr.ty).map(|t| &t.kind),
+                                            Some(TypeKind::Dynamic)
+                                        );
+                                        if returns_new_array && expr_is_dynamic {
+                                            if let Some(result_reg) = final_result {
+                                                return self.box_dispatch_result(
+                                                    result_reg,
+                                                    class_name,
+                                                    method_name,
+                                                    runtime_call,
+                                                );
+                                            }
+                                        }
                                         if let Some(result_reg) = final_result {
                                             self.record_stdlib_return_hint(
                                                 result_reg,

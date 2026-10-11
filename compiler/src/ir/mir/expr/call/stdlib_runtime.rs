@@ -925,8 +925,14 @@ impl<'a> HirToMirContext<'a> {
                             // typer; the owner had no row for it, and no other
                             // class's same-named row is it (`Int64.toInt` is not
                             // `Usize.toInt`). Only an owner-less symbol goes on
-                            // to the return-type inference and the class scan.
-                            if method_sym.qualified_name.is_some() {
+                            // to the return-type inference and the class scan. A
+                            // structure's method names its typedef, which no
+                            // value implements, so it is owner-less too.
+                            let structural_receiver = matches!(
+                                self.type_table.get(receiver_type).map(|t| &t.kind),
+                                Some(TypeKind::Anonymous { .. })
+                            );
+                            if method_sym.qualified_name.is_some() && !structural_receiver {
                                 *fell_through = true;
                                 return None;
                             }
@@ -1621,7 +1627,7 @@ impl<'a> HirToMirContext<'a> {
                 // fat pointer.
                 if param_idx == 0
                     && matches!(class_name, "Reflect" | "Type")
-                    && self.is_interface_value_type(arg.ty)
+                    && self.is_interface_value_expr(arg)
                 {
                     let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                     let identity = self.get_or_register_extern_function(

@@ -179,6 +179,8 @@ pub enum IrFieldShape {
     Boxed,
     /// An unboxed `Null<Int>` slot: `NULL_INT` or an Int.
     NullInt,
+    /// An enum value, of the enum with this runtime type id.
+    Enum(u32),
 }
 
 /// Struct field

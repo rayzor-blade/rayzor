@@ -1000,6 +1000,8 @@ impl<'a> AstLowering<'a> {
                     .and_then(|expr| self.function_field_signature(expr))
                     .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type())
             };
+            let field_type =
+                self.struct_init_optional_field_type(&class_decl.meta, field, field_type);
 
             let interned_name = self.context.intern_string(&field_name);
             let field_symbol = self.context.symbol_table.create_variable(interned_name);

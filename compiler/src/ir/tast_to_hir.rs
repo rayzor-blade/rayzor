@@ -2592,6 +2592,9 @@ impl<'a> TastToHirContext<'a> {
                 if let Some(guarded) = self.lower_safe_navigation_write(expr) {
                     return guarded;
                 }
+                if let Some(coalesced) = self.lower_null_coal_assign(expr) {
+                    return coalesced;
+                }
                 if *operator == BinaryOperator::Assign
                     && let TypedExpressionKind::FieldAccess {
                         object,
@@ -2981,13 +2984,26 @@ impl<'a> TastToHirContext<'a> {
                         if is_optional_prim {
                             let lhs_expr = self.lower_expression(left);
                             let rhs_expr = self.lower_expression(right);
+                            // The MIR builds the value as this type.
+                            let untyped = matches!(
+                                self.type_table
+                                    .borrow()
+                                    .get(expr.expr_type)
+                                    .map(|t| &t.kind),
+                                None | Some(TypeKind::Dynamic | TypeKind::Unknown | TypeKind::Void)
+                            );
+                            let result_type = if untyped {
+                                right.expr_type
+                            } else {
+                                expr.expr_type
+                            };
                             return HirExpr::new(
                                 HirExprKind::Binary {
                                     op: HirBinaryOp::NullCoalesce,
                                     lhs: Box::new(lhs_expr),
                                     rhs: Box::new(rhs_expr),
                                 },
-                                right.expr_type,
+                                result_type,
                                 self.current_lifetime,
                                 expr.source_location,
                             );
@@ -4177,6 +4193,100 @@ impl<'a> TastToHirContext<'a> {
         let mut reference = operand.clone();
         reference.kind = TypedExpressionKind::Variable { symbol_id: symbol };
         reference
+    }
+
+    /// `a ??= b`, parsed as `a = a ?? b` with both `a` at one location:
+    /// `{ var t = a; t == null ? { var v = b; a = v; v } : t }`, the target's
+    /// receiver and index bound once, so `a` is read once and written only
+    /// when null. A `Null<T>` slot of a type parameter keeps the plain form.
+    fn lower_null_coal_assign(&mut self, expr: &TypedExpression) -> Option<HirExpr> {
+        let TypedExpressionKind::BinaryOp {
+            left: target,
+            operator: BinaryOperator::Assign,
+            right,
+        } = &expr.kind
+        else {
+            return None;
+        };
+        let TypedExpressionKind::BinaryOp {
+            left: read,
+            operator: BinaryOperator::NullCoal,
+            right: value,
+        } = &right.kind
+        else {
+            return None;
+        };
+        if !target.source_location.is_valid() || read.source_location != target.source_location {
+            return None;
+        }
+        let generic = {
+            let table = self.type_table.borrow();
+            let inner = match table.get(target.expr_type).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => *inner_type,
+                _ => target.expr_type,
+            };
+            matches!(
+                table.get(inner).map(|t| &t.kind),
+                Some(TypeKind::TypeParameter { .. })
+            )
+        };
+        if generic {
+            return None;
+        }
+        let (scope, lifetime, location) = (
+            self.current_scope,
+            self.current_lifetime,
+            expr.source_location,
+        );
+        let mut statements = Vec::new();
+        let target = self.bind_assignment_target(target, &mut statements);
+        let current = self.lower_expression(&target);
+        let current = self.bind_hir_operand(current, &mut statements);
+
+        let mut store = Vec::new();
+        let stored = self.bind_assignment_operand(value, &mut store);
+        let mut assign = expr.clone();
+        assign.kind = TypedExpressionKind::BinaryOp {
+            left: Box::new(target.clone()),
+            operator: BinaryOperator::Assign,
+            right: Box::new(stored.clone()),
+        };
+        assign.expr_type = target.expr_type;
+        store.push(HirStatement::Expr(self.lower_expression(&assign)));
+        let stored = self.lower_expression(&stored);
+        let assigned = HirExpr::new(
+            HirExprKind::Block(HirBlock::with_expr(store, stored, scope)),
+            value.expr_type,
+            lifetime,
+            location,
+        );
+
+        let is_null = HirExpr::new(
+            HirExprKind::Binary {
+                op: HirBinaryOp::Eq,
+                lhs: Box::new(current.clone()),
+                rhs: Box::new(self.make_null_literal()),
+            },
+            self.get_bool_type(),
+            lifetime,
+            location,
+        );
+        let choice = HirExpr::new(
+            HirExprKind::If {
+                condition: Box::new(is_null),
+                then_expr: Box::new(assigned),
+                else_expr: Box::new(current),
+            },
+            target.expr_type,
+            lifetime,
+            location,
+        );
+        Some(HirExpr::new(
+            HirExprKind::Block(HirBlock::with_expr(statements, choice, scope)),
+            expr.expr_type,
+            lifetime,
+            location,
+        ))
     }
 
     /// `o?.f = v`, `o?.f op= v`, `o?.f++`: the write happens only when `o`

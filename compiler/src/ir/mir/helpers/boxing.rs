@@ -405,7 +405,14 @@ impl<'a> HirToMirContext<'a> {
             }
             _ => value,
         };
-        let tag_reg = self.builder.build_const(IrValue::I32(0))?;
+        // An object-constrained `T` that no instance binds still holds a
+        // reference, not the Int an unresolved tag stands for.
+        let default_tag = if self.type_param_is_object(symbol_id) {
+            rayzor_runtime::type_system::ValueTag::Reference as i32
+        } else {
+            0
+        };
+        let tag_reg = self.builder.build_const(IrValue::I32(default_tag))?;
         if let Some(func) = self.builder.current_function_mut() {
             func.type_param_tag_fixups.push((tag_reg, tp_name));
         }
@@ -417,6 +424,36 @@ impl<'a> HirToMirContext<'a> {
         );
         self.builder
             .build_call_direct(box_func, vec![v64, tag_reg], ptr_u8)
+    }
+
+    /// A type parameter constrained to an object type (`K:{}`, `O:{} & T`,
+    /// `T:SomeClass`), whose values are references.
+    fn type_param_is_object(&self, symbol_id: SymbolId) -> bool {
+        let Some(types) = self.type_table.types_for_symbol(symbol_id) else {
+            return false;
+        };
+        types
+            .iter()
+            .any(|ty| match self.type_table.get(*ty).map(|t| &t.kind) {
+                Some(TypeKind::TypeParameter { constraints, .. }) => {
+                    constraints.iter().any(|c| self.is_object_constraint(*c))
+                }
+                _ => false,
+            })
+    }
+
+    fn is_object_constraint(&self, ty: TypeId) -> bool {
+        match self
+            .type_table
+            .get(self.resolve_through_aliases(ty))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Anonymous { .. } | TypeKind::Class { .. }) => true,
+            Some(TypeKind::Intersection { types }) => {
+                types.iter().any(|t| self.is_object_constraint(*t))
+            }
+            _ => false,
+        }
     }
 
     /// Box a value for extern function calls when the expected type is a pointer but the actual type is a primitive.

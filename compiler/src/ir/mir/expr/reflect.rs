@@ -124,6 +124,57 @@ impl<'a> HirToMirContext<'a> {
             .build_call_direct(unbox, vec![as_ptr], IrType::I64)
     }
 
+    /// Whether a declared formal is `Dynamic`, which a call passes a box.
+    fn is_dynamic_formal(&self, ty: TypeId) -> bool {
+        matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        )
+    }
+
+    /// Element `idx` of callMethod's arguments array for a `Dynamic` formal,
+    /// boxed as a direct call through the same function type boxes it. None
+    /// for an element whose type gives no box, which keeps the slot path.
+    fn call_method_dynamic_arg(
+        &mut self,
+        array: IrId,
+        array_ty: TypeId,
+        idx: usize,
+        slots: CallMethodSlots,
+    ) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        match slots {
+            CallMethodSlots::Boxed => return None,
+            CallMethodSlots::NullInt => {
+                let raw = self.call_method_raw(array, idx)?;
+                let value = self.builder.build_bitcast(raw, IrType::NullInt)?;
+                return self.null_int_to_dynamic(value);
+            }
+            _ => {}
+        }
+        let element = self
+            .get_array_element_type(self.resolve_through_aliases(array_ty))
+            .map(|element| self.resolve_through_aliases(element))?;
+        if !matches!(
+            self.type_table.get(element).map(|t| &t.kind),
+            Some(
+                TypeKind::Int
+                    | TypeKind::Float
+                    | TypeKind::Bool
+                    | TypeKind::String
+                    | TypeKind::Enum { .. }
+            )
+        ) {
+            return None;
+        }
+        let raw = self.call_method_raw(array, idx)?;
+        let value = self.coerce_from_i64(raw, element)?;
+        let boxed = self.maybe_box_value(value, element, self.type_table.dynamic_type())?;
+        self.coerce_reg_to(boxed, &ptr_u8)
+    }
+
     /// Element `idx` of callMethod's arguments array for a `Null<Int>`
     /// parameter: an Int slot sign-extends, a `NullInt` slot is taken as is,
     /// any other slot is a box or null.
@@ -295,6 +346,8 @@ impl<'a> HirToMirContext<'a> {
             _ => None,
         };
         let slots = self.call_method_slots(args_array_expr.ty);
+        let declared = self.resolve_function_type_signature(func_expr.ty);
+        let array_ty = args_array_expr.ty;
         let defaults: Vec<Option<HirExpr>> = callee
             .and_then(|id| self.function_param_defaults.get(&id).cloned())
             .unwrap_or_default();
@@ -407,6 +460,20 @@ impl<'a> HirToMirContext<'a> {
                             if *target_ty == IrType::NullInt {
                                 return this.call_method_null_int(args_array_ptr, idx, slots);
                             }
+                            let dynamic_formal = declared
+                                .as_ref()
+                                .and_then(|(params, _)| params.get(idx))
+                                .is_some_and(|ty| this.is_dynamic_formal(*ty));
+                            if dynamic_formal {
+                                if let Some(boxed) = this.call_method_dynamic_arg(
+                                    args_array_ptr,
+                                    array_ty,
+                                    idx,
+                                    slots,
+                                ) {
+                                    return this.coerce_reg_to(boxed, target_ty);
+                                }
+                            }
                             if let Some(value) =
                                 this.call_method_number(args_array_ptr, idx, slots, target_ty)?
                             {
@@ -452,6 +519,19 @@ impl<'a> HirToMirContext<'a> {
 
             if matches!(result_type, IrType::Ptr(ref inner) if matches!(inner.as_ref(), IrType::Void))
             {
+                // An enum keeps its type id in the box.
+                if let Some((_, ret)) = declared.as_ref().filter(|(_, ret)| {
+                    matches!(
+                        this.type_table
+                            .get(this.resolve_through_aliases(*ret))
+                            .map(|t| &t.kind),
+                        Some(TypeKind::Enum { .. })
+                    )
+                }) {
+                    if let Some(boxed) = this.box_value_for_dynamic(call_result, *ret) {
+                        return Some(boxed);
+                    }
+                }
                 if let Some(boxed) = this.box_primitive_to_dynamic(call_result, return_ir.clone()) {
                     return Some(boxed);
                 }
@@ -514,6 +594,13 @@ impl<'a> HirToMirContext<'a> {
                 |this| {
                     if target_ty == IrType::NullInt {
                         return this.call_method_null_int(args_array_ptr, idx, slots);
+                    }
+                    if this.is_dynamic_formal(*param_ty_id) {
+                        if let Some(boxed) =
+                            this.call_method_dynamic_arg(args_array_ptr, array_ty, idx, slots)
+                        {
+                            return this.coerce_reg_to(boxed, &target_ty);
+                        }
                     }
                     if let Some(value) =
                         this.call_method_number(args_array_ptr, idx, slots, &target_ty)?

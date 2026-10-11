@@ -424,7 +424,7 @@ impl<'a> HirToMirContext<'a> {
         match op {
             HirBinaryOp::And => return self.lower_logical_and(lhs, rhs),
             HirBinaryOp::Or => return self.lower_logical_or(lhs, rhs),
-            HirBinaryOp::NullCoalesce => return self.lower_null_coalesce(lhs, rhs),
+            HirBinaryOp::NullCoalesce => return self.lower_null_coalesce(lhs, rhs, expr.ty),
             _ => {}
         }
 

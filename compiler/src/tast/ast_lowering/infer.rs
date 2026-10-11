@@ -305,6 +305,9 @@ impl<'a> AstLowering<'a> {
                 operator,
                 right,
             } => {
+                if *operator == BinaryOperator::NullCoal {
+                    return Ok(self.null_coal_type(left, right));
+                }
                 let string = self.context.type_table.borrow().string_type();
                 if matches!(
                     operator,
@@ -553,10 +556,6 @@ impl<'a> AstLowering<'a> {
                     | BinaryOperator::UshrAssign
                     | BinaryOperator::ModAssign => {
                         // Assignment returns the type of the left operand
-                        Ok(left.expr_type)
-                    }
-                    BinaryOperator::NullCoal => {
-                        // Null coalescing: result type is the LHS type (non-null version)
                         Ok(left.expr_type)
                     }
                     _ => Ok(type_table.dynamic_type()),
@@ -2036,6 +2035,73 @@ impl<'a> AstLowering<'a> {
         let (a, b) = (self.unalias(a), self.unalias(b));
         let tt = self.context.type_table.borrow();
         a == b || tt.get(a).map(|t| &t.kind) == tt.get(b).map(|t| &t.kind)
+    }
+
+    /// `a ?? b` as Haxe types it: the operands' `unify_min`, out of `Null`
+    /// unless `b` is itself `Null<T>`; a `b` that never completes leaves `a`'s
+    /// type out of `Null`. A `Dynamic` or untyped `b` keeps `a`'s type, as
+    /// does a result other than a basic type, `String`, class, array or
+    /// structure: an interface or abstract is laid out apart from its operands.
+    fn null_coal_type(&self, left: &TypedExpression, right: &TypedExpression) -> TypeId {
+        let lt = left.expr_type;
+        let (li, right_kind) = {
+            let tt = self.context.type_table.borrow();
+            let li = match tt.get(self.unalias(lt)).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => *inner_type,
+                _ => lt,
+            };
+            let right_kind = tt
+                .get(self.unalias(right.expr_type))
+                .map(|t| t.kind.clone());
+            (li, right_kind)
+        };
+        let out_of_null = |ty: TypeId| {
+            let ty = self.unalias(ty);
+            let tt = self.context.type_table.borrow();
+            let inner = match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => self.unalias(*inner_type),
+                _ => ty,
+            };
+            let plain = matches!(
+                tt.get(inner).map(|t| &t.kind),
+                Some(
+                    TypeKind::Int
+                        | TypeKind::Float
+                        | TypeKind::Bool
+                        | TypeKind::String
+                        | TypeKind::Class { .. }
+                        | TypeKind::Array { .. }
+                        | TypeKind::Anonymous { .. }
+                )
+            );
+            plain.then_some(inner)
+        };
+        if matches!(
+            right.kind,
+            TypedExpressionKind::Throw { .. }
+                | TypedExpressionKind::Return { .. }
+                | TypedExpressionKind::Break
+                | TypedExpressionKind::Continue
+        ) {
+            return out_of_null(li).unwrap_or(lt);
+        }
+        if matches!(right.kind, TypedExpressionKind::Null)
+            || matches!(
+                right_kind,
+                None | Some(
+                    TypeKind::Optional { .. }
+                        | TypeKind::Dynamic
+                        | TypeKind::Unknown
+                        | TypeKind::Void
+                        | TypeKind::TypeParameter { .. }
+                )
+            )
+        {
+            return lt;
+        }
+        self.unify_min(&[lt, right.expr_type])
+            .and_then(out_of_null)
+            .unwrap_or(lt)
     }
 
     fn unalias(&self, mut ty: TypeId) -> TypeId {

@@ -301,17 +301,33 @@ impl<'a> HirToMirContext<'a> {
     /// Also handles TypeParameters with interface constraints (T:Printable).
     /// A value of interface type, `Null<I>` included: held as a fat pointer.
     pub(crate) fn is_interface_value_type(&self, type_id: TypeId) -> bool {
+        // A pre-registered interface type can be a `Class` over an interface
+        // symbol; `convert_type` makes either a fat pointer.
+        let is_interface = |kind: Option<&TypeKind>| match kind {
+            Some(TypeKind::Interface { .. }) => true,
+            Some(TypeKind::Class { symbol_id, .. }) => self
+                .symbol_table
+                .get_symbol(*symbol_id)
+                .is_some_and(|s| s.kind == crate::tast::SymbolKind::Interface),
+            _ => false,
+        };
         let type_id = self.resolve_through_aliases(type_id);
         match self.type_table.get(type_id).map(|t| &t.kind) {
-            Some(TypeKind::Interface { .. }) => true,
-            Some(TypeKind::Optional { inner_type }) => matches!(
+            Some(TypeKind::Optional { inner_type }) => is_interface(
                 self.type_table
                     .get(self.resolve_through_aliases(*inner_type))
                     .map(|t| &t.kind),
-                Some(TypeKind::Interface { .. })
             ),
-            _ => false,
+            kind => is_interface(kind),
         }
+    }
+
+    /// Whether an expression yields an interface fat pointer, looking
+    /// through a cast to the value it converts.
+    pub(crate) fn is_interface_value_expr(&self, expr: &HirExpr) -> bool {
+        self.is_interface_value_type(expr.ty)
+            || matches!(&expr.kind, HirExprKind::Cast { expr: inner, .. }
+                if self.is_interface_value_type(inner.ty))
     }
 
     pub(crate) fn get_interface_symbol(&self, type_id: TypeId) -> Option<SymbolId> {

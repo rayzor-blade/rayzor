@@ -870,6 +870,40 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 {
                     return Ok(inner_type);
                 }
+                // `a ??= b` (parsed as `a = a ?? b`) is `a`'s type, out of
+                // `Null` when `b` is a basic type.
+                if let parser::ExprKind::Assign {
+                    left,
+                    op: parser::AssignOp::Assign,
+                    right,
+                } = &inner.kind
+                    && let parser::ExprKind::Binary {
+                        left: read,
+                        op: parser::BinaryOp::NullCoal,
+                        ..
+                    } = &right.kind
+                    && read == left
+                    && let crate::tast::TypedExpressionKind::BinaryOp { right: value, .. } =
+                        &typed.kind
+                    && let crate::tast::TypedExpressionKind::BinaryOp { right: value, .. } =
+                        &value.kind
+                {
+                    let table = self.lowering.context.type_table.borrow();
+                    let basic = matches!(
+                        table.get(value.expr_type).map(|t| &t.kind),
+                        Some(
+                            crate::tast::TypeKind::Int
+                                | crate::tast::TypeKind::Float
+                                | crate::tast::TypeKind::Bool
+                        )
+                    );
+                    if basic
+                        && let Some(crate::tast::TypeKind::Optional { inner_type }) =
+                            table.get(ty).map(|t| &t.kind)
+                    {
+                        return Ok(*inner_type);
+                    }
+                }
                 Ok(ty)
             }
             Ok(_) => Err(probe_errors.join("\n")),

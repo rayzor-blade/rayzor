@@ -769,6 +769,41 @@ impl<'a> HirToMirContext<'a> {
         Some(fields)
     }
 
+    /// A value stored into a struct-init field: an Int for a Float (or
+    /// `Null<Float>`) field is that Float, a scalar for a `Null<Float>` or
+    /// `Null<Bool>` field is its box, and a `Null<Int>` slot gets a `NullInt`.
+    fn struct_init_field_value(
+        &mut self,
+        value: IrId,
+        value_ty: TypeId,
+        field_type: TypeId,
+        is_int: bool,
+    ) -> IrId {
+        let field_ir_type = self.convert_type(field_type);
+        let optional_inner = match self.type_table.get(field_type).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => {
+                self.type_table.get(*inner_type).map(|t| t.kind.clone())
+            }
+            _ => None,
+        };
+        let wants_float =
+            field_ir_type == IrType::F64 || matches!(optional_inner, Some(TypeKind::Float));
+        let value = match self.builder.get_register_type(value) {
+            Some(have @ (IrType::I32 | IrType::I64)) if is_int && wants_float => self
+                .builder
+                .build_cast(value, have, IrType::F64)
+                .unwrap_or(value),
+            _ => value,
+        };
+        let value = if matches!(optional_inner, Some(TypeKind::Float | TypeKind::Bool)) {
+            self.maybe_box_for_optional(value, value_ty, field_type)
+                .unwrap_or(value)
+        } else {
+            value
+        };
+        self.coerce_null_int(value, &field_ir_type).unwrap_or(value)
+    }
+
     fn lower_struct_init_class_literal(
         &mut self,
         fields: &[(InternedString, HirExpr)],
@@ -875,20 +910,13 @@ impl<'a> HirToMirContext<'a> {
             let value = match literal_init {
                 Some(init) => {
                     let value = self.lower_expression(&init)?;
-                    match self.builder.get_register_type(value) {
-                        Some(have @ (IrType::I32 | IrType::I64))
-                            if field_ir_type == IrType::F64 =>
-                        {
-                            self.builder
-                                .build_cast(value, have, IrType::F64)
-                                .unwrap_or(value)
-                        }
-                        _ => value,
-                    }
+                    self.struct_init_field_value(value, init.ty, field_type, true)
                 }
-                None => self.build_type_default(field_type)?,
+                None => {
+                    let value = self.build_type_default(field_type)?;
+                    self.coerce_null_int(value, &field_ir_type).unwrap_or(value)
+                }
             };
-            let value = self.coerce_null_int(value, &field_ir_type).unwrap_or(value);
             let index = self.builder.build_const(IrValue::I64(index as i64))?;
             let field_ptr = self.builder.build_gep(object, vec![index], field_ir_type)?;
             self.builder.build_store(field_ptr, value);
@@ -911,23 +939,12 @@ impl<'a> HirToMirContext<'a> {
                     })?;
             let value = self.lower_expression(expression)?;
             let (value, _) = self.maybe_wrap_for_interface(value, expression.ty, field_type);
-            let field_ir_type = self.convert_type(field_type);
-            // An Int for a Float field is that Float.
             let is_int = matches!(
                 self.type_table.get(expression.ty).map(|t| &t.kind),
                 Some(TypeKind::Int)
             );
-            let value = match self.builder.get_register_type(value) {
-                Some(have @ (IrType::I32 | IrType::I64))
-                    if is_int && field_ir_type == IrType::F64 =>
-                {
-                    self.builder
-                        .build_cast(value, have, IrType::F64)
-                        .unwrap_or(value)
-                }
-                _ => value,
-            };
-            let value = self.coerce_null_int(value, &field_ir_type).unwrap_or(value);
+            let value = self.struct_init_field_value(value, expression.ty, field_type, is_int);
+            let field_ir_type = self.convert_type(field_type);
             let index = self.builder.build_const(IrValue::I64(index as i64))?;
             let field_ptr = self.builder.build_gep(object, vec![index], field_ir_type)?;
             self.builder.build_store(field_ptr, value);

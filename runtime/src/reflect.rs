@@ -339,7 +339,10 @@ unsafe fn class_field_of(type_id: u32, obj: *mut u8, name: &str) -> *mut u8 {
             Some((offset, ty)) => {
                 let slot_ptr = obj.add(offset) as *const u64;
                 let value = std::ptr::read_unaligned(slot_ptr);
-                box_class_field_as_dynamic(value, ty)
+                match crate::type_system::lookup_class_field_enum(type_id, name) {
+                    Some(enum_id) => crate::type_system::box_enum_slot(value, enum_id),
+                    None => box_class_field_as_dynamic(value, ty),
+                }
             }
             // A method with a registered thunk (under its run-time name,
             // which `@:native` may change) is a callable bound closure;
@@ -520,7 +523,10 @@ pub extern "C" fn haxe_reflect_set_field(obj: *mut u8, field: *mut u8, value: *m
                 name_len as usize,
             ));
             if let Some((offset, ty)) = lookup_class_field(type_id_lo, name) {
-                let raw = raw_value_to_slot(value, ty);
+                let raw = match crate::type_system::lookup_class_field_enum(type_id_lo, name) {
+                    Some(enum_id) => crate::type_system::enum_slot_value(value, enum_id),
+                    None => raw_value_to_slot(value, ty),
+                };
                 let slot_ptr = actual.add(offset) as *mut u64;
                 std::ptr::write_unaligned(slot_ptr, raw);
             }

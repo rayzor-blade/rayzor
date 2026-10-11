@@ -178,6 +178,27 @@ impl<'a> HirToMirContext<'a> {
             self.builder.build_store(field_ptr_i64, arg_reg)?;
         }
 
+        // An omitted optional argument holds its field's null.
+        for i in constructor_args.len().min(field_count)..field_count {
+            let null = match field_types.get(i).map(|(ir, _)| ir) {
+                Some(IrType::NullInt) => {
+                    let null = self.builder.build_null_int()?;
+                    self.coerce_reg_to(null, &IrType::I64)?
+                }
+                _ => self.builder.build_const(IrValue::I64(0))?,
+            };
+            let field_offset = self.builder.build_const(IrValue::I64((8 + i * 8) as i64))?;
+            let field_ptr = self.builder.build_gep(
+                ptr,
+                vec![field_offset],
+                IrType::Ptr(Box::new(IrType::I8)),
+            )?;
+            let field_ptr_i64 = self
+                .builder
+                .build_bitcast(field_ptr, IrType::Ptr(Box::new(IrType::I64)))?;
+            self.builder.build_store(field_ptr_i64, null)?;
+        }
+
         self.builder.build_bitcast(ptr, IrType::I64)
     }
 

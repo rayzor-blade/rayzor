@@ -471,7 +471,20 @@ impl<'a> AstLowering<'a> {
             }
             // Handle regular fields (var, final, property)
             match self.lower_field(field) {
-                Ok(typed_field) => fields.push(typed_field),
+                Ok(mut typed_field) => {
+                    let ty = self.struct_init_optional_field_type(
+                        &class_decl.meta,
+                        field,
+                        typed_field.field_type,
+                    );
+                    if ty != typed_field.field_type {
+                        typed_field.field_type = ty;
+                        self.context
+                            .symbol_table
+                            .update_symbol_type(typed_field.symbol_id, ty);
+                    }
+                    fields.push(typed_field)
+                }
                 Err(e) => self.context.add_error(e),
             }
         }

@@ -269,9 +269,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
         loop {
             // Haxe's ladder, not C's: `%` above `*` `/`; the three bitwise
             // operators share one level ABOVE the comparisons, so
-            // `n & 0x8000 != 0` is `(n & 0x8000) != 0`; `...` sits below them.
+            // `n & 0x8000 != 0` is `(n & 0x8000) != 0`; `??` sits between the
+            // two, so `a ?? b || c` is `(a ?? b) || c`; `...` sits below them.
             let (op, prec, right_assoc) = match self.stream.peek().kind {
-                TokenKind::QuestionQuestion => (BinaryOp::NullCoal, 2, true),
                 TokenKind::PipePipe => (BinaryOp::Or, 3, false),
                 TokenKind::AmpAmp => (BinaryOp::And, 4, false),
                 TokenKind::DotDotDot => (BinaryOp::Range, 5, false),
@@ -282,19 +282,20 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 TokenKind::Gt => (BinaryOp::Gt, 6, false),
                 TokenKind::Ge => (BinaryOp::Ge, 6, false),
                 TokenKind::KwIs => (BinaryOp::Is, 6, false),
-                TokenKind::Pipe => (BinaryOp::BitOr, 7, false),
-                TokenKind::Caret => (BinaryOp::BitXor, 7, false),
-                TokenKind::Amp => (BinaryOp::BitAnd, 7, false),
-                TokenKind::Shl => (BinaryOp::Shl, 8, false),
-                TokenKind::Shr => (BinaryOp::Shr, 8, false),
-                TokenKind::Ushr => (BinaryOp::Ushr, 8, false),
-                TokenKind::Plus => (BinaryOp::Add, 9, false),
-                TokenKind::Minus => (BinaryOp::Sub, 9, false),
-                TokenKind::Star => (BinaryOp::Mul, 10, false),
-                TokenKind::Slash => (BinaryOp::Div, 10, false),
-                TokenKind::Percent => (BinaryOp::Mod, 11, false),
+                TokenKind::QuestionQuestion => (BinaryOp::NullCoal, 7, false),
+                TokenKind::Pipe => (BinaryOp::BitOr, 8, false),
+                TokenKind::Caret => (BinaryOp::BitXor, 8, false),
+                TokenKind::Amp => (BinaryOp::BitAnd, 8, false),
+                TokenKind::Shl => (BinaryOp::Shl, 9, false),
+                TokenKind::Shr => (BinaryOp::Shr, 9, false),
+                TokenKind::Ushr => (BinaryOp::Ushr, 9, false),
+                TokenKind::Plus => (BinaryOp::Add, 10, false),
+                TokenKind::Minus => (BinaryOp::Sub, 10, false),
+                TokenKind::Star => (BinaryOp::Mul, 11, false),
+                TokenKind::Slash => (BinaryOp::Div, 11, false),
+                TokenKind::Percent => (BinaryOp::Mod, 12, false),
                 // Tighter than every other binary operator, right to left.
-                TokenKind::KwIn => (BinaryOp::In, 12, true),
+                TokenKind::KwIn => (BinaryOp::In, 13, true),
                 _ => break,
             };
 

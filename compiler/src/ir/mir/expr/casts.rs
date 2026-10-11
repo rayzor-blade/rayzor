@@ -207,6 +207,36 @@ impl<'a> HirToMirContext<'a> {
             return self.null_int_to_ir(value, &to_type);
         }
 
+        // `(1 : Null<Float>)`, `(true : Null<Bool>)`: a scalar under `Null` is
+        // its box, an Int converted first for a Float.
+        let boxed_inner = match self.type_table.get(target_type).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => {
+                match self.type_table.get(*inner_type).map(|t| &t.kind) {
+                    Some(TypeKind::Float) => Some(IrType::F64),
+                    Some(TypeKind::Bool) => Some(IrType::Bool),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(inner_ir) = boxed_inner
+            && matches!(
+                self.type_table.get(expr.ty).map(|t| &t.kind),
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+            )
+        {
+            let value_reg = self.lower_expression(expr)?;
+            let value_reg = match self.builder.get_register_type(value_reg) {
+                Some(have @ (IrType::I32 | IrType::I64)) if inner_ir == IrType::F64 => {
+                    self.builder.build_cast(value_reg, have, IrType::F64)?
+                }
+                _ => value_reg,
+            };
+            return self
+                .maybe_box_for_optional(value_reg, expr.ty, target_type)
+                .or(Some(value_reg));
+        }
+
         // A Dynamic source is a box, so even the unchecked cast changes the
         // representation: the value comes out of the box, unverified. Before
         // the same-MIR-type shortcut, which a box and an object both take.

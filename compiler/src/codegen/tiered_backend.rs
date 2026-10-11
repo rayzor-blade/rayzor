@@ -2839,6 +2839,7 @@ impl TieredBackend {
                     .map(|h| h as u32)
                     .unwrap_or(typedef.type_id.0);
                 register_enum_from_mir(rtti_key, &typedef.name, &variant_data);
+                CraneliftBackend::register_variant_param_enums(rtti_key, variants);
             }
         }
     }
@@ -2902,6 +2903,7 @@ impl TieredBackend {
                     &static_fields,
                     &typedef.instance_methods,
                 );
+                CraneliftBackend::register_field_enums(rtti_key, fields);
             }
         }
         CraneliftBackend::register_stdlib_runtime_class_rtti();

@@ -950,6 +950,43 @@ impl<'a> AstLowering<'a> {
         ty
     }
 
+    /// An `@:optional` var of a `@:structInit` class holding a basic type is
+    /// `Null<T>`: an omitted field reads null, as on Haxe's dynamic targets.
+    pub(crate) fn struct_init_optional_field_type(
+        &self,
+        class_meta: &[Metadata],
+        field: &ClassField,
+        ty: TypeId,
+    ) -> TypeId {
+        let has = |meta: &[Metadata], name: &str| {
+            meta.iter()
+                .any(|m| m.name.strip_prefix(':').unwrap_or(&m.name) == name)
+        };
+        let is_var = matches!(
+            field.kind,
+            ClassFieldKind::Var { .. } | ClassFieldKind::Final { .. }
+        );
+        if !is_var
+            || field.modifiers.contains(&Modifier::Static)
+            || !has(&field.meta, "optional")
+            || !has(class_meta, "structInit")
+        {
+            return ty;
+        }
+        let mut tt = self.context.type_table.borrow_mut();
+        let mut cur = ty;
+        for _ in 0..8 {
+            match tt.get(cur).map(|t| t.kind.clone()) {
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool) => {
+                    return tt.create_optional_type(ty);
+                }
+                Some(TypeKind::TypeAlias { target_type, .. }) => cur = target_type,
+                _ => return ty,
+            }
+        }
+        ty
+    }
+
     pub(crate) fn lower_parameter(
         &mut self,
         parameter: &FunctionParam,

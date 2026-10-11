@@ -1019,7 +1019,20 @@ impl<'a> HirToMirContext<'a> {
                 Some(self.lower_reflect_make_var_args(args, result_type, location))
             }
             "haxe_reflect_set_field" | "haxe_reflect_set_property" if args.len() == 3 => {
-                let object = self.lower_expression(&args[0])?;
+                let mut object = self.lower_expression(&args[0])?;
+                // Reflection writes the object an interface value wraps.
+                if self.is_interface_value_expr(&args[0]) {
+                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                    let identity = self.get_or_register_extern_function(
+                        "haxe_iface_identity",
+                        vec![ptr_u8.clone()],
+                        ptr_u8.clone(),
+                    );
+                    let wrapped = self.coerce_reg_to(object, &ptr_u8)?;
+                    object = self
+                        .builder
+                        .build_call_direct(identity, vec![wrapped], ptr_u8)?;
+                }
                 let name = self.lower_expression(&args[1])?;
                 let value = self.lower_expression(&args[2])?;
                 // Reflect setters consume a Dynamic box, including reference values.

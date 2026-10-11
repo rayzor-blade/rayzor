@@ -431,7 +431,12 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// `a ?? b` with `a` a `Null<Int>`: `a` unless it holds `NULL_INT`.
-    fn lower_null_int_coalesce(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
+    fn lower_null_int_coalesce(
+        &mut self,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+        result_ty: TypeId,
+    ) -> Option<IrId> {
         let lhs_pass = self.builder.create_block()?;
         let eval_rhs = self.builder.create_block()?;
         let merge = self.builder.create_block()?;
@@ -443,141 +448,167 @@ impl<'a> HirToMirContext<'a> {
         self.builder
             .build_cond_branch(present, lhs_pass, eval_rhs)?;
 
-        let result_type = self.convert_type(rhs.ty);
+        let result_type = self.convert_type(result_ty);
         self.builder.switch_to_block(lhs_pass);
         let lhs_final = self.null_int_to_ir(lhs_val, &result_type)?;
         let lhs_pass_block = self.builder.current_block()?;
         self.builder.build_branch(merge)?;
 
         self.builder.switch_to_block(eval_rhs);
-        let rhs_val = self.lower_expression(rhs)?;
-        let rhs_val = self
-            .coerce_null_int(rhs_val, &result_type)
-            .unwrap_or(rhs_val);
+        let rhs_incoming = self.lower_null_coal_rhs(rhs, result_ty, merge)?;
+        self.finish_null_coalesce(
+            merge,
+            result_type,
+            (lhs_pass_block, lhs_final),
+            rhs_incoming,
+        )
+    }
+
+    /// `b` of `a ?? b` in the result's representation, branching to `merge`;
+    /// `None` inside when `b` never completes (`?? throw e`).
+    fn lower_null_coal_rhs(
+        &mut self,
+        rhs: &HirExpr,
+        result_ty: TypeId,
+        merge: IrBlockId,
+    ) -> Option<Option<(IrBlockId, IrId)>> {
+        let rhs_val = self.lower_expression(rhs);
+        if self.is_terminated() {
+            return Some(None);
+        }
+        let rhs_val = self.coerce_null_coal_operand(rhs_val?, rhs.ty, result_ty)?;
         let rhs_block = self.builder.current_block()?;
         self.builder.build_branch(merge)?;
+        Some(Some((rhs_block, rhs_val)))
+    }
 
+    fn finish_null_coalesce(
+        &mut self,
+        merge: IrBlockId,
+        result_type: IrType,
+        lhs_incoming: (IrBlockId, IrId),
+        rhs_incoming: Option<(IrBlockId, IrId)>,
+    ) -> Option<IrId> {
         self.builder.switch_to_block(merge);
         let result = self.builder.build_phi(merge, result_type)?;
         self.builder
-            .add_phi_incoming(merge, result, lhs_pass_block, lhs_final)?;
-        self.builder
-            .add_phi_incoming(merge, result, rhs_block, rhs_val)?;
+            .add_phi_incoming(merge, result, lhs_incoming.0, lhs_incoming.1)?;
+        if let Some((block, value)) = rhs_incoming {
+            self.builder.add_phi_incoming(merge, result, block, value)?;
+        }
         Some(result)
     }
 
-    pub(crate) fn lower_null_coalesce(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
-        if self.is_null_int_type(lhs.ty) {
-            return self.lower_null_int_coalesce(lhs, rhs);
+    /// A `??` operand as the result's representation: a box for a nullable
+    /// result, the opened and converted scalar for a plain one.
+    fn coerce_null_coal_operand(
+        &mut self,
+        value: IrId,
+        from_ty: TypeId,
+        result_ty: TypeId,
+    ) -> Option<IrId> {
+        let want = self.convert_type(result_ty);
+        let Some(have) = self.builder.get_register_type(value) else {
+            return Some(value);
+        };
+        if have == want {
+            return Some(value);
         }
+        if have == IrType::NullInt || want == IrType::NullInt {
+            return self.coerce_null_int(value, &want).or(Some(value));
+        }
+        let scalar = |t: &IrType| {
+            matches!(
+                t,
+                IrType::I32 | IrType::I64 | IrType::F32 | IrType::F64 | IrType::Bool
+            )
+        };
+        match (&have, &want) {
+            (IrType::Ptr(_), w) if scalar(w) => {
+                let inner = match self.type_table.get(from_ty).map(|t| &t.kind) {
+                    Some(TypeKind::Optional { inner_type }) => *inner_type,
+                    _ => return Some(value),
+                };
+                let opened = self
+                    .maybe_unbox_optional(value, from_ty, inner)
+                    .unwrap_or(value);
+                match self.builder.get_register_type(opened) {
+                    Some(h) if h != want && scalar(&h) => {
+                        self.builder.build_cast(opened, h, want.clone())
+                    }
+                    _ => Some(opened),
+                }
+            }
+            (h, IrType::Ptr(_)) if scalar(h) => {
+                let wants_float = matches!(
+                    self.type_table.get(result_ty).map(|t| &t.kind),
+                    Some(TypeKind::Optional { inner_type })
+                        if matches!(
+                            self.type_table.get(*inner_type).map(|t| &t.kind),
+                            Some(TypeKind::Float)
+                        )
+                );
+                let value = if wants_float && matches!(h, IrType::I32 | IrType::I64) {
+                    self.builder.build_cast(value, h.clone(), IrType::F64)?
+                } else {
+                    value
+                };
+                self.maybe_box_for_optional(value, from_ty, result_ty)
+                    .or_else(|| self.maybe_box_value(value, from_ty, result_ty))
+                    .or(Some(value))
+            }
+            (h, w) if scalar(h) && scalar(w) => {
+                self.builder.build_cast(value, h.clone(), w.clone())
+            }
+            (IrType::Ptr(_), IrType::Ptr(_)) => self.builder.build_bitcast(value, want.clone()),
+            _ => Some(value),
+        }
+    }
+
+    pub(crate) fn lower_null_coalesce(
+        &mut self,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+        result_ty: TypeId,
+    ) -> Option<IrId> {
+        if self.is_null_int_type(lhs.ty) {
+            return self.lower_null_int_coalesce(lhs, rhs, result_ty);
+        }
+        let result_type = self.convert_type(result_ty);
+        let lhs_val = self.lower_expression(lhs)?;
+        // A raw scalar is never null: `b` is not evaluated.
+        if matches!(
+            self.builder.get_register_type(lhs_val),
+            Some(IrType::I32 | IrType::F32 | IrType::F64 | IrType::Bool)
+        ) {
+            return self.coerce_null_coal_operand(lhs_val, lhs.ty, result_ty);
+        }
+
         // Intermediary blocks (as for ternary) avoid Cranelift phi issues when
         // br_if targets a merge block directly.
         let lhs_pass = self.builder.create_block()?;
         let eval_rhs = self.builder.create_block()?;
         let merge = self.builder.create_block()?;
 
-        // Optional{primitive} needs an unbox on the pass-through path.
-        let opt_prim = self.is_optional_primitive(lhs.ty);
-
-        let lhs_val = self.lower_expression(lhs)?;
-        let lhs_val = self.truth_of(lhs_val, lhs.ty)?;
-
-        // Null check: lhs != 0 (null pointers and null values are 0). The zero
-        // takes the LHS type to avoid a type mismatch in the comparison.
-        let lhs_ir_type = self.builder.get_register_type(lhs_val);
-        let zero = match lhs_ir_type {
-            Some(IrType::I32) => self.builder.build_const(IrValue::I32(0))?,
-            Some(IrType::F32) => self.builder.build_const(IrValue::F32(0.0))?,
-            Some(IrType::F64) => self.builder.build_const(IrValue::F64(0.0))?,
-            _ => self.builder.build_const(IrValue::I64(0))?,
-        };
+        // The test is on the box, not its payload: a boxed `false` is not null.
+        let zero = self.builder.build_const(IrValue::I64(0))?;
         let is_not_null = self.builder.build_cmp(CompareOp::Ne, lhs_val, zero)?;
-
         self.builder
             .build_cond_branch(is_not_null, lhs_pass, eval_rhs)?;
 
         self.builder.switch_to_block(lhs_pass);
-        let lhs_final = if opt_prim {
-            // Unbox the boxed primitive: Ptr(U8) → inner type
-            let inner_type = {
-                let type_table = self.type_table;
-                match type_table.get(lhs.ty).map(|t| &t.kind) {
-                    Some(crate::tast::TypeKind::Optional { inner_type }) => Some(*inner_type),
-                    _ => None,
-                }
-            };
-            if let Some(inner_ty) = inner_type {
-                let inner_ir = self.convert_type(inner_ty);
-                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                match &inner_ir {
-                    IrType::I32 => {
-                        let unbox_func = self.get_or_register_extern_function(
-                            "haxe_unbox_int_ptr",
-                            vec![ptr_u8],
-                            IrType::I64,
-                        );
-                        let unboxed = self.builder.build_call_direct(
-                            unbox_func,
-                            vec![lhs_val],
-                            IrType::I64,
-                        )?;
-                        self.builder.build_cast(unboxed, IrType::I64, IrType::I32)?
-                    }
-                    IrType::F64 => {
-                        let unbox_func = self.get_or_register_extern_function(
-                            "haxe_unbox_float_ptr",
-                            vec![ptr_u8],
-                            IrType::F64,
-                        );
-                        self.builder
-                            .build_call_direct(unbox_func, vec![lhs_val], IrType::F64)?
-                    }
-                    IrType::Bool => {
-                        let unbox_func = self.get_or_register_extern_function(
-                            "haxe_unbox_bool_ptr",
-                            vec![ptr_u8],
-                            IrType::I64,
-                        );
-                        let unboxed = self.builder.build_call_direct(
-                            unbox_func,
-                            vec![lhs_val],
-                            IrType::I64,
-                        )?;
-                        self.builder
-                            .build_cast(unboxed, IrType::I64, IrType::Bool)?
-                    }
-                    _ => lhs_val,
-                }
-            } else {
-                lhs_val
-            }
-        } else {
-            lhs_val
-        };
+        let lhs_final = self.coerce_null_coal_operand(lhs_val, lhs.ty, result_ty)?;
         let lhs_pass_block = self.builder.current_block()?;
         self.builder.build_branch(merge)?;
 
         self.builder.switch_to_block(eval_rhs);
-        let rhs_val = self.lower_expression(rhs)?;
-        let rhs_val = self.truth_of(rhs_val, rhs.ty)?;
-        let rhs_block = self.builder.current_block()?;
-        self.builder.build_branch(merge)?;
-
-        // When LHS was Optional{primitive}, the result type is the unboxed
-        // primitive type (the RHS type).
-        self.builder.switch_to_block(merge);
-        let result_type = if opt_prim {
-            self.convert_type(rhs.ty)
-        } else {
-            self.convert_type(lhs.ty)
-        };
-        let result = self.builder.build_phi(merge, result_type)?;
-        self.builder
-            .add_phi_incoming(merge, result, lhs_pass_block, lhs_final)?;
-        self.builder
-            .add_phi_incoming(merge, result, rhs_block, rhs_val)?;
-
-        Some(result)
+        let rhs_incoming = self.lower_null_coal_rhs(rhs, result_ty, merge)?;
+        self.finish_null_coalesce(
+            merge,
+            result_type,
+            (lhs_pass_block, lhs_final),
+            rhs_incoming,
+        )
     }
 
     pub(crate) fn lower_conditional(

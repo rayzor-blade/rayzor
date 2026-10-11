@@ -399,6 +399,22 @@ fn collect_param_copies<'a>(expr: &'a Expr, names: &mut BTreeMap<&'a str, &'a st
     changed
 }
 
+/// What a literal case pattern says about the subject it is matched against.
+fn literal_pattern_use(pattern: &parser::Pattern) -> Option<ParamUse<'static>> {
+    match pattern {
+        parser::Pattern::Const(value) => match &value.kind {
+            ExprKind::Int(_) => Some(ParamUse::Int),
+            ExprKind::Float(_) => Some(ParamUse::Float),
+            ExprKind::String(_) => Some(ParamUse::String),
+            ExprKind::Bool(_) => Some(ParamUse::Bool),
+            _ => None,
+        },
+        parser::Pattern::Or(items) => items.iter().find_map(literal_pattern_use),
+        parser::Pattern::Bind { pattern, .. } => literal_pattern_use(pattern),
+        _ => None,
+    }
+}
+
 fn operand_use(
     expr: &Expr,
     strings: &std::collections::BTreeSet<String>,
@@ -602,6 +618,12 @@ fn collect_param_operator_uses<'a>(
                 })
             }) {
                 note(subject, ParamUse::EnumOf(ctor, cases), uses);
+            } else if let Some(use_) = cases
+                .iter()
+                .find_map(|c| c.patterns.iter().find_map(literal_pattern_use))
+            {
+                // A subject matched against a literal is of that literal's type.
+                note(subject, use_, uses);
             }
             visit(subject, uses);
             for case in cases {
@@ -659,10 +681,17 @@ fn collect_param_operator_uses<'a>(
                 }
             }
         }
+        // `(p : T)` checks the parameter against `T`.
+        ExprKind::TypeCheck {
+            expr: inner,
+            type_hint,
+        } => {
+            note(inner, ParamUse::Hint(type_hint), uses);
+            visit(inner, uses);
+        }
         ExprKind::Field { expr: inner, .. }
         | ExprKind::Throw(inner)
         | ExprKind::Cast { expr: inner, .. }
-        | ExprKind::TypeCheck { expr: inner, .. }
         | ExprKind::Untyped(inner)
         | ExprKind::Meta { expr: inner, .. }
         | ExprKind::Paren(inner)

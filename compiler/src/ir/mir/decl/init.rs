@@ -645,11 +645,17 @@ impl<'a> HirToMirContext<'a> {
                         .get(field.name)
                         .unwrap_or("<unknown>")
                         .to_string();
+                    // Only an enum argument's shape is kept: it names the
+                    // enum a raw discriminant belongs to.
+                    let shape = match self.field_shape(field.ty) {
+                        shape @ crate::ir::IrFieldShape::Enum(_) => shape,
+                        _ => Default::default(),
+                    };
                     IrField {
                         name: field_name,
                         ty: self.convert_type(field.ty),
                         offset: None,
-                        shape: Default::default(),
+                        shape,
                     }
                 })
                 .collect();

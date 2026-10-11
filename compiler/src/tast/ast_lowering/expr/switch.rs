@@ -64,6 +64,29 @@ impl<'a> AstLowering<'a> {
         let guard = match case.guard.as_ref() {
             Some(own) => {
                 let own = self.lower_expression(own)?;
+                // It reads the names the pattern binds, so they are bound
+                // ahead of it as well as ahead of the body.
+                let own = if prelude.is_empty() {
+                    own
+                } else {
+                    let mut statements = prelude.clone();
+                    let ty = own.expr_type;
+                    statements.push(TypedStatement::Expression {
+                        expression: own,
+                        source_location: self.context.span_to_location(&case.span),
+                    });
+                    TypedExpression {
+                        kind: TypedExpressionKind::Block {
+                            statements,
+                            scope_id: case_scope,
+                        },
+                        expr_type: ty,
+                        usage: VariableUsage::Borrow,
+                        lifetime_id: LifetimeId::from_raw(1),
+                        source_location: self.context.span_to_location(&case.span),
+                        metadata: ExpressionMetadata::default(),
+                    }
+                };
                 let ty = self.context.type_table.borrow().bool_type();
                 Some(TypedExpression {
                     kind: TypedExpressionKind::BinaryOp {

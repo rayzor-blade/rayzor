@@ -2212,6 +2212,44 @@ pub extern "C" fn haxe_trace_enum(type_id: i64, discriminant: i64) {
     }
 }
 
+/// The enum each enum-typed constructor argument holds, by enum id, variant
+/// index and argument index: a tag-only enum's argument is a bare
+/// discriminant, so only this names it.
+static ENUM_PARAM_ENUMS: RwLock<Option<HashMap<(u32, usize, usize), u32>>> = RwLock::new(None);
+
+/// Record the enums of `enum_id`'s constructor arguments, as
+/// `(variant index, argument index, argument's enum id)`.
+pub fn register_enum_param_enums(enum_id: u32, params: &[(usize, usize, u32)]) {
+    let mut guard = ENUM_PARAM_ENUMS.write().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+    for &(variant, index, param_enum) in params {
+        map.insert((enum_id, variant, index), param_enum);
+    }
+}
+
+/// The constructor name an enum-typed argument holds when its enum is
+/// tag-only: the slot is the discriminant, or a box of it.
+fn enum_argument_name(
+    enum_id: u32,
+    variant: usize,
+    index: usize,
+    value: i64,
+) -> Option<&'static str> {
+    let param_enum = *ENUM_PARAM_ENUMS
+        .read()
+        .unwrap()
+        .as_ref()?
+        .get(&(enum_id, variant, index))?;
+    if enum_is_boxed(param_enum) {
+        return None;
+    }
+    let discriminant = match dynamic_box_at(value as *mut u8) {
+        Some(d) if d.type_id.0 == param_enum => d.value_ptr as i64,
+        _ => value,
+    };
+    get_enum_variant_name(TypeId(param_enum), discriminant)
+}
+
 /// `VariantName` or `VariantName(p1, p2)` for a heap enum value with the
 /// layout `[tag:i32][pad:i32][field0:i64][field1:i64]...`.
 fn format_enum_boxed(type_id: u32, ptr: *const u8) -> String {
@@ -2244,7 +2282,10 @@ fn format_enum_boxed(type_id: u32, ptr: *const u8) -> String {
                     let val = *(field_ptr as *const i64);
                     match stamped_enum_cell_type(val) {
                         Some(nested) => out.push_str(&format_enum_boxed(nested, val as *const u8)),
-                        None => out.push_str(&val.to_string()),
+                        None => match enum_argument_name(type_id, tag as usize, i, val) {
+                            Some(name) => out.push_str(name),
+                            None => out.push_str(&val.to_string()),
+                        },
                     }
                 }
                 ParamType::NullInt => {
@@ -3967,16 +4008,25 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
         // (array, anon) has no header to read and boxes untyped.
         Some(ValueTag::Reference) => {
             let p = value as *mut u8;
+            // `Null<T>` over a reference is the reference: its null is null.
             if p.is_null() {
-                return Box::into_raw(Box::new(haxe_box_null())) as *mut u8;
+                return std::ptr::null_mut();
             }
-            // A `T` bound to Dynamic already holds a box. An enum cell's
-            // first word is its variant index, so cells are ruled out first.
+            // A type token or a tag-only enum's discriminant has no header.
+            if (p as usize) <= u32::MAX as usize {
+                return haxe_box_int_ptr(value);
+            }
+            // An enum cell boxes as its enum; its first word, the variant
+            // index, would read as a builtin box's tag.
+            if let Some(type_id) =
+                stamped_enum_cell_type(value).or_else(|| registered_enum_cell_type(value))
+            {
+                return haxe_box_reference_ptr(p, type_id);
+            }
+            // A `T` bound to Dynamic already holds a box.
             let builtin_box = || {
-                stamped_enum_cell_type(value).is_none()
-                    && registered_enum_cell_type(value).is_none()
-                    && dynamic_box_at(p)
-                        .is_some_and(|d| (TYPE_NULL.0..=TYPE_ARRAY.0).contains(&d.type_id.0))
+                dynamic_box_at(p)
+                    .is_some_and(|d| (TYPE_NULL.0..=TYPE_ARRAY.0).contains(&d.type_id.0))
             };
             if is_reference_box(p) || builtin_box() {
                 return p;
@@ -4228,6 +4278,58 @@ pub fn lookup_class_field(start_type_id: u32, name: &str) -> Option<(usize, Para
         current = class_info.super_type_id.map(TypeId);
     }
     None
+}
+
+/// The enum each enum-typed instance slot holds, by class id and field
+/// index: the slot is a discriminant or a cell, so only this names its enum.
+static CLASS_FIELD_ENUMS: RwLock<Option<HashMap<(u32, usize), u32>>> = RwLock::new(None);
+
+/// Record the enums of a class's instance fields; `enum_ids` parallels its
+/// instance fields, 0 for a field of any other type.
+pub fn register_class_field_enums(type_id: u32, enum_ids: &[u32]) {
+    let mut guard = CLASS_FIELD_ENUMS.write().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+    for (idx, &enum_id) in enum_ids.iter().enumerate() {
+        if enum_id != 0 {
+            map.insert((type_id, idx), enum_id);
+        }
+    }
+}
+
+/// The enum of the instance field `name`, found as `lookup_class_field`
+/// finds the field.
+pub fn lookup_class_field_enum(start_type_id: u32, name: &str) -> Option<u32> {
+    let enums = CLASS_FIELD_ENUMS.read().unwrap();
+    let enums = enums.as_ref()?;
+    let guard = TYPE_REGISTRY.read().unwrap();
+    let registry = guard.as_ref()?;
+    let mut current = Some(TypeId(start_type_id));
+    while let Some(tid) = current {
+        let class_info = registry.get(&tid)?.class_info.as_ref()?;
+        if let Some(idx) = class_info.instance_fields.iter().position(|n| *n == name) {
+            return enums.get(&(tid.0, idx)).copied();
+        }
+        current = class_info.super_type_id.map(TypeId);
+    }
+    None
+}
+
+/// An enum slot's value boxed under its enum, as a Dynamic read sees it. A
+/// zero is null only for an enum of cells: a tag-only enum's 0 is a variant.
+pub fn box_enum_slot(value: u64, enum_id: u32) -> *mut u8 {
+    if value == 0 && enum_is_boxed(enum_id) {
+        return std::ptr::null_mut();
+    }
+    haxe_box_reference_ptr(value as *mut u8, enum_id)
+}
+
+/// The slot bits for an enum value stored through Dynamic: a box of that
+/// enum stores its payload; a raw discriminant or cell is stored as it is.
+pub fn enum_slot_value(value: *mut u8, enum_id: u32) -> u64 {
+    match dynamic_box_at(value) {
+        Some(d) if d.type_id.0 == enum_id => d.value_ptr as u64,
+        _ => value as u64,
+    }
 }
 
 /// Returns `true` if `type_id` corresponds to a registered class
