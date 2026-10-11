@@ -106,6 +106,14 @@ impl<'a> HirToMirContext<'a> {
             if hir_func.body.is_some() {
                 self.functions_applying_defaults.insert(func_id);
             }
+            let defaulted_ints: Vec<bool> = hir_func
+                .params
+                .iter()
+                .map(|p| self.param_defaulted_in_body(hir_func, p))
+                .collect();
+            if defaulted_ints.contains(&true) {
+                self.callee_defaulted_ints.insert(func_id, defaulted_ints);
+            }
         }
 
         // Store parameter HIR types for structural subtyping materialization at call sites
@@ -275,6 +283,14 @@ impl<'a> HirToMirContext<'a> {
             // `param_default_guards` heads every lowered body.
             if hir_func.body.is_some() {
                 self.functions_applying_defaults.insert(func_id);
+            }
+            let defaulted_ints: Vec<bool> = hir_func
+                .params
+                .iter()
+                .map(|p| self.param_defaulted_in_body(hir_func, p))
+                .collect();
+            if defaulted_ints.contains(&true) {
+                self.callee_defaulted_ints.insert(func_id, defaulted_ints);
             }
         }
 

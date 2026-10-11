@@ -34,6 +34,10 @@ pub struct StaticMethodSig {
     pub type_params: Vec<parser::TypeParam>,
     /// Each parameter is optional (`?x`) or has a default.
     pub optional: Vec<bool>,
+    /// Each parameter is a plain Int with a non-null default, which a body
+    /// takes as a `NullInt` and defaults itself (MIR's
+    /// `param_defaults_in_callee`).
+    pub defaulted_ints: Vec<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -308,6 +312,39 @@ impl StaticSigIndex {
         Some(names)
     }
 
+    /// The parameters of an interface method as bare type names, as its
+    /// slot takes them (see `indexed_static_param_kinds`), from the first
+    /// interface on the `extends` chain that declares it.
+    pub fn interface_param_kinds(
+        &mut self,
+        name: &str,
+        method: &str,
+    ) -> Option<Vec<Option<String>>> {
+        self.interface_param_kinds_inner(name, method, &mut BTreeSet::new())
+    }
+
+    fn interface_param_kinds_inner(
+        &mut self,
+        name: &str,
+        method: &str,
+        visiting: &mut BTreeSet<String>,
+    ) -> Option<Vec<Option<String>>> {
+        self.ensure_indexed_from_known_files(name);
+        if !visiting.insert(name.to_owned()) {
+            return None;
+        }
+        let class = self.classes.get(name)?;
+        if let Some(sig) = class.instances.get(method) {
+            return Some(Self::slot_kinds(sig));
+        }
+        let (parents, _) = class.interface.clone()?;
+        let package = class.package.clone();
+        parents.into_iter().find_map(|parent| {
+            let parent = self.qualify_parent(parent, &package);
+            self.interface_param_kinds_inner(&parent, method, visiting)
+        })
+    }
+
     /// A bare `extends Base` names a type in the subclass's own package, then
     /// in each enclosing one; fall back to the name as written so an imported
     /// parent still resolves through the unambiguous bare form.
@@ -465,15 +502,61 @@ impl StaticSigIndex {
     }
 
     /// The declared parameters of an indexed static as bare type names (see
-    /// `StaticMethodSig::param_kinds`). Sizes a forward reference to a call
-    /// that leaves trailing optional arguments out.
+    /// `StaticMethodSig::param_kinds`), as its signature takes them. Sizes a
+    /// forward reference to a call that leaves trailing optional arguments out.
     pub fn indexed_static_param_kinds(
         &self,
         owner: &str,
         method: &str,
-    ) -> Option<&[Option<String>]> {
+    ) -> Option<Vec<Option<String>>> {
         let sig = self.classes.get(owner)?.statics.get(method)?;
-        Some(&sig.param_kinds)
+        Some(Self::slot_kinds(sig))
+    }
+
+    /// `param_kinds` with each Int the callee defaults itself as `NullInt`.
+    fn slot_kinds(sig: &StaticMethodSig) -> Vec<Option<String>> {
+        sig.param_kinds
+            .iter()
+            .zip(&sig.defaulted_ints)
+            .map(|(kind, defaulted)| {
+                if *defaulted {
+                    Some("NullInt".to_string())
+                } else {
+                    kind.clone()
+                }
+            })
+            .collect()
+    }
+
+    /// A plain Int parameter with a non-null default: annotated `Int`, or
+    /// unannotated with an Int literal default.
+    fn defaulted_int(p: &parser::FunctionParam) -> bool {
+        if p.optional || crate::debug_flags::null_int_boxed() {
+            return false;
+        }
+        let Some(default) = p.default_value.as_deref() else {
+            return false;
+        };
+        let mut t = p.type_hint.as_ref();
+        while let Some(ty) = t {
+            match ty {
+                parser::Type::Parenthesis { inner, .. } | parser::Type::Named { inner, .. } => {
+                    t = Some(inner)
+                }
+                parser::Type::Path { path, .. } => {
+                    return path.name == "Int" && !matches!(default.kind, parser::ExprKind::Null);
+                }
+                _ => return false,
+            }
+        }
+        match &default.kind {
+            parser::ExprKind::Int(_) => true,
+            parser::ExprKind::Unary {
+                op: parser::UnaryOp::Neg,
+                expr,
+            } => matches!(expr.kind, parser::ExprKind::Int(_)),
+            _ => false,
+        }
     }
 
     pub(crate) fn parameter_name(&self, owner: &str, method: &str, index: usize) -> Option<&str> {
@@ -806,6 +889,7 @@ impl StaticSigIndex {
                         .iter()
                         .map(|p| p.optional || p.default_value.is_some())
                         .collect(),
+                    defaulted_ints: func.params.iter().map(Self::defaulted_int).collect(),
                 });
         }
         self.bare_to_qualified

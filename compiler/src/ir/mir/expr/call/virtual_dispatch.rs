@@ -98,7 +98,8 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
                 // Omitted trailing arguments take the method's declared defaults.
-                if let Some(&func_id) = self.function_map.get(symbol) {
+                let func_id = self.function_map.get(symbol).copied();
+                if let Some(func_id) = func_id {
                     self.fill_default_args(func_id, &mut call_args, true);
                 }
                 let lookup_fn = self.get_or_register_extern_function(
@@ -120,6 +121,8 @@ impl<'a> HirToMirContext<'a> {
                     let passed = declared.or_else(|| self.builder.get_register_type(*reg));
                     param_types.push(passed.unwrap_or(IrType::I64));
                 }
+                let method = func_id.or_else(|| self.external_function_map.get(symbol).copied());
+                let param_types = self.class_slot_param_types(method, &call_args, param_types);
                 let return_type = self.convert_type(expr.ty);
                 return self.build_class_slot_call(fn_ptr, call_args, param_types, return_type);
             }

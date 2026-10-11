@@ -520,6 +520,9 @@ pub struct HirToMirContext<'a> {
     /// Functions whose body applies its own defaults to a null `Null<Int>`
     /// parameter, so an omitted one is passed as null.
     functions_applying_defaults: BTreeSet<IrFunctionId>,
+    /// Per parameter: a defaulted plain `Int` the callee takes as `NullInt`
+    /// and defaults itself (`param_defaults_in_callee`).
+    callee_defaulted_ints: BTreeMap<IrFunctionId, Vec<bool>>,
 
     /// Constructor param counts from import modules (for BLADE-cached constructors).
     /// fill_default_args uses this when the constructor isn't in the local module yet.
@@ -1493,6 +1496,7 @@ impl<'a> HirToMirContext<'a> {
             function_param_defaults: BTreeMap::new(),
             function_param_symbols: BTreeMap::new(),
             functions_applying_defaults: BTreeSet::new(),
+            callee_defaulted_ints: BTreeMap::new(),
             external_constructor_param_counts: BTreeMap::new(),
             external_function_param_types: BTreeMap::new(),
             function_param_hir_types: BTreeMap::new(),

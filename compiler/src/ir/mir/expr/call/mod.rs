@@ -936,6 +936,11 @@ impl<'a> HirToMirContext<'a> {
                                     for arg in args.iter().skip(1) {
                                         param_types.push(self.convert_type(arg.ty));
                                     }
+                                    let param_types = self.class_slot_param_types(
+                                        Some(func_id),
+                                        &arg_regs,
+                                        param_types,
+                                    );
                                     return self.build_class_slot_call(
                                         closure_ptr,
                                         arg_regs,

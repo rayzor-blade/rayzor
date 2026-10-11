@@ -188,6 +188,10 @@ impl<'a> HirToMirContext<'a> {
         match slots {
             CallMethodSlots::Int => return self.to_null_int(raw),
             CallMethodSlots::NullInt => return self.builder.build_bitcast(raw, IrType::NullInt),
+            CallMethodSlots::Float => {
+                let float = self.builder.build_bitcast(raw, IrType::F64)?;
+                return self.to_null_int(float);
+            }
             _ => {}
         }
         let as_ptr = self
@@ -582,9 +586,21 @@ impl<'a> HirToMirContext<'a> {
             args_array_reg
         };
 
+        // A parameter the callee defaults itself is a `NullInt` there.
+        let param_ir_types: Vec<IrType> = param_type_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, ty)| {
+                if callee.is_some_and(|id| self.callee_defaults_int(id, idx)) {
+                    IrType::NullInt
+                } else {
+                    self.convert_type(*ty)
+                }
+            })
+            .collect();
         for (idx, param_ty_id) in param_type_ids.iter().enumerate() {
             let default = defaults.get(idx).cloned().flatten();
-            let target_ty = self.convert_type(*param_ty_id);
+            let target_ty = param_ir_types[idx].clone();
             let value = self.call_method_arg(
                 args_array_ptr,
                 idx,
@@ -618,10 +634,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         let func_signature = IrType::Function {
-            params: param_type_ids
-                .iter()
-                .map(|ty| self.convert_type(*ty))
-                .collect(),
+            params: param_ir_types,
             return_type: Box::new(self.convert_type(return_type_id)),
             varargs: false,
         };

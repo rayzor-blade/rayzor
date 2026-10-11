@@ -435,6 +435,9 @@ impl<'a> HirToMirContext<'a> {
                 for (i, arg) in args.iter().enumerate() {
                     param_types.push(self.convert_type(formals.get(i).copied().unwrap_or(arg.ty)));
                 }
+                self.fill_default_args(func_id, &mut call_args, true);
+                let param_types =
+                    self.class_slot_param_types(Some(func_id), &call_args, param_types);
                 let return_type = self.convert_type(expr.ty);
                 return self.build_class_slot_call(
                     closure_ptr,
@@ -1540,7 +1543,6 @@ impl<'a> HirToMirContext<'a> {
                                         .and_then(|i| {
                                             i.borrow()
                                                 .indexed_static_param_kinds(owner, method_name)
-                                                .map(|k| k.to_vec())
                                         })
                                         .unwrap_or_default();
                                     let mut arg_regs = Vec::new();

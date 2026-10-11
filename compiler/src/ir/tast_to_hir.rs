@@ -4590,7 +4590,8 @@ impl<'a> TastToHirContext<'a> {
     /// `if (p == null) p = default;` for each String or `Null<scalar>`
     /// parameter with a non-null default: Haxe applies a default in the
     /// callee, so an explicit null or a call through a function value still
-    /// gets it. A plain scalar parameter has no null to test.
+    /// gets it. A plain Int is defaulted by MIR, which takes it as a
+    /// `NullInt` (`bind_defaulted_int_param`); a Float or Bool has no null.
     fn param_default_guards(&mut self, params: &[TypedParameter]) -> Vec<HirStatement> {
         let mut guards = Vec::new();
         for param in params {

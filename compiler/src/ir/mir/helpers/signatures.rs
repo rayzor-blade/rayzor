@@ -38,7 +38,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         for param in &func.params {
-            let param_type = self.convert_type(param.ty);
+            let param_type = self.param_ir_type(func, param);
             let param_name = self
                 .string_interner
                 .get(param.name)
@@ -90,7 +90,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         for param in &func.params {
-            let param_type = self.convert_type(param.ty);
+            let param_type = self.param_ir_type(func, param);
             let param_name = self
                 .string_interner
                 .get(param.name)
@@ -158,6 +158,122 @@ impl<'a> HirToMirContext<'a> {
         builder.build()
     }
 
+    /// A plain `Int` parameter with a non-null default. Haxe applies a
+    /// default in the callee, so a body taking one declares it `NullInt`: an
+    /// omitted or null argument arrives as null and the body substitutes its
+    /// own default, the receiver's on a virtual call. The body still reads
+    /// an Int (`bind_defaulted_int_param`). Overrides and implementations
+    /// agree on the slot because Haxe requires them to match the parent's
+    /// optional flags and parameter types.
+    pub(crate) fn param_defaults_in_callee(&self, param: &HirParam) -> bool {
+        if crate::debug_flags::null_int_boxed() {
+            return false;
+        }
+        param
+            .default
+            .as_ref()
+            .is_some_and(|default| !matches!(default.kind, HirExprKind::Null))
+            && matches!(
+                self.type_table.get(param.ty).map(|t| &t.kind),
+                Some(TypeKind::Int)
+            )
+    }
+
+    /// Whether `func`'s body defaults `param` itself (an async body is
+    /// rewritten into a closure and keeps the declared type).
+    pub(crate) fn param_defaulted_in_body(&self, func: &HirFunction, param: &HirParam) -> bool {
+        func.body.is_some() && !func.is_async && self.param_defaults_in_callee(param)
+    }
+
+    /// A parameter's type in `func`'s signature.
+    pub(crate) fn param_ir_type(&self, func: &HirFunction, param: &HirParam) -> IrType {
+        if self.param_defaulted_in_body(func, param) {
+            IrType::NullInt
+        } else {
+            self.convert_type(param.ty)
+        }
+    }
+
+    /// Whether `func_id` takes parameter `index` (`this` excluded) as a
+    /// `NullInt` it defaults itself. An imported callee says so in its
+    /// compiled signature: `NullInt` where the declared type is a plain Int.
+    pub(crate) fn callee_defaults_int(&self, func_id: IrFunctionId, index: usize) -> bool {
+        if let Some(flags) = self.callee_defaulted_ints.get(&func_id) {
+            return flags.get(index).copied().unwrap_or(false);
+        }
+        let (Some(ir), Some(declared)) = (
+            self.external_function_param_types.get(&func_id),
+            self.function_param_hir_types.get(&func_id),
+        ) else {
+            return false;
+        };
+        let offset = match ir.len().checked_sub(declared.len()) {
+            Some(offset @ (0 | 1)) => offset,
+            _ => return false,
+        };
+        ir.get(index + offset) == Some(&IrType::NullInt)
+            && declared.get(index).is_some_and(|ty| {
+                matches!(
+                    self.type_table.get(*ty).map(|t| &t.kind),
+                    Some(TypeKind::Int)
+                )
+            })
+    }
+
+    /// The parameter types of a call through a class slot, one per argument
+    /// (the receiver first), with each parameter the callee defaults itself
+    /// as the `NullInt` its slot takes.
+    pub(crate) fn class_slot_param_types(
+        &self,
+        func_id: Option<IrFunctionId>,
+        args: &[IrId],
+        mut params: Vec<IrType>,
+    ) -> Vec<IrType> {
+        for arg in args.iter().skip(params.len()) {
+            params.push(self.builder.get_register_type(*arg).unwrap_or(IrType::I64));
+        }
+        if let Some(func_id) = func_id {
+            for (i, param) in params.iter_mut().enumerate().skip(1) {
+                if self.callee_defaults_int(func_id, i - 1) {
+                    *param = IrType::NullInt;
+                }
+            }
+        }
+        params
+    }
+
+    /// The Int a body reads for a parameter it defaults itself: its default
+    /// when the `NullInt` argument is null, else the argument.
+    pub(crate) fn bind_defaulted_int_param(&mut self, param: &HirParam, reg: IrId) -> IrId {
+        let Some(default) = param.default.as_ref() else {
+            return reg;
+        };
+        // The default is evaluated only when the argument is null: it may
+        // have side effects.
+        (|| {
+            let is_null = self.null_int_is_null(reg)?;
+            let value = self.builder.build_cast(reg, IrType::NullInt, IrType::I32)?;
+            let value_block = self.builder.current_block()?;
+            let use_default = self.builder.create_block()?;
+            let merge = self.builder.create_block()?;
+            self.builder
+                .build_cond_branch(is_null, use_default, merge)?;
+            self.builder.switch_to_block(use_default);
+            let fallback = self.lower_expression(default)?;
+            let fallback = self.coerce_reg_to(fallback, &IrType::I32)?;
+            let default_block = self.builder.current_block()?;
+            self.builder.build_branch(merge)?;
+            self.builder.switch_to_block(merge);
+            let result = self.builder.build_phi(merge, IrType::I32)?;
+            self.builder
+                .add_phi_incoming(merge, result, value_block, value)?;
+            self.builder
+                .add_phi_incoming(merge, result, default_block, fallback)?;
+            Some(result)
+        })()
+        .unwrap_or(reg)
+    }
+
     /// Place supplied arguments in the parameters they can actually occupy,
     /// filling any LEADING optional the caller skipped.
     ///
@@ -204,8 +320,9 @@ impl<'a> HirToMirContext<'a> {
             match slot {
                 Some(a_idx) => rebound.push(supplied_regs[*a_idx]),
                 // A skipped `Null<Int>` is null, as when it is left off the end.
-                None if self.convert_type(param_types[p_idx]) == IrType::NullInt
-                    && (callee_applies || !matches!(defaults.get(p_idx), Some(Some(_)))) =>
+                None if self.callee_defaults_int(func_id, p_idx)
+                    || (self.convert_type(param_types[p_idx]) == IrType::NullInt
+                        && (callee_applies || !matches!(defaults.get(p_idx), Some(Some(_))))) =>
                 {
                     let Some(reg) = self.builder.build_null_int() else {
                         return;
@@ -351,6 +468,23 @@ impl<'a> HirToMirContext<'a> {
         arg_expr: &HirExpr,
         arg_reg: IrId,
     ) -> Option<IrId> {
+        // A callee that defaults the parameter itself takes the null.
+        if self.callee_defaults_int(func_id, param_index) {
+            if matches!(arg_expr.kind, HirExprKind::Null) {
+                return self.builder.build_null_int();
+            }
+            let nullable = matches!(
+                self.type_table
+                    .get(self.resolve_through_aliases(arg_expr.ty))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Optional { .. }) | Some(TypeKind::Dynamic)
+            );
+            return match self.builder.get_register_type(arg_reg) {
+                Some(IrType::NullInt) => Some(arg_reg),
+                Some(IrType::Ptr(_)) if nullable => self.to_null_int(arg_reg),
+                _ => None,
+            };
+        }
         let default_expr = self
             .function_param_defaults
             .get(&func_id)?
@@ -518,7 +652,9 @@ impl<'a> HirToMirContext<'a> {
                 // An omitted `Null<Int>` is null when it has no default, or
                 // when the callee applies its own: a virtual call then gets
                 // the default of the receiver's class.
-                if null_int_formal && (callee_applies || defaults[i].is_none()) {
+                if self.callee_defaults_int(func_id, i)
+                    || (null_int_formal && (callee_applies || defaults[i].is_none()))
+                {
                     if let Some(reg) = self.builder.build_null_int() {
                         arg_regs.push(reg);
                     }

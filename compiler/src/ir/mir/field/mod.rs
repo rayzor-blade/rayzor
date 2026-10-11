@@ -61,10 +61,7 @@ impl<'a> HirToMirContext<'a> {
             let pointer =
                 self.builder
                     .build_call_direct(lookup, vec![args[0], slot], IrType::I64)?;
-            let params = args
-                .iter()
-                .map(|arg| self.builder.get_register_type(*arg).unwrap_or(IrType::I64))
-                .collect();
+            let params = self.class_slot_param_types(Some(func_id), &args, Vec::new());
             self.build_class_slot_call(pointer, args, params, return_type)
         } else {
             self.builder.build_call_direct(func_id, args, return_type)

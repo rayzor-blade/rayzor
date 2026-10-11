@@ -54,6 +54,53 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
+    /// Per slot parameter: a defaulted plain `Int`, which the slot takes as
+    /// the `NullInt` its implementations default themselves.
+    fn interface_slot_defaulted_ints(
+        &self,
+        interface: SymbolId,
+        name: InternedString,
+    ) -> Vec<bool> {
+        let mut pending = vec![interface];
+        let mut seen = BTreeSet::new();
+        while let Some(interface) = pending.pop() {
+            if !seen.insert(interface) {
+                continue;
+            }
+            for declaration in self.current_hir_types.values() {
+                if let HirTypeDecl::Interface(declaration) = declaration {
+                    if declaration.symbol_id == interface {
+                        if let Some(method) = declaration.methods.iter().find(|m| m.name == name) {
+                            return method
+                                .params
+                                .iter()
+                                .map(|p| self.param_defaults_in_callee(p))
+                                .collect();
+                        }
+                    }
+                }
+            }
+            // Declared elsewhere: the parsed declaration says so.
+            let declared = self
+                .class_qualified_name(interface)
+                .zip(self.string_interner.get(name))
+                .zip(self.static_sig_index.as_ref())
+                .and_then(|((owner, method), index)| {
+                    index.borrow_mut().interface_param_kinds(&owner, method)
+                });
+            if let Some(kinds) = declared {
+                return kinds
+                    .iter()
+                    .map(|kind| kind.as_deref() == Some("NullInt"))
+                    .collect();
+            }
+            if let Some(parents) = self.interface_extends.get(&interface) {
+                pending.extend(parents);
+            }
+        }
+        Vec::new()
+    }
+
     pub(crate) fn prepare_interface_slot_args(
         &mut self,
         interface: SymbolId,
@@ -65,9 +112,12 @@ impl<'a> HirToMirContext<'a> {
             .interface_slot_signature(interface, name)
             .map(|s| s.0)
             .unwrap_or_default();
+        let defaulted = self.interface_slot_defaulted_ints(interface, name);
         let mut params = vec![IrType::Ptr(Box::new(IrType::Void))];
         for (i, arg) in arguments.iter_mut().enumerate().skip(1) {
-            if let (Some(source), Some(target)) = (types.get(i - 1), formals.get(i - 1)) {
+            if defaulted.get(i - 1).copied().unwrap_or(false) {
+                *arg = self.to_null_int(*arg)?;
+            } else if let (Some(source), Some(target)) = (types.get(i - 1), formals.get(i - 1)) {
                 *arg = self.adapt_interface_slot_value(*arg, *source, *target)?;
             }
             params.push(self.builder.get_register_type(*arg).unwrap_or(IrType::I64));
@@ -75,8 +125,12 @@ impl<'a> HirToMirContext<'a> {
         // Omitted trailing arguments: null for a `Null<Int>`, whose default
         // the implementation applies, else the zero of the slot's type.
         let supplied = arguments.len().saturating_sub(1);
-        for formal in formals.iter().skip(supplied) {
-            let ty = self.convert_type(*formal);
+        for (i, formal) in formals.iter().enumerate().skip(supplied) {
+            let ty = if defaulted.get(i).copied().unwrap_or(false) {
+                IrType::NullInt
+            } else {
+                self.convert_type(*formal)
+            };
             let value = match &ty {
                 IrType::NullInt => self.builder.build_null_int()?,
                 IrType::I32 => self.builder.build_const(IrValue::I32(0))?,
@@ -275,8 +329,16 @@ impl<'a> HirToMirContext<'a> {
             .param("this".to_owned(), IrType::Ptr(Box::new(IrType::Void)))
             .returns(slot_ir_return)
             .calling_convention(CallingConvention::Haxe);
+        // The slot's own types where the interface and the implementation
+        // disagree on whether a plain Int is defaulted by the callee.
+        let defaulted = self.interface_slot_defaulted_ints(interface, name);
         for (i, (slot, native)) in slot_params.iter().zip(&native_params).enumerate() {
-            let ty = if self.interface_slot_needs_conversion(*slot, *native) {
+            let ty = if defaulted.get(i).copied().unwrap_or(false) {
+                IrType::NullInt
+            } else if self.interface_slot_needs_conversion(*slot, *native)
+                || (native_ir_params[i] == IrType::NullInt
+                    && self.convert_type(*slot) == IrType::I32)
+            {
                 self.convert_type(*slot)
             } else {
                 native_ir_params[i].clone()

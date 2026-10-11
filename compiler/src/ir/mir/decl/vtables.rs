@@ -713,6 +713,8 @@ impl<'a> HirToMirContext<'a> {
             let Some(ty) = cur else { break };
             match self.type_table.get(ty).map(|t| &t.kind) {
                 Some(TypeKind::Dynamic) => return SlotKind::Dynamic,
+                // An Int parameter its callee defaults itself.
+                Some(TypeKind::Int) if *ir_ty == IrType::NullInt => return SlotKind::NullInt,
                 Some(TypeKind::Int) => return SlotKind::Scalar(ir_ty.clone()),
                 Some(TypeKind::Float) => return SlotKind::Float(ir_ty.clone()),
                 Some(TypeKind::Bool) => return SlotKind::Bool,

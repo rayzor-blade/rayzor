@@ -394,8 +394,17 @@ impl<'a> HirToMirContext<'a> {
         let param_offset = if this_type.is_some() { 1 } else { 0 };
         for (i, param) in hir_func.params.iter().enumerate() {
             if let Some(sig_param) = func.signature.parameters.get(i + param_offset) {
-                self.symbol_map.insert(param.symbol_id, sig_param.reg);
-                let _ = self.box_capture_binding(param.symbol_id, sig_param.reg);
+                // A parameter the body defaults itself is read as its Int;
+                // earlier parameters are bound for a default that names one.
+                let reg = if sig_param.ty == IrType::NullInt
+                    && self.param_defaulted_in_body(hir_func, param)
+                {
+                    self.bind_defaulted_int_param(param, sig_param.reg)
+                } else {
+                    sig_param.reg
+                };
+                self.symbol_map.insert(param.symbol_id, reg);
+                let _ = self.box_capture_binding(param.symbol_id, reg);
             }
         }
 

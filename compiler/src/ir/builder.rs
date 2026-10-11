@@ -755,6 +755,18 @@ impl IrBuilder {
                         .collect()
                 })
                 .unwrap_or_default();
+            // An Int bound for a `NullInt` parameter sign-extends, as in
+            // `build_call_direct`.
+            for (arg, param_ty) in args.iter_mut().zip(&param_types) {
+                if *param_ty != IrType::NullInt {
+                    continue;
+                }
+                if let Some(arg_ty) = self.get_register_type(*arg) {
+                    if let Some(coerced) = self.coerce_null_int_arg(*arg, &arg_ty, param_ty) {
+                        *arg = coerced;
+                    }
+                }
+            }
             if args.len() < param_types.len() {
                 for param_ty in &param_types[args.len()..] {
                     let default_val = match param_ty {
