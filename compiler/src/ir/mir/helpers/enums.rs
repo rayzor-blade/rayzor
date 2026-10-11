@@ -61,6 +61,67 @@ impl<'a> HirToMirContext<'a> {
         false
     }
 
+    /// A tag-only enum: its values are bare discriminants, so null is
+    /// `NULL_INT` rather than 0, which is the first constructor.
+    pub(crate) fn is_tag_only_enum_type(&self, ty: TypeId) -> bool {
+        match self
+            .type_table
+            .get(self.resolve_through_aliases(ty))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Enum { symbol_id, .. }) => !self.enum_is_boxed(*symbol_id),
+            _ => false,
+        }
+    }
+
+    /// `NULL_INT` for a null literal passed to a tag-only enum parameter that
+    /// has no default.
+    pub(crate) fn null_for_enum_formal(
+        &mut self,
+        func_id: IrFunctionId,
+        param_index: usize,
+        arg_expr: &HirExpr,
+    ) -> Option<IrId> {
+        if !matches!(arg_expr.kind, HirExprKind::Null) {
+            return None;
+        }
+        let param_ty = *self
+            .function_param_hir_types
+            .get(&func_id)?
+            .get(param_index)?;
+        let has_default = self
+            .function_param_defaults
+            .get(&func_id)
+            .and_then(|defaults| defaults.get(param_index))
+            .is_some_and(|default| default.is_some());
+        if has_default || !self.is_tag_only_enum_type(param_ty) {
+            return None;
+        }
+        self.builder.build_const(IrValue::null_int())
+    }
+
+    /// `reg == null` for a tag-only enum value: `NULL_INT` in an integer
+    /// register, a null pointer where the value travels as one.
+    pub(crate) fn enum_tag_is_null(&mut self, reg: IrId) -> Option<IrId> {
+        match self.builder.get_register_type(reg) {
+            Some(IrType::Ptr(_)) => {
+                let bits = self.builder.build_bitcast(reg, IrType::I64)?;
+                let zero = self.builder.build_const(IrValue::I64(0))?;
+                self.builder.build_cmp(CompareOp::Eq, bits, zero)
+            }
+            Some(IrType::I64) | None => {
+                let null = self.builder.build_const(IrValue::null_int())?;
+                self.builder.build_cmp(CompareOp::Eq, reg, null)
+            }
+            Some(other) if other.is_integer() => {
+                let wide = self.builder.build_cast(reg, other, IrType::I64)?;
+                let null = self.builder.build_const(IrValue::null_int())?;
+                self.builder.build_cmp(CompareOp::Eq, wide, null)
+            }
+            _ => self.builder.build_bool(false),
+        }
+    }
+
     /// Stable runtime id for an enum, from its declaration symbol. Mirrors the
     /// `TypeKind::Enum` arm of `runtime_type_id` so a value boxed by type and a
     /// lookup keyed by symbol land on the same key. Enum RTTI registration uses

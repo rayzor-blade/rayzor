@@ -224,6 +224,9 @@ impl<'a> HirToMirContext<'a> {
                         .filter_map(|(i, a)| {
                             let reg = self.lower_expression(a)?;
                             let i = param_of[i];
+                            if let Some(null) = self.null_for_enum_formal(func_id, i, a) {
+                                return Some(null);
+                            }
                             if let Some(filled) = self.default_for_null_arg(func_id, i, a, reg) {
                                 return Some(filled);
                             }
@@ -243,6 +246,14 @@ impl<'a> HirToMirContext<'a> {
                                         Some(TypeKind::Optional { .. })
                                     )
                                 });
+                            let formal_ty = self
+                                .function_param_hir_types
+                                .get(&func_id)
+                                .and_then(|types| types.get(i))
+                                .copied();
+                            if let Some(formal_ty) = formal_ty {
+                                self.mark_int_array_for_erased_view(reg, a, formal_ty);
+                            }
                             Some(if optional_formal {
                                 self.maybe_materialize_for_call(a, reg, Some(func_id), i)
                             } else if scalar_formal {

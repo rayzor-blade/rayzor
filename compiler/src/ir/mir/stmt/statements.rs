@@ -1187,6 +1187,12 @@ impl<'a> HirToMirContext<'a> {
                     if let (Some(val), Some(fn_ret_ty)) =
                         (result, self.current_function_return_type)
                     {
+                        // A null returned as a tag-only enum is `NULL_INT`.
+                        if matches!(e.kind, HirExprKind::Null)
+                            && self.is_tag_only_enum_type(fn_ret_ty)
+                        {
+                            return self.builder.build_const(IrValue::null_int());
+                        }
                         if let Some(converted) =
                             self.maybe_abstract_to_convert(val, e.ty, fn_ret_ty)
                         {

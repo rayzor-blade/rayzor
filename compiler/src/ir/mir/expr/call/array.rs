@@ -23,6 +23,60 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// An `Array<Int>` handed to an `Array<Any>`/`Array<Dynamic>` slot is
+    /// marked, so a Float pushed through that view is stored as an Int. A
+    /// literal checked against the erased type is built as that type and
+    /// is left alone.
+    pub(crate) fn mark_int_array_for_erased_view(
+        &mut self,
+        reg: IrId,
+        source: &HirExpr,
+        target_ty: TypeId,
+    ) {
+        let element_of = |me: &Self, ty: TypeId| {
+            me.type_table
+                .get(me.resolve_through_aliases(ty))
+                .and_then(|t| match &t.kind {
+                    TypeKind::Array { element_type } => Some(*element_type),
+                    _ => None,
+                })
+        };
+        let source_ty = match &source.kind {
+            HirExprKind::Cast { expr, .. } if !matches!(expr.kind, HirExprKind::Array { .. }) => {
+                expr.ty
+            }
+            _ => source.ty,
+        };
+        let int_source = element_of(&*self, source_ty).is_some_and(|et| {
+            matches!(
+                self.type_table
+                    .get(self.resolve_through_aliases(et))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Int)
+            )
+        });
+        let erased_target = element_of(&*self, target_ty).is_some_and(|et| {
+            matches!(
+                self.type_table.get(et).map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            ) || self.is_any_type(et)
+        });
+        if !int_source || !erased_target {
+            return;
+        }
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let Some(arr) = self.coerce_reg_to(reg, &ptr_u8) else {
+            return;
+        };
+        let mark = self.get_or_register_extern_function(
+            "haxe_array_mark_int_elems",
+            vec![ptr_u8],
+            IrType::Void,
+        );
+        self.builder
+            .build_call_direct(mark, vec![arr], IrType::Void);
+    }
+
     pub(crate) fn try_array_runtime_call(
         &mut self,
         expr: &HirExpr,
@@ -205,6 +259,47 @@ impl<'a> HirToMirContext<'a> {
                     })
                     .unwrap_or((false, false))
             };
+            // A Float through an `Array<Any>`/`Array<Dynamic>` view: the runtime
+            // stores it as an Int when the array is an `Array<Int>`.
+            let elem_is_erased = elem_is_dynamic
+                || self
+                    .type_table
+                    .get(self.resolve_through_aliases(args[0].ty))
+                    .is_some_and(|t| {
+                        matches!(&t.kind, TypeKind::Array { element_type }
+                            if self.is_any_type(*element_type))
+                    });
+            if elem_is_erased && self.convert_type(args[1].ty) == IrType::F64 {
+                let arr = self.lower_expression(&args[0])?;
+                let value = self.lower_expression(&args[1])?;
+                let value = match self.builder.get_register_type(value) {
+                    Some(IrType::F64) => value,
+                    Some(from @ (IrType::F32 | IrType::I32)) => {
+                        self.builder.build_cast(value, from, IrType::F64)?
+                    }
+                    // An erased slot carries the f64 bits.
+                    Some(IrType::I64) => self.builder.build_bitcast(value, IrType::F64)?,
+                    _ => {
+                        let bits = self.coerce_reg_to(value, &IrType::I64)?;
+                        let push = self.get_or_register_extern_function(
+                            "haxe_array_push_i64",
+                            vec![IrType::Ptr(Box::new(IrType::I64)), IrType::I64],
+                            IrType::Void,
+                        );
+                        return self
+                            .builder
+                            .build_call_direct(push, vec![arr, bits], IrType::Void);
+                    }
+                };
+                let push = self.get_or_register_extern_function(
+                    "haxe_array_push_any_f64",
+                    vec![IrType::Ptr(Box::new(IrType::I64)), IrType::F64],
+                    IrType::Void,
+                );
+                return self
+                    .builder
+                    .build_call_direct(push, vec![arr, value], IrType::Void);
+            }
             // Dynamic string slots need a tag for value-based equality.
             if elem_is_dynamic && self.convert_type(args[1].ty) == IrType::String {
                 let arr = self.lower_expression(&args[0])?;

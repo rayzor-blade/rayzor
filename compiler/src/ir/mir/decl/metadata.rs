@@ -93,6 +93,11 @@ impl<'a> HirToMirContext<'a> {
                 Some(other) => other,
                 None => IrValue::null_int(),
             })
+        } else if self.is_tag_only_enum_type(field.ty)
+            && matches!(initializer, None | Some(IrValue::Null))
+        {
+            // A tag-only enum static starts null too.
+            Some(IrValue::null_int())
         } else {
             initializer
         };

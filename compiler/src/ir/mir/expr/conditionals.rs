@@ -591,8 +591,15 @@ impl<'a> HirToMirContext<'a> {
         let merge = self.builder.create_block()?;
 
         // The test is on the box, not its payload: a boxed `false` is not null.
-        let zero = self.builder.build_const(IrValue::I64(0))?;
-        let is_not_null = self.builder.build_cmp(CompareOp::Ne, lhs_val, zero)?;
+        // A tag-only enum's null is `NULL_INT`.
+        let is_not_null = if self.is_tag_only_enum_type(lhs.ty) {
+            let is_null = self.enum_tag_is_null(lhs_val)?;
+            let no = self.builder.build_bool(false)?;
+            self.builder.build_cmp(CompareOp::Eq, is_null, no)?
+        } else {
+            let zero = self.builder.build_const(IrValue::I64(0))?;
+            self.builder.build_cmp(CompareOp::Ne, lhs_val, zero)?
+        };
         self.builder
             .build_cond_branch(is_not_null, lhs_pass, eval_rhs)?;
 
@@ -829,6 +836,8 @@ impl<'a> HirToMirContext<'a> {
                         )
                     })
                     .unwrap_or(false);
+                // A tag-only enum result takes `NULL_INT` for the null side.
+                let result_is_tag_enum = result_ty.is_some_and(|t| self.is_tag_only_enum_type(t));
 
                 // ...and only when the pointer side is literally `null`. A pointer
                 // branch carrying a real value (e.g. `x` in `(x == null) ? 0 : x`
@@ -879,19 +888,37 @@ impl<'a> HirToMirContext<'a> {
                         else_val = Some(ni_out);
                         then_val = Some(other_out);
                     }
-                } else if result_is_scalar && then_is_ptr && else_is_prim && then_is_null_lit {
+                } else if (result_is_scalar || result_is_tag_enum)
+                    && then_is_ptr
+                    && else_is_prim
+                    && then_is_null_lit
+                {
                     let cur = self.builder.current_block();
                     self.builder.switch_to_block(then_end_block);
-                    if let Some(z) = self.zero_of_ir_type(&else_rty.clone().unwrap()) {
+                    let z = if result_is_tag_enum {
+                        self.builder.build_const(IrValue::null_int())
+                    } else {
+                        self.zero_of_ir_type(&else_rty.clone().unwrap())
+                    };
+                    if let Some(z) = z {
                         then_val = Some(z);
                     }
                     if let Some(c) = cur {
                         self.builder.switch_to_block(c);
                     }
-                } else if result_is_scalar && else_is_ptr && then_is_prim && else_is_null_lit {
+                } else if (result_is_scalar || result_is_tag_enum)
+                    && else_is_ptr
+                    && then_is_prim
+                    && else_is_null_lit
+                {
                     let cur = self.builder.current_block();
                     self.builder.switch_to_block(else_end_block);
-                    if let Some(z) = self.zero_of_ir_type(&then_rty.clone().unwrap()) {
+                    let z = if result_is_tag_enum {
+                        self.builder.build_const(IrValue::null_int())
+                    } else {
+                        self.zero_of_ir_type(&then_rty.clone().unwrap())
+                    };
+                    if let Some(z) = z {
                         else_val = Some(z);
                     }
                     if let Some(c) = cur {

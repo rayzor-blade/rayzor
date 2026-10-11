@@ -150,9 +150,9 @@ impl<'a> HirToMirContext<'a> {
         Some(obj_ptr)
     }
 
-    /// Write `NULL_INT` into the `Null<Int>` slots of a `class_symbol`
-    /// instance -- its own fields, and its ancestors' with `inherited` -- since
-    /// a zeroed slot reads as Int 0, not null.
+    /// Write `NULL_INT` into the `Null<Int>` and tag-only enum slots of a
+    /// `class_symbol` instance -- its own fields, and its ancestors' with
+    /// `inherited` -- since a zeroed slot reads as 0, not null.
     pub(crate) fn fill_null_int_fields(
         &mut self,
         object: IrId,
@@ -187,14 +187,15 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         for (_, field_type, index) in fields {
-            if !self.is_null_int_type(field_type) {
+            let (null, slot_ty) = if self.is_null_int_type(field_type) {
+                (self.builder.build_null_int()?, IrType::NullInt)
+            } else if self.is_tag_only_enum_type(field_type) {
+                (self.builder.build_const(IrValue::null_int())?, IrType::I64)
+            } else {
                 continue;
-            }
-            let null = self.builder.build_null_int()?;
+            };
             let index = self.builder.build_const(IrValue::I32(index as i32))?;
-            let slot = self
-                .builder
-                .build_gep(object, vec![index], IrType::NullInt)?;
+            let slot = self.builder.build_gep(object, vec![index], slot_ty)?;
             self.builder.build_store(slot, null)?;
         }
         Some(())

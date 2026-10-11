@@ -2204,7 +2204,10 @@ pub extern "C" fn haxe_type_enum_parameters(
 /// Prints the variant name if available, otherwise the discriminant
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_enum(type_id: i64, discriminant: i64) {
-    if let Some(name) = get_enum_variant_name(TypeId(type_id as u32), discriminant) {
+    // A tag-only enum's null.
+    if discriminant == NULL_INT {
+        println!("null");
+    } else if let Some(name) = get_enum_variant_name(TypeId(type_id as u32), discriminant) {
         println!("{}", name);
     } else {
         // Fallback to discriminant if enum not registered
@@ -2375,6 +2378,7 @@ pub extern "C" fn haxe_array_to_string_enum(
                 } else {
                     match get_enum_variant_name(TypeId(type_id), slot) {
                         Some(name) => out.push_str(name),
+                        None if slot == NULL_INT => out.push_str("null"),
                         None => out.push_str(&slot.to_string()),
                     }
                 }
@@ -2390,6 +2394,7 @@ pub extern "C" fn haxe_array_to_string_enum(
 pub extern "C" fn haxe_enum_to_string(type_id: i64, discriminant: i64) -> *mut u8 {
     let text = match get_enum_variant_name(TypeId(type_id as u32), discriminant) {
         Some(name) => name.to_string(),
+        None if discriminant == NULL_INT => "null".to_string(),
         None => discriminant.to_string(),
     };
     unsafe { alloc_haxe_string(&text) }

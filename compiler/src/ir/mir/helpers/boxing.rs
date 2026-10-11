@@ -316,8 +316,25 @@ impl<'a> HirToMirContext<'a> {
                     ptr_u8.clone(),
                 );
 
-                self.builder
-                    .build_call_direct(box_func_id, vec![value, type_id_const], ptr_u8)
+                let boxed = self.builder.build_call_direct(
+                    box_func_id,
+                    vec![value, type_id_const],
+                    ptr_u8.clone(),
+                )?;
+                // A tag-only enum's `NULL_INT` is a null Dynamic.
+                let tag_only_enum = matches!(
+                    &value_kind_cloned,
+                    Some(TypeKind::Enum { symbol_id, .. }) if !self.enum_is_boxed(*symbol_id)
+                ) && self.builder.get_register_type(value) == Some(IrType::I64);
+                if !tag_only_enum {
+                    return Some(boxed);
+                }
+                let null = self.builder.build_const(IrValue::null_int())?;
+                let absent = self.builder.build_cmp(CompareOp::Eq, value, null)?;
+                let bits = self.builder.build_bitcast(boxed, IrType::I64)?;
+                let zero = self.builder.build_const(IrValue::I64(0))?;
+                let out = self.builder.build_select(absent, zero, bits)?;
+                self.builder.build_bitcast(out, ptr_u8)
             }
 
             Some(TypeKind::Function { .. }) => {
@@ -966,6 +983,17 @@ impl<'a> HirToMirContext<'a> {
                 .build_call_direct(box_func, vec![v64, tag_reg], ptr_u8);
         }
 
+        // A `Null<E>` over a tag-only enum carries the discriminant raw, null
+        // as 0; the enum's own null is `NULL_INT`.
+        if self.is_tag_only_enum_type(inner_type)
+            && self.builder.get_register_type(value) == Some(IrType::I64)
+        {
+            let null = self.builder.build_const(IrValue::null_int())?;
+            let absent = self.builder.build_cmp(CompareOp::Eq, value, null)?;
+            let zero = self.builder.build_const(IrValue::I64(0))?;
+            return self.builder.build_select(absent, zero, value);
+        }
+
         // Only box genuine primitive *value* types. An IR-type check alone is
         // not enough: an Enum and a pointer-sized abstract (Usize/Ptr/Ref/Box)
         // both lower to `I64`, yet they are reference/handle values that are
@@ -1288,13 +1316,18 @@ impl<'a> HirToMirContext<'a> {
 
             // Enums: a variant access may be typed Dynamic in HIR while the MIR
             // value is a raw i64 discriminant rather than a boxed pointer.
-            Some(TypeKind::Enum { .. }) => {
+            Some(TypeKind::Enum { symbol_id, .. }) => {
                 let actual_type = self.builder.get_register_type(value);
                 if matches!(actual_type, Some(IrType::I64) | Some(IrType::I32)) {
                     debug!(
                         "[UNBOXING] Skipping unbox for enum - value is already i64 discriminant"
                     );
                     return Some(value);
+                }
+                // A tag-only enum reads a null Dynamic as `NULL_INT`.
+                let tag_only = !self.enum_is_boxed(*symbol_id);
+                if tag_only && self.builder.is_null_const(value) {
+                    return self.builder.build_const(IrValue::null_int());
                 }
                 debug!("[UNBOXING] Auto-unboxing Dynamic to Enum using unbox_reference");
 
@@ -1304,8 +1337,18 @@ impl<'a> HirToMirContext<'a> {
                     vec![ptr_u8.clone()],
                     ptr_u8.clone(),
                 );
-                self.builder
-                    .build_call_direct(unbox_func_id, vec![value], ptr_u8)
+                let unboxed = self
+                    .builder
+                    .build_call_direct(unbox_func_id, vec![value], ptr_u8)?;
+                if !tag_only {
+                    return Some(unboxed);
+                }
+                let bits = self.builder.build_bitcast(unboxed, IrType::I64)?;
+                let source = self.builder.build_bitcast(value, IrType::I64)?;
+                let zero = self.builder.build_const(IrValue::I64(0))?;
+                let absent = self.builder.build_cmp(CompareOp::Eq, source, zero)?;
+                let null = self.builder.build_const(IrValue::null_int())?;
+                self.builder.build_select(absent, null, bits)
             }
 
             // A class or enum used as a value is its type id; under Dynamic it

@@ -1033,6 +1033,10 @@ impl<'a> HirToMirContext<'a> {
 
             // A null typed `Null<Int>` is `NULL_INT` from the start.
             HirExprKind::Null if self.is_null_int_type(expr.ty) => self.builder.build_null_int(),
+            // So is one typed as a tag-only enum.
+            HirExprKind::Null if self.is_tag_only_enum_type(expr.ty) => {
+                self.builder.build_const(IrValue::null_int())
+            }
             HirExprKind::Null => self.builder.build_null(),
 
             HirExprKind::Untyped(inner) => {

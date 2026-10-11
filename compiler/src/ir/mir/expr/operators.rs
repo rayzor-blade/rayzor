@@ -629,6 +629,27 @@ impl<'a> HirToMirContext<'a> {
             return self.builder.build_cmp(cmp_op, sides[0], sides[1]);
         }
 
+        // A tag-only enum value against null: null is `NULL_INT`, never a
+        // discriminant.
+        if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
+            let enum_side = if is_null_literal(rhs) && self.is_tag_only_enum_type(lhs.ty) {
+                Some(lhs)
+            } else if is_null_literal(lhs) && self.is_tag_only_enum_type(rhs.ty) {
+                Some(rhs)
+            } else {
+                None
+            };
+            if let Some(side) = enum_side {
+                let reg = self.lower_expression(side)?;
+                let is_null = self.enum_tag_is_null(reg)?;
+                if matches!(op, HirBinaryOp::Eq) {
+                    return Some(is_null);
+                }
+                let no = self.builder.build_bool(false)?;
+                return self.builder.build_cmp(CompareOp::Eq, is_null, no);
+            }
+        }
+
         // Comparison against a type parameter. A generic body is lowered ONCE
         // with its parameters erased to i64, so `a == b` on `T` compiles to a
         // raw integer compare: correct for Int, wrong for every value whose

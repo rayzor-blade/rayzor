@@ -340,6 +340,10 @@ impl<'a> HirToMirContext<'a> {
                                 has_implicit_this,
                             )
                         }
+                        // A skipped tag-only enum is null.
+                        _ if self.is_tag_only_enum_type(param_types[p_idx]) => {
+                            self.builder.build_const(IrValue::null_int())
+                        }
                         // Skipped and undefaulted: the parameter is Null<T>, so
                         // it reads as absent rather than as a value.
                         _ => {
@@ -644,6 +648,19 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or_default();
             let callee_applies = self.functions_applying_defaults.contains(&func_id);
             for i in user_arg_count..defaults.len() {
+                // An omitted, undefaulted tag-only enum is null.
+                if defaults[i].is_none()
+                    && self
+                        .function_param_hir_types
+                        .get(&func_id)
+                        .and_then(|types| types.get(i))
+                        .is_some_and(|ty| self.is_tag_only_enum_type(*ty))
+                {
+                    if let Some(reg) = self.builder.build_const(IrValue::null_int()) {
+                        arg_regs.push(reg);
+                    }
+                    continue;
+                }
                 let null_int_formal = self
                     .function_param_hir_types
                     .get(&func_id)
@@ -735,6 +752,22 @@ impl<'a> HirToMirContext<'a> {
         let total_provided = arg_regs.len();
         if total_provided < sig_param_count {
             for i in total_provided..sig_param_count {
+                // An omitted tag-only enum is null.
+                let enum_formal = i
+                    .checked_sub(usize::from(has_implicit_this))
+                    .and_then(|h| {
+                        self.function_param_hir_types
+                            .get(&func_id)
+                            .and_then(|types| types.get(h))
+                            .copied()
+                    })
+                    .is_some_and(|ty| self.is_tag_only_enum_type(ty));
+                if enum_formal && matches!(sig_params.get(i), Some(IrType::I64) | None) {
+                    if let Some(reg) = self.builder.build_const(IrValue::null_int()) {
+                        arg_regs.push(reg);
+                    }
+                    continue;
+                }
                 let default_val = if i < sig_params.len() {
                     match &sig_params[i] {
                         // An omitted `Null<Int>` is null, not 0.
@@ -1017,6 +1050,10 @@ impl<'a> HirToMirContext<'a> {
                     let resolved_param = self.resolve_through_aliases(param_type_id);
                     let resolved_arg = self.resolve_through_aliases(arg_expr.ty);
 
+                    if let Some(null) = self.null_for_enum_formal(func_id, param_index, arg_expr) {
+                        return null;
+                    }
+
                     // A parameter typed `Iterable<T>`/`Iterator<T>` takes an
                     // iteration handle, built here while the argument's concrete
                     // type is still known. This precedes the anon handling below
@@ -1036,6 +1073,7 @@ impl<'a> HirToMirContext<'a> {
                     {
                         return erased;
                     }
+                    self.mark_int_array_for_erased_view(arg_reg, arg_expr, param_type_id);
                     // A `Null<Int>` meets any other formal by value: a box slot
                     // (`Null<T>`, Dynamic) takes its box, an Int its value.
                     if self.builder.get_register_type(arg_reg) == Some(IrType::NullInt) {

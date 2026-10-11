@@ -1275,6 +1275,17 @@ pub extern "C" fn haxe_array_push_f64(arr: i32, val: f64) {
     }
 }
 
+/// A Float pushed through an `Array<Any>` view; the wasm header has no
+/// element-kind flag, so it stores the f64.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_push_any_f64(arr: i32, val: f64) {
+    haxe_array_push_f64(arr, val);
+}
+
+/// The native element-kind flag; the wasm header has none.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_mark_int_elems(_arr: i32) {}
+
 /// Get the low 32 bits of an element at index. Returns 0 if out of bounds.
 /// Reads from `data_ptr + idx * elem_size`.
 #[unsafe(no_mangle)]

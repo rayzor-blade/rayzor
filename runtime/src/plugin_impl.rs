@@ -294,6 +294,14 @@ register_symbol!(
     crate::haxe_array::haxe_array_push_f64
 );
 register_symbol!("haxe_array_get_f64", crate::haxe_array::haxe_array_get_f64);
+register_symbol!(
+    "haxe_array_push_any_f64",
+    crate::haxe_array::haxe_array_push_any_f64
+);
+register_symbol!(
+    "haxe_array_mark_int_elems",
+    crate::haxe_array::haxe_array_mark_int_elems
+);
 
 // ============================================================================
 // Math Functions

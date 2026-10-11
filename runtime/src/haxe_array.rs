@@ -25,6 +25,10 @@ pub struct HaxeArray {
 /// they go through `haxe_array_set_*`.
 pub const HAXE_ARRAY_VIEW: usize = 1;
 
+/// An `Array<Int>` that has been handed to an `Array<Any>`/`Array<Dynamic>`
+/// slot: a Float pushed through that view is stored as an Int.
+pub const HAXE_ARRAY_INT_ELEMS: usize = 2;
+
 const INITIAL_CAPACITY: usize = 8;
 
 // ============================================================================
@@ -928,6 +932,29 @@ pub extern "C" fn haxe_array_get_i64(arr: *const HaxeArray, index: usize) -> i64
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_push_f64(arr: *mut HaxeArray, value: f64) {
     haxe_array_push(arr, &value as *const f64 as *const u8);
+}
+
+/// Mark `arr` as holding Ints (`HAXE_ARRAY_INT_ELEMS`). A box over an
+/// array marks the array it holds.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_mark_int_elems(arr: *mut HaxeArray) {
+    let arr =
+        crate::type_system::haxe_unbox_if_tag(arr as *mut u8, crate::type_system::TYPE_ARRAY.0)
+            as *mut HaxeArray;
+    if !arr.is_null() {
+        unsafe { (*arr).flags |= HAXE_ARRAY_INT_ELEMS };
+    }
+}
+
+/// Push a Float through an `Array<Any>`/`Array<Dynamic>` view: an Int array
+/// stores it as an Int, any other array its f64 bits.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_push_any_f64(arr: *mut HaxeArray, value: f64) {
+    if !arr.is_null() && unsafe { (*arr).flags } & HAXE_ARRAY_INT_ELEMS != 0 {
+        haxe_array_push_i64(arr, value as i64);
+    } else {
+        haxe_array_push_f64(arr, value);
+    }
 }
 
 /// Get f64 from array
