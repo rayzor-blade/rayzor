@@ -811,7 +811,7 @@ impl MacroVm {
                 _ => Ok(MacroValue::Null),
             },
             MacroValue::String(s) => match name {
-                "length" => Ok(MacroValue::Int(s.len() as i64)),
+                "length" => Ok(MacroValue::Int(s.chars().count() as i64)),
                 _ => Ok(MacroValue::Null),
             },
             MacroValue::Null => Err(VmError::new("cannot access field on null")),
@@ -1132,7 +1132,7 @@ impl MacroVm {
         args: Vec<MacroValue>,
     ) -> Result<MacroValue, VmError> {
         match method {
-            "length" => Ok(MacroValue::Int(s.len() as i64)),
+            "length" => Ok(MacroValue::Int(s.chars().count() as i64)),
             "charAt" => {
                 let idx = args.first().and_then(|a| a.as_int()).unwrap_or(0) as usize;
                 Ok(s.chars()
@@ -1143,7 +1143,7 @@ impl MacroVm {
             "indexOf" => {
                 if let Some(MacroValue::String(needle)) = args.first() {
                     match s.find(needle.as_ref()) {
-                        Some(pos) => Ok(MacroValue::Int(pos as i64)),
+                        Some(pos) => Ok(MacroValue::Int(s[..pos].chars().count() as i64)),
                         None => Ok(MacroValue::Int(-1)),
                     }
                 } else {

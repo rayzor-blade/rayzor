@@ -121,26 +121,31 @@ class BPETokenizer implements Tokenizer {
             return encodeBPE(text);
         }
 
+        // Matched over UTF-8 bytes: a valid needle only matches on a
+        // character boundary, so every chunk is whole characters.
+        var tb = haxe.io.Bytes.ofString(text);
+        var nb:Array<haxe.io.Bytes> = [];
+        for (k in 0...specialNames.length) nb.push(haxe.io.Bytes.ofString(specialNames[k]));
         var ids:Array<Int> = [];
         var i = 0;
-        var n = text.length;
+        var n = tb.length;
         var chunkStart = 0;
         while (i < n) {
             var bestMatched = -1;
             var bestLen = 0;
             for (k in 0...specialNames.length) {
-                var name = specialNames[k];
-                var slen = name.length;
+                var needle = nb[k];
+                var slen = needle.length;
                 if (slen <= bestLen) continue;
                 if (i + slen > n) continue;
-                if (substringEq(text, i, name)) {
-                    bestMatched = specials.get(name);
+                if (bytesEqAt(tb, i, needle)) {
+                    bestMatched = specials.get(specialNames[k]);
                     bestLen = slen;
                 }
             }
             if (bestMatched >= 0) {
                 if (i > chunkStart) {
-                    var sub = text.substr(chunkStart, i - chunkStart);
+                    var sub = tb.sub(chunkStart, i - chunkStart).toString();
                     var subIds = encodeBPE(sub);
                     // Index iteration: `for (id in subIds)` desugars to
                     // `haxe.iterators.ArrayIterator.new` which is trap-
@@ -155,7 +160,7 @@ class BPETokenizer implements Tokenizer {
             }
         }
         if (chunkStart < n) {
-            var tail = text.substr(chunkStart, n - chunkStart);
+            var tail = tb.sub(chunkStart, n - chunkStart).toString();
             var tailIds = encodeBPE(tail);
             for (kk in 0...tailIds.length) ids.push(tailIds[kk]);
         }
@@ -226,17 +231,17 @@ class BPETokenizer implements Tokenizer {
         return 0x7FFFFFFF;
     }
 
-    /** Split into UTF-8 CHARACTERS — a multi-byte codepoint must stay one
-        symbol or merges would straddle it. */
-    private function utf8Chars(text:String):Array<String> {
+    /** Split UTF-8 bytes into CHARACTERS — a multi-byte codepoint must stay
+        one symbol or merges would straddle it. */
+    private function utf8Chars(b:haxe.io.Bytes):Array<String> {
         var out:Array<String> = [];
         var i = 0;
-        var n = text.length;
+        var n = b.length;
         while (i < n) {
-            var c = text.charCodeAt(i);
+            var c = b.get(i);
             var len = (c >= 0xF0) ? 4 : ((c >= 0xE0) ? 3 : ((c >= 0xC0) ? 2 : 1));
             if (i + len > n) len = 1;
-            out.push(text.substr(i, len));
+            out.push(b.sub(i, len).toString());
             i += len;
         }
         return out;
@@ -267,23 +272,24 @@ class BPETokenizer implements Tokenizer {
         that byte. Byte-fallback tokens can split a codepoint across tokens, so
         callers must still carry an incomplete tail. */
     private function spmDecodeToBytes(sp:String):haxe.io.Bytes {
+        var sb = haxe.io.Bytes.ofString(sp);
         var out:Array<Int> = [];
         var i = 0;
-        var n = sp.length;
+        var n = sb.length;
         while (i < n) {
-            var c = sp.charCodeAt(i);
-            if (c == 60 && i + 5 < n && sp.charCodeAt(i + 1) == 48
-                && (sp.charCodeAt(i + 2) | 32) == 120 && sp.charCodeAt(i + 5) == 62) {
-                var hi = hexVal(sp.charCodeAt(i + 3));
-                var lo = hexVal(sp.charCodeAt(i + 4));
+            var c = sb.get(i);
+            if (c == 60 && i + 5 < n && sb.get(i + 1) == 48
+                && (sb.get(i + 2) | 32) == 120 && sb.get(i + 5) == 62) {
+                var hi = hexVal(sb.get(i + 3));
+                var lo = hexVal(sb.get(i + 4));
                 if (hi >= 0 && lo >= 0) {
                     out.push((hi << 4) | lo);
                     i += 6;
                     continue;
                 }
             }
-            if (c == 0xE2 && i + 2 < n && sp.charCodeAt(i + 1) == 0x96
-                && sp.charCodeAt(i + 2) == 0x81) {
+            if (c == 0xE2 && i + 2 < n && sb.get(i + 1) == 0x96
+                && sb.get(i + 2) == 0x81) {
                 out.push(32);
                 i += 3;
                 continue;
@@ -303,9 +309,10 @@ class BPETokenizer implements Tokenizer {
     private function encodeSPM(text:String):Array<Int> {
         if (text.length == 0) return [];
         // Space-escaped with a leading word mark, built byte-wise.
+        var tb = haxe.io.Bytes.ofString(text);
         var esc:Array<Int> = [0xE2, 0x96, 0x81];
-        for (i in 0...text.length) {
-            var c = text.charCodeAt(i);
+        for (i in 0...tb.length) {
+            var c = tb.get(i);
             if (c == 32) {
                 esc.push(0xE2);
                 esc.push(0x96);
@@ -316,7 +323,7 @@ class BPETokenizer implements Tokenizer {
         }
         var mb = haxe.io.Bytes.alloc(esc.length);
         for (i in 0...esc.length) mb.set(i, esc[i]);
-        var pieces = utf8Chars(mb.toString());
+        var pieces = utf8Chars(mb);
         var n = pieces.length;
         if (n > 1) {
             var prevIx:Array<Int> = [];
@@ -373,8 +380,9 @@ class BPETokenizer implements Tokenizer {
                 ids.push(id);
                 continue;
             }
-            for (b in 0...p.length) {
-                var bid = vocab.lookup(byteToken(p.charCodeAt(b)));
+            var pb = haxe.io.Bytes.ofString(p);
+            for (b in 0...pb.length) {
+                var bid = vocab.lookup(byteToken(pb.get(b)));
                 if (bid >= 0) ids.push(bid);
             }
         }
@@ -389,8 +397,7 @@ class BPETokenizer implements Tokenizer {
         if (byteLevel) {
             pieces = byteEncodePieces(text);
         } else {
-            pieces = [];
-            for (i in 0...text.length) pieces.push(text.charAt(i));
+            pieces = utf8Chars(haxe.io.Bytes.ofString(text));
         }
 
         // O(n log n). The previous version rescanned every adjacent pair to
@@ -469,12 +476,12 @@ class BPETokenizer implements Tokenizer {
         return ids;
     }
 
-    /** Byte-level substring equality: `text[pos..pos+needle.length] == needle`. */
-    private static function substringEq(text:String, pos:Int, needle:String):Bool {
+    /** Byte equality: `text[pos..pos+needle.length] == needle`. */
+    private static function bytesEqAt(text:haxe.io.Bytes, pos:Int, needle:haxe.io.Bytes):Bool {
         var nlen = needle.length;
         if (pos + nlen > text.length) return false;
         for (j in 0...nlen) {
-            if (text.charCodeAt(pos + j) != needle.charCodeAt(j)) return false;
+            if (text.get(pos + j) != needle.get(j)) return false;
         }
         return true;
     }
@@ -545,18 +552,11 @@ class BPETokenizer implements Tokenizer {
     }
 
     /**
-     * Inverse byte alphabet: walk the input as UTF-8, decode codepoints,
-     * translate each codepoint back to its source byte via `rev`, then
-     * reinterpret the byte sequence as UTF-8.
-     *
-     * CRITICAL: must walk UTF-8 codepoints, NOT raw bytes. Rayzor's
-     * `String.charCodeAt(i)` returns the i-th BYTE (Strings are byte-
-     * indexed); a naive per-char walk would split `Ġ` (UTF-8 `c4 a0`)
-     * into separate `0xC4` and `0xA0` codes. `rev[0xC4]` self-maps to
-     * byte 0xC4, `rev[0xA0]` is -1 → fallback writes `c2 a0`, producing
-     * invalid UTF-8 (`c4 c2`) → `Bytes.toString` emits `�`. The fix is
-     * to combine multi-byte UTF-8 sequences into a single codepoint
-     * before the reverse lookup.
+     * Inverse byte alphabet: walk the input's UTF-8 bytes, decode
+     * codepoints, translate each codepoint back to its source byte via
+     * `rev`, then reinterpret the byte sequence as UTF-8. Multi-byte
+     * sequences must combine into one codepoint before the lookup:
+     * `Ġ` is `c4 a0`, and a per-byte lookup would scramble it.
      */
     static function byteDecode(s:String):String {
         return byteDecodeToBytes(s, byteDecoderArray()).toString();
@@ -636,33 +636,35 @@ class BPETokenizer implements Tokenizer {
         prebuilt reverse map. Returning Bytes (not String) lets the streaming
         path split at a UTF-8 codepoint boundary. */
     static function byteDecodeToBytes(s:String, rev:Array<Int>):haxe.io.Bytes {
-        if (s == null || s.length == 0) return haxe.io.Bytes.alloc(0);
-        var n = s.length;
+        if (s == null) return haxe.io.Bytes.alloc(0);
+        var sb = haxe.io.Bytes.ofString(s);
+        var n = sb.length;
+        if (n == 0) return haxe.io.Bytes.alloc(0);
         // Worst case: each codepoint is a 4-byte UTF-8 unknown that
         // we pass through as raw codepoint bytes.
         var buf = haxe.io.Bytes.alloc(n * 4);
         var pos = 0;
         var i = 0;
         while (i < n) {
-            var b0 = s.charCodeAt(i);
+            var b0 = sb.get(i);
             var code:Int;
             var consumed:Int;
             if (b0 < 0x80) {
                 code = b0;
                 consumed = 1;
             } else if ((b0 & 0xE0) == 0xC0 && i + 1 < n) {
-                var b1 = s.charCodeAt(i + 1);
+                var b1 = sb.get(i + 1);
                 code = ((b0 & 0x1F) << 6) | (b1 & 0x3F);
                 consumed = 2;
             } else if ((b0 & 0xF0) == 0xE0 && i + 2 < n) {
-                var b1 = s.charCodeAt(i + 1);
-                var b2 = s.charCodeAt(i + 2);
+                var b1 = sb.get(i + 1);
+                var b2 = sb.get(i + 2);
                 code = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
                 consumed = 3;
             } else if ((b0 & 0xF8) == 0xF0 && i + 3 < n) {
-                var b1 = s.charCodeAt(i + 1);
-                var b2 = s.charCodeAt(i + 2);
-                var b3 = s.charCodeAt(i + 3);
+                var b1 = sb.get(i + 1);
+                var b2 = sb.get(i + 2);
+                var b3 = sb.get(i + 3);
                 code = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F);
                 consumed = 4;
             } else {
@@ -738,36 +740,30 @@ class BPETokenizer implements Tokenizer {
      * Reverse alphabet keyed by codepoint → byte. Length 0x144 covers
      * every codepoint the forward table can emit (0x00..0xFF self-maps
      * + the U+0100..U+0143 spillover range). Slots that aren't mapped
-     * by the alphabet hold -1 so the caller can detect them.
-     *
-     * CRITICAL: Rayzor strings are UTF-8 byte arrays and `charCodeAt(i)`
-     * returns the i-th byte, not the codepoint. `String.fromCharCode(0x120)`
-     * returns a 2-byte UTF-8 string (`c4 a0`), so a naive `ch.charCodeAt(0)`
-     * would key the reverse map at 0xC4 instead of 0x120 — silently
-     * scrambling the table. Decode the codepoint from the UTF-8 bytes
-     * explicitly.
+     * by the alphabet hold -1 so the caller can detect them. Each entry's
+     * codepoint is decoded from its UTF-8 bytes.
      */
     static function byteDecoderArray():Array<Int> {
         var table = byteEncoderTable();
         var rev:Array<Int> = [for (_ in 0...0x144) -1];
         for (b in 0...256) {
-            var ch = table[b];
+            var ch = haxe.io.Bytes.ofString(table[b]);
             if (ch.length == 0) continue;
-            var b0 = ch.charCodeAt(0);
+            var b0 = ch.get(0);
             var code:Int;
             if (b0 < 0x80) {
                 code = b0;
             } else if ((b0 & 0xE0) == 0xC0 && ch.length >= 2) {
-                var b1 = ch.charCodeAt(1);
+                var b1 = ch.get(1);
                 code = ((b0 & 0x1F) << 6) | (b1 & 0x3F);
             } else if ((b0 & 0xF0) == 0xE0 && ch.length >= 3) {
-                var b1 = ch.charCodeAt(1);
-                var b2 = ch.charCodeAt(2);
+                var b1 = ch.get(1);
+                var b2 = ch.get(2);
                 code = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
             } else if ((b0 & 0xF8) == 0xF0 && ch.length >= 4) {
-                var b1 = ch.charCodeAt(1);
-                var b2 = ch.charCodeAt(2);
-                var b3 = ch.charCodeAt(3);
+                var b1 = ch.get(1);
+                var b2 = ch.get(2);
+                var b3 = ch.get(3);
                 code = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F);
             } else {
                 code = b0;

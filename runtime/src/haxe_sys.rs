@@ -9,7 +9,10 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 // Use the canonical HaxeString definition from haxe_string module
-use crate::haxe_string::HaxeString;
+use crate::haxe_string::{
+    HaxeString, advance_chars, boxed_string, byte_to_char, char_count, char_to_byte, char_width,
+    decode_char, find_bytes, rfind_bytes, string_bytes,
+};
 
 const TRACE_STATE_UNINITIALIZED: u8 = 0;
 const TRACE_STATE_ENABLED: u8 = 1;
@@ -794,62 +797,36 @@ pub extern "C" fn haxe_string_lower(s: *const HaxeString) -> *mut HaxeString {
 // ============================================================================
 // String Instance Methods (working with *const HaxeString)
 // ============================================================================
+//
+// Indices are code points; see the code-point helpers in `haxe_string`.
 
-/// Get string length
+/// `String.length`: the number of code points.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_len(s: *const HaxeString) -> i32 {
-    if s.is_null() {
-        return 0;
-    }
-    unsafe { (*s).len as i32 }
+    char_count(unsafe { string_bytes(s) }) as i32
 }
 
 /// Get character at index - returns empty string if out of bounds
 /// Note: charAt returns String, not Int, per Haxe specification
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_char_at_ptr(s: *const HaxeString, index: i64) -> *mut HaxeString {
-    if s.is_null() {
-        return Box::into_raw(Box::new(HaxeString {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        }));
+    let b = unsafe { string_bytes(s) };
+    let at = usize::try_from(index).map_or(b.len(), |i| char_to_byte(b, i));
+    if at >= b.len() {
+        return boxed_string(Vec::new());
     }
-    unsafe {
-        let s_ref = &*s;
-        if index < 0 || (index as usize) >= s_ref.len || s_ref.ptr.is_null() {
-            // Return empty string for out of bounds
-            return Box::into_raw(Box::new(HaxeString {
-                ptr: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            }));
-        }
-
-        // Get the byte at the index
-        let byte = *s_ref.ptr.add(index as usize);
-        let bytes = vec![byte];
-        let len = bytes.len();
-        let cap = bytes.capacity();
-        let ptr = bytes.as_ptr() as *mut u8;
-        std::mem::forget(bytes);
-        Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
-    }
+    boxed_string(b[at..at + char_width(b, at)].to_vec())
 }
 
 /// Get character code at index - returns -1 (represented as null Int) if out of bounds
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_char_code_at_ptr(s: *const HaxeString, index: i64) -> i64 {
-    if s.is_null() {
-        return -1; // null
+    let b = unsafe { string_bytes(s) };
+    let at = usize::try_from(index).map_or(b.len(), |i| char_to_byte(b, i));
+    if at >= b.len() {
+        return -1;
     }
-    unsafe {
-        let s_ref = &*s;
-        if index < 0 || (index as usize) >= s_ref.len || s_ref.ptr.is_null() {
-            return -1; // null
-        }
-        *s_ref.ptr.add(index as usize) as i64
-    }
+    i64::from(decode_char(b, at).0)
 }
 
 /// `String.charCodeAt` as an unboxed `Null<Int>`: `NULL_INT` out of range.
@@ -872,39 +849,15 @@ pub extern "C" fn haxe_string_index_of_ptr(
     if s.is_null() || needle.is_null() {
         return -1;
     }
-    unsafe {
-        let s_ref = &*s;
-        let needle_ref = &*needle;
+    let (hay, needle) = unsafe { (string_bytes(s), string_bytes(needle)) };
 
-        if s_ref.ptr.is_null() || needle_ref.ptr.is_null() {
-            return -1;
-        }
-
-        // An empty needle is found at the start, clamped to the string.
-        if needle_ref.len == 0 {
-            return start_index.clamp(0, s_ref.len as i32);
-        }
-
-        let start = if start_index < 0 {
-            0
-        } else {
-            start_index as usize
-        };
-        if start >= s_ref.len || needle_ref.len > s_ref.len {
-            return -1;
-        }
-
-        let haystack = std::slice::from_raw_parts(s_ref.ptr, s_ref.len);
-        let needle_bytes = std::slice::from_raw_parts(needle_ref.ptr, needle_ref.len);
-
-        // Simple substring search
-        for i in start..=(s_ref.len.saturating_sub(needle_ref.len)) {
-            if &haystack[i..i + needle_ref.len] == needle_bytes {
-                return i as i32;
-            }
-        }
-        -1
+    // An empty needle is found at the start, clamped to the string.
+    if needle.is_empty() {
+        return start_index.clamp(0, char_count(hay) as i32);
     }
+
+    let from = char_to_byte(hay, start_index.max(0) as usize);
+    find_bytes(hay, needle, from).map_or(-1, |at| byte_to_char(hay, at) as i32)
 }
 
 /// Find last index of substring, searching backwards from startIndex
@@ -918,113 +871,45 @@ pub extern "C" fn haxe_string_last_index_of_ptr(
     if s.is_null() || needle.is_null() {
         return -1;
     }
-    unsafe {
-        let s_ref = &*s;
-        let needle_ref = &*needle;
+    let (hay, needle) = unsafe { (string_bytes(s), string_bytes(needle)) };
 
-        if s_ref.ptr.is_null() || needle_ref.ptr.is_null() {
-            return -1;
-        }
-
-        // A negative start searches position 0 only, as ECMAScript clamps it.
-        let start_index = start_index.max(0);
-        // An empty needle is found at the start, clamped to the string.
-        if needle_ref.len == 0 {
-            return start_index.min(s_ref.len as i32);
-        }
-
-        if needle_ref.len > s_ref.len {
-            return -1;
-        }
-
-        let haystack = std::slice::from_raw_parts(s_ref.ptr, s_ref.len);
-        let needle_bytes = std::slice::from_raw_parts(needle_ref.ptr, needle_ref.len);
-
-        // Calculate the maximum starting position
-        let max_start = s_ref.len - needle_ref.len;
-        let search_start = (start_index as usize).min(max_start);
-
-        // Search backwards
-        for i in (0..=search_start).rev() {
-            if &haystack[i..i + needle_ref.len] == needle_bytes {
-                return i as i32;
-            }
-        }
-        -1
+    // A negative start searches position 0 only, as ECMAScript clamps it.
+    let start = start_index.max(0) as usize;
+    // An empty needle is found at the start, clamped to the string.
+    if needle.is_empty() {
+        return start.min(char_count(hay)) as i32;
     }
+
+    let max_start = char_to_byte(hay, start);
+    rfind_bytes(hay, needle, max_start).map_or(-1, |at| byte_to_char(hay, at) as i32)
 }
 
-/// Get substring using substr semantics (pos, len)
-/// A negative len counts back from the end when pos is 0 (`substr(0, -1)`
-/// drops the last character) and is empty otherwise.
-/// If pos is negative, calculated from end
+/// `String.substr(pos, len)`. A negative `pos` counts from the end; a
+/// negative `len` ends that many characters before the end.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_substr_ptr(
     s: *const HaxeString,
     pos: i32,
     len: i32,
 ) -> *mut HaxeString {
-    if s.is_null() {
-        return Box::into_raw(Box::new(HaxeString {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        }));
+    let b = unsafe { string_bytes(s) };
+    let n = char_count(b) as i64;
+    let mut pos = i64::from(pos);
+    if pos >= n {
+        return boxed_string(Vec::new());
     }
-    unsafe {
-        let s_ref = &*s;
-        let len = if len < 0 && pos == 0 {
-            s_ref.len as i64 + i64::from(len)
-        } else {
-            i64::from(len)
-        };
-        if s_ref.ptr.is_null() || s_ref.len == 0 || len < 0 {
-            return Box::into_raw(Box::new(HaxeString {
-                ptr: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            }));
-        }
-
-        // Handle negative pos (from end)
-        let actual_pos = if pos < 0 {
-            let from_end = (-pos) as usize;
-            s_ref.len.saturating_sub(from_end)
-        } else {
-            pos as usize
-        };
-
-        if actual_pos >= s_ref.len {
-            return Box::into_raw(Box::new(HaxeString {
-                ptr: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            }));
-        }
-
-        let available = s_ref.len - actual_pos;
-        let actual_len = (len as usize).min(available);
-
-        if actual_len == 0 {
-            return Box::into_raw(Box::new(HaxeString {
-                ptr: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            }));
-        }
-
-        let slice = std::slice::from_raw_parts(s_ref.ptr.add(actual_pos), actual_len);
-        let bytes = slice.to_vec();
-        let new_len = bytes.len();
-        let cap = bytes.capacity();
-        let ptr = bytes.as_ptr() as *mut u8;
-        std::mem::forget(bytes);
-        Box::into_raw(Box::new(HaxeString {
-            ptr,
-            len: new_len,
-            cap,
-        }))
+    if pos < 0 {
+        pos = (n + pos).max(0);
     }
+    let len = i64::from(len);
+    let len = if len < 0 { n + len - pos } else { len };
+    if len <= 0 {
+        return boxed_string(Vec::new());
+    }
+    let len = len.min(n - pos);
+    let start = char_to_byte(b, pos as usize);
+    let end = advance_chars(b, start, len as usize);
+    boxed_string(b[start..end].to_vec())
 }
 
 /// Get substring using substring semantics (startIndex, endIndex)
@@ -1036,60 +921,13 @@ pub extern "C" fn haxe_string_substring_ptr(
     start_index: i32,
     end_index: i32,
 ) -> *mut HaxeString {
-    if s.is_null() {
-        return Box::into_raw(Box::new(HaxeString {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        }));
+    let b = unsafe { string_bytes(s) };
+    let mut start = char_to_byte(b, start_index.max(0) as usize);
+    let mut end = char_to_byte(b, end_index.max(0) as usize);
+    if start > end {
+        std::mem::swap(&mut start, &mut end);
     }
-    unsafe {
-        let s_ref = &*s;
-        if s_ref.ptr.is_null() || s_ref.len == 0 {
-            return Box::into_raw(Box::new(HaxeString {
-                ptr: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            }));
-        }
-
-        // Clamp negative values to 0
-        let mut start = if start_index < 0 {
-            0
-        } else {
-            start_index as usize
-        };
-        let mut end = if end_index < 0 { 0 } else { end_index as usize };
-
-        // Clamp to string length
-        start = start.min(s_ref.len);
-        end = end.min(s_ref.len);
-
-        // Swap if start > end
-        if start > end {
-            std::mem::swap(&mut start, &mut end);
-        }
-
-        if start == end {
-            return Box::into_raw(Box::new(HaxeString {
-                ptr: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            }));
-        }
-
-        let slice = std::slice::from_raw_parts(s_ref.ptr.add(start), end - start);
-        let bytes = slice.to_vec();
-        let new_len = bytes.len();
-        let cap = bytes.capacity();
-        let ptr = bytes.as_ptr() as *mut u8;
-        std::mem::forget(bytes);
-        Box::into_raw(Box::new(HaxeString {
-            ptr,
-            len: new_len,
-            cap,
-        }))
-    }
+    boxed_string(b[start..end].to_vec())
 }
 
 /// Create string from character code (static method)
@@ -1201,13 +1039,11 @@ pub extern "C" fn haxe_string_split_ptr(
         // Empty delimiter - split into individual characters
         if delim_ref.ptr.is_null() || delim_ref.len == 0 {
             let mut parts: Vec<*mut HaxeString> = Vec::with_capacity(s_ref.len);
-            for i in 0..s_ref.len {
-                let byte = *s_ref.ptr.add(i);
-                let bytes = vec![byte];
-                let cap = bytes.capacity();
-                let ptr = bytes.as_ptr() as *mut u8;
-                std::mem::forget(bytes);
-                parts.push(Box::into_raw(Box::new(HaxeString { ptr, len: 1, cap })));
+            let mut i = 0;
+            while i < haystack.len() {
+                let w = char_width(haystack, i);
+                parts.push(boxed_string(haystack[i..i + w].to_vec()));
+                i += w;
             }
             *out_len = parts.len() as i64;
             Box::into_raw(parts.into_boxed_slice()) as *mut *mut HaxeString

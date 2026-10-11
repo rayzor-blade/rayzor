@@ -127,6 +127,8 @@ StringTools contains static=true ctor=false params=2 -> haxe_string_contains
 StringTools endsWith static=true ctor=false params=2 -> haxe_string_ends_with
 StringTools replace static=true ctor=false params=3 -> haxe_string_replace
 StringTools startsWith static=true ctor=false params=2 -> haxe_string_starts_with
+StringTools urlDecode static=true ctor=false params=1 -> haxe_string_url_decode
+StringTools urlEncode static=true ctor=false params=1 -> haxe_string_url_encode
 Sys args static=true ctor=false params=0 -> haxe_sys_args
 Sys command static=true ctor=false params=1 -> haxe_sys_command
 Sys cpuArch static=true ctor=false params=0 -> haxe_sys_cpu_arch

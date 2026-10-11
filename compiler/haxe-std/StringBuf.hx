@@ -30,8 +30,8 @@
 	append — O(n) leaked allocations per built string, the dominant heap growth
 	in string-heavy loops (tokenizers, response serialization). Here the only
 	allocations are the buffer (old one freed on grow) and the final
-	`toString()` copy. `length` reports UTF-8 BYTES — identical to upstream on
-	rayzor, where `String.length` is also byte-based.
+	`toString()` copy. The buffer holds UTF-8: `len` counts bytes, `length`
+	counts characters, as `String.length` does.
 **/
 class StringBuf {
 	var b:rayzor.Bytes;
@@ -52,8 +52,12 @@ class StringBuf {
 		len = 0;
 	}
 
-	inline function get_length():Int {
-		return len;
+	function get_length():Int {
+		var n = 0;
+		for (i in 0...len)
+			if ((b.get(i) & 0xC0) != 0x80)
+				n++;
+		return n;
 	}
 
 	function grow(need:Int):Void {
@@ -78,13 +82,14 @@ class StringBuf {
 	**/
 	public function add<T>(x:T):Void {
 		var s = Std.string(x);
-		var n = s.length;
-		if (n == 0) return;
-		grow(n);
 		// Bulk byte copy through a transient Bytes copy — avoids per-char
 		// charCodeAt (Null<Int> round-trips) and String concatenation.
 		var sb = rayzor.Bytes.ofString(s);
-		sb.blitTo(0, b, len, n);
+		var n = sb.length;
+		if (n > 0) {
+			grow(n);
+			sb.blitTo(0, b, len, n);
+		}
 		sb.free();
 		len += n;
 	}
@@ -135,14 +140,13 @@ class StringBuf {
 		of `s`.
 	**/
 	public function addSub(s:String, pos:Int, ?len:Int):Void {
-		var sb = rayzor.Bytes.ofString(s);
-		var n:Int = (len == null) ? sb.length - pos : len;
-		if (n <= 0) {
-			sb.free();
-			return;
+		// `pos` and `len` count characters; the copy is of the substring's bytes.
+		var sb = rayzor.Bytes.ofString(len == null ? s.substr(pos) : s.substr(pos, len));
+		var n = sb.length;
+		if (n > 0) {
+			grow(n);
+			sb.blitTo(0, b, this.len, n);
 		}
-		grow(n);
-		sb.blitTo(pos, b, this.len, n);
 		sb.free();
 		this.len += n;
 	}

@@ -193,32 +193,166 @@ pub extern "C" fn haxe_string_from_bytes(out: *mut HaxeString, bytes: *const u8,
 }
 
 // ============================================================================
+// Code-point indexing
+// ============================================================================
+//
+// Haxe indexes a String by code point (`target.unicode`); the buffer stays
+// UTF-8 and every index crossing the API is converted here. A byte that does
+// not start a well-formed sequence counts as one character of its own value,
+// so every function agrees on where characters begin.
+
+/// The bytes of `s`; empty for null.
+///
+/// # Safety
+/// `s` must be null or a valid `HaxeString` whose buffer outlives the borrow.
+pub(crate) unsafe fn string_bytes<'a>(s: *const HaxeString) -> &'a [u8] {
+    unsafe {
+        if s.is_null() || (*s).ptr.is_null() || (*s).len == 0 {
+            return &[];
+        }
+        slice::from_raw_parts((*s).ptr, (*s).len)
+    }
+}
+
+/// Byte width of the character starting at byte `i`.
+#[inline]
+pub(crate) fn char_width(b: &[u8], i: usize) -> usize {
+    let want = match b[i] {
+        0x00..=0x7F => return 1,
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => return 1,
+    };
+    if i + want <= b.len() && b[i + 1..i + want].iter().all(|&c| c & 0xC0 == 0x80) {
+        want
+    } else {
+        1
+    }
+}
+
+/// The code point starting at byte `i`, and its byte width.
+pub(crate) fn decode_char(b: &[u8], i: usize) -> (u32, usize) {
+    let w = char_width(b, i);
+    let tail = |k: usize| (b[i + k] & 0x3F) as u32;
+    let lead = b[i] as u32;
+    let code = match w {
+        1 => lead,
+        2 => ((lead & 0x1F) << 6) | tail(1),
+        3 => ((lead & 0x0F) << 12) | (tail(1) << 6) | tail(2),
+        _ => ((lead & 0x07) << 18) | (tail(1) << 12) | (tail(2) << 6) | tail(3),
+    };
+    (code, w)
+}
+
+/// Number of characters in `b`.
+pub(crate) fn char_count(b: &[u8]) -> usize {
+    if b.is_ascii() {
+        return b.len();
+    }
+    if let Ok(text) = str::from_utf8(b) {
+        return text.chars().count();
+    }
+    let (mut i, mut n) = (0, 0);
+    while i < b.len() {
+        i += char_width(b, i);
+        n += 1;
+    }
+    n
+}
+
+/// Byte offset reached by stepping `count` characters from byte `from`,
+/// clamped to `b.len()`.
+pub(crate) fn advance_chars(b: &[u8], from: usize, count: usize) -> usize {
+    let from = from.min(b.len());
+    // An ASCII run is one byte per character.
+    let probe = count.min(b.len() - from);
+    if b[from..from + probe].is_ascii() {
+        return from + probe;
+    }
+    let (mut i, mut n) = (from, 0);
+    while n < count && i < b.len() {
+        i += char_width(b, i);
+        n += 1;
+    }
+    i
+}
+
+/// Byte offset of character `index`, clamped to `b.len()`.
+#[inline]
+pub(crate) fn char_to_byte(b: &[u8], index: usize) -> usize {
+    advance_chars(b, 0, index)
+}
+
+/// Character index of byte offset `offset`, which lies on a character
+/// boundary.
+pub(crate) fn byte_to_char(b: &[u8], offset: usize) -> usize {
+    let offset = offset.min(b.len());
+    if b[..offset].is_ascii() {
+        return offset;
+    }
+    let (mut i, mut n) = (0, 0);
+    while i < offset {
+        i += char_width(b, i);
+        n += 1;
+    }
+    n
+}
+
+/// First byte offset at or after `from` where `needle` occurs.
+pub(crate) fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if from > hay.len() {
+        return None;
+    }
+    let Some((&first, _)) = needle.split_first() else {
+        return Some(from);
+    };
+    let last = hay.len().checked_sub(needle.len())?;
+    let mut i = from;
+    while i <= last {
+        i += hay[i..=last].iter().position(|&c| c == first)?;
+        if &hay[i..i + needle.len()] == needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Last byte offset at or before `max_start` where `needle` occurs.
+pub(crate) fn rfind_bytes(hay: &[u8], needle: &[u8], max_start: usize) -> Option<usize> {
+    let last = hay.len().checked_sub(needle.len())?;
+    let mut i = max_start.min(last);
+    loop {
+        if &hay[i..i + needle.len()] == needle {
+            return Some(i);
+        }
+        if i == 0 {
+            return None;
+        }
+        i -= 1;
+    }
+}
+
+// ============================================================================
 // String Properties
 // ============================================================================
 
-/// Get string length
+/// `String.length`: the number of code points.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_length(s: *const HaxeString) -> usize {
-    if s.is_null() {
-        return 0;
-    }
-    unsafe { (*s).len }
+    char_count(unsafe { string_bytes(s) })
 }
 
-/// Get character at index
+/// Code point at character `index`, or -1 out of range.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_char_at(s: *const HaxeString, index: usize) -> i32 {
-    if s.is_null() {
+    let b = unsafe { string_bytes(s) };
+    let at = char_to_byte(b, index);
+    if at >= b.len() {
         return -1;
     }
-
-    unsafe {
-        let s_ref = &*s;
-        if index >= s_ref.len {
-            return -1;
-        }
-        *s_ref.ptr.add(index) as i32
-    }
+    decode_char(b, at).0 as i32
 }
 
 /// Get character code at index
@@ -274,7 +408,7 @@ pub extern "C" fn haxe_string_concat_sret(
     })
 }
 
-/// Get substring
+/// Copy the BYTE range `[start, end)` into `out`.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_substring(
     out: *mut HaxeString,
@@ -315,7 +449,7 @@ pub extern "C" fn haxe_string_substring(
     }
 }
 
-/// Substring with just start position (to end of string)
+/// Copy `length` BYTES from byte `start` into `out`.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_substr(
     out: *mut HaxeString,
@@ -388,7 +522,7 @@ pub extern "C" fn haxe_string_to_lower_case(out: *mut HaxeString, s: *const Haxe
     }
 }
 
-/// Index of substring
+/// BYTE offset of `needle` at or after byte `start`; -1 when absent.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_index_of(
     s: *const HaxeString,
@@ -856,6 +990,24 @@ pub extern "C" fn haxe_string_replace(
         let n = &*needle;
         let r = &*replacement;
 
+        // An empty needle matches between every pair of characters.
+        if n.len == 0 && h.len > 0 && !h.ptr.is_null() {
+            let h_bytes = slice::from_raw_parts(h.ptr, h.len);
+            let r_bytes = string_bytes(replacement);
+            let mut out = Vec::with_capacity(h.len);
+            let mut i = 0;
+            while i < h_bytes.len() {
+                if i > 0 {
+                    out.extend_from_slice(r_bytes);
+                }
+                let w = char_width(h_bytes, i);
+                out.extend_from_slice(&h_bytes[i..i + w]);
+                i += w;
+            }
+            haxe_string_from_bytes(result_ptr, out.as_ptr(), out.len());
+            return result_ptr;
+        }
+
         if h.len == 0 || n.len == 0 || h.ptr.is_null() || n.ptr.is_null() {
             // Copy haystack as-is
             if h.len > 0 && !h.ptr.is_null() {
@@ -913,4 +1065,65 @@ pub extern "C" fn haxe_string_hash(s: *const HaxeString) -> i32 {
         }
         hash as i32
     }
+}
+
+/// A heap `HaxeString` owning `bytes`.
+pub(crate) fn boxed_string(bytes: Vec<u8>) -> *mut HaxeString {
+    if bytes.is_empty() {
+        return Box::into_raw(Box::new(HaxeString {
+            ptr: ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        }));
+    }
+    let mut bytes = std::mem::ManuallyDrop::new(bytes);
+    Box::into_raw(Box::new(HaxeString {
+        ptr: bytes.as_mut_ptr(),
+        len: bytes.len(),
+        cap: bytes.capacity(),
+    }))
+}
+
+/// `StringTools.urlEncode`: percent-encodes each UTF-8 byte outside
+/// `[A-Za-z0-9-_.]`.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_string_url_encode(s: *const HaxeString) -> *mut HaxeString {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let b = unsafe { string_bytes(s) };
+    let mut out = Vec::with_capacity(b.len());
+    for &c in b {
+        if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.') {
+            out.push(c);
+        } else {
+            out.extend_from_slice(&[b'%', HEX[(c >> 4) as usize], HEX[(c & 15) as usize]]);
+        }
+    }
+    boxed_string(out)
+}
+
+/// `StringTools.urlDecode`: `+` is a space and `%XX` a byte; a `%` without
+/// two hex digits is dropped.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_string_url_decode(s: *const HaxeString) -> *mut HaxeString {
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let b = unsafe { string_bytes(s) };
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                if let (Some(hi), Some(lo)) = (
+                    b.get(i + 1).copied().and_then(hex),
+                    b.get(i + 2).copied().and_then(hex),
+                ) {
+                    out.push((hi << 4) | lo);
+                    i += 2;
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    boxed_string(out)
 }

@@ -2918,7 +2918,7 @@ impl MacroInterpreter {
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
         match method {
-            "length" => Ok(MacroValue::Int(s.len() as i64)),
+            "length" => Ok(MacroValue::Int(s.chars().count() as i64)),
             "charAt" => {
                 let idx = args.first().and_then(|a| a.as_int()).unwrap_or(0) as usize;
                 Ok(MacroValue::String(Arc::from(
@@ -2932,7 +2932,9 @@ impl MacroInterpreter {
             "indexOf" => {
                 let needle = args.first().and_then(|a| a.as_string()).unwrap_or("");
                 Ok(MacroValue::Int(
-                    s.find(needle).map(|i| i as i64).unwrap_or(-1),
+                    s.find(needle)
+                        .map(|i| s[..i].chars().count() as i64)
+                        .unwrap_or(-1),
                 ))
             }
             "split" => {
@@ -3346,7 +3348,7 @@ impl MacroInterpreter {
                 }),
             },
             MacroValue::String(s) => match field {
-                "length" => Ok(MacroValue::Int(s.len() as i64)),
+                "length" => Ok(MacroValue::Int(s.chars().count() as i64)),
                 _ => Err(MacroError::TypeError {
                     message: format!("String has no field '{}'", field),
                     location,

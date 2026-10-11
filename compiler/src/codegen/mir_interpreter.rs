@@ -3015,7 +3015,7 @@ impl MirInterpreter {
                     .map(|arg| self.interp_value_to_haxe_string(arg))
                     .transpose()?
                     .flatten()
-                    .map(|s| s.len() as i32)
+                    .map(|s| s.chars().count() as i32)
                     .unwrap_or(0);
                 Ok(InterpValue::I32(len))
             }

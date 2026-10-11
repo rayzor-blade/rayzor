@@ -12,9 +12,11 @@ class Main {
         trace("bytes.len=" + bytes.length);
         trace("bytes0=" + bytes.get(0));
         var spaceAlias = String.fromCharCode(0x120);
-        trace("alias.len=" + spaceAlias.length);
-        trace("alias.cca0=" + spaceAlias.charCodeAt(0));
-        trace("alias.cca1=" + spaceAlias.charCodeAt(1));
+        // The alias probes report UTF-8 bytes.
+        var aliasBytes = haxe.io.Bytes.ofString(spaceAlias);
+        trace("alias.len=" + aliasBytes.length);
+        trace("alias.cca0=" + aliasBytes.get(0));
+        trace("alias.cca1=" + aliasBytes.get(1));
         var sm = new StringMap<Int>();
         sm.set("P", 80);
         sm.set(spaceAlias, 32);
@@ -59,9 +61,10 @@ class Main {
         trace("t4.80.push.len=" + t4[80].length);
         trace("t4.length=" + t4.length);
         trace("t4.80.push.cca0=" + t4[80].charCodeAt(0));
-        trace("t4.32.push.len=" + t4[32].length);
-        trace("t4.32.push.cca0=" + t4[32].charCodeAt(0));
-        trace("t4.32.push.cca1=" + t4[32].charCodeAt(1));
+        var t4b = haxe.io.Bytes.ofString(t4[32]);
+        trace("t4.32.push.len=" + t4b.length);
+        trace("t4.32.push.cca0=" + t4b.get(0));
+        trace("t4.32.push.cca1=" + t4b.get(1));
         for (b in 0x21...0x7F) table[b] = String.fromCharCode(b);
         trace("table.length=" + table.length);
         for (b in 0xA1...0xAD) table[b] = String.fromCharCode(b);
@@ -76,9 +79,10 @@ class Main {
         trace("table80.len=" + table[80].length);
         trace("table80.cca0=" + table[80].charCodeAt(0));
         trace("table80.eqP=" + (table[80] == "P"));
-        trace("table32.len=" + table[32].length);
-        trace("table32.cca0=" + table[32].charCodeAt(0));
-        trace("table32.cca1=" + table[32].charCodeAt(1));
+        var t32b = haxe.io.Bytes.ofString(table[32]);
+        trace("table32.len=" + t32b.length);
+        trace("table32.cca0=" + t32b.get(0));
+        trace("table32.cca1=" + t32b.get(1));
         trace("table32.eqAlias=" + (table[32] == spaceAlias));
 
         var vocab = new Vocab();

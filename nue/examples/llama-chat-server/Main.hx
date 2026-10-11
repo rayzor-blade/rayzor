@@ -151,7 +151,7 @@ class Main {
                 conn.setTimeout(120.0);
                 prompt = readSocketRequest(conn);
                 trace("[server] accepted request " + reqNo
-                    + " bytes=" + prompt.length);
+                    + " bytes=" + Bytes.ofString(prompt).length);
                 if (prompt.length == 0) prompt = DEFAULT_PROMPT;
             }
 

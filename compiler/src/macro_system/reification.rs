@@ -641,7 +641,7 @@ impl ReificationEngine {
                         Ok(map.get(field).cloned().unwrap_or(MacroValue::Null))
                     }
                     MacroValue::String(s) => match field.as_str() {
-                        "length" => Ok(MacroValue::Int(s.len() as i64)),
+                        "length" => Ok(MacroValue::Int(s.chars().count() as i64)),
                         _ => Err(MacroError::ReificationError {
                             message: format!("String has no field '{}'", field),
                             location,

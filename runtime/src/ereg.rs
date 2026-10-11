@@ -7,7 +7,9 @@ use std::alloc::{Layout, alloc};
 use std::ptr;
 
 use crate::haxe_array::HaxeArray;
-use crate::haxe_string::{HaxeString, haxe_string_from_bytes};
+use crate::haxe_string::{
+    HaxeString, advance_chars, byte_to_char, char_to_byte, char_width, haxe_string_from_bytes,
+};
 
 // ============================================================================
 // Internal types
@@ -20,6 +22,19 @@ struct HaxeEReg {
     last_input: Option<String>,
     /// Byte offset ranges for each capture group. Index 0 = full match.
     last_captures: Option<Vec<Option<(usize, usize)>>>,
+}
+
+impl HaxeEReg {
+    /// The whole match as code-point `(pos, len)`.
+    fn matched_span(&self) -> Option<(i64, i64)> {
+        let (Some(captures), Some(input)) = (&self.last_captures, &self.last_input) else {
+            return None;
+        };
+        let &(start, end) = captures.first()?.as_ref()?;
+        let b = input.as_bytes();
+        let pos = byte_to_char(b, start);
+        Some((pos as i64, (byte_to_char(b, end) - pos) as i64))
+    }
 }
 
 /// Convert HaxeString pointer to Rust &str
@@ -239,15 +254,9 @@ pub extern "C" fn haxe_ereg_matched_pos(ereg: *mut u8, out_pos: *mut i32, out_le
     }
     unsafe {
         let ereg = &*(ereg as *mut HaxeEReg);
-        if let Some(captures) = &ereg.last_captures
-            && let Some(Some((start, end))) = captures.first()
-        {
-            *out_pos = *start as i32;
-            *out_len = (*end - *start) as i32;
-            return;
-        }
-        *out_pos = -1;
-        *out_len = 0;
+        let (pos, len) = ereg.matched_span().unwrap_or((-1, 0));
+        *out_pos = pos as i32;
+        *out_len = len as i32;
     }
 }
 
@@ -272,18 +281,7 @@ pub extern "C" fn haxe_ereg_matched_pos_anon(ereg: *mut u8) -> *mut u8 {
     let (pos, len) = if ereg.is_null() {
         (-1i64, 0i64)
     } else {
-        unsafe {
-            let ereg_ref = &*(ereg as *mut HaxeEReg);
-            if let Some(captures) = &ereg_ref.last_captures {
-                if let Some(Some((start, end))) = captures.first() {
-                    (*start as i64, (*end - *start) as i64)
-                } else {
-                    (-1, 0)
-                }
-            } else {
-                (-1, 0)
-            }
-        }
+        unsafe { (*(ereg as *mut HaxeEReg)).matched_span() }.unwrap_or((-1, 0))
     };
 
     // Create anon object {len: Int, pos: Int}
@@ -293,7 +291,7 @@ pub extern "C" fn haxe_ereg_matched_pos_anon(ereg: *mut u8) -> *mut u8 {
     handle
 }
 
-/// Match a substring of s starting at pos with optional length.
+/// Match a substring of s starting at character pos with optional length.
 /// len = -1 means match to end of string.
 /// Returns 1 if match found, 0 otherwise.
 #[unsafe(no_mangle)]
@@ -309,11 +307,12 @@ pub extern "C" fn haxe_ereg_match_sub(
     unsafe {
         let ereg_ref = &mut *(ereg as *mut HaxeEReg);
         let full_input = hs_to_str(s);
-        let start = (pos as usize).min(full_input.len());
+        let b = full_input.as_bytes();
+        let start = char_to_byte(b, pos.max(0) as usize);
         let end = if len < 0 {
-            full_input.len()
+            b.len()
         } else {
-            (start + len as usize).min(full_input.len())
+            advance_chars(b, start, len as usize)
         };
         let sub = &full_input[start..end];
 
@@ -465,8 +464,9 @@ pub extern "C" fn haxe_ereg_map(
                 // Guard against zero-length matches to prevent infinite loops
                 if match_start == match_end {
                     if offset < input.len() {
-                        result.push(input.as_bytes()[offset] as char);
-                        offset += 1;
+                        let width = char_width(input.as_bytes(), offset);
+                        result.push_str(&input[offset..offset + width]);
+                        offset += width;
                     } else {
                         break;
                     }

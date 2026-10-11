@@ -105,7 +105,7 @@ fn declare_string_externs(builder: &mut MirBuilder) {
     builder.mark_as_extern(func_id);
 
     // extern fn haxe_string_length(s: *String) -> i64
-    // Returns the byte length of the string. Used by the 1-arg substr
+    // Returns the length in code points. Used by the 1-arg substr
     // wrapper to compute the default trailing length.
     let func_id = builder
         .begin_function("haxe_string_length")

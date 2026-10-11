@@ -1850,6 +1850,58 @@ pub extern "C" fn haxe_string_substr_ptr(s: i32, pos: i32, len: i32) -> i32 {
     out
 }
 
+/// A new HaxeString* holding `bytes`.
+fn wasm_string_of(bytes: &[u8]) -> i32 {
+    let out = rt_alloc(12);
+    if out != 0 {
+        haxe_string_from_bytes(out, bytes.as_ptr() as i32, bytes.len() as i32);
+    }
+    out
+}
+
+/// `StringTools.urlEncode`: percent-encodes each byte outside `[A-Za-z0-9-_.]`.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_string_url_encode(s: i32) -> i32 {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let text = unsafe { haxe_string_to_string(s) }.unwrap_or_default();
+    let mut out = Vec::with_capacity(text.len());
+    for c in text.bytes() {
+        if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.') {
+            out.push(c);
+        } else {
+            out.extend_from_slice(&[b'%', HEX[(c >> 4) as usize], HEX[(c & 15) as usize]]);
+        }
+    }
+    wasm_string_of(&out)
+}
+
+/// `StringTools.urlDecode`: `+` is a space and `%XX` a byte.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_string_url_decode(s: i32) -> i32 {
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let text = unsafe { haxe_string_to_string(s) }.unwrap_or_default();
+    let b = text.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                if let (Some(hi), Some(lo)) = (
+                    b.get(i + 1).copied().and_then(hex),
+                    b.get(i + 2).copied().and_then(hex),
+                ) {
+                    out.push((hi << 4) | lo);
+                    i += 2;
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    wasm_string_of(&out)
+}
+
 /// Split string `s` by `delimiter`. Returns a HaxeArray* of HaxeString*.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_split_array(s: i32, delimiter: i32) -> i32 {

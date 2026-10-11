@@ -1904,6 +1904,11 @@ impl StdlibMapping {
                 types: &[PtrString, PtrString, PtrString] => PtrString),
             // StringTools.lpad/rpad/hex are implemented in Haxe, don't map to runtime
             // They use StringBuf, charAt, etc. which ARE mapped
+            // urlEncode/urlDecode work on UTF-8 bytes, which String indexing does not expose.
+            map_method!(static "StringTools", "urlEncode" => "haxe_string_url_encode", params: 1, returns: primitive,
+                types: &[PtrString] => PtrString),
+            map_method!(static "StringTools", "urlDecode" => "haxe_string_url_decode", params: 1, returns: primitive,
+                types: &[PtrString] => PtrString),
         ];
 
         self.register_from_tuples(mappings);

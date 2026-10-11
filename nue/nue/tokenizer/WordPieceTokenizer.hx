@@ -17,7 +17,7 @@ import haxe.ds.StringMap;
  *   6. wordpiece         — greedy longest-prefix match, `##` continuation,
  *                          `[UNK]` fallback, max 100 codepoints/word
  *
- * rayzor `String` is UTF-8 bytes, so this decodes to codepoints itself.
+ * Input is decoded to codepoints from its UTF-8 bytes.
  * Full Unicode NFD isn't implemented — accent stripping covers Latin-1
  * Supplement (café, naïve, résumé, …); other combining scripts pass
  * through unchanged, which is correct for the common embedding corpora.
@@ -171,27 +171,28 @@ class WordPieceTokenizer implements Tokenizer {
     // --- UTF-8 codec ---
 
     static function decodeUtf8(s:String):Array<Int> {
+        var b = haxe.io.Bytes.ofString(s);
         var out:Array<Int> = [];
         var i = 0;
-        var n = s.length;
+        var n = b.length;
         while (i < n) {
-            var b0 = s.charCodeAt(i);
+            var b0 = b.get(i);
             if (b0 < 0x80) {
                 out.push(b0);
                 i += 1;
             } else if (b0 < 0xE0) {
-                var b1 = (i + 1 < n) ? s.charCodeAt(i + 1) : 0;
+                var b1 = (i + 1 < n) ? b.get(i + 1) : 0;
                 out.push(((b0 & 0x1F) << 6) | (b1 & 0x3F));
                 i += 2;
             } else if (b0 < 0xF0) {
-                var b1 = (i + 1 < n) ? s.charCodeAt(i + 1) : 0;
-                var b2 = (i + 2 < n) ? s.charCodeAt(i + 2) : 0;
+                var b1 = (i + 1 < n) ? b.get(i + 1) : 0;
+                var b2 = (i + 2 < n) ? b.get(i + 2) : 0;
                 out.push(((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F));
                 i += 3;
             } else {
-                var b1 = (i + 1 < n) ? s.charCodeAt(i + 1) : 0;
-                var b2 = (i + 2 < n) ? s.charCodeAt(i + 2) : 0;
-                var b3 = (i + 3 < n) ? s.charCodeAt(i + 3) : 0;
+                var b1 = (i + 1 < n) ? b.get(i + 1) : 0;
+                var b2 = (i + 2 < n) ? b.get(i + 2) : 0;
+                var b3 = (i + 3 < n) ? b.get(i + 3) : 0;
                 out.push(((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F));
                 i += 4;
             }

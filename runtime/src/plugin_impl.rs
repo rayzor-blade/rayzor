@@ -109,6 +109,14 @@ register_symbol!(
     crate::haxe_string::haxe_string_replace
 );
 register_symbol!(
+    "haxe_string_url_encode",
+    crate::haxe_string::haxe_string_url_encode
+);
+register_symbol!(
+    "haxe_string_url_decode",
+    crate::haxe_string::haxe_string_url_decode
+);
+register_symbol!(
     "haxe_string_starts_with",
     crate::string::haxe_string_starts_with
 );

@@ -1274,9 +1274,9 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Index loop over an array or a string: `var _i = 0; while (_i < len)
-    /// { var x = seq[_i]; body; _i++; }`. Both keep their length at offset 8,
-    /// so only the element read differs: a string yields the char code at
-    /// the index, as `for (c in s)` does in Haxe 4.
+    /// { var x = seq[_i]; body; _i++; }`. An array's length is its header
+    /// field; a string's is its code-point count, and each element is the
+    /// char code at the index, as `for (c in s)` does in Haxe 4.
     pub(crate) fn lower_for_in_over_seq(
         &mut self,
         pattern: &HirPattern,
@@ -1286,17 +1286,28 @@ impl<'a> HirToMirContext<'a> {
         label: Option<&SymbolId>,
         seq: SeqKind,
     ) {
-        // Read array length from HaxeArray struct (offset 8 = len field)
-        let Some(offset_8) = self.builder.build_const(IrValue::I64(8)) else {
-            return;
-        };
-        let Some(len_ptr) =
+        let array_len = if matches!(seq, SeqKind::String) {
+            let length = self.get_or_register_extern_function(
+                "haxe_string_length",
+                vec![IrType::Ptr(Box::new(IrType::U8))],
+                IrType::I64,
+            );
             self.builder
-                .build_binop(crate::ir::instructions::BinaryOp::Add, collection, offset_8)
-        else {
-            return;
+                .build_call_direct(length, vec![collection], IrType::I64)
+        } else {
+            // HaxeArray keeps its length at offset 8.
+            self.builder
+                .build_const(IrValue::I64(8))
+                .and_then(|offset_8| {
+                    self.builder.build_binop(
+                        crate::ir::instructions::BinaryOp::Add,
+                        collection,
+                        offset_8,
+                    )
+                })
+                .and_then(|len_ptr| self.builder.build_load(len_ptr, IrType::I64))
         };
-        let Some(array_len) = self.builder.build_load(len_ptr, IrType::I64) else {
+        let Some(array_len) = array_len else {
             return;
         };
 
