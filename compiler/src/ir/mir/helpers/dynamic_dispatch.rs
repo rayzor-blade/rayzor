@@ -157,16 +157,25 @@ impl<'a> HirToMirContext<'a> {
         let let_boxed = matches!(&callee.kind, HirExprKind::Variable { symbol, .. }
             if self.boxed_dynamic_symbols.contains(symbol));
         let is_dynamic = matches!(
-            self.type_table.get(callee.ty).map(|t| &t.kind),
+            self.type_table
+                .get(self.resolve_storage_type(callee.ty))
+                .map(|t| &t.kind),
             Some(TypeKind::Dynamic)
         );
-        if !let_boxed && !is_dynamic {
+        if !let_boxed && !is_dynamic && !matches!(callee.kind, HirExprKind::Call { .. }) {
             return reg;
         }
-        if !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_))) {
+        if !matches!(
+            self.builder.get_register_type(reg),
+            Some(IrType::Ptr(_) | IrType::Function { .. })
+        ) {
             return reg;
         }
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let reg = self
+            .builder
+            .build_bitcast(reg, ptr_u8.clone())
+            .unwrap_or(reg);
         let unbox = self.get_or_register_extern_function(
             "haxe_unbox_if_tag",
             vec![ptr_u8.clone(), IrType::U32],
@@ -278,7 +287,21 @@ impl<'a> HirToMirContext<'a> {
         rest: &[(IrId, TypeId)],
     ) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-        let _ = (class, method_name);
+        if class == "Array" && method_name == "push" && rest.len() == 1 {
+            let (value, ty) = rest[0];
+            let (tag, metadata) = self.array_element_descriptor(ty)?;
+            let bits = self.coerce_to_i64(value, ty)?;
+            let push = self.get_or_register_extern_function(
+                "haxe_array_push_typed",
+                vec![ptr_u8, IrType::I64, IrType::I32, IrType::U64],
+                IrType::I32,
+            );
+            return self.builder.build_call_direct(
+                push,
+                vec![receiver, bits, tag, metadata],
+                IrType::I32,
+            );
+        }
         let runtime_name = call.runtime_name;
         if call.is_mir_wrapper {
             let (params, ret) = self

@@ -405,9 +405,26 @@ impl<'a> HirToMirContext<'a> {
                     }
                 };
 
+                let formals = self
+                    .symbol_table
+                    .get_symbol(*field)
+                    .and_then(|symbol| self.resolve_function_type_signature(symbol.type_id))
+                    .map(|(params, _)| params)
+                    .unwrap_or_default();
+                self.function_param_hir_types
+                    .entry(func_id)
+                    .or_insert_with(|| formals.clone());
                 let mut call_args = vec![obj_reg];
-                for arg in args.iter() {
+                let argument_types: Vec<_> = args.iter().map(|arg| arg.ty).collect();
+                let parameter_indices = self.arg_param_indices(func_id, &argument_types);
+                for (index, arg) in args.iter().enumerate() {
                     if let Some(reg) = self.lower_expression(arg) {
+                        let reg = self.maybe_materialize_for_call(
+                            arg,
+                            reg,
+                            Some(func_id),
+                            parameter_indices[index],
+                        );
                         call_args.push(reg);
                     }
                 }
@@ -425,12 +442,6 @@ impl<'a> HirToMirContext<'a> {
                     IrType::I64,
                 )?;
 
-                let formals = self
-                    .symbol_table
-                    .get_symbol(*field)
-                    .and_then(|symbol| self.resolve_function_type_signature(symbol.type_id))
-                    .map(|(params, _)| params)
-                    .unwrap_or_default();
                 let mut param_types = vec![IrType::Ptr(Box::new(IrType::Void))];
                 for (i, arg) in args.iter().enumerate() {
                     param_types.push(self.convert_type(formals.get(i).copied().unwrap_or(arg.ty)));
@@ -572,6 +583,8 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or(false);
 
             let mut method_arg_regs = vec![obj_reg]; // 'this' as first arg
+            let argument_types: Vec<_> = args.iter().map(|arg| arg.ty).collect();
+            let parameter_indices = self.arg_param_indices(func_id, &argument_types);
             for (param_idx, arg) in args.iter().enumerate() {
                 if let Some(reg) = self.lower_expression(arg) {
                     if callee_is_user_defined {
@@ -586,6 +599,16 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
                     let reg = self.unbox_dynamic_numeric_call_arg(arg, reg, func_id, param_idx);
+                    let reg = if callee_is_user_defined {
+                        self.maybe_materialize_for_call(
+                            arg,
+                            reg,
+                            Some(func_id),
+                            parameter_indices[param_idx],
+                        )
+                    } else {
+                        reg
+                    };
                     method_arg_regs.push(reg);
                 }
             }
@@ -617,6 +640,33 @@ impl<'a> HirToMirContext<'a> {
             // trap-stubs the generic template. A method reached through a
             // Field callee -- which is how an inherited method is called --
             // used to drop them here.
+            let mut call_type_args = call_type_args.clone();
+            if call_type_args.is_empty() {
+                let receiver = self.resolve_through_aliases(object.ty);
+                let type_args = self
+                    .type_table
+                    .get(receiver)
+                    .and_then(|ty| match &ty.kind {
+                        TypeKind::Class { type_args, .. }
+                        | TypeKind::GenericInstance { type_args, .. }
+                        | TypeKind::Abstract { type_args, .. } => Some(type_args.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                if self
+                    .builder
+                    .module
+                    .functions
+                    .get(&func_id)
+                    .is_some_and(|f| f.signature.type_params.len() == type_args.len())
+                {
+                    call_type_args = type_args
+                        .iter()
+                        .map(|ty| self.convert_type_arg(*ty))
+                        .collect();
+                }
+            }
+            self.bind_generic_return_args(func_id, expr.ty, &mut call_type_args);
             let call_result = if call_type_args.is_empty() {
                 self.builder
                     .build_call_direct(func_id, arg_regs, actual_return_type.clone())?
@@ -763,7 +813,7 @@ impl<'a> HirToMirContext<'a> {
                                     runtime_func,
                                     i + param_offset,
                                     reg,
-                                    arg.ty,
+                                    arg,
                                 ) {
                                     Some(boxed) => boxed,
                                     None => self.maybe_box_for_extern_call(
@@ -1055,7 +1105,7 @@ impl<'a> HirToMirContext<'a> {
                                         &runtime_name,
                                         param_idx,
                                         reg,
-                                        arg.ty,
+                                        arg,
                                     ) {
                                         Some(boxed) => boxed,
                                         None => self.maybe_box_for_extern_call(

@@ -1609,6 +1609,14 @@ impl<'a> HirToMirContext<'a> {
                     self.build_class_slot_call(pointer, call_args, params, ret_ty.clone())
                 })
             }
+            None if !method_sig.type_params.is_empty() => {
+                self.builder.build_call_direct_with_type_args(
+                    method_func_id,
+                    call_args,
+                    ret_ty.clone(),
+                    vec![IrType::dynamic_ptr(); method_sig.type_params.len()],
+                )
+            }
             None => self
                 .builder
                 .build_call_direct(method_func_id, call_args, ret_ty.clone()),

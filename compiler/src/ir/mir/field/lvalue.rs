@@ -74,7 +74,7 @@ impl<'a> HirToMirContext<'a> {
             HirLValue::Index { object, index } => {
                 if let Some(obj_reg) = self.lower_expression(object) {
                     if let Some(idx_reg) = self.lower_expression(index) {
-                        self.load_index_with_regs(obj_reg, idx_reg, object.ty)
+                        self.load_index_with_regs(obj_reg, idx_reg, object.ty, None)
                     } else {
                         None
                     }
@@ -993,6 +993,7 @@ impl<'a> HirToMirContext<'a> {
         obj_reg: IrId,
         idx_reg: IrId,
         object_ty: TypeId,
+        element_ty: Option<TypeId>,
     ) -> Option<IrId> {
         if matches!(
             self.type_table
@@ -1006,24 +1007,26 @@ impl<'a> HirToMirContext<'a> {
             return self.load_map_index_with_regs(obj_reg, idx_reg, object_ty);
         }
         if let Some(class) = self.vec_index_class(object_ty) {
-            let elem = self.type_table.dynamic_type();
+            let elem = element_ty
+                .or_else(|| {
+                    self.type_table
+                        .get(self.resolve_through_aliases(object_ty))
+                        .and_then(|ty| match &ty.kind {
+                            TypeKind::Class { type_args, .. }
+                            | TypeKind::Abstract { type_args, .. }
+                            | TypeKind::GenericInstance { type_args, .. } => {
+                                type_args.first().copied()
+                            }
+                            _ => None,
+                        })
+                })
+                .unwrap_or_else(|| self.type_table.dynamic_type());
             return self.load_vec_index_with_regs(&class, obj_reg, idx_reg, elem);
         }
-        // An `Array<Null<Int>>` element reads by its own type: its slot holds
-        // the `NullInt`.
-        let null_int_element = match self
-            .type_table
-            .get(self.resolve_through_aliases(object_ty))
-            .map(|t| &t.kind)
-        {
-            Some(TypeKind::Array { element_type }) => Some(*element_type),
-            _ => None,
-        }
-        .filter(|element_type| self.is_null_int_type(*element_type));
-        if let Some(element_type) = null_int_element {
-            return self.lower_index_access(obj_reg, idx_reg, element_type);
-        }
-        self.lower_index_access(obj_reg, idx_reg, object_ty)
+        let element = element_ty
+            .or_else(|| self.get_array_element_type(self.resolve_storage_type(object_ty)))
+            .unwrap_or(object_ty);
+        self.lower_index_access(obj_reg, idx_reg, element)
     }
 
     /// Store `value` into `obj_reg[idx_reg]`, given the receiver and index
@@ -1056,7 +1059,10 @@ impl<'a> HirToMirContext<'a> {
             // converted -- the get side bitcasts it back.
             let value_i64 = match self.builder.get_register_type(value) {
                 Some(IrType::I64) => value,
-                Some(IrType::F64) | Some(IrType::F32) | Some(IrType::Ptr(_)) => self
+                Some(IrType::F64)
+                | Some(IrType::F32)
+                | Some(IrType::Ptr(_))
+                | Some(IrType::TypeVar(_)) => self
                     .builder
                     .build_bitcast(value, IrType::I64)
                     .unwrap_or(value),
@@ -1066,13 +1072,16 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or(value),
                 None => value,
             };
+            let mut values = vec![obj_reg, key_reg, value_i64];
+            let mut types = vec![ptr_void, key_ir_type, IrType::I64];
+            let typed_runtime =
+                self.append_native_map_layout(set_fn_name, object_ty, &mut values, &mut types);
             let set_fn = self.get_or_register_extern_function(
-                set_fn_name,
-                vec![ptr_void, key_ir_type, IrType::I64],
+                typed_runtime.as_deref().unwrap_or(set_fn_name),
+                types,
                 IrType::Void,
             );
-            self.builder
-                .build_call_direct(set_fn, vec![obj_reg, key_reg, value_i64], IrType::Void);
+            self.builder.build_call_direct(set_fn, values, IrType::Void);
             return;
         }
         let idx_i64 = {
@@ -1103,12 +1112,26 @@ impl<'a> HirToMirContext<'a> {
             }
         };
 
+        let element_ty = self
+            .type_table
+            .get(self.resolve_storage_type(object_ty))
+            .and_then(|ty| match &ty.kind {
+                TypeKind::Array { element_type } => Some(*element_type),
+                _ => None,
+            });
+        let dynamic_elements = element_ty.is_some_and(|element| {
+            matches!(
+                self.type_table.get(element).map(|ty| &ty.kind),
+                Some(TypeKind::Dynamic)
+            )
+        });
         if matches!(
             self.type_table
                 .get(self.resolve_storage_type(object_ty))
                 .map(|t| &t.kind),
             Some(TypeKind::Dynamic)
-        ) {
+        ) || dynamic_elements
+        {
             let ptr = IrType::Ptr(Box::new(IrType::U8));
             let typed = self
                 .pending_store_value_ty
@@ -1143,14 +1166,6 @@ impl<'a> HirToMirContext<'a> {
             return;
         }
 
-        let dynamic_elements = matches!(
-            self.type_table.get(object_ty).map(|t| &t.kind),
-            Some(TypeKind::Array { element_type })
-                if matches!(
-                    self.type_table.get(*element_type).map(|t| &t.kind),
-                    Some(TypeKind::Dynamic)
-                )
-        );
         // An `Array<Null<Int>>` slot holds the `NullInt`; a store past the end
         // opens slots that read as null.
         if self.array_of_null_int(object_ty) {
@@ -1168,31 +1183,10 @@ impl<'a> HirToMirContext<'a> {
                 ],
                 IrType::Bool,
             );
-            self.build_array_store(obj_reg, idx_i64, value, IrType::NullInt, setter);
+            self.build_array_store(obj_reg, idx_i64, value, IrType::NullInt, setter, element_ty);
             return;
         }
-        let mut value = value;
-        let mut value_ir_type = self.builder.get_register_type(value);
-        let raw_string = match &value_ir_type {
-            Some(IrType::String) => true,
-            Some(IrType::Ptr(inner)) => **inner == IrType::String,
-            _ => false,
-        };
-        // Dynamic array slots retain the String tag for value comparison.
-        if dynamic_elements && raw_string {
-            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-            if let Some(raw) = self.builder.build_bitcast(value, ptr_u8.clone()) {
-                let box_fn = self.get_or_register_extern_function(
-                    "haxe_box_haxestring_ptr",
-                    vec![ptr_u8.clone()],
-                    ptr_u8.clone(),
-                );
-                if let Some(boxed) = self.builder.build_call_direct(box_fn, vec![raw], ptr_u8) {
-                    value = boxed;
-                    value_ir_type = self.builder.get_register_type(boxed);
-                }
-            }
-        }
+        let value_ir_type = self.builder.get_register_type(value);
         match &value_ir_type {
             Some(IrType::F32) | Some(IrType::F64) => {
                 let func_id = self.get_or_register_extern_function(
@@ -1216,7 +1210,14 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or(value),
                     None => value,
                 };
-                self.build_array_store(obj_reg, idx_i64, value_f64, IrType::F64, func_id);
+                self.build_array_store(
+                    obj_reg,
+                    idx_i64,
+                    value_f64,
+                    IrType::F64,
+                    func_id,
+                    element_ty,
+                );
             }
             _ => {
                 // For Int, Bool, null, pointers: use haxe_array_set_i64
@@ -1267,7 +1268,14 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or(value),
                     None => value,
                 };
-                self.build_array_store(obj_reg, idx_i64, value_i64, IrType::I64, func_id);
+                self.build_array_store(
+                    obj_reg,
+                    idx_i64,
+                    value_i64,
+                    IrType::I64,
+                    func_id,
+                    element_ty,
+                );
             }
         }
     }
@@ -1283,6 +1291,7 @@ impl<'a> HirToMirContext<'a> {
         value: IrId,
         slot_type: IrType,
         set_fn: IrFunctionId,
+        element_ty: Option<TypeId>,
     ) {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let in_bounds = (|| {
@@ -1318,8 +1327,29 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_branch(merge);
 
         self.builder.switch_to_block(slow);
-        self.builder
-            .build_call_direct(set_fn, vec![obj, idx64, value], IrType::Bool);
+        let descriptor = element_ty.and_then(|ty| self.array_element_descriptor(ty));
+        if let Some((tag, metadata)) = descriptor {
+            let bits = self.coerce_reg_to(value, &IrType::I64).unwrap_or(value);
+            let setter = self.get_or_register_extern_function(
+                "haxe_array_set_typed",
+                vec![
+                    IrType::Ptr(Box::new(IrType::U8)),
+                    IrType::I64,
+                    IrType::I64,
+                    IrType::I32,
+                    IrType::U64,
+                ],
+                IrType::Bool,
+            );
+            self.builder.build_call_direct(
+                setter,
+                vec![obj, idx64, bits, tag, metadata],
+                IrType::Bool,
+            );
+        } else {
+            self.builder
+                .build_call_direct(set_fn, vec![obj, idx64, value], IrType::Bool);
+        }
         self.builder.build_branch(merge);
 
         self.builder.switch_to_block(merge);

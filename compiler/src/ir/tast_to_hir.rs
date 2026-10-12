@@ -165,15 +165,15 @@ impl<'a> TastToHirContext<'a> {
         )
     }
 
-    fn is_named_type_value(&self, expr: &HirExpr) -> bool {
+    fn named_type_value(&self, expr: &HirExpr) -> Option<TypeId> {
         let HirExprKind::Variable { symbol, .. } = &expr.kind else {
-            return false;
+            return None;
         };
-        let Some(sym) = self.symbol_table.get_symbol(*symbol) else {
-            return false;
-        };
-        !matches!(self.string_interner.get(sym.name), Some("Class" | "Enum"))
+        let sym = self.symbol_table.get_symbol(*symbol)?;
+        (!matches!(self.string_interner.get(sym.name), Some("Class" | "Enum"))
             && self.is_type_value_expr(expr)
+            && self.type_table.borrow().get(sym.type_id).is_some())
+        .then_some(sym.type_id)
     }
 
     /// Create a new lowering context
@@ -2579,6 +2579,9 @@ impl<'a> TastToHirContext<'a> {
                     };
                     return self.lower_expression(&call);
                 }
+                if let Some(updated) = self.lower_array_accessor_update(expr) {
+                    return updated;
+                }
                 HirExprKind::Unary {
                     op: self.convert_unary_op(operator),
                     operand: Box::new(self.lower_expression(operand)),
@@ -3731,11 +3734,13 @@ impl<'a> TastToHirContext<'a> {
                 {
                     let value_hir = self.lower_expression(&arguments[0]);
                     let target_hir = self.lower_expression(&arguments[1]);
-                    if self.is_named_type_value(&target_hir) && !self.is_type_value_expr(&value_hir)
+                    if let Some(expected) = self
+                        .named_type_value(&target_hir)
+                        .filter(|_| !self.is_type_value_expr(&value_hir))
                     {
                         HirExprKind::TypeCheck {
                             expr: Box::new(value_hir),
-                            expected: arguments[1].expr_type,
+                            expected,
                         }
                     } else {
                         HirExprKind::RuntimeTypeCheck {
@@ -4152,6 +4157,57 @@ impl<'a> TastToHirContext<'a> {
             table.get(*underlying).map(|t| &t.kind),
             Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
         )
+    }
+
+    fn lower_array_accessor_update(&mut self, expr: &TypedExpression) -> Option<HirExpr> {
+        let TypedExpressionKind::UnaryOp { operator, operand } = &expr.kind else {
+            return None;
+        };
+        let (binary_op, postfix) = match operator {
+            UnaryOperator::PreInc => (BinaryOperator::Add, false),
+            UnaryOperator::PostInc => (BinaryOperator::Add, true),
+            UnaryOperator::PreDec => (BinaryOperator::Sub, false),
+            UnaryOperator::PostDec => (BinaryOperator::Sub, true),
+            _ => return None,
+        };
+        let TypedExpressionKind::ArrayAccess { array, .. } = &operand.kind else {
+            return None;
+        };
+        self.find_array_access_method(array.expr_type, "get")?;
+        self.find_array_access_method(array.expr_type, "set")?;
+
+        // Bind the address and getter once, then write through the setter.
+        let mut statements = Vec::new();
+        let target = self.bind_assignment_target(operand, &mut statements);
+        let current = self.bind_assignment_operand(&target, &mut statements);
+        let mut one = expr.clone();
+        one.expr_type = self.get_int_type();
+        one.kind = TypedExpressionKind::Literal {
+            value: LiteralValue::Int(1),
+        };
+        let mut next = expr.clone();
+        next.expr_type = operand.expr_type;
+        next.kind = TypedExpressionKind::BinaryOp {
+            left: Box::new(current.clone()),
+            operator: binary_op,
+            right: Box::new(one),
+        };
+        let next = self.bind_assignment_operand(&next, &mut statements);
+        let mut assignment = expr.clone();
+        assignment.expr_type = operand.expr_type;
+        assignment.kind = TypedExpressionKind::BinaryOp {
+            left: Box::new(target),
+            operator: BinaryOperator::Assign,
+            right: Box::new(next.clone()),
+        };
+        statements.push(HirStatement::Expr(self.lower_expression(&assignment)));
+        let result = self.lower_expression(if postfix { &current } else { &next });
+        Some(HirExpr::new(
+            HirExprKind::Block(HirBlock::with_expr(statements, result, self.current_scope)),
+            expr.expr_type,
+            self.current_lifetime,
+            expr.source_location,
+        ))
     }
 
     /// Bind the address operands before evaluating the RHS or reading the target.
@@ -9219,12 +9275,13 @@ impl<'a> TastToHirContext<'a> {
                     && matches!(method_name, Some("is") | Some("isOfType"))
                     && arguments.len() == 2
                 {
-                    let kind = if self.is_named_type_value(&lowered_args[1])
-                        && !self.is_type_value_expr(&lowered_args[0])
+                    let kind = if let Some(expected) = self
+                        .named_type_value(&lowered_args[1])
+                        .filter(|_| !self.is_type_value_expr(&lowered_args[0]))
                     {
                         HirExprKind::TypeCheck {
                             expr: Box::new(lowered_args[0].clone()),
-                            expected: arguments[1].expr_type,
+                            expected,
                         }
                     } else {
                         HirExprKind::RuntimeTypeCheck {

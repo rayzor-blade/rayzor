@@ -157,6 +157,43 @@ register_symbol!("haxe_array_length", crate::haxe_array::haxe_array_length);
 // Access
 register_symbol!("haxe_array_get", crate::haxe_array::haxe_array_get);
 register_symbol!("haxe_array_set", crate::haxe_array::haxe_array_set);
+register_symbol!(
+    "haxe_array_push_typed",
+    crate::haxe_array::haxe_array_push_typed
+);
+register_symbol!(
+    "haxe_array_push_typed_f64",
+    crate::haxe_array::haxe_array_push_typed_f64
+);
+register_symbol!(
+    "haxe_array_init_element_tag",
+    crate::haxe_array::haxe_array_init_element_tag
+);
+register_symbol!(
+    "haxe_array_mark_slot_layout",
+    crate::haxe_array::haxe_array_mark_slot_layout
+);
+register_symbol!(
+    "haxe_array_get_typed",
+    crate::haxe_array::haxe_array_get_typed
+);
+register_symbol!(
+    "haxe_array_set_typed",
+    crate::haxe_array::haxe_array_set_typed
+);
+register_symbol!(
+    "haxe_array_take_typed",
+    crate::haxe_array::haxe_array_take_typed
+);
+register_symbol!(
+    "haxe_array_unshift_typed",
+    crate::haxe_array::haxe_array_unshift_typed
+);
+register_symbol!(
+    "haxe_array_insert_typed",
+    crate::haxe_array::haxe_array_insert_typed
+);
+
 register_symbol!("haxe_array_set_i64", crate::haxe_array::haxe_array_set_i64);
 register_symbol!("haxe_array_set_f64", crate::haxe_array::haxe_array_set_f64);
 register_symbol!(
@@ -933,6 +970,30 @@ register_symbol!("haxe_bytes_free", crate::haxe_sys::haxe_bytes_free);
 // ============================================================================
 register_symbol!("haxe_stringmap_new", crate::haxe_sys::haxe_stringmap_new);
 register_symbol!("haxe_stringmap_set", crate::haxe_sys::haxe_stringmap_set);
+register_symbol!(
+    "haxe_stringmap_get_typed",
+    crate::haxe_sys::haxe_stringmap_get_typed
+);
+register_symbol!(
+    "haxe_stringmap_set_typed",
+    crate::haxe_sys::haxe_stringmap_set_typed
+);
+register_symbol!(
+    "haxe_intmap_get_typed",
+    crate::haxe_sys::haxe_intmap_get_typed
+);
+register_symbol!(
+    "haxe_intmap_set_typed",
+    crate::haxe_sys::haxe_intmap_set_typed
+);
+register_symbol!(
+    "haxe_objectmap_get_typed",
+    crate::haxe_sys::haxe_objectmap_get_typed
+);
+register_symbol!(
+    "haxe_objectmap_set_typed",
+    crate::haxe_sys::haxe_objectmap_set_typed
+);
 register_symbol!("haxe_stringmap_get", crate::haxe_sys::haxe_stringmap_get);
 register_symbol!(
     "haxe_stringmap_exists",
@@ -1060,6 +1121,14 @@ register_symbol!("haxe_box_int_ptr", crate::type_system::haxe_box_int_ptr);
 register_symbol!("haxe_box_int64_ptr", crate::type_system::haxe_box_int64_ptr);
 register_symbol!("haxe_box_float_ptr", crate::type_system::haxe_box_float_ptr);
 register_symbol!("haxe_box_bool_ptr", crate::type_system::haxe_box_bool_ptr);
+register_symbol!(
+    "haxe_box_generic_ptr",
+    crate::type_system::haxe_box_generic_ptr
+);
+register_symbol!(
+    "haxe_value_to_string_with_metadata",
+    crate::haxe_sys::haxe_value_to_string_with_metadata
+);
 register_symbol!("haxe_box_typed_ptr", crate::type_system::haxe_box_typed_ptr);
 register_symbol!(
     "haxe_box_string_ptr",
@@ -1777,6 +1846,10 @@ register_symbol!(
 
 // Vec<T> (reference types) -> VecPtr
 register_symbol!("rayzor_vec_ptr_new", crate::generic_vec::rayzor_vec_ptr_new);
+register_symbol!(
+    "rayzor_vec_ptr_set_element_descriptor",
+    crate::generic_vec::rayzor_vec_ptr_set_element_descriptor
+);
 register_symbol!(
     "rayzor_vec_ptr_push",
     crate::generic_vec::rayzor_vec_ptr_push

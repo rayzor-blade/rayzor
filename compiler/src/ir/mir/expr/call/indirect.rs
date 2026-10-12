@@ -133,9 +133,12 @@ impl<'a> HirToMirContext<'a> {
                 Some(formal) if boxable => {
                     self.maybe_box_value(reg, storage_ty, formal).unwrap_or(reg)
                 }
-                Some(formal) => self
-                    .unbox_optional_for_erased_formal(reg, a.ty, formal)
-                    .unwrap_or(reg),
+                Some(formal) => {
+                    let reg = self
+                        .unbox_optional_for_erased_formal(reg, a.ty, formal)
+                        .unwrap_or(reg);
+                    self.maybe_unbox_value(reg, a.ty, formal).unwrap_or(reg)
+                }
                 None => reg,
             };
             arg_regs.push(reg);

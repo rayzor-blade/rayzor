@@ -22,6 +22,114 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    pub(crate) fn try_native_map_call(
+        &mut self,
+        expr: &HirExpr,
+        fell_through: &mut bool,
+    ) -> Option<IrId> {
+        let HirExprKind::Call {
+            callee,
+            args,
+            is_method,
+            ..
+        } = &expr.kind
+        else {
+            return None;
+        };
+        let (receiver, method, arguments) = match &callee.kind {
+            HirExprKind::Variable { symbol, .. } if *is_method && !args.is_empty() => {
+                (&args[0], *symbol, &args[1..])
+            }
+            HirExprKind::Field { object, field } if *is_method => {
+                (object.as_ref(), *field, args.as_slice())
+            }
+            _ => {
+                *fell_through = true;
+                return None;
+            }
+        };
+        let method = self
+            .symbol_table
+            .get_symbol(method)
+            .and_then(|s| self.string_interner.get(s.name));
+        let Some((runtime, key_type, element)) = self.map_index_info(receiver.ty) else {
+            *fell_through = true;
+            return None;
+        };
+        if !matches!(
+            (method, arguments.len()),
+            (Some("get"), 1) | (Some("set"), 2)
+        ) {
+            *fell_through = true;
+            return None;
+        }
+        let object = self.lower_expression(receiver)?;
+        let key = self.lower_expression(&arguments[0])?;
+        let key_target = match runtime {
+            "haxe_stringmap_get" => self.type_table.string_type(),
+            "haxe_intmap_get" => self.type_table.int_type(),
+            _ => arguments[0].ty,
+        };
+        let key = self
+            .maybe_unbox_value(key, arguments[0].ty, key_target)
+            .unwrap_or(key);
+        let key = self.coerce_map_key(key, &key_type);
+        if method == Some("set") {
+            let value = self.lower_expression(&arguments[1])?;
+            let value = self
+                .maybe_unbox_value(value, arguments[1].ty, element)
+                .unwrap_or(value);
+            let value = self
+                .maybe_box_value(value, arguments[1].ty, element)
+                .unwrap_or(value);
+            self.store_index_with_regs(object, key, receiver.ty, value);
+            return None;
+        }
+        let value = self.load_map_index_with_regs(object, key, receiver.ty)?;
+        let exists = self.get_or_register_extern_function(
+            &runtime.replace("_get", "_exists"),
+            vec![IrType::Ptr(Box::new(IrType::Void)), key_type],
+            IrType::Bool,
+        );
+        let value =
+            match self.box_raw_optional_result(value, expr.ty, Some((exists, vec![object, key]))) {
+                Some(boxed) => boxed,
+                None => self
+                    .maybe_box_value(value, element, expr.ty)
+                    .unwrap_or(value),
+            };
+        let target = self.convert_type(expr.ty);
+        self.coerce_reg_to(value, &target)
+    }
+
+    pub(crate) fn append_native_map_layout(
+        &mut self,
+        runtime: &str,
+        receiver: TypeId,
+        values: &mut Vec<IrId>,
+        types: &mut Vec<IrType>,
+    ) -> Option<String> {
+        if !matches!(
+            runtime,
+            "haxe_stringmap_set"
+                | "haxe_stringmap_get"
+                | "haxe_intmap_set"
+                | "haxe_intmap_get"
+                | "haxe_objectmap_set"
+                | "haxe_objectmap_get"
+        ) {
+            return None;
+        }
+        let (_, _, value) = self.map_index_info(self.resolve_storage_type(receiver))?;
+        if runtime.ends_with("_set") {
+            values[2] = self.coerce_reg_to(values[2], &IrType::I64)?;
+        }
+        let (tag, metadata) = self.array_element_descriptor(value)?;
+        values.extend([tag, metadata]);
+        types.extend([IrType::I32, IrType::U64]);
+        Some(format!("{runtime}_typed"))
+    }
+
     pub(crate) fn try_stdlib_runtime_dispatch(
         &mut self,
         expr: &HirExpr,
@@ -292,6 +400,17 @@ impl<'a> HirToMirContext<'a> {
                         *first = self.unbox_dynamic_receiver(*first, receiver, class_name);
                     }
 
+                    if runtime_func.ends_with("map_set")
+                        && let Some((_, _, element)) =
+                            self.map_index_info(self.resolve_storage_type(receiver_type))
+                        && let Some(argument) = args.last()
+                        && let Some(value) = arg_regs.last_mut()
+                    {
+                        *value = self
+                            .maybe_box_value(*value, argument.ty, element)
+                            .unwrap_or(*value);
+                    }
+
                     // Raw-value params (StringMap, IntMap) are stored inline as u64 bits:
                     // no boxing, no heap allocation.
                     let mut final_arg_regs = arg_regs.clone();
@@ -489,7 +608,7 @@ impl<'a> HirToMirContext<'a> {
                     }
 
                     // Param types come from TAST, adjusted for the conversions applied above.
-                    let param_types: Vec<IrType> = args
+                    let mut param_types: Vec<IrType> = args
                         .iter()
                         .enumerate()
                         .map(|(i, arg)| {
@@ -568,6 +687,13 @@ impl<'a> HirToMirContext<'a> {
 
                     let probe_param_types = param_types.clone();
                     let probe_args = final_arg_regs.clone();
+                    let typed_runtime = self.append_native_map_layout(
+                        runtime_func,
+                        receiver_type,
+                        &mut final_arg_regs,
+                        &mut param_types,
+                    );
+                    let runtime_func = typed_runtime.as_deref().unwrap_or(runtime_func);
                     let runtime_func_id = self.get_or_register_extern_function(
                         &runtime_func,
                         param_types,
@@ -1219,7 +1345,7 @@ impl<'a> HirToMirContext<'a> {
                                         return result;
                                     }
 
-                                    let arg_regs: Vec<_> = args
+                                    let mut arg_regs: Vec<_> = args
                                         .iter()
                                         .filter_map(|a| self.lower_expression(a))
                                         .collect();
@@ -1618,7 +1744,19 @@ impl<'a> HirToMirContext<'a> {
             };
             for (i, arg) in args.iter().enumerate() {
                 let mut arg_reg = self.lower_expression(arg)?;
-                let actual_ty = self.convert_type(arg.ty);
+                if runtime_func.ends_with("map_set")
+                    && i + 1 == args.len()
+                    && let Some((_, _, element)) =
+                        self.map_index_info(self.resolve_storage_type(object.ty))
+                {
+                    arg_reg = self
+                        .maybe_box_value(arg_reg, arg.ty, element)
+                        .unwrap_or(arg_reg);
+                }
+                let actual_ty = self
+                    .builder
+                    .get_register_type(arg_reg)
+                    .unwrap_or_else(|| self.convert_type(arg.ty));
 
                 // Instance methods offset by 1 for 'this'.
                 let param_idx = if prepend_receiver { i + 1 } else { i };
@@ -1647,7 +1785,7 @@ impl<'a> HirToMirContext<'a> {
 
                 // Auto-box if needed (Int -> Ptr(U8) for Deque<Int>.add()).
                 let final_reg = match self
-                    .box_for_runtime_dynamic_param(runtime_func, param_idx, arg_reg, arg.ty)
+                    .box_for_runtime_dynamic_param(runtime_func, param_idx, arg_reg, arg)
                     .or_else(|| self.box_anon_for_dynamic_slot(arg_reg, arg.ty, &expected_ty))
                 {
                     Some(boxed) => boxed,
@@ -1660,7 +1798,7 @@ impl<'a> HirToMirContext<'a> {
             // take a hidden type_id argument.
             self.inject_hidden_enum_type_id_arg(runtime_func, args, &mut arg_regs);
 
-            let param_types = if expected_param_types.len() == arg_regs.len() {
+            let mut param_types = if expected_param_types.len() == arg_regs.len() {
                 expected_param_types.clone()
             } else {
                 let mut params = if prepend_receiver {
@@ -1673,6 +1811,14 @@ impl<'a> HirToMirContext<'a> {
                 }
                 params
             };
+
+            let typed_runtime = self.append_native_map_layout(
+                runtime_func,
+                object.ty,
+                &mut arg_regs,
+                &mut param_types,
+            );
+            let runtime_func = typed_runtime.as_deref().unwrap_or(runtime_func);
 
             let call_result = if is_mir_wrapper {
                 let mir_func_id = self.register_stdlib_mir_forward_ref(

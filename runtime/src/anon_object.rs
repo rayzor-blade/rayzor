@@ -321,6 +321,7 @@ pub extern "C" fn rayzor_anon_drop(ptr: *mut u8) {
 /// as null.
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_get_field_by_index(ptr: *mut u8, index: u32) -> u64 {
+    let ptr = crate::type_system::haxe_unbox_reference_ptr(ptr);
     if ptr.is_null() {
         if crate::exception::has_handler() {
             crate::exception::throw_with_message("Null Object Reference".to_string());
@@ -472,8 +473,9 @@ pub extern "C" fn rayzor_anon_set_field(
             let dv = *(value_ptr as *const DynamicValue);
             if dv.value_ptr.is_null() {
                 (dv.type_id.0, 0u64)
-            } else if dv.type_id == TYPE_INT || dv.type_id == TYPE_FLOAT || dv.type_id == TYPE_BOOL
-            {
+            } else if dv.type_id == TYPE_BOOL {
+                (dv.type_id.0, *(dv.value_ptr as *const bool) as u64)
+            } else if dv.type_id == TYPE_INT || dv.type_id == TYPE_FLOAT {
                 // Primitive types: dereference to get the raw value
                 (dv.type_id.0, *(dv.value_ptr as *const u64))
             } else {
@@ -723,6 +725,24 @@ mod tests {
             2.78
         );
 
+        rayzor_anon_drop(handle);
+    }
+
+    #[test]
+    fn bool_field_reads_only_the_payload_byte() {
+        let handle = rayzor_anon_new(DYNAMIC_SHAPE, 0);
+        let payload = 0xffffffffffffff00u64;
+        let value = DynamicValue {
+            type_id: TYPE_BOOL,
+            value_ptr: (&payload as *const u64).cast_mut().cast(),
+        };
+        rayzor_anon_set_field(
+            handle,
+            b"value".as_ptr(),
+            5,
+            (&value as *const DynamicValue).cast_mut().cast(),
+        );
+        assert_eq!(rayzor_anon_get_field_by_index(handle, 0), 0);
         rayzor_anon_drop(handle);
     }
 

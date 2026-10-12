@@ -14,8 +14,7 @@
 //!   result are `DynamicValue` boxes.
 
 use crate::type_system::{
-    TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_NULL, dynamic_value_if_boxed, haxe_unbox_bool,
-    haxe_unbox_float, haxe_unbox_int,
+    TYPE_BOOL, TYPE_FLOAT, TYPE_INT, dynamic_value_if_boxed, haxe_unbox_float, haxe_unbox_int,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
@@ -128,7 +127,15 @@ fn lookup(code: usize) -> Entries {
     let guard = ENTRIES.read().unwrap();
     guard
         .as_ref()
-        .and_then(|m| m.get(&code).copied())
+        .and_then(|m| {
+            m.get(&code).copied().or_else(|| {
+                m.values()
+                    .find(|entry| {
+                        entry.slot == code || entry.dynamic == code || entry.packed == code
+                    })
+                    .copied()
+            })
+        })
         .unwrap_or_default()
 }
 
@@ -139,6 +146,11 @@ pub(crate) fn closure_slot_code(code: usize) -> usize {
         0 => code,
         slot => slot,
     }
+}
+
+pub(crate) fn closure_dynamic_code(code: usize) -> Option<usize> {
+    let entry = lookup(code).dynamic;
+    (entry != 0).then_some(entry)
 }
 
 /// A view of `closure` using raw 64-bit arguments and result slots.
@@ -365,17 +377,7 @@ pub extern "C" fn haxe_call_method_dynamic(func: *mut u8, args: *mut u8) -> *mut
 /// its bits, a String or reference as its pointer. A non-box passes through.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_to_slot(ptr: *mut u8) -> i64 {
-    if ptr.is_null() {
-        return 0;
-    }
-    match dynamic_value_if_boxed(ptr) {
-        Some(d) if d.type_id == TYPE_NULL => 0,
-        Some(d) if d.type_id == TYPE_INT => haxe_unbox_int(d),
-        Some(d) if d.type_id == TYPE_BOOL => haxe_unbox_bool(d) as i64,
-        Some(d) if d.type_id == TYPE_FLOAT => haxe_unbox_float(d).to_bits() as i64,
-        Some(d) => d.value_ptr as usize as i64,
-        None => ptr as usize as i64,
-    }
+    crate::type_system::haxe_unbox_erased_return(ptr)
 }
 
 /// A box's payload as a float: a Float's value, an Int's conversion.

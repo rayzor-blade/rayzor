@@ -165,7 +165,7 @@ impl<'a> HirToMirContext<'a> {
                             .cloned()
                             .unwrap_or_else(|| actual_ty.clone());
                         let final_reg = match self
-                            .box_for_runtime_dynamic_param(runtime_func, i, arg_reg, arg.ty)
+                            .box_for_runtime_dynamic_param(runtime_func, i, arg_reg, arg)
                             .or_else(|| {
                                 self.box_anon_for_dynamic_slot(arg_reg, arg.ty, &expected_ty)
                             }) {

@@ -632,11 +632,14 @@ pub extern "C" fn haxe_value_to_string_by_tag(value: i64, type_tag: i32) -> *mut
     match ValueTag::from_i32(type_tag) {
         // value is already a HaxeString pointer, return it directly
         Some(ValueTag::String) => value as *mut HaxeString,
-        Some(ValueTag::Int) => haxe_string_from_int(value),
+        Some(ValueTag::Int | ValueTag::Int64) => haxe_string_from_int(value),
         Some(ValueTag::NullInt) => haxe_null_int_to_string(value),
         Some(ValueTag::Bool) => haxe_string_from_bool(value != 0),
         // reinterpret i64 bits as f64
         Some(ValueTag::Float) => haxe_string_from_float(f64::from_bits(value as u64)),
+        Some(ValueTag::Array) => crate::type_system::haxe_std_string_ptr(
+            crate::type_system::haxe_box_array_ptr(value as *mut u8, 0),
+        ),
         Some(ValueTag::Reference | ValueTag::Dynamic) => {
             crate::type_system::haxe_std_string_ptr(value as *mut u8)
         }
@@ -669,6 +672,21 @@ pub extern "C" fn haxe_value_to_string_by_tag(value: i64, type_tag: i32) -> *mut
         }
         // A tag from outside the space.
         _ => haxe_string_from_int(value),
+    }
+}
+
+/// Stringify a generic value with its reference identity or array slot layout.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_value_to_string_with_metadata(
+    value: i64,
+    type_tag: i32,
+    metadata: u64,
+) -> *mut HaxeString {
+    if metadata != 0 || type_tag == crate::type_system::ValueTag::Int64 as i32 {
+        let boxed = crate::type_system::haxe_box_generic_ptr(value, type_tag, metadata);
+        crate::type_system::haxe_std_string_ptr(boxed)
+    } else {
+        haxe_value_to_string_by_tag(value, type_tag)
     }
 }
 
@@ -3288,7 +3306,11 @@ pub extern "C" fn haxe_bytes_of_int_array(
     unsafe {
         let dst = (*bytes).ptr;
         for i in 0..len.min(available) {
-            *dst.add(i) = crate::haxe_array::haxe_array_get_i64(data, i) as u8;
+            *dst.add(i) = crate::haxe_array::haxe_array_get_typed(
+                data,
+                i as i64,
+                crate::type_system::ValueTag::Int as i32,
+            ) as u8;
         }
     }
     bytes
@@ -3372,6 +3394,11 @@ fn sync_bytes_data_views(bytes: *const HaxeBytes, start: usize, count: usize) {
             let last = (end - source_start).min(array.len);
             for index in first..last {
                 let value = *source.ptr.add(index) as i64;
+                let value = if array.flags & crate::haxe_array::HAXE_ARRAY_BOXED_ELEMS != 0 {
+                    crate::type_system::haxe_box_int_ptr(value) as i64
+                } else {
+                    value
+                };
                 std::ptr::write_unaligned(array.ptr.add(index * 8) as *mut i64, value);
             }
         }
@@ -3392,7 +3419,11 @@ pub extern "C" fn haxe_bytes_fast_get(data: *const crate::haxe_array::HaxeArray,
     if pos < 0 {
         return 0;
     }
-    crate::haxe_array::haxe_array_get_i64(data, pos as usize) as i32
+    crate::haxe_array::haxe_array_get_typed(
+        data,
+        pos as i64,
+        crate::type_system::ValueTag::Int as i32,
+    ) as i32
 }
 
 /// `bytes.getData()`: an `Array<Int>` view of the byte buffer.
@@ -4148,26 +4179,108 @@ pub extern "C" fn haxe_bytes_free(bytes: *mut HaxeBytes) {
 // StringMap<T> (haxe.ds.StringMap)
 // ============================================================================
 //
-// High-performance StringMap with inline value storage.
-// Values are stored as raw 64-bit values (u64) - no boxing, no heap allocation per value.
-// Type is known at compile time; the runtime stores raw bits.
-//
-// For primitives (Int, Float, Bool): value is stored directly as bits
-// For pointers (String, objects): pointer value is stored as u64
-//
-// This gives us:
-// - No heap allocation per value (values inline in HashMap)
-// - No type tags (type known at compile time)
-// - Cache-friendly layout
-// - Zero-cost abstraction over HashMap<String, u64>
+// Values stay in raw 64-bit slots. The map remembers their representation so
+// typed and Dynamic aliases can share the same entries.
 
 use std::collections::HashMap;
+
+#[derive(Clone, Copy, Default)]
+struct MapValueLayout {
+    tag: i32,
+    metadata: u64,
+}
+
+impl MapValueLayout {
+    fn transcode(self, bits: u64, target: Self) -> u64 {
+        use crate::type_system::*;
+        if self.tag == 0 || self.tag == target.tag {
+            return bits;
+        }
+        let boxed = haxe_box_generic_ptr(bits as i64, self.tag, self.metadata);
+        match ValueTag::from_i32(target.tag) {
+            Some(ValueTag::Dynamic) => boxed as u64,
+            Some(ValueTag::Int) => haxe_unbox_int_ptr(boxed) as u64,
+            Some(ValueTag::Bool) => haxe_unbox_bool_ptr(boxed) as u64,
+            Some(ValueTag::Float) => haxe_unbox_float_ptr(boxed).to_bits(),
+            Some(ValueTag::NullInt) => haxe_null_int_from_dynamic(boxed) as u64,
+            _ => haxe_unbox_generic_return(boxed, target.tag) as u64,
+        }
+    }
+
+    fn write(&mut self, bits: u64, source: Self) -> u64 {
+        if self.tag == 0 {
+            *self = source;
+        }
+        source.transcode(bits, *self)
+    }
+
+    fn mark_array(self, array: *mut crate::haxe_array::HaxeArray) {
+        use crate::type_system::ValueTag;
+        if self.tag == ValueTag::Dynamic as i32 {
+            crate::haxe_array::haxe_array_init_element_tag(array, self.tag);
+            return;
+        }
+        let layout = match ValueTag::from_i32(self.tag) {
+            Some(ValueTag::Bool) => 2,
+            Some(ValueTag::Int) => 3,
+            Some(ValueTag::Float) => 4,
+            Some(ValueTag::String) => 5,
+            Some(
+                ValueTag::Reference | ValueTag::Enum | ValueTag::Function | ValueTag::Interface,
+            ) => self.metadata.max(6),
+            Some(ValueTag::Array) => self.metadata,
+            Some(ValueTag::NullInt) => 8,
+            Some(ValueTag::Int64) => 9,
+            _ => return,
+        };
+        crate::haxe_array::haxe_array_mark_slot_layout(array, layout);
+    }
+}
+
+#[cfg(test)]
+mod map_layout_tests {
+    use super::*;
+    use crate::type_system::*;
+
+    #[test]
+    fn typed_maps_share_scalar_values_with_dynamic_views() {
+        let map = haxe_intmap_new();
+        haxe_intmap_set_typed(map, 1, (-465i64) as u64, ValueTag::Int as i32, 0);
+        let erased = haxe_intmap_get_typed(map, 1, ValueTag::Dynamic as i32, 0) as *mut u8;
+        assert_eq!(haxe_unbox_int_ptr(erased), -465);
+        let update = haxe_box_int_ptr(7);
+        haxe_intmap_set_typed(map, 1, update as u64, ValueTag::Dynamic as i32, 0);
+        assert_eq!(haxe_intmap_get_typed(map, 1, ValueTag::Int as i32, 0), 7);
+        let copied = haxe_intmap_copy(map);
+        let erased = haxe_intmap_get_typed(copied, 1, ValueTag::Dynamic as i32, 0) as *mut u8;
+        assert_eq!(haxe_unbox_int_ptr(erased), 7);
+    }
+
+    #[test]
+    fn typed_reads_open_values_from_dynamic_maps() {
+        let map = haxe_stringmap_new();
+        let key = rust_string_to_haxe("foo".to_owned());
+        let value = rust_string_to_haxe("bar".to_owned());
+        let boxed = haxe_box_haxestring_ptr(value.cast());
+        haxe_stringmap_set_typed(map, key, boxed as u64, ValueTag::Dynamic as i32, 0);
+        assert_eq!(
+            haxe_stringmap_get_typed(map, key, ValueTag::String as i32, 0),
+            value as u64
+        );
+        let values = haxe_stringmap_values_to_array(map);
+        assert_eq!(
+            crate::haxe_array::haxe_array_get_typed(values, 0, ValueTag::String as i32),
+            value as i64
+        );
+    }
+}
 
 /// High-performance StringMap with inline 8-byte value storage
 /// Values are stored as raw u64 bits - no boxing overhead
 #[repr(C)]
 pub struct HaxeStringMap {
     map: HashMap<String, u64>,
+    value_layout: MapValueLayout,
 }
 
 /// Create a new StringMap
@@ -4175,6 +4288,7 @@ pub struct HaxeStringMap {
 pub extern "C" fn haxe_stringmap_new() -> *mut HaxeStringMap {
     Box::into_raw(Box::new(HaxeStringMap {
         map: HashMap::new(),
+        value_layout: MapValueLayout::default(),
     }))
 }
 
@@ -4194,6 +4308,49 @@ pub extern "C" fn haxe_stringmap_set(
         if let Some(key_str) = haxe_string_to_rust(key) {
             map.map.insert(key_str, value);
         }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_stringmap_set_typed(
+    map_ptr: *mut HaxeStringMap,
+    key: *const HaxeString,
+    value: u64,
+    tag: i32,
+    metadata: u64,
+) {
+    if map_ptr.is_null() {
+        return;
+    }
+    unsafe {
+        if let Some(key) = haxe_string_to_rust(key) {
+            let map = &mut *map_ptr;
+            let value = map
+                .value_layout
+                .write(value, MapValueLayout { tag, metadata });
+            map.map.insert(key, value);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_stringmap_get_typed(
+    map_ptr: *mut HaxeStringMap,
+    key: *const HaxeString,
+    tag: i32,
+    metadata: u64,
+) -> u64 {
+    if map_ptr.is_null() {
+        return 0;
+    }
+    unsafe {
+        let map = &*map_ptr;
+        haxe_string_to_rust(key)
+            .and_then(|key| map.map.get(&key))
+            .map_or(0, |bits| {
+                map.value_layout
+                    .transcode(*bits, MapValueLayout { tag, metadata })
+            })
     }
 }
 
@@ -4274,7 +4431,14 @@ pub extern "C" fn haxe_stringmap_copy(map_ptr: *mut HaxeStringMap) -> *mut HaxeS
     } else {
         unsafe { (*map_ptr).map.clone() }
     };
-    Box::into_raw(Box::new(HaxeStringMap { map }))
+    Box::into_raw(Box::new(HaxeStringMap {
+        map,
+        value_layout: if map_ptr.is_null() {
+            MapValueLayout::default()
+        } else {
+            unsafe { (*map_ptr).value_layout }
+        },
+    }))
 }
 
 /// Get the number of entries in the map
@@ -4352,7 +4516,22 @@ pub extern "C" fn haxe_stringmap_to_string_typed(
         let entries: Vec<String> = map
             .map
             .iter()
-            .map(|(k, v)| format!("{} => {}", k, map_slot_to_string(*v, val_tag)))
+            .map(|(k, v)| {
+                format!(
+                    "{} => {}",
+                    k,
+                    map_slot_to_string(
+                        map.value_layout.transcode(
+                            *v,
+                            MapValueLayout {
+                                tag: val_tag,
+                                metadata: 0
+                            }
+                        ),
+                        val_tag
+                    )
+                )
+            })
             .collect();
         rust_string_to_haxe(format!("[{}]", entries.join(", ")))
     }
@@ -4372,7 +4551,22 @@ pub extern "C" fn haxe_intmap_to_string_typed(
         let entries: Vec<String> = map
             .map
             .iter()
-            .map(|(k, v)| format!("{} => {}", k, map_slot_to_string(*v, val_tag)))
+            .map(|(k, v)| {
+                format!(
+                    "{} => {}",
+                    k,
+                    map_slot_to_string(
+                        map.value_layout.transcode(
+                            *v,
+                            MapValueLayout {
+                                tag: val_tag,
+                                metadata: 0
+                            }
+                        ),
+                        val_tag
+                    )
+                )
+            })
             .collect();
         rust_string_to_haxe(format!("[{}]", entries.join(", ")))
     }
@@ -4398,7 +4592,16 @@ pub extern "C" fn haxe_objectmap_to_string_typed(
                 format!(
                     "{} => {}",
                     map_slot_to_string(*k, key_tag),
-                    map_slot_to_string(*v, val_tag)
+                    map_slot_to_string(
+                        map.value_layout.transcode(
+                            *v,
+                            MapValueLayout {
+                                tag: val_tag,
+                                metadata: 0
+                            }
+                        ),
+                        val_tag
+                    )
                 )
             })
             .collect();
@@ -4434,6 +4637,7 @@ pub extern "C" fn haxe_stringmap_to_string(map_ptr: *mut HaxeStringMap) -> *mut 
 #[repr(C)]
 pub struct HaxeIntMap {
     map: HashMap<i64, u64>,
+    value_layout: MapValueLayout,
 }
 
 /// Create a new IntMap
@@ -4441,6 +4645,7 @@ pub struct HaxeIntMap {
 pub extern "C" fn haxe_intmap_new() -> *mut HaxeIntMap {
     Box::into_raw(Box::new(HaxeIntMap {
         map: HashMap::new(),
+        value_layout: MapValueLayout::default(),
     }))
 }
 
@@ -4454,6 +4659,49 @@ pub extern "C" fn haxe_intmap_set(map_ptr: *mut HaxeIntMap, key: i64, value: u64
     unsafe {
         let map = &mut *map_ptr;
         map.map.insert(key, value);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_intmap_set_typed(
+    map_ptr: *mut HaxeIntMap,
+    key: i64,
+    value: u64,
+    tag: i32,
+    metadata: u64,
+) {
+    if map_ptr.is_null() {
+        return;
+    }
+    unsafe {
+        if let Some(key) = Some(key) {
+            let map = &mut *map_ptr;
+            let value = map
+                .value_layout
+                .write(value, MapValueLayout { tag, metadata });
+            map.map.insert(key, value);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_intmap_get_typed(
+    map_ptr: *mut HaxeIntMap,
+    key: i64,
+    tag: i32,
+    metadata: u64,
+) -> u64 {
+    if map_ptr.is_null() {
+        return 0;
+    }
+    unsafe {
+        let map = &*map_ptr;
+        Some(key)
+            .and_then(|key| map.map.get(&key))
+            .map_or(0, |bits| {
+                map.value_layout
+                    .transcode(*bits, MapValueLayout { tag, metadata })
+            })
     }
 }
 
@@ -4515,7 +4763,14 @@ pub extern "C" fn haxe_intmap_copy(map_ptr: *mut HaxeIntMap) -> *mut HaxeIntMap 
     } else {
         unsafe { (*map_ptr).map.clone() }
     };
-    Box::into_raw(Box::new(HaxeIntMap { map }))
+    Box::into_raw(Box::new(HaxeIntMap {
+        map,
+        value_layout: if map_ptr.is_null() {
+            MapValueLayout::default()
+        } else {
+            unsafe { (*map_ptr).value_layout }
+        },
+    }))
 }
 
 /// Get the number of entries in the map
@@ -4633,6 +4888,7 @@ pub extern "C" fn haxe_stringmap_values_to_array(
 
         if !map_ptr.is_null() {
             let map = &*map_ptr;
+            map.value_layout.mark_array(arr);
             for &val in map.map.values() {
                 crate::haxe_array::haxe_array_push_i64(arr, val as i64);
             }
@@ -4657,6 +4913,7 @@ pub extern "C" fn haxe_intmap_values_to_array(
 
         if !map_ptr.is_null() {
             let map = &*map_ptr;
+            map.value_layout.mark_array(arr);
             for &val in map.map.values() {
                 crate::haxe_array::haxe_array_push_i64(arr, val as i64);
             }
@@ -4676,6 +4933,7 @@ pub extern "C" fn haxe_intmap_values_to_array(
 #[repr(C)]
 pub struct HaxeObjectMap {
     map: HashMap<u64, u64>,
+    value_layout: MapValueLayout,
 }
 
 /// A key's identity: a box of an enum value is its cell or discriminant, a
@@ -4699,6 +4957,7 @@ fn objectmap_key(key: u64) -> u64 {
 pub extern "C" fn haxe_objectmap_new() -> *mut HaxeObjectMap {
     Box::into_raw(Box::new(HaxeObjectMap {
         map: HashMap::new(),
+        value_layout: MapValueLayout::default(),
     }))
 }
 
@@ -4712,6 +4971,49 @@ pub extern "C" fn haxe_objectmap_set(map_ptr: *mut HaxeObjectMap, key: u64, valu
     unsafe {
         let map = &mut *map_ptr;
         map.map.insert(objectmap_key(key), value);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_objectmap_set_typed(
+    map_ptr: *mut HaxeObjectMap,
+    key: u64,
+    value: u64,
+    tag: i32,
+    metadata: u64,
+) {
+    if map_ptr.is_null() {
+        return;
+    }
+    unsafe {
+        if let Some(key) = Some(objectmap_key(key)) {
+            let map = &mut *map_ptr;
+            let value = map
+                .value_layout
+                .write(value, MapValueLayout { tag, metadata });
+            map.map.insert(key, value);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_objectmap_get_typed(
+    map_ptr: *mut HaxeObjectMap,
+    key: u64,
+    tag: i32,
+    metadata: u64,
+) -> u64 {
+    if map_ptr.is_null() {
+        return 0;
+    }
+    unsafe {
+        let map = &*map_ptr;
+        Some(objectmap_key(key))
+            .and_then(|key| map.map.get(&key))
+            .map_or(0, |bits| {
+                map.value_layout
+                    .transcode(*bits, MapValueLayout { tag, metadata })
+            })
     }
 }
 
@@ -4814,6 +5116,7 @@ pub extern "C" fn haxe_objectmap_values_to_array(
 
         if !map_ptr.is_null() {
             let map = &*map_ptr;
+            map.value_layout.mark_array(arr);
             for &val in map.map.values() {
                 crate::haxe_array::haxe_array_push_i64(arr, val as i64);
             }
@@ -4853,6 +5156,7 @@ pub extern "C" fn haxe_objectmap_copy(map_ptr: *mut HaxeObjectMap) -> *mut HaxeO
         let map = &*map_ptr;
         Box::into_raw(Box::new(HaxeObjectMap {
             map: map.map.clone(),
+            value_layout: map.value_layout,
         }))
     }
 }

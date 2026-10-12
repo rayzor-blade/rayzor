@@ -1988,6 +1988,16 @@ impl<'a> HirToMirContext<'a> {
         let mut seen = BTreeSet::new();
         while seen.insert(current) {
             match self.type_table.get(current).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type })
+                    if matches!(
+                        self.type_table
+                            .get(self.resolve_through_aliases(*inner_type))
+                            .map(|ty| &ty.kind),
+                        Some(TypeKind::Dynamic)
+                    ) =>
+                {
+                    current = self.resolve_through_aliases(*inner_type);
+                }
                 Some(TypeKind::Abstract {
                     symbol_id,
                     underlying,

@@ -141,13 +141,15 @@ impl<'a> HirToMirContext<'a> {
                         matches!(e.kind, HirExprKind::Null) || self.is_null_int_type(e.ty)
                     }))
         });
-        // An `Array<Dynamic>` holds references as boxes. Scalars stay raw: the
-        // reflection helpers and erased-generic readers take them that way.
-        let dynamic_elements = element_type_id.is_some_and(|et| {
+        // Every Dynamic slot holds a box, including homogeneous scalar literals.
+        let dynamic_elements = matches!(
+            self.type_table.get(array_type).map(|ty| &ty.kind),
+            Some(TypeKind::Dynamic)
+        ) || element_type_id.is_some_and(|et| {
             matches!(
                 self.type_table.get(et).map(|t| &t.kind),
                 Some(TypeKind::Dynamic)
-            )
+            ) || self.is_any_type(et)
         });
         // A literal whose elements all carry one concrete Haxe type is
         // homogeneous whatever registers they arrive in (a String literal
@@ -247,6 +249,10 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        if !elements.is_empty() {
+            self.init_array_element_layout(array_ptr, array_type)?;
+        }
+
         // For non-empty arrays, push each element using the appropriate
         // typed runtime function. This avoids cross-type bitcasts that lose
         // precision on WASM32 (where IrType::I64 lowers to WASM i32).
@@ -340,16 +346,14 @@ impl<'a> HirToMirContext<'a> {
                         } else if dynamic_elements
                             && !matches!(
                                 self.type_table.get(elem.ty).map(|t| &t.kind),
-                                Some(TypeKind::Dynamic)
-                                    | Some(TypeKind::Unknown)
-                                    | Some(TypeKind::Int)
-                                    | Some(TypeKind::Float)
-                                    | Some(TypeKind::Bool)
-                                    | None
+                                Some(TypeKind::Dynamic) | Some(TypeKind::Unknown) | None
                             )
                         {
                             let dynamic = self.type_table.dynamic_type();
-                            self.maybe_box_value(v, storage_ty, dynamic).unwrap_or(v)
+                            self.maybe_box_value(v, storage_ty, dynamic)
+                                .filter(|boxed| *boxed != v)
+                                .or_else(|| self.box_scalar_register(v))
+                                .unwrap_or(v)
                         } else {
                             v
                         };
@@ -386,6 +390,18 @@ impl<'a> HirToMirContext<'a> {
                 })
             };
 
+            if heterogeneous {
+                let offset = self.builder.build_const(IrValue::I64(32))?;
+                let ptr = self.builder.build_ptr_add(
+                    array_ptr,
+                    offset,
+                    IrType::Ptr(Box::new(IrType::U8)),
+                )?;
+                let flag = self.builder.build_const(IrValue::I64(
+                    rayzor_runtime::haxe_array::HAXE_ARRAY_BOXED_ELEMS as i64,
+                ))?;
+                self.builder.build_store(ptr, flag)?;
+            }
             for entry in lowered {
                 let (elem_val, elem_type, hir_kind) = match entry {
                     Some(triple) => triple,
@@ -531,7 +547,22 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        Some(array_ptr)
+        if matches!(
+            self.type_table.get(array_type).map(|ty| &ty.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            let ptr = IrType::Ptr(Box::new(IrType::U8));
+            let layout = self.builder.build_const(IrValue::U64(0))?;
+            let boxer = self.get_or_register_extern_function(
+                "haxe_box_array_ptr",
+                vec![ptr.clone(), IrType::U64],
+                ptr.clone(),
+            );
+            self.builder
+                .build_call_direct(boxer, vec![array_ptr, layout], ptr)
+        } else {
+            Some(array_ptr)
+        }
     }
 
     pub(crate) fn lower_map_literal(
@@ -588,8 +619,14 @@ impl<'a> HirToMirContext<'a> {
                 .build_call_direct(new_fn, vec![], map_ptr_type.clone())?;
 
             let set_fn = self.get_or_register_extern_function(
-                "haxe_intmap_set",
-                vec![map_ptr_type.clone(), IrType::I64, IrType::U64],
+                "haxe_intmap_set_typed",
+                vec![
+                    map_ptr_type.clone(),
+                    IrType::I64,
+                    IrType::U64,
+                    IrType::I32,
+                    IrType::U64,
+                ],
                 IrType::Void,
             );
 
@@ -621,9 +658,10 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or(value_val),
                 };
 
+                let (tag, metadata) = self.array_element_descriptor(value.ty)?;
                 self.builder.build_call_direct(
                     set_fn,
-                    vec![map_ptr, key_i64, val_u64],
+                    vec![map_ptr, key_i64, val_u64, tag, metadata],
                     IrType::Void,
                 );
             }
@@ -641,10 +679,12 @@ impl<'a> HirToMirContext<'a> {
                 .build_call_direct(new_fn, vec![], map_ptr_type.clone())?;
 
             let set_fn = self.get_or_register_extern_function(
-                "haxe_stringmap_set",
+                "haxe_stringmap_set_typed",
                 vec![
                     map_ptr_type.clone(),
                     IrType::Ptr(Box::new(IrType::U8)),
+                    IrType::U64,
+                    IrType::I32,
                     IrType::U64,
                 ],
                 IrType::Void,
@@ -668,9 +708,10 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or(value_val),
                 };
 
+                let (tag, metadata) = self.array_element_descriptor(value.ty)?;
                 self.builder.build_call_direct(
                     set_fn,
-                    vec![map_ptr, key_val, val_u64],
+                    vec![map_ptr, key_val, val_u64, tag, metadata],
                     IrType::Void,
                 );
             }
@@ -688,8 +729,14 @@ impl<'a> HirToMirContext<'a> {
                 .build_call_direct(new_fn, vec![], map_ptr_type.clone())?;
 
             let set_fn = self.get_or_register_extern_function(
-                "haxe_objectmap_set",
-                vec![map_ptr_type.clone(), IrType::U64, IrType::U64],
+                "haxe_objectmap_set_typed",
+                vec![
+                    map_ptr_type.clone(),
+                    IrType::U64,
+                    IrType::U64,
+                    IrType::I32,
+                    IrType::U64,
+                ],
                 IrType::Void,
             );
 
@@ -721,9 +768,10 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or(value_val),
                 };
 
+                let (tag, metadata) = self.array_element_descriptor(value.ty)?;
                 self.builder.build_call_direct(
                     set_fn,
-                    vec![map_ptr, key_u64, val_u64],
+                    vec![map_ptr, key_u64, val_u64, tag, metadata],
                     IrType::Void,
                 );
             }

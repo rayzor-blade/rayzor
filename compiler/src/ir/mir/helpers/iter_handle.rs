@@ -1051,13 +1051,14 @@ impl<'a> HirToMirContext<'a> {
             .build_call_indirect(nx_b, vec![obj_b], next_sig)
         {
             if let HirPattern::Variable { symbol, .. } = pattern {
-                let target = self
-                    .symbol_table
-                    .get_symbol(*symbol)
-                    .map(|s| s.type_id)
-                    .map(|t| self.convert_type(t));
+                let target = self.symbol_table.get_symbol(*symbol).map(|s| s.type_id);
                 let value = match target {
-                    Some(t) => self.iter_elem_from_i64(value, &t).unwrap_or(value),
+                    Some(t) => {
+                        let target =
+                            self.convert_type_or_type_var(t, &self.current_type_param_names());
+                        self.array_iterator_next_result(value, t, &target)
+                            .unwrap_or(value)
+                    }
                     None => value,
                 };
                 self.symbol_map.insert(*symbol, value);
@@ -1215,13 +1216,10 @@ impl<'a> HirToMirContext<'a> {
                 _ => return None,
             };
             let elem_kind = &self.type_table.get(elem)?.kind;
-            if matches!(
-                elem_kind,
-                TypeKind::TypeParameter { .. } | TypeKind::Dynamic
-            ) {
+            if matches!(elem_kind, TypeKind::Dynamic) {
                 return None;
             }
-            return Some(self.convert_type(elem));
+            return Some(self.convert_type_or_type_var(elem, &self.current_type_param_names()));
         }
         None
     }
@@ -1259,8 +1257,19 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<IrId> {
         // An `Array<Null<Int>>` slot holds the `NullInt` itself.
         if self.is_null_int_type(ty) {
-            return self.builder.build_bitcast(value, IrType::NullInt);
+            return self.iter_elem_from_i64(value, &IrType::NullInt);
         }
+        let (tag, _) = self.array_element_descriptor(ty)?;
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let value = self.builder.build_bitcast(value, ptr.clone())?;
+        let unbox = self.get_or_register_extern_function(
+            "haxe_unbox_generic_return",
+            vec![ptr, IrType::I32],
+            IrType::I64,
+        );
+        let value = self
+            .builder
+            .build_call_direct(unbox, vec![value, tag], IrType::I64)?;
         let generic_target = self.convert_type_or_type_var(ty, &self.current_type_param_names());
         let target = if matches!(generic_target, IrType::TypeVar(_)) {
             &generic_target
@@ -1477,7 +1486,7 @@ impl<'a> HirToMirContext<'a> {
         let result = self.builder.build_load(result_slot, ret_ty)?;
         if matches!(protocol, IterProtocol::Iterator) && method == "next" {
             if let Some(elem_ty) = self.iter_elem_ir_type(receiver.ty) {
-                return self.iter_elem_from_i64(result, &elem_ty);
+                return self.array_iterator_next_result(result, expr.ty, &elem_ty);
             }
             if matches!(
                 self.type_table

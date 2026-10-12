@@ -23,10 +23,58 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
-    /// An `Array<Int>` handed to an `Array<Any>`/`Array<Dynamic>` slot is
-    /// marked, so a Float pushed through that view is stored as an Int. A
-    /// literal checked against the erased type is built as that type and
-    /// is left alone.
+    pub(crate) fn array_element_descriptor(&mut self, ty: TypeId) -> Option<(IrId, IrId)> {
+        if let Some(name) = self.resolve_type_param_name(ty)
+            && self.current_type_param_names().contains(&name)
+        {
+            return self.type_param_value_descriptor(name, 0);
+        }
+        let nullable_box = self.type_table.get(ty).is_some_and(|ty| match &ty.kind {
+            TypeKind::Optional { inner_type } => {
+                matches!(
+                    self.type_table.get(*inner_type).map(|ty| &ty.kind),
+                    Some(TypeKind::Float | TypeKind::Bool)
+                )
+            }
+            _ => false,
+        });
+        let ty = if nullable_box {
+            IrType::dynamic_ptr()
+        } else {
+            self.convert_type_arg(ty)
+        };
+        Some((
+            self.builder
+                .build_const(IrValue::I32(ty.value_tag() as i32))?,
+            self.builder
+                .build_const(IrValue::U64(ty.value_metadata()))?,
+        ))
+    }
+
+    pub(crate) fn init_array_element_layout(&mut self, array: IrId, ty: TypeId) -> Option<()> {
+        let element = match self.type_table.get(ty).map(|ty| &ty.kind) {
+            Some(TypeKind::Array { element_type }) => *element_type,
+            _ => return Some(()),
+        };
+        if !matches!(
+            self.type_table.get(element).map(|ty| &ty.kind),
+            Some(TypeKind::Dynamic | TypeKind::TypeParameter { .. })
+        ) && !self.is_any_type(element)
+        {
+            return Some(());
+        }
+        let (tag, _) = self.array_element_descriptor(element)?;
+        let function = self.get_or_register_extern_function(
+            "haxe_array_init_element_tag",
+            vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
+            IrType::Void,
+        );
+        self.builder
+            .build_call_direct(function, vec![array, tag], IrType::Void);
+        Some(())
+    }
+
+    /// Keep the raw slot layout when a concrete array is exposed through an erased view.
     pub(crate) fn mark_int_array_for_erased_view(
         &mut self,
         reg: IrId,
@@ -35,7 +83,7 @@ impl<'a> HirToMirContext<'a> {
     ) {
         let element_of = |me: &Self, ty: TypeId| {
             me.type_table
-                .get(me.resolve_through_aliases(ty))
+                .get(me.resolve_storage_type(ty))
                 .and_then(|t| match &t.kind {
                     TypeKind::Array { element_type } => Some(*element_type),
                     _ => None,
@@ -47,34 +95,146 @@ impl<'a> HirToMirContext<'a> {
             }
             _ => source.ty,
         };
-        let int_source = element_of(&*self, source_ty).is_some_and(|et| {
-            matches!(
-                self.type_table
-                    .get(self.resolve_through_aliases(et))
-                    .map(|t| &t.kind),
-                Some(TypeKind::Int)
-            )
-        });
-        let erased_target = element_of(&*self, target_ty).is_some_and(|et| {
-            matches!(
-                self.type_table.get(et).map(|t| &t.kind),
-                Some(TypeKind::Dynamic)
-            ) || self.is_any_type(et)
-        });
-        if !int_source || !erased_target {
-            return;
-        }
-        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-        let Some(arr) = self.coerce_reg_to(reg, &ptr_u8) else {
+        let Some(element) = element_of(self, source_ty) else {
             return;
         };
-        let mark = self.get_or_register_extern_function(
-            "haxe_array_mark_int_elems",
-            vec![ptr_u8],
+        let erased = element_of(self, target_ty).is_some_and(|element| {
+            matches!(
+                self.type_table.get(element).map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            ) || self.is_any_type(element)
+        });
+        if !erased {
+            return;
+        }
+        let layout = self.erased_array_slot_layout(element, 0);
+        if layout == 0 {
+            return;
+        }
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let Some(array) = self.coerce_reg_to(reg, &ptr) else {
+            return;
+        };
+        let Some(layout) = self.builder.build_const(IrValue::U64(layout)) else {
+            return;
+        };
+        let function = self.get_or_register_extern_function(
+            "haxe_array_mark_slot_layout",
+            vec![ptr, IrType::U64],
             IrType::Void,
         );
         self.builder
-            .build_call_direct(mark, vec![arr], IrType::Void);
+            .build_call_direct(function, vec![array, layout], IrType::Void);
+    }
+
+    fn lower_array_storage_call(
+        &mut self,
+        expr: &HirExpr,
+        name: &str,
+        args: &[HirExpr],
+    ) -> Option<IrId> {
+        let element = self
+            .type_table
+            .get(self.resolve_storage_type(args[0].ty))
+            .and_then(|ty| match &ty.kind {
+                TypeKind::Array { element_type } => Some(*element_type),
+                _ => None,
+            })?;
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let array = self.lower_expression(&args[0])?;
+        let array = self.coerce_reg_to(array, &ptr)?;
+        if matches!(name, "pop" | "shift") {
+            let target = if self.is_null_int_type(expr.ty) {
+                expr.ty
+            } else {
+                element
+            };
+            let (tag, _) = self.array_element_descriptor(target)?;
+            let from_end = self.builder.build_const(IrValue::Bool(name == "pop"))?;
+            let offset = self.builder.build_const(IrValue::I64(8))?;
+            let length_ptr = self.builder.build_ptr_add(array, offset, ptr.clone())?;
+            let length = self.builder.build_load(length_ptr, IrType::I64)?;
+            let zero = self.builder.build_const(IrValue::I64(0))?;
+            let present = self.builder.build_cmp(CompareOp::Ne, length, zero)?;
+            let function = self.get_or_register_extern_function(
+                "haxe_array_take_typed",
+                vec![ptr, IrType::Bool, IrType::I32],
+                IrType::I64,
+            );
+            let value = self.builder.build_call_direct(
+                function,
+                vec![array, from_end, tag],
+                IrType::I64,
+            )?;
+            let result_type = self.convert_type(expr.ty);
+            let result_type = if result_type == IrType::Void {
+                self.convert_type(element)
+            } else {
+                result_type
+            };
+            let value = if self.is_null_int_type(expr.ty) {
+                self.coerce_reg_to(value, &result_type)?
+            } else {
+                let element_type = self.convert_type(element);
+                let value = self.coerce_reg_to(value, &element_type)?;
+                let value = self
+                    .maybe_box_value(value, element, expr.ty)
+                    .unwrap_or(value);
+                self.coerce_reg_to(value, &result_type)?
+            };
+            if matches!(result_type, IrType::Ptr(_)) {
+                let bits = self.coerce_reg_to(value, &IrType::I64)?;
+                let bits = self.builder.build_select(present, bits, zero)?;
+                self.coerce_reg_to(bits, &result_type)
+            } else {
+                Some(value)
+            }
+        } else {
+            let arg = args.last()?;
+            let value = self.lower_expression(arg)?;
+            let value = self
+                .maybe_unbox_value(value, arg.ty, element)
+                .unwrap_or(value);
+            let value = self
+                .maybe_box_value(value, arg.ty, element)
+                .unwrap_or(value);
+            let ty = self.convert_type(element);
+            let value = self.coerce_reg_to(value, &ty)?;
+            if name == "push" && ty == IrType::F64 {
+                let function = self.get_or_register_extern_function(
+                    "haxe_array_push_typed_f64",
+                    vec![ptr, IrType::F64],
+                    IrType::I32,
+                );
+                return self
+                    .builder
+                    .build_call_direct(function, vec![array, value], IrType::I32);
+            }
+            let (tag, metadata) = self.array_element_descriptor(element)?;
+            let bits = self.coerce_reg_to(value, &IrType::I64)?;
+            let mut types = vec![ptr];
+            let mut values = vec![array];
+            if name == "insert" {
+                let index = self.lower_expression(&args[1])?;
+                let index = self.coerce_reg_to(index, &IrType::I32)?;
+                types.push(IrType::I32);
+                values.push(index);
+            }
+            types.extend([IrType::I64, IrType::I32, IrType::U64]);
+            values.extend([bits, tag, metadata]);
+            let runtime = match name {
+                "push" => "haxe_array_push_typed",
+                "unshift" => "haxe_array_unshift_typed",
+                _ => "haxe_array_insert_typed",
+            };
+            let result = if name == "push" {
+                IrType::I32
+            } else {
+                IrType::Void
+            };
+            let function = self.get_or_register_extern_function(runtime, types, result.clone());
+            self.builder.build_call_direct(function, values, result)
+        }
     }
 
     pub(crate) fn try_array_runtime_call(
@@ -100,6 +260,22 @@ impl<'a> HirToMirContext<'a> {
             .get_symbol(*symbol)
             .and_then(|s| self.string_interner.get(s.name))
             .unwrap_or("?");
+        if *is_method
+            && matches!(
+                (vname, args.len()),
+                ("push" | "unshift", 2) | ("insert", 3) | ("pop" | "shift", 1)
+            )
+            && args.first().is_some_and(|arg| {
+                matches!(
+                    self.type_table
+                        .get(self.resolve_storage_type(arg.ty))
+                        .map(|ty| &ty.kind),
+                    Some(TypeKind::Array { .. })
+                )
+            })
+        {
+            return self.lower_array_storage_call(expr, vname, args);
+        }
         if *is_method
             && Self::null_int_array_method(vname, args.len())
             && self.array_of_null_int(args[0].ty)
@@ -127,8 +303,7 @@ impl<'a> HirToMirContext<'a> {
                     Some(TypeKind::Dynamic)
                 )
             };
-            let dynamic_search =
-                element_type.is_some_and(|ty| is_dynamic(self, ty)) && is_dynamic(self, args[1].ty);
+            let dynamic_search = element_type.is_some_and(|ty| is_dynamic(self, ty));
             // An erased `Array<T>` searched for a `T` compares the way `==` on
             // T does, by the tag monomorphisation substitutes for T.
             let type_param_name = |me: &Self, ty: TypeId| match me.type_table.get(ty) {
@@ -145,8 +320,15 @@ impl<'a> HirToMirContext<'a> {
             let shared_param = element_type
                 .and_then(|ty| type_param_name(self, ty))
                 .filter(|name| type_param_name(self, args[1].ty).as_ref() == Some(name));
+            let scalar_search = element_type.is_some_and(|ty| {
+                matches!(
+                    self.convert_type(ty),
+                    IrType::I32 | IrType::I64 | IrType::F64 | IrType::Bool | IrType::NullInt
+                )
+            });
+            let typed_search = shared_param.is_some() || scalar_search;
             let search = element_type.and_then(|ty| {
-                if shared_param.is_some() {
+                if typed_search {
                     Some(("haxe_array_typed_index_of", IrType::I64))
                 } else if self.convert_type(ty) == IrType::String {
                     Some(("haxe_array_string_index_of", IrType::String))
@@ -172,9 +354,20 @@ impl<'a> HirToMirContext<'a> {
             if let Some((name, value_type)) = search {
                 let arr = self.lower_expression(&args[0])?;
                 let value = self.lower_expression(&args[1])?;
-                let value = if shared_param.is_some() {
+                let value = if typed_search {
+                    let element = element_type?;
+                    let value = self
+                        .maybe_unbox_value(value, args[1].ty, element)
+                        .unwrap_or(value);
+                    let expected = self.convert_type(element);
+                    let value = self.coerce_reg_to(value, &expected)?;
                     self.erase_reflect_compare_arg(value)
                 } else {
+                    let value = if dynamic_search {
+                        self.maybe_box_value(value, args[1].ty, element_type?)?
+                    } else {
+                        value
+                    };
                     self.coerce_reg_to(value, &value_type)?
                 };
                 let from = if let Some(arg) = args.get(2) {
@@ -193,11 +386,8 @@ impl<'a> HirToMirContext<'a> {
                     IrType::I32,
                 ];
                 let mut call_args = vec![arr, value, from, reverse];
-                if let Some(tp_name) = shared_param {
-                    let tag = self.builder.build_const(IrValue::I32(0))?;
-                    if let Some(func) = self.builder.current_function_mut() {
-                        func.type_param_tag_fixups.push((tag, tp_name));
-                    }
+                if typed_search {
+                    let (tag, _) = self.array_element_descriptor(element_type?)?;
                     param_types.push(IrType::I32);
                     call_args.push(tag);
                 }
@@ -233,172 +423,6 @@ impl<'a> HirToMirContext<'a> {
 
         // Array<Float>.push on WASM32 (Variable-callee shape, where the
         // receiver is desugared to args[0] and the value to args[1]).
-        // The generic `array_push` MIR wrapper takes an I64 value param,
-        // but IrType::I64 lowers to a WASM `i32`, so a Float value (the
-        // f64 bit-pattern bitcast to i64) loses its high 32 bits and reads
-        // back as 0/garbage. Route Float-element pushes through the f64
-        // runtime entry — value stays F64 (→ WASM f64, full 8 bytes). This
-        // matches the array-literal lowering and is bit-identical on native.
-        if vname == "push" && *is_method && args.len() == 2 {
-            let (elem_is_f64, elem_is_dynamic) = {
-                let type_table = self.type_table;
-                type_table
-                    .get(self.resolve_through_aliases(args[0].ty))
-                    .and_then(|t| {
-                        if let TypeKind::Array { element_type } = &t.kind {
-                            Some(*element_type)
-                        } else {
-                            None
-                        }
-                    })
-                    .map(|et| {
-                        (
-                            self.convert_type(et) == IrType::F64,
-                            matches!(type_table.get(et).map(|t| &t.kind), Some(TypeKind::Dynamic)),
-                        )
-                    })
-                    .unwrap_or((false, false))
-            };
-            // A Float through an `Array<Any>`/`Array<Dynamic>` view: the runtime
-            // stores it as an Int when the array is an `Array<Int>`.
-            let elem_is_erased = elem_is_dynamic
-                || self
-                    .type_table
-                    .get(self.resolve_through_aliases(args[0].ty))
-                    .is_some_and(|t| {
-                        matches!(&t.kind, TypeKind::Array { element_type }
-                            if self.is_any_type(*element_type))
-                    });
-            if elem_is_erased && self.convert_type(args[1].ty) == IrType::F64 {
-                let arr = self.lower_expression(&args[0])?;
-                let value = self.lower_expression(&args[1])?;
-                let value = match self.builder.get_register_type(value) {
-                    Some(IrType::F64) => value,
-                    Some(from @ (IrType::F32 | IrType::I32)) => {
-                        self.builder.build_cast(value, from, IrType::F64)?
-                    }
-                    // An erased slot carries the f64 bits.
-                    Some(IrType::I64) => self.builder.build_bitcast(value, IrType::F64)?,
-                    _ => {
-                        let bits = self.coerce_reg_to(value, &IrType::I64)?;
-                        let push = self.get_or_register_extern_function(
-                            "haxe_array_push_i64",
-                            vec![IrType::Ptr(Box::new(IrType::I64)), IrType::I64],
-                            IrType::Void,
-                        );
-                        return self
-                            .builder
-                            .build_call_direct(push, vec![arr, bits], IrType::Void);
-                    }
-                };
-                let push = self.get_or_register_extern_function(
-                    "haxe_array_push_any_f64",
-                    vec![IrType::Ptr(Box::new(IrType::I64)), IrType::F64],
-                    IrType::Void,
-                );
-                return self
-                    .builder
-                    .build_call_direct(push, vec![arr, value], IrType::Void);
-            }
-            // Dynamic string slots need a tag for value-based equality.
-            if elem_is_dynamic && self.convert_type(args[1].ty) == IrType::String {
-                let arr = self.lower_expression(&args[0])?;
-                let value = self.lower_expression(&args[1])?;
-                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                let raw = self.builder.build_bitcast(value, ptr_u8.clone())?;
-                let box_fn = self.get_or_register_extern_function(
-                    "haxe_box_haxestring_ptr",
-                    vec![ptr_u8.clone()],
-                    ptr_u8,
-                );
-                let boxed = self.builder.build_call_direct(
-                    box_fn,
-                    vec![raw],
-                    IrType::Ptr(Box::new(IrType::U8)),
-                )?;
-                let slot = self.builder.build_bitcast(boxed, IrType::I64)?;
-                let push = self.get_or_register_extern_function(
-                    "haxe_array_push_i64",
-                    vec![IrType::Ptr(Box::new(IrType::I64)), IrType::I64],
-                    IrType::Void,
-                );
-                return self
-                    .builder
-                    .build_call_direct(push, vec![arr, slot], IrType::Void);
-            }
-            // A Dynamic pushed into an Int or Bool array stores the scalar its
-            // box holds; raw bits pass through unchanged.
-            let elem_is_int_or_bool = self
-                .type_table
-                .get(self.resolve_through_aliases(args[0].ty))
-                .and_then(|t| match &t.kind {
-                    TypeKind::Array { element_type } => Some(*element_type),
-                    _ => None,
-                })
-                .is_some_and(|et| {
-                    matches!(
-                        self.type_table.get(et).map(|t| &t.kind),
-                        Some(TypeKind::Int | TypeKind::Bool)
-                    )
-                });
-            let arg_is_dynamic = matches!(
-                self.type_table
-                    .get(self.resolve_through_aliases(args[1].ty))
-                    .map(|t| &t.kind),
-                Some(TypeKind::Dynamic)
-            );
-            if elem_is_int_or_bool && arg_is_dynamic {
-                let arr = self.lower_expression(&args[0])?;
-                let value = self.lower_expression(&args[1])?;
-                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                let value = self.coerce_reg_to(value, &ptr_u8)?;
-                let unbox = self.get_or_register_extern_function(
-                    "haxe_unbox_scalar_or_addr",
-                    vec![ptr_u8],
-                    IrType::I64,
-                );
-                let slot = self
-                    .builder
-                    .build_call_direct(unbox, vec![value], IrType::I64)?;
-                let push = self.get_or_register_extern_function(
-                    "haxe_array_push_i64",
-                    vec![IrType::Ptr(Box::new(IrType::I64)), IrType::I64],
-                    IrType::Void,
-                );
-                return self
-                    .builder
-                    .build_call_direct(push, vec![arr, slot], IrType::Void);
-            }
-            if elem_is_f64 {
-                if let (Some(arr_reg), Some(val_reg)) = (
-                    self.lower_expression(&args[0]),
-                    self.lower_expression(&args[1]),
-                ) {
-                    let val_ty = self
-                        .builder
-                        .get_register_type(val_reg)
-                        .unwrap_or(IrType::F64);
-                    let val_f64 = if val_ty == IrType::F64 {
-                        val_reg
-                    } else {
-                        self.builder
-                            .build_cast(val_reg, val_ty, IrType::F64)
-                            .unwrap_or(val_reg)
-                    };
-                    let push_fn = self.get_or_register_extern_function(
-                        "haxe_array_push_f64",
-                        vec![IrType::Ptr(Box::new(IrType::I64)), IrType::F64],
-                        IrType::Void,
-                    );
-                    return self.builder.build_call_direct(
-                        push_fn,
-                        vec![arr_reg, val_f64],
-                        IrType::Void,
-                    );
-                }
-            }
-        }
-
         // Array.join: the generic array_join runtime treats every
         // element as a HaxeString pointer, which SIGSEGVs for non-
         // String element types. Route through haxe_array_join_typed

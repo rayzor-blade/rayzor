@@ -1434,6 +1434,7 @@ impl<'a> HirToMirContext<'a> {
             }
             _ => self.builder.build_const(IrValue::I64(0))?,
         };
+        let (tag, _) = self.array_element_descriptor(ty)?;
         let check_block = self.builder.current_block()?;
         let read_block = self.builder.create_block()?;
         let merge = self.builder.create_block()?;
@@ -1441,23 +1442,67 @@ impl<'a> HirToMirContext<'a> {
             .build_cond_branch(in_bounds, read_block, merge)?;
 
         self.builder.switch_to_block(read_block);
-        let data_ptr = self.builder.build_load(obj, ptr_u8)?;
+        let flags_off = self.builder.build_const(IrValue::I64(32))?;
+        let flags_ptr = self.builder.build_ptr_add(obj, flags_off, ptr_u8.clone())?;
+        let flags = self.builder.build_load(flags_ptr, IrType::I64)?;
+        let zero_flags = self.builder.build_const(IrValue::I64(0))?;
+        let plain = self.builder.build_cmp(CompareOp::Eq, flags, zero_flags)?;
+        let fast_block = self.builder.create_block()?;
+        let slow_block = self.builder.create_block()?;
+        self.builder
+            .build_cond_branch(plain, fast_block, slow_block)?;
+        self.builder.switch_to_block(fast_block);
+        let data_ptr = self.builder.build_load(obj, ptr_u8.clone())?;
         let elem_ptr = self.builder.build_gep(data_ptr, vec![idx64], IrType::I64)?;
         let loaded = self.builder.build_load(elem_ptr, load_type.clone())?;
         self.builder.build_branch(merge)?;
 
+        self.builder.switch_to_block(slow_block);
+        let getter = self.get_or_register_extern_function(
+            "haxe_array_get_typed",
+            vec![ptr_u8, IrType::I64, IrType::I32],
+            IrType::I64,
+        );
+        let converted =
+            self.builder
+                .build_call_direct(getter, vec![obj, idx64, tag], IrType::I64)?;
+        let converted = match &load_type {
+            IrType::I64 => converted,
+            IrType::F64 | IrType::Ptr(_) => {
+                self.builder.build_bitcast(converted, load_type.clone())?
+            }
+            _ => self
+                .builder
+                .build_cast(converted, IrType::I64, load_type.clone())?,
+        };
+        self.builder.build_branch(merge)?;
         self.builder.switch_to_block(merge);
         let value = self.builder.build_phi(merge, load_type.clone())?;
         self.builder
-            .add_phi_incoming(merge, value, read_block, loaded)?;
+            .add_phi_incoming(merge, value, fast_block, loaded)?;
+        self.builder
+            .add_phi_incoming(merge, value, slow_block, converted)?;
         self.builder
             .add_phi_incoming(merge, value, check_block, zero)?;
 
-        if load_type != target_type {
-            self.builder.build_cast(value, load_type, target_type)
-        } else {
-            Some(value)
+        let semantic_type = self.convert_type_or_type_var(ty, &self.current_type_param_names());
+        if matches!(semantic_type, IrType::TypeVar(_)) {
+            return self.builder.build_bitcast(value, semantic_type);
         }
+        let value = if load_type != target_type {
+            self.builder.build_cast(value, load_type, target_type)?
+        } else {
+            value
+        };
+        if matches!(
+            self.type_table
+                .get(self.resolve_storage_type(ty))
+                .map(|ty| &ty.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            self.boxed_value_regs.insert(value);
+        }
+        Some(value)
     }
 
     pub(crate) fn lower_field_expr(&mut self, expr: &HirExpr) -> Option<IrId> {
@@ -1814,7 +1859,14 @@ impl<'a> HirToMirContext<'a> {
         let value =
             self.builder
                 .build_call_direct(function, vec![obj_reg, index, tag_reg], IrType::I64)?;
-        self.coerce_from_i64(value, element_ty)
+        let value = self.coerce_from_i64(value, element_ty)?;
+        if matches!(
+            self.type_table.get(element_ty).map(|ty| &ty.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            self.boxed_value_regs.insert(value);
+        }
+        Some(value)
     }
 
     /// The monomorph (`VecI32`, `VecF64`, `VecPtr`, …) a `rayzor.Vec<T>`
@@ -1918,6 +1970,27 @@ impl<'a> HirToMirContext<'a> {
         if have == *want {
             return Some(reg);
         }
+        if self.boxed_value_regs.contains(&reg)
+            && matches!(have, IrType::Ptr(_))
+            && matches!(want, IrType::I32 | IrType::F64 | IrType::Bool)
+        {
+            let ptr = IrType::Ptr(Box::new(IrType::U8));
+            let reg = self.builder.build_bitcast(reg, ptr.clone())?;
+            let (name, ret) = match want {
+                IrType::F64 => ("haxe_coerce_dynamic_to_float", IrType::F64),
+                IrType::Bool => ("haxe_dynamic_truthy", IrType::Bool),
+                _ => ("haxe_coerce_dynamic_to_int", IrType::I64),
+            };
+            let function = self.get_or_register_extern_function(name, vec![ptr], ret.clone());
+            let value = self
+                .builder
+                .build_call_direct(function, vec![reg], ret.clone())?;
+            return if ret == *want {
+                Some(value)
+            } else {
+                self.builder.build_cast(value, ret, want.clone())
+            };
+        }
         // `Null<Int>` converts by value, except through an 8-byte slot, which
         // keeps its bits.
         let slot = |t: &IrType| matches!(t, IrType::I64 | IrType::U64);
@@ -1927,8 +2000,14 @@ impl<'a> HirToMirContext<'a> {
         if have == IrType::NullInt && !slot(want) {
             return self.null_int_to_ir(reg, want);
         }
+        if matches!(have, IrType::Function { .. } | IrType::TypeVar(_))
+            || matches!(want, IrType::Function { .. } | IrType::TypeVar(_))
+        {
+            return self.builder.build_bitcast(reg, want.clone());
+        }
         match (&have, want) {
-            (IrType::F64, IrType::I64) | (IrType::I64, IrType::F64) => {
+            (IrType::F64, IrType::I64 | IrType::Ptr(_))
+            | (IrType::I64 | IrType::Ptr(_), IrType::F64) => {
                 self.builder.build_bitcast(reg, want.clone())
             }
             (IrType::Ptr(_), IrType::Ptr(_)) | (IrType::Ptr(_), IrType::I64) => {
@@ -1960,7 +2039,28 @@ impl<'a> HirToMirContext<'a> {
     /// For a Map-typed index target, return `(get_fn_name, key IrType, value TypeId)`.
     /// `None` when the object is an array/string, which use array-style indexing.
     pub(crate) fn map_index_info(&self, obj_ty: TypeId) -> Option<(&'static str, IrType, TypeId)> {
-        let (key_type, value_type) = match self.type_table.get(obj_ty).map(|t| &t.kind) {
+        let mut object_kind = self
+            .type_table
+            .get(self.resolve_storage_type(obj_ty))?
+            .kind
+            .clone();
+        if let TypeKind::GenericInstance {
+            base_type,
+            type_args,
+            ..
+        } = &object_kind
+        {
+            let mut base_kind = self.type_table.get(*base_type)?.kind.clone();
+            if let TypeKind::Class {
+                type_args: arguments,
+                ..
+            } = &mut base_kind
+            {
+                *arguments = type_args.clone();
+                object_kind = base_kind;
+            }
+        }
+        let (key_type, value_type) = match Some(&object_kind) {
             Some(crate::tast::TypeKind::Map {
                 key_type,
                 value_type,
@@ -2057,14 +2157,18 @@ impl<'a> HirToMirContext<'a> {
         let (get_fn_name, key_ir_type, value_type_id) = self.map_index_info(object_ty)?;
         let ptr_void = IrType::Ptr(Box::new(IrType::Void));
         let key_reg = self.coerce_map_key(idx_reg, &key_ir_type);
+        let mut values = vec![obj_reg, key_reg];
+        let mut types = vec![ptr_void, key_ir_type];
+        let typed_runtime =
+            self.append_native_map_layout(get_fn_name, object_ty, &mut values, &mut types);
         let get_fn = self.get_or_register_extern_function(
-            get_fn_name,
-            vec![ptr_void, key_ir_type],
+            typed_runtime.as_deref().unwrap_or(get_fn_name),
+            types,
             IrType::I64,
         );
-        let raw_value =
-            self.builder
-                .build_call_direct(get_fn, vec![obj_reg, key_reg], IrType::I64)?;
+        let raw_value = self
+            .builder
+            .build_call_direct(get_fn, values, IrType::I64)?;
         // Strings are stored as a `*mut HaxeString` pointer in map slots,
         // not as the StringPtr struct convert_type yields — mirror
         // lower_index_access so trace/string-concat see a String, not an Int.

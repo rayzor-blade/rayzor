@@ -223,10 +223,71 @@ impl IrType {
             IrType::Ptr(inner) if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_dynamic") => {
                 ValueTag::Dynamic
             }
+            IrType::Ptr(inner) if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_int64") => {
+                ValueTag::Int64
+            }
+            IrType::Ptr(inner) if matches!(&**inner, IrType::Array(_, _)) => ValueTag::Array,
             IrType::Ptr(_) => ValueTag::Reference,
             IrType::Function { .. } => ValueTag::Function,
             IrType::NullInt => ValueTag::NullInt,
             _ => ValueTag::Int,
+        }
+    }
+
+    /// Runtime reference ID or array layout retained by a generic type argument.
+    pub fn value_metadata(&self) -> u64 {
+        match self {
+            IrType::Ptr(inner) => match &**inner {
+                IrType::Array(element, _) => {
+                    let layout = element.array_slot_layout(0);
+                    if layout >> 56 == 0 {
+                        7 | (layout << 8)
+                    } else {
+                        0
+                    }
+                }
+                IrType::Opaque { name, .. } => name
+                    .strip_prefix("__haxe_reference:")
+                    .and_then(|id| id.parse::<u32>().ok())
+                    .map_or(0, |id| 6 | (u64::from(id) << 8)),
+                _ => 0,
+            },
+            _ => 0,
+        }
+    }
+
+    fn array_slot_layout(&self, depth: usize) -> u64 {
+        use rayzor_runtime::type_system::ValueTag;
+        if depth >= 7 {
+            return 0;
+        }
+        match self.value_tag() {
+            ValueTag::Int => 3,
+            ValueTag::Bool => 2,
+            ValueTag::Float => 4,
+            ValueTag::String => 5,
+            ValueTag::NullInt => 8,
+            ValueTag::Int64 => 9,
+            ValueTag::Array => match self {
+                IrType::Ptr(inner) => match &**inner {
+                    IrType::Array(element, _) => {
+                        let layout = element.array_slot_layout(depth + 1);
+                        if layout >> 56 == 0 {
+                            7 | (layout << 8)
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 0,
+                },
+                _ => 0,
+            },
+            ValueTag::Reference => match self.value_metadata() {
+                0 => 6,
+                value => value,
+            },
+            ValueTag::Enum => 6,
+            _ => 0,
         }
     }
 

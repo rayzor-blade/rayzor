@@ -1098,6 +1098,7 @@ impl<'a> FunctionBuilder<'a> {
             source_location: IrSourceLocation::unknown(),
             next_reg_id,
             type_param_tag_fixups: Vec::new(),
+            type_param_metadata_fixups: Vec::new(),
             wasm_export: false,
             js_import: None,
         };

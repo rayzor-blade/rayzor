@@ -29,6 +29,242 @@ pub const HAXE_ARRAY_VIEW: usize = 1;
 /// slot: a Float pushed through that view is stored as an Int.
 pub const HAXE_ARRAY_INT_ELEMS: usize = 2;
 
+/// Slots are Dynamic boxes even when accessed through a concrete array type.
+pub const HAXE_ARRAY_BOXED_ELEMS: usize = 4;
+
+/// The upper bytes describe raw slots exposed through an erased array view.
+pub const HAXE_ARRAY_SLOT_LAYOUT: usize = 8;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_init_element_tag(arr: *mut HaxeArray, tag: i32) {
+    if !arr.is_null() && tag == crate::type_system::ValueTag::Dynamic as i32 {
+        unsafe { (*arr).flags |= HAXE_ARRAY_BOXED_ELEMS };
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_mark_slot_layout(arr: *mut HaxeArray, layout: u64) {
+    if arr.is_null() {
+        return;
+    }
+    unsafe {
+        if (*arr).flags & HAXE_ARRAY_BOXED_ELEMS == 0 {
+            (*arr).flags |= HAXE_ARRAY_SLOT_LAYOUT | (layout as usize) << 8;
+            if layout == 3 {
+                (*arr).flags |= HAXE_ARRAY_INT_ELEMS;
+            }
+        }
+    }
+}
+
+pub(crate) fn stored_slot_layout(array: &HaxeArray) -> Option<u64> {
+    if array.flags & HAXE_ARRAY_BOXED_ELEMS != 0 {
+        Some(0)
+    } else if array.flags & HAXE_ARRAY_SLOT_LAYOUT != 0 {
+        Some((array.flags >> 8) as u64)
+    } else if array.flags & (HAXE_ARRAY_INT_ELEMS | HAXE_ARRAY_VIEW) != 0 {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+/// Read shared storage using the caller's element type.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_get_typed(arr: *const HaxeArray, index: i64, tag: i32) -> i64 {
+    use crate::type_system::*;
+    let null = if tag == ValueTag::NullInt as i32 {
+        NULL_INT
+    } else {
+        0
+    };
+    if arr.is_null() || index < 0 {
+        return null;
+    }
+    unsafe {
+        let array = &*arr;
+        if index as usize >= array.len {
+            return null;
+        }
+        if let Some(byte) = crate::haxe_sys::bytes_data_get(array, index as usize) {
+            return match ValueTag::from_i32(tag) {
+                Some(ValueTag::Dynamic) => haxe_box_int_ptr(byte) as i64,
+                Some(ValueTag::Float) => (byte as f64).to_bits() as i64,
+                _ => byte,
+            };
+        }
+        let bits = ptr::read_unaligned(array.ptr.add(index as usize * 8).cast::<i64>());
+        if tag == ValueTag::Unresolved as i32 {
+            return if array.flags & HAXE_ARRAY_BOXED_ELEMS != 0 {
+                haxe_unbox_erased_return(bits as *mut u8)
+            } else {
+                bits
+            };
+        }
+        let Some(layout) = stored_slot_layout(array) else {
+            return bits;
+        };
+        let same_layout = match ValueTag::from_i32(tag) {
+            Some(ValueTag::Int) => layout & 0xff == 3,
+            Some(ValueTag::Bool) => layout & 0xff == 2,
+            Some(ValueTag::Float) => layout & 0xff == 4,
+            Some(ValueTag::String) => layout & 0xff == 5,
+            Some(
+                ValueTag::Reference | ValueTag::Enum | ValueTag::Function | ValueTag::Interface,
+            ) => layout & 0xff == 6,
+            Some(ValueTag::Array) => layout & 0xff == 7,
+            Some(ValueTag::NullInt) => matches!(layout & 0xff, 3 | 8),
+            Some(ValueTag::Int64) => layout & 0xff == 9,
+            _ => false,
+        };
+        if same_layout {
+            return bits;
+        }
+        let value = box_erased_array_slot(bits as u64, layout);
+        match ValueTag::from_i32(tag) {
+            Some(ValueTag::Int | ValueTag::Int64) => haxe_unbox_int_ptr(value),
+            Some(ValueTag::Bool) => i64::from(haxe_unbox_bool_ptr(value)),
+            Some(ValueTag::Float) => haxe_unbox_float_ptr(value).to_bits() as i64,
+            Some(ValueTag::NullInt) => haxe_null_int_from_dynamic(value),
+            Some(
+                ValueTag::String
+                | ValueTag::Reference
+                | ValueTag::Array
+                | ValueTag::Enum
+                | ValueTag::Function
+                | ValueTag::Interface,
+            ) => haxe_unbox_reference_ptr(value) as i64,
+            _ => value as i64,
+        }
+    }
+}
+
+fn encode_typed_array_slot(array: &HaxeArray, bits: i64, tag: i32, metadata: u64) -> i64 {
+    use crate::type_system::*;
+    if array.flags & HAXE_ARRAY_BOXED_ELEMS != 0 {
+        return haxe_box_generic_ptr(bits, tag, metadata) as i64;
+    }
+    if tag == ValueTag::Dynamic as i32
+        && let Some(layout) = stored_slot_layout(array)
+    {
+        let value = bits as *mut u8;
+        return match layout & 0xff {
+            2 => i64::from(haxe_unbox_bool_ptr(value)),
+            3 => haxe_coerce_dynamic_to_int(value),
+            4 => haxe_unbox_float_ptr(value).to_bits() as i64,
+            8 => haxe_null_int_from_dynamic(value),
+            9 => haxe_unbox_int_ptr(value),
+            5..=7 => haxe_unbox_reference_ptr(value) as i64,
+            _ => bits,
+        };
+    }
+    if array.flags & HAXE_ARRAY_INT_ELEMS != 0 && tag == ValueTag::Float as i32 {
+        return f64::from_bits(bits as u64) as i64;
+    }
+    bits
+}
+
+/// Write a concrete element without changing an array's shared storage layout.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_set_typed(
+    arr: *mut HaxeArray,
+    index: usize,
+    bits: i64,
+    tag: i32,
+    metadata: u64,
+) -> bool {
+    if arr.is_null() {
+        return false;
+    }
+    let value = encode_typed_array_slot(unsafe { &*arr }, bits, tag, metadata);
+    if tag == crate::type_system::ValueTag::NullInt as i32
+        && unsafe { (*arr).flags & HAXE_ARRAY_BOXED_ELEMS == 0 }
+    {
+        haxe_array_set_null_int(arr, index, value)
+    } else {
+        haxe_array_set_i64(arr, index, value)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_push_typed(
+    arr: *mut HaxeArray,
+    bits: i64,
+    tag: i32,
+    metadata: u64,
+) -> i32 {
+    if !arr.is_null() && unsafe { (*arr).len == 0 && stored_slot_layout(&*arr).is_none() } {
+        haxe_array_init_element_tag(arr, tag);
+    }
+    if arr.is_null() {
+        return 0;
+    }
+    let value = encode_typed_array_slot(unsafe { &*arr }, bits, tag, metadata);
+    haxe_array_push_i64(arr, value);
+    unsafe { (*arr).len as i32 }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_push_typed_f64(arr: *mut HaxeArray, value: f64) -> i32 {
+    if arr.is_null() {
+        return 0;
+    }
+    haxe_array_push_any_f64(arr, value);
+    unsafe { (*arr).len as i32 }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_unshift_typed(
+    arr: *mut HaxeArray,
+    bits: i64,
+    tag: i32,
+    metadata: u64,
+) {
+    if arr.is_null() {
+        return;
+    }
+    let value = encode_typed_array_slot(unsafe { &*arr }, bits, tag, metadata);
+    haxe_array_unshift(arr, value);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_insert_typed(
+    arr: *mut HaxeArray,
+    index: i32,
+    bits: i64,
+    tag: i32,
+    metadata: u64,
+) {
+    if arr.is_null() {
+        return;
+    }
+    let value = encode_typed_array_slot(unsafe { &*arr }, bits, tag, metadata);
+    haxe_array_insert(arr, index, (&value as *const i64).cast());
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_take_typed(arr: *mut HaxeArray, from_end: bool, tag: i32) -> i64 {
+    if arr.is_null() || unsafe { (*arr).len } == 0 {
+        return if tag == crate::type_system::ValueTag::NullInt as i32 {
+            crate::type_system::NULL_INT
+        } else {
+            0
+        };
+    }
+    let index = if from_end {
+        unsafe { (*arr).len as i64 - 1 }
+    } else {
+        0
+    };
+    let value = haxe_array_get_typed(arr, index, tag);
+    if from_end {
+        haxe_array_pop_i64(arr);
+    } else {
+        haxe_array_shift(arr);
+    }
+    value
+}
+
 const INITIAL_CAPACITY: usize = 8;
 
 // ============================================================================
@@ -799,6 +1035,7 @@ pub extern "C" fn haxe_array_copy(out: *mut HaxeArray, arr: *const HaxeArray) {
     unsafe {
         let arr_ref = &*arr;
         haxe_array_from_elements(out, arr_ref.ptr, arr_ref.len, arr_ref.elem_size);
+        (*out).flags = arr_ref.flags & !HAXE_ARRAY_VIEW;
     }
 }
 
@@ -835,6 +1072,7 @@ pub extern "C" fn haxe_array_slice(
         if actual_start >= actual_end {
             debug!("[haxe_array_slice] Creating empty array (start >= end)");
             haxe_array_new(out, arr_ref.elem_size);
+            (*out).flags = arr_ref.flags & !HAXE_ARRAY_VIEW;
             return;
         }
 
@@ -845,6 +1083,7 @@ pub extern "C" fn haxe_array_slice(
             count, actual_start
         );
         haxe_array_from_elements(out, start_ptr, count, arr_ref.elem_size);
+        (*out).flags = arr_ref.flags & !HAXE_ARRAY_VIEW;
         debug!("[haxe_array_slice] Done");
     }
 }
@@ -942,7 +1181,11 @@ pub extern "C" fn haxe_array_mark_int_elems(arr: *mut HaxeArray) {
         crate::type_system::haxe_unbox_if_tag(arr as *mut u8, crate::type_system::TYPE_ARRAY.0)
             as *mut HaxeArray;
     if !arr.is_null() {
-        unsafe { (*arr).flags |= HAXE_ARRAY_INT_ELEMS };
+        unsafe {
+            if (*arr).flags & HAXE_ARRAY_BOXED_ELEMS == 0 {
+                (*arr).flags |= HAXE_ARRAY_INT_ELEMS;
+            }
+        };
     }
 }
 
@@ -952,6 +1195,8 @@ pub extern "C" fn haxe_array_mark_int_elems(arr: *mut HaxeArray) {
 pub extern "C" fn haxe_array_push_any_f64(arr: *mut HaxeArray, value: f64) {
     if !arr.is_null() && unsafe { (*arr).flags } & HAXE_ARRAY_INT_ELEMS != 0 {
         haxe_array_push_i64(arr, value as i64);
+    } else if !arr.is_null() && unsafe { (*arr).flags } & HAXE_ARRAY_BOXED_ELEMS != 0 {
+        haxe_array_push_i64(arr, crate::type_system::haxe_box_float_ptr(value) as i64);
     } else {
         haxe_array_push_f64(arr, value);
     }
@@ -1107,7 +1352,9 @@ pub extern "C" fn haxe_array_join_typed(
         let mut strs: Vec<*mut HaxeString> = Vec::with_capacity(arr_ref.len);
         for i in 0..arr_ref.len {
             let value = *(arr_ref.ptr.add(i * arr_ref.elem_size) as *const i64);
-            let string = if elem_tag == 5 {
+            let string = if arr_ref.flags & HAXE_ARRAY_BOXED_ELEMS != 0 {
+                crate::type_system::haxe_std_string_ptr(value as *mut u8)
+            } else if elem_tag == 5 {
                 // A String inferred through an initially Dynamic array may be boxed.
                 crate::type_system::dynamic_value_if_boxed(value as *mut u8)
                     .filter(|d| d.type_id == crate::type_system::TYPE_STRING)
@@ -1233,8 +1480,12 @@ pub extern "C" fn haxe_array_map(
 
         // The slot-shaped entry: a callback declared on i32, Bool or f64
         // reads its argument and returns its result as a 64-bit slot.
-        let callback: extern "C" fn(*mut u8, i64) -> i64 =
-            std::mem::transmute(crate::closure_entries::closure_slot_code(fn_ptr));
+        let dynamic_entry = (arr_ref.flags & HAXE_ARRAY_BOXED_ELEMS != 0)
+            .then(|| crate::closure_entries::closure_dynamic_code(fn_ptr))
+            .flatten();
+        let callback: extern "C" fn(*mut u8, i64) -> i64 = std::mem::transmute(
+            dynamic_entry.unwrap_or_else(|| crate::closure_entries::closure_slot_code(fn_ptr)),
+        );
 
         for i in 0..len {
             // Read element as i64
@@ -1257,7 +1508,11 @@ pub extern "C" fn haxe_array_map(
         (*out).len = len;
         (*out).cap = out_cap;
         (*out).elem_size = 8;
-        (*out).flags = 0;
+        (*out).flags = if dynamic_entry.is_some() {
+            HAXE_ARRAY_BOXED_ELEMS
+        } else {
+            0
+        };
     }
 }
 
@@ -1291,8 +1546,12 @@ pub extern "C" fn haxe_array_filter(
             panic!("Failed to allocate memory for Array.filter result");
         }
 
-        let callback: extern "C" fn(*mut u8, i64) -> i64 =
-            std::mem::transmute(crate::closure_entries::closure_slot_code(fn_ptr));
+        let dynamic_entry = (arr_ref.flags & HAXE_ARRAY_BOXED_ELEMS != 0)
+            .then(|| crate::closure_entries::closure_dynamic_code(fn_ptr))
+            .flatten();
+        let callback: extern "C" fn(*mut u8, i64) -> i64 = std::mem::transmute(
+            dynamic_entry.unwrap_or_else(|| crate::closure_entries::closure_slot_code(fn_ptr)),
+        );
 
         let mut out_len = 0usize;
         for i in 0..len {
@@ -1305,7 +1564,12 @@ pub extern "C" fn haxe_array_filter(
             };
 
             let keep = callback(env_ptr, elem);
-            if keep != 0 {
+            let keep = if dynamic_entry.is_some() {
+                crate::type_system::haxe_dynamic_truthy(keep as *mut u8)
+            } else {
+                keep != 0
+            };
+            if keep {
                 *(out_ptr.add(out_len * 8) as *mut i64) = elem;
                 out_len += 1;
             }
@@ -1315,7 +1579,7 @@ pub extern "C" fn haxe_array_filter(
         (*out).len = out_len;
         (*out).cap = out_cap;
         (*out).elem_size = 8;
-        (*out).flags = 0;
+        (*out).flags = arr_ref.flags & !HAXE_ARRAY_VIEW;
     }
 }
 
@@ -1599,7 +1863,33 @@ pub extern "C" fn haxe_array_concat(
         (*out).len = total_len;
         (*out).cap = cap;
         (*out).elem_size = es;
-        (*out).flags = 0;
+        let first_flags = if arr.is_null() {
+            0
+        } else {
+            (*arr).flags & !HAXE_ARRAY_VIEW
+        };
+        let second_flags = if other.is_null() {
+            0
+        } else {
+            (*other).flags & !HAXE_ARRAY_VIEW
+        };
+        (*out).flags = if arr_len == 0 {
+            second_flags
+        } else {
+            first_flags
+        };
+        if arr_len > 0 && other_len > 0 && first_flags != second_flags {
+            let first_layout = stored_slot_layout(&*arr);
+            let second_layout = stored_slot_layout(&*other);
+            if let (Some(first), Some(second)) = (first_layout, second_layout) {
+                for i in 0..total_len {
+                    let slot = new_ptr.add(i * es).cast::<u64>();
+                    let layout = if i < arr_len { first } else { second };
+                    *slot = box_erased_array_slot(*slot, layout) as u64;
+                }
+                (*out).flags = HAXE_ARRAY_BOXED_ELEMS;
+            }
+        }
     }
 }
 
@@ -1629,6 +1919,7 @@ pub extern "C" fn haxe_array_splice(out: *mut HaxeArray, arr: *mut HaxeArray, po
         // Handle invalid len
         if len <= 0 || actual_pos >= arr_ref.len {
             haxe_array_new(out, es);
+            (*out).flags = arr_ref.flags & !HAXE_ARRAY_VIEW;
             return;
         }
 
@@ -1637,6 +1928,7 @@ pub extern "C" fn haxe_array_splice(out: *mut HaxeArray, arr: *mut HaxeArray, po
         // Copy removed elements to out
         let removed_ptr = arr_ref.ptr.add(actual_pos * es);
         haxe_array_from_elements(out, removed_ptr, actual_len, es);
+        (*out).flags = arr_ref.flags & !HAXE_ARRAY_VIEW;
 
         // Shift remaining elements left
         let remaining = arr_ref.len - actual_pos - actual_len;
@@ -1710,7 +2002,9 @@ pub extern "C" fn haxe_array_resize_null_int(arr: *mut HaxeArray, new_len: i64) 
     }
     let old_len = unsafe { (*arr).len };
     haxe_array_resize(arr, new_len);
-    unsafe { fill_null_int(arr, old_len, new_len as usize) };
+    if unsafe { (*arr).flags & HAXE_ARRAY_BOXED_ELEMS == 0 } {
+        unsafe { fill_null_int(arr, old_len, new_len as usize) };
+    }
 }
 
 /// toString for an Array whose elements are all `f64` — `Array<Float>`
@@ -1770,7 +2064,11 @@ unsafe fn array_to_string_typed(
             if i > 0 {
                 s.push(',');
             }
-            s.push_str(&render(*data.add(i)));
+            if arr_ref.flags & HAXE_ARRAY_BOXED_ELEMS != 0 {
+                s.push_str(&crate::haxe_sys::format_array_slot_for_string(*data.add(i)));
+            } else {
+                s.push_str(&render(*data.add(i)));
+            }
         }
         s.push(']');
         let bytes = s.as_bytes();
@@ -1799,8 +2097,13 @@ pub extern "C" fn haxe_array_to_string_f64(arr: *const HaxeArray) -> *mut HaxeSt
             if i > 0 {
                 s.push(',');
             }
-            let v = *data.add(i);
-            s.push_str(&crate::haxe_sys::format_f64_for_string(v));
+            if arr_ref.flags & HAXE_ARRAY_BOXED_ELEMS != 0 {
+                let value = ptr::read_unaligned(arr_ref.ptr.add(i * 8).cast::<i64>());
+                s.push_str(&crate::haxe_sys::format_array_slot_for_string(value));
+            } else {
+                let v = *data.add(i);
+                s.push_str(&crate::haxe_sys::format_f64_for_string(v));
+            }
         }
         s.push(']');
         let bytes = s.as_bytes();
@@ -1881,8 +2184,12 @@ pub extern "C" fn haxe_array_sort(arr: *mut HaxeArray, fn_ptr: usize, env_ptr: *
             return;
         }
 
-        let callback: extern "C" fn(*mut u8, i64, i64) -> i64 =
-            std::mem::transmute(crate::closure_entries::closure_slot_code(fn_ptr));
+        let dynamic_entry = (arr_ref.flags & HAXE_ARRAY_BOXED_ELEMS != 0)
+            .then(|| crate::closure_entries::closure_dynamic_code(fn_ptr))
+            .flatten();
+        let callback: extern "C" fn(*mut u8, i64, i64) -> i64 = std::mem::transmute(
+            dynamic_entry.unwrap_or_else(|| crate::closure_entries::closure_slot_code(fn_ptr)),
+        );
 
         // Simple insertion sort for now (stable, in-place)
         // Elements are i64 (8 bytes each)
@@ -1892,6 +2199,11 @@ pub extern "C" fn haxe_array_sort(arr: *mut HaxeArray, fn_ptr: usize, env_ptr: *
             let mut j = i as isize - 1;
             while j >= 0 {
                 let cmp = callback(env_ptr, *data.add(j as usize), key);
+                let cmp = if dynamic_entry.is_some() {
+                    crate::type_system::haxe_unbox_int_ptr(cmp as *mut u8)
+                } else {
+                    cmp
+                };
                 if cmp > 0 {
                     *data.add((j + 1) as usize) = *data.add(j as usize);
                     j -= 1;
@@ -1935,8 +2247,7 @@ pub unsafe extern "C" fn haxe_array_function_index_of(
     }
 }
 
-/// Dynamic search: a function box matches an equal closure, any other slot
-/// matches by identity, as the generic search does.
+/// Dynamic array searches compare values through the same equality as `==`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn haxe_array_dynamic_index_of(
     arr: *const HaxeArray,
@@ -1963,8 +2274,8 @@ pub unsafe extern "C" fn haxe_array_dynamic_index_of(
             start.max(0)
         };
         while i >= 0 && i < len {
-            let element = *(array.ptr as *const *mut u8).add(i as usize);
-            if element == value
+            let element = haxe_array_get_erased(arr as *mut u8, i, 0) as *mut u8;
+            if crate::type_system::haxe_dynamic_equals(element, value)
                 || wanted.is_some_and(|f| {
                     function_of(element)
                         .is_some_and(|g| crate::closure_entries::haxe_closure_equals(f, g))
@@ -2001,7 +2312,7 @@ pub unsafe extern "C" fn haxe_array_typed_index_of(
             start.max(0)
         };
         while i >= 0 && i < len {
-            let element = *(array.ptr as *const i64).add(i as usize);
+            let element = haxe_array_get_typed(arr, i, tag);
             if crate::reflect::haxe_reflect_compare_typed(element, value, tag) == 0 {
                 return i;
             }
@@ -2050,6 +2361,15 @@ pub extern "C" fn haxe_array_get_erased(array: *mut u8, index: i64, target: i32)
     if array.is_null() || index < 0 {
         return 0;
     }
+    if let Some(value) = crate::generic_vec::get_erased_vector(array, index as usize) {
+        return match target {
+            1 => haxe_coerce_dynamic_to_int(value) as u64,
+            2 => haxe_coerce_dynamic_to_float(value).to_bits(),
+            3 => haxe_dynamic_truthy(value) as u64,
+            5 => haxe_unbox_reference_ptr(value) as u64,
+            _ => value as u64,
+        };
+    }
     unsafe {
         let boxed = std::ptr::read_unaligned(array as *const u32) == TYPE_ARRAY.0;
         let slot_layout = if boxed {
@@ -2077,9 +2397,10 @@ pub extern "C" fn haxe_array_get_erased(array: *mut u8, index: i64, target: i32)
             };
         }
         let value = std::ptr::read_unaligned(array.ptr.add(index as usize * 8) as *const u64);
-        if !boxed {
+        let slot_layout = stored_slot_layout(array).or_else(|| boxed.then_some(slot_layout));
+        let Some(slot_layout) = slot_layout else {
             return value;
-        }
+        };
         let value = box_erased_array_slot(value, slot_layout);
         if value.is_null() {
             return 0;
@@ -2104,9 +2425,13 @@ pub(crate) fn box_erased_array_slot(value: u64, layout: u64) -> *mut u8 {
         3 if value as i64 == NULL_INT => std::ptr::null_mut(),
         3 => haxe_box_int_ptr(value as i64),
         8 => haxe_null_int_to_dynamic(value as i64),
+        9 => haxe_box_int64_ptr(value as i64),
         4 => haxe_box_float_ptr(f64::from_bits(value)),
         5 if value != 0 => haxe_box_reference_ptr(value as *mut u8, TYPE_STRING.0),
-        6 if value != 0 => haxe_box_reference_ptr(value as *mut u8, (layout >> 8) as u32),
+        6 if value != 0 && layout >> 8 == 0 => {
+            haxe_box_typed_ptr(value as i64, ValueTag::Reference as i32)
+        }
+        6 if value != 0 => haxe_box_generic_ptr(value as i64, ValueTag::Reference as i32, layout),
         7 if value != 0 => haxe_box_array_ptr(value as *mut u8, layout >> 8),
         _ => value as *mut u8,
     }
@@ -2118,6 +2443,9 @@ pub extern "C" fn haxe_array_set_erased(array: *mut u8, index: i64, value: *mut 
     use crate::type_system::*;
     if array.is_null() || index < 0 {
         return false;
+    }
+    if let Some(stored) = crate::generic_vec::set_erased_vector(array, index as usize, value) {
+        return stored;
     }
     unsafe {
         let boxed = std::ptr::read_unaligned(array as *const u32) == TYPE_ARRAY.0;
@@ -2133,12 +2461,18 @@ pub extern "C" fn haxe_array_set_erased(array: *mut u8, index: i64, value: *mut 
         };
         let array = raw as *mut HaxeArray;
         let index = index as usize;
+        let layout = if raw.is_null() {
+            layout
+        } else {
+            stored_slot_layout(&*array).unwrap_or(layout)
+        };
         match layout & 0xff {
             2 => haxe_array_set_i64(array, index, i64::from(haxe_unbox_bool_ptr(value))),
             3 => haxe_array_set_i64(array, index, haxe_coerce_dynamic_to_int(value)),
             4 => haxe_array_set_f64(array, index, haxe_unbox_float_ptr(value)),
             5..=7 => haxe_array_set_i64(array, index, haxe_unbox_reference_ptr(value) as i64),
             8 => haxe_array_set_null_int(array, index, haxe_null_int_from_dynamic(value)),
+            9 => haxe_array_set_i64(array, index, haxe_unbox_int_ptr(value)),
             _ => haxe_array_set_i64(array, index, value as i64),
         }
     }
@@ -2182,5 +2516,88 @@ mod null_int_tests {
         assert!(box_erased_array_slot(NULL_INT as u64, 8).is_null());
         let boxed = box_erased_array_slot(-4i64 as u64, 8);
         assert_eq!(crate::type_system::haxe_unbox_int_ptr(boxed), -4);
+    }
+}
+
+#[cfg(test)]
+mod shared_array_layout_tests {
+    use super::*;
+    use crate::type_system::*;
+
+    fn array() -> HaxeArray {
+        let mut array = HaxeArray {
+            ptr: ptr::null_mut(),
+            len: 0,
+            cap: 0,
+            elem_size: 8,
+            flags: 0,
+        };
+        haxe_array_new(&mut array, 8);
+        array
+    }
+
+    #[test]
+    fn concrete_accesses_keep_boxed_slots_and_aliases() {
+        let mut array = array();
+        haxe_array_init_element_tag(&mut array, ValueTag::Dynamic as i32);
+        haxe_array_push_typed(&mut array, 0, ValueTag::Int as i32, 0);
+        haxe_array_push_typed(
+            &mut array,
+            1.5f64.to_bits() as i64,
+            ValueTag::Float as i32,
+            0,
+        );
+        assert_eq!(haxe_array_get_typed(&array, 0, ValueTag::Int as i32), 0);
+        assert_eq!(
+            haxe_array_get_typed(&array, 1, ValueTag::Float as i32),
+            1.5f64.to_bits() as i64
+        );
+        haxe_array_set_typed(&mut array, 0, 7, ValueTag::Int as i32, 0);
+        let boxed = haxe_array_get_typed(&array, 0, ValueTag::Dynamic as i32) as *mut u8;
+        assert_eq!(haxe_unbox_int_ptr(boxed), 7);
+        haxe_array_set_typed(
+            &mut array,
+            1,
+            (-2.25f64).to_bits() as i64,
+            ValueTag::Float as i32,
+            0,
+        );
+        assert_eq!(
+            haxe_array_take_typed(&mut array, true, ValueTag::Float as i32),
+            (-2.25f64).to_bits() as i64
+        );
+        assert_eq!(array.len, 1);
+        let boxed_array = haxe_box_array_ptr((&mut array as *mut HaxeArray).cast(), 3);
+        assert_eq!(boxed_array_slot_layout(boxed_array), Some(0));
+        assert_eq!(haxe_array_get_erased(boxed_array, 0, 1), 7);
+        haxe_array_free(&mut array);
+    }
+
+    #[test]
+    fn erased_writes_keep_raw_integer_storage() {
+        let mut array = array();
+        haxe_array_mark_slot_layout(&mut array, 3);
+        haxe_array_push_typed(
+            &mut array,
+            haxe_box_float_ptr(3.9) as i64,
+            ValueTag::Dynamic as i32,
+            0,
+        );
+        assert_eq!(haxe_array_get_i64(&array, 0), 3);
+        assert_eq!(
+            haxe_unbox_int_ptr(haxe_array_get_typed(&array, 0, ValueTag::Dynamic as i32) as *mut u8),
+            3
+        );
+        let mut copy = HaxeArray {
+            ptr: ptr::null_mut(),
+            len: 0,
+            cap: 0,
+            elem_size: 8,
+            flags: 0,
+        };
+        haxe_array_copy(&mut copy, &array);
+        assert_eq!(copy.flags, array.flags);
+        haxe_array_free(&mut copy);
+        haxe_array_free(&mut array);
     }
 }

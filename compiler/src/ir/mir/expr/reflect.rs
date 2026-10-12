@@ -699,7 +699,9 @@ impl<'a> HirToMirContext<'a> {
         // as-is: `box_value_for_dynamic` signals "no boxing needed" with `None`,
         // which the `?` below would read as failure. Concrete values still box.
         let arg_is_dynamic = matches!(
-            self.type_table.get(args[0].ty).map(|t| &t.kind),
+            self.type_table
+                .get(self.resolve_storage_type(args[0].ty))
+                .map(|t| &t.kind),
             Some(crate::tast::TypeKind::Dynamic)
         );
         let value_dyn = if actual_ty == IrType::NullInt {

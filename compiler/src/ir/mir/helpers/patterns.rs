@@ -197,6 +197,16 @@ impl<'a> HirToMirContext<'a> {
                                             field_val = cast_val;
                                         }
                                     }
+                                    if resolved_type_id != TypeId::invalid() {
+                                        // Reflected constructors can store boxed payload fields.
+                                        field_val = self
+                                            .array_iterator_next_result(
+                                                field_val,
+                                                resolved_type_id,
+                                                &resolved_type,
+                                            )
+                                            .unwrap_or(field_val);
+                                    }
                                     if let HirPattern::Variable { symbol, .. } = field_pattern {
                                         self.symbol_ir_types.insert(*symbol, resolved_type.clone());
                                         if resolved_type_id != TypeId::invalid() {

@@ -1142,13 +1142,27 @@ impl<'a> HirToMirContext<'a> {
                         .get(&func_id)
                         .is_some_and(|f| !f.signature.type_params.is_empty());
                     if param_is_dynamic && !erased_into_generic {
+                        let source_ty = if matches!(
+                            self.type_table.get(resolved_arg).map(|ty| &ty.kind),
+                            Some(TypeKind::Dynamic)
+                        ) {
+                            match &arg_expr.kind {
+                                HirExprKind::Variable { symbol, .. } => self
+                                    .symbol_table
+                                    .get_symbol(*symbol)
+                                    .map(|symbol| symbol.type_id)
+                                    .unwrap_or(arg_expr.ty),
+                                _ => arg_expr.ty,
+                            }
+                        } else {
+                            arg_expr.ty
+                        };
                         let box_target = if self.is_any_type(resolved_param) {
                             self.type_table.dynamic_type()
                         } else {
                             param_type_id
                         };
-                        if let Some(boxed) = self.maybe_box_value(arg_reg, arg_expr.ty, box_target)
-                        {
+                        if let Some(boxed) = self.maybe_box_value(arg_reg, source_ty, box_target) {
                             if boxed != arg_reg {
                                 return boxed;
                             }

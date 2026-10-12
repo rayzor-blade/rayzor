@@ -32,6 +32,9 @@ impl<'a> HirToMirContext<'a> {
         if self.is_null_int_type(ty) {
             return 8;
         }
+        if self.is_int64_type(ty) {
+            return 9;
+        }
         let ty = self.resolve_storage_type(ty);
         match self.type_table.get(ty).map(|t| &t.kind) {
             Some(TypeKind::Int) => 3,
@@ -436,18 +439,29 @@ impl<'a> HirToMirContext<'a> {
         } else {
             0
         };
-        let tag_reg = self.builder.build_const(IrValue::I32(default_tag))?;
-        if let Some(func) = self.builder.current_function_mut() {
-            func.type_param_tag_fixups.push((tag_reg, tp_name));
-        }
+        let (tag_reg, metadata) = self.type_param_value_descriptor(tp_name, default_tag)?;
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let box_func = self.get_or_register_extern_function(
-            "haxe_box_typed_ptr",
-            vec![IrType::I64, IrType::I32],
+            "haxe_box_generic_ptr",
+            vec![IrType::I64, IrType::I32, IrType::U64],
             ptr_u8.clone(),
         );
         self.builder
-            .build_call_direct(box_func, vec![v64, tag_reg], ptr_u8)
+            .build_call_direct(box_func, vec![v64, tag_reg, metadata], ptr_u8)
+    }
+
+    pub(crate) fn type_param_value_descriptor(
+        &mut self,
+        name: String,
+        default_tag: i32,
+    ) -> Option<(IrId, IrId)> {
+        let tag = self.builder.build_const(IrValue::I32(default_tag))?;
+        let metadata = self.builder.build_const(IrValue::U64(0))?;
+        if let Some(function) = self.builder.current_function_mut() {
+            function.type_param_tag_fixups.push((tag, name.clone()));
+            function.type_param_metadata_fixups.push((metadata, name));
+        }
+        Some((tag, metadata))
     }
 
     /// A type parameter constrained to an object type (`K:{}`, `O:{} & T`,
@@ -518,15 +532,19 @@ impl<'a> HirToMirContext<'a> {
         runtime_func: &str,
         param_idx: usize,
         value: IrId,
-        hir_ty: TypeId,
+        argument: &HirExpr,
     ) -> Option<IrId> {
-        if !matches!((runtime_func, param_idx), ("haxe_json_stringify", 0))
-            || self.boxed_value_regs.contains(&value)
+        if !matches!(
+            (runtime_func, param_idx),
+            ("haxe_json_stringify" | "haxe_reflect_fields", 0)
+        ) || self.boxed_value_regs.contains(&value)
+            || self.is_class_symbol_expr(argument)
+            || self.is_type_token_call(argument)
         {
             return None;
         }
         let dynamic_ty = self.type_table.dynamic_type();
-        self.maybe_box_value(value, hir_ty, dynamic_ty)
+        self.maybe_box_value(value, argument.ty, dynamic_ty)
             .filter(|boxed| *boxed != value)
     }
 
@@ -975,19 +993,16 @@ impl<'a> HirToMirContext<'a> {
             };
 
             // Create type_tag constant with fixup (placeholder 0, monomorphizer fills in)
-            let tag_reg = self.builder.build_const(IrValue::I32(0))?;
-            if let Some(func) = self.builder.current_function_mut() {
-                func.type_param_tag_fixups.push((tag_reg, tp_name));
-            }
+            let (tag_reg, metadata) = self.type_param_value_descriptor(tp_name, 0)?;
 
             let box_func = self.get_or_register_extern_function(
-                "haxe_box_typed_ptr",
-                vec![IrType::I64, IrType::I32],
+                "haxe_box_generic_ptr",
+                vec![IrType::I64, IrType::I32, IrType::U64],
                 ptr_u8.clone(),
             );
             return self
                 .builder
-                .build_call_direct(box_func, vec![v64, tag_reg], ptr_u8);
+                .build_call_direct(box_func, vec![v64, tag_reg, metadata], ptr_u8);
         }
 
         // A `Null<E>` over a tag-only enum carries the discriminant raw, null
@@ -1119,13 +1134,20 @@ impl<'a> HirToMirContext<'a> {
             value_ty
         };
         let storage = self.resolve_storage_type(target_ty);
-        let target_ty = if matches!(
-            self.type_table.get(storage).map(|ty| &ty.kind),
-            Some(TypeKind::Dynamic)
-        ) {
-            storage
-        } else {
+        let type_handle = matches!(
+            self.type_table.get(target_ty).map(|ty| &ty.kind),
+            Some(TypeKind::Abstract { symbol_id, .. })
+                if self.symbol_table.get_symbol(*symbol_id).is_some_and(|symbol| {
+                    crate::tast::core::is_haxe_std_type(
+                        symbol, self.string_interner, &["Class", "Enum"],
+                    )
+                })
+        );
+        // Abstract references use their underlying object at typed boundaries.
+        let target_ty = if self.is_int64_type(target_ty) || type_handle {
             target_ty
+        } else {
+            storage
         };
 
         // Clone TypeKind to avoid borrow checker issues
@@ -1289,15 +1311,19 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::TypeParameter { .. }) => self.unbox_generic_value(value, target_ty),
             // Value types (need to extract from heap)
             Some(TypeKind::Int) => {
-                debug!("[UNBOXING] Auto-unboxing Dynamic to Int using haxe_unbox_int_ptr");
                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                let unbox_func_id = self.get_or_register_extern_function(
-                    "haxe_unbox_int_ptr",
-                    vec![ptr_u8],
-                    IrType::I32,
-                );
-                self.builder
-                    .build_call_direct(unbox_func_id, vec![value], IrType::I32)
+                // A Dynamic-typed field can already carry an erased integer slot.
+                let unbox = if value_is_optional_scalar {
+                    "haxe_unbox_int_ptr"
+                } else {
+                    "haxe_coerce_dynamic_to_int"
+                };
+                let unbox_func_id =
+                    self.get_or_register_extern_function(unbox, vec![ptr_u8], IrType::I64);
+                let unboxed =
+                    self.builder
+                        .build_call_direct(unbox_func_id, vec![value], IrType::I64)?;
+                self.builder.build_cast(unboxed, IrType::I64, IrType::I32)
             }
             Some(TypeKind::Float) => {
                 debug!("[UNBOXING] Auto-unboxing Dynamic to Float using haxe_unbox_float_ptr");
@@ -1394,32 +1420,10 @@ impl<'a> HirToMirContext<'a> {
             }
 
             // Reference types (just extract the pointer)
-            Some(TypeKind::Class { symbol_id, .. }) => {
-                // MIR wrapper classes (extern abstracts like Ptr, Ref, Box,
-                // Usize) are zero-cost over Int, never heap-boxed.
-                if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
-                    // Qualified name first ("rayzor.Ptr"), then native name.
-                    let class_name = sym
-                        .qualified_name
-                        .and_then(|qn| self.string_interner.get(qn))
-                        .map(|qn| qn.to_string())
-                        .or_else(|| {
-                            sym.native_name
-                                .and_then(|nn| self.string_interner.get(nn))
-                                .map(|nn| nn.replace("::", "."))
-                        });
-                    if let Some(cn) = class_name
-                        .as_deref()
-                        .and_then(|n| self.stdlib_mapping.class_key(n))
-                    {
-                        if self.stdlib_mapping.is_mir_wrapper_class(cn) {
-                            debug!(
-                                "[UNBOXING] Skipping unbox for MIR wrapper class '{}' (extern abstract)",
-                                cn
-                            );
-                            return Some(value);
-                        }
-                    }
+            Some(TypeKind::Class { .. }) => {
+                // Only integer-backed wrappers are already their erased payload.
+                if self.convert_type(target_ty).is_integer() {
+                    return Some(value);
                 }
 
                 debug!(
@@ -1438,6 +1442,7 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(unbox_func_id, vec![value], ptr_u8)
             }
             Some(TypeKind::Interface { .. })
+            | Some(TypeKind::GenericInstance { .. })
             | Some(TypeKind::Anonymous { .. })
             | Some(TypeKind::Array { .. }) => {
                 debug!(
@@ -1581,7 +1586,27 @@ impl<'a> HirToMirContext<'a> {
             };
             return self.to_null_int(as_ptr);
         }
-        let resolved = {
+        let concrete_call = {
+            let mut ty = call_ty;
+            for _ in 0..8 {
+                match self.type_table.get(ty).map(|ty| &ty.kind) {
+                    Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            match self.type_table.get(ty).map(|ty| &ty.kind) {
+                None
+                | Some(
+                    TypeKind::TypeParameter { .. }
+                    | TypeKind::Dynamic
+                    | TypeKind::Unknown
+                    | TypeKind::Placeholder { .. },
+                ) => None,
+                Some(_) => Some(ty),
+            }
+        };
+        let resolved = concrete_call.or_else(|| {
             let type_table = self.type_table;
             match type_table.get(receiver_ty).map(|ti| &ti.kind) {
                 Some(TypeKind::Class { type_args, .. })
@@ -1616,7 +1641,7 @@ impl<'a> HirToMirContext<'a> {
                 }
                 _ => None,
             }
-        };
+        });
         let Some(resolved) = resolved else {
             return Some(call_result);
         };
@@ -1661,12 +1686,16 @@ impl<'a> HirToMirContext<'a> {
 
     /// Resolve the payload representation when an enclosing generic binds T.
     pub(crate) fn unbox_generic_value(&mut self, value: IrId, ty: TypeId) -> Option<IrId> {
-        let name = self
-            .resolve_type_param_name(self.resolve_through_aliases(ty))
+        let parameter = self.resolve_type_param_name(self.resolve_through_aliases(ty));
+        let name = parameter
+            .clone()
             .filter(|name| self.current_type_param_names().contains(name));
-        let tag = self
-            .builder
-            .build_const(IrValue::I32(self.convert_type_arg(ty).value_tag() as i32))?;
+        let default_tag = if parameter.is_some() {
+            rayzor_runtime::type_system::ValueTag::Dynamic as i32
+        } else {
+            self.convert_type_arg(ty).value_tag() as i32
+        };
+        let tag = self.builder.build_const(IrValue::I32(default_tag))?;
         if let Some(name) = name
             && let Some(function) = self.builder.current_function_mut()
         {

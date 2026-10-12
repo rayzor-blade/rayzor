@@ -119,6 +119,14 @@ class Serializer {
 		return buf.toString();
 	}
 
+	/** Clears the buffer and reference caches, retaining the instance settings. **/
+	public function reset():Void {
+		buf = new StringBuf();
+		cache = new Array();
+		shash = new haxe.ds.StringMap();
+		scount = 0;
+	}
+
 	/* prefixes :
 		a : array
 		b : hash

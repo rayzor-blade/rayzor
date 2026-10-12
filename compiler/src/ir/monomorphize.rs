@@ -229,6 +229,7 @@ impl Monomorphizer {
         // (e.g., set__String_i32 calls setLoop which has fixups for Reflect.compare).
         // Propagate the substitution map to create specialized versions of those callees.
         self.propagate_transitive_fixups(module);
+        self.adapt_specialized_call_returns(module);
 
         // Keep the module's id allocator above the instances we just minted.
         // Phase 4 / transitive monomorphization insert directly into
@@ -401,10 +402,11 @@ impl Monomorphizer {
                             .parameters
                             .iter()
                             .any(|p| p.ty.type_param_name() == Some(type_param.name.as_str()))
-                        && !callee
+                        && (!callee
                             .type_param_tag_fixups
                             .iter()
                             .any(|(_, name)| *name == type_param.name)
+                            || self.erasure_safe_tag_fixups(callee, &type_param.name, module))
                     {
                         if dbg_mono {
                             eprintln!(
@@ -496,31 +498,7 @@ impl Monomorphizer {
         // Substitute types in CFG instructions
         self.substitute_cfg(&mut specialized.cfg);
 
-        // A value returned from an erased slot is still the slot's bits; a
-        // float return reinterprets them rather than converting the integer.
-        if matches!(specialized.signature.return_type, IrType::F64 | IrType::F32) {
-            let ret_ty = specialized.signature.return_type.clone();
-            let block_ids: Vec<_> = specialized.cfg.blocks.keys().copied().collect();
-            for block_id in block_ids {
-                let returned = match specialized.cfg.blocks.get(&block_id).map(|b| &b.terminator) {
-                    Some(IrTerminator::Return { value: Some(v) }) => *v,
-                    _ => continue,
-                };
-                if !matches!(specialized.register_types.get(&returned), Some(IrType::I64)) {
-                    continue;
-                }
-                let dest = specialized.alloc_reg();
-                specialized.register_types.insert(dest, ret_ty.clone());
-                if let Some(block) = specialized.cfg.blocks.get_mut(&block_id) {
-                    block.instructions.push(IrInstruction::BitCast {
-                        dest,
-                        src: returned,
-                        ty: ret_ty.clone(),
-                    });
-                    block.terminator = IrTerminator::Return { value: Some(dest) };
-                }
-            }
-        }
+        self.adapt_erased_returns(&mut specialized);
 
         // Process type parameter tag fixups: replace placeholder const values
         // with concrete type tags based on the substitution map
@@ -559,13 +537,294 @@ impl Monomorphizer {
         }
     }
 
+    /// A generic return takes its concrete ABI from the erased slot's bits.
+    fn adapt_erased_returns(&self, function: &mut IrFunction) {
+        let ty = function.signature.return_type.clone();
+        if ty == IrType::Void {
+            for block in function.cfg.blocks.values_mut() {
+                if matches!(block.terminator, IrTerminator::Return { .. }) {
+                    block.terminator = IrTerminator::Return { value: None };
+                }
+            }
+            return;
+        }
+        if !matches!(
+            ty,
+            IrType::F64
+                | IrType::F32
+                | IrType::String
+                | IrType::Ptr(_)
+                | IrType::I32
+                | IrType::Bool
+        ) {
+            return;
+        }
+        let blocks: Vec<_> = function.cfg.blocks.keys().copied().collect();
+        for id in blocks {
+            let returned = match function.cfg.blocks.get(&id).map(|b| &b.terminator) {
+                Some(IrTerminator::Return { value: Some(value) }) => *value,
+                _ => continue,
+            };
+            if function.register_types.get(&returned) != Some(&IrType::I64) {
+                continue;
+            }
+            let dest = function.alloc_reg();
+            function.register_types.insert(dest, ty.clone());
+            let instruction = if matches!(ty, IrType::F64 | IrType::F32) {
+                IrInstruction::BitCast {
+                    dest,
+                    src: returned,
+                    ty: ty.clone(),
+                }
+            } else {
+                IrInstruction::Cast {
+                    dest,
+                    src: returned,
+                    from_ty: IrType::I64,
+                    to_ty: ty.clone(),
+                }
+            };
+            if let Some(block) = function.cfg.blocks.get_mut(&id) {
+                block.instructions.push(instruction);
+                block.terminator = IrTerminator::Return { value: Some(dest) };
+            }
+        }
+    }
+
+    /// Slot readers and raw array writes do not require a concrete type binding.
+    fn erasure_safe_tag_fixups(
+        &self,
+        function: &IrFunction,
+        name: &str,
+        module: &IrModule,
+    ) -> bool {
+        function
+            .type_param_tag_fixups
+            .iter()
+            .filter(|(_, parameter)| parameter == name)
+            .all(|(tag, _)| {
+                function.cfg.blocks.values().any(|block| {
+                    block
+                        .instructions
+                        .iter()
+                        .any(|instruction| instruction.uses().contains(tag))
+                }) && function.cfg.blocks.values().all(|block| {
+                    block.instructions.iter().all(|instruction| {
+                        if !instruction.uses().contains(tag) {
+                            return true;
+                        }
+                        let IrInstruction::CallDirect { func_id, args, .. } = instruction else {
+                            return false;
+                        };
+                        let callee = module
+                            .extern_functions
+                            .get(func_id)
+                            .map(|function| function.name.as_str())
+                            .or_else(|| {
+                                module
+                                    .functions
+                                    .get(func_id)
+                                    .map(|function| function.name.as_str())
+                            });
+                        callee.is_some_and(|callee| match callee {
+                            "haxe_array_init_element_tag" | "haxe_unbox_generic_return" => {
+                                args.get(1) == Some(tag)
+                            }
+                            "haxe_array_get_typed" => args.get(2) == Some(tag),
+                            "haxe_array_push_typed" => args.get(2) == Some(tag),
+                            _ => false,
+                        })
+                    })
+                })
+            })
+    }
+
+    /// Preserve the caller's slot type while reading the specialized return ABI.
+    pub(crate) fn adapt_specialized_call_returns(&self, module: &mut IrModule) {
+        let returns: BTreeMap<_, _> = self.call_return_types(module);
+        let mut parameters: BTreeMap<_, _> = module
+            .functions
+            .iter()
+            .filter(|(_, function)| function.signature.type_params.is_empty())
+            .map(|(id, function)| {
+                (
+                    *id,
+                    function
+                        .signature
+                        .parameters
+                        .iter()
+                        .map(|p| p.ty.clone())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        for (id, function) in &module.extern_functions {
+            parameters.insert(
+                *id,
+                function
+                    .signature
+                    .parameters
+                    .iter()
+                    .map(|p| p.ty.clone())
+                    .collect(),
+            );
+        }
+        for function in module.functions.values_mut() {
+            let erased_float_returns: BTreeSet<_> = function
+                .cfg
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter_map(|instruction| match instruction {
+                    IrInstruction::CallDirect {
+                        dest: Some(dest),
+                        func_id,
+                        ..
+                    } if returns.get(func_id) == Some(&IrType::F64)
+                        && function
+                            .register_types
+                            .get(dest)
+                            .is_some_and(contains_type_param) =>
+                    {
+                        Some(*dest)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let mut next = function
+                .register_types
+                .keys()
+                .map(|reg| reg.0 + 1)
+                .max()
+                .unwrap_or(function.next_reg_id)
+                .max(function.next_reg_id);
+            for block in function.cfg.blocks.values_mut() {
+                let mut instructions = Vec::new();
+                for mut instruction in std::mem::take(&mut block.instructions) {
+                    if let IrInstruction::CallDirect { func_id, args, .. } = &mut instruction
+                        && let Some(params) = parameters.get(func_id)
+                    {
+                        for (arg, param) in args.iter_mut().zip(params) {
+                            let actual = function.register_types.get(arg).cloned();
+                            if matches!(param, IrType::I64 | IrType::Ptr(_))
+                                && matches!(actual, Some(IrType::F64 | IrType::I32 | IrType::Bool))
+                            {
+                                let bits = IrId::new(next);
+                                next += 1;
+                                instructions.push(if actual == Some(IrType::F64) {
+                                    IrInstruction::BitCast {
+                                        dest: bits,
+                                        src: *arg,
+                                        ty: param.clone(),
+                                    }
+                                } else {
+                                    IrInstruction::Cast {
+                                        dest: bits,
+                                        src: *arg,
+                                        from_ty: actual.unwrap(),
+                                        to_ty: param.clone(),
+                                    }
+                                });
+                                function.register_types.insert(bits, param.clone());
+                                *arg = bits;
+                            }
+                        }
+                    }
+                    if let IrInstruction::Cast {
+                        dest,
+                        src,
+                        from_ty,
+                        to_ty,
+                    } = &instruction
+                        && contains_type_param(from_ty)
+                        && *to_ty == IrType::F64
+                        && erased_float_returns.contains(src)
+                    {
+                        instruction = IrInstruction::BitCast {
+                            dest: *dest,
+                            src: *src,
+                            ty: IrType::F64,
+                        };
+                    }
+                    let conversion = if let IrInstruction::CallDirect {
+                        dest: Some(dest),
+                        func_id,
+                        ..
+                    } = &mut instruction
+                    {
+                        returns.get(func_id).and_then(|returned| {
+                            let expected = function.register_types.get(dest)?.clone();
+                            let expected = if contains_type_param(&expected) {
+                                IrType::I64
+                            } else {
+                                expected
+                            };
+                            function.register_types.insert(*dest, expected.clone());
+                            if expected == *returned || *returned == IrType::Void {
+                                return None;
+                            }
+                            let source = IrId::new(next);
+                            next += 1;
+                            let target = *dest;
+                            *dest = source;
+                            function.register_types.insert(source, returned.clone());
+                            Some(
+                                if matches!(
+                                    (returned, &expected),
+                                    (IrType::F64, IrType::I64 | IrType::U64)
+                                        | (IrType::I64 | IrType::U64, IrType::F64)
+                                ) {
+                                    IrInstruction::BitCast {
+                                        dest: target,
+                                        src: source,
+                                        ty: expected,
+                                    }
+                                } else {
+                                    IrInstruction::Cast {
+                                        dest: target,
+                                        src: source,
+                                        from_ty: returned.clone(),
+                                        to_ty: expected,
+                                    }
+                                },
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                    instructions.push(instruction);
+                    if let Some(conversion) = conversion {
+                        instructions.push(conversion);
+                    }
+                }
+                block.instructions = instructions;
+            }
+            function.next_reg_id = next;
+        }
+    }
+
+    fn call_return_types(&self, module: &IrModule) -> BTreeMap<IrFunctionId, IrType> {
+        module
+            .functions
+            .iter()
+            .filter(|(_, function)| !contains_type_param(&function.signature.return_type))
+            .map(|(id, function)| (*id, function.signature.return_type.clone()))
+            .collect()
+    }
+
     /// Recursively substitute type variables with concrete types
     fn substitute_type(&self, ty: &IrType) -> IrType {
         match ty {
             IrType::TypeVar(name) => self
                 .substitution_map
                 .get(name)
-                .cloned()
+                .map(|bound| {
+                    if matches!(bound, IrType::Ptr(inner) if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_int64")) {
+                        IrType::I64
+                    } else {
+                        bound.clone()
+                    }
+                })
                 .unwrap_or_else(|| ty.clone()),
             IrType::Ptr(inner) => IrType::Ptr(Box::new(self.substitute_type(inner))),
             IrType::Ref(inner) => IrType::Ref(Box::new(self.substitute_type(inner))),
@@ -629,6 +888,22 @@ impl Monomorphizer {
         }
     }
 
+    /// Call-site arguments retain semantic descriptors independently of the slot ABI.
+    fn substitute_type_argument(&self, ty: &IrType) -> IrType {
+        match ty {
+            IrType::TypeVar(name) => self
+                .substitution_map
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| ty.clone()),
+            IrType::Ptr(inner) => IrType::Ptr(Box::new(self.substitute_type_argument(inner))),
+            IrType::Array(inner, count) => {
+                IrType::Array(Box::new(self.substitute_type_argument(inner)), *count)
+            }
+            _ => self.substitute_type(ty),
+        }
+    }
+
     /// Substitute types in a single instruction
     fn substitute_instruction(&self, inst: &mut IrInstruction) {
         match inst {
@@ -648,7 +923,7 @@ impl Monomorphizer {
             IrInstruction::CallDirect { type_args, .. } => {
                 // Substitute type args
                 for arg in type_args.iter_mut() {
-                    *arg = self.substitute_type(arg);
+                    *arg = self.substitute_type_argument(arg);
                 }
             }
             IrInstruction::CallIndirect { signature, .. } => {
@@ -675,7 +950,7 @@ impl Monomorphizer {
     /// After monomorphization resolves the concrete types, this method replaces the
     /// placeholder with the correct type tag based on the substitution map.
     fn apply_type_param_tag_fixups(&self, func: &mut IrFunction) {
-        if func.type_param_tag_fixups.is_empty() {
+        if func.type_param_tag_fixups.is_empty() && func.type_param_metadata_fixups.is_empty() {
             return;
         }
 
@@ -693,6 +968,21 @@ impl Monomorphizer {
                     if let IrInstruction::Const { dest, value } = inst {
                         if *dest == *reg_id {
                             *value = IrValue::I32(type_tag);
+                        }
+                    }
+                }
+            }
+        }
+        for (reg, name) in std::mem::take(&mut func.type_param_metadata_fixups) {
+            let Some(concrete) = self.substitution_map.get(&name) else {
+                continue;
+            };
+            let metadata = concrete.value_metadata();
+            for block in func.cfg.blocks.values_mut() {
+                for instruction in &mut block.instructions {
+                    if let IrInstruction::Const { dest, value } = instruction {
+                        if *dest == reg {
+                            *value = IrValue::U64(metadata);
                         }
                     }
                 }
@@ -948,6 +1238,8 @@ impl Monomorphizer {
         // Substitute types in CFG
         self.substitute_cfg(&mut specialized.cfg);
 
+        self.adapt_erased_returns(&mut specialized);
+
         // Resolve type_param_tag_fixups using the substitution map
         self.apply_type_param_tag_fixups(&mut specialized);
 
@@ -978,6 +1270,7 @@ impl Monomorphizer {
         requests: &BTreeMap<MonoKey, Vec<CallSiteLocation>>,
     ) {
         let mut param_tys: BTreeMap<IrFunctionId, (Vec<IrType>, IrType)> = BTreeMap::new();
+        let mut float_bindings = BTreeSet::new();
         let mut by_block: BTreeMap<(IrFunctionId, IrBlockId), Vec<(usize, IrFunctionId)>> =
             BTreeMap::new();
         for (key, locations) in requests {
@@ -985,6 +1278,9 @@ impl Monomorphizer {
                 Some(id) => *id,
                 None => continue,
             };
+            if key.type_args == vec![IrType::F64] {
+                float_bindings.insert(specialized_id);
+            }
             if let Some(f) = module.functions.get(&specialized_id) {
                 param_tys.entry(specialized_id).or_insert_with(|| {
                     (
@@ -1018,7 +1314,7 @@ impl Monomorphizer {
                 next = next.max(reg.0 + 1);
             }
             for (index, specialized_id) in sites {
-                let (ptys, ret_ty) = match param_tys.get(&specialized_id) {
+                let (ptys, _) = match param_tys.get(&specialized_id) {
                     Some(p) => p,
                     None => continue,
                 };
@@ -1035,6 +1331,28 @@ impl Monomorphizer {
                 let mut new_args = args.clone();
                 for (i, arg) in args.iter().enumerate() {
                     if ptys.get(i) != Some(&IrType::I64) {
+                        continue;
+                    }
+                    if float_bindings.contains(&specialized_id)
+                        && func.register_types.get(arg) == Some(&IrType::I32)
+                    {
+                        let wide = IrId::new(next);
+                        let bits = IrId::new(next + 1);
+                        next += 2;
+                        coercions.push(IrInstruction::Cast {
+                            dest: wide,
+                            src: *arg,
+                            from_ty: IrType::I32,
+                            to_ty: IrType::F64,
+                        });
+                        coercions.push(IrInstruction::BitCast {
+                            dest: bits,
+                            src: wide,
+                            ty: IrType::I64,
+                        });
+                        func.register_types.insert(wide, IrType::F64);
+                        func.register_types.insert(bits, IrType::I64);
+                        new_args[i] = bits;
                         continue;
                     }
                     match func.register_types.get(arg) {
@@ -1076,31 +1394,17 @@ impl Monomorphizer {
                     Some(b) => b,
                     None => continue,
                 };
-                let mut retyped: Option<IrId> = None;
                 if let Some(IrInstruction::CallDirect {
                     func_id: callee,
                     type_args,
                     args,
-                    dest,
                     ..
                 }) = block.instructions.get_mut(index)
                 {
                     *callee = specialized_id;
                     type_args.clear();
                     *args = new_args;
-                    retyped = *dest;
                     self.stats.call_sites_rewritten += 1;
-                }
-                // The result register was typed for the erased callee (an i64
-                // slot); the instance returns its concrete type, and the
-                // backend widens or reinterprets from the recorded type.
-                if let Some(dest) = retyped {
-                    if *ret_ty != IrType::Void {
-                        func.register_types.insert(dest, ret_ty.clone());
-                        if let Some(local) = func.locals.get_mut(&dest) {
-                            local.ty = ret_ty.clone();
-                        }
-                    }
                 }
                 for (k, inst) in coercions.into_iter().enumerate() {
                     block.instructions.insert(index + k, inst);

@@ -199,12 +199,14 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_iterator_while_loop(
         &mut self,
         pattern: &HirPattern,
         obj_reg: IrId,
         has_next_fn: IrFunctionId,
         next_fn: IrFunctionId,
+        iterator_type_args: &[IrType],
         body: &HirBlock,
         label: Option<&SymbolId>,
     ) {
@@ -329,10 +331,12 @@ impl<'a> HirToMirContext<'a> {
                     .map(|f| f.signature.return_type.clone())
             })
             .unwrap_or(IrType::I64);
-        let Some(next_value) =
-            self.builder
-                .build_call_direct(next_fn, vec![obj_for_body], next_return.clone())
-        else {
+        let Some(next_value) = self.builder.build_call_direct_with_type_args(
+            next_fn,
+            vec![obj_for_body],
+            next_return.clone(),
+            iterator_type_args.to_vec(),
+        ) else {
             self.loop_stack.pop();
             return;
         };

@@ -25,6 +25,107 @@ use std::alloc::{Layout, alloc, dealloc, realloc};
 use std::mem;
 use std::ptr;
 
+#[derive(Clone, Copy)]
+enum ErasedVectorKind {
+    Int,
+    Int64,
+    Float,
+    Bool,
+    Pointer,
+    TypedPointer { tag: i32, metadata: u64 },
+}
+
+fn erased_vectors() -> &'static std::sync::Mutex<std::collections::HashMap<usize, ErasedVectorKind>>
+{
+    static VECTORS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<usize, ErasedVectorKind>>,
+    > = std::sync::OnceLock::new();
+    VECTORS.get_or_init(Default::default)
+}
+
+fn register_erased_vector<T>(vector: *mut T, kind: ErasedVectorKind) {
+    erased_vectors()
+        .lock()
+        .unwrap()
+        .insert(vector as usize, kind);
+}
+
+fn unregister_erased_vector<T>(vector: *mut T) {
+    erased_vectors().lock().unwrap().remove(&(vector as usize));
+}
+
+/// Retain the logical element type when a generic vector uses pointer-sized slots.
+#[unsafe(no_mangle)]
+pub extern "C" fn rayzor_vec_ptr_set_element_descriptor(vector: *mut u8, tag: i32, metadata: u64) {
+    register_erased_vector(vector, ErasedVectorKind::TypedPointer { tag, metadata });
+}
+
+fn erased_vector_kind(vector: *mut u8) -> Option<(*mut u8, ErasedVectorKind)> {
+    let vectors = erased_vectors().lock().unwrap();
+    if let Some(kind) = vectors.get(&(vector as usize)) {
+        return Some((vector, *kind));
+    }
+    drop(vectors);
+    if !crate::type_system::is_reference_box(vector) {
+        return None;
+    }
+    let raw = unsafe { (*(vector as *const crate::type_system::DynamicValue)).value_ptr };
+    erased_vectors()
+        .lock()
+        .unwrap()
+        .get(&(raw as usize))
+        .map(|kind| (raw, *kind))
+}
+
+// Erased indexing must use the vector's allocation layout, which differs from Array.
+pub(crate) fn get_erased_vector(vector: *mut u8, index: usize) -> Option<*mut u8> {
+    use crate::type_system::*;
+    let (vector, kind) = erased_vector_kind(vector)?;
+    Some(match kind {
+        ErasedVectorKind::Int => haxe_box_int_ptr(rayzor_vec_i32_get(vector.cast(), index) as i64),
+        ErasedVectorKind::Int64 => haxe_box_int64_ptr(rayzor_vec_i64_get(vector.cast(), index)),
+        ErasedVectorKind::Float => haxe_box_float_ptr(rayzor_vec_f64_get(vector.cast(), index)),
+        ErasedVectorKind::Bool => haxe_box_bool_ptr(rayzor_vec_bool_get(vector.cast(), index)),
+        ErasedVectorKind::Pointer => rayzor_vec_ptr_get(vector.cast(), index),
+        ErasedVectorKind::TypedPointer { tag, metadata } => haxe_box_generic_ptr(
+            rayzor_vec_ptr_get(vector.cast(), index) as i64,
+            tag,
+            metadata,
+        ),
+    })
+}
+
+pub(crate) fn set_erased_vector(vector: *mut u8, index: usize, value: *mut u8) -> Option<bool> {
+    use crate::type_system::*;
+    let (vector, kind) = erased_vector_kind(vector)?;
+    match kind {
+        ErasedVectorKind::Int => rayzor_vec_i32_set(
+            vector.cast(),
+            index,
+            haxe_coerce_dynamic_to_int(value) as i32,
+        ),
+        ErasedVectorKind::Int64 => {
+            rayzor_vec_i64_set(vector.cast(), index, haxe_coerce_dynamic_to_int(value))
+        }
+        ErasedVectorKind::Float => {
+            rayzor_vec_f64_set(vector.cast(), index, haxe_coerce_dynamic_to_float(value))
+        }
+        ErasedVectorKind::Bool => {
+            rayzor_vec_bool_set(vector.cast(), index, haxe_dynamic_truthy(value))
+        }
+        ErasedVectorKind::Pointer => rayzor_vec_ptr_set(vector.cast(), index, value),
+        ErasedVectorKind::TypedPointer { tag, .. } => {
+            let bits = if tag == ValueTag::NullInt as i32 {
+                haxe_null_int_from_dynamic(value)
+            } else {
+                haxe_unbox_generic_return(value, tag)
+            };
+            rayzor_vec_ptr_set(vector.cast(), index, bits as *mut u8);
+        }
+    }
+    Some(true)
+}
+
 /// Initial capacity for new vectors
 const INITIAL_CAPACITY: usize = 8;
 
@@ -65,6 +166,7 @@ pub extern "C" fn rayzor_vec_i32_new() -> *mut VecI32 {
         (*vec_ptr).len = 0;
         (*vec_ptr).cap = INITIAL_CAPACITY;
 
+        register_erased_vector(vec_ptr, ErasedVectorKind::Int);
         vec_ptr
     }
 }
@@ -96,6 +198,7 @@ pub extern "C" fn rayzor_vec_i32_with_capacity(capacity: usize) -> *mut VecI32 {
         (*vec_ptr).len = 0;
         (*vec_ptr).cap = cap;
 
+        register_erased_vector(vec_ptr, ErasedVectorKind::Int);
         vec_ptr
     }
 }
@@ -299,6 +402,7 @@ pub extern "C" fn rayzor_vec_i32_free(vec: *mut VecI32) {
     if vec.is_null() {
         return;
     }
+    unregister_erased_vector(vec);
 
     unsafe {
         let v = &*vec;
@@ -341,6 +445,7 @@ pub extern "C" fn rayzor_vec_i64_new() -> *mut VecI64 {
         (*vec_ptr).ptr = data_ptr;
         (*vec_ptr).len = 0;
         (*vec_ptr).cap = INITIAL_CAPACITY;
+        register_erased_vector(vec_ptr, ErasedVectorKind::Int64);
         vec_ptr
     }
 }
@@ -464,6 +569,7 @@ pub extern "C" fn rayzor_vec_i64_free(vec: *mut VecI64) {
     if vec.is_null() {
         return;
     }
+    unregister_erased_vector(vec);
     unsafe {
         let v = &*vec;
         if !v.ptr.is_null() && v.cap > 0 {
@@ -504,6 +610,7 @@ pub extern "C" fn rayzor_vec_f64_new() -> *mut VecF64 {
         (*vec_ptr).ptr = data_ptr;
         (*vec_ptr).len = 0;
         (*vec_ptr).cap = INITIAL_CAPACITY;
+        register_erased_vector(vec_ptr, ErasedVectorKind::Float);
         vec_ptr
     }
 }
@@ -681,6 +788,7 @@ pub extern "C" fn rayzor_vec_f64_free(vec: *mut VecF64) {
     if vec.is_null() {
         return;
     }
+    unregister_erased_vector(vec);
     unsafe {
         let v = &*vec;
         if !v.ptr.is_null() && v.cap > 0 {
@@ -721,6 +829,7 @@ pub extern "C" fn rayzor_vec_ptr_new() -> *mut VecPtr {
         (*vec_ptr).ptr = data_ptr;
         (*vec_ptr).len = 0;
         (*vec_ptr).cap = INITIAL_CAPACITY;
+        register_erased_vector(vec_ptr, ErasedVectorKind::Pointer);
         vec_ptr
     }
 }
@@ -883,6 +992,7 @@ pub extern "C" fn rayzor_vec_ptr_free(vec: *mut VecPtr) {
     if vec.is_null() {
         return;
     }
+    unregister_erased_vector(vec);
     unsafe {
         let v = &*vec;
         if !v.ptr.is_null() && v.cap > 0 {
@@ -923,6 +1033,7 @@ pub extern "C" fn rayzor_vec_bool_new() -> *mut VecBool {
         (*vec_ptr).ptr = data_ptr;
         (*vec_ptr).len = 0;
         (*vec_ptr).cap = INITIAL_CAPACITY;
+        register_erased_vector(vec_ptr, ErasedVectorKind::Bool);
         vec_ptr
     }
 }
@@ -1023,6 +1134,7 @@ pub extern "C" fn rayzor_vec_bool_free(vec: *mut VecBool) {
     if vec.is_null() {
         return;
     }
+    unregister_erased_vector(vec);
     unsafe {
         let v = &*vec;
         if !v.ptr.is_null() && v.cap > 0 {
@@ -1040,6 +1152,68 @@ pub extern "C" fn rayzor_vec_bool_free(vec: *mut VecBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn erased_vector_indexing_preserves_native_layouts() {
+        use crate::type_system::*;
+
+        let ints = rayzor_vec_i32_new();
+        rayzor_vec_i32_push(ints, -17);
+        let boxed = haxe_box_reference_ptr(ints.cast(), TYPE_DYNAMIC_TOKEN.0);
+        let read = get_erased_vector(boxed, 0).unwrap();
+        assert_eq!(haxe_coerce_dynamic_to_int(read), -17);
+        assert_eq!(
+            set_erased_vector(boxed, 0, haxe_box_int_ptr(23)),
+            Some(true)
+        );
+        assert_eq!(rayzor_vec_i32_get(ints, 0), 23);
+
+        let floats = rayzor_vec_f64_new();
+        rayzor_vec_f64_push(floats, -2.5);
+        assert_eq!(
+            haxe_coerce_dynamic_to_float(get_erased_vector(floats.cast(), 0).unwrap()),
+            -2.5
+        );
+        set_erased_vector(floats.cast(), 0, haxe_box_float_ptr(4.25));
+        assert_eq!(rayzor_vec_f64_get(floats, 0), 4.25);
+
+        let bools = rayzor_vec_bool_new();
+        rayzor_vec_bool_push(bools, false);
+        assert!(!haxe_dynamic_truthy(
+            get_erased_vector(bools.cast(), 0).unwrap()
+        ));
+        set_erased_vector(bools.cast(), 0, haxe_box_bool_ptr(true));
+        assert!(rayzor_vec_bool_get(bools, 0));
+
+        let words = rayzor_vec_i64_new();
+        let large = (1_i64 << 48) + 7;
+        rayzor_vec_i64_push(words, large);
+        assert_eq!(
+            haxe_coerce_dynamic_to_int(get_erased_vector(words.cast(), 0).unwrap()),
+            large
+        );
+        set_erased_vector(words.cast(), 0, haxe_box_int64_ptr(-large));
+        assert_eq!(rayzor_vec_i64_get(words, 0), -large);
+
+        let pointers = rayzor_vec_ptr_new();
+        let value = haxe_box_int_ptr(7);
+        rayzor_vec_ptr_push(pointers, value);
+        assert_eq!(get_erased_vector(pointers.cast(), 0), Some(value));
+        set_erased_vector(pointers.cast(), 0, std::ptr::null_mut());
+        assert_eq!(rayzor_vec_ptr_get(pointers, 0), std::ptr::null_mut());
+
+        rayzor_vec_i32_free(ints);
+        assert!(
+            !erased_vectors()
+                .lock()
+                .unwrap()
+                .contains_key(&(ints as usize))
+        );
+        rayzor_vec_f64_free(floats);
+        rayzor_vec_bool_free(bools);
+        rayzor_vec_i64_free(words);
+        rayzor_vec_ptr_free(pointers);
+    }
 
     #[test]
     fn test_vec_i32_basic() {

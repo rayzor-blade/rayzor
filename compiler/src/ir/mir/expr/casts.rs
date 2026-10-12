@@ -50,10 +50,12 @@ impl<'a> HirToMirContext<'a> {
             | Some(TypeKind::Bool)
             | Some(TypeKind::String)
             | Some(TypeKind::Class { .. })
+            | Some(TypeKind::GenericInstance { .. })
             | Some(TypeKind::Array { .. })
             | Some(TypeKind::Anonymous { .. })
             | Some(TypeKind::Function { .. })
             | Some(TypeKind::TypeParameter { .. })
+            | Some(TypeKind::Abstract { .. })
             | Some(TypeKind::Enum { .. }) => self.maybe_unbox_value(value, source, target),
             _ => None,
         }
@@ -320,7 +322,7 @@ impl<'a> HirToMirContext<'a> {
             let source_is_abstract = matches!(&source_kind, Some(TypeKind::Abstract { .. }));
             let target_is_dynamic = matches!(&target_kind, Some(TypeKind::Dynamic));
 
-            if source_is_abstract && target_is_dynamic {
+            if source_is_abstract && target_is_dynamic && !*is_safe {
                 return self.lower_expression(expr);
             }
 

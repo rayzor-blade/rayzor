@@ -69,6 +69,87 @@ mod super_call;
 mod virtual_dispatch;
 
 impl<'a> HirToMirContext<'a> {
+    pub(crate) fn infer_generic_call_args(
+        &self,
+        id: IrFunctionId,
+        args: &[HirExpr],
+        is_method: bool,
+    ) -> Vec<IrType> {
+        let Some(function) = self.builder.module.functions.get(&id) else {
+            return Vec::new();
+        };
+        let Some(formals) = self.function_param_hir_types.get(&id) else {
+            return Vec::new();
+        };
+        function
+            .signature
+            .type_params
+            .iter()
+            .map(|parameter| {
+                formals
+                    .iter()
+                    .zip(args.iter().skip(usize::from(is_method)))
+                    .find_map(|(formal, actual)| {
+                        let (formal, actual) = match (
+                            self.type_table
+                                .get(self.resolve_through_aliases(*formal))
+                                .map(|ty| &ty.kind),
+                            self.type_table
+                                .get(self.resolve_through_aliases(actual.ty))
+                                .map(|ty| &ty.kind),
+                        ) {
+                            (
+                                Some(TypeKind::Array {
+                                    element_type: formal,
+                                }),
+                                Some(TypeKind::Array {
+                                    element_type: actual,
+                                }),
+                            ) => (*formal, *actual),
+                            _ => (*formal, actual.ty),
+                        };
+                        (self.resolve_type_param_name(formal).as_deref()
+                            == Some(parameter.name.as_str()))
+                        .then(|| self.convert_type_arg(actual))
+                    })
+            })
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn bind_generic_return_args(
+        &self,
+        id: IrFunctionId,
+        ty: TypeId,
+        args: &mut [IrType],
+    ) {
+        let Some(function) = self.builder.module.functions.get(&id) else {
+            return;
+        };
+        let IrType::TypeVar(name) = &function.signature.return_type else {
+            return;
+        };
+        let Some(index) = function
+            .signature
+            .type_params
+            .iter()
+            .position(|param| &param.name == name)
+        else {
+            return;
+        };
+        if index >= args.len() {
+            return;
+        }
+        let expected = self.convert_type_arg(ty);
+        if !matches!(
+            self.type_table.get(ty).map(|ty| &ty.kind),
+            Some(TypeKind::TypeParameter { .. } | TypeKind::Unknown)
+        ) && expected != IrType::dynamic_ptr()
+        {
+            args[index] = expected;
+        }
+    }
+
     /// A local variable or parameter bound in the function being lowered.
     pub(crate) fn is_local_value(&self, symbol: SymbolId) -> bool {
         self.symbol_map.contains_key(&symbol)
@@ -214,6 +295,8 @@ impl<'a> HirToMirContext<'a> {
         // Std.string(v) with a user toString, before the stdlib mapping
         // can answer it from the boxed value's runtime tag.
         probe!(self.try_user_to_string_call(expr));
+
+        probe!(self.try_native_map_call(expr));
 
         // A method called on a Dynamic or structural receiver, by name.
         probe!(self.try_dynamic_member_call(expr));
@@ -911,7 +994,7 @@ impl<'a> HirToMirContext<'a> {
 
                     // Extract type_args for generic method calls.
                     // Priority: 1) HIR type_args, 2) class type_args, 3) infer from args
-                    let ir_type_args = if !converted_hir_type_args.is_empty() {
+                    let mut ir_type_args = if !converted_hir_type_args.is_empty() {
                         converted_hir_type_args.clone()
                     } else if !args.is_empty() {
                         let receiver_type = args[0].ty;
@@ -975,6 +1058,8 @@ impl<'a> HirToMirContext<'a> {
                     } else {
                         Vec::new()
                     };
+
+                    self.bind_generic_return_args(func_id, expr.ty, &mut ir_type_args);
 
                     debug!(
                         "[FUNCTION_MAP] Method call lowered {} args: {:?}, type_args: {:?}",

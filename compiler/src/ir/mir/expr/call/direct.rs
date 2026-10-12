@@ -312,7 +312,7 @@ impl<'a> HirToMirContext<'a> {
                 // Gather type_args: first from HIR call-site type_args, then from receiver's
                 // generic instance type_args, then from the converted HIR type_args computed
                 // earlier in the Call handler.
-                let call_type_args = if has_type_params {
+                let mut call_type_args = if has_type_params {
                     if !converted_hir_type_args.is_empty() {
                         converted_hir_type_args.clone()
                     } else if *is_method && !args.is_empty() {
@@ -345,6 +345,33 @@ impl<'a> HirToMirContext<'a> {
                 } else {
                     vec![]
                 };
+
+                let inferred = self.infer_generic_call_args(func_id, args, *is_method);
+                if call_type_args.is_empty() {
+                    call_type_args = inferred;
+                } else if call_type_args.len() == inferred.len() {
+                    for (argument, inferred) in call_type_args.iter_mut().zip(inferred) {
+                        if *argument == IrType::I64 {
+                            *argument = inferred;
+                        }
+                    }
+                }
+                self.bind_generic_return_args(func_id, expr.ty, &mut call_type_args);
+                // Imported stubs can erase the return variable before their body is merged.
+                if call_type_args.len() == 1 && self.callee_returns_type_param(*symbol) {
+                    let expected = self.convert_type_arg(expr.ty);
+                    if !matches!(expected, IrType::TypeVar(_))
+                        && expected != IrType::dynamic_ptr()
+                        && !matches!(
+                            self.type_table
+                                .get(self.resolve_through_aliases(expr.ty))
+                                .map(|ty| &ty.kind),
+                            Some(TypeKind::Unknown | TypeKind::TypeParameter { .. })
+                        )
+                    {
+                        call_type_args[0] = expected;
+                    }
+                }
 
                 if !call_type_args.is_empty() {
                     let result = self.builder.build_call_direct_with_type_args(
@@ -442,9 +469,31 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(func_id) = resolved {
                     if func_id.0 >= 100_000 {
                         // Resolved to an import function — use it directly
+                        if let Some((parameters, _)) = self
+                            .symbol_table
+                            .get_symbol(*symbol)
+                            .and_then(|symbol| self.resolve_function_type_signature(symbol.type_id))
+                        {
+                            self.function_param_hir_types
+                                .entry(func_id)
+                                .or_insert(parameters);
+                        }
+                        let argument_types: Vec<_> =
+                            args.iter().skip(1).map(|arg| arg.ty).collect();
+                        let parameter_indices = self.arg_param_indices(func_id, &argument_types);
                         let mut arg_regs = Vec::new();
-                        for arg in args.iter() {
+                        for (index, arg) in args.iter().enumerate() {
                             if let Some(reg) = self.lower_expression(arg) {
+                                let reg = if index == 0 {
+                                    reg
+                                } else {
+                                    self.maybe_materialize_for_call(
+                                        arg,
+                                        reg,
+                                        Some(func_id),
+                                        parameter_indices[index - 1],
+                                    )
+                                };
                                 arg_regs.push(reg);
                             }
                         }
@@ -458,10 +507,29 @@ impl<'a> HirToMirContext<'a> {
                             &hir_types,
                             false,
                         );
-                        let converted_hir_type_args = type_args
+                        let mut converted_hir_type_args = type_args
                             .iter()
                             .map(|ty| self.convert_type_arg(*ty))
                             .collect::<Vec<_>>();
+                        if converted_hir_type_args.is_empty() {
+                            let receiver = self.resolve_through_aliases(args[0].ty);
+                            let receiver_args = self
+                                .type_table
+                                .get(receiver)
+                                .and_then(|ty| match &ty.kind {
+                                    TypeKind::Class { type_args, .. }
+                                    | TypeKind::GenericInstance { type_args, .. }
+                                    | TypeKind::Abstract { type_args, .. } => {
+                                        Some(type_args.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .unwrap_or_default();
+                            converted_hir_type_args = receiver_args
+                                .iter()
+                                .map(|ty| self.convert_type_arg(*ty))
+                                .collect();
+                        }
                         let result = if converted_hir_type_args.is_empty() {
                             self.builder
                                 .build_call_direct(func_id, arg_regs, result_type)?

@@ -356,6 +356,22 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(wrapper_func_id, arg_regs, result_type);
                 if let Some(reg) = result {
                     self.set_class_hint(reg, class_name.to_string());
+                    if wrapper_name == "VecPtr_new"
+                        && let Some(element) = hir_type_args.first()
+                    {
+                        let (tag, metadata) = self.array_element_descriptor(*element)?;
+                        let pointer = IrType::Ptr(Box::new(IrType::U8));
+                        let descriptor = self.get_or_register_extern_function(
+                            "rayzor_vec_ptr_set_element_descriptor",
+                            vec![pointer, IrType::I32, IrType::U64],
+                            IrType::Void,
+                        );
+                        self.builder.build_call_direct(
+                            descriptor,
+                            vec![reg, tag, metadata],
+                            IrType::Void,
+                        );
+                    }
                 }
                 return result;
             }
@@ -576,6 +592,7 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
+            self.init_array_element_layout(array_ptr, *class_type)?;
             return Some(array_ptr);
         }
 

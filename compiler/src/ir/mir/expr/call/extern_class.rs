@@ -580,8 +580,19 @@ impl<'a> HirToMirContext<'a> {
                     // Lower the arguments and auto-box if needed
                     let param_offset = if is_instance_method { 1 } else { 0 };
                     for (i, arg) in args_to_process.iter().enumerate() {
-                        let arg_reg = self.lower_expression(arg)?;
-                        let actual_ty = self.convert_type(arg.ty);
+                        let mut arg_reg = self.lower_expression(arg)?;
+                        if runtime_func.ends_with("map_set")
+                            && i + 1 == args_to_process.len()
+                            && let Some((_, _, element)) = self.map_index_info(receiver_type)
+                        {
+                            arg_reg = self
+                                .maybe_box_value(arg_reg, arg.ty, element)
+                                .unwrap_or(arg_reg);
+                        }
+                        let actual_ty = self
+                            .builder
+                            .get_register_type(arg_reg)
+                            .unwrap_or_else(|| self.convert_type(arg.ty));
                         let expected_ty = expected_param_types
                             .get(i + param_offset)
                             .cloned()
@@ -592,7 +603,7 @@ impl<'a> HirToMirContext<'a> {
                     }
 
                     // Use expected parameter types for registration
-                    let param_types = if expected_param_types.len() == arg_regs.len() {
+                    let mut param_types = if expected_param_types.len() == arg_regs.len() {
                         expected_param_types.clone()
                     } else {
                         let mut params = if is_instance_method {
@@ -608,6 +619,13 @@ impl<'a> HirToMirContext<'a> {
 
                     let probe_param_types = param_types.clone();
                     let probe_args = arg_regs.clone();
+                    let typed_runtime = self.append_native_map_layout(
+                        runtime_func,
+                        receiver_type,
+                        &mut arg_regs,
+                        &mut param_types,
+                    );
+                    let runtime_func = typed_runtime.as_deref().unwrap_or(runtime_func);
                     let extern_func_id = self.get_or_register_extern_function(
                         runtime_func,
                         param_types,

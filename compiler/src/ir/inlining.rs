@@ -438,6 +438,20 @@ impl InliningPass {
             .ok_or_else(|| format!("Callee function {:?} not found", call_site.callee))?
             .clone();
 
+        if callee.signature.type_params.len() == 1
+            && type_sub_map.len() == 1
+            && !callee.type_param_tag_fixups.is_empty()
+        {
+            erased_tp_slots.extend(
+                callee
+                    .signature
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, param)| (param.ty == IrType::I64).then_some(index)),
+            );
+        }
+
         // Get caller function
         let caller = module
             .functions
@@ -463,6 +477,28 @@ impl InliningPass {
             let mut mapped = *arg;
             if erased_tp_slots.contains(&i) {
                 match caller.register_types.get(arg) {
+                    Some(IrType::I32)
+                        if type_sub_map.len() == 1
+                            && type_sub_map.values().next() == Some(&IrType::F64) =>
+                    {
+                        let wide = IrId::new(*next_reg_id);
+                        let bits = IrId::new(*next_reg_id + 1);
+                        *next_reg_id += 2;
+                        arg_coercions.push(IrInstruction::Cast {
+                            dest: wide,
+                            src: *arg,
+                            from_ty: IrType::I32,
+                            to_ty: IrType::F64,
+                        });
+                        arg_coercions.push(IrInstruction::BitCast {
+                            dest: bits,
+                            src: wide,
+                            ty: IrType::I64,
+                        });
+                        caller.register_types.insert(wide, IrType::F64);
+                        caller.register_types.insert(bits, IrType::I64);
+                        mapped = bits;
+                    }
                     Some(IrType::F64) => {
                         let bits = IrId::new(*next_reg_id);
                         *next_reg_id += 1;
@@ -743,6 +779,31 @@ impl InliningPass {
             }
         }
 
+        for (fixup_reg, name) in &callee.type_param_metadata_fixups {
+            let mapped = *reg_map.get(fixup_reg).unwrap_or(fixup_reg);
+            match type_sub_map.get(name) {
+                Some(IrType::TypeVar(bound)) => {
+                    caller
+                        .type_param_metadata_fixups
+                        .push((mapped, bound.clone()));
+                }
+                Some(bound) => {
+                    for block in caller.cfg.blocks.values_mut() {
+                        for instruction in &mut block.instructions {
+                            if let IrInstruction::Const { dest, value } = instruction
+                                && *dest == mapped
+                            {
+                                *value = IrValue::U64(bound.value_metadata());
+                            }
+                        }
+                    }
+                }
+                None => caller
+                    .type_param_metadata_fixups
+                    .push((mapped, name.clone())),
+            }
+        }
+
         // Merge return values into the continuation block.
         // - Single return: use a Copy instruction (preserves SRA/optimizer compatibility)
         // - Multiple returns: use a phi node (correct SSA for merging values from different paths)
@@ -1004,6 +1065,9 @@ impl OptimizationPass for InliningPass {
             }
         }
 
+        if result.modified {
+            super::monomorphize::Monomorphizer::new().adapt_specialized_call_returns(module);
+        }
         result
     }
 }

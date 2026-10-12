@@ -234,6 +234,10 @@ pub enum ValueTag {
     Enum = 11,
     /// An already boxed Dynamic value bound to a generic parameter.
     Dynamic = 12,
+    /// An array pointer with its slot layout supplied as metadata.
+    Array = 13,
+    /// Native Int64 bits, boxed as the Haxe two-word integer class.
+    Int64 = 14,
 }
 
 impl ValueTag {
@@ -250,6 +254,8 @@ impl ValueTag {
             10 => Some(ValueTag::NullInt),
             11 => Some(ValueTag::Enum),
             12 => Some(ValueTag::Dynamic),
+            13 => Some(ValueTag::Array),
+            14 => Some(ValueTag::Int64),
             _ => None,
         }
     }
@@ -1401,6 +1407,17 @@ pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32, string_params:
         for i in 0..variant_a.param_count {
             let va = *(ptr_a.add(8 + i * 8) as *const i64);
             let vb = *(ptr_b.add(8 + i * 8) as *const i64);
+            let nested_enum = ENUM_PARAM_ENUMS
+                .read()
+                .unwrap()
+                .as_ref()
+                .and_then(|params| params.get(&(enum_type, tag_a as usize, i)).copied());
+            if let Some(nested_enum) = nested_enum {
+                if !haxe_type_enum_eq(va, vb, nested_enum as i32, 0) {
+                    return false;
+                }
+                continue;
+            }
             if let (Some(a), Some(b)) = (
                 boxed_enum_parameter(ptr_a, i),
                 boxed_enum_parameter(ptr_b, i),
@@ -1608,9 +1625,17 @@ fn create_enum_value_from_slots(
             if param_types.get(i) == Some(&ParamType::NullInt) {
                 val = haxe_null_int_from_dynamic(val as *mut u8);
             } else if let Some(param_type) = param_types.get(i)
-                && let Some(dynamic) = dynamic_box_at(val as *mut u8)
+                && let Some(dynamic) =
+                    dynamic_box_at(val as *mut u8).filter(|_| stamped_enum_cell_type(val).is_none())
             {
                 val = match (param_type, dynamic.type_id) {
+                    (_, type_id)
+                        if is_reference_box(val as *mut u8)
+                            && get_type_info(type_id)
+                                .is_some_and(|info| info.enum_info.is_some()) =>
+                    {
+                        dynamic.value_ptr as i64
+                    }
                     (ParamType::String, TYPE_STRING) => dynamic.value_ptr as i64,
                     (ParamType::Int, TYPE_INT) | (ParamType::Bool, TYPE_BOOL) => {
                         haxe_unbox_int(dynamic)
@@ -1636,10 +1661,17 @@ fn create_enum_value_from_slots(
             });
             let boxed_parameter = match slot_box {
                 Some(_) => slot as *mut u8,
-                None => box_class_field_as_dynamic(
-                    val as u64,
-                    param_types.get(i).copied().unwrap_or(ParamType::Dynamic),
-                ),
+                None if param_types.get(i) == Some(&ParamType::NullInt) => {
+                    haxe_null_int_to_dynamic(val)
+                }
+                None => stamped_enum_cell_type(val)
+                    .map(|type_id| box_enum_slot(val as u64, type_id))
+                    .unwrap_or_else(|| {
+                        box_class_field_as_dynamic(
+                            val as u64,
+                            param_types.get(i).copied().unwrap_or(ParamType::Dynamic),
+                        )
+                    }),
             };
             haxe_enum_register_parameter(ptr, i as i32, boxed_parameter);
         }
@@ -1955,6 +1987,7 @@ pub extern "C" fn haxe_enum_get_parameters(
             panic!("Failed to allocate HaxeArray for getParameters");
         }
         crate::haxe_array::haxe_array_new(ptr, 8); // elem_size=8 for i64/pointer elements
+        (*ptr).flags = crate::haxe_array::HAXE_ARRAY_BOXED_ELEMS;
         ptr
     };
 
@@ -1973,12 +2006,22 @@ pub extern "C" fn haxe_enum_get_parameters(
         let tag = *(ptr as *const i32) as i64;
         if let Some(variant_info) = get_enum_variant_info(TypeId(type_id), tag) {
             for i in 0..variant_info.param_count {
+                let field_ptr = ptr.add(8 + i * 8);
+                let raw_val = *(field_ptr as *const i64);
+                let nested = ENUM_PARAM_ENUMS
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|params| params.get(&(type_id, tag as usize, i)).copied());
+                if let Some(nested) = nested {
+                    let boxed = box_enum_slot(raw_val as u64, nested);
+                    crate::haxe_array::haxe_array_push_i64(arr, boxed as i64);
+                    continue;
+                }
                 if let Some(boxed) = boxed_enum_parameter(ptr, i) {
                     crate::haxe_array::haxe_array_push_i64(arr, boxed as i64);
                     continue;
                 }
-                let field_ptr = ptr.add(8 + i * 8);
-                let raw_val = *(field_ptr as *const i64);
                 let param_type = variant_info
                     .param_types
                     .get(i)
@@ -3854,7 +3897,10 @@ pub extern "C" fn haxe_unbox_erased_return(ptr: *mut u8) -> i64 {
         if d.type_id == TYPE_FLOAT {
             return haxe_unbox_float(d).to_bits() as i64;
         }
-        if d.type_id == TYPE_STRING {
+        if d.type_id == TYPE_NULL {
+            return 0;
+        }
+        if matches!(d.type_id, TYPE_STRING | TYPE_FUNCTION) {
             return d.value_ptr as i64;
         }
     }
@@ -3866,6 +3912,11 @@ pub extern "C" fn haxe_unbox_erased_return(ptr: *mut u8) -> i64 {
 pub extern "C" fn haxe_unbox_generic_return(ptr: *mut u8, type_tag: i32) -> i64 {
     if type_tag == ValueTag::Dynamic as i32 {
         ptr as i64
+    } else if type_tag == ValueTag::Int64 as i32
+        && is_raw_class_instance(ptr)
+        && unsafe { *(ptr as *const u32) } == stable_class_type_id("haxe.___Int64")
+    {
+        unsafe { int64_from_object(ptr) }
     } else {
         haxe_unbox_erased_return(ptr)
     }
@@ -4194,6 +4245,10 @@ pub extern "C" fn haxe_unbox_bool_ptr(ptr: *mut u8) -> bool {
 pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
     match ValueTag::from_i32(type_tag) {
         Some(ValueTag::Dynamic) => value as *mut u8,
+        Some(ValueTag::Array) if value == 0 => std::ptr::null_mut(),
+        Some(ValueTag::Array) => haxe_box_array_ptr(value as *mut u8, 0),
+        Some(ValueTag::Int64) => haxe_box_int64_ptr(value),
+        Some(ValueTag::Function) => haxe_box_function_ptr(value as *mut u8),
         Some(ValueTag::Interface) => {
             let object = haxe_iface_identity(value as *mut u8);
             haxe_box_typed_ptr(object as i64, ValueTag::Reference as i32)
@@ -4272,6 +4327,19 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
     }
 }
 
+/// Box generic bits using the semantic type information retained at the call site.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_box_generic_ptr(value: i64, type_tag: i32, metadata: u64) -> *mut u8 {
+    match metadata & 0xff {
+        7 if value != 0 => haxe_box_array_ptr(value as *mut u8, metadata >> 8),
+        6 if value != 0 && is_raw_class_instance(value as *mut u8) => {
+            haxe_box_class_instance(value as *mut u8)
+        }
+        6 if value != 0 => haxe_box_reference_ptr(value as *mut u8, (metadata >> 8) as u32),
+        _ => haxe_box_typed_ptr(value, type_tag),
+    }
+}
+
 // ============================================================================
 // Reference type boxing/unboxing (Classes, Enums, Anonymous, Arrays, etc.)
 // ============================================================================
@@ -4325,6 +4393,15 @@ pub extern "C" fn haxe_box_reference_ptr(value_ptr: *mut u8, type_id: u32) -> *m
 /// slot kind; reference IDs and nested array layouts occupy the upper bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_array_ptr(value_ptr: *mut u8, slot_layout: u64) -> *mut u8 {
+    let slot_layout = if value_ptr.is_null() {
+        slot_layout
+    } else {
+        let array = value_ptr.cast::<crate::haxe_array::HaxeArray>();
+        if crate::haxe_array::stored_slot_layout(unsafe { &*array }).is_none() && slot_layout != 0 {
+            crate::haxe_array::haxe_array_mark_slot_layout(array, slot_layout);
+        }
+        crate::haxe_array::stored_slot_layout(unsafe { &*array }).unwrap_or(slot_layout)
+    };
     let boxed = haxe_box_reference_ptr(value_ptr, TYPE_ARRAY.0);
     ARRAY_BOXES
         .write()
@@ -4358,7 +4435,9 @@ pub extern "C" fn haxe_unbox_reference_ptr(ptr: *mut u8) -> *mut u8 {
     }
     match dynamic_box_at(ptr) {
         Some(dynamic)
-            if is_reference_box(ptr) || (dynamic.type_id.0 != 0 && dynamic.tag_is_builtin()) =>
+            if is_reference_box(ptr)
+                || dynamic.type_id == TYPE_FUNCTION
+                || (dynamic.type_id.0 != 0 && dynamic.tag_is_builtin()) =>
         {
             dynamic.value_ptr
         }
@@ -4684,6 +4763,17 @@ pub extern "C" fn haxe_type_get_class(obj_ptr: *const u8) -> i64 {
             0
         } else {
             reflected_class_token(value.type_id.0) as i64
+        };
+    }
+    if is_reference_box(obj_ptr as *mut u8) && is_class_type(value.type_id.0) {
+        if value.value_ptr.is_null() || value.value_ptr as usize <= u32::MAX as usize {
+            return 0;
+        }
+        // Runtime classes need no object header; user instances retain their actual subclass.
+        return if is_raw_class_instance(value.value_ptr) {
+            unsafe { *(value.value_ptr as *const i64) }
+        } else {
+            i64::from(value.type_id.0)
         };
     }
     if let Some(instance) = class_box_instance(obj_ptr as *mut u8) {
@@ -5360,6 +5450,55 @@ pub extern "C" fn haxe_meta_get_statics(type_id: i64) -> *mut u8 {
 #[cfg(test)]
 mod value_tag_tests {
     use super::*;
+
+    #[test]
+    fn erased_slots_preserve_raw_strings_and_null_enum_parameters() {
+        let text = unsafe { alloc_haxe_string("bar") };
+        assert_eq!(
+            crate::closure_entries::haxe_dynamic_to_slot(text.cast()),
+            text as i64
+        );
+        let boxed = haxe_box_haxestring_ptr(text);
+        assert_eq!(
+            crate::closure_entries::haxe_dynamic_to_slot(boxed),
+            text as i64
+        );
+        let cell = create_enum_value_from_slots(0, 1, &[ParamType::NullInt], &[0], true);
+        assert_eq!(unsafe { *((cell as *const i64).add(1)) }, NULL_INT);
+    }
+
+    #[test]
+    fn generic_array_metadata_keeps_float_slots_and_shared_storage() {
+        let mut array = crate::haxe_array::HaxeArray {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+            elem_size: 8,
+            flags: 0,
+        };
+        crate::haxe_array::haxe_array_new(&mut array, 8);
+        crate::haxe_array::haxe_array_push_f64(&mut array, 1.5);
+        let boxed = haxe_box_generic_ptr(
+            (&mut array as *mut crate::haxe_array::HaxeArray) as i64,
+            ValueTag::Array as i32,
+            7 | (4 << 8),
+        );
+        assert_eq!(boxed_array_slot_layout(boxed), Some(4));
+        assert_eq!(
+            crate::haxe_array::haxe_array_get_erased(boxed, 0, 2),
+            1.5f64.to_bits()
+        );
+        crate::haxe_array::haxe_array_set_f64(&mut array, 0, -2.5);
+        assert_eq!(
+            crate::haxe_array::haxe_array_get_erased(boxed, 0, 2),
+            (-2.5f64).to_bits()
+        );
+        assert_eq!(
+            haxe_unbox_reference_ptr(boxed),
+            (&mut array as *mut crate::haxe_array::HaxeArray).cast()
+        );
+        assert!(haxe_box_generic_ptr(0, ValueTag::Array as i32, 7 | (4 << 8)).is_null());
+    }
 
     #[test]
     fn reflected_generic_enum_parameters_keep_their_concrete_boxes() {

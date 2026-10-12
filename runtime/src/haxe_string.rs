@@ -570,8 +570,16 @@ pub extern "C" fn haxe_string_compare(a: *const HaxeString, b: *const HaxeString
     unsafe {
         let a_ref = &*a;
         let b_ref = &*b;
-        let a_bytes = slice::from_raw_parts(a_ref.ptr, a_ref.len);
-        let b_bytes = slice::from_raw_parts(b_ref.ptr, b_ref.len);
+        let a_bytes = if a_ref.len == 0 {
+            &[]
+        } else {
+            slice::from_raw_parts(a_ref.ptr, a_ref.len)
+        };
+        let b_bytes = if b_ref.len == 0 {
+            &[]
+        } else {
+            slice::from_raw_parts(b_ref.ptr, b_ref.len)
+        };
         match a_bytes.cmp(b_bytes) {
             std::cmp::Ordering::Less => -1,
             std::cmp::Ordering::Equal => 0,

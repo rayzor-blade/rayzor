@@ -522,6 +522,7 @@ impl<'a> HirToMirContext<'a> {
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
             type_param_tag_fixups: Vec::new(),
+            type_param_metadata_fixups: Vec::new(),
             wasm_export: false,
             js_import: None,
         };

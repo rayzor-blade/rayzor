@@ -57,6 +57,10 @@ pub struct IrFunction {
     #[serde(default)]
     pub type_param_tag_fixups: Vec<(IrId, String)>,
 
+    /// Runtime reference IDs and array slot layouts resolved with generic bindings.
+    #[serde(default)]
+    pub type_param_metadata_fixups: Vec<(IrId, String)>,
+
     /// Whether this function should be exported from WASM (@:export metadata).
     /// When true, the WASM backend exports it with its qualified_name.
     #[serde(default)]
@@ -292,6 +296,7 @@ impl IrFunction {
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
             type_param_tag_fixups: Vec::new(),
+            type_param_metadata_fixups: Vec::new(),
             wasm_export: false,
             js_import: None,
         };

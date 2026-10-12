@@ -154,7 +154,8 @@ impl<'a> HirToMirContext<'a> {
                 {
                     let obj_reg = self.lower_expression(object)?;
                     let idx_reg = self.lower_expression(index)?;
-                    let loaded = self.load_index_with_regs(obj_reg, idx_reg, object.ty)?;
+                    let loaded =
+                        self.load_index_with_regs(obj_reg, idx_reg, object.ty, Some(operand.ty))?;
                     // A `Null<scalar>` element is a box: open it, count, close it.
                     let opened = self.open_nullable_scalar(loaded, operand.ty);
                     let old_value = opened.unwrap_or(loaded);
@@ -439,16 +440,14 @@ impl<'a> HirToMirContext<'a> {
                 | HirBinaryOp::Shl
                 | HirBinaryOp::Shr
                 | HirBinaryOp::Ushr
-        ) && self.convert_type(expr.ty) == IrType::I32
-            && [lhs, rhs].iter().any(|operand| {
-                matches!(
-                    self.type_table
-                        .get(self.resolve_through_aliases(operand.ty))
-                        .map(|t| &t.kind),
-                    Some(TypeKind::Dynamic)
-                )
-            })
-        {
+        ) && [lhs, rhs].iter().any(|operand| {
+            matches!(
+                self.type_table
+                    .get(self.resolve_through_aliases(operand.ty))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            )
+        }) {
             let mut integer_operand = |operand: &HirExpr| {
                 let reg = self.lower_expression(operand)?;
                 let ty = self.resolve_through_aliases(operand.ty);

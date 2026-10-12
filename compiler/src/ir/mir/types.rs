@@ -234,6 +234,44 @@ impl<'a> HirToMirContext<'a> {
         {
             return IrType::TypeVar(name);
         }
+        if self.is_int64_type(resolved) {
+            return IrType::Ptr(Box::new(IrType::Opaque {
+                name: "__haxe_int64".to_string(),
+                size: 0,
+                align: 8,
+            }));
+        }
+        let mut storage = self.resolve_storage_type(resolved);
+        if let Some(TypeKind::Optional { inner_type }) =
+            self.type_table.get(storage).map(|ty| &ty.kind)
+        {
+            let inner = self.resolve_storage_type(*inner_type);
+            if !self.is_int64_type(inner)
+                && self.get_interface_symbol(inner).is_none()
+                && matches!(
+                    self.type_table.get(inner).map(|ty| &ty.kind),
+                    Some(TypeKind::Class { .. } | TypeKind::Array { .. })
+                )
+            {
+                storage = inner;
+            }
+        }
+        match self.type_table.get(storage).map(|ty| &ty.kind) {
+            Some(TypeKind::Array { element_type }) => {
+                return IrType::Ptr(Box::new(IrType::Array(
+                    Box::new(self.convert_type_arg(*element_type)),
+                    0,
+                )));
+            }
+            Some(TypeKind::Class { .. }) if self.get_interface_symbol(storage).is_none() => {
+                return IrType::Ptr(Box::new(IrType::Opaque {
+                    name: format!("__haxe_reference:{}", self.runtime_type_id(storage)),
+                    size: 0,
+                    align: 8,
+                }));
+            }
+            _ => {}
+        }
         let enum_type = match self.type_table.get(resolved).map(|t| &t.kind) {
             Some(TypeKind::Optional { inner_type }) => self.resolve_through_aliases(*inner_type),
             _ => resolved,
@@ -420,13 +458,15 @@ impl<'a> HirToMirContext<'a> {
 
                 // Recover storage from the declaration while retaining this
                 // instantiation's arguments for representation selection.
-                let underlying = underlying.or_else(|| {
-                    let declared = self.symbol_table.get_symbol(*symbol_id)?;
-                    match self.type_table.get(declared.type_id).map(|t| &t.kind) {
-                        Some(TypeKind::Abstract { underlying, .. }) => *underlying,
-                        _ => None,
-                    }
-                });
+                let underlying = underlying
+                    .or_else(|| {
+                        let declared = self.symbol_table.get_symbol(*symbol_id)?;
+                        match self.type_table.get(declared.type_id).map(|t| &t.kind) {
+                            Some(TypeKind::Abstract { underlying, .. }) => *underlying,
+                            _ => None,
+                        }
+                    })
+                    .or_else(|| self.type_table.resolve_abstract_underlying(*symbol_id));
                 if let Some(underlying_type) = underlying {
                     // A generic abstract's underlying is written in terms of its
                     // own type parameter -- `abstract Val<T>(T)` -- so converting
@@ -1118,13 +1158,10 @@ impl<'a> HirToMirContext<'a> {
         // even though the MIR type is I64 (type-erased).
         if let Some(type_id) = hir_type_id {
             if let Some(type_param_name) = self.resolve_type_param_name(type_id) {
-                let tag_reg = self.builder.build_const(IrValue::I32(0))?;
-                if let Some(func) = self.builder.current_function_mut() {
-                    func.type_param_tag_fixups.push((tag_reg, type_param_name));
-                }
+                let (tag_reg, metadata) = self.type_param_value_descriptor(type_param_name, 0)?;
                 let func_id = self.get_or_register_extern_function(
-                    "haxe_value_to_string_by_tag",
-                    vec![IrType::I64, IrType::I32],
+                    "haxe_value_to_string_with_metadata",
+                    vec![IrType::I64, IrType::I32, IrType::U64],
                     IrType::Ptr(Box::new(IrType::String)),
                 );
                 let val_as_i64 = self
@@ -1133,7 +1170,7 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or(value);
                 return self.builder.build_call_direct(
                     func_id,
-                    vec![val_as_i64, tag_reg],
+                    vec![val_as_i64, tag_reg, metadata],
                     IrType::String,
                 );
             }
@@ -1247,14 +1284,11 @@ impl<'a> HirToMirContext<'a> {
             IrType::TypeVar(type_param_name) => {
                 // The tag is a placeholder (0) resolved during inlining or
                 // monomorphization via type_param_tag_fixups.
-                let tag_reg = self.builder.build_const(IrValue::I32(0))?;
-                if let Some(func) = self.builder.current_function_mut() {
-                    func.type_param_tag_fixups
-                        .push((tag_reg, type_param_name.clone()));
-                }
+                let (tag_reg, metadata) =
+                    self.type_param_value_descriptor(type_param_name.clone(), 0)?;
                 let func_id = self.get_or_register_extern_function(
-                    "haxe_value_to_string_by_tag",
-                    vec![IrType::I64, IrType::I32],
+                    "haxe_value_to_string_with_metadata",
+                    vec![IrType::I64, IrType::I32, IrType::U64],
                     IrType::Ptr(Box::new(IrType::String)),
                 );
                 let val_as_i64 = self
@@ -1263,7 +1297,7 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or(value);
                 return self.builder.build_call_direct(
                     func_id,
-                    vec![val_as_i64, tag_reg],
+                    vec![val_as_i64, tag_reg, metadata],
                     IrType::String,
                 );
             }
@@ -1580,6 +1614,29 @@ impl<'a> HirToMirContext<'a> {
     /// Resolves TypeParameter types through the current class context.
     /// Returns Some(boxed_reg) on success, None if value is already Dynamic or can't be resolved.
     pub(crate) fn box_value_for_dynamic(&mut self, value: IrId, type_id: TypeId) -> Option<IrId> {
+        if matches!(
+            self.type_table.get(type_id).map(|t| &t.kind),
+            Some(TypeKind::Optional { .. })
+        ) && matches!(
+            self.type_table
+                .get(self.resolve_storage_type(type_id))
+                .map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            return Some(value);
+        }
+        if matches!(
+            self.type_table.get(type_id).map(|ty| &ty.kind),
+            Some(
+                TypeKind::Class { .. }
+                    | TypeKind::GenericInstance { .. }
+                    | TypeKind::Array { .. }
+                    | TypeKind::Anonymous { .. }
+                    | TypeKind::Interface { .. }
+            )
+        ) {
+            return self.maybe_box_value(value, type_id, self.type_table.dynamic_type());
+        }
         let dyn_ptr = IrType::Ptr(Box::new(IrType::Dynamic));
 
         // Resolve the concrete type — handles TypeParameter through class context
@@ -1817,6 +1874,12 @@ impl<'a> HirToMirContext<'a> {
     /// Coerce a value to i64 for anonymous object field storage.
     /// Ints pass through, floats are bitcast, pointers are cast to i64.
     pub(crate) fn coerce_to_i64(&mut self, value: IrId, type_id: TypeId) -> Option<IrId> {
+        if matches!(
+            self.builder.get_register_type(value),
+            Some(IrType::TypeVar(_))
+        ) {
+            return self.builder.build_bitcast(value, IrType::I64);
+        }
         let ir_type = self.convert_type(type_id);
         // A `Null<Int>` slot here still holds a box (or null), as the runtime
         // reads these slots.

@@ -856,8 +856,16 @@ pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
         if dv_a.type_id == TYPE_STRING && dv_b.type_id == TYPE_STRING {
             let sa = &*(dv_a.value_ptr as *const crate::haxe_string::HaxeString);
             let sb = &*(dv_b.value_ptr as *const crate::haxe_string::HaxeString);
-            let bytes_a = std::slice::from_raw_parts(sa.ptr, sa.len);
-            let bytes_b = std::slice::from_raw_parts(sb.ptr, sb.len);
+            let bytes_a = if sa.len == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(sa.ptr, sa.len)
+            };
+            let bytes_b = if sb.len == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(sb.ptr, sb.len)
+            };
             return match bytes_a.cmp(bytes_b) {
                 std::cmp::Ordering::Less => -1,
                 std::cmp::Ordering::Equal => 0,
@@ -946,8 +954,16 @@ pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i
             unsafe {
                 let sa = &*(a as *const crate::haxe_string::HaxeString);
                 let sb = &*(b as *const crate::haxe_string::HaxeString);
-                let bytes_a = std::slice::from_raw_parts(sa.ptr, sa.len);
-                let bytes_b = std::slice::from_raw_parts(sb.ptr, sb.len);
+                let bytes_a = if sa.len == 0 {
+                    &[]
+                } else {
+                    std::slice::from_raw_parts(sa.ptr, sa.len)
+                };
+                let bytes_b = if sb.len == 0 {
+                    &[]
+                } else {
+                    std::slice::from_raw_parts(sb.ptr, sb.len)
+                };
                 match bytes_a.cmp(bytes_b) {
                     std::cmp::Ordering::Less => -1,
                     std::cmp::Ordering::Equal => 0,
@@ -1226,6 +1242,9 @@ fn valuetype_tenum(type_id: i64) -> i64 {
 pub extern "C" fn haxe_type_typeof(v: *mut u8) -> i32 {
     if v.is_null() {
         return TVALUETYPE_TNULL;
+    }
+    if anon_object::is_anon_handle(v) {
+        return TVALUETYPE_TOBJECT;
     }
     // Class and enum values are type tokens rather than heap pointers.
     if (v as usize) >> 32 == 0 {

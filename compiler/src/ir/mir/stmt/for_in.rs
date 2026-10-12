@@ -27,6 +27,7 @@ use std::rc::Rc;
 pub(crate) enum SeqKind {
     Array,
     String,
+    Vector(TypeId),
 }
 
 impl<'a> HirToMirContext<'a> {
@@ -269,7 +270,19 @@ impl<'a> HirToMirContext<'a> {
             iter_expr.ty, elem_type_id
         );
 
-        self.lower_for_in_over_array(pattern, collection, elem_type_id, body, label);
+        let storage = self.resolve_storage_type(iter_expr.ty);
+        if self.vec_index_class(storage).is_some() {
+            self.lower_for_in_over_seq(
+                pattern,
+                collection,
+                elem_type_id,
+                body,
+                label,
+                SeqKind::Vector(storage),
+            );
+        } else {
+            self.lower_for_in_over_array(pattern, collection, elem_type_id, body, label);
+        }
     }
 
     /// Lower a range-based for-in loop: `for (i in start...end) { body }`
@@ -643,6 +656,7 @@ impl<'a> HirToMirContext<'a> {
                         obj_reg,
                         has_next_fn,
                         next_fn,
+                        &[],
                         body,
                         label,
                     );
@@ -948,7 +962,29 @@ impl<'a> HirToMirContext<'a> {
             }
         };
 
-        self.emit_iterator_while_loop(pattern, obj_reg, has_next_fn, next_fn, body, label);
+        let iterator_type_args = self
+            .type_table
+            .get(self.resolve_through_aliases(iter_expr.ty))
+            .and_then(|ty| match &ty.kind {
+                TypeKind::Class { type_args, .. }
+                | TypeKind::GenericInstance { type_args, .. }
+                | TypeKind::Abstract { type_args, .. } => Some(type_args.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let iterator_type_args: Vec<_> = iterator_type_args
+            .iter()
+            .map(|ty| self.convert_type_arg(*ty))
+            .collect();
+        self.emit_iterator_while_loop(
+            pattern,
+            obj_reg,
+            has_next_fn,
+            next_fn,
+            &iterator_type_args,
+            body,
+            label,
+        );
     }
 
     /// Helper: iterate over map keys and look up values for `for (key => value in map)`.
@@ -1458,6 +1494,9 @@ impl<'a> HirToMirContext<'a> {
         };
         let element_value = match seq {
             SeqKind::Array => self.lower_index_access(collection, idx_for_access, elem_type_id),
+            SeqKind::Vector(storage) => self.vec_index_class(storage).and_then(|class| {
+                self.load_vec_index_with_regs(&class, collection, idx_for_access, elem_type_id)
+            }),
             SeqKind::String => {
                 let char_code_at = self.get_or_register_extern_function(
                     "haxe_string_char_code_at_ptr",
