@@ -679,6 +679,10 @@ register_symbol!(
 
 // Command execution
 register_symbol!("haxe_sys_command", crate::haxe_sys::haxe_sys_command);
+register_symbol!(
+    "haxe_sys_command_args",
+    crate::haxe_sys::haxe_sys_command_args
+);
 register_symbol!("haxe_sys_get_char", crate::haxe_sys::haxe_sys_get_char);
 
 // ============================================================================

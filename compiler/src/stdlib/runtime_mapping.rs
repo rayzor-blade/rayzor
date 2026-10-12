@@ -2126,6 +2126,8 @@ impl StdlibMapping {
             // Command execution
             map_method!(static "Sys", "command" => "haxe_sys_command", params: 1, returns: primitive,
                 types: &[PtrVoid] => I32),
+            map_method!(static "Sys", "command" => "haxe_sys_command_args", params: 2, returns: primitive,
+                types: &[PtrVoid, PtrVoid] => I32),
             map_method!(static "Sys", "getChar" => "haxe_sys_get_char", params: 1, returns: primitive,
                 types: &[Bool] => I32),
             // Program arguments

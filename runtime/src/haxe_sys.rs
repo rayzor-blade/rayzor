@@ -1505,9 +1505,7 @@ pub extern "C" fn haxe_sys_program_path() -> *mut HaxeString {
     }
 }
 
-/// Execute a shell command and return the exit code
-/// Sys.command(cmd: String, args: Array<String>): Int
-/// When args is null, cmd is passed directly to the shell
+/// Execute a command through the shell and return its exit code.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_sys_command(cmd: *const HaxeString) -> i32 {
     unsafe {
@@ -1528,6 +1526,38 @@ pub extern "C" fn haxe_sys_command(cmd: *const HaxeString) -> i32 {
             .status();
 
         match output {
+            Ok(status) => status.code().unwrap_or(-1),
+            Err(_) => -1,
+        }
+    }
+}
+
+/// Execute a command with literal arguments, or use the shell when args is null.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_sys_command_args(
+    cmd: *const HaxeString,
+    args: *const crate::haxe_array::HaxeArray,
+) -> i32 {
+    if args.is_null() {
+        return haxe_sys_command(cmd);
+    }
+    unsafe {
+        let Some(command) = haxe_string_to_rust(cmd) else {
+            return -1;
+        };
+        let mut process = std::process::Command::new(command);
+        for index in 0..(*args).len {
+            let arg = crate::haxe_array::haxe_array_get_typed(
+                args,
+                index as i64,
+                crate::type_system::ValueTag::String as i32,
+            ) as *const HaxeString;
+            let Some(arg) = haxe_string_to_rust(arg) else {
+                return -1;
+            };
+            process.arg(arg);
+        }
+        match process.status() {
             Ok(status) => status.code().unwrap_or(-1),
             Err(_) => -1,
         }

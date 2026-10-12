@@ -164,34 +164,15 @@ impl CompilationUnit {
                 // shadow the correct one (Thread_spawn, a dylib descriptor's
                 // export) and fail at JIT link time. The dotted class name is
                 // enough: the mapping resolves every spelling of it.
-                let builtin_match = builtin_mapping
-                    .class_key(&class_dot_name)
-                    .and_then(|key| builtin_mapping.find_by_name(key, &method_name));
+                let declared = method.parameters.len();
+                let builtin_match = builtin_mapping.class_key(&class_dot_name).and_then(|key| {
+                    builtin_mapping
+                        .find_by_name_and_params(key, &method_name, declared)
+                        .or_else(|| builtin_mapping.find_by_name(key, &method_name))
+                });
                 if let Some((_sig, call)) = builtin_match {
-                    // DECLARATION vs RUNTIME arity. The lookup above is three
-                    // name-only attempts with no arity awareness, so a method
-                    // whose .hx signature promises more parameters than the
-                    // runtime implements still binds here — and every later call
-                    // inherits that binding. A call passing the extra argument is
-                    // then emitted against a native symbol of a different arity:
-                    // LLVM rejects the module ("Incorrect number of arguments"),
-                    // the tier falls back, and the enclosing function silently
-                    // emits NOTHING. No compile error, no runtime message.
-                    //
-                    // Known live cases: `Sys.command(cmd, ?args)` maps to
-                    // `haxe_sys_command` (params: 1 — `?args` is unimplemented),
-                    // and `File.read(path, binary = true)` maps to
-                    // `file_read_default` (params: 1). Both are real gaps between
-                    // the .hx surface and the runtime, not compiler confusion.
-                    //
-                    // Loud rather than fatal by default; RAYZOR_STRICT_STDLIB_ARITY=1
-                    // rejects the binding instead (the intended end state).
-                    let declared = method.parameters.len();
-                    // OFF by default: the six known stdlib mismatches would print
-                    // on every compile, which is noise until they are fixed (and
-                    // buries any NEW mismatch in it). RAYZOR_STDLIB_ARITY_WARN=1
-                    // lists them; RAYZOR_STRICT_STDLIB_ARITY=1 still rejects the
-                    // binding regardless of the warning setting.
+                    // Prefer the declared arity; a fallback may omit optional arguments.
+                    // RAYZOR_STDLIB_ARITY_WARN reports mismatches without rejecting them.
                     let warn_arity = std::env::var_os("RAYZOR_STDLIB_ARITY_WARN").is_some();
                     if declared != call.param_count && warn_arity {
                         eprintln!(

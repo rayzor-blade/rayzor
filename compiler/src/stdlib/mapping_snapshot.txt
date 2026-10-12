@@ -131,6 +131,7 @@ StringTools urlDecode static=true ctor=false params=1 -> haxe_string_url_decode
 StringTools urlEncode static=true ctor=false params=1 -> haxe_string_url_encode
 Sys args static=true ctor=false params=0 -> haxe_sys_args
 Sys command static=true ctor=false params=1 -> haxe_sys_command
+Sys command static=true ctor=false params=2 -> haxe_sys_command_args
 Sys cpuArch static=true ctor=false params=0 -> haxe_sys_cpu_arch
 Sys cpuTime static=true ctor=false params=0 -> haxe_sys_cpu_time
 Sys environment static=true ctor=false params=0 -> haxe_sys_environment

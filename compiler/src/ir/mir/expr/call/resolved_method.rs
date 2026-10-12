@@ -260,7 +260,13 @@ impl<'a> HirToMirContext<'a> {
                         if let Some((_sig, mapping)) = self
                             .stdlib_mapping
                             .class_key(&qualified_class)
-                            .and_then(|key| self.stdlib_mapping.find_by_name(key, mir_method_name))
+                            .and_then(|key| {
+                                self.stdlib_mapping
+                                    .find_by_name_and_params(key, mir_method_name, args.len())
+                                    .or_else(|| {
+                                        self.stdlib_mapping.find_by_name(key, mir_method_name)
+                                    })
+                            })
                         {
                             let runtime_func = mapping.runtime_name;
                             debug!(
@@ -978,7 +984,11 @@ impl<'a> HirToMirContext<'a> {
                         let stdlib_result = self
                             .stdlib_mapping
                             .class_key(&class_name)
-                            .and_then(|key| self.stdlib_mapping.find_by_name(key, method_name))
+                            .and_then(|key| {
+                                self.stdlib_mapping
+                                    .find_by_name_and_params(key, method_name, args.len())
+                                    .or_else(|| self.stdlib_mapping.find_by_name(key, method_name))
+                            })
                             .map(|(sig, m)| (sig.clone(), m.clone()))
                             .or_else(|| {
                                 let (underlying_type, forward_list) =
@@ -996,7 +1006,11 @@ impl<'a> HirToMirContext<'a> {
                                 self.stdlib_mapping
                                     .class_key(&underlying_class)
                                     .and_then(|key| {
-                                        self.stdlib_mapping.find_by_name(key, method_name)
+                                        self.stdlib_mapping
+                                            .find_by_name_and_params(key, method_name, args.len())
+                                            .or_else(|| {
+                                                self.stdlib_mapping.find_by_name(key, method_name)
+                                            })
                                     })
                                     .map(|(sig, m)| (sig.clone(), m.clone()))
                             });
