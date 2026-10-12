@@ -15,12 +15,73 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// Bind a pattern's payloads through the constructor's declared result.
+    pub(crate) fn enum_constructor_for_result(&self, declared: TypeId, result: TypeId) -> TypeId {
+        let return_type = {
+            let table = self.context.type_table.borrow();
+            match table.get(declared).map(|ty| &ty.kind) {
+                Some(TypeKind::Function { return_type, .. }) => *return_type,
+                _ => return declared,
+            }
+        };
+        let mut bindings = Vec::new();
+        self.unify_type_args_inner(return_type, result, 0, &mut bindings, true);
+        self.substitute_type_bindings(declared, &bindings, false)
+    }
+
+    /// Bind every constructor parameter through its complete payload type.
+    fn enum_constructor_signature(
+        &self,
+        constructor: SymbolId,
+        arguments: &[TypedExpression],
+    ) -> Option<TypeId> {
+        let declared = self.context.symbol_table.get_symbol(constructor)?.type_id;
+        let params = {
+            let table = self.context.type_table.borrow();
+            match table.get(declared).map(|ty| &ty.kind) {
+                Some(TypeKind::Function {
+                    params,
+                    return_type,
+                    ..
+                }) if matches!(
+                    table.get(*return_type).map(|ty| &ty.kind),
+                    Some(TypeKind::Enum { .. })
+                ) =>
+                {
+                    params.clone()
+                }
+                Some(TypeKind::Enum { .. }) => return Some(declared),
+                _ => return None,
+            }
+        };
+        let mut inferred = Vec::new();
+        for (&parameter, actual) in params.iter().zip(arguments) {
+            self.unify_type_args_inner(parameter, actual.expr_type, 0, &mut inferred, true);
+        }
+        let mut candidates: BTreeMap<SymbolId, Vec<TypeId>> = BTreeMap::new();
+        for (parameter, actual) in inferred {
+            candidates.entry(parameter).or_default().push(actual);
+        }
+        let bindings: Vec<_> = candidates
+            .into_iter()
+            .map(|(parameter, actual)| (parameter, self.unify_min(&actual).unwrap_or(actual[0])))
+            .collect();
+        Some(self.substitute_type_bindings(declared, &bindings, false))
+    }
+
     /// Infer the type of an enum constructor call with generic type instantiation
     fn infer_enum_constructor_type(
         &mut self,
         constructor_symbol: SymbolId,
         arguments: &[TypedExpression],
     ) -> LoweringResult<TypeId> {
+        if let Some(signature) = self.enum_constructor_signature(constructor_symbol, arguments) {
+            let table = self.context.type_table.borrow();
+            return Ok(match table.get(signature).map(|ty| &ty.kind) {
+                Some(TypeKind::Function { return_type, .. }) => *return_type,
+                _ => signature,
+            });
+        }
         // println!(
         //     "DEBUG: Inferring enum constructor type for symbol {:?} with {} arguments",
         //     constructor_symbol,
@@ -119,6 +180,10 @@ impl<'a> AstLowering<'a> {
         arguments: &[TypedExpression],
         mut func_expr: TypedExpression,
     ) -> LoweringResult<TypedExpression> {
+        if let Some(signature) = self.enum_constructor_signature(constructor_symbol, arguments) {
+            func_expr.expr_type = signature;
+            return Ok(func_expr);
+        }
         // println!(
         //     "DEBUG: Instantiating constructor function type for symbol {:?} with {} arguments",
         //     constructor_symbol,
@@ -518,6 +583,19 @@ impl<'a> AstLowering<'a> {
 
     /// Lower an enum variant
     fn lower_enum_variant(
+        &mut self,
+        variant: &EnumConstructor,
+        enum_type_id: TypeId,
+        enum_symbol: SymbolId,
+    ) -> LoweringResult<TypedEnumVariant> {
+        let parameters = self.function_type_parameter_map(&variant.type_params)?;
+        self.context.push_type_parameters(parameters);
+        let result = self.lower_enum_variant_inner(variant, enum_type_id, enum_symbol);
+        self.context.pop_type_parameters();
+        result
+    }
+
+    fn lower_enum_variant_inner(
         &mut self,
         variant: &EnumConstructor,
         enum_type_id: TypeId,

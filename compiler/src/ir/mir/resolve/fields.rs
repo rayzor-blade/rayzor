@@ -29,117 +29,171 @@ impl<'a> HirToMirContext<'a> {
         field_type_id: TypeId,
         generic_info: &Option<(TypeId, Vec<TypeId>)>,
     ) -> IrType {
-        let type_table = self.type_table;
-
-        if let Some(type_info) = type_table.get(field_type_id) {
-            if let crate::tast::TypeKind::TypeParameter { symbol_id, .. } = &type_info.kind {
-                if let Some((base_type, concrete_args)) = generic_info {
-                    // Find which index this type parameter corresponds to in the base enum's type_args
-                    if let Some(base_info) = type_table.get(*base_type) {
-                        let base_type_args = match &base_info.kind {
-                            crate::tast::TypeKind::Enum { type_args, .. } => type_args,
-                            _ => return IrType::I64,
-                        };
-                        for (idx, &param_type_id) in base_type_args.iter().enumerate() {
-                            if let Some(param_info) = type_table.get(param_type_id) {
-                                if let crate::tast::TypeKind::TypeParameter {
-                                    symbol_id: param_sym,
-                                    ..
-                                } = &param_info.kind
-                                {
-                                    if param_sym == symbol_id {
-                                        if let Some(&concrete_type_id) = concrete_args.get(idx) {
-                                            return self.convert_type(concrete_type_id);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // concrete_args may be shorter than the base type_args, so a
-                        // lone concrete arg is taken as the substitution.
-                        if concrete_args.len() == 1 {
-                            let concrete_id = concrete_args[0];
-                            if let Some(ci) = type_table.get(concrete_id) {
-                                if !matches!(ci.kind, crate::tast::TypeKind::TypeParameter { .. }) {
-                                    return self.convert_type(concrete_id);
-                                }
-                            }
-                        }
-                    }
-                }
-                // Unresolved type parameter — treat as I64
-                return IrType::I64;
-            }
+        let resolved = self.resolve_field_type_id(field_type_id, generic_info);
+        if matches!(
+            self.type_table.get(resolved).map(|ty| &ty.kind),
+            Some(TypeKind::TypeParameter { .. })
+        ) {
+            return IrType::I64;
         }
-
-        self.convert_type(field_type_id)
+        self.convert_type(resolved)
     }
 
-    /// Like resolve_field_type but returns the concrete TypeId instead of IrType.
+    /// Resolve payload parameters against the constructor's result type.
     pub(crate) fn resolve_field_type_id(
         &self,
         field_type_id: TypeId,
         generic_info: &Option<(TypeId, Vec<TypeId>)>,
     ) -> TypeId {
-        let type_table = self.type_table;
-        if let Some(type_info) = type_table.get(field_type_id) {
-            if let crate::tast::TypeKind::TypeParameter { symbol_id, .. } = &type_info.kind {
-                if let Some((base_type, concrete_args)) = generic_info {
-                    if let Some(base_info) = type_table.get(*base_type) {
-                        let base_type_args = match &base_info.kind {
-                            crate::tast::TypeKind::Enum { type_args, .. } => type_args,
-                            _ => return field_type_id,
-                        };
-                        for (idx, &param_type_id) in base_type_args.iter().enumerate() {
-                            if let Some(param_info) = type_table.get(param_type_id) {
-                                if let crate::tast::TypeKind::TypeParameter {
-                                    symbol_id: param_sym,
-                                    ..
-                                } = &param_info.kind
-                                {
-                                    if param_sym == symbol_id {
-                                        if let Some(&concrete_type_id) = concrete_args.get(idx) {
-                                            return concrete_type_id;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if concrete_args.len() == 1 {
-                            let concrete_id = concrete_args[0];
-                            if let Some(ci) = type_table.get(concrete_id) {
-                                if !matches!(ci.kind, crate::tast::TypeKind::TypeParameter { .. }) {
-                                    return concrete_id;
-                                }
-                            }
-                        }
-                    }
+        let mut bindings = BTreeMap::new();
+        if let Some((result, actual_args)) = generic_info {
+            if let Some(TypeKind::Enum { type_args, .. }) =
+                self.type_table.get(*result).map(|ty| &ty.kind)
+            {
+                for (&declared, &actual) in type_args.iter().zip(actual_args) {
+                    self.bind_payload_type_parameters(declared, actual, &mut bindings, 0);
                 }
             }
         }
-        let Some(mut kind) = type_table.get(field_type_id).map(|t| t.kind.clone()) else {
+        self.resolve_payload_type_id(field_type_id, &bindings, 0)
+    }
+
+    fn bind_payload_type_parameters(
+        &self,
+        declared: TypeId,
+        actual: TypeId,
+        bindings: &mut BTreeMap<SymbolId, TypeId>,
+        depth: u32,
+    ) {
+        if depth > 32 {
+            return;
+        }
+        let declared = self.resolve_through_aliases(declared);
+        let actual = self.resolve_through_aliases(actual);
+        let (Some(declared), Some(actual_info)) =
+            (self.type_table.get(declared), self.type_table.get(actual))
+        else {
+            return;
+        };
+        match (&declared.kind, &actual_info.kind) {
+            (TypeKind::TypeParameter { symbol_id, .. }, _) => {
+                bindings.insert(*symbol_id, actual);
+            }
+            (
+                TypeKind::Array { element_type: left },
+                TypeKind::Array {
+                    element_type: right,
+                },
+            )
+            | (TypeKind::Optional { inner_type: left }, TypeKind::Optional { inner_type: right }) => {
+                self.bind_payload_type_parameters(*left, *right, bindings, depth + 1)
+            }
+            (
+                TypeKind::Class {
+                    symbol_id: left,
+                    type_args: declared,
+                }
+                | TypeKind::Interface {
+                    symbol_id: left,
+                    type_args: declared,
+                }
+                | TypeKind::Enum {
+                    symbol_id: left,
+                    type_args: declared,
+                }
+                | TypeKind::Abstract {
+                    symbol_id: left,
+                    type_args: declared,
+                    ..
+                },
+                TypeKind::Class {
+                    symbol_id: right,
+                    type_args: actual,
+                }
+                | TypeKind::Interface {
+                    symbol_id: right,
+                    type_args: actual,
+                }
+                | TypeKind::Enum {
+                    symbol_id: right,
+                    type_args: actual,
+                }
+                | TypeKind::Abstract {
+                    symbol_id: right,
+                    type_args: actual,
+                    ..
+                },
+            ) if left == right => {
+                for (&left, &right) in declared.iter().zip(actual) {
+                    self.bind_payload_type_parameters(left, right, bindings, depth + 1);
+                }
+            }
+            (
+                TypeKind::GenericInstance {
+                    base_type: left,
+                    type_args: declared,
+                    ..
+                },
+                TypeKind::GenericInstance {
+                    base_type: right,
+                    type_args: actual,
+                    ..
+                },
+            ) if left == right => {
+                for (&left, &right) in declared.iter().zip(actual) {
+                    self.bind_payload_type_parameters(left, right, bindings, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn resolve_payload_type_id(
+        &self,
+        field_type_id: TypeId,
+        bindings: &BTreeMap<SymbolId, TypeId>,
+        depth: u32,
+    ) -> TypeId {
+        if depth > 32 {
+            return field_type_id;
+        }
+        let Some(mut kind) = self.type_table.get(field_type_id).map(|t| t.kind.clone()) else {
             return field_type_id;
         };
         match &mut kind {
+            TypeKind::TypeParameter { symbol_id, .. } => {
+                return bindings.get(symbol_id).copied().unwrap_or(field_type_id);
+            }
             TypeKind::Enum { type_args, .. }
             | TypeKind::Class { type_args, .. }
             | TypeKind::Interface { type_args, .. }
             | TypeKind::Abstract { type_args, .. }
+            | TypeKind::TypeAlias { type_args, .. }
             | TypeKind::GenericInstance { type_args, .. } => {
                 for arg in type_args {
-                    *arg = self.resolve_field_type_id(*arg, generic_info);
+                    *arg = self.resolve_payload_type_id(*arg, bindings, depth + 1);
                 }
             }
             TypeKind::Array { element_type }
             | TypeKind::Optional {
                 inner_type: element_type,
             } => {
-                *element_type = self.resolve_field_type_id(*element_type, generic_info);
+                *element_type = self.resolve_payload_type_id(*element_type, bindings, depth + 1);
+            }
+            TypeKind::Function {
+                params,
+                return_type,
+                ..
+            } => {
+                for param in params {
+                    *param = self.resolve_payload_type_id(*param, bindings, depth + 1);
+                }
+                *return_type = self.resolve_payload_type_id(*return_type, bindings, depth + 1);
             }
             _ => return field_type_id,
         }
         // TAST substitution interns concrete composite payload types before MIR.
-        type_table
+        self.type_table
             .find_type_with_kind(&kind)
             .unwrap_or(field_type_id)
     }

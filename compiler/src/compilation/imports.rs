@@ -552,10 +552,18 @@ impl CompilationUnit {
                 }
                 TypeDeclaration::Enum(enum_decl) => {
                     for ctor in &enum_decl.constructors {
+                        for parameter in &ctor.type_params {
+                            for constraint in &parameter.constraints {
+                                extract_type_deps(constraint, &mut deps);
+                            }
+                        }
                         for param in &ctor.params {
                             if let Some(ty) = &param.type_hint {
                                 extract_type_deps(ty, &mut deps);
                             }
+                        }
+                        if let Some(result) = &ctor.return_type {
+                            extract_type_deps(result, &mut deps);
                         }
                     }
                 }

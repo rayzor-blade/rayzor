@@ -1037,6 +1037,18 @@ impl<'a> HirToMirContext<'a> {
             HirExprKind::Null if self.is_tag_only_enum_type(expr.ty) => {
                 self.builder.build_const(IrValue::null_int())
             }
+            HirExprKind::Null
+                if matches!(
+                    self.convert_type_or_type_var(expr.ty, &self.current_type_param_names()),
+                    IrType::TypeVar(_)
+                ) =>
+            {
+                // Generic defaults must specialize with the result's representation.
+                let target =
+                    self.convert_type_or_type_var(expr.ty, &self.current_type_param_names());
+                let zero = self.builder.build_const(IrValue::I64(0))?;
+                self.builder.build_bitcast(zero, target)
+            }
             HirExprKind::Null => self.builder.build_null(),
 
             HirExprKind::Untyped(inner) => {

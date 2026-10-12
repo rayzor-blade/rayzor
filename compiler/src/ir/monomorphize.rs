@@ -881,6 +881,9 @@ impl Monomorphizer {
     /// Substitute types in all CFG instructions
     fn substitute_cfg(&self, cfg: &mut IrControlFlowGraph) {
         for (_, block) in cfg.blocks.iter_mut() {
+            for phi in &mut block.phi_nodes {
+                phi.ty = self.substitute_type(&phi.ty);
+            }
             for inst in block.instructions.iter_mut() {
                 self.substitute_instruction(inst);
             }

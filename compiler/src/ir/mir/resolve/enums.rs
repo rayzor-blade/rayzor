@@ -133,21 +133,7 @@ impl<'a> HirToMirContext<'a> {
                         type_args,
                         ..
                     } => {
-                        // Non-TypeParameter type_args mean this is already the
-                        // concrete instance, so the base enum must be located.
-                        let has_concrete_args = !type_args.is_empty()
-                            && type_args.iter().any(|ta| {
-                                type_table
-                                    .get(*ta)
-                                    .map(|ti| {
-                                        !matches!(
-                                            ti.kind,
-                                            crate::tast::TypeKind::TypeParameter { .. }
-                                        )
-                                    })
-                                    .unwrap_or(false)
-                            });
-                        if has_concrete_args {
+                        if !type_args.is_empty() {
                             // Find the base enum type (with TypeParameter type_args) via symbol
                             let base_type = self
                                 .symbol_table
@@ -171,10 +157,29 @@ impl<'a> HirToMirContext<'a> {
 
         let enum_sym = match enum_symbol {
             Some(s) => s,
-            None => {
-                return vec![];
-            }
+            None => return vec![],
         };
+
+        // Constructor parameters can differ from the enum's parameters and order.
+        let generic_type_args = generic_type_args.map(|(base, arguments)| {
+            let result = self
+                .symbol_table
+                .get_enum_variants(enum_sym)
+                .and_then(|variants| {
+                    variants.iter().find_map(|variant| {
+                        let symbol = self.symbol_table.get_symbol(*variant)?;
+                        if symbol.name != variant_name {
+                            return None;
+                        }
+                        match self.type_table.get(symbol.type_id).map(|ty| &ty.kind) {
+                            Some(TypeKind::Function { return_type, .. }) => Some(*return_type),
+                            _ => None,
+                        }
+                    })
+                })
+                .unwrap_or(base);
+            (result, arguments)
+        });
 
         // Step 2: Find the variant by name and get its field TypeIds from HIR
         let variant_name_str = self.string_interner.get(variant_name).unwrap_or("");

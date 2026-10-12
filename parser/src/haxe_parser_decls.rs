@@ -177,6 +177,7 @@ fn enum_constructor<'a>(full: &'a str, input: &'a str) -> PResult<'a, EnumConstr
 
     let (input, meta) = metadata_list(full, input)?;
     let (input, name) = identifier(input)?;
+    let (input, type_params) = type_params(full, input)?;
 
     // Optional parameters
     let (input, params) = opt(delimited(
@@ -195,6 +196,7 @@ fn enum_constructor<'a>(full: &'a str, input: &'a str) -> PResult<'a, EnumConstr
         EnumConstructor {
             meta,
             name,
+            type_params,
             params: params.unwrap_or_default(),
             return_type,
             span: Span::new(start, end),

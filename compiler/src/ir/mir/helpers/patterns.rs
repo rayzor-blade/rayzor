@@ -67,6 +67,7 @@ impl<'a> HirToMirContext<'a> {
                         if (hint_is_void_ptr && actual_is_specific)
                             || (actual_is_ptr && hint_is_scalar)
                             || float_int_mismatch
+                            || matches!(actual_type, IrType::TypeVar(_))
                         {
                             actual_type.clone()
                         } else {

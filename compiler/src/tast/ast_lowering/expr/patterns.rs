@@ -117,7 +117,7 @@ impl<'a> AstLowering<'a> {
                 if let Some(sym_id) = ctor_sym {
                     if let Some(sym) = self.context.symbol_table.get_symbol(sym_id) {
                         let ctor_type_id = expected_type
-                            .map(|ty| self.substitute_receiver_type(sym.type_id, ty))
+                            .map(|ty| self.enum_constructor_for_result(sym.type_id, ty))
                             .unwrap_or(sym.type_id);
                         if ctor_type_id != TypeId::invalid() {
                             let type_table = self.context.type_table.borrow();

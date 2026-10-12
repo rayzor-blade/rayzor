@@ -383,6 +383,7 @@ pub struct EnumDecl {
 pub struct EnumConstructor {
     pub meta: Vec<Metadata>,
     pub name: String,
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<FunctionParam>,
     /// GADT-style explicit result type: `C(s:String):E<String>;`
     pub return_type: Option<Type>,
