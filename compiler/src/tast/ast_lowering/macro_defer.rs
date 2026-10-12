@@ -21,6 +21,8 @@ pub(crate) struct DeferredMacroTyper<'l, 'a> {
     pub receiver: Option<(&'l parser::Expr, TypeId)>,
     /// The type the call's position expects (`Context.getExpectedType`).
     pub expected: Option<TypeId>,
+    /// Bindings imposed on the expected generic type by `Context.unify`.
+    pub inferred: Option<&'l mut std::collections::BTreeMap<crate::tast::SymbolId, TypeId>>,
 }
 
 impl AstLowering<'_> {
@@ -386,6 +388,7 @@ impl AstLowering<'_> {
                 lowering: self,
                 receiver: None,
                 expected: None,
+                inferred: None,
             };
             engine.evaluate(&info, local_type, args, span, &mut typer)
         };
@@ -657,6 +660,7 @@ impl AstLowering<'_> {
                 lowering: self,
                 receiver: Some((receiver_ast, receiver.expr_type)),
                 expected: None,
+                inferred: None,
             };
             cell.borrow_mut()
                 .expand_deferred_call(&name, &macro_call, &mut typer)
@@ -757,6 +761,7 @@ impl AstLowering<'_> {
                 lowering: self,
                 receiver: Some((receiver_ast, receiver_type)),
                 expected: None,
+                inferred: None,
             };
             cell.borrow_mut()
                 .expand_deferred_call(&name, &macro_call, &mut typer)
@@ -879,21 +884,34 @@ impl AstLowering<'_> {
             span,
         };
         let cell = self.deferred_macro_expander.unwrap();
+        let template = self.deferred_macro_template.clone().unwrap();
+        let mut inferred = std::collections::BTreeMap::new();
         let expanded = {
             let mut typer = DeferredMacroTyper {
                 lowering: self,
                 receiver: None,
                 expected: Some(declared),
+                inferred: Some(&mut inferred),
             };
-            cell.borrow_mut()
-                .expand_deferred_call(&name, &macro_call, &mut typer)
+            match cell.try_borrow_mut() {
+                Ok(mut engine) => engine.expand_deferred_call(&name, &macro_call, &mut typer),
+                Err(_) => {
+                    template
+                        .fork_for_typing()
+                        .expand_deferred_call(&name, &macro_call, &mut typer)
+                }
+            }
         }
         .map_err(|e| super::LoweringError::SemanticError {
             message: format!("macro '{}' failed during typing: {}", name, e),
             location: self.context.create_location_from_span(span),
         })?;
+        let bindings: Vec<_> = inferred.into_iter().collect();
+        let declared = self.substitute_type_bindings(declared, &bindings, false);
         self.expected_arg_type_stack.push(Some(declared));
+        let previous_hint = self.context.expected_new_type_hint.replace(declared);
         let lowered = self.lower_value_expression(&expanded);
+        self.context.expected_new_type_hint = previous_hint;
         self.expected_arg_type_stack.pop();
         lowered.map(Some)
     }
@@ -1230,6 +1248,55 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         }
     }
 
+    fn enum_constructor_access(
+        &mut self,
+        expression: &parser::Expr,
+    ) -> Option<(TypeId, crate::macro_system::value::MacroValue)> {
+        use crate::macro_system::value::MacroValue as V;
+        use crate::tast::{SymbolKind, TypedExpressionKind};
+        use std::{collections::BTreeMap, sync::Arc};
+
+        fn is_path(expression: &parser::Expr) -> bool {
+            match &expression.kind {
+                parser::ExprKind::Ident(_) => true,
+                parser::ExprKind::Field { expr, .. } | parser::ExprKind::Paren(expr) => {
+                    is_path(expr)
+                }
+                _ => false,
+            }
+        }
+        if !is_path(expression) {
+            return None;
+        }
+        let typed = self.lowering.lower_expression(expression).ok()?;
+        let symbol = match typed.kind {
+            TypedExpressionKind::Variable { symbol_id } => symbol_id,
+            TypedExpressionKind::StaticFieldAccess { field_symbol, .. } => field_symbol,
+            _ => return None,
+        };
+        let table = &self.lowering.context.symbol_table;
+        let field = table.get_symbol(symbol)?;
+        if field.kind != SymbolKind::EnumVariant {
+            return None;
+        }
+        let parent = table.find_parent_enum_for_constructor(symbol)?;
+        let enum_type = table.get_symbol(parent)?.type_id;
+        let index = table
+            .get_enum_variants(parent)?
+            .iter()
+            .position(|&id| id == symbol)?;
+        let name = self.lowering.context.string_interner.get(field.name)?;
+        Some((
+            enum_type,
+            V::Object(Arc::new(BTreeMap::from([
+                ("name".to_string(), V::String(Arc::from(name))),
+                ("index".to_string(), V::Int(index as i64)),
+                ("type".to_string(), V::Type(typed.expr_type)),
+                ("params".to_string(), V::Array(Arc::new(Vec::new()))),
+            ]))),
+        ))
+    }
+
     fn field_access_kind(&mut self, receiver: TypeId, name: &str) -> Option<(bool, bool)> {
         use crate::tast::core::TypeKind;
         let mut ty = receiver;
@@ -1464,15 +1531,52 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         monomorphs: &std::collections::BTreeSet<TypeId>,
         bindings: &mut std::collections::BTreeMap<TypeId, TypeId>,
     ) -> bool {
-        unify(
+        let mut variables = monomorphs.clone();
+        let mut parameters = Vec::new();
+        if self.inferred.is_some() {
+            let mut pending: Vec<_> = self.expected.into_iter().collect();
+            let mut visited = std::collections::BTreeSet::new();
+            while let Some(ty) = pending.pop() {
+                if !visited.insert(ty) {
+                    continue;
+                }
+                if matches!(
+                    self.lowering
+                        .context
+                        .type_table
+                        .borrow()
+                        .get(ty)
+                        .map(|ty| &ty.kind),
+                    Some(crate::tast::TypeKind::TypeParameter { .. })
+                ) {
+                    variables.insert(ty);
+                    parameters.push(ty);
+                }
+                pending.extend(self.type_children(ty));
+            }
+        }
+        let compatible = unify(
             a,
             b,
             self.lowering.context.type_table,
             &self.lowering.abstract_casts,
-            monomorphs,
+            &variables,
             bindings,
             0,
-        )
+        );
+        if compatible && let Some(inferred) = &mut self.inferred {
+            let table = self.lowering.context.type_table.borrow();
+            for parameter in parameters {
+                let bound = resolve_bound(bindings, parameter);
+                if bound != parameter
+                    && let Some(crate::tast::TypeKind::TypeParameter { symbol_id, .. }) =
+                        table.get(parameter).map(|ty| &ty.kind)
+                {
+                    inferred.insert(*symbol_id, bound);
+                }
+            }
+        }
+        compatible
     }
 
     fn type_adt_view(
@@ -1481,6 +1585,7 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
     ) -> Option<(String, Vec<crate::macro_system::value::MacroValue>)> {
         use crate::macro_system::value::MacroValue as V;
         use crate::tast::core::TypeKind;
+        use std::sync::Arc;
         let kind = self
             .lowering
             .context
@@ -1548,10 +1653,33 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
             TypeKind::Function {
                 params,
                 return_type,
+                labels,
                 ..
             } => (
                 "TFun".to_string(),
-                vec![args_of(&params), V::Type(return_type)],
+                vec![
+                    V::Array(Arc::new(
+                        params
+                            .iter()
+                            .enumerate()
+                            .map(|(index, &ty)| {
+                                let label = labels.get(index).copied().unwrap_or_default();
+                                let name = label
+                                    .name
+                                    .and_then(|name| {
+                                        self.lowering.context.string_interner.get(name)
+                                    })
+                                    .unwrap_or("");
+                                V::Object(Arc::new(std::collections::BTreeMap::from([
+                                    ("name".to_string(), V::String(Arc::from(name))),
+                                    ("opt".to_string(), V::Bool(label.optional)),
+                                    ("t".to_string(), V::Type(ty)),
+                                ])))
+                            })
+                            .collect(),
+                    )),
+                    V::Type(return_type),
+                ],
             ),
             TypeKind::Dynamic => ("TDynamic".to_string(), vec![V::Null]),
             TypeKind::GenericInstance {
@@ -1998,6 +2126,32 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
             .type_table
             .borrow_mut()
             .create_type(kind)
+    }
+
+    fn function_type(
+        &mut self,
+        arguments: Vec<(String, bool, TypeId)>,
+        return_type: TypeId,
+    ) -> Option<TypeId> {
+        let labels = arguments
+            .iter()
+            .map(|(name, optional, _)| crate::tast::core::FunctionArgLabel {
+                name: (!name.is_empty()).then(|| self.lowering.context.intern_string(name)),
+                optional: *optional,
+            })
+            .collect();
+        Some(
+            self.lowering
+                .context
+                .type_table
+                .borrow_mut()
+                .create_labelled_function_type(
+                    arguments.into_iter().map(|(_, _, ty)| ty).collect(),
+                    return_type,
+                    Default::default(),
+                    labels,
+                ),
+        )
     }
 
     fn instantiate_alias(&mut self, def: TypeId, args: Vec<TypeId>) -> Option<TypeId> {

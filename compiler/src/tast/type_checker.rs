@@ -1269,6 +1269,25 @@ impl<'a> TypeChecker<'a> {
                 }
             }
 
+            (
+                TypeKind::Abstract {
+                    symbol_id: source_sym,
+                    type_args: source_args,
+                    ..
+                },
+                TypeKind::Abstract {
+                    symbol_id: target_sym,
+                    type_args: target_args,
+                    ..
+                },
+            ) => {
+                if source_sym == target_sym && source_args.len() == target_args.len() {
+                    self.check_generic_compatibility(source_args, target_args)
+                } else {
+                    TypeCompatibility::Incompatible
+                }
+            }
+
             // === Generic Instances ===
             (
                 TypeKind::GenericInstance {
@@ -2559,6 +2578,49 @@ mod tests {
         );
         assert_eq!(
             checker.check_compatibility(func1, func3),
+            TypeCompatibility::Incompatible
+        );
+    }
+
+    #[test]
+    fn abstract_arguments_compare_function_signatures() {
+        let (type_table, symbol_table, scope_tree, mut string_interner) = create_test_setup();
+        let label = string_interner.intern("value");
+        let (unlabelled, labelled, nullary, unrelated) = {
+            let mut table = type_table.borrow_mut();
+            let string = table.string_type();
+            let void = table.void_type();
+            let plain = table.create_function_type(vec![string], void);
+            let named = table.create_labelled_function_type(
+                vec![string],
+                void,
+                Default::default(),
+                vec![super::super::core::FunctionArgLabel {
+                    name: Some(label),
+                    optional: false,
+                }],
+            );
+            let empty = table.create_function_type(vec![], void);
+            let abstract_symbol = SymbolId::from_raw(100);
+            (
+                table.create_abstract_type(abstract_symbol, Some(string), vec![plain]),
+                table.create_abstract_type(abstract_symbol, Some(string), vec![named]),
+                table.create_abstract_type(abstract_symbol, Some(string), vec![empty]),
+                table.create_abstract_type(SymbolId::from_raw(101), Some(string), vec![plain]),
+            )
+        };
+        let mut checker =
+            TypeChecker::new(&type_table, &symbol_table, &scope_tree, &string_interner);
+        assert_eq!(
+            checker.check_compatibility(labelled, unlabelled),
+            TypeCompatibility::Identical
+        );
+        assert_eq!(
+            checker.check_compatibility(labelled, nullary),
+            TypeCompatibility::Incompatible
+        );
+        assert_eq!(
+            checker.check_compatibility(labelled, unrelated),
             TypeCompatibility::Incompatible
         );
     }

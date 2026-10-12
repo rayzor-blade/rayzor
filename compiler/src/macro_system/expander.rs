@@ -197,6 +197,19 @@ impl MacroExpander {
         &mut self.registry
     }
 
+    pub(crate) fn fork_for_typing(&self) -> Self {
+        let mut context = MacroContext::new();
+        context.defines = self.context.defines.clone();
+        context.current_module = self.context.current_module.clone();
+        context.current_class = self.context.current_class.clone();
+        context.current_method = self.context.current_method.clone();
+        let mut fork = Self::with_state(self.registry.clone(), context);
+        fork.class_registry = self.class_registry.clone();
+        fork.import_map = self.import_map.clone();
+        fork.file_imports = self.file_imports.clone();
+        fork
+    }
+
     pub(crate) fn has_generic_builds(&self) -> bool {
         self.class_registry.has_generic_builds()
     }

@@ -3716,6 +3716,18 @@ impl MacroInterpreter {
                         .transpose()?,
                     attrs,
                 },
+                ExprKind::New {
+                    type_path,
+                    params,
+                    args,
+                } => ExprKind::New {
+                    type_path,
+                    params,
+                    args: args
+                        .into_iter()
+                        .map(|arg| walk(interp, arg, counter))
+                        .collect::<Result<Vec<_>, _>>()?,
+                },
                 ExprKind::Call { expr, args } => ExprKind::Call {
                     expr: Box::new(walk(interp, *expr, counter)?),
                     args: args
@@ -4573,6 +4585,23 @@ mod tests {
         );
         assert_eq!(eval("return true;").unwrap(), MacroValue::Bool(true));
         assert_eq!(eval("return null;").unwrap(), MacroValue::Null);
+    }
+
+    #[test]
+    fn constructor_splices_evaluate_complex_payloads() {
+        let value = eval(
+            r#"var text = "hello";
+               return macro new Result($v{text.toUpperCase()}, $v{text.length});"#,
+        )
+        .unwrap();
+        let MacroValue::Expr(expression) = value else {
+            panic!("expected a quoted expression");
+        };
+        let ExprKind::New { args, .. } = &expression.kind else {
+            panic!("expected a constructor expression");
+        };
+        assert!(matches!(&args[0].kind, ExprKind::String(value) if value == "HELLO"));
+        assert!(matches!(args[1].kind, ExprKind::Int(5)));
     }
 
     #[test]

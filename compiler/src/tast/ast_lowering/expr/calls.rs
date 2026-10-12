@@ -2300,6 +2300,7 @@ impl<'a> AstLowering<'a> {
                         lowering: self,
                         receiver: None,
                         expected,
+                        inferred: None,
                     };
                     cell.borrow_mut()
                         .expand_deferred_call(&name, expression, &mut typer)
@@ -2463,26 +2464,52 @@ impl<'a> AstLowering<'a> {
         if let Some(ps) = &expected_param_types {
             for (i, arg) in args.iter().enumerate() {
                 let hint = ps.get(formal_index(i)).cloned().flatten();
-                if is_literal(arg) && hint_has_type_params(self, &hint) {
+                let generic_formal = expected_arg_types.as_ref().is_some_and(|formals| {
+                    formals.get(formal_index(i)).is_some_and(|formal| {
+                        self.type_mentions_type_param(&self.context.type_table.borrow(), *formal)
+                    })
+                });
+                if is_literal(arg) && (generic_formal || hint_has_type_params(self, &hint)) {
                     generic_literal_positions.push(i);
                 }
             }
         }
         let mut lowered: Vec<Option<TypedExpression>> = vec![None; args.len()];
-        let mut lower_arg =
-            |slf: &mut Self, i: usize, hint: Option<Vec<TypeId>>| -> Result<TypedExpression, _> {
-                let arg_type_hint = expected_arg_types
-                    .as_ref()
-                    .and_then(|ts| ts.get(formal_index(i)).copied());
-                slf.expected_lambda_params_stack.push(hint);
-                slf.expected_arg_type_stack.push(arg_type_hint);
-                let result = slf
-                    .lower_value_expression(&args[i])
-                    .map(|typed| slf.instantiate_function_reference(typed, arg_type_hint));
-                slf.expected_arg_type_stack.pop();
-                slf.expected_lambda_params_stack.pop();
-                result
-            };
+        let mut converted_macro = false;
+        let mut lower_arg = |slf: &mut Self,
+                             i: usize,
+                             hint: Option<Vec<TypeId>>,
+                             bindings: &BTreeMap<SymbolId, TypeId>|
+         -> Result<TypedExpression, _> {
+            let bound: Vec<_> = bindings.iter().map(|(&symbol, &ty)| (symbol, ty)).collect();
+            let arg_type_hint = expected_arg_types
+                .as_ref()
+                .and_then(|ts| ts.get(formal_index(i)).copied())
+                .map(|ty| slf.substitute_type_bindings(ty, &bound, false));
+            let hint = hint.or_else(|| {
+                let table = slf.context.type_table.borrow();
+                let ty = Self::resolve_alias_chain(&table, arg_type_hint?);
+                match table.get(ty).map(|ty| &ty.kind) {
+                    Some(TypeKind::Function { params, .. }) => Some(params.clone()),
+                    _ => None,
+                }
+            });
+            slf.expected_lambda_params_stack.push(hint);
+            slf.expected_arg_type_stack.push(arg_type_hint);
+            let result = slf
+                .lower_value_expression(&args[i])
+                .map(|typed| slf.instantiate_function_reference(typed, arg_type_hint));
+            slf.expected_arg_type_stack.pop();
+            slf.expected_lambda_params_stack.pop();
+            let typed = result?;
+            if let Some(converted) = slf.lower_macro_from(&args[i], &typed, arg_type_hint)? {
+                converted_macro = true;
+                Ok(converted)
+            } else {
+                Ok(typed)
+            }
+        };
+        let mut bindings = BTreeMap::new();
         for i in 0..args.len() {
             if generic_literal_positions.contains(&i) {
                 continue;
@@ -2491,17 +2518,16 @@ impl<'a> AstLowering<'a> {
                 .as_ref()
                 .and_then(|ps| ps.get(formal_index(i)).cloned())
                 .flatten();
-            lowered[i] = Some(lower_arg(self, i, hint)?);
+            let typed = lower_arg(self, i, hint, &bindings)?;
+            if let Some(formal) = expected_arg_types
+                .as_ref()
+                .and_then(|formals| formals.get(formal_index(i)))
+            {
+                self.bind_type_params(*formal, typed.expr_type, &mut bindings);
+            }
+            lowered[i] = Some(typed);
         }
         if !generic_literal_positions.is_empty() {
-            let mut bindings: BTreeMap<SymbolId, TypeId> = BTreeMap::new();
-            if let Some(formals) = &expected_arg_types {
-                for (i, typed) in lowered.iter().enumerate() {
-                    if let (Some(formal), Some(typed)) = (formals.get(formal_index(i)), typed) {
-                        self.bind_type_params(*formal, typed.expr_type, &mut bindings);
-                    }
-                }
-            }
             for &i in &generic_literal_positions {
                 let hint = expected_param_types
                     .as_ref()
@@ -2512,10 +2538,59 @@ impl<'a> AstLowering<'a> {
                             .map(|p| self.substitute_bound_type_params(p, &bindings))
                             .collect::<Vec<_>>()
                     });
-                lowered[i] = Some(lower_arg(self, i, hint)?);
+                lowered[i] = Some(lower_arg(self, i, hint, &bindings)?);
             }
         }
         let mut arg_exprs: Vec<TypedExpression> = lowered.into_iter().flatten().collect();
+        // Conversions bind generic parameters before later arguments are checked.
+        if let Some(formals) = &expected_arg_types {
+            let mut bindings = BTreeMap::new();
+            for (i, argument) in arg_exprs.iter().enumerate() {
+                if let Some(formal) = formals.get(formal_index(i)) {
+                    self.bind_type_params(*formal, argument.expr_type, &mut bindings);
+                }
+            }
+            if converted_macro {
+                let bound: Vec<_> = bindings.into_iter().collect();
+                let mut checker = crate::tast::type_checker::TypeChecker::new(
+                    self.context.type_table,
+                    self.context.symbol_table,
+                    self.context.scope_tree,
+                    self.context.string_interner,
+                );
+                for (i, argument) in arg_exprs.iter().enumerate() {
+                    let Some(&formal) = formals.get(formal_index(i)) else {
+                        continue;
+                    };
+                    if !self.type_mentions_type_param(&self.context.type_table.borrow(), formal) {
+                        continue;
+                    }
+                    let expected = self.substitute_type_bindings(formal, &bound, false);
+                    if matches!(
+                        checker.check_compatibility(argument.expr_type, expected),
+                        crate::tast::type_checker::TypeCompatibility::Incompatible
+                    ) {
+                        let render = |ty| {
+                            super::super::macro_defer::render_type(
+                                ty,
+                                self.context.type_table,
+                                self.context.symbol_table,
+                                self.context.string_interner,
+                                0,
+                            )
+                        };
+                        return Err(LoweringError::SemanticError {
+                            message: format!(
+                                "{} should be {}",
+                                render(argument.expr_type),
+                                render(expected)
+                            ),
+                            location: argument.source_location,
+                        });
+                    }
+                }
+            }
+        }
         // Skipped optional formals travel as null.
         if let Some(map) = &formal_of {
             let location = self.context.create_location_from_span(expr.span);

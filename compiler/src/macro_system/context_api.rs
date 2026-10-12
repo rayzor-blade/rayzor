@@ -85,6 +85,14 @@ pub trait MacroTyper {
     /// Rebuild a type with mapped children, preserving its declaration data.
     fn rebuild_type(&mut self, id: TypeId, children: &[TypeId]) -> TypeId;
 
+    fn function_type(
+        &mut self,
+        _arguments: Vec<(String, bool, TypeId)>,
+        _return_type: TypeId,
+    ) -> Option<TypeId> {
+        None
+    }
+
     /// Rebuild a typedef instance from its handle and fresh arguments —
     /// the reconstruction half of the round trip above.
     fn instantiate_alias(&mut self, def: TypeId, args: Vec<TypeId>) -> Option<TypeId>;
@@ -92,6 +100,13 @@ pub trait MacroTyper {
     /// How `receiver.name` is accessed: whether the receiver is a class
     /// (else a structure) and whether the field is a method.
     fn field_access_kind(&mut self, _receiver: TypeId, _name: &str) -> Option<(bool, bool)> {
+        None
+    }
+
+    fn enum_constructor_access(
+        &mut self,
+        _expression: &parser::Expr,
+    ) -> Option<(TypeId, MacroValue)> {
         None
     }
 
@@ -488,6 +503,31 @@ impl MacroContext {
         match value {
             MacroValue::Type(id) => Some(*id),
             MacroValue::Enum(_, variant, payload) => {
+                if &**variant == "TFun" {
+                    let Some(MacroValue::Array(parameters)) = payload.first() else {
+                        return None;
+                    };
+                    let arguments = parameters
+                        .iter()
+                        .map(|parameter| match parameter {
+                            MacroValue::Object(fields) => Some((
+                                fields
+                                    .get("name")
+                                    .map(MacroValue::to_display_string)
+                                    .unwrap_or_default(),
+                                matches!(fields.get("opt"), Some(MacroValue::Bool(true))),
+                                self.coerce_type_value(fields.get("t")?)?,
+                            )),
+                            value => Some((String::new(), false, self.coerce_type_value(value)?)),
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    let return_type = self.coerce_type_value(payload.get(1)?)?;
+                    return self
+                        .typer
+                        .as_mut()?
+                        .get()
+                        .function_type(arguments, return_type);
+                }
                 let def = match payload.first() {
                     Some(MacroValue::Type(id)) => *id,
                     _ => return None,
@@ -791,6 +831,33 @@ impl MacroContext {
     /// `TField(e, access)` for a field read, the typed shape macros inspect:
     /// FInstance / FClosure on a class, FAnon / FClosure(null) on a structure.
     fn typed_field_access(&mut self, expr: &parser::Expr) -> Option<MacroValue> {
+        if let Some((enum_type, field)) = self.typer.as_mut()?.get().enum_constructor_access(expr) {
+            let value = |name: &str, args| {
+                MacroValue::Enum(Arc::from("FieldAccess"), Arc::from(name), Arc::new(args))
+            };
+            let reference = MacroValue::Type(enum_type);
+            let module = MacroValue::Enum(
+                Arc::from("ModuleType"),
+                Arc::from("TEnumDecl"),
+                Arc::new(vec![reference.clone()]),
+            );
+            let receiver = MacroValue::Object(Arc::new(BTreeMap::from([
+                ("t".to_string(), reference.clone()),
+                (
+                    "expr".to_string(),
+                    MacroValue::Enum(
+                        Arc::from("TypedExprDef"),
+                        Arc::from("TTypeExpr"),
+                        Arc::new(vec![module]),
+                    ),
+                ),
+            ])));
+            return Some(MacroValue::Enum(
+                Arc::from("TypedExprDef"),
+                Arc::from("TField"),
+                Arc::new(vec![receiver, value("FEnum", vec![reference, field])]),
+            ));
+        }
         let parser::ExprKind::Field {
             expr: receiver,
             field,

@@ -291,6 +291,7 @@ impl<'a> AstLowering<'a> {
                                 lowering: self,
                                 receiver: None,
                                 expected: None,
+                                inferred: None,
                             }
                             .fresh_monomorph();
                             self.generic_build_monomorphs.insert(id);

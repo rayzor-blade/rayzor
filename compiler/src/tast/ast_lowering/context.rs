@@ -81,6 +81,7 @@ impl<'a> AstLowering<'a> {
             expected_arg_type_stack: Vec::new(),
             suppress_callee_hint: false,
             deferred_macro_expander: None,
+            deferred_macro_template: None,
             deferred_macro_registry: None,
             generic_build_results: BTreeMap::new(),
             generic_build_active: std::collections::BTreeSet::new(),
@@ -130,6 +131,7 @@ impl<'a> AstLowering<'a> {
         deferred: Vec<crate::macro_system::expander::DeferredMacroCall>,
     ) {
         self.deferred_macro_expander = Some(expander);
+        self.deferred_macro_template = Some(Rc::new(expander.borrow().fork_for_typing()));
         self.deferred_macro_registry = Some(expander.borrow().registry().clone());
         self.generic_build_engine = expander.borrow().generic_build_engine().map(Rc::new);
         for call in deferred {

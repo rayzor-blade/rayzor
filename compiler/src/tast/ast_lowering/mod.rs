@@ -1714,6 +1714,7 @@ pub struct AstLowering<'a> {
     /// The expander kept alive from expansion, for re-running the macro calls
     /// it deferred (typer-dependent bodies). See `macro_defer`.
     deferred_macro_expander: Option<&'a std::cell::RefCell<crate::macro_system::MacroExpander>>,
+    deferred_macro_template: Option<Rc<crate::macro_system::MacroExpander>>,
     /// Definitions remain available after compile-time methods are stripped from the AST.
     deferred_macro_registry: Option<crate::macro_system::MacroRegistry>,
     generic_build_results: BTreeMap<(SymbolId, Vec<TypeId>), parser::Type>,
