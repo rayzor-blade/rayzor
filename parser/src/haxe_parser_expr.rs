@@ -716,7 +716,7 @@ fn simple_string<'a>(full: &'a str, input: &'a str, quote: char) -> PResult<'a, 
 /// Convert escape sequences in a parsed string literal to their actual characters.
 pub(crate) fn unescape_string(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars();
+    let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\\' {
             match chars.next() {
@@ -731,8 +731,19 @@ pub(crate) fn unescape_string(s: &str) -> String {
                 Some('v') => result.push('\x0B'), // vertical tab
                 Some('0') => result.push('\0'),   // null
                 Some('u') => {
-                    // Unicode escape: \uXXXX
-                    let hex: String = chars.by_ref().take(4).collect();
+                    let hex: String = if chars.next_if_eq(&'{').is_some() {
+                        chars.by_ref().take_while(|ch| *ch != '}').collect()
+                    } else {
+                        chars.by_ref().take(4).collect()
+                    };
+                    if let Ok(code) = u32::from_str_radix(&hex, 16)
+                        && let Some(ch) = char::from_u32(code)
+                    {
+                        result.push(ch);
+                    }
+                }
+                Some('x') => {
+                    let hex: String = chars.by_ref().take(2).collect();
                     if let Ok(code) = u32::from_str_radix(&hex, 16)
                         && let Some(ch) = char::from_u32(code)
                     {
