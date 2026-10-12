@@ -2162,6 +2162,8 @@ register_symbol!(
 // ============================================================================
 // Exception Handling (setjmp/longjmp)
 // ============================================================================
+// Register the CRT entry directly: a wrapper would save an already-returned frame.
+register_symbol!("_setjmp", crate::exception::_setjmp);
 register_symbol!(
     "rayzor_exception_push_handler",
     crate::exception::rayzor_exception_push_handler

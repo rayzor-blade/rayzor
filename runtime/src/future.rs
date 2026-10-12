@@ -22,9 +22,7 @@ use std::thread;
 
 use crate::concurrency::{ACTIVE_THREAD_COUNT, arm64_jit_barrier};
 
-unsafe extern "C" {
-    fn _setjmp(buf: *mut u8) -> i32;
-}
+use crate::exception::_setjmp;
 
 /// Future states
 const STATE_PENDING: u8 = 0;
@@ -117,7 +115,10 @@ fn spawn_future(handle: &FutureHandle, handle_ptr: *mut FutureHandle) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Install Haxe exception handler on this worker thread
             let jmp_buf = crate::exception::rayzor_exception_push_handler();
+            #[cfg(not(all(windows, target_arch = "x86_64")))]
             let caught = unsafe { _setjmp(jmp_buf) };
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            let caught = unsafe { _setjmp(jmp_buf, ptr::null_mut()) };
 
             if caught == 0 {
                 // Normal path — call the closure

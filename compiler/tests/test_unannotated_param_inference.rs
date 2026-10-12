@@ -9,7 +9,7 @@ fn unannotated_constructor_params_take_their_field_types() {
     let source = r#"
 class Node {
     var left:Node;
-    var item:Int;
+    public var item:Int;
     public function new(left, item) {
         this.left = left;
         this.item = item;

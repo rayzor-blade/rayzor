@@ -22,6 +22,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    fn emit_setjmp(&mut self, jmp_buf: IrId) -> Option<IrId> {
+        let ptr_type = IrType::Ptr(Box::new(IrType::Void));
+        let (params, args) = if cfg!(all(windows, target_arch = "x86_64")) {
+            // A null Win64 frame disables SEH unwinding through JIT frames.
+            let frame = self.builder.build_const(IrValue::Null)?;
+            (vec![ptr_type.clone(), ptr_type], vec![jmp_buf, frame])
+        } else {
+            (vec![ptr_type], vec![jmp_buf])
+        };
+        let setjmp = self.get_or_register_extern_function("_setjmp", params, IrType::I32);
+        self.builder.build_call_direct(setjmp, args, IrType::I32)
+    }
+
     /// A throw longjmps to the landing pad, which never sees registers the
     /// try body assigned: the variables it references live in cells until the
     /// continuation, so the catch reads what the try wrote. They leave
@@ -171,19 +184,12 @@ impl<'a> HirToMirContext<'a> {
             self.builder
                 .build_call_direct(push_fn, vec![], IrType::Ptr(Box::new(IrType::Void)));
 
-        let setjmp_fn = self.get_or_register_extern_function(
-            "_setjmp",
-            vec![IrType::Ptr(Box::new(IrType::Void))],
-            IrType::I32,
-        );
         let jmp_buf_reg = jmp_buf.unwrap_or_else(|| {
             self.builder
                 .build_const(IrValue::I64(0))
                 .expect("failed to create const")
         });
-        let setjmp_result =
-            self.builder
-                .build_call_direct(setjmp_fn, vec![jmp_buf_reg], IrType::I32);
+        let setjmp_result = self.emit_setjmp(jmp_buf_reg);
 
         let zero = self
             .builder
@@ -633,16 +639,9 @@ impl<'a> HirToMirContext<'a> {
             self.builder
                 .build_call_direct(push_fn, vec![], IrType::Ptr(Box::new(IrType::Void)));
 
-        let setjmp_fn = self.get_or_register_extern_function(
-            "_setjmp",
-            vec![IrType::Ptr(Box::new(IrType::Void))],
-            IrType::I32,
-        );
         let jmp_buf_reg =
             jmp_buf.unwrap_or_else(|| self.builder.build_const(IrValue::I64(0)).expect("const"));
-        let setjmp_result =
-            self.builder
-                .build_call_direct(setjmp_fn, vec![jmp_buf_reg], IrType::I32);
+        let setjmp_result = self.emit_setjmp(jmp_buf_reg);
 
         let zero = self.builder.build_const(IrValue::I32(0)).expect("const");
         let setjmp_reg = setjmp_result.unwrap_or(zero);

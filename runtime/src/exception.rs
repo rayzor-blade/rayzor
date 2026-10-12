@@ -12,13 +12,18 @@ const JMP_BUF_SIZE: usize = 256;
 const TYPE_DYNAMIC: u32 = 5;
 
 unsafe extern "C" {
-    fn _setjmp(buf: *mut u8) -> i32;
+    #[cfg(not(all(windows, target_arch = "x86_64")))]
+    pub(crate) fn _setjmp(buf: *mut u8) -> i32;
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    pub(crate) fn _setjmp(buf: *mut u8, frame: *mut u8) -> i32;
     // The MSVC CRT exports `longjmp`, not the POSIX `_longjmp` spelling — it
     // does export `_setjmp`, which is why only this one needs redirecting.
     #[cfg_attr(windows, link_name = "longjmp")]
     fn _longjmp(buf: *mut u8, val: i32) -> !;
 }
 
+// The Win64 CRT saves XMM registers with aligned stores into the jump buffer.
+#[cfg_attr(all(windows, target_arch = "x86_64"), repr(C, align(16)))]
 struct ExceptionHandler {
     jmp_buf: [u8; JMP_BUF_SIZE],
     /// Shadow-stack depth at the time this handler was installed.
