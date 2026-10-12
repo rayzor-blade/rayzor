@@ -30,6 +30,7 @@ mod import_hx_test;
 mod incremental_parse_debug_test;
 mod method_type_test;
 mod minimal_validation_test;
+mod module_enum_variants_test;
 mod module_field_test;
 mod parse_recovery_test;
 // mod enhanced_type_checking_test;  // Disabled - enhanced_type_checker module doesn't exist

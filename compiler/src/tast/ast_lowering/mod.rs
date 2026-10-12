@@ -1595,6 +1595,8 @@ pub struct AstLowering<'a> {
     /// keeps whichever namesake registered first, so another module's enum
     /// constructor (`ValueType.TEnum`) can hold the name there.
     pub(crate) module_enum_abstract_values: BTreeMap<InternedString, SymbolId>,
+    /// This file's constructors precede constructors registered by other modules.
+    pub(crate) module_enum_variants: BTreeMap<InternedString, SymbolId>,
     /// The current file's `overload` groups, keyed by owner and name.
     pub(crate) overload_groups: overloads::OverloadGroups,
     /// Child class symbol -> parent class symbol, for resolving inherited

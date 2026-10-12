@@ -256,6 +256,15 @@ impl<'a> AstLowering<'a> {
             if let Some(&value) = self.module_enum_abstract_values.get(&name) {
                 return Some(value);
             }
+            if outer_match.is_none_or(|symbol| {
+                self.context
+                    .symbol_table
+                    .get_symbol(symbol)
+                    .is_some_and(|symbol| symbol.kind == crate::tast::SymbolKind::EnumVariant)
+            }) && let Some(&variant) = self.module_enum_variants.get(&name)
+            {
+                return Some(variant);
+            }
         }
 
         // A namesake from an enclosing scope, now that the class hierarchy has

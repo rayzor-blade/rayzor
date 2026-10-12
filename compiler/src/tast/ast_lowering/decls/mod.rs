@@ -36,6 +36,7 @@ impl<'a> AstLowering<'a> {
             .unwrap_or_default();
         let file = desugared.as_ref().map_or(file, |(file, _)| file);
         self.module_enum_abstract_values.clear();
+        self.module_enum_variants.clear();
         let overloaded = super::overloads::desugar(file);
         self.overload_groups = overloaded
             .as_ref()
@@ -161,6 +162,21 @@ impl<'a> AstLowering<'a> {
             for declaration in &file.declarations {
                 if let Err(e) = self.pre_register_declaration(declaration) {
                     self.collected_errors.push(e);
+                }
+            }
+        }
+
+        for declaration in &file.declarations {
+            if let TypeDeclaration::Enum(enumeration) = declaration {
+                let name = self.context.intern_string(&enumeration.name);
+                if let Some(symbol) = self.package_type_symbol(name, SymbolKind::Enum)
+                    && let Some(variants) = self.context.symbol_table.get_enum_variants(symbol)
+                {
+                    for variant in variants {
+                        if let Some(symbol) = self.context.symbol_table.get_symbol(*variant) {
+                            self.module_enum_variants.insert(symbol.name, symbol.id);
+                        }
+                    }
                 }
             }
         }

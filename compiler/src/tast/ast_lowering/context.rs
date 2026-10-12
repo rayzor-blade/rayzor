@@ -48,6 +48,7 @@ impl<'a> AstLowering<'a> {
             module_statics: BTreeMap::new(),
             unknown_return_slots: std::collections::BTreeSet::new(),
             module_enum_abstract_values: BTreeMap::new(),
+            module_enum_variants: BTreeMap::new(),
             overload_groups: Default::default(),
             class_parents: BTreeMap::new(),
             skip_stdlib_loading: false,
