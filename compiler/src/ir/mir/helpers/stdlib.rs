@@ -870,7 +870,8 @@ impl<'a> HirToMirContext<'a> {
         let Some(abs_name) = self.resolve_abstract_name(source_type) else {
             return false;
         };
-        self.abstract_to_rule(abs_name, target_type).is_some()
+        self.abstract_to_rule(abs_name, source_type, target_type)
+            .is_some()
     }
 
     /// The abstract's `@:to` method rule for `target_type`, and whether its
@@ -879,6 +880,7 @@ impl<'a> HirToMirContext<'a> {
     fn abstract_to_rule(
         &self,
         abs_name: InternedString,
+        source_type: TypeId,
         target_type: TypeId,
     ) -> Option<(HirCastRule, bool)> {
         let target_kind = &self
@@ -891,13 +893,20 @@ impl<'a> HirToMirContext<'a> {
                 .map(|t| &t.kind)
         };
         let rules = self.abstract_to_rules.get(&abs_name)?;
-        let exact = |r: &&HirCastRule| kind_of(r.to_type) == Some(target_kind);
+        let (symbol, args) = self.abstract_and_args(source_type)?;
+        let bound_type = |ty| {
+            self.substitute_abstract_type_arg(symbol, ty, &args)
+                .unwrap_or(ty)
+        };
+        let exact = |r: &&HirCastRule| kind_of(bound_type(r.to_type)) == Some(target_kind);
         if let Some(rule) = rules
             .iter()
             .filter(&exact)
             .find(|r| r.cast_function.is_some())
         {
-            return Some((rule.clone(), false));
+            let mut rule = rule.clone();
+            rule.to_type = bound_type(rule.to_type);
+            return Some((rule, false));
         }
         if rules.iter().any(|r| exact(&r))
             || !matches!(
@@ -924,7 +933,7 @@ impl<'a> HirToMirContext<'a> {
         target_type: TypeId,
     ) -> Option<IrId> {
         let abs_name = self.resolve_abstract_name(source_type)?;
-        let Some((rule, boxed)) = self.abstract_to_rule(abs_name, target_type) else {
+        let Some((rule, boxed)) = self.abstract_to_rule(abs_name, source_type, target_type) else {
             let mid = self.chained_to_source(source_type, target_type)?;
             return self.maybe_abstract_to_convert(value, mid, target_type);
         };
@@ -938,8 +947,32 @@ impl<'a> HirToMirContext<'a> {
             return self.maybe_unbox_value(result, rule.to_type, target_type);
         }
         let result_type = self.convert_type(target_type);
-        self.builder
-            .build_call_direct(func_id, vec![value], result_type)
+        let type_args = self
+            .abstract_and_args(source_type)
+            .map(|(_, args)| {
+                args.into_iter()
+                    .map(|ty| self.convert_type_arg(ty))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !type_args.is_empty()
+            && self
+                .builder
+                .module
+                .functions
+                .get(&func_id)
+                .is_some_and(|f| !f.signature.type_params.is_empty())
+        {
+            self.builder.build_call_direct_with_type_args(
+                func_id,
+                vec![value],
+                result_type,
+                type_args,
+            )
+        } else {
+            self.builder
+                .build_call_direct(func_id, vec![value], result_type)
+        }
     }
 
     pub(crate) fn try_lower_special_runtime_call(
@@ -1201,6 +1234,39 @@ impl<'a> HirToMirContext<'a> {
                 Some(
                     self.builder
                         .build_call_direct(func_id, vec![value_dyn], IrType::Bool),
+                )
+            }
+            "haxe_reflect_has_field" | "haxe_reflect_field" | "haxe_reflect_get_property"
+                if args.len() == 2 && self.is_interface_value_expr(&args[0]) =>
+            {
+                let mut object = self.lower_expression(&args[0])?;
+                let ptr = IrType::Ptr(Box::new(IrType::U8));
+                if !self.boxed_value_regs.contains(&object) {
+                    let identity = self.get_or_register_extern_function(
+                        "haxe_iface_identity",
+                        vec![ptr.clone()],
+                        ptr.clone(),
+                    );
+                    let wrapped = self.coerce_reg_to(object, &ptr)?;
+                    object =
+                        self.builder
+                            .build_call_direct(identity, vec![wrapped], ptr.clone())?;
+                }
+                let field = self.lower_expression(&args[1])?;
+                let field = self.coerce_reg_to(field, &ptr)?;
+                let ret = if runtime_func == "haxe_reflect_has_field" {
+                    IrType::Bool
+                } else {
+                    ptr.clone()
+                };
+                let reader = self.get_or_register_extern_function(
+                    runtime_func,
+                    vec![ptr.clone(), ptr],
+                    ret.clone(),
+                );
+                Some(
+                    self.builder
+                        .build_call_direct(reader, vec![object, field], ret),
                 )
             }
             // A function reflects through its box, which says it has no fields;

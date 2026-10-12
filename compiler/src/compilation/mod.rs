@@ -1086,6 +1086,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_imports_do_not_load_ambient_namesakes() {
+        let mut unit = CompilationUnit::new(CompilationConfig::default());
+        let ast = unit
+            .parse_file(
+                "Main.hx",
+                r#"
+            package test;
+            import Patterns.UnicodeString;
+            import helpers.Source as Alias;
+            import Math;
+            class Main {
+                var values:Array<UnicodeString>;
+                var source:Alias;
+                function value():Float return Math.PI;
+            }
+        "#,
+            )
+            .unwrap();
+        let deps = CompilationUnit::extract_all_dependencies(&ast);
+        assert!(deps.contains(&"Patterns.UnicodeString".to_owned()));
+        assert!(deps.contains(&"helpers.Source".to_owned()));
+        assert!(deps.contains(&"Math".to_owned()));
+        assert!(!deps.contains(&"UnicodeString".to_owned()));
+        assert!(!deps.contains(&"test.UnicodeString".to_owned()));
+        assert!(!deps.contains(&"Alias".to_owned()));
+        assert!(!deps.contains(&"test.Alias".to_owned()));
+    }
+
+    #[test]
     fn cached_class_keeps_predeclared_identity() {
         let mut unit = CompilationUnit::new(CompilationConfig::default());
         let source = "package unit; class Collection { public function iterator():Int return 1; }";

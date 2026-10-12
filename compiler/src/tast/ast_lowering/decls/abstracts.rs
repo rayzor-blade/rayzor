@@ -456,7 +456,10 @@ impl<'a> AstLowering<'a> {
                     }
                     if is_static
                         && field.meta.iter().any(|m| m.name == ":to" || m.name == "to")
-                        && abstract_decl.meta.iter().any(|m| m.name == ":multiType")
+                        && abstract_decl
+                            .meta
+                            .iter()
+                            .any(|m| matches!(m.name.as_str(), "multiType" | ":multiType"))
                     {
                         self.context.symbol_table.add_symbol_flags(
                             sym,

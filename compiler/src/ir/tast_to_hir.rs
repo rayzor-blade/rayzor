@@ -8135,6 +8135,9 @@ impl<'a> TastToHirContext<'a> {
             TypedStatement::Return {
                 value: Some(value), ..
             } => Self::expression_writes_this(value),
+            TypedStatement::Block { statements, .. } => {
+                statements.iter().any(Self::statement_writes_this)
+            }
             _ => false,
         }
     }
@@ -8160,6 +8163,9 @@ impl<'a> TastToHirContext<'a> {
             TypedExpressionKind::Return { value: Some(value) } => {
                 Self::expression_writes_this(value)
             }
+            TypedExpressionKind::Block { statements, .. } => {
+                statements.iter().any(Self::statement_writes_this)
+            }
             _ => false,
         }
     }
@@ -8168,7 +8174,11 @@ impl<'a> TastToHirContext<'a> {
     /// abstract's own methods `this` is the variable bound to symbol 0, so a
     /// body that writes `this` rebinds it rather than a copy.
     fn abstract_inline_receiver(&self, receiver: HirExpr, writes_this: bool) -> HirExpr {
-        if writes_this && matches!(receiver.kind, HirExprKind::This) {
+        let is_this = matches!(receiver.kind, HirExprKind::This)
+            || matches!(&receiver.kind, HirExprKind::Variable { symbol, .. }
+                if self.symbol_table.get_symbol(*symbol)
+                    .is_some_and(|s| self.string_interner.get(s.name) == Some("this")));
+        if writes_this && is_this {
             HirExpr {
                 kind: HirExprKind::Variable {
                     symbol: SymbolId::from_raw(0),

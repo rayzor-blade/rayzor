@@ -154,8 +154,7 @@ impl<'a> HirToMirContext<'a> {
             };
             eprintln!("[calltarget] {} {} is_method={}", t, shape, is_method);
         }
-        // `Reflect.field(o, "m")` reads a method by name: its class then
-        // registers a bound thunk for `m`.
+        // Reflected method reads require callable thunks, including computed names.
         if let crate::ir::hir::CallTarget::Static { class, method } = _resolved_target {
             let name_of = |s: &SymbolId| {
                 self.symbol_table
@@ -163,9 +162,12 @@ impl<'a> HirToMirContext<'a> {
                     .map(|sym| self.interned_str(sym.name))
                     .unwrap_or("")
             };
-            let method_name = name_of(method);
+            let method_name = name_of(method).to_string();
             if name_of(class) == "Reflect"
-                && matches!(method_name, "field" | "getProperty" | "setProperty")
+                && matches!(
+                    method_name.as_str(),
+                    "field" | "getProperty" | "setProperty"
+                )
             {
                 if let Some(HirExprKind::Literal(HirLiteral::String(field))) =
                     args.get(1).map(|a| &a.kind)
@@ -177,6 +179,29 @@ impl<'a> HirToMirContext<'a> {
                         self.dynamic_member_names.insert(format!("set_{field}"));
                     }
                     self.dynamic_member_names.insert(field);
+                } else if let Some(receiver) = args.first() {
+                    let mut receiver = receiver;
+                    while let HirExprKind::Cast { expr, .. } = &receiver.kind {
+                        receiver = expr;
+                    }
+                    let receiver_ty = self
+                        .effective_receiver_type(receiver)
+                        .unwrap_or(receiver.ty);
+                    let mut class = self.resolve_receiver_class_symbol(receiver_ty);
+                    let mut visited = BTreeSet::new();
+                    while let Some(symbol) = class.filter(|symbol| visited.insert(*symbol)) {
+                        for ((owner, name), _) in self
+                            .class_method_by_name
+                            .iter()
+                            .chain(self.class_method_symbols.iter())
+                        {
+                            if *owner == symbol {
+                                self.dynamic_member_names
+                                    .insert(self.interned_str(*name).to_string());
+                            }
+                        }
+                        class = self.class_parent_map.get(&symbol).copied();
+                    }
                 }
             }
         }

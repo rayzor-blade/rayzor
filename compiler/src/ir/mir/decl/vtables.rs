@@ -985,6 +985,17 @@ impl<'a> HirToMirContext<'a> {
                         Some(v)
                     }
                 }
+                SlotKind::Reference(_) => {
+                    let unbox = self.get_or_register_extern_function(
+                        "haxe_unbox_reference_ptr",
+                        vec![ptr_u8.clone()],
+                        ptr_u8.clone(),
+                    );
+                    let raw = self
+                        .builder
+                        .build_call_direct(unbox, vec![reg], ptr_u8.clone())?;
+                    self.builder.build_cast(raw, ptr_u8, want.clone())
+                }
                 _ => {
                     let f = self.get_or_register_extern_function(
                         "haxe_dynamic_to_slot",

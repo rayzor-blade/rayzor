@@ -1442,13 +1442,17 @@ impl<'a> AstLowering<'a> {
         location: crate::tast::SourceLocation,
     ) -> Option<TypedExpression> {
         use crate::tast::core::TypeKind;
-        let abstract_symbol = {
+        let (abstract_symbol, type_args) = {
             let table = self.context.type_table.borrow();
             match table
                 .get(Self::resolve_alias_chain(&table, abstract_type))
                 .map(|t| &t.kind)
             {
-                Some(TypeKind::Abstract { symbol_id, .. }) => *symbol_id,
+                Some(TypeKind::Abstract {
+                    symbol_id,
+                    type_args,
+                    ..
+                }) => (*symbol_id, type_args.clone()),
                 _ => return None,
             }
         };
@@ -1456,19 +1460,83 @@ impl<'a> AstLowering<'a> {
             abstract_symbol,
             crate::tast::symbols::SymbolFlags::MULTI_TYPE_TO,
         );
-        let (method_symbol, underlying) = {
-            let table = self.context.type_table.borrow();
+        let declared_params = self
+            .context
+            .symbol_table
+            .get_class_type_params(abstract_symbol)
+            .cloned()
+            .unwrap_or_default();
+        let declared_underlying = self
+            .context
+            .symbol_table
+            .get_symbol(abstract_symbol)
+            .and_then(|s| {
+                self.context
+                    .type_table
+                    .borrow()
+                    .get(s.type_id)
+                    .and_then(|t| match t.kind {
+                        TypeKind::Abstract { underlying, .. } => underlying,
+                        _ => None,
+                    })
+            });
+        let (method_symbol, underlying, result_type, bindings) = {
             methods.into_iter().find_map(|(method, _, ty)| {
-                match table.get(ty).map(|t| &t.kind) {
-                    Some(TypeKind::Function { params, .. })
-                        if params.len() == arguments.len() + 1 =>
+                let kind = self
+                    .context
+                    .type_table
+                    .borrow()
+                    .get(ty)
+                    .map(|t| t.kind.clone());
+                match kind {
+                    Some(TypeKind::Function {
+                        params,
+                        return_type,
+                        ..
+                    }) if params.len() == arguments.len() + 1
+                        && params[1..].iter().zip(arguments).all(|(param, arg)| {
+                            self.abstract_source_accepts(*param, arg.expr_type, 0)
+                        }) =>
                     {
-                        Some((method, params[0]))
+                        let mut bindings = Vec::new();
+                        if let Some(declared) = declared_underlying {
+                            self.unify_type_args(declared, params[0], 0, &mut bindings);
+                        }
+                        // A selected underlying must agree with already bound abstract arguments.
+                        for (parameter, actual) in declared_params.iter().zip(&type_args) {
+                            let inferred = self.substitute_alias_args(*parameter, &bindings);
+                            let table = self.context.type_table.borrow();
+                            let inferred = Self::resolve_alias_chain(&table, inferred);
+                            let actual = Self::resolve_alias_chain(&table, *actual);
+                            let actual_kind = table.get(actual).map(|ty| &ty.kind);
+                            if !matches!(actual_kind, Some(TypeKind::TypeParameter { .. }))
+                                && inferred != actual
+                                && table.get(inferred).map(|ty| &ty.kind) != actual_kind
+                            {
+                                return None;
+                            }
+                        }
+                        Some((method, params[0], return_type, bindings))
                     }
                     _ => None,
                 }
             })?
         };
+        let inferred_args: Vec<_> = declared_params
+            .iter()
+            .enumerate()
+            .map(|(index, param)| {
+                type_args
+                    .get(index)
+                    .copied()
+                    .unwrap_or_else(|| self.substitute_alias_args(*param, &bindings))
+            })
+            .collect();
+        let abstract_type = self.context.type_table.borrow_mut().create_abstract_type(
+            abstract_symbol,
+            Some(underlying),
+            inferred_args,
+        );
         let null = TypedExpression {
             kind: crate::tast::node::TypedExpressionKind::Null,
             expr_type: underlying,
@@ -1480,8 +1548,8 @@ impl<'a> AstLowering<'a> {
         let mut call_arguments = Vec::with_capacity(arguments.len() + 1);
         call_arguments.push(null);
         call_arguments.extend(arguments.iter().cloned());
-        Some(TypedExpression {
-            expr_type: abstract_type,
+        let call = TypedExpression {
+            expr_type: result_type,
             kind: crate::tast::node::TypedExpressionKind::StaticMethodCall {
                 class_symbol: abstract_symbol,
                 method_symbol,
@@ -1492,6 +1560,31 @@ impl<'a> AstLowering<'a> {
             lifetime_id: crate::tast::LifetimeId::first(),
             source_location: location,
             metadata: crate::tast::node::ExpressionMetadata::default(),
+        };
+        // The converter's class result first takes the declared underlying ABI.
+        let underlying_value = TypedExpression {
+            expr_type: underlying,
+            kind: TypedExpressionKind::Cast {
+                expression: Box::new(call),
+                target_type: underlying,
+                cast_kind: CastKind::Implicit,
+            },
+            usage: VariableUsage::Copy,
+            lifetime_id: crate::tast::LifetimeId::first(),
+            source_location: location,
+            metadata: ExpressionMetadata::default(),
+        };
+        Some(TypedExpression {
+            expr_type: abstract_type,
+            kind: TypedExpressionKind::Cast {
+                expression: Box::new(underlying_value),
+                target_type: abstract_type,
+                cast_kind: CastKind::Implicit,
+            },
+            usage: VariableUsage::Copy,
+            lifetime_id: crate::tast::LifetimeId::first(),
+            source_location: location,
+            metadata: ExpressionMetadata::default(),
         })
     }
 
@@ -1735,7 +1828,8 @@ impl<'a> AstLowering<'a> {
         };
         let location = arg.source_location.clone();
         let arguments = vec![arg];
-        let type_arguments = self.infer_call_type_arguments(method_symbol, &arguments);
+        let type_arguments =
+            self.infer_call_type_arguments_with_result(method_symbol, &arguments, Some(formal_ty));
         let declared_return = self
             .context
             .symbol_table
@@ -2246,9 +2340,16 @@ impl<'a> AstLowering<'a> {
                 // this context and its real `match(s:String)` would be eaten.
                 let receiver_is_enum = {
                     let tt = self.context.type_table.borrow();
-                    tt.get(receiver.expr_type)
-                        .map(|t| matches!(t.kind, crate::tast::core::TypeKind::Enum { .. }))
-                        .unwrap_or(false)
+                    let receiver_type = Self::resolve_alias_chain(&tt, receiver.expr_type);
+                    match tt.get(receiver_type).map(|t| &t.kind) {
+                        Some(TypeKind::Enum { .. }) => true,
+                        Some(TypeKind::Class { symbol_id, .. }) => self
+                            .context
+                            .symbol_table
+                            .get_symbol(*symbol_id)
+                            .is_some_and(|s| s.kind == crate::tast::SymbolKind::Enum),
+                        _ => false,
+                    }
                 } || self
                     .abstract_over_enum_without_match(receiver.expr_type);
                 if receiver_is_enum || Self::expr_has_wildcard(&args[0]) {
@@ -4799,6 +4900,15 @@ impl<'a> AstLowering<'a> {
         callee_symbol: SymbolId,
         arguments: &[TypedExpression],
     ) -> Vec<TypeId> {
+        self.infer_call_type_arguments_with_result(callee_symbol, arguments, None)
+    }
+
+    fn infer_call_type_arguments_with_result(
+        &self,
+        callee_symbol: SymbolId,
+        arguments: &[TypedExpression],
+        expected_result: Option<TypeId>,
+    ) -> Vec<TypeId> {
         use crate::tast::core::TypeKind;
 
         let Some(fn_type) = self
@@ -4847,6 +4957,16 @@ impl<'a> AstLowering<'a> {
                     if !bindings.iter().any(|(v, _)| *v == var) {
                         bindings.push((var, ty));
                     }
+                }
+            }
+        }
+        // The expected result fills variables absent from the source arguments.
+        if let Some(expected) = expected_result {
+            let mut from_result = Vec::new();
+            self.unify_type_args(return_type, expected, 0, &mut from_result);
+            for (var, ty) in from_result {
+                if !bindings.iter().any(|(bound, _)| *bound == var) {
+                    bindings.push((var, ty));
                 }
             }
         }
@@ -5825,8 +5945,16 @@ impl<'a> AstLowering<'a> {
                 TypeKind::Class {
                     symbol_id: ds,
                     type_args: da,
+                }
+                | TypeKind::Interface {
+                    symbol_id: ds,
+                    type_args: da,
                 },
                 TypeKind::Class {
+                    symbol_id: as_,
+                    type_args: aa,
+                }
+                | TypeKind::Interface {
                     symbol_id: as_,
                     type_args: aa,
                 },

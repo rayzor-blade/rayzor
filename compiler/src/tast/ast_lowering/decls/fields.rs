@@ -265,7 +265,10 @@ impl<'a> AstLowering<'a> {
             };
         // An initializer takes the declared type as a `var` does: an Int
         // initializing a Float field is that Float.
-        let initializer = initializer.map(|init| self.retype_literal_to(init, field_type));
+        let initializer = initializer.map(|init| {
+            let init = self.coerce_arg_via_abstract_from(init, Some(field_type));
+            self.retype_literal_to(init, field_type)
+        });
 
         let interned_field_name = self.context.intern_string(&field_name);
         // A field pre-registered for forward references keeps its symbol: a

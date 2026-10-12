@@ -505,6 +505,10 @@ register_symbol!(
     crate::type_system::haxe_enum_nullary_cell
 );
 register_symbol!(
+    "haxe_enum_register_parameter",
+    crate::type_system::haxe_enum_register_parameter
+);
+register_symbol!(
     "haxe_object_is_instance",
     crate::type_system::haxe_object_is_instance
 );

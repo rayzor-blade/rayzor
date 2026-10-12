@@ -612,6 +612,31 @@ impl CompilationUnit {
         // into load_imports_efficiently where they become failed path guesses.
         deps.retain(|d| !Self::is_bare_stdtypes_prelude_dependency(d));
 
+        // Subtype and alias imports bind names that must not load ambient namesakes.
+        let imported_names: BTreeSet<_> = ast
+            .imports
+            .iter()
+            .filter_map(|import| match &import.mode {
+                parser::ImportMode::Normal
+                    if import.path.iter().rev().nth(1).is_some_and(|part| {
+                        part.chars().next().is_some_and(char::is_uppercase)
+                    }) =>
+                {
+                    import.path.last().cloned()
+                }
+                parser::ImportMode::Alias(name) | parser::ImportMode::Field(name) => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let explicit_dependencies: BTreeSet<_> = ast
+            .imports
+            .iter()
+            .flat_map(Self::import_dependencies)
+            .collect();
+        deps.retain(|d| !imported_names.contains(d) || explicit_dependencies.contains(d));
+
         // A leading type name is package-relative, including module subtypes
         // such as `Helpers.Worker`; lowercase package paths are absolute.
         if let Some(package) = &ast.package {

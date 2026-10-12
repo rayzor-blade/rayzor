@@ -53,6 +53,7 @@ impl<'a> HirToMirContext<'a> {
             | Some(TypeKind::Array { .. })
             | Some(TypeKind::Anonymous { .. })
             | Some(TypeKind::Function { .. })
+            | Some(TypeKind::TypeParameter { .. })
             | Some(TypeKind::Enum { .. }) => self.maybe_unbox_value(value, source, target),
             _ => None,
         }
@@ -458,16 +459,8 @@ impl<'a> HirToMirContext<'a> {
             }
             (Some(TypeKind::Dynamic), Some(TypeKind::TypeParameter { .. }))
             | (Some(TypeKind::Optional { .. }), Some(TypeKind::TypeParameter { .. })) => {
-                // An erased T carries raw bits: the scalar payload, else the address.
                 let value_reg = self.lower_expression(expr)?;
-                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                let unbox_id = self.get_or_register_extern_function(
-                    "haxe_unbox_scalar_or_addr",
-                    vec![ptr_u8],
-                    IrType::I64,
-                );
-                self.builder
-                    .build_call_direct(unbox_id, vec![value_reg], IrType::I64)
+                self.unbox_generic_value(value_reg, *target)
             }
             // Dynamic → non-primitive type: runtime downcast (null on failure)
             (Some(TypeKind::Dynamic), _) if !matches!(&target_kind, Some(TypeKind::Dynamic)) => {

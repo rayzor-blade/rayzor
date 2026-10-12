@@ -273,6 +273,9 @@ impl<'a> HirToMirContext<'a> {
 
                 let mut assigned_value = new_value;
                 match &operand.kind {
+                    HirExprKind::This => {
+                        self.symbol_map.insert(SymbolId::from_raw(0), new_value);
+                    }
                     HirExprKind::Variable { symbol, .. } => {
                         // A bare static field lives in GLOBAL storage, not an
                         // SSA local, so the write must go through the global.

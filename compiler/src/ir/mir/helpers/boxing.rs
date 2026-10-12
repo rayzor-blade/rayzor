@@ -1286,6 +1286,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         match &target_kind_cloned {
+            Some(TypeKind::TypeParameter { .. }) => self.unbox_generic_value(value, target_ty),
             // Value types (need to extract from heap)
             Some(TypeKind::Int) => {
                 debug!("[UNBOXING] Auto-unboxing Dynamic to Int using haxe_unbox_int_ptr");

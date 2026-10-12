@@ -85,6 +85,38 @@ pub const TYPE_ARRAY: TypeId = TypeId(7);
 static ARRAY_BOXES: RwLock<Option<HashMap<usize, (usize, u64)>>> = RwLock::new(None);
 static ENUM_ARRAY_TYPES: RwLock<Option<HashMap<usize, (u32, bool)>>> = RwLock::new(None);
 static ENUM_VALUE_TYPES: RwLock<Option<HashMap<usize, u32>>> = RwLock::new(None);
+type EnumValueParameters = HashMap<usize, Vec<Option<usize>>>;
+static ENUM_VALUE_PARAMETERS: RwLock<Option<EnumValueParameters>> = RwLock::new(None);
+
+/// An enum cell retains the concrete boxes of its immutable parameters.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_enum_register_parameter(cell: *mut u8, index: i32, value: *mut u8) {
+    let Ok(index) = usize::try_from(index) else {
+        return;
+    };
+    if cell.is_null() {
+        return;
+    }
+    let mut parameters = ENUM_VALUE_PARAMETERS.write().unwrap();
+    let values = parameters
+        .get_or_insert_with(HashMap::new)
+        .entry(cell as usize)
+        .or_default();
+    values.resize(values.len().max(index + 1), None);
+    values[index] = Some(value as usize);
+}
+
+fn boxed_enum_parameter(cell: *const u8, index: usize) -> Option<*mut u8> {
+    ENUM_VALUE_PARAMETERS
+        .read()
+        .unwrap()
+        .as_ref()?
+        .get(&(cell as usize))?
+        .get(index)
+        .copied()
+        .flatten()
+        .map(|value| value as *mut u8)
+}
 
 /// Record a runtime-built enum cell's enum, and stamp it into the cell's pad
 /// word as compiled constructors do.
@@ -398,7 +430,7 @@ static ENUM_NAME_REGISTRY: RwLock<Option<HashMap<String, u32>>> = RwLock::new(No
 /// class type_id -> set of interface type_ids implemented by that class.
 static INTERFACE_IMPL_REGISTRY: RwLock<Option<HashMap<u32, HashSet<u32>>>> = RwLock::new(None);
 
-fn stable_class_type_id(name: &str) -> u32 {
+pub(crate) fn stable_class_type_id(name: &str) -> u32 {
     let mut hash = 0x811c9dc5u32;
     for byte in name.bytes() {
         hash ^= byte as u32;
@@ -955,6 +987,14 @@ pub extern "C" fn haxe_type_get_class_fields(type_id: i64) -> *mut u8 {
     unsafe { build_string_array(&[]) }
 }
 
+pub(crate) fn reflect_instance_fields(type_id: u32) -> *mut u8 {
+    let fields = get_type_info(TypeId(type_id))
+        .and_then(|info| info.class_info)
+        .map(|info| info.instance_fields)
+        .unwrap_or(&[]);
+    unsafe { build_string_array(fields) }
+}
+
 /// Type.resolveClass(name) -> Class<Dynamic> (returns type_id, or -1 if not found)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_resolve_class(name_ptr: *mut u8) -> i64 {
@@ -1361,6 +1401,25 @@ pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32, string_params:
         for i in 0..variant_a.param_count {
             let va = *(ptr_a.add(8 + i * 8) as *const i64);
             let vb = *(ptr_b.add(8 + i * 8) as *const i64);
+            if let (Some(a), Some(b)) = (
+                boxed_enum_parameter(ptr_a, i),
+                boxed_enum_parameter(ptr_b, i),
+            ) {
+                let nested = |value| {
+                    dynamic_value_if_boxed(value)
+                        .and_then(|d| enum_box_slot(&d).map(|slot| (d.type_id.0, slot)))
+                };
+                let equal = match (nested(a), nested(b)) {
+                    (Some((a_type, a_value)), Some((b_type, b_value))) => {
+                        a_type == b_type && haxe_type_enum_eq(a_value, b_value, a_type as i32, 0)
+                    }
+                    _ => haxe_dynamic_equals(a, b),
+                };
+                if !equal {
+                    return false;
+                }
+                continue;
+            }
             let slot = first_slot + i;
             let param_type = if slot < 64 && string_params & (1i64 << slot) != 0 {
                 ParamType::String
@@ -1571,6 +1630,18 @@ fn create_enum_value_from_slots(
             }
             let field_ptr = ptr.add(8 + i * 8);
             *(field_ptr as *mut i64) = val;
+            let slot_box = dynamic_box_at(slot as *mut u8).filter(|d| {
+                stamped_enum_cell_type(slot).is_none()
+                    && (d.tag_is_builtin() || is_reference_box(slot as *mut u8))
+            });
+            let boxed_parameter = match slot_box {
+                Some(_) => slot as *mut u8,
+                None => box_class_field_as_dynamic(
+                    val as u64,
+                    param_types.get(i).copied().unwrap_or(ParamType::Dynamic),
+                ),
+            };
+            haxe_enum_register_parameter(ptr, i as i32, boxed_parameter);
         }
 
         ptr as i64
@@ -1902,6 +1973,10 @@ pub extern "C" fn haxe_enum_get_parameters(
         let tag = *(ptr as *const i32) as i64;
         if let Some(variant_info) = get_enum_variant_info(TypeId(type_id), tag) {
             for i in 0..variant_info.param_count {
+                if let Some(boxed) = boxed_enum_parameter(ptr, i) {
+                    crate::haxe_array::haxe_array_push_i64(arr, boxed as i64);
+                    continue;
+                }
                 let field_ptr = ptr.add(8 + i * 8);
                 let raw_val = *(field_ptr as *const i64);
                 let param_type = variant_info
@@ -2325,6 +2400,17 @@ fn format_enum_boxed(type_id: u32, ptr: *const u8) -> String {
         for i in 0..variant_info.param_count {
             if i > 0 {
                 out.push(',');
+            }
+            if let Some(boxed) = boxed_enum_parameter(ptr, i) {
+                let text = haxe_std_string_ptr(boxed);
+                match text.as_ref() {
+                    Some(text) if !text.ptr.is_null() => {
+                        let bytes = std::slice::from_raw_parts(text.ptr as *const u8, text.len);
+                        out.push_str(&String::from_utf8_lossy(bytes));
+                    }
+                    _ => out.push_str("null"),
+                }
+                continue;
             }
             let field_ptr = ptr.add(8 + i * 8);
             let param_type = variant_info
@@ -3619,6 +3705,11 @@ pub extern "C" fn haxe_unbox_int_ptr(ptr: *mut u8) -> i64 {
     if ptr.is_null() {
         return 0;
     }
+    if is_raw_class_instance(ptr)
+        && unsafe { *(ptr as *const u32) } == stable_class_type_id("haxe.___Int64")
+    {
+        return unsafe { int64_from_object(ptr) };
+    }
     unsafe {
         let dynamic_ptr = ptr as *const DynamicValue;
         let dynamic = *dynamic_ptr;
@@ -3755,7 +3846,7 @@ pub extern "C" fn haxe_unbox_erased_return(ptr: *mut u8) -> i64 {
     }
     if let Some(d) = dynamic_box_at(ptr) {
         if is_reference_box(ptr) {
-            return d.value_ptr as i64;
+            return boxed_integer_value(d).unwrap_or(d.value_ptr as i64);
         }
         if d.type_id == TYPE_INT || d.type_id == TYPE_BOOL {
             return haxe_unbox_int(d);
@@ -5271,6 +5362,34 @@ mod value_tag_tests {
     use super::*;
 
     #[test]
+    fn reflected_generic_enum_parameters_keep_their_concrete_boxes() {
+        let type_id = 61_301;
+        register_enum_from_mir(
+            type_id,
+            "CapturedParameter",
+            &[("Payload".to_owned(), 1, vec![ParamType::Int])],
+        );
+        let make = |text: &str| {
+            let string = unsafe { alloc_haxe_string(text) };
+            let boxed = haxe_box_haxestring_ptr(string);
+            let cell = create_enum_value_from_slots(0, 1, &[ParamType::Int], &[boxed as i64], true);
+            register_reflected_enum_value(cell, type_id);
+            (cell, boxed)
+        };
+        let (a, boxed) = make("hello");
+        let (b, _) = make("hello");
+        let (c, _) = make("other");
+        assert_eq!(format_enum_boxed(type_id, a as *const u8), "Payload(hello)");
+        assert!(haxe_type_enum_eq(a, b, type_id as i32, 0));
+        assert!(!haxe_type_enum_eq(a, c, type_id as i32, 0));
+        let parameters = haxe_enum_get_parameters(type_id, a, 1);
+        assert_eq!(
+            crate::haxe_array::haxe_array_get_i64(parameters, 0),
+            boxed as i64
+        );
+    }
+
+    #[test]
     fn erased_reference_boxing_preserves_function_boxes() {
         let mut closure = [0i64; 2];
         let boxed = haxe_box_function_ptr(closure.as_mut_ptr().cast());
@@ -5311,6 +5430,25 @@ mod value_tag_tests {
     #[test]
     fn erased_return_opens_scalar_and_reference_boxes() {
         assert_eq!(haxe_unbox_erased_return(haxe_box_int_ptr(-7)), -7);
+        for value in [1, 0x1_ffff_ffff, -0x8000_0001] {
+            assert_eq!(haxe_unbox_erased_return(haxe_box_int64_ptr(value)), value);
+        }
+        let type_id = stable_class_type_id("haxe.___Int64");
+        register_class_from_mir(
+            type_id,
+            "haxe.___Int64",
+            None,
+            &["high".to_owned(), "low".to_owned()],
+            &[ParamType::Int, ParamType::Int],
+            &[],
+        );
+        let mut native_integer = [type_id as i64, 1, -1];
+        let native_pointer = native_integer.as_mut_ptr().cast::<u8>();
+        assert_eq!(
+            haxe_unbox_erased_return(native_pointer),
+            native_pointer as i64
+        );
+        assert_eq!(haxe_unbox_int_ptr(native_pointer), 0x1_ffff_ffff);
         assert_eq!(haxe_unbox_erased_return(haxe_box_bool_ptr(true)), 1);
         assert_eq!(
             haxe_unbox_erased_return(haxe_box_float_ptr(1.5)),

@@ -1261,16 +1261,6 @@ impl<'a> AstLowering<'a> {
                         .collect(),
                     None => arg_exprs,
                 };
-                if params.is_empty()
-                    && let Some(built) = self.multitype_construction(
-                        base_class_type_id,
-                        &arg_exprs,
-                        self.context.span_to_location(&expression.span),
-                    )
-                {
-                    return Ok(built);
-                }
-
                 // If the call site omitted explicit `<...>` params (e.g.
                 // `var m:Map<String,Int> = new Map();`), borrow them from
                 // the surrounding `expected_new_type_hint` when the hint
@@ -1552,6 +1542,14 @@ impl<'a> AstLowering<'a> {
                 // memory/feedback_no_silent_dispatch_fallthrough.md.
                 let (final_class_type, final_type_args, final_class_name) =
                     self.maybe_resolve_multitype_map(actual_class_type, type_args, type_path);
+
+                if let Some(built) = self.multitype_construction(
+                    final_class_type,
+                    &arg_exprs,
+                    self.context.span_to_location(&expression.span),
+                ) {
+                    return Ok(built);
+                }
 
                 if let Some(underlying) = self.forwarded_constructor_type(final_class_type) {
                     let (type_arguments, builtin_name) = {

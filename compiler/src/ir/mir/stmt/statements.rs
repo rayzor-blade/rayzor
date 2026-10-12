@@ -1222,6 +1222,14 @@ impl<'a> HirToMirContext<'a> {
                                 return Some(boxed);
                             }
                         }
+                        // A generic return consumes a Dynamic box according to T.
+                        if self
+                            .resolve_type_param_name(fn_ret_ty)
+                            .is_some_and(|name| self.current_type_param_names().contains(&name))
+                            && matches!(self.builder.get_register_type(val), Some(IrType::Ptr(_)))
+                        {
+                            return self.unbox_generic_value(val, fn_ret_ty);
+                        }
                         // Inverse: a `Null<T>` expression (boxed `DynamicValue*`) returned
                         // from a `:T` function must be unboxed, or the caller reads the box
                         // pointer's address as the value.

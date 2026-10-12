@@ -215,6 +215,7 @@ impl<'a> HirToMirContext<'a> {
             let arg_result = self.lower_expression(arg);
             self.let_target_type_hint = prev_target;
             let mut arg_reg = arg_result?;
+            let original_arg_reg = arg_reg;
             if let Some((target_ir, target_ty)) = field_types.get(i) {
                 // Concrete fields unbox Dynamic inputs; erased fields keep raw slots.
                 arg_reg = self
@@ -224,6 +225,58 @@ impl<'a> HirToMirContext<'a> {
                 let source_ir = self.builder.get_register_type(arg_reg)?;
                 if *target_ir == IrType::F64 && source_ir.is_integer() {
                     arg_reg = self.builder.build_cast(arg_reg, source_ir, IrType::F64)?;
+                }
+            }
+            let parameter_ty = field_types.get(i).map_or(arg.ty, |(_, ty)| *ty);
+            let unbound_parameter = self
+                .resolve_type_param_name(parameter_ty)
+                .is_some_and(|name| !self.current_type_param_names().contains(&name));
+            let (parameter_reg, parameter_ty) = if unbound_parameter {
+                (original_arg_reg, arg.ty)
+            } else {
+                (arg_reg, parameter_ty)
+            };
+            let parameter_ty = self.resolve_storage_type(parameter_ty);
+            let parameter_ty = match self.type_table.get(parameter_ty).map(|ty| &ty.kind) {
+                Some(TypeKind::Optional { inner_type })
+                    if !self.optional_inner_is_boxable_primitive(*inner_type) =>
+                {
+                    *inner_type
+                }
+                _ => parameter_ty,
+            };
+            let unresolved_parameter = self
+                .resolve_type_param_name(parameter_ty)
+                .is_some_and(|name| !self.current_type_param_names().contains(&name));
+            if !unresolved_parameter
+                && let Some(parameter_box) = self.maybe_box_value(
+                    parameter_reg,
+                    parameter_ty,
+                    self.type_table.dynamic_type(),
+                )
+            {
+                if parameter_box != parameter_reg
+                    || matches!(
+                        self.type_table.get(parameter_ty).map(|ty| &ty.kind),
+                        Some(TypeKind::Dynamic | TypeKind::Optional { .. })
+                    ) && matches!(
+                        self.builder.get_register_type(parameter_box),
+                        Some(IrType::Ptr(_))
+                    )
+                {
+                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                    let parameter_box = self.coerce_reg_to(parameter_box, &ptr_u8)?;
+                    let parameter_index = self.builder.build_const(IrValue::I32(i as i32))?;
+                    let record = self.get_or_register_extern_function(
+                        "haxe_enum_register_parameter",
+                        vec![ptr_u8.clone(), IrType::I32, ptr_u8],
+                        IrType::Void,
+                    );
+                    self.builder.build_call_direct(
+                        record,
+                        vec![ptr, parameter_index, parameter_box],
+                        IrType::Void,
+                    );
                 }
             }
             arg_reg = self.coerce_reg_to(arg_reg, &IrType::I64)?;

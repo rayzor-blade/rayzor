@@ -644,10 +644,7 @@ pub extern "C" fn haxe_reflect_delete_field(obj: *mut u8, field: *mut u8) -> boo
 
 /// Reflect.fields(obj) -> Array<String>
 ///
-/// Returns the field names of the given object. For class instances
-/// this delegates to `haxe_type_get_instance_fields` (so the result
-/// includes inherited fields, matching Haxe semantics). For anon
-/// objects it delegates to `rayzor_anon_fields`.
+/// Returns stored instance fields, including inherited fields, or anon fields.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_fields(obj: *mut u8) -> *mut u8 {
     if obj.is_null() {
@@ -671,7 +668,7 @@ pub extern "C" fn haxe_reflect_fields(obj: *mut u8) -> *mut u8 {
         let actual = unwrap_anon_dynamic(obj);
         let type_id_lo = read_class_type_id(actual);
         if is_class_type(type_id_lo) {
-            return crate::type_system::haxe_type_get_instance_fields(type_id_lo as i64);
+            return crate::type_system::reflect_instance_fields(type_id_lo);
         }
         anon_object::rayzor_anon_fields(actual)
     }
@@ -1188,20 +1185,6 @@ pub extern "C" fn haxe_reflect_is_enum_value(v: *mut u8) -> bool {
 // Type API
 // ============================================================================
 
-/// Allocate a boxed enum payload with no constructor parameters.
-/// Layout: [tag:i32][pad:i32] => returned as i64 pointer.
-unsafe fn alloc_boxed_enum_tag_only(tag: i32) -> i64 {
-    unsafe {
-        let ptr = libc::malloc(8) as *mut u8;
-        if ptr.is_null() {
-            return 0;
-        }
-        *(ptr as *mut i32) = tag;
-        *((ptr as *mut i32).add(1)) = 0;
-        ptr as i64
-    }
-}
-
 /// Allocate a boxed enum payload with one i64 constructor parameter.
 /// Layout: [tag:i32][pad:i32][field0:i64] => returned as i64 pointer.
 unsafe fn alloc_boxed_enum_with_i64(tag: i32, field0: i64) -> i64 {
@@ -1212,13 +1195,17 @@ unsafe fn alloc_boxed_enum_with_i64(tag: i32, field0: i64) -> i64 {
         }
         std::ptr::write_bytes(ptr, 0, 16);
         *(ptr as *mut i32) = tag;
+        *(ptr.add(4) as *mut u32) = crate::type_system::stable_class_type_id("enum:ValueType");
         *(ptr.add(8) as *mut i64) = field0;
         ptr as i64
     }
 }
 
 fn valuetype_tag_only(tag: i32) -> i64 {
-    unsafe { alloc_boxed_enum_tag_only(tag) }
+    crate::type_system::haxe_enum_nullary_cell(
+        crate::type_system::stable_class_type_id("enum:ValueType"),
+        tag,
+    ) as i64
 }
 
 fn valuetype_tclass(type_id: i64) -> i64 {
