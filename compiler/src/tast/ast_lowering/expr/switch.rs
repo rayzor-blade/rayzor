@@ -15,6 +15,118 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    fn collect_case_type_bindings(
+        &mut self,
+        pattern: &parser::Pattern,
+        subject: &parser::Expr,
+        bindings: &mut Vec<(SymbolId, TypeId)>,
+    ) -> Result<(), LoweringError> {
+        use parser::Pattern;
+        match pattern {
+            Pattern::Const(value) if matches!(value.kind, ExprKind::Object(_)) => {
+                if let Some(pattern) = Self::pattern_from_expr(value) {
+                    self.collect_case_type_bindings(&pattern, subject, bindings)?;
+                }
+            }
+            Pattern::Array(patterns) => {
+                if let ExprKind::Array(items) = &subject.kind {
+                    for (pattern, item) in patterns.iter().zip(items) {
+                        self.collect_case_type_bindings(pattern, item, bindings)?;
+                    }
+                }
+            }
+            Pattern::Object { fields, .. } => {
+                for (field, pattern) in fields {
+                    let accessor = Expr {
+                        kind: ExprKind::Field {
+                            expr: Box::new(subject.clone()),
+                            field: field.clone(),
+                            is_optional: false,
+                        },
+                        span: subject.span,
+                    };
+                    self.collect_case_type_bindings(pattern, &accessor, bindings)?;
+                }
+            }
+            Pattern::Var(name)
+            | Pattern::Constructor {
+                path: parser::TypePath { name, .. },
+                ..
+            } => {
+                let typed = self.lower_expression(subject)?;
+                let name = self.context.intern_string(name);
+                if let Some(constructor) = self.resolve_enum_constructor_of(typed.expr_type, name) {
+                    let declared = self
+                        .context
+                        .symbol_table
+                        .get_symbol(constructor)
+                        .unwrap()
+                        .type_id;
+                    let result = match self
+                        .context
+                        .type_table
+                        .borrow()
+                        .get(declared)
+                        .map(|t| &t.kind)
+                    {
+                        Some(TypeKind::Function { return_type, .. }) => *return_type,
+                        _ => declared,
+                    };
+                    let subject_type = self.substitute_alias_args(typed.expr_type, bindings);
+                    let mut constraints = Vec::new();
+                    self.unify_type_args_inner(subject_type, result, 0, &mut constraints, false);
+                    for (parameter, actual) in constraints {
+                        if !bindings.iter().any(|(bound, _)| *bound == parameter) {
+                            bindings.push((parameter, actual));
+                        }
+                    }
+                }
+            }
+            Pattern::Or(alternatives) => {
+                let mut common = None::<Vec<(SymbolId, TypeId)>>;
+                for alternative in alternatives {
+                    let mut branch = bindings.clone();
+                    self.collect_case_type_bindings(alternative, subject, &mut branch)?;
+                    match &mut common {
+                        Some(common) => common.retain(|binding| branch.contains(binding)),
+                        None => common = Some(branch),
+                    }
+                }
+                if let Some(common) = common {
+                    *bindings = common;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) fn lower_refined_switch_case(
+        &mut self,
+        case: &parser::Case,
+        subject: &parser::Expr,
+        as_expression: bool,
+    ) -> Result<TypedSwitchCase, LoweringError> {
+        let mut bindings = self.context.case_type_bindings.clone();
+        if case.patterns.len() == 1 {
+            self.collect_case_type_bindings(&case.patterns[0], subject, &mut bindings)?;
+        }
+        let saved_bindings = std::mem::replace(&mut self.context.case_type_bindings, bindings);
+        let saved_scope = self.context.current_scope;
+        let saved_subject = self.context.switch_discriminant_type;
+        self.context.switch_discriminant_type = saved_subject
+            .map(|ty| self.substitute_alias_args(ty, &self.context.case_type_bindings));
+        let result = if as_expression {
+            self.lower_switch_case_expression(case, subject)
+        } else {
+            self.lower_switch_case(case, subject)
+        };
+        self.context.case_type_bindings = saved_bindings;
+        self.context.current_scope = saved_scope;
+        self.context.switch_discriminant_type = saved_subject;
+        result
+    }
+
     /// The wildcard-plus-guard case an extractor becomes.
     fn build_extractor_case(
         &mut self,

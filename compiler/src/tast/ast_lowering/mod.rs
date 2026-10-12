@@ -1379,6 +1379,8 @@ pub struct LoweringContext<'a> {
     pub current_scope: ScopeId,
     pub errors: Vec<LoweringError>,
     pub type_parameter_stack: Vec<BTreeMap<InternedString, TypeId>>,
+    /// Pattern constraints apply only while lowering their case.
+    pub case_type_bindings: Vec<(SymbolId, TypeId)>,
     pub span_converter: Option<super::span_conversion::SpanConverter>,
     /// Stack of class symbols we're currently inside (for method resolution)
     pub class_context_stack: Vec<SymbolId>,
@@ -1435,6 +1437,7 @@ impl<'a> LoweringContext<'a> {
             import_resolver,
             current_package: None,
             switch_discriminant_type: None,
+            case_type_bindings: Vec::new(),
             expected_new_type_hint: None,
             expected_return_type: None,
         }

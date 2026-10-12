@@ -457,6 +457,7 @@ impl AstLowering<'_> {
         let package = self.context.current_package;
         let classes = std::mem::take(&mut self.context.class_context_stack);
         let type_params = std::mem::take(&mut self.context.type_parameter_stack);
+        let case_bindings = std::mem::take(&mut self.context.case_type_bindings);
         let return_type = self.context.expected_return_type.take();
         let new_hint = self.context.expected_new_type_hint.take();
         let switch_type = self.context.switch_discriminant_type.take();
@@ -477,6 +478,7 @@ impl AstLowering<'_> {
         self.context.current_package = package;
         self.context.class_context_stack = classes;
         self.context.type_parameter_stack = type_params;
+        self.context.case_type_bindings = case_bindings;
         self.context.expected_return_type = return_type;
         self.context.expected_new_type_hint = new_hint;
         self.context.switch_discriminant_type = switch_type;

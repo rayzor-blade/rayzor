@@ -369,6 +369,12 @@ impl<'a> HirToMirContext<'a> {
             if target_is_type_param && matches!(from_type, IrType::F64 | IrType::F32) {
                 return self.builder.build_bitcast(value_reg, to_type);
             }
+            if matches!(
+                self.type_table.get(expr.ty).map(|t| &t.kind),
+                Some(TypeKind::TypeParameter { .. })
+            ) {
+                return self.coerce_reg_to(value_reg, &to_type);
+            }
             return self.builder.build_cast(value_reg, from_type, to_type);
         }
 

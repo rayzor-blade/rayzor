@@ -291,7 +291,27 @@ impl<'a> AstLowering<'a> {
         }
         let result = self
             .lower_expression_unnested(expression)
-            .and_then(|typed| {
+            .and_then(|mut typed| {
+                let refined =
+                    self.substitute_alias_args(typed.expr_type, &self.context.case_type_bindings);
+                if refined != typed.expr_type
+                    && matches!(
+                        self.context
+                            .type_table
+                            .borrow()
+                            .get(typed.expr_type)
+                            .map(|ty| &ty.kind),
+                        Some(TypeKind::TypeParameter { .. })
+                    )
+                {
+                    // Retain the erased source type for the case's value cast.
+                    typed.kind = TypedExpressionKind::Cast {
+                        expression: Box::new(typed.clone()),
+                        target_type: refined,
+                        cast_kind: CastKind::Unsafe,
+                    };
+                }
+                typed.expr_type = refined;
                 if self.macro_probe_depth > 0 {
                     self.validate_macro_probe_expression(&typed)?;
                 }
@@ -2040,7 +2060,7 @@ impl<'a> AstLowering<'a> {
                     // Lower as switch expression
                     let mut typed_cases = Vec::with_capacity(cases.len());
                     for case in cases {
-                        let typed_case = self.lower_switch_case_expression(case, expr)?;
+                        let typed_case = self.lower_refined_switch_case(case, expr, true)?;
                         typed_cases.push(typed_case);
                     }
 
@@ -2061,7 +2081,7 @@ impl<'a> AstLowering<'a> {
                     // For now, we'll lower it as a switch expression but mark it as void type
                     let mut typed_cases = Vec::with_capacity(cases.len());
                     for case in cases {
-                        let typed_case = self.lower_switch_case(case, expr)?;
+                        let typed_case = self.lower_refined_switch_case(case, expr, false)?;
                         typed_cases.push(typed_case);
                     }
 
