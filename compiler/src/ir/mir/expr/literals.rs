@@ -115,6 +115,23 @@ impl<'a> HirToMirContext<'a> {
         elements: &[HirExpr],
         array_type: TypeId,
     ) -> Option<IrId> {
+        self.lower_array_literal_with_context(elements, array_type, false)
+    }
+
+    pub(crate) fn lower_contextual_array_literal(
+        &mut self,
+        elements: &[HirExpr],
+        array_type: TypeId,
+    ) -> Option<IrId> {
+        self.lower_array_literal_with_context(elements, array_type, true)
+    }
+
+    fn lower_array_literal_with_context(
+        &mut self,
+        elements: &[HirExpr],
+        array_type: TypeId,
+        contextual: bool,
+    ) -> Option<IrId> {
         // Elements of an interface-typed array must be stored as fat pointers,
         // so resolve the element type's interface symbol once up front.
         //
@@ -145,12 +162,8 @@ impl<'a> HirToMirContext<'a> {
         let dynamic_elements = matches!(
             self.type_table.get(array_type).map(|ty| &ty.kind),
             Some(TypeKind::Dynamic)
-        ) || element_type_id.is_some_and(|et| {
-            matches!(
-                self.type_table.get(et).map(|t| &t.kind),
-                Some(TypeKind::Dynamic)
-            ) || self.is_any_type(et)
-        });
+        ) || element_type_id
+            .is_some_and(|et| self.array_element_is_boxed(et));
         // A literal whose elements all carry one concrete Haxe type is
         // homogeneous whatever registers they arrive in (a String literal
         // and `String.fromCharCode(..)` differ as registers, not as values).
@@ -354,6 +367,31 @@ impl<'a> HirToMirContext<'a> {
                                 .filter(|boxed| *boxed != v)
                                 .or_else(|| self.box_scalar_register(v))
                                 .unwrap_or(v)
+                        } else {
+                            v
+                        };
+                        // Concrete slots contain their payload, even when a literal's
+                        // element expression arrives through Dynamic.
+                        let v = if contextual
+                            && !dynamic_elements
+                            && !null_int_elements
+                            && let Some(target) = element_type_id
+                            && !matches!(
+                                self.type_table.get(target).map(|ty| &ty.kind),
+                                Some(TypeKind::TypeParameter { .. })
+                            ) {
+                            let v = self.maybe_box_value(v, storage_ty, target).unwrap_or(v);
+                            let v = self.maybe_unbox_value(v, storage_ty, target).unwrap_or(v);
+                            if matches!(
+                                self.type_table
+                                    .get(self.resolve_storage_type(target))
+                                    .map(|ty| &ty.kind),
+                                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+                            ) {
+                                self.coerce_reg_to(v, &self.convert_type(target))?
+                            } else {
+                                v
+                            }
                         } else {
                             v
                         };

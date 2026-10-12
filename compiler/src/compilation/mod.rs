@@ -1086,6 +1086,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inferred_class_array_keeps_raw_slots() {
+        let source = r#"
+    class Body {
+        public var x:Float;
+        public function new(x:Float) this.x = x;
+        public static function make(x:Float):Body return new Body(x);
+    }
+    class Main {
+        var bodies:Array<Body>;
+        public function new() bodies = [Body.make(1.0), Body.make(2.0)];
+        static function main() {
+            var simulation = new Main();
+            trace(simulation.bodies[0].x);
+        }
+    }
+    "#;
+        let mut unit = CompilationUnit::new(CompilationConfig::default());
+        unit.load_stdlib().expect("stdlib");
+        unit.add_file(source, "Main.hx").expect("source");
+        unit.lower_to_tast().expect("lowering");
+        let modules = unit.get_mir_modules();
+        let module = modules
+            .iter()
+            .find(|module| {
+                module
+                    .functions
+                    .values()
+                    .any(|function| function.qualified_name.as_deref() == Some("Main.new"))
+            })
+            .expect("Main constructor is lowered");
+        let constructor = module
+            .functions
+            .values()
+            .find(|function| function.qualified_name.as_deref() == Some("Main.new"))
+            .unwrap();
+        for instruction in constructor
+            .cfg
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+        {
+            if let crate::ir::IrInstruction::CallDirect { func_id, .. } = instruction {
+                let name = module
+                    .functions
+                    .get(func_id)
+                    .map(|callee| callee.name.as_str())
+                    .or_else(|| {
+                        module
+                            .extern_functions
+                            .get(func_id)
+                            .map(|callee| callee.name.as_str())
+                    })
+                    .expect("constructor callee is declared");
+                assert_ne!(
+                    name, "haxe_array_init_element_tag",
+                    "concrete class pointers must not be marked as boxed slots"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn explicit_imports_do_not_load_ambient_namesakes() {
         let mut unit = CompilationUnit::new(CompilationConfig::default());
         let ast = unit

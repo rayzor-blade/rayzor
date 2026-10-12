@@ -110,10 +110,8 @@ impl<'a> HirToMirContext<'a> {
                         None
                     };
 
-                    // An array literal's `expr.ty` is inferred from its FIRST element, so lower
-                    // it against the declared `Array<Interface>` slot type instead to get the
-                    // per-element fat-pointer wrap. Erased-generic returns need the declared
-                    // type as well, to pick the right unbox.
+                    // The declared slot type determines a literal's array layout.
+                    // Generic call results also use it to select their unbox.
                     let prev_let_hint = self.let_target_type_hint.take();
                     if matches!(&init_expr.kind, HirExprKind::Call { .. }) {
                         self.let_target_type_hint = *type_hint;
@@ -121,35 +119,12 @@ impl<'a> HirToMirContext<'a> {
                     let value = if let (HirExprKind::Array { elements }, Some(target_ty)) =
                         (&init_expr.kind, type_hint)
                     {
-                        let target_is_iface_array = {
-                            let type_table = self.type_table;
-                            type_table.get(*target_ty).and_then(|t| match &t.kind {
-                                TypeKind::Array { element_type } => {
-                                    self.get_interface_symbol(*element_type)
-                                }
-                                _ => None,
-                            })
-                        };
-                        let target_is_dynamic_array = matches!(
-                            self.type_table.get(*target_ty).map(|t| &t.kind),
-                            Some(TypeKind::Array { element_type })
-                                if matches!(
-                                    self.type_table.get(*element_type).map(|t| &t.kind),
-                                    Some(TypeKind::Dynamic)
-                                ) || self.is_any_type(*element_type)
-                        );
-                        // An `Array<Null<Int>>` target stores its elements inline,
-                        // whatever the literal's first element made its own type.
-                        let target_is_null_int_array = matches!(
-                            self.type_table.get(*target_ty).map(|t| &t.kind),
-                            Some(TypeKind::Array { element_type })
-                                if self.is_null_int_type(*element_type)
-                        );
-                        if target_is_iface_array.is_some()
-                            || target_is_dynamic_array
-                            || target_is_null_int_array
-                        {
-                            self.lower_array_literal(elements, *target_ty)
+                        let target_ty = self.resolve_storage_type(*target_ty);
+                        if matches!(
+                            self.type_table.get(target_ty).map(|t| &t.kind),
+                            Some(TypeKind::Array { .. })
+                        ) {
+                            self.lower_contextual_array_literal(elements, target_ty)
                         } else {
                             self.lower_expression(init_expr)
                         }
@@ -719,7 +694,20 @@ impl<'a> HirToMirContext<'a> {
                 }
                 // `@:bypassAccessor` on an assignment reaches its target only.
                 let bypass = std::mem::replace(&mut self.bypass_accessors, false);
-                let rhs_value = self.lower_expression(rhs);
+                let rhs_value = match (&rhs.kind, slot_ty) {
+                    (HirExprKind::Array { elements }, Some(target_ty)) if op.is_none() => {
+                        let target_ty = self.resolve_storage_type(target_ty);
+                        if matches!(
+                            self.type_table.get(target_ty).map(|t| &t.kind),
+                            Some(TypeKind::Array { .. })
+                        ) {
+                            self.lower_contextual_array_literal(elements, target_ty)
+                        } else {
+                            self.lower_expression(rhs)
+                        }
+                    }
+                    _ => self.lower_expression(rhs),
+                };
                 self.bypass_accessors = bypass;
                 self.object_literal_target_ty = prev_anon_target;
                 self.let_target_type_hint = prev_call_target;

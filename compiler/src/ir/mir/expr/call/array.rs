@@ -23,6 +23,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    pub(crate) fn array_element_is_boxed(&self, ty: TypeId) -> bool {
+        self.is_any_type(ty)
+            || self.type_table.get(ty).is_some_and(|ty| match &ty.kind {
+                TypeKind::Dynamic => true,
+                TypeKind::Optional { inner_type } => matches!(
+                    self.type_table.get(*inner_type).map(|ty| &ty.kind),
+                    Some(TypeKind::Float | TypeKind::Bool)
+                ),
+                _ => false,
+            })
+    }
+
     pub(crate) fn array_element_descriptor(&mut self, ty: TypeId) -> Option<(IrId, IrId)> {
         if let Some(name) = self.resolve_type_param_name(ty)
             && self.current_type_param_names().contains(&name)
@@ -56,10 +68,11 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::Array { element_type }) => *element_type,
             _ => return Some(()),
         };
-        if !matches!(
-            self.type_table.get(element).map(|ty| &ty.kind),
-            Some(TypeKind::Dynamic | TypeKind::TypeParameter { .. })
-        ) && !self.is_any_type(element)
+        if !self.array_element_is_boxed(element)
+            && !matches!(
+                self.type_table.get(element).map(|ty| &ty.kind),
+                Some(TypeKind::TypeParameter { .. })
+            )
         {
             return Some(());
         }

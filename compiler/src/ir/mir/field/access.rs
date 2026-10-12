@@ -1416,6 +1416,14 @@ impl<'a> HirToMirContext<'a> {
                 Some(crate::tast::TypeKind::Bool) => (IrType::I64, IrType::Bool),
                 // A Dynamic element is a box: the slot is its address.
                 Some(crate::tast::TypeKind::Dynamic) => (IrType::I64, ptr_u8.clone()),
+                Some(TypeKind::Optional { inner_type })
+                    if matches!(
+                        self.type_table.get(*inner_type).map(|ty| &ty.kind),
+                        Some(TypeKind::Float | TypeKind::Bool)
+                    ) =>
+                {
+                    (IrType::I64, ptr_u8.clone())
+                }
                 Some(crate::tast::TypeKind::Anonymous { .. }) => {
                     (IrType::I64, IrType::Ptr(Box::new(IrType::Void)))
                 }
@@ -1494,12 +1502,7 @@ impl<'a> HirToMirContext<'a> {
         } else {
             value
         };
-        if matches!(
-            self.type_table
-                .get(self.resolve_storage_type(ty))
-                .map(|ty| &ty.kind),
-            Some(TypeKind::Dynamic)
-        ) {
+        if self.array_element_is_boxed(self.resolve_storage_type(ty)) {
             self.boxed_value_regs.insert(value);
         }
         Some(value)
