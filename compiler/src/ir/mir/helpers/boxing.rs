@@ -2379,7 +2379,12 @@ impl<'a> HirToMirContext<'a> {
                 } else {
                     IrType::I64
                 };
-                self.builder.build_cast(int, IrType::I32, wide)
+                let value = self.builder.build_cast(int, IrType::I32, wide)?;
+                if matches!(target, IrType::TypeVar(_)) {
+                    self.builder.build_bitcast(value, target.clone())
+                } else {
+                    Some(value)
+                }
             }
             IrType::F64 | IrType::F32 => {
                 let int = self.builder.build_cast(reg, IrType::NullInt, IrType::I32)?;

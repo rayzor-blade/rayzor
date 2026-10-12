@@ -591,7 +591,7 @@ impl<'a> AstLowering<'a> {
                             drop(type_table);
                             let mut bindings = Vec::new();
                             for (p, a) in params.iter().zip(arguments.iter()) {
-                                self.unify_type_args(*p, a.expr_type, 0, &mut bindings);
+                                self.unify_call_type_args(*p, a.expr_type, &mut bindings);
                             }
                             if bindings.is_empty() {
                                 return Ok(ret);

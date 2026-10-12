@@ -1003,6 +1003,8 @@ impl<'a> HirToMirContext<'a> {
                                 .and_then(|tgt_ir| self.coerce_null_int(value, tgt_ir))
                             {
                                 converted
+                            } else if let Some(tgt_ir @ IrType::TypeVar(_)) = &tgt_ir_opt {
+                                self.coerce_reg_to(value, tgt_ir).unwrap_or(value)
                             } else if let Some(tgt_ir) = tgt_ir_opt {
                                 let val_ir =
                                     self.builder.get_register_type(value).unwrap_or(IrType::I64);
@@ -1228,7 +1230,8 @@ impl<'a> HirToMirContext<'a> {
                             .is_some_and(|name| self.current_type_param_names().contains(&name))
                             && matches!(self.builder.get_register_type(val), Some(IrType::Ptr(_)))
                         {
-                            return self.unbox_generic_value(val, fn_ret_ty);
+                            let raw = self.unbox_generic_value(val, fn_ret_ty)?;
+                            return self.coerce_reg_to(raw, &self.convert_type_arg(fn_ret_ty));
                         }
                         // Inverse: a `Null<T>` expression (boxed `DynamicValue*`) returned
                         // from a `:T` function must be unboxed, or the caller reads the box
@@ -1334,7 +1337,8 @@ impl<'a> HirToMirContext<'a> {
                                 Some(TypeKind::TypeParameter { .. })
                             )
                         {
-                            return Some(self.erase_reflect_compare_arg(val));
+                            let raw = self.erase_reflect_compare_arg(val);
+                            return self.coerce_reg_to(raw, &self.convert_type_arg(fn_ret_ty));
                         }
                         let needs_int_to_float = matches!(
                             (&val_ir, &ret_ir),

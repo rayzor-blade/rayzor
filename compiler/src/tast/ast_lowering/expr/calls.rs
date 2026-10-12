@@ -4490,8 +4490,14 @@ impl<'a> AstLowering<'a> {
         let rebuilt = match kind {
             Some(TypeKind::TypeParameter { symbol_id, .. }) => {
                 return match bindings.iter().find(|(p, _)| *p == symbol_id) {
-                    Some((_, a)) if expand_bindings => {
-                        self.substitute_type_bindings(*a, bindings, expand_bindings)
+                    Some((_, a)) if expand_bindings && *a != ty => {
+                        // A binding expands once along each substitution path.
+                        let remaining: Vec<_> = bindings
+                            .iter()
+                            .copied()
+                            .filter(|(parameter, _)| *parameter != symbol_id)
+                            .collect();
+                        self.substitute_type_bindings(*a, &remaining, expand_bindings)
                     }
                     Some((_, a)) => *a,
                     None => ty,
@@ -5034,13 +5040,13 @@ impl<'a> AstLowering<'a> {
                 let declared = self
                     .class_literal_parameter(*declared, argument)
                     .unwrap_or(*declared);
-                self.unify_type_args(declared, argument.expr_type, 0, &mut bindings);
+                self.unify_call_type_args(declared, argument.expr_type, &mut bindings);
             }
         }
         for (declared, argument) in params.iter().zip(arguments.iter()) {
             if is_function(self, argument.expr_type) {
                 let mut from_function = Vec::new();
-                self.unify_type_args(*declared, argument.expr_type, 0, &mut from_function);
+                self.unify_call_type_args(*declared, argument.expr_type, &mut from_function);
                 for (var, ty) in from_function {
                     if !bindings.iter().any(|(v, _)| *v == var) {
                         bindings.push((var, ty));
@@ -5051,7 +5057,7 @@ impl<'a> AstLowering<'a> {
         // The expected result fills variables absent from the source arguments.
         if let Some(expected) = expected_result {
             let mut from_result = Vec::new();
-            self.unify_type_args(return_type, expected, 0, &mut from_result);
+            self.unify_call_type_args(return_type, expected, &mut from_result);
             for (var, ty) in from_result {
                 if !bindings.iter().any(|(bound, _)| *bound == var) {
                     bindings.push((var, ty));
@@ -5262,6 +5268,21 @@ impl<'a> AstLowering<'a> {
             let Some(&target) = bound.get(symbol_id) else {
                 continue;
             };
+            if matches!(
+                tt.get(target).map(|t| &t.kind),
+                Some(TypeKind::TypeParameter { .. })
+            ) && matches!(
+                tt.get(argument.expr_type).map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            ) {
+                argument.kind = TypedExpressionKind::Cast {
+                    expression: Box::new(argument.clone()),
+                    target_type: target,
+                    cast_kind: CastKind::Implicit,
+                };
+                argument.expr_type = target;
+                continue;
+            }
             // A primitive for a variable bound to an abstract converts the
             // way `(v:A)` does, Int widening first when only Float is accepted.
             if target != argument.expr_type
@@ -5627,6 +5648,30 @@ impl<'a> AstLowering<'a> {
         self.unify_type_args_inner(declared, actual, depth, out, false);
     }
 
+    pub(crate) fn unify_call_type_args(
+        &self,
+        declared: TypeId,
+        actual: TypeId,
+        bindings: &mut Vec<(SymbolId, TypeId)>,
+    ) {
+        self.unify_type_args_inner(declared, actual, 0, bindings, true);
+        // An unbound callee parameter is not a parameter of its caller.
+        bindings.retain(|(_, actual)| {
+            let table = self.context.type_table.borrow();
+            let Some(TypeKind::TypeParameter { symbol_id, .. }) =
+                table.get(*actual).map(|ty| &ty.kind)
+            else {
+                return true;
+            };
+            self.context
+                .symbol_table
+                .get_symbol(*symbol_id)
+                .is_some_and(|symbol| {
+                    self.context.resolve_type_parameter(symbol.name) == Some(*actual)
+                })
+        });
+    }
+
     /// Validate fixed cast-source arguments and fields after generic substitution.
     fn abstract_source_accepts(&self, source: TypeId, actual: TypeId, depth: u32) -> bool {
         if depth > 16 {
@@ -5847,7 +5892,7 @@ impl<'a> AstLowering<'a> {
     /// reaches T, and `Iterable<T>` against `{ iterator: f }` reaches T
     /// through the alias's structure. Depth-bounded because a type can be
     /// cyclic.
-    /// Constructors also preserve bindings to their caller's type parameters.
+    /// Calls and constructors preserve bindings to their caller's type parameters.
     pub(crate) fn unify_type_args_inner(
         &self,
         declared: TypeId,
@@ -6212,7 +6257,7 @@ impl<'a> AstLowering<'a> {
         let mut bindings = Vec::new();
         for (p, a) in params.iter().zip(arguments.iter()) {
             let declared = self.class_literal_parameter(*p, a).unwrap_or(*p);
-            self.unify_type_args(declared, a.expr_type, 0, &mut bindings);
+            self.unify_call_type_args(declared, a.expr_type, &mut bindings);
         }
         // RAYZOR_BIND_TRACE=1 prints each call's parameter bindings.
         if std::env::var_os("RAYZOR_BIND_TRACE").is_some() {

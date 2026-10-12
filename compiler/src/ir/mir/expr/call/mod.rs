@@ -81,37 +81,22 @@ impl<'a> HirToMirContext<'a> {
         let Some(formals) = self.function_param_hir_types.get(&id) else {
             return Vec::new();
         };
+        let mut bindings = BTreeMap::new();
+        for (&formal, actual) in formals.iter().zip(args.iter().skip(usize::from(is_method))) {
+            self.bind_type_parameters(formal, actual.ty, &mut bindings, 0);
+        }
         function
             .signature
             .type_params
             .iter()
             .map(|parameter| {
-                formals
-                    .iter()
-                    .zip(args.iter().skip(usize::from(is_method)))
-                    .find_map(|(formal, actual)| {
-                        let (formal, actual) = match (
-                            self.type_table
-                                .get(self.resolve_through_aliases(*formal))
-                                .map(|ty| &ty.kind),
-                            self.type_table
-                                .get(self.resolve_through_aliases(actual.ty))
-                                .map(|ty| &ty.kind),
-                        ) {
-                            (
-                                Some(TypeKind::Array {
-                                    element_type: formal,
-                                }),
-                                Some(TypeKind::Array {
-                                    element_type: actual,
-                                }),
-                            ) => (*formal, *actual),
-                            _ => (*formal, actual.ty),
-                        };
-                        (self.resolve_type_param_name(formal).as_deref()
-                            == Some(parameter.name.as_str()))
-                        .then(|| self.convert_type_arg(actual))
-                    })
+                bindings.iter().find_map(|(&symbol, &actual)| {
+                    let name = self
+                        .symbol_table
+                        .get_symbol(symbol)
+                        .and_then(|symbol| self.string_interner.get(symbol.name))?;
+                    (name == parameter.name).then(|| self.convert_type_arg(actual))
+                })
             })
             .collect::<Option<Vec<_>>>()
             .unwrap_or_default()

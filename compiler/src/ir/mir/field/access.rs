@@ -2000,6 +2000,10 @@ impl<'a> HirToMirContext<'a> {
         if have == IrType::NullInt && !slot(want) {
             return self.null_int_to_ir(reg, want);
         }
+        if matches!(want, IrType::TypeVar(_)) && !matches!(have, IrType::TypeVar(_)) {
+            let bits = self.erase_reflect_compare_arg(reg);
+            return self.builder.build_bitcast(bits, want.clone());
+        }
         if matches!(have, IrType::Function { .. } | IrType::TypeVar(_))
             || matches!(want, IrType::Function { .. } | IrType::TypeVar(_))
         {

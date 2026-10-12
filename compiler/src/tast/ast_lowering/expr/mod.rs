@@ -1910,10 +1910,17 @@ impl<'a> AstLowering<'a> {
                     self.context.expected_new_type_hint = self.context.expected_return_type;
                     let lowered = self.lower_value_expression(expr);
                     self.context.expected_new_type_hint = prev_hint;
-                    let lowered = match self.context.expected_return_type {
+                    let mut lowered = match self.context.expected_return_type {
                         Some(ret) => self.retype_literal_to(lowered?, ret),
                         None => lowered?,
                     };
+                    // GADT branches refine T independently; their join retains T.
+                    if matches!(lowered.kind, TypedExpressionKind::Switch { .. })
+                        && let Some(ret) = self.context.expected_return_type
+                        && self.context.type_table.borrow().is_type_parameter(ret)
+                    {
+                        lowered.expr_type = ret;
+                    }
                     Some(Box::new(lowered))
                 } else {
                     None

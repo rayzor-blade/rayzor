@@ -51,14 +51,14 @@ impl<'a> HirToMirContext<'a> {
                 self.type_table.get(*result).map(|ty| &ty.kind)
             {
                 for (&declared, &actual) in type_args.iter().zip(actual_args) {
-                    self.bind_payload_type_parameters(declared, actual, &mut bindings, 0);
+                    self.bind_type_parameters(declared, actual, &mut bindings, 0);
                 }
             }
         }
         self.resolve_payload_type_id(field_type_id, &bindings, 0)
     }
 
-    fn bind_payload_type_parameters(
+    pub(crate) fn bind_type_parameters(
         &self,
         declared: TypeId,
         actual: TypeId,
@@ -77,7 +77,7 @@ impl<'a> HirToMirContext<'a> {
         };
         match (&declared.kind, &actual_info.kind) {
             (TypeKind::TypeParameter { symbol_id, .. }, _) => {
-                bindings.insert(*symbol_id, actual);
+                bindings.entry(*symbol_id).or_insert(actual);
             }
             (
                 TypeKind::Array { element_type: left },
@@ -86,7 +86,7 @@ impl<'a> HirToMirContext<'a> {
                 },
             )
             | (TypeKind::Optional { inner_type: left }, TypeKind::Optional { inner_type: right }) => {
-                self.bind_payload_type_parameters(*left, *right, bindings, depth + 1)
+                self.bind_type_parameters(*left, *right, bindings, depth + 1)
             }
             (
                 TypeKind::Class {
@@ -125,7 +125,7 @@ impl<'a> HirToMirContext<'a> {
                 },
             ) if left == right => {
                 for (&left, &right) in declared.iter().zip(actual) {
-                    self.bind_payload_type_parameters(left, right, bindings, depth + 1);
+                    self.bind_type_parameters(left, right, bindings, depth + 1);
                 }
             }
             (
@@ -141,7 +141,7 @@ impl<'a> HirToMirContext<'a> {
                 },
             ) if left == right => {
                 for (&left, &right) in declared.iter().zip(actual) {
-                    self.bind_payload_type_parameters(left, right, bindings, depth + 1);
+                    self.bind_type_parameters(left, right, bindings, depth + 1);
                 }
             }
             _ => {}
