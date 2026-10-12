@@ -717,6 +717,20 @@ impl<'a> HirToMirContext<'a> {
                         };
                         arg_regs.push(reg);
                     }
+                } else {
+                    // Every omitted parameter keeps its slot before later defaults.
+                    let ty = self
+                        .function_param_hir_types
+                        .get(&func_id)
+                        .and_then(|types| types.get(i))
+                        .map(|ty| self.convert_type(*ty))
+                        .unwrap_or(IrType::I64);
+                    if let Some(reg) = self
+                        .zero_of_ir_type(&ty)
+                        .or_else(|| self.builder.build_const(IrValue::I64(0)))
+                    {
+                        arg_regs.push(reg);
+                    }
                 }
             }
             return;
