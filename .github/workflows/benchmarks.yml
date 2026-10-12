@@ -158,20 +158,16 @@ jobs:
           sudo ldconfig
           hl --version
 
-      - name: Install hxcpp
+      - name: Cache Haxe target packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rayzor-benchmark-libs
+          key: ${{ runner.os }}-benchmark-libs-${{ hashFiles('.github/scripts/benchmark-libs.sha256') }}
+
+      - name: Install Haxe target packages
         run: |
           haxelib setup ~/haxelib
-          haxelib install hxcpp --always
-
-      - name: Install hxjava
-        run: |
-          haxelib install hxjava
-
-      # The HL/C target is refused by the Haxe compiler without this, even
-      # though the generated code needs only HashLink's C headers.
-      - name: Install hashlink haxelib
-        run: |
-          haxelib install hashlink
+          bash .github/scripts/install-benchmark-libs.sh
 
       - name: Verify Haxe installation
         run: |
