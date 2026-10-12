@@ -1,0 +1,5 @@
+[project]
+name = "module-macro-paths"
+entry = "helpers/ModuleMacroPaths.hx"
+[build]
+class-paths = ["."]

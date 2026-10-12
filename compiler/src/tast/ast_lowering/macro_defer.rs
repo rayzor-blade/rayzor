@@ -489,6 +489,70 @@ impl AstLowering<'_> {
         result
     }
 
+    /// Static macros inside another macro's quoted argument reach typing unexpanded.
+    pub(crate) fn static_macro_name(&mut self, callee: &parser::Expr) -> Option<String> {
+        use crate::tast::SymbolKind;
+        use parser::ExprKind;
+
+        let registry = self.deferred_macro_registry.as_ref()?;
+        if let ExprKind::Ident(name) = &callee.kind {
+            let name = self.context.intern_string(name);
+            let symbol = self.resolve_symbol_in_scope_hierarchy(name)?;
+            let symbol = self.context.symbol_table.get_symbol(symbol)?;
+            let qualified = self.context.string_interner.get(symbol.qualified_name?)?;
+            return registry
+                .get_macro(qualified)
+                .filter(|definition| definition.is_static)
+                .map(|definition| definition.qualified_name.clone());
+        }
+        let ExprKind::Field { expr, field, .. } = &callee.kind else {
+            return None;
+        };
+        if !registry
+            .all_macros()
+            .any(|definition| definition.name == *field)
+        {
+            return None;
+        }
+        fn path(expression: &parser::Expr) -> Option<String> {
+            match &expression.kind {
+                ExprKind::Ident(name) => Some(name.clone()),
+                ExprKind::Field { expr, field, .. } => Some(format!("{}.{field}", path(expr)?)),
+                _ => None,
+            }
+        }
+        let path = path(expr)?;
+        let first = self.context.intern_string(path.split('.').next()?);
+        if let Some(symbol) = self.resolve_symbol_in_scope_hierarchy(first)
+            && self
+                .context
+                .symbol_table
+                .get_symbol(symbol)
+                .is_some_and(|symbol| {
+                    !matches!(
+                        symbol.kind,
+                        SymbolKind::Class
+                            | SymbolKind::Abstract
+                            | SymbolKind::Enum
+                            | SymbolKind::TypeAlias
+                    )
+                })
+        {
+            return None;
+        }
+        let name = self.context.intern_string(&path);
+        let owner = self.resolve_class_like_symbol_by_name(name)?;
+        let owner = self.context.symbol_table.get_symbol(owner)?;
+        let owner = self
+            .context
+            .string_interner
+            .get(owner.qualified_name.unwrap_or(owner.name))?;
+        registry
+            .get_macro(&format!("{owner}.{field}"))
+            .filter(|definition| definition.is_static)
+            .map(|definition| definition.qualified_name.clone())
+    }
+
     /// Resolve compile-time members against the typed receiver before ordinary arguments lower.
     pub(crate) fn lower_receiver_macro_call(
         &mut self,
@@ -654,7 +718,6 @@ impl AstLowering<'_> {
             },
             span: call.span,
         };
-        let cell = self.deferred_macro_expander.unwrap();
         let expanded = {
             let mut typer = DeferredMacroTyper {
                 lowering: self,
@@ -662,8 +725,7 @@ impl AstLowering<'_> {
                 expected: None,
                 inferred: None,
             };
-            cell.borrow_mut()
-                .expand_deferred_call(&name, &macro_call, &mut typer)
+            typer.expand_deferred_call(&name, &macro_call)
         }
         .map_err(|e| super::LoweringError::SemanticError {
             message: format!("macro '{}' failed during typing: {}", name, e),
@@ -755,7 +817,6 @@ impl AstLowering<'_> {
             },
             span,
         };
-        let cell = self.deferred_macro_expander.unwrap();
         let expanded = {
             let mut typer = DeferredMacroTyper {
                 lowering: self,
@@ -763,8 +824,7 @@ impl AstLowering<'_> {
                 expected: None,
                 inferred: None,
             };
-            cell.borrow_mut()
-                .expand_deferred_call(&name, &macro_call, &mut typer)
+            typer.expand_deferred_call(&name, &macro_call)
         }
         .map_err(|e| super::LoweringError::SemanticError {
             message: format!("macro '{}' failed during typing: {}", name, e),
@@ -883,8 +943,6 @@ impl AstLowering<'_> {
             },
             span,
         };
-        let cell = self.deferred_macro_expander.unwrap();
-        let template = self.deferred_macro_template.clone().unwrap();
         let mut inferred = std::collections::BTreeMap::new();
         let expanded = {
             let mut typer = DeferredMacroTyper {
@@ -893,14 +951,7 @@ impl AstLowering<'_> {
                 expected: Some(declared),
                 inferred: Some(&mut inferred),
             };
-            match cell.try_borrow_mut() {
-                Ok(mut engine) => engine.expand_deferred_call(&name, &macro_call, &mut typer),
-                Err(_) => {
-                    template
-                        .fork_for_typing()
-                        .expand_deferred_call(&name, &macro_call, &mut typer)
-                }
-            }
+            typer.expand_deferred_call(&name, &macro_call)
         }
         .map_err(|e| super::LoweringError::SemanticError {
             message: format!("macro '{}' failed during typing: {}", name, e),
@@ -918,6 +969,27 @@ impl AstLowering<'_> {
 }
 
 impl DeferredMacroTyper<'_, '_> {
+    pub(crate) fn expand_deferred_call(
+        &mut self,
+        name: &str,
+        call: &parser::Expr,
+    ) -> Result<parser::Expr, crate::macro_system::errors::MacroError> {
+        let cell = self
+            .lowering
+            .deferred_macro_expander
+            .expect("deferred call recorded without its expander");
+        match cell.try_borrow_mut() {
+            Ok(mut engine) => engine.expand_deferred_call(name, call, self),
+            Err(_) => self
+                .lowering
+                .deferred_macro_template
+                .clone()
+                .expect("deferred call recorded without its template")
+                .fork_for_typing()
+                .expand_deferred_call(name, call, self),
+        }
+    }
+
     /// A forward-declared type the typer left as a named placeholder, as the
     /// type that name resolves to at the call site.
     fn resolve_placeholder(&mut self, ty: TypeId) -> TypeId {

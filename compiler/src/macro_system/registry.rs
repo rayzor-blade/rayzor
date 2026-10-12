@@ -131,6 +131,8 @@ pub struct BuildMacroEntry {
 pub struct MacroRegistry {
     /// Macro function definitions indexed by qualified name
     macros: BTreeMap<String, MacroDefinition>,
+    /// Secondary declarations can also be addressed through their module.
+    module_aliases: BTreeMap<String, String>,
     /// Build macros pending application
     build_macros: Vec<BuildMacroEntry>,
     /// Current expansion depth counter
@@ -152,6 +154,7 @@ impl MacroRegistry {
     pub fn new() -> Self {
         Self {
             macros: BTreeMap::new(),
+            module_aliases: BTreeMap::new(),
             build_macros: Vec::new(),
             expansion_depth: 0,
             max_depth: DEFAULT_MAX_DEPTH,
@@ -254,6 +257,9 @@ impl MacroRegistry {
         declarations.scan_and_register(file, &file.filename)?;
         for (name, definition) in declarations.macros {
             self.macros.entry(name).or_insert(definition);
+        }
+        for (alias, name) in declarations.module_aliases {
+            self.module_aliases.entry(alias).or_insert(name);
         }
         self.build_macros.extend(declarations.build_macros);
         Ok(())
@@ -359,6 +365,24 @@ impl MacroRegistry {
             // interpreter will compile hot macros on-demand after they cross the
             // call-count threshold (morsel-parallelism-inspired scheduling).
 
+            let module = std::path::Path::new(source_file)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            let (pack, class) = class_qualified
+                .rsplit_once('.')
+                .map_or(("", class_qualified), |(pack, class)| (pack, class));
+            if !module.is_empty() && module != class {
+                let owner = if pack.is_empty() {
+                    format!("{module}.{class}")
+                } else {
+                    format!("{pack}.{module}.{class}")
+                };
+                self.module_aliases.insert(
+                    format!("{owner}.{}", definition.name),
+                    qualified_name.clone(),
+                );
+            }
             self.macros.insert(qualified_name, definition);
         }
 
@@ -399,7 +423,11 @@ impl MacroRegistry {
 
     /// Look up a macro by its qualified name
     pub fn get_macro(&self, qualified_name: &str) -> Option<&MacroDefinition> {
-        self.macros.get(qualified_name)
+        self.macros.get(qualified_name).or_else(|| {
+            self.module_aliases
+                .get(qualified_name)
+                .and_then(|name| self.macros.get(name))
+        })
     }
 
     /// Look up a compiled bytecode chunk by qualified name.
@@ -415,7 +443,7 @@ impl MacroRegistry {
     /// Look up a macro by simple name (searches all registered macros)
     pub fn find_macro_by_name(&self, name: &str) -> Option<&MacroDefinition> {
         // First try exact match
-        if let Some(def) = self.macros.get(name) {
+        if let Some(def) = self.get_macro(name) {
             return Some(def);
         }
         // Then by simple name
@@ -429,7 +457,13 @@ impl MacroRegistry {
                 .macros
                 .iter()
                 .find(|(k, _)| k.ends_with(&suffix_key))
-                .map(|(_, def)| def);
+                .map(|(_, def)| def)
+                .or_else(|| {
+                    self.module_aliases
+                        .iter()
+                        .find(|(alias, _)| alias.ends_with(&suffix_key))
+                        .and_then(|(_, name)| self.macros.get(name))
+                });
         }
         None
     }
@@ -494,21 +528,7 @@ impl MacroRegistry {
 
     /// Check if a name refers to a registered macro
     pub fn is_macro(&self, name: &str) -> bool {
-        self.macros.contains_key(name)
-            || self.macros.values().any(|def| def.name == name)
-            || self.matches_class_method_suffix(name)
-    }
-
-    /// `HelperMacros.typeString` names `unit.HelperMacros.typeString` when the
-    /// class arrived through an import (import.hx included) rather than by its
-    /// dotted path. The registry is FQN-keyed, so accept a `Class.method` form
-    /// by suffix — the class simple name plus the method is unambiguous in
-    /// practice, and mirrors what simple-name lookup above already allows.
-    fn matches_class_method_suffix(&self, name: &str) -> bool {
-        name.contains('.') && {
-            let suffix_key = format!(".{}", name);
-            self.macros.keys().any(|k| k.ends_with(&suffix_key))
-        }
+        self.find_macro_by_name(name).is_some()
     }
 
     /// Compile class constructors/methods from a ClassRegistry for VM dispatch.

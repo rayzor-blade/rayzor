@@ -1771,37 +1771,17 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    /// The nearest class every one of `types` is or extends, the way haxe
-    /// unifies branch types. `None` unless each is a class without type
-    /// arguments and they share one.
+    /// The nearest instantiated class shared by all branch types.
     fn common_branch_class(&self, types: &[TypeId]) -> Option<TypeId> {
-        let plain_class =
-            |ty: TypeId| match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
-                Some(TypeKind::Class {
-                    symbol_id,
-                    type_args,
-                }) if type_args.is_empty() => Some(*symbol_id),
-                _ => None,
-            };
-        let chains = types
+        let chains: Vec<_> = types
             .iter()
-            .map(|&ty| {
-                let mut chain = vec![plain_class(ty)?];
-                while let Some(parent) = self.parent_class_symbol(*chain.last()?) {
-                    if chain.contains(&parent) {
-                        break;
-                    }
-                    chain.push(parent);
-                }
-                Some(chain)
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let shared = chains
-            .first()?
-            .iter()
-            .find(|class| chains.iter().all(|chain| chain.contains(class)))?;
-        let ty = self.context.symbol_table.get_symbol(*shared)?.type_id;
-        (plain_class(ty) == Some(*shared)).then_some(ty)
+            .map(|&ty| self.instantiated_class_chain(ty))
+            .collect();
+        chains.first()?.iter().copied().find(|&base| {
+            chains
+                .iter()
+                .all(|chain| chain.iter().any(|&ty| self.same_type(ty, base)))
+        })
     }
 
     /// The one function type differing function types of one arity all
@@ -1949,7 +1929,7 @@ impl<'a> AstLowering<'a> {
     /// Whether a value of `from` can be used as `to`, for `unify_min`.
     /// Classes extend or implement; structures match on the fields `to`
     /// names. A class instance is not taken as a structure: it is not laid out as
-    /// one. Generic instances only unify when identical.
+    /// one. Generic class ancestors retain their instantiated arguments.
     fn unifies_with(&self, from: TypeId, to: TypeId) -> bool {
         let (from, to) = (self.unalias(from), self.unalias(to));
         if from == to {
@@ -1974,20 +1954,10 @@ impl<'a> AstLowering<'a> {
             }
             (_, TypeKind::Optional { inner_type }) => self.unifies_with(from, *inner_type),
             (TypeKind::Optional { inner_type }, _) => self.unifies_with(*inner_type, to),
-            (
-                TypeKind::Class {
-                    symbol_id: class,
-                    type_args: class_args,
-                },
-                TypeKind::Class {
-                    symbol_id: parent,
-                    type_args: parent_args,
-                },
-            ) => {
-                class_args.is_empty()
-                    && parent_args.is_empty()
-                    && self.class_chain(*class).contains(parent)
-            }
+            (TypeKind::Class { .. }, TypeKind::Class { .. }) => self
+                .instantiated_class_chain(from)
+                .into_iter()
+                .any(|base| self.same_type(base, to)),
             (
                 TypeKind::Class {
                     symbol_id: class,
@@ -2127,9 +2097,42 @@ impl<'a> AstLowering<'a> {
         chain
     }
 
-    /// The non-generic classes and interfaces a value of `ty` is, in haxe's
-    /// `unify_min` order: its class chain nearest first, then the interfaces,
-    /// the farthest ancestor's first and each ahead of those it extends.
+    /// Instantiated ancestors, nearest first, with parameters bound at each step.
+    fn instantiated_class_chain(&self, ty: TypeId) -> Vec<TypeId> {
+        let mut chain = Vec::new();
+        let mut visited = std::collections::BTreeSet::new();
+        let mut current = self.unalias(ty);
+        loop {
+            let symbol = match self
+                .context
+                .type_table
+                .borrow()
+                .get(current)
+                .map(|ty| &ty.kind)
+            {
+                Some(TypeKind::Class { symbol_id, .. }) => *symbol_id,
+                _ => break,
+            };
+            if !visited.insert(symbol) {
+                break;
+            }
+            chain.push(current);
+            let parent = self
+                .context
+                .symbol_table
+                .get_class_super_type(symbol)
+                .or_else(|| {
+                    self.parent_class_symbol(symbol)
+                        .and_then(|parent| self.context.symbol_table.get_symbol(parent))
+                        .map(|parent| parent.type_id)
+                });
+            let Some(parent) = parent else { break };
+            current = self.unalias(self.substitute_receiver_type(parent, current));
+        }
+        chain
+    }
+
+    /// Classes followed by interfaces in Haxe's `unify_min` order.
     fn base_types(&self, ty: TypeId) -> Vec<TypeId> {
         let (symbol, is_interface) = match self
             .context
@@ -2142,41 +2145,28 @@ impl<'a> AstLowering<'a> {
             Some(TypeKind::Interface { symbol_id, .. }) => (*symbol_id, true),
             _ => return Vec::new(),
         };
-        let chain = if is_interface {
-            Vec::new()
-        } else {
-            self.class_chain(symbol)
-        };
+        let mut bases = self.instantiated_class_chain(ty);
         let mut interfaces = Vec::new();
         if is_interface {
             self.push_interface(symbol, &mut interfaces);
         }
-        for &class in chain.iter().rev() {
+        for &class in self.class_chain(symbol).iter().rev() {
             for interface in self.direct_interfaces(class).into_iter().rev() {
                 self.push_interface(interface, &mut interfaces);
             }
         }
-        chain
-            .into_iter()
-            .chain(interfaces)
-            .filter_map(|symbol| {
-                let ty = self.context.symbol_table.get_symbol(symbol)?.type_id;
-                let plain = match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
-                    Some(
-                        TypeKind::Class {
-                            symbol_id,
-                            type_args,
-                        }
-                        | TypeKind::Interface {
-                            symbol_id,
-                            type_args,
-                        },
-                    ) => *symbol_id == symbol && type_args.is_empty(),
-                    _ => false,
-                };
-                plain.then_some(ty)
-            })
-            .collect()
+        bases.extend(interfaces.into_iter().filter_map(|symbol| {
+            let ty = self.context.symbol_table.get_symbol(symbol)?.type_id;
+            let plain = match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Interface {
+                    symbol_id,
+                    type_args,
+                }) => *symbol_id == symbol && type_args.is_empty(),
+                _ => false,
+            };
+            plain.then_some(ty)
+        }));
+        bases
     }
 
     fn push_interface(&self, interface: SymbolId, out: &mut Vec<SymbolId>) {

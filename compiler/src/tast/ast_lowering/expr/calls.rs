@@ -2288,9 +2288,6 @@ impl<'a> AstLowering<'a> {
         if !self.deferred_macro_calls.is_empty() {
             let key = (expression.span.start, expression.span.end);
             if let Some(name) = self.deferred_macro_calls.get(&key).cloned() {
-                let cell = self
-                    .deferred_macro_expander
-                    .expect("deferred call recorded without its expander");
                 let expected = self
                     .var_init_expected
                     .filter(|(span, _)| *span == key)
@@ -2302,8 +2299,7 @@ impl<'a> AstLowering<'a> {
                         expected,
                         inferred: None,
                     };
-                    cell.borrow_mut()
-                        .expand_deferred_call(&name, expression, &mut typer)
+                    typer.expand_deferred_call(&name, expression)
                 };
                 match expanded {
                     Ok(result) => return self.lower_expression(&result),
@@ -2315,6 +2311,23 @@ impl<'a> AstLowering<'a> {
                     }
                 }
             }
+        }
+
+        if let Some(name) = self.static_macro_name(expr) {
+            let expanded = {
+                let mut typer = super::super::macro_defer::DeferredMacroTyper {
+                    lowering: self,
+                    receiver: None,
+                    expected: None,
+                    inferred: None,
+                };
+                typer.expand_deferred_call(&name, expression)
+            }
+            .map_err(|error| LoweringError::SemanticError {
+                message: format!("macro '{name}' failed during typing: {error}"),
+                location: self.context.create_location_from_span(expression.span),
+            })?;
+            return self.lower_expression(&expanded);
         }
 
         if let Some(expanded) = self.lower_receiver_macro_call(expression, expr, args)? {
