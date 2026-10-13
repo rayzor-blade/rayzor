@@ -147,6 +147,11 @@ impl<'a> AstLowering<'a> {
                     return Ok(builtin_type);
                 }
 
+                if self.preserve_macro_multitype
+                    && let Some(ty) = self.macro_source_type(&name, params)?
+                {
+                    return Ok(ty);
+                }
                 let interned_name = self.context.intern_string(&name);
 
                 // 3. Module-level types (current module/file scope)
@@ -354,7 +359,8 @@ impl<'a> AstLowering<'a> {
                             // multiType here too so the field/param/return type
                             // becomes the concrete container regardless of the
                             // symbol's (possibly stale) kind or compile order.
-                            if path.name == "Map"
+                            if !self.preserve_macro_multitype
+                                && path.name == "Map"
                                 && (path.package.is_empty()
                                     || path.package == vec!["haxe".to_string(), "ds".to_string()])
                                 && type_arg_ids.len() == 2
@@ -483,7 +489,8 @@ impl<'a> AstLowering<'a> {
                             // implementer (which fails to monomorphize
                             // cross-module → trap stub → SIGILL), and the
                             // construction never routes through `StringMap`.
-                            if path.name == "Map"
+                            if !self.preserve_macro_multitype
+                                && path.name == "Map"
                                 && (path.package.is_empty()
                                     || path.package == vec!["haxe".to_string(), "ds".to_string()])
                                 && type_arg_ids.len() == 2
@@ -530,7 +537,8 @@ impl<'a> AstLowering<'a> {
                             // fix did, fixed construction but left dispatch
                             // through Map-typed fields silently broken — the
                             // MIR lowerer ended up elided the call entirely.
-                            if path.name == "Map"
+                            if !self.preserve_macro_multitype
+                                && path.name == "Map"
                                 && (path.package.is_empty()
                                     || path.package == vec!["haxe".to_string(), "ds".to_string()])
                                 && type_arg_ids.len() == 2

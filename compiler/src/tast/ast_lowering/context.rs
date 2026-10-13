@@ -104,6 +104,8 @@ impl<'a> AstLowering<'a> {
             generated_declarations: Vec::new(),
             generated_type_names: std::collections::BTreeSet::new(),
             macro_probe_depth: 0,
+            preserve_macro_multitype: false,
+            macro_declared_types: BTreeMap::new(),
             macro_private_access: false,
             class_value_bindings: BTreeMap::new(),
             deferred_macro_calls: BTreeMap::new(),

@@ -103,7 +103,12 @@ pub fn process_build_macros_with_class_registry(
                     .cloned()
                     .collect();
 
+                let mut deferred = false;
                 for meta in &build_metas {
+                    if deferred {
+                        defer_build_macro(&mut class, meta);
+                        continue;
+                    }
                     match apply_build_macro(
                         &mut class,
                         meta,
@@ -111,6 +116,7 @@ pub fn process_build_macros_with_class_registry(
                         class_registry.clone(),
                         &file_pack,
                         &file_module,
+                        None,
                     ) {
                         Ok(()) => {
                             applied_count += 1;
@@ -118,6 +124,10 @@ pub fn process_build_macros_with_class_registry(
                                 format!("@:build macro applied to class '{}'", class.name),
                                 super::errors::span_to_location(meta.span),
                             ));
+                        }
+                        Err(MacroError::NeedsTyper { .. }) => {
+                            defer_build_macro(&mut class, meta);
+                            deferred = true;
                         }
                         Err(e) => {
                             diagnostics.push(MacroDiagnostic::error(
@@ -135,6 +145,10 @@ pub fn process_build_macros_with_class_registry(
                     .unwrap_or_default();
                 for (index, auto_build) in auto_build_interfaces.iter().enumerate() {
                     if targets.contains(&index) {
+                        if deferred {
+                            defer_build_macro(&mut class, &auto_build.build_meta);
+                            continue;
+                        }
                         match apply_build_macro(
                             &mut class,
                             &auto_build.build_meta,
@@ -142,6 +156,7 @@ pub fn process_build_macros_with_class_registry(
                             class_registry.clone(),
                             &file_pack,
                             &file_module,
+                            None,
                         ) {
                             Ok(()) => {
                                 applied_count += 1;
@@ -152,6 +167,10 @@ pub fn process_build_macros_with_class_registry(
                                     ),
                                     super::errors::span_to_location(auto_build.build_meta.span),
                                 ));
+                            }
+                            Err(MacroError::NeedsTyper { .. }) => {
+                                defer_build_macro(&mut class, &auto_build.build_meta);
+                                deferred = true;
                             }
                             Err(e) => {
                                 diagnostics.push(MacroDiagnostic::error(
@@ -180,6 +199,12 @@ pub fn process_build_macros_with_class_registry(
     }
 }
 
+fn defer_build_macro(class: &mut ClassDecl, meta: &Metadata) {
+    let mut pending = meta.clone();
+    pending.name = ":rayzorDeferredBuild".to_owned();
+    class.meta.push(pending);
+}
+
 /// Apply a single @:build macro to a class.
 ///
 /// Steps:
@@ -188,13 +213,14 @@ pub fn process_build_macros_with_class_registry(
 /// 3. Set up a MacroContext with build class context
 /// 4. Call the build macro function
 /// 5. Apply returned fields back to the class
-fn apply_build_macro(
+pub(crate) fn apply_build_macro(
     class: &mut ClassDecl,
     meta: &Metadata,
     registry: &MacroRegistry,
     class_registry: Option<Arc<super::class_registry::ClassRegistry>>,
     pack: &[String],
     module: &str,
+    typer: Option<(&mut dyn super::context_api::MacroTyper, crate::tast::TypeId)>,
 ) -> Result<(), MacroError> {
     let location = super::errors::span_to_location(meta.span);
 
@@ -231,6 +257,20 @@ fn apply_build_macro(
         pack: class_pack,
     });
     context.current_class = Some(class.name.clone());
+    context.current_module = Some(
+        pack.iter()
+            .cloned()
+            .chain(std::iter::once(module.to_owned()))
+            .collect::<Vec<_>>()
+            .join("."),
+    );
+    if let Some((typer, local_type)) = typer {
+        context.local_type = Some(local_type);
+        // The interpreter and its context are dropped before this call returns.
+        unsafe {
+            context.set_typer(typer);
+        }
+    }
 
     // Step 4: Call the build macro function.
     // Try exact FQN first; fall back to simple-name lookup so partial names

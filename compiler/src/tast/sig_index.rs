@@ -97,6 +97,7 @@ pub struct StaticSigIndex {
     bare_to_qualified: BTreeMap<String, BTreeSet<String>>,
     /// Typedef alias (`haxe.io.Bytes`) → target path (`rayzor.Bytes`).
     aliases: BTreeMap<String, String>,
+    type_sources: BTreeMap<String, TypeSourceSig>,
     /// Files already indexed (canonical path string) — parse each once.
     indexed_files: BTreeSet<String>,
     /// Qualified names whose on-demand parse failed — don't retry.
@@ -109,7 +110,25 @@ pub struct StaticSigIndex {
     known_files: BTreeMap<String, std::path::PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct TypeSourceSig {
+    pub package: Vec<String>,
+    pub imports: Vec<parser::Import>,
+    pub params: Vec<parser::TypeParam>,
+    pub target: Option<parser::Type>,
+    pub alias: bool,
+}
+
 impl StaticSigIndex {
+    pub(crate) fn type_source(
+        &mut self,
+        name: &str,
+        resolve_file: &dyn Fn(&str) -> Option<std::path::PathBuf>,
+    ) -> Option<TypeSourceSig> {
+        self.ensure_indexed(name, resolve_file);
+        self.type_sources.get(name).cloned()
+    }
+
     /// Record where a type is declared, WITHOUT parsing it: one key and one
     /// path per import the loader has already resolved. First writer wins, so
     /// a bare name two packages both spell keeps the resolution the loader
@@ -622,6 +641,44 @@ impl StaticSigIndex {
             .map(|p| p.path.join("."))
             .unwrap_or_default();
         for decl in &file.declarations {
+            let source = match decl {
+                parser::TypeDeclaration::Typedef(alias) => Some((
+                    &alias.name,
+                    &alias.type_params,
+                    Some(alias.type_def.clone()),
+                    true,
+                )),
+                parser::TypeDeclaration::Abstract(abstract_decl)
+                    if abstract_decl
+                        .meta
+                        .iter()
+                        .any(|meta| meta.name.trim_start_matches(':') == "multiType") =>
+                {
+                    Some((
+                        &abstract_decl.name,
+                        &abstract_decl.type_params,
+                        abstract_decl.underlying.clone(),
+                        false,
+                    ))
+                }
+                _ => None,
+            };
+            if let Some((name, params, target, alias)) = source {
+                self.type_sources.insert(
+                    Self::qualify(&package, name),
+                    TypeSourceSig {
+                        package: file
+                            .package
+                            .as_ref()
+                            .map(|p| p.path.clone())
+                            .unwrap_or_default(),
+                        imports: file.imports.clone(),
+                        params: params.clone(),
+                        target,
+                        alias,
+                    },
+                );
+            }
             self.index_declaration(&package, decl);
         }
     }

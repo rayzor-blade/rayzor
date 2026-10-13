@@ -237,6 +237,9 @@ impl<'a> AstLowering<'a> {
             self.class_type_params.insert(class_symbol, ordered_tp_ids);
         }
 
+        let built = self.apply_deferred_class_builds(class_decl, class_symbol)?;
+        let class_decl = built.as_ref().unwrap_or(class_decl);
+
         // Process extends clause
         let extends = if let Some(extends_type) = &class_decl.extends {
             let parent = self.lower_type(extends_type)?;

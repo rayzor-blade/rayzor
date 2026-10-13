@@ -260,7 +260,10 @@ impl CompilationUnit {
                 }
             }
             deferred_macro_calls = expansion.deferred.clone();
-            if kept_expander.registry().macro_count() != 0 || kept_expander.has_generic_builds() {
+            if kept_expander.registry().macro_count() != 0
+                || kept_expander.has_generic_builds()
+                || kept_expander.has_deferred_builds()
+            {
                 deferred_macro_expander = Some(std::cell::RefCell::new(kept_expander));
             }
             // Surface macro expansion diagnostics to the user, not just to
@@ -1618,7 +1621,7 @@ fn build_macro_module_paths(file: &HaxeFile) -> Vec<String> {
             continue;
         };
         path.pop();
-        while path.len() > 1 {
+        while !path.is_empty() {
             paths.push(path.join("."));
             path.pop();
         }

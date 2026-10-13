@@ -1,0 +1,6 @@
+[project]
+name = "typer-build-macros"
+entry = "BuildWithType.hx"
+
+[build]
+class-paths = ["."]

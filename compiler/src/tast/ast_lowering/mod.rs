@@ -1747,6 +1747,9 @@ pub struct AstLowering<'a> {
     generated_declarations: Vec<TypedDeclaration>,
     generated_type_names: std::collections::BTreeSet<String>,
     macro_probe_depth: usize,
+    /// Macro type resolution retains multiType abstractions until follow is requested.
+    preserve_macro_multitype: bool,
+    macro_declared_types: BTreeMap<(String, Vec<TypeId>), Option<TypeId>>,
     macro_private_access: bool,
     class_value_bindings: BTreeMap<SymbolId, SymbolId>,
     /// Deferred call sites by (span.start, span.end), mapped to the registry

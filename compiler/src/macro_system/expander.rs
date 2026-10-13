@@ -92,6 +92,8 @@ pub struct MacroExpander {
     call_cache: BTreeMap<(String, u64), Expr>,
     /// Call sites deferred to lowering (typer-dependent macro bodies).
     deferred: Vec<DeferredMacroCall>,
+    /// Build calls waiting for class lowering's live typer.
+    deferred_builds: bool,
     /// Types `Context.defineType` defined while expanding this file; they
     /// join the file's declarations when expansion finishes.
     defined_types: Vec<super::context_api::DefinedType>,
@@ -122,6 +124,7 @@ impl MacroExpander {
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
             deferred: Vec::new(),
+            deferred_builds: false,
             defined_types: Vec::new(),
             hooks: Vec::new(),
             deferred_classes: std::collections::BTreeSet::new(),
@@ -142,6 +145,7 @@ impl MacroExpander {
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
             deferred: Vec::new(),
+            deferred_builds: false,
             defined_types: Vec::new(),
             hooks: Vec::new(),
             deferred_classes: std::collections::BTreeSet::new(),
@@ -162,6 +166,7 @@ impl MacroExpander {
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
             deferred: Vec::new(),
+            deferred_builds: false,
             defined_types: Vec::new(),
             hooks: Vec::new(),
             deferred_classes: std::collections::BTreeSet::new(),
@@ -207,6 +212,7 @@ impl MacroExpander {
         fork.class_registry = self.class_registry.clone();
         fork.import_map = self.import_map.clone();
         fork.file_imports = self.file_imports.clone();
+        fork.deferred_builds = self.deferred_builds;
         fork
     }
 
@@ -214,12 +220,17 @@ impl MacroExpander {
         self.class_registry.has_generic_builds()
     }
 
+    pub(crate) fn has_deferred_builds(&self) -> bool {
+        self.deferred_builds
+    }
+
     pub(crate) fn generic_build_engine(&self) -> Option<super::generic_build::GenericBuildEngine> {
-        self.has_generic_builds()
-            .then(|| super::generic_build::GenericBuildEngine {
+        (self.has_generic_builds() || self.deferred_builds).then(|| {
+            super::generic_build::GenericBuildEngine {
                 registry: self.registry.clone(),
                 class_registry: self.class_registry.clone(),
-            })
+            }
+        })
     }
 
     /// Expand all macros in a parsed file.
@@ -277,6 +288,10 @@ impl MacroExpander {
                 Some(self.class_registry.clone()),
             );
             file = build_result.file;
+            self.deferred_builds = file.declarations.iter().any(|declaration| {
+                matches!(declaration, TypeDeclaration::Class(class)
+                    if class.meta.iter().any(|meta| meta.name.trim_start_matches(':') == "rayzorDeferredBuild"))
+            });
             self.expansions_count += build_result.applied_count;
             for diag in build_result.diagnostics {
                 self.context.diagnostics.push(diag);

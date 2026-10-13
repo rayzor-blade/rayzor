@@ -1071,6 +1071,11 @@ impl MacroInterpreter {
                 AssignOp::UshrAssign => BinaryOp::Ushr,
                 AssignOp::Assign => unreachable!(),
             };
+            let (current, right_val) = if bin_op == BinaryOp::Add {
+                (self.type_as_text(current), self.type_as_text(right_val))
+            } else {
+                (current, right_val)
+            };
             ast_bridge::apply_binary_op(&bin_op, &current, &right_val, location)?
         } else {
             right_val

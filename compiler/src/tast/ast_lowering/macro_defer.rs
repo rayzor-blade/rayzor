@@ -26,6 +26,183 @@ pub(crate) struct DeferredMacroTyper<'l, 'a> {
 }
 
 impl AstLowering<'_> {
+    /// Macro type queries retain declared aliases and abstracts before storage lowering.
+    pub(crate) fn macro_source_type(
+        &mut self,
+        name: &str,
+        params: &[parser::Type],
+    ) -> super::LoweringResult<Option<TypeId>> {
+        let Some(index) = self.static_sig_index.clone() else {
+            return Ok(None);
+        };
+        let source = index.borrow_mut().type_source(name, &|name| {
+            self.context
+                .namespace_resolver
+                .resolve_qualified_path_to_file_force(name)
+        });
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let arguments = params
+            .iter()
+            .map(|ty| self.lower_type(ty))
+            .collect::<super::LoweringResult<Vec<_>>>()?;
+        let key = (name.to_owned(), arguments.clone());
+        if let Some(cached) = self.macro_declared_types.get(&key) {
+            return Ok(*cached);
+        }
+        self.macro_declared_types.insert(key.clone(), None);
+        let result = self.in_generated_context(&source.package, |this| {
+            this.context.enter_scope(crate::tast::ScopeKind::Block);
+            for import in &source.imports {
+                this.lower_import(import)?;
+            }
+            let mut bindings = std::collections::BTreeMap::new();
+            let mut arguments = arguments.clone();
+            for (index, param) in source.params.iter().enumerate() {
+                let ty = arguments
+                    .get(index)
+                    .copied()
+                    .unwrap_or_else(|| this.context.type_table.borrow().unknown_type());
+                if index == arguments.len() {
+                    arguments.push(ty);
+                }
+                bindings.insert(this.context.intern_string(&param.name), ty);
+            }
+            this.context.push_type_parameters(bindings);
+            let target = source
+                .target
+                .as_ref()
+                .map(|ty| this.lower_type(ty))
+                .transpose()?;
+            this.context.pop_type_parameters();
+            let bare = this
+                .context
+                .intern_string(name.rsplit('.').next().unwrap_or(name));
+            let symbol = if source.alias {
+                this.context
+                    .symbol_table
+                    .create_type_alias_in_scope(bare, this.context.current_scope)
+            } else {
+                this.context
+                    .symbol_table
+                    .create_abstract_in_scope(bare, this.context.current_scope)
+            };
+            let qualified = this.context.intern_string(name);
+            this.context
+                .symbol_table
+                .get_symbol_mut(symbol)
+                .unwrap()
+                .qualified_name = Some(qualified);
+            let ty = if source.alias {
+                let target_type =
+                    target.unwrap_or_else(|| this.context.type_table.borrow().dynamic_type());
+                this.context
+                    .type_table
+                    .borrow_mut()
+                    .create_type(crate::tast::TypeKind::TypeAlias {
+                        symbol_id: symbol,
+                        target_type,
+                        type_args: arguments,
+                    })
+            } else {
+                this.context
+                    .type_table
+                    .borrow_mut()
+                    .create_abstract_type(symbol, target, arguments)
+            };
+            this.context.symbol_table.update_symbol_type(symbol, ty);
+            Ok(ty)
+        });
+        match result {
+            Ok(ty) => {
+                self.macro_declared_types.insert(key, Some(ty));
+                Ok(Some(ty))
+            }
+            Err(error) => {
+                self.macro_declared_types.remove(&key);
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn apply_deferred_class_builds(
+        &mut self,
+        declaration: &parser::ClassDecl,
+        symbol: crate::tast::SymbolId,
+    ) -> super::LoweringResult<Option<parser::ClassDecl>> {
+        let pending: Vec<_> = declaration
+            .meta
+            .iter()
+            .filter(|meta| meta.name.trim_start_matches(':') == "rayzorDeferredBuild")
+            .cloned()
+            .collect();
+        if pending.is_empty() {
+            return Ok(None);
+        }
+        let engine = self.generic_build_engine.clone().ok_or_else(|| {
+            super::LoweringError::SemanticError {
+                message: "deferred build macro has no macro registry".to_owned(),
+                location: self.context.create_location_from_span(declaration.span),
+            }
+        })?;
+        let pack: Vec<String> = self
+            .context
+            .current_package
+            .and_then(|id| self.context.namespace_resolver.get_package(id))
+            .map(|package| {
+                package
+                    .full_path
+                    .iter()
+                    .filter_map(|name| self.context.string_interner.get(*name).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let module = std::path::Path::new(&self.pos_file_name)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+            .to_owned();
+        let arguments = self
+            .class_type_params
+            .get(&symbol)
+            .cloned()
+            .unwrap_or_default();
+        let local_type = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_class_type(symbol, arguments);
+        let mut built = declaration.clone();
+        built
+            .meta
+            .retain(|meta| meta.name.trim_start_matches(':') != "rayzorDeferredBuild");
+        for meta in pending {
+            let result = {
+                let mut typer = DeferredMacroTyper {
+                    lowering: self,
+                    receiver: None,
+                    expected: None,
+                    inferred: None,
+                };
+                crate::macro_system::build_macros::apply_build_macro(
+                    &mut built,
+                    &meta,
+                    &engine.registry,
+                    Some(engine.class_registry.clone()),
+                    &pack,
+                    &module,
+                    Some((&mut typer, local_type)),
+                )
+            };
+            result.map_err(|error| super::LoweringError::SemanticError {
+                message: format!("build macro for '{}' failed: {error}", declaration.name),
+                location: self.context.create_location_from_span(meta.span),
+            })?;
+        }
+        Ok(Some(built))
+    }
+
     /// Record what a declaration expects of its initializer — the annotation,
     /// else a monomorph — for a deferred macro call that is the initializer.
     /// Returns the previous record for the caller to restore.
@@ -1567,7 +1744,10 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
 
         let before = self.lowering.collected_errors.len();
         let ctx_before = self.lowering.context.errors.len();
+        let previous = self.lowering.preserve_macro_multitype;
+        self.lowering.preserve_macro_multitype = true;
         let resolved = self.lowering.lower_type(&annotation);
+        self.lowering.preserve_macro_multitype = previous;
         self.lowering.collected_errors.truncate(before);
         self.lowering.context.errors.truncate(ctx_before);
         let id = resolved.map_err(|e| e.to_compilation_error().message)?;
@@ -2017,6 +2197,40 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 .borrow()
                 .get(current)
                 .map(|t| t.kind.clone());
+            // Following a multiType abstract selects the implementation for its key.
+            let map = match &kind {
+                Some(
+                    TypeKind::Abstract {
+                        symbol_id,
+                        type_args,
+                        ..
+                    }
+                    | TypeKind::Class {
+                        symbol_id,
+                        type_args,
+                    },
+                ) if abstracts => self
+                    .lowering
+                    .context
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|symbol| {
+                        self.lowering
+                            .context
+                            .string_interner
+                            .get(symbol.qualified_name.unwrap_or(symbol.name))
+                    })
+                    .filter(|name| *name == "haxe.ds.Map")
+                    .and_then(|_| self.lowering.resolve_multitype_map_to_concrete(type_args)),
+                _ => None,
+            };
+            if let Some(concrete) = map {
+                current = concrete;
+                if once {
+                    break;
+                }
+                continue;
+            }
             let (next, parameterization) = match kind {
                 Some(TypeKind::TypeAlias {
                     target_type,
