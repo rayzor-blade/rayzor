@@ -34,7 +34,16 @@ impl<'a> HirToMirContext<'a> {
                 .get(type_param.name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("T{}", type_param.name.as_raw()));
-            builder = builder.type_param(param_name);
+            let constraints = if type_param
+                .bounds
+                .iter()
+                .any(|ty| self.is_object_constraint(*ty))
+            {
+                vec!["{}".to_owned()]
+            } else {
+                Vec::new()
+            };
+            builder = builder.type_param_with_constraints(param_name, constraints);
         }
 
         for param in &func.params {
@@ -76,7 +85,16 @@ impl<'a> HirToMirContext<'a> {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("T{}", type_param.name.as_raw()));
             type_param_names.push(param_name.clone());
-            builder = builder.type_param(param_name);
+            let constraints = if type_param
+                .bounds
+                .iter()
+                .any(|ty| self.is_object_constraint(*ty))
+            {
+                vec!["{}".to_owned()]
+            } else {
+                Vec::new()
+            };
+            builder = builder.type_param_with_constraints(param_name, constraints);
         }
 
         for type_param in &func.type_params {
@@ -86,7 +104,16 @@ impl<'a> HirToMirContext<'a> {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("T{}", type_param.name.as_raw()));
             type_param_names.push(param_name.clone());
-            builder = builder.type_param(param_name);
+            let constraints = if type_param
+                .bounds
+                .iter()
+                .any(|ty| self.is_object_constraint(*ty))
+            {
+                vec!["{}".to_owned()]
+            } else {
+                Vec::new()
+            };
+            builder = builder.type_param_with_constraints(param_name, constraints);
         }
 
         for param in &func.params {

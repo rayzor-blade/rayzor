@@ -3922,6 +3922,26 @@ pub extern "C" fn haxe_unbox_generic_return(ptr: *mut u8, type_tag: i32) -> i64 
     }
 }
 
+/// Refined values keep their representation when a generic result is boxed.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_adapt_generic_value(
+    value: i64,
+    source_tag: i32,
+    target_tag: i32,
+    metadata: u64,
+) -> i64 {
+    if source_tag == target_tag {
+        return value;
+    }
+    if target_tag == ValueTag::Dynamic as i32 {
+        haxe_box_generic_ptr(value, source_tag, metadata) as i64
+    } else if source_tag == ValueTag::Dynamic as i32 {
+        haxe_unbox_generic_return(value as *mut u8, target_tag)
+    } else {
+        value
+    }
+}
+
 /// Safely coerce a Dynamic-typed value to a float.
 /// Same heuristic as haxe_coerce_dynamic_to_int.
 #[unsafe(no_mangle)]
@@ -5538,6 +5558,46 @@ mod value_tag_tests {
         assert_eq!(
             haxe_unbox_generic_return(returned, ValueTag::Dynamic as i32),
             boxed as i64
+        );
+    }
+
+    #[test]
+    fn generic_refinements_preserve_boxed_float_and_string_values() {
+        use crate::haxe_string::HaxeString;
+
+        let dynamic = ValueTag::Dynamic as i32;
+        let float = ValueTag::Float as i32;
+        let string = ValueTag::String as i32;
+        for value in [12.5_f64, 7.5, 0.0, -0.0] {
+            let bits = value.to_bits() as i64;
+            assert_eq!(haxe_adapt_generic_value(bits, float, float, 0), bits);
+            let boxed = haxe_adapt_generic_value(bits, float, dynamic, 0);
+            assert_eq!(haxe_adapt_generic_value(boxed, dynamic, float, 0), bits);
+            assert_eq!(haxe_adapt_generic_value(boxed, dynamic, dynamic, 0), boxed);
+        }
+        let left = haxe_adapt_generic_value(0.0_f64.to_bits() as i64, float, dynamic, 0);
+        let right = haxe_adapt_generic_value((-0.0_f64).to_bits() as i64, float, dynamic, 0);
+        assert_eq!(
+            crate::reflect::haxe_reflect_compare_typed(left, right, dynamic),
+            0
+        );
+        let mut a_bytes = b"equal text".to_vec();
+        let mut b_bytes = b"equal text".to_vec();
+        let mut a = HaxeString {
+            ptr: a_bytes.as_mut_ptr(),
+            len: a_bytes.len(),
+            cap: a_bytes.capacity(),
+        };
+        let mut b = HaxeString {
+            ptr: b_bytes.as_mut_ptr(),
+            len: b_bytes.len(),
+            cap: b_bytes.capacity(),
+        };
+        let left = haxe_adapt_generic_value(&mut a as *mut HaxeString as i64, string, dynamic, 0);
+        let right = haxe_adapt_generic_value(&mut b as *mut HaxeString as i64, string, dynamic, 0);
+        assert_eq!(
+            crate::reflect::haxe_reflect_compare_typed(left, right, dynamic),
+            0
         );
     }
 

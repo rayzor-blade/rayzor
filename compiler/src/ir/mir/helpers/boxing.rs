@@ -464,6 +464,58 @@ impl<'a> HirToMirContext<'a> {
         Some((tag, metadata))
     }
 
+    /// A refined arm can become a boxed result when its type parameter stays existential.
+    pub(crate) fn coerce_type_param_value(
+        &mut self,
+        value: IrId,
+        source: &IrType,
+        target: &IrType,
+    ) -> Option<IrId> {
+        let IrType::TypeVar(target_name) = target else {
+            return self.coerce_reg_to(value, target);
+        };
+        let source = if self.boxed_value_regs.contains(&value) {
+            IrType::dynamic_ptr()
+        } else if let Some(concrete @ (IrType::F64 | IrType::F32 | IrType::Bool | IrType::String)) =
+            self.builder.get_register_type(value)
+        {
+            // Runtime-mapped calls can have a more precise ABI than their HIR result.
+            concrete
+        } else {
+            source.clone()
+        };
+        if &source == target {
+            return self.coerce_reg_to(value, target);
+        }
+        let (source_tag, metadata) = if let IrType::TypeVar(name) = &source {
+            self.type_param_value_descriptor(name.clone(), 0)?
+        } else {
+            (
+                self.builder
+                    .build_const(IrValue::I32(source.value_tag() as i32))?,
+                self.builder
+                    .build_const(IrValue::U64(source.value_metadata()))?,
+            )
+        };
+        let target_tag = self.builder.build_const(IrValue::I32(0))?;
+        self.builder
+            .current_function_mut()?
+            .type_param_tag_fixups
+            .push((target_tag, target_name.clone()));
+        let bits = self.erase_reflect_compare_arg(value);
+        let adapt = self.get_or_register_extern_function(
+            "haxe_adapt_generic_value",
+            vec![IrType::I64, IrType::I32, IrType::I32, IrType::U64],
+            IrType::I64,
+        );
+        let result = self.builder.build_call_direct(
+            adapt,
+            vec![bits, source_tag, target_tag, metadata],
+            IrType::I64,
+        )?;
+        self.builder.build_bitcast(result, target.clone())
+    }
+
     /// A type parameter constrained to an object type (`K:{}`, `O:{} & T`,
     /// `T:SomeClass`), whose values are references.
     fn type_param_is_object(&self, symbol_id: SymbolId) -> bool {
@@ -480,7 +532,7 @@ impl<'a> HirToMirContext<'a> {
             })
     }
 
-    fn is_object_constraint(&self, ty: TypeId) -> bool {
+    pub(crate) fn is_object_constraint(&self, ty: TypeId) -> bool {
         match self
             .type_table
             .get(self.resolve_through_aliases(ty))

@@ -1164,6 +1164,10 @@ register_symbol!(
     crate::type_system::haxe_unbox_generic_return
 );
 register_symbol!(
+    "haxe_adapt_generic_value",
+    crate::type_system::haxe_adapt_generic_value
+);
+register_symbol!(
     "haxe_coerce_dynamic_to_float",
     crate::type_system::haxe_coerce_dynamic_to_float
 );

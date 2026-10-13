@@ -368,6 +368,8 @@ impl SymbolFlags {
     /// A static `@:to` method of a `@:multiType` abstract: what `new` on the
     /// abstract calls, with the underlying value first.
     pub const MULTI_TYPE_TO: Self = Self(1 << 30);
+    /// A constructor-local type parameter, existential when unpacking an enum.
+    pub const EXISTENTIAL: Self = Self(1 << 31);
 
     pub const fn is_wasm_export(self) -> bool {
         self.contains(Self::WASM_EXPORT)

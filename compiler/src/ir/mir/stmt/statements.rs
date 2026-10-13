@@ -992,7 +992,12 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 converted
                             } else if let Some(tgt_ir @ IrType::TypeVar(_)) = &tgt_ir_opt {
-                                self.coerce_reg_to(value, tgt_ir).unwrap_or(value)
+                                self.coerce_type_param_value(
+                                    value,
+                                    &self.convert_type_arg(rhs_ty),
+                                    tgt_ir,
+                                )
+                                .unwrap_or(value)
                             } else if let Some(tgt_ir) = tgt_ir_opt {
                                 let val_ir =
                                     self.builder.get_register_type(value).unwrap_or(IrType::I64);

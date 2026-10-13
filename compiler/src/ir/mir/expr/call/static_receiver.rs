@@ -333,11 +333,22 @@ impl<'a> HirToMirContext<'a> {
             };
             // Only a generic callee is given type arguments; an imported one
             // may not show its type parameters until the modules merge.
-            if !type_args.is_empty() {
-                let ir_type_args: Vec<IrType> = type_args
-                    .iter()
-                    .map(|t| self.convert_type_arg(*t))
-                    .collect();
+            let mut ir_type_args: Vec<IrType> = type_args
+                .iter()
+                .map(|t| self.convert_type_arg(*t))
+                .collect();
+            let inferred = self.infer_generic_call_args(func_id, args, false);
+            if ir_type_args.is_empty() {
+                ir_type_args = inferred;
+            } else if ir_type_args.len() == inferred.len() {
+                for (argument, inferred) in ir_type_args.iter_mut().zip(inferred) {
+                    if *argument == IrType::I64 {
+                        *argument = inferred;
+                    }
+                }
+            }
+            self.bind_generic_return_args(func_id, expr.ty, &mut ir_type_args);
+            if !ir_type_args.is_empty() {
                 let result = self.builder.build_call_direct_with_type_args(
                     func_id,
                     arg_regs,

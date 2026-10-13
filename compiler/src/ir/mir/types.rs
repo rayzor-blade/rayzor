@@ -229,6 +229,15 @@ impl<'a> HirToMirContext<'a> {
         ) {
             return IrType::dynamic_ptr();
         }
+        if let Some(TypeKind::TypeParameter { symbol_id, .. }) =
+            self.type_table.get(resolved).map(|ty| &ty.kind)
+            && self
+                .symbol_table
+                .get_symbol(*symbol_id)
+                .is_some_and(|symbol| symbol.flags.contains(SymbolFlags::EXISTENTIAL))
+        {
+            return IrType::dynamic_ptr();
+        }
         if let Some(name) = self.resolve_type_param_name(resolved)
             && self.current_type_param_names().contains(&name)
         {

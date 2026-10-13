@@ -230,6 +230,7 @@ impl Monomorphizer {
         // Propagate the substitution map to create specialized versions of those callees.
         self.propagate_transitive_fixups(module);
         self.adapt_specialized_call_returns(module);
+        self.fold_generic_value_adapters(module);
 
         // Keep the module's id allocator above the instances we just minted.
         // Phase 4 / transitive monomorphization insert directly into
@@ -417,6 +418,10 @@ impl Monomorphizer {
                         inferred_args.push(IrType::I64);
                         found = true;
                     }
+                    if !found && type_param.constraints.iter().any(|bound| bound == "{}") {
+                        inferred_args.push(IrType::Ptr(Box::new(IrType::Void)));
+                        found = true;
+                    }
                     if !found {
                         // Can't infer all type params — skip
                         if dbg_mono {
@@ -458,6 +463,7 @@ impl Monomorphizer {
             self.substitution_map
                 .insert(param.name.clone(), arg.clone());
         }
+        Self::bind_object_constraints(generic_func, &mut self.substitution_map);
 
         // Clone and specialize the function
         let new_id = IrFunctionId(self.next_func_id);
@@ -466,9 +472,6 @@ impl Monomorphizer {
         let mut specialized = generic_func.clone();
         specialized.id = new_id;
         specialized.name = key.mangled_name(&generic_func.name);
-
-        // Clear type params - this is now a concrete function
-        specialized.signature.type_params.clear();
 
         // Substitute types in signature
         specialized.signature = self.substitute_signature(&specialized.signature);
@@ -532,7 +535,16 @@ impl Monomorphizer {
             return_type: self.substitute_type(&sig.return_type),
             calling_convention: sig.calling_convention,
             can_throw: sig.can_throw,
-            type_params: Vec::new(), // Cleared - now concrete
+            type_params: sig
+                .type_params
+                .iter()
+                .filter(|parameter| {
+                    self.substitution_map
+                        .get(&parameter.name)
+                        .is_none_or(contains_type_param)
+                })
+                .cloned()
+                .collect(),
             uses_sret: sig.uses_sret,
         }
     }
@@ -632,11 +644,78 @@ impl Monomorphizer {
                             }
                             "haxe_array_get_typed" => args.get(2) == Some(tag),
                             "haxe_array_push_typed" => args.get(2) == Some(tag),
+                            "haxe_adapt_generic_value" => {
+                                args.get(1) == Some(tag) || args.get(2) == Some(tag)
+                            }
                             _ => false,
                         })
                     })
                 })
             })
+    }
+
+    /// Concrete specializations retain raw slots without a runtime adapter call.
+    fn fold_generic_value_adapters(&self, module: &mut IrModule) {
+        let adapters: BTreeSet<_> = module
+            .functions
+            .iter()
+            .map(|(id, function)| (id, &function.name))
+            .chain(
+                module
+                    .extern_functions
+                    .iter()
+                    .map(|(id, function)| (id, &function.name)),
+            )
+            .filter(|(_, name)| name.as_str() == "haxe_adapt_generic_value")
+            .map(|(id, _)| *id)
+            .collect();
+        for function in module.functions.values_mut() {
+            let unresolved: BTreeSet<_> = function
+                .type_param_tag_fixups
+                .iter()
+                .map(|(reg, _)| *reg)
+                .collect();
+            let tags: BTreeMap<_, _> = function
+                .cfg
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter_map(|instruction| match instruction {
+                    IrInstruction::Const {
+                        dest,
+                        value: IrValue::I32(tag),
+                    } if !unresolved.contains(dest) => Some((*dest, *tag)),
+                    _ => None,
+                })
+                .collect();
+            for block in function.cfg.blocks.values_mut() {
+                for instruction in &mut block.instructions {
+                    let IrInstruction::CallDirect {
+                        dest: Some(dest),
+                        func_id,
+                        args,
+                        ..
+                    } = instruction
+                    else {
+                        continue;
+                    };
+                    if !adapters.contains(func_id) || args.len() != 4 {
+                        continue;
+                    }
+                    let (Some(source), Some(target)) = (tags.get(&args[1]), tags.get(&args[2]))
+                    else {
+                        continue;
+                    };
+                    let dynamic = rayzor_runtime::type_system::ValueTag::Dynamic as i32;
+                    if source == target || (*source != dynamic && *target != dynamic) {
+                        *instruction = IrInstruction::Copy {
+                            dest: *dest,
+                            src: args[0],
+                        };
+                    }
+                }
+            }
+        }
     }
 
     /// Preserve the caller's slot type while reading the specialized return ABI.
@@ -960,8 +1039,12 @@ impl Monomorphizer {
         let fixups = std::mem::take(&mut func.type_param_tag_fixups);
         for (reg_id, type_param_name) in &fixups {
             let concrete_type = match self.substitution_map.get(type_param_name) {
-                Some(ty) => ty.clone(),
-                None => continue,
+                Some(ty) if !contains_type_param(ty) => ty.clone(),
+                _ => {
+                    func.type_param_tag_fixups
+                        .push((*reg_id, type_param_name.clone()));
+                    continue;
+                }
             };
 
             let type_tag = concrete_type.value_tag() as i32;
@@ -977,7 +1060,12 @@ impl Monomorphizer {
             }
         }
         for (reg, name) in std::mem::take(&mut func.type_param_metadata_fixups) {
-            let Some(concrete) = self.substitution_map.get(&name) else {
+            let Some(concrete) = self
+                .substitution_map
+                .get(&name)
+                .filter(|ty| !contains_type_param(ty))
+            else {
+                func.type_param_metadata_fixups.push((reg, name));
                 continue;
             };
             let metadata = concrete.value_metadata();
@@ -1111,7 +1199,20 @@ impl Monomorphizer {
                                 } else {
                                     None
                                 };
-                                let callee_map = own_map.as_ref().unwrap_or(&sub_map);
+                                let callee_map = match own_map.as_ref() {
+                                    Some(map) => map,
+                                    None if callee_is_generic && !type_args.is_empty() => continue,
+                                    None => &sub_map,
+                                };
+                                if callee_is_generic
+                                    && !callee.signature.type_params.iter().any(|parameter| {
+                                        callee_map
+                                            .get(&parameter.name)
+                                            .is_some_and(|ty| !contains_type_param(ty))
+                                    })
+                                {
+                                    continue;
+                                }
                                 let (new_id, is_new) =
                                     self.instantiate_with_sub_map(&callee, callee_map);
                                 rewrites.push((*block_id, inst_idx, new_id));
@@ -1187,10 +1288,24 @@ impl Monomorphizer {
         generic_func: &IrFunction,
         sub_map: &BTreeMap<String, IrType>,
     ) -> (IrFunctionId, bool) {
-        // Build deterministic type_args from sorted substitution map for caching
-        let mut sorted_entries: Vec<_> = sub_map.iter().collect();
-        sorted_entries.sort_by_key(|(k, _)| (*k).clone());
-        let type_args: Vec<IrType> = sorted_entries.iter().map(|(_, v)| (*v).clone()).collect();
+        let mut sub_map = sub_map.clone();
+        Self::bind_object_constraints(generic_func, &mut sub_map);
+        // Declared parameters use the same order as direct instantiation requests.
+        let type_args: Vec<IrType> = if generic_func.signature.type_params.is_empty() {
+            sub_map.values().cloned().collect()
+        } else {
+            generic_func
+                .signature
+                .type_params
+                .iter()
+                .map(|parameter| {
+                    sub_map
+                        .get(&parameter.name)
+                        .cloned()
+                        .unwrap_or_else(|| IrType::TypeVar(parameter.name.clone()))
+                })
+                .collect()
+        };
 
         let key = MonoKey::new(generic_func.id, type_args);
 
@@ -1209,9 +1324,6 @@ impl Monomorphizer {
         let mut specialized = generic_func.clone();
         specialized.id = new_id;
         specialized.name = key.mangled_name(&generic_func.name);
-
-        // Clear any type params (shouldn't have any, but be safe)
-        specialized.signature.type_params.clear();
 
         // Substitute types in signature (params + return type)
         specialized.signature = self.substitute_signature(&specialized.signature);
@@ -1258,6 +1370,17 @@ impl Monomorphizer {
         self.pending_transitive_funcs.push(specialized);
 
         (new_id, true)
+    }
+
+    /// Object bounds supply a representation even without a concrete caller binding.
+    fn bind_object_constraints(function: &IrFunction, bindings: &mut BTreeMap<String, IrType>) {
+        for parameter in &function.signature.type_params {
+            if parameter.constraints.iter().any(|bound| bound == "{}") {
+                bindings
+                    .entry(parameter.name.clone())
+                    .or_insert_with(|| IrType::Ptr(Box::new(IrType::Void)));
+            }
+        }
     }
 
     /// Point each call at its instance, handing an erased slot the bits.
@@ -1490,6 +1613,85 @@ struct CallSiteLocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn two_parameter_template() -> IrFunction {
+        let signature = IrFunctionSignature {
+            parameters: Vec::new(),
+            return_type: IrType::TypeVar("T".into()),
+            calling_convention: crate::ir::CallingConvention::Haxe,
+            can_throw: false,
+            type_params: ["T", "C"]
+                .into_iter()
+                .map(|name| crate::ir::IrTypeParam {
+                    name: name.into(),
+                    constraints: Vec::new(),
+                })
+                .collect(),
+            uses_sret: false,
+        };
+        let mut function = IrFunction::new(
+            IrFunctionId(1),
+            crate::tast::SymbolId::from_raw(1),
+            "evaluate".into(),
+            signature,
+        );
+        let tag = function.alloc_reg();
+        function.register_types.insert(tag, IrType::I32);
+        function.type_param_tag_fixups.push((tag, "C".into()));
+        function.type_param_metadata_fixups.push((tag, "C".into()));
+        function
+    }
+
+    #[test]
+    fn transitive_cache_uses_declared_parameter_order() {
+        let template = two_parameter_template();
+        let mut mono = Monomorphizer::new();
+        let direct = mono.instantiate(&template, &[IrType::F64, IrType::Bool]);
+        let bindings = BTreeMap::from([("T".into(), IrType::F64), ("C".into(), IrType::Bool)]);
+        let (transitive, is_new) = mono.instantiate_with_sub_map(&template, &bindings);
+        assert_eq!(transitive, direct.id);
+        assert!(!is_new);
+    }
+
+    #[test]
+    fn partial_specialization_keeps_unbound_parameters_and_fixups() {
+        let template = two_parameter_template();
+        let mut mono = Monomorphizer::new();
+        mono.instantiate_with_sub_map(&template, &BTreeMap::from([("T".into(), IrType::Bool)]));
+        let instance = mono.pending_transitive_funcs.pop().unwrap();
+        assert_eq!(instance.signature.return_type, IrType::Bool);
+        assert_eq!(instance.signature.type_params.len(), 1);
+        assert_eq!(instance.signature.type_params[0].name, "C");
+        assert_eq!(
+            instance.type_param_tag_fixups,
+            template.type_param_tag_fixups
+        );
+        assert_eq!(
+            instance.type_param_metadata_fixups,
+            template.type_param_metadata_fixups
+        );
+        assert!(references_type_params(&instance));
+    }
+
+    #[test]
+    fn partial_specialization_resolves_object_bounded_parameters() {
+        let mut template = two_parameter_template();
+        template.signature.type_params[1]
+            .constraints
+            .push("{}".into());
+        let mut mono = Monomorphizer::new();
+        mono.instantiate_with_sub_map(&template, &BTreeMap::from([("T".into(), IrType::Bool)]));
+        let instance = mono.pending_transitive_funcs.pop().unwrap();
+        assert_eq!(instance.signature.return_type, IrType::Bool);
+        assert!(instance.signature.type_params.is_empty());
+        assert!(instance.type_param_tag_fixups.is_empty());
+        assert!(instance.type_param_metadata_fixups.is_empty());
+        assert!(!references_type_params(&instance));
+        assert_eq!(
+            mono.instantiation_sub_maps[&instance.id]["C"],
+            IrType::Ptr(Box::new(IrType::Void))
+        );
+    }
 
     #[test]
     fn test_mono_key_mangling() {

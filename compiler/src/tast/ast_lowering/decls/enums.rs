@@ -589,6 +589,15 @@ impl<'a> AstLowering<'a> {
         enum_symbol: SymbolId,
     ) -> LoweringResult<TypedEnumVariant> {
         let parameters = self.function_type_parameter_map(&variant.type_params)?;
+        for ty in parameters.values() {
+            if let Some(TypeKind::TypeParameter { symbol_id, .. }) =
+                self.context.type_table.borrow().get(*ty).map(|ty| &ty.kind)
+            {
+                self.context
+                    .symbol_table
+                    .add_symbol_flags(*symbol_id, SymbolFlags::EXISTENTIAL);
+            }
+        }
         self.context.push_type_parameters(parameters);
         let result = self.lower_enum_variant_inner(variant, enum_type_id, enum_symbol);
         self.context.pop_type_parameters();
