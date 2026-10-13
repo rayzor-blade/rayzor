@@ -600,13 +600,13 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// Coerce args to match external function param types at cross-module call boundaries.
-    /// Only casts I32→F64 and I64→F64 where the callee expects Float but caller passes Int.
+    /// Coerce cross-module arguments using both the erased ABI and specialization.
     pub(crate) fn coerce_args_for_cross_module_call(
         &mut self,
         func_id: IrFunctionId,
         arg_regs: &mut [IrId],
         skip_first: bool, // true if first arg is implicit 'this'
+        type_args: &[TypeId],
     ) {
         // Only coerce for external (cross-module) functions
         let param_types = match self.external_function_param_types.get(&func_id) {
@@ -615,6 +615,66 @@ impl<'a> HirToMirContext<'a> {
         };
 
         let start = if skip_first { 1 } else { 0 };
+        let mut boxed_params = BTreeSet::new();
+        if !type_args.is_empty()
+            && let Some(signature) = self.external_function_map.iter().find_map(|(symbol, id)| {
+                (*id == func_id)
+                    .then(|| self.symbol_table.get_symbol(*symbol))?
+                    .map(|symbol| symbol.type_id)
+            })
+            && let Some(TypeKind::Function { params, .. }) =
+                self.type_table.get(signature).map(|ty| &ty.kind)
+        {
+            let mut variables = BTreeSet::new();
+            let mut seen = BTreeSet::new();
+            let mut pending = vec![signature];
+            while let Some(ty) = pending.pop() {
+                if !seen.insert(ty) {
+                    continue;
+                }
+                match self.type_table.get(ty).map(|ty| &ty.kind) {
+                    Some(TypeKind::TypeParameter { symbol_id, .. }) => {
+                        variables.insert(*symbol_id);
+                    }
+                    Some(TypeKind::Function {
+                        params,
+                        return_type,
+                        ..
+                    }) => {
+                        pending.extend(params);
+                        pending.push(*return_type);
+                    }
+                    Some(TypeKind::Array { element_type }) => pending.push(*element_type),
+                    Some(TypeKind::Optional { inner_type }) => pending.push(*inner_type),
+                    Some(TypeKind::Anonymous { fields }) => {
+                        pending.extend(fields.iter().map(|f| f.type_id))
+                    }
+                    Some(
+                        TypeKind::Class { type_args, .. }
+                        | TypeKind::Enum { type_args, .. }
+                        | TypeKind::Abstract { type_args, .. }
+                        | TypeKind::TypeAlias { type_args, .. }
+                        | TypeKind::GenericInstance { type_args, .. },
+                    ) => pending.extend(type_args),
+                    _ => {}
+                }
+            }
+            if variables.len() == type_args.len() {
+                let bindings: BTreeMap<_, _> = variables.into_iter().zip(type_args).collect();
+                for (index, param) in params.iter().enumerate() {
+                    if let Some(TypeKind::TypeParameter { symbol_id, .. }) =
+                        self.type_table.get(*param).map(|ty| &ty.kind)
+                        && let Some(bound) = bindings.get(symbol_id)
+                        && matches!(
+                            self.type_table.get(**bound).map(|ty| &ty.kind),
+                            Some(TypeKind::Dynamic)
+                        )
+                    {
+                        boxed_params.insert(index + start);
+                    }
+                }
+            }
+        }
         for (i, arg_reg) in arg_regs.iter_mut().enumerate().skip(start) {
             if let Some(expected_ty) = param_types.get(i) {
                 if let Some(converted) = self.coerce_null_int(*arg_reg, expected_ty) {
@@ -637,7 +697,8 @@ impl<'a> HirToMirContext<'a> {
                 // bound for anything but a box slot comes out of it: an erased
                 // slot takes the payload's bits, a String its pointer, a
                 // scalar its value.
-                let expects_box = matches!(expected_ty, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void));
+                let expects_box = boxed_params.contains(&i)
+                    || matches!(expected_ty, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void));
                 if self.boxed_value_regs.contains(arg_reg) && !expects_box {
                     let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                     let (f, ret) = match expected_ty {

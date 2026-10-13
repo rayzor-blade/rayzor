@@ -609,6 +609,80 @@ impl<'a> AstLowering<'a> {
 }
 
 impl<'a> AstLowering<'a> {
+    pub(crate) fn record_inferred_map(&mut self, symbol: SymbolId, init: &Expr, ty: TypeId) {
+        if is_bare_new_map(init) && self.map_class_name(ty).as_deref() == Some("Map") {
+            self.inferred_maps.insert(symbol, init.clone());
+        }
+    }
+
+    pub(crate) fn try_bind_inferred_map(&mut self, map: &Expr, key: &Expr, value: &Expr) {
+        let ExprKind::Ident(name) = &map.kind else {
+            return;
+        };
+        let name = self.context.intern_string(name);
+        let Some(symbol) = self.resolve_symbol_in_scope_hierarchy(name) else {
+            return;
+        };
+        if !self.inferred_maps.contains_key(&symbol) {
+            return;
+        }
+        if self
+            .context
+            .symbol_table
+            .get_symbol(symbol)
+            .is_some_and(|s| self.map_class_name(s.type_id).as_deref() != Some("Map"))
+        {
+            return;
+        }
+        let Some(key) = self.peek_map_operand_type(key) else {
+            return;
+        };
+        let Some(value) = self.peek_map_operand_type(value) else {
+            return;
+        };
+        if let Some(ty) = self.resolve_multitype_map_to_concrete(&[key, value]) {
+            self.context.symbol_table.update_symbol_type(symbol, ty);
+        }
+    }
+
+    pub(crate) fn finish_inferred_maps(&mut self, statements: &mut [TypedStatement]) {
+        for statement in statements {
+            let TypedStatement::VarDeclaration {
+                symbol_id,
+                var_type,
+                initializer,
+                ..
+            } = statement
+            else {
+                continue;
+            };
+            let Some(source) = self.inferred_maps.remove(symbol_id) else {
+                continue;
+            };
+            let Some(ty) = self
+                .context
+                .symbol_table
+                .get_symbol(*symbol_id)
+                .map(|s| s.type_id)
+            else {
+                continue;
+            };
+            if ty == *var_type {
+                continue;
+            }
+            let previous = self.context.expected_new_type_hint.replace(ty);
+            let lowered = self.lower_expression(&source);
+            self.context.expected_new_type_hint = previous;
+            match lowered {
+                Ok(value) => {
+                    *var_type = ty;
+                    *initializer = Some(value);
+                }
+                Err(error) => self.collected_errors.push(error),
+            }
+        }
+    }
+
     /// For each unannotated `var x = new Map()` in `elements`, the first later
     /// `x.set(k, v)` or `x[k] = v`, whose operands type the map's K and V.
     pub(crate) fn scan_map_ctor_uses(
@@ -654,22 +728,32 @@ impl<'a> AstLowering<'a> {
     pub(crate) fn map_class_name(&self, target_ty: TypeId) -> Option<String> {
         use crate::tast::core::TypeKind;
         let tt = self.context.type_table.borrow();
-        match tt.get(target_ty).map(|t| &t.kind) {
-            Some(TypeKind::Class { symbol_id, .. })
-            | Some(TypeKind::Abstract { symbol_id, .. }) => self
-                .context
-                .symbol_table
-                .get_symbol(*symbol_id)
-                .and_then(|sy| self.context.string_interner.get(sy.name))
-                .filter(|n| {
-                    matches!(
-                        *n,
-                        "Map" | "StringMap" | "IntMap" | "ObjectMap" | "EnumValueMap"
-                    )
-                })
-                .map(|n| n.to_string()),
-            _ => None,
+        let mut target_ty = target_ty;
+        for _ in 0..32 {
+            let kind = &tt.get(target_ty)?.kind;
+            if let TypeKind::Class { symbol_id, .. }
+            | TypeKind::Abstract { symbol_id, .. }
+            | TypeKind::TypeAlias { symbol_id, .. } = kind
+            {
+                let name = self
+                    .context
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|symbol| self.context.string_interner.get(symbol.name));
+                if let Some(
+                    name @ ("Map" | "StringMap" | "IntMap" | "ObjectMap" | "EnumValueMap"),
+                ) = name
+                {
+                    return Some(name.to_owned());
+                }
+            }
+            target_ty = match kind {
+                TypeKind::TypeAlias { target_type, .. } => *target_type,
+                TypeKind::GenericInstance { base_type, .. } => *base_type,
+                _ => return None,
+            };
         }
+        None
     }
 
     pub(crate) fn map_ctor_hint(&mut self, var_name: &str, init: &Expr) -> Option<TypeId> {

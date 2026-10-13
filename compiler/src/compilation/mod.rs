@@ -1086,6 +1086,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn manifest_method_parameters_shadow_class_parameters() {
+        let mut unit = CompilationUnit::new(CompilationConfig::default());
+        let ast = unit
+            .parse_file(
+                "Holder.hx",
+                "class Holder<T> { public static function identity<T>(value:T):T return value; public function get():T return null; }",
+            )
+            .unwrap();
+        let info = bsym::extract_type_info_from_ast(&ast);
+        let classes = unit.register_symbols_from_type_info(&info);
+        let (_, _, scope) = classes["Holder"];
+        let signature = |name: &str| {
+            let method = unit.symbol_table.find_symbols(|symbol| {
+                symbol.scope_id == scope && unit.string_interner.get(symbol.name) == Some(name)
+            })[0];
+            unit.type_table
+                .borrow()
+                .get(method.type_id)
+                .unwrap()
+                .kind
+                .clone()
+        };
+        let TypeKind::Function {
+            params,
+            return_type,
+            ..
+        } = signature("identity")
+        else {
+            panic!("identity signature");
+        };
+        assert_eq!(params, vec![return_type]);
+        assert!(matches!(
+            unit.type_table.borrow().get(return_type).unwrap().kind,
+            TypeKind::TypeParameter { .. }
+        ));
+        let TypeKind::Function {
+            return_type: class_param,
+            ..
+        } = signature("get")
+        else {
+            panic!("get signature");
+        };
+        assert_ne!(return_type, class_param);
+        assert!(matches!(
+            unit.type_table.borrow().get(class_param).unwrap().kind,
+            TypeKind::TypeParameter { .. }
+        ));
+        assert!(unit.manifest_type_params.is_empty());
+    }
+
+    #[test]
     fn inferred_class_array_keeps_raw_slots() {
         let source = r#"
     class Body {

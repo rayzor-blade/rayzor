@@ -856,7 +856,7 @@ impl<'a> HirToMirContext<'a> {
 
             let pre_fill = arg_regs.len();
             // Coerce Int→Float at cross-module call boundaries
-            self.coerce_args_for_cross_module_call(constructor_func_id, &mut arg_regs, true);
+            self.coerce_args_for_cross_module_call(constructor_func_id, &mut arg_regs, true, &[]);
             let hir_types: Vec<Option<TypeId>> = std::iter::once(None)
                 .chain(args.iter().map(|a| Some(a.ty)))
                 .collect();

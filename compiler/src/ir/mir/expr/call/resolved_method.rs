@@ -820,6 +820,7 @@ impl<'a> HirToMirContext<'a> {
                                     i + param_offset,
                                     reg,
                                     arg,
+                                    &expected_ty,
                                 ) {
                                     Some(boxed) => boxed,
                                     None => self.maybe_box_for_extern_call(
@@ -1120,6 +1121,7 @@ impl<'a> HirToMirContext<'a> {
                                         param_idx,
                                         reg,
                                         arg,
+                                        &expected_ty,
                                     ) {
                                         Some(boxed) => boxed,
                                         None => self.maybe_box_for_extern_call(
@@ -1613,6 +1615,37 @@ impl<'a> HirToMirContext<'a> {
                                     let mut param_types = Vec::new();
                                     for (i, arg) in static_args.iter().enumerate() {
                                         if let Some(reg) = self.lower_expression(arg) {
+                                            let primitive = match declared
+                                                .get(i)
+                                                .and_then(|k| k.as_deref())
+                                            {
+                                                Some("String") => {
+                                                    Some(self.type_table.string_type())
+                                                }
+                                                Some("Int") => Some(self.type_table.int_type()),
+                                                Some("Float") => Some(self.type_table.float_type()),
+                                                Some("Bool") => Some(self.type_table.bool_type()),
+                                                _ => None,
+                                            };
+                                            // The declaration supplies the ABI before the callee's module is lowered.
+                                            if let Some(ty) = primitive {
+                                                let reg = self
+                                                    .maybe_unbox_value(reg, arg.ty, ty)
+                                                    .unwrap_or(reg);
+                                                let expected = self.convert_type(ty);
+                                                let actual = self
+                                                    .builder
+                                                    .get_register_type(reg)
+                                                    .unwrap_or(expected.clone());
+                                                let reg = self
+                                                    .maybe_box_for_extern_call(
+                                                        reg, &actual, &expected,
+                                                    )
+                                                    .unwrap_or(reg);
+                                                arg_regs.push(reg);
+                                                param_types.push(expected);
+                                                continue;
+                                            }
                                             if declared.get(i).and_then(|k| k.as_deref())
                                                 == Some("NullInt")
                                             {

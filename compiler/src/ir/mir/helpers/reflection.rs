@@ -373,7 +373,9 @@ impl<'a> HirToMirContext<'a> {
         let reg_ty = self.builder.get_register_type(reg).unwrap_or(IrType::I64);
         match reg_ty {
             IrType::I64 => reg,
-            IrType::F64 => self.builder.build_bitcast(reg, IrType::I64).unwrap_or(reg),
+            IrType::F64 | IrType::TypeVar(_) => {
+                self.builder.build_bitcast(reg, IrType::I64).unwrap_or(reg)
+            }
             IrType::F32 => self
                 .builder
                 .build_cast(reg, IrType::F32, IrType::F64)

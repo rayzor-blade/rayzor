@@ -22,6 +22,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    fn is_type_handle(&self, ty: TypeId) -> bool {
+        let ty = self.resolve_through_aliases(ty);
+        matches!(
+            self.type_table.get(ty).map(|ty| &ty.kind),
+            Some(TypeKind::Abstract { symbol_id, .. })
+                if self.symbol_table.get_symbol(*symbol_id).is_some_and(|symbol| {
+                    crate::tast::core::is_haxe_std_type(
+                        symbol, self.string_interner, &["Class", "Enum"],
+                    )
+                })
+        )
+    }
+
     /// Array slot kinds: zero is boxed, builtins use their runtime tag, and
     /// references carry their type ID above kind 6. Kind 7 nests an array layout;
     /// kind 8 is an unboxed `Null<Int>`.
@@ -77,7 +90,7 @@ impl<'a> HirToMirContext<'a> {
             )
         };
         // Dynamic-backed abstracts use boxes at assignments, arguments and returns.
-        if stores_dynamic(value_storage) {
+        if stores_dynamic(value_storage) && !self.is_type_handle(value_ty) {
             value_ty = value_storage;
         }
         // An abstract over an Array boxes as that Array.
@@ -91,7 +104,7 @@ impl<'a> HirToMirContext<'a> {
         }
         if stores_dynamic(target_storage) && target_storage != target_ty {
             target_ty = target_storage;
-            if !self.is_int64_type(value_ty) {
+            if !self.is_int64_type(value_ty) && !self.is_type_handle(value_ty) {
                 value_ty = value_storage;
             }
         }
@@ -184,6 +197,28 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             return Some(value);
+        }
+
+        // A type handle carries its runtime ID as both the payload and the tag.
+        if self.is_type_handle(value_ty) {
+            let actual = self.builder.get_register_type(value)?;
+            let id = self.builder.build_cast(value, actual, IrType::U32)?;
+            let bits = self.builder.build_cast(id, IrType::U32, IrType::U64)?;
+            let ptr = IrType::Ptr(Box::new(IrType::U8));
+            let payload = self.builder.build_bitcast(bits, ptr.clone())?;
+            let function = self.get_or_register_extern_function(
+                "haxe_box_reference_ptr",
+                vec![ptr.clone(), IrType::U32],
+                ptr.clone(),
+            );
+            let boxed = self
+                .builder
+                .build_call_direct(function, vec![payload, id], ptr.clone())?;
+            let zero = self.builder.build_const(IrValue::U32(0))?;
+            let absent = self.builder.build_cmp(CompareOp::Eq, id, zero)?;
+            let zero = self.builder.build_const(IrValue::I64(0))?;
+            let null = self.builder.build_bitcast(zero, ptr)?;
+            return self.builder.build_select(absent, null, boxed);
         }
 
         // Int64 keeps its backing class identity across Dynamic.
@@ -585,10 +620,20 @@ impl<'a> HirToMirContext<'a> {
         param_idx: usize,
         value: IrId,
         argument: &HirExpr,
+        expected_ty: &IrType,
     ) -> Option<IrId> {
+        if self.is_type_handle(argument.ty)
+            && matches!(expected_ty, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void))
+            && !self.boxed_value_regs.contains(&value)
+        {
+            return self.maybe_box_value(value, argument.ty, self.type_table.dynamic_type());
+        }
         if !matches!(
             (runtime_func, param_idx),
-            ("haxe_json_stringify" | "haxe_reflect_fields", 0)
+            (
+                "haxe_json_stringify" | "haxe_reflect_fields" | "haxe_reflect_is_enum_value",
+                0
+            )
         ) || self.boxed_value_regs.contains(&value)
             || self.is_class_symbol_expr(argument)
             || self.is_type_token_call(argument)
@@ -2011,6 +2056,12 @@ impl<'a> HirToMirContext<'a> {
         value_ty: TypeId,
         target_ty: TypeId,
     ) -> Option<IrId> {
+        // Enum slots are pointer-sized values even when their MIR type is I64.
+        if self.resolve_enum_symbol(target_ty).is_some()
+            && matches!(self.builder.get_register_type(value), Some(IrType::Ptr(_)))
+        {
+            return self.unbox_generic_value(value, target_ty);
+        }
         // Driven by the MIR register type, not the HIR type: a ternary like
         // `(v == null) ? -1 : v` unifies its branches to bare `Int` in TAST
         // while the register still holds a boxed `DynamicValue*` from the
@@ -2108,12 +2159,10 @@ impl<'a> HirToMirContext<'a> {
                     let unbox_fn = self.get_or_register_extern_function(
                         "haxe_unbox_int_ptr",
                         vec![ptr_u8.clone()],
-                        IrType::I32,
+                        IrType::I64,
                     );
-                    let i32_reg =
-                        self.builder
-                            .build_call_direct(unbox_fn, vec![value], IrType::I32)?;
-                    self.builder.build_cast(i32_reg, IrType::I32, IrType::I64)
+                    self.builder
+                        .build_call_direct(unbox_fn, vec![value], IrType::I64)
                 }
                 IrType::F64 => {
                     let unbox_fn = self.get_or_register_extern_function(

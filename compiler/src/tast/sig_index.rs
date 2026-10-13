@@ -832,7 +832,7 @@ impl StaticSigIndex {
                 entry.overrides.insert(func.name.clone());
             }
             for metadata in &field.meta {
-                if metadata.name != "op" {
+                if !matches!(metadata.name.as_str(), "op" | "resolve") {
                     continue;
                 }
                 let key = match metadata.params.first().map(|p| &p.kind) {
@@ -841,6 +841,8 @@ impl StaticSigIndex {
                         op => format!("{op:?}"),
                     },
                     Some(parser::ExprKind::Unary { op, .. }) => format!("Unary{op:?}"),
+                    Some(parser::ExprKind::Field { .. }) => "a.b".to_string(),
+                    None if metadata.name == "resolve" => "a.b".to_string(),
                     _ => continue,
                 };
                 let methods = entry.operators.entry(key).or_default();

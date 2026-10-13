@@ -804,6 +804,9 @@ pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
     if b.is_null() {
         return 1;
     }
+    if let (Some(a), Some(b)) = (class_token_of(a), class_token_of(b)) {
+        return a.cmp(&b) as i64;
+    }
     unsafe {
         let dv_a = *(a as *const DynamicValue);
         let dv_b = *(b as *const DynamicValue);
@@ -1182,7 +1185,7 @@ fn compare_reference_slot(a: i64, b: i64) -> i64 {
 /// v: DynamicValue pointer
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_is_enum_value(v: *mut u8) -> bool {
-    if v.is_null() {
+    if v.is_null() || class_token_of(v).is_some() {
         return false;
     }
     unsafe {

@@ -1072,7 +1072,7 @@ impl<'a> HirToMirContext<'a> {
                     regs.push(self.lower_expression(arg)?);
                 }
                 let value = match self
-                    .box_for_runtime_dynamic_param(runtime_func, 0, regs[0], &args[0])
+                    .box_for_runtime_dynamic_param(runtime_func, 0, regs[0], &args[0], &ptr_u8)
                     .or_else(|| self.box_anon_for_dynamic_slot(regs[0], args[0].ty, &ptr_u8))
                 {
                     Some(boxed) => boxed,

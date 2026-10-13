@@ -1,0 +1,6 @@
+[project]
+name = "forward-dynamic-arguments"
+entry = "ForwardDynamicArguments.hx"
+
+[build]
+class-paths = ["."]

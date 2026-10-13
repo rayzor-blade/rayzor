@@ -489,6 +489,31 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        let rtti_field = if class_decl
+            .meta
+            .iter()
+            .any(|meta| meta.name.trim_start_matches(':') == "rtti")
+        {
+            let index = fields.len();
+            fields.push(self.lower_field(&ClassField {
+                meta: vec![],
+                access: Some(parser::Access::Public),
+                modifiers: vec![Modifier::Static],
+                kind: ClassFieldKind::Var {
+                    name: "__rtti".into(),
+                    type_hint: None,
+                    expr: Some(Expr {
+                        kind: ExprKind::String(String::new()),
+                        span: class_decl.span,
+                    }),
+                },
+                span: class_decl.span,
+            })?);
+            Some(index)
+        } else {
+            None
+        };
+
         self.infer_unannotated_param_types(class_decl, class_symbol);
         for field in &mut fields {
             let slot = self
@@ -828,6 +853,15 @@ impl<'a> AstLowering<'a> {
                     .symbol_table
                     .add_symbol_flags(member.symbol_id, crate::tast::symbols::SymbolFlags::KEEP);
             }
+        }
+
+        if let Some(index) = rtti_field {
+            let xml =
+                self.class_rtti_xml(class_decl, class_symbol, &fields, &methods, &constructors);
+            fields[index].initializer = Some(self.lower_expression(&Expr {
+                kind: ExprKind::String(xml),
+                span: class_decl.span,
+            })?);
         }
 
         let typed_class = TypedClass {

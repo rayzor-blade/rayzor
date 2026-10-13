@@ -1785,7 +1785,13 @@ impl<'a> HirToMirContext<'a> {
 
                 // Auto-box if needed (Int -> Ptr(U8) for Deque<Int>.add()).
                 let final_reg = match self
-                    .box_for_runtime_dynamic_param(runtime_func, param_idx, arg_reg, arg)
+                    .box_for_runtime_dynamic_param(
+                        runtime_func,
+                        param_idx,
+                        arg_reg,
+                        arg,
+                        &expected_ty,
+                    )
                     .or_else(|| self.box_anon_for_dynamic_slot(arg_reg, arg.ty, &expected_ty))
                 {
                     Some(boxed) => boxed,

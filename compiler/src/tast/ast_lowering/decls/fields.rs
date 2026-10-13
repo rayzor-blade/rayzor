@@ -1276,6 +1276,7 @@ impl<'a> AstLowering<'a> {
                         }
                     }
                 }
+                self.finish_inferred_maps(&mut statements);
                 Ok(statements)
             }
             _ => {

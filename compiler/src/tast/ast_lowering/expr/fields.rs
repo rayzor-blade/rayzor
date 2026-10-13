@@ -963,14 +963,17 @@ impl<'a> AstLowering<'a> {
             .is_some_and(|s| {
                 s.kind == crate::tast::symbols::SymbolKind::Field && !s.type_id.is_valid()
             });
+        let mut resolver_type = None;
         if is_placeholder && !is_optional && field != "new" {
             if let Some(value) =
                 self.lower_resolve_macro_field(expression, expr, field, obj_expr.expr_type)?
             {
                 return Ok(value);
             }
-            if let Some(value) =
-                self.lower_unresolved_method_value(expression, expr, field, &obj_expr)?
+            resolver_type = self.field_operator_return_type(obj_expr.expr_type);
+            if resolver_type.is_none()
+                && let Some(value) =
+                    self.lower_unresolved_method_value(expression, expr, field, &obj_expr)?
             {
                 return Ok(value);
             }
@@ -1056,7 +1059,10 @@ impl<'a> AstLowering<'a> {
         };
 
         // Build the TypedExpression for the non-early-return path
-        let expr_type = self.infer_expression_type(&kind)?;
+        let expr_type = match resolver_type {
+            Some(ty) => ty,
+            None => self.infer_expression_type(&kind)?,
+        };
         let expr_type = self.registered_alias_as_array(expr_type);
         let usage = self.determine_variable_usage(&kind);
         let lifetime_id = self.assign_lifetime(&kind, &expr_type);
@@ -1070,6 +1076,59 @@ impl<'a> AstLowering<'a> {
             source_location: self.context.span_to_location(&expression.span),
             metadata,
         })
+    }
+
+    /// A field resolver's declared result is needed before typing chained calls.
+    fn field_operator_return_type(&mut self, receiver: TypeId) -> Option<TypeId> {
+        let owner = {
+            let table = self.context.type_table.borrow();
+            let mut ty = receiver;
+            let mut found = None;
+            for _ in 0..16 {
+                match table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    Some(TypeKind::Abstract { symbol_id, .. }) => {
+                        found = Some(*symbol_id);
+                        break;
+                    }
+                    _ => return None,
+                }
+            }
+            found
+        };
+        let owner = owner?;
+        let symbol = self.context.symbol_table.get_symbol(owner)?;
+        let name = self
+            .context
+            .string_interner
+            .get(symbol.qualified_name.unwrap_or(symbol.name))?
+            .to_owned();
+        let index = self.static_sig_index.as_ref()?.clone();
+        let methods = index.borrow_mut().operator_methods(&name, "a.b");
+        let mut candidates = Vec::new();
+        for (method, is_static, _) in methods {
+            let name = self.context.intern_string(&method);
+            let Some(sig) = self.resolve_declared_method_sig(owner, name, is_static) else {
+                continue;
+            };
+            let arity = 1 + usize::from(is_static);
+            if sig.is_macro
+                || sig.params.len() < arity
+                || !sig.optional.iter().skip(arity).all(|optional| *optional)
+            {
+                continue;
+            }
+            candidates.push((sig.params.len() != arity, name, sig));
+        }
+        candidates.sort_by_key(|(optional, _, _)| *optional);
+        let (_, name, sig) = candidates.first()?;
+        let method = self.resolve_class_method_symbol(owner, *name)?;
+        let ty = self.apply_declared_sig(method, sig);
+        let result = match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Function { return_type, .. }) => *return_type,
+            _ => return None,
+        };
+        Some(self.substitute_receiver_type(result, receiver))
     }
 
     /// Check if function has @:arrayAccess metadata

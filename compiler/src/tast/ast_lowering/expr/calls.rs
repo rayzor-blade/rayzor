@@ -5141,6 +5141,12 @@ impl<'a> AstLowering<'a> {
             if prev == ty {
                 continue;
             }
+            // An explicitly Dynamic container keeps boxed elements even when
+            // another argument supplies a concrete value for the same parameter.
+            if prev == dynamic || ty == dynamic {
+                resolved.insert(var, dynamic);
+                continue;
+            }
             if !float_element
                 && ((prev == int_t && ty == float_t) || (prev == float_t && ty == int_t))
             {
@@ -5912,6 +5918,37 @@ impl<'a> AstLowering<'a> {
             };
             (d.kind.clone(), a.kind.clone())
         };
+        // A protocol over Array<Dynamic> binds its element to Dynamic, not an
+        // unconstrained parameter: iteration returns the array's boxed slots.
+        if let (
+            TypeKind::Class {
+                symbol_id,
+                type_args,
+            }
+            | TypeKind::TypeAlias {
+                symbol_id,
+                type_args,
+                ..
+            },
+            TypeKind::Array { element_type },
+        ) = (&d, &a)
+            && type_args.len() == 1
+            && self
+                .context
+                .symbol_table
+                .get_symbol(*symbol_id)
+                .and_then(|s| self.context.string_interner.get(s.name))
+                .is_some_and(|name| matches!(name, "Iterable" | "Iterator"))
+        {
+            let table = self.context.type_table.borrow();
+            if let (Some(TypeKind::TypeParameter { symbol_id, .. }), Some(TypeKind::Dynamic)) = (
+                table.get(type_args[0]).map(|t| &t.kind),
+                table.get(*element_type).map(|t| &t.kind),
+            ) {
+                out.push((*symbol_id, *element_type));
+                return;
+            }
+        }
         // A concrete ArrayIterator<Dynamic> explicitly carries boxed elements.
         // This binds Iterator<T>'s T even though a bare Dynamic says nothing.
         if let (

@@ -826,6 +826,7 @@ mod classes;
 mod enums;
 mod fields;
 mod registration;
+mod rtti;
 
 /// The bare names of the types a module declares, through `#if` blocks.
 pub(super) fn module_type_names(

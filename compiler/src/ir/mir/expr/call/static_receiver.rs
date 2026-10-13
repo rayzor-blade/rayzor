@@ -36,7 +36,13 @@ impl<'a> HirToMirContext<'a> {
         func_id: Option<IrFunctionId>,
         fell_through: &mut bool,
     ) -> Option<IrId> {
-        let HirExprKind::Call { callee, args, .. } = &expr.kind else {
+        let HirExprKind::Call {
+            callee,
+            args,
+            type_args,
+            ..
+        } = &expr.kind
+        else {
             unreachable!("try_static_receiver_call on a non-Call expression")
         };
         let HirExprKind::Field { object, field } = &callee.kind else {
@@ -165,7 +171,13 @@ impl<'a> HirToMirContext<'a> {
                             .cloned()
                             .unwrap_or_else(|| actual_ty.clone());
                         let final_reg = match self
-                            .box_for_runtime_dynamic_param(runtime_func, i, arg_reg, arg)
+                            .box_for_runtime_dynamic_param(
+                                runtime_func,
+                                i,
+                                arg_reg,
+                                arg,
+                                &expected_ty,
+                            )
                             .or_else(|| {
                                 self.box_anon_for_dynamic_slot(arg_reg, arg.ty, &expected_ty)
                             }) {
@@ -314,7 +326,7 @@ impl<'a> HirToMirContext<'a> {
             }
 
             self.bind_skipped_optional_args(func_id, &mut arg_regs, &call_arg_types, false);
-            self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, false);
+            self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, false, type_args);
             let hir_types: Vec<Option<TypeId>> = call_arg_types.iter().map(|t| Some(*t)).collect();
             self.unbox_optional_args_for_erased_formals(func_id, &mut arg_regs, &hir_types, false);
             self.fill_default_args(func_id, &mut arg_regs, false);

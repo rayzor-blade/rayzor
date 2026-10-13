@@ -907,6 +907,33 @@ impl<'a> HirToMirContext<'a> {
                                 .builder
                                 .build_bitcast(value, self.convert_type_arg(actual_field_ty));
                         }
+                        // Structural assignment can leave a boxed String in a
+                        // field declared String or Null<String> by the reader.
+                        let mut string_ty = self.resolve_through_aliases(actual_field_ty);
+                        if let Some(TypeKind::Optional { inner_type }) =
+                            self.type_table.get(string_ty).map(|ty| &ty.kind)
+                        {
+                            string_ty = self.resolve_through_aliases(*inner_type);
+                        }
+                        if matches!(
+                            self.type_table.get(string_ty).map(|ty| &ty.kind),
+                            Some(TypeKind::String)
+                        ) {
+                            let ptr = IrType::Ptr(Box::new(IrType::U8));
+                            let raw = self.builder.build_bitcast(raw_val, ptr.clone())?;
+                            let tag = self.builder.build_const(IrValue::U32(5))?;
+                            let unbox = self.get_or_register_extern_function(
+                                "haxe_unbox_if_tag",
+                                vec![ptr.clone(), IrType::U32],
+                                ptr,
+                            );
+                            let value = self.builder.build_call_direct(
+                                unbox,
+                                vec![raw, tag],
+                                IrType::String,
+                            )?;
+                            return Some(value);
+                        }
                         return self.coerce_from_i64(raw_val, actual_field_ty);
                     }
                 }

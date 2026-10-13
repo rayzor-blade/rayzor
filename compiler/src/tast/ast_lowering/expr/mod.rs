@@ -918,6 +918,16 @@ impl<'a> AstLowering<'a> {
                 return self.lower_expression(&table);
             }
             ExprKind::Call { expr, args } => {
+                if let ExprKind::Field {
+                    expr: receiver,
+                    field,
+                    ..
+                } = &expr.kind
+                {
+                    if field == "set" && args.len() == 2 {
+                        self.try_bind_inferred_map(receiver, &args[0], &args[1]);
+                    }
+                }
                 // Monomorph rewrite: `arr.push(e)` on an untyped empty array binds
                 // its element type from `e` (before the call lowers, so the
                 // receiver resolves to the concrete Array<T>).
@@ -1023,8 +1033,9 @@ impl<'a> AstLowering<'a> {
             ExprKind::Assign { left, op, right } => {
                 // Monomorph rewrite: `arr[i] = e` on an untyped empty array binds
                 // its element type from `e` before the target lowers.
-                if let ExprKind::Index { expr: recv, .. } = &left.kind {
+                if let ExprKind::Index { expr: recv, index } = &left.kind {
                     self.try_bind_inferred_array(recv, right);
+                    self.try_bind_inferred_map(recv, index, right);
                 }
                 let slot = self.dynamic_method_slot(left);
                 let left: &Expr = slot.as_ref().unwrap_or(left);
@@ -1818,6 +1829,8 @@ impl<'a> AstLowering<'a> {
                     }
                 }
 
+                self.finish_inferred_maps(&mut statements);
+                self.map_first_uses.pop();
                 // Leave the block scope
                 let parent_scope = self
                     .context
@@ -2531,7 +2544,6 @@ impl<'a> AstLowering<'a> {
                 if generic {
                     self.context.pop_type_parameters();
                 }
-                self.map_first_uses.pop();
                 self.context.exit_scope();
 
                 TypedExpressionKind::FunctionLiteral {
@@ -2955,6 +2967,9 @@ impl<'a> AstLowering<'a> {
                     self.null_decl_depth.insert(var_symbol, self.closure_depth);
                 }
                 if let Some(init_expr) = expr {
+                    if declared_type.is_none() {
+                        self.record_inferred_map(var_symbol, init_expr, var_type);
+                    }
                     self.record_macro_local_views(
                         var_symbol,
                         init_expr,
@@ -3147,6 +3162,9 @@ impl<'a> AstLowering<'a> {
                     self.empty_array_inferred.insert(var_symbol, loc);
                 }
                 if let Some(init_expr) = expr {
+                    if declared_type.is_none() {
+                        self.record_inferred_map(var_symbol, init_expr, var_type);
+                    }
                     self.record_macro_local_views(
                         var_symbol,
                         init_expr,

@@ -124,6 +124,14 @@ impl SpanConverter {
         &self.source_map
     }
 
+    /// Original spelling for syntax whose literal representation is significant.
+    pub fn source_slice(&self, span: Span) -> Option<&str> {
+        self.source_map
+            .get_file(self.current_file_id)?
+            .content
+            .get(span.start as usize..span.end as usize)
+    }
+
     /// Get mutable access to the underlying source map
     pub fn source_map_mut(&mut self) -> &mut SourceMap {
         &mut self.source_map

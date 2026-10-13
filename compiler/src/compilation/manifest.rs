@@ -447,13 +447,17 @@ impl CompilationUnit {
                     .create_function_in_scope(method_name, class_scope)
             });
 
-        // Parse parameter types and return type to create a function type
+        // Method parameters shadow the enclosing class's generic parameters.
+        let method_type_params = self.register_manifest_type_params(&method.type_params);
+        let outer_type_params = self.manifest_type_params.clone();
+        self.manifest_type_params.extend(method_type_params);
         let param_types: Vec<TypeId> = method
             .params
             .iter()
             .map(|p| self.resolve_blade_type_or_dynamic(p.param_type.as_ref()))
             .collect();
         let return_type = self.resolve_blade_type_or_dynamic(method.return_type.as_ref());
+        self.manifest_type_params = outer_type_params;
 
         // Create function type
         let func_type = self

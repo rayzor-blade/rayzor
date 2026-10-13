@@ -365,7 +365,8 @@ impl<'a> HirToMirContext<'a> {
             .get(&method_sym)
             .copied()
             .or_else(|| self.external_function_map.get(&method_sym).copied())?;
-        self.ensure_vtable_dispatch_thunk(func_id).or(Some(func_id))
+        self.ensure_vtable_dispatch_thunk(func_id)
+            .or_else(|| self.ensure_cross_module_dispatch_thunk(method_sym, func_id))
     }
 
     /// The entry point for a stdlib iterator method named by its runtime symbol.

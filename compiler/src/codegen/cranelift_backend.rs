@@ -4358,7 +4358,10 @@ impl CraneliftBackend {
                         builder.ins().fcvt_from_sint(types::F64, wide)
                     }
 
-                    // Int to Int conversions (sign extension or truncation)
+                    // Integer widening preserves the source's signedness.
+                    (types::I32, types::I64) if matches!(from_ty, IrType::U32) => {
+                        builder.ins().uextend(types::I64, src_val)
+                    }
                     (types::I32, types::I64) => builder.ins().sextend(types::I64, src_val),
                     (types::I64, types::I32) => builder.ins().ireduce(types::I32, src_val),
 

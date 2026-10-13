@@ -23,6 +23,9 @@ use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
     fn box_conditional_arm(&mut self, value: IrId, ty: TypeId, ir: IrType) -> Option<IrId> {
+        if self.resolve_enum_symbol(ty).is_some() {
+            return self.maybe_box_value(value, ty, self.type_table.dynamic_type());
+        }
         if let Some(TypeKind::TypeParameter { symbol_id, .. }) = self
             .type_table
             .get(self.resolve_through_aliases(ty))
@@ -58,6 +61,7 @@ impl<'a> HirToMirContext<'a> {
                         | TypeKind::Array { .. }
                         | TypeKind::Anonymous { .. }
                         | TypeKind::Function { .. }
+                        | TypeKind::Enum { .. }
                 )
             )
         };
