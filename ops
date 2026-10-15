@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1792101827,"nonce":"9//67wnOvZ6fIui1PcgInT+KqwE=","message":"Committed in 4fb9df2e. The native regression passes on both Mac and NUC; final corpus results are 1087/1092 on both with no lost passes, and all 255 fixtures pass on each.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1792101828,"nonce":"lODPYxhI6ni9gDwZCrPC4DHU80M=","status":2}]}
