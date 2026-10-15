@@ -292,6 +292,7 @@ impl StdlibMapping {
         // Haxe classes (not runtime-backed). No stdlib mappings needed.
         mapping.register_math_methods();
         mapping.register_sys_methods();
+        mapping.register_process_methods();
         mapping.register_std_methods();
         mapping.register_file_methods();
         mapping.register_fileinput_methods();
@@ -2070,6 +2071,30 @@ impl StdlibMapping {
     // ============================================================================
     // Sys Methods
     // ============================================================================
+
+    fn register_process_methods(&mut self) {
+        use IrTypeDescriptor::*;
+        self.register_from_tuples(vec![
+            map_method!(constructor "sys.io.NativeProcess", "new" => "haxe_process_new", params: 3, returns: primitive,
+                types: &[PtrString, PtrVoid, Bool] => PtrVoid),
+            map_method!(instance "sys.io.NativeProcess", "takeStdin" => "haxe_process_stdin", params: 0, returns: primitive,
+                types: &[PtrVoid] => PtrVoid),
+            map_method!(instance "sys.io.NativeProcess", "takeStdout" => "haxe_process_stdout", params: 0, returns: primitive,
+                types: &[PtrVoid] => PtrVoid),
+            map_method!(instance "sys.io.NativeProcess", "takeStderr" => "haxe_process_stderr", params: 0, returns: primitive,
+                types: &[PtrVoid] => PtrVoid),
+            map_method!(instance "sys.io.NativeProcess", "getPid" => "haxe_process_pid", params: 0, returns: primitive,
+                types: &[PtrVoid] => I32),
+            map_method!(instance "sys.io.NativeProcess", "hasExited" => "haxe_process_has_exited", params: 0, returns: primitive,
+                types: &[PtrVoid] => Bool),
+            map_method!(instance "sys.io.NativeProcess", "waitForExit" => "haxe_process_wait", params: 0, returns: primitive,
+                types: &[PtrVoid] => I32),
+            map_method!(instance "sys.io.NativeProcess", "kill" => "haxe_process_kill", params: 0, returns: void,
+                types: &[PtrVoid]),
+            map_method!(instance "sys.io.NativeProcess", "close" => "haxe_process_close", params: 0, returns: void,
+                types: &[PtrVoid]),
+        ]);
+    }
 
     fn register_sys_methods(&mut self) {
         use IrTypeDescriptor::*;

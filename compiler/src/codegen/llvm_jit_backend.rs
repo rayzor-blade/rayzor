@@ -671,19 +671,8 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         Some((a, b))
     }
 
-    /// Emit `malloc(size)` by materializing malloc's absolute address as an IR
-    /// constant and calling it indirectly, instead of referencing the external
-    /// `malloc` symbol.
-    ///
-    /// LLVM recognizes `malloc`/`free` as libcalls and routes them through
-    /// TargetLibraryInfo. On Linux, MCJIT/RuntimeDyld leaves the large-code-
-    /// model `R_X86_64_64` relocation for that libcall at 0 — unlike ordinary
-    /// runtime symbols (`haxe_*`/`rayzor_*`), which resolve through the
-    /// `LLVMAddSymbol` explicit table — so the JIT bakes `movabs $0; call *reg`
-    /// and SIGSEGVs the first startup hook that boxes a closure
-    /// (`__vtable_init__` allocating a 16-byte FunctionRef). The compiler
-    /// process is the JIT host, so the registered libc `malloc` address is the
-    /// correct callee; baking it as a constant sidesteps symbol resolution.
+    /// AOT uses relocatable libc symbols; JIT uses host addresses to avoid
+    /// unresolved MCJIT libc relocations.
     fn build_heap_malloc(
         &self,
         size: inkwell::values::IntValue<'ctx>,
@@ -691,6 +680,21 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     ) -> Result<PointerValue<'ctx>, String> {
         let i64_type = self.context.i64_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let ft = ptr_type.fn_type(&[i64_type.into()], false);
+        if self.aot_mode {
+            let malloc = self.module.get_function("malloc").unwrap_or_else(|| {
+                self.module
+                    .add_function("malloc", ft, Some(inkwell::module::Linkage::External))
+            });
+            return self
+                .builder
+                .build_call(malloc, &[size.into()], name)
+                .map_err(|e| format!("call malloc: {}", e))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| "malloc did not return a value".to_string())
+                .map(|v| v.into_pointer_value());
+        }
         let addr = self.runtime_addr("malloc").unwrap_or(
             libc::malloc as unsafe extern "C" fn(libc::size_t) -> *mut libc::c_void as usize as u64,
         );
@@ -698,7 +702,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .builder
             .build_int_to_ptr(i64_type.const_int(addr, false), ptr_type, "malloc_fp")
             .map_err(|e| format!("inttoptr malloc: {}", e))?;
-        let ft = ptr_type.fn_type(&[i64_type.into()], false);
         self.builder
             .build_indirect_call(ft, fp, &[size.into()], name)
             .map_err(|e| format!("call malloc: {}", e))?
@@ -708,12 +711,21 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .map(|v| v.into_pointer_value())
     }
 
-    /// Emit `free(ptr)` via a materialized absolute-address indirect call — see
-    /// [`Self::build_heap_malloc`] for why the `free` libcall can't go through
-    /// MCJIT symbol resolution on Linux.
+    /// Release memory using the same symbol policy as heap allocation.
     fn build_heap_free(&self, ptr: PointerValue<'ctx>) -> Result<(), String> {
         let i64_type = self.context.i64_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let ft = self.context.void_type().fn_type(&[ptr_type.into()], false);
+        if self.aot_mode {
+            let free = self.module.get_function("free").unwrap_or_else(|| {
+                self.module
+                    .add_function("free", ft, Some(inkwell::module::Linkage::External))
+            });
+            self.builder
+                .build_call(free, &[ptr.into()], "free_call")
+                .map_err(|e| format!("call free: {}", e))?;
+            return Ok(());
+        }
         let addr = self
             .runtime_addr("free")
             .unwrap_or(libc::free as unsafe extern "C" fn(*mut libc::c_void) as usize as u64);
@@ -721,7 +733,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .builder
             .build_int_to_ptr(i64_type.const_int(addr, false), ptr_type, "free_fp")
             .map_err(|e| format!("inttoptr free: {}", e))?;
-        let ft = self.context.void_type().fn_type(&[ptr_type.into()], false);
         self.builder
             .build_indirect_call(ft, fp, &[ptr.into()], "free_call")
             .map_err(|e| format!("call free: {}", e))?;
@@ -8834,5 +8845,33 @@ impl LLVMJitBackend {
 
     pub fn get_function_ptr(&self, _func_id: crate::ir::IrFunctionId) -> Result<*const u8, String> {
         Err("LLVM backend not enabled".to_string())
+    }
+}
+
+#[cfg(all(test, feature = "llvm-backend"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aot_heap_calls_are_relocatable() {
+        let context = Context::create();
+        let backend = LLVMJitBackend::with_aot_mode(&context, OptimizationLevel::None).unwrap();
+        let function = backend.module.add_function(
+            "allocate_and_free",
+            context.void_type().fn_type(&[], false),
+            None,
+        );
+        let block = context.append_basic_block(function, "entry");
+        backend.builder.position_at_end(block);
+        let allocation = backend
+            .build_heap_malloc(context.i64_type().const_int(16, false), "allocation")
+            .unwrap();
+        backend.build_heap_free(allocation).unwrap();
+        backend.builder.build_return(None).unwrap();
+        backend.module.verify().unwrap();
+        let ir = backend.module.print_to_string().to_string();
+        assert!(ir.contains("call ptr @malloc(i64 16)"), "{ir}");
+        assert!(ir.contains("call void @free(ptr "), "{ir}");
+        assert!(!ir.contains("inttoptr"), "{ir}");
     }
 }

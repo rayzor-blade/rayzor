@@ -64,6 +64,8 @@ pub fn run_aot(config: AotConfig, plugins: Vec<Box<dyn CompilerPlugin>>) -> Resu
     compiler.linker = config.linker;
     compiler.runtime_dir = config.runtime_dir;
     compiler.sysroot = config.sysroot;
+    compiler.enable_cache = config.enable_cache;
+    compiler.cache_dir = config.cache_dir;
     compiler.extra_source_dirs = config.extra_source_dirs;
     compiler.native_link_libs = config.native_link_libs;
 

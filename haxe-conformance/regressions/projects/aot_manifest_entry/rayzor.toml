@@ -1,0 +1,6 @@
+[project]
+name = "aot-manifest-entry"
+entry = "../aot_manifest_source/ExternalEntry.hx"
+
+[build]
+class-paths = ["helpers"]

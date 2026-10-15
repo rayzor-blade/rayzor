@@ -5028,10 +5028,6 @@ pub extern "C" fn haxe_vtable_set_slot(type_id: i32, slot_index: i32, closure_pt
 type IfaceVtableMap = HashMap<(u32, u32), Vec<i64>>;
 static IFACE_VTABLE_REGISTRY: RwLock<Option<IfaceVtableMap>> = RwLock::new(None);
 
-/// Register one (class, iface, slot) → closure_ptr entry. Called once
-/// per (class, iface, method) tuple during program startup from
-/// `__vtable_init__`.
-#[unsafe(no_mangle)]
 /// Whether `RAYZOR_IFACE_DEBUG` is set, read once. Both callers sit on the
 /// interface dispatch path, where a `getenv` per call is pure overhead.
 fn iface_debug_enabled() -> bool {
@@ -5040,6 +5036,10 @@ fn iface_debug_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("RAYZOR_IFACE_DEBUG").is_some())
 }
 
+/// Register one (class, iface, slot) → closure_ptr entry. Called once
+/// per (class, iface, method) tuple during program startup from
+/// `__vtable_init__`.
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_iface_vtable_set_slot(
     class_type_id: i32,
     iface_type_id: i32,
@@ -5256,20 +5256,6 @@ fn ensure_flat_vtable() {
     }
 }
 
-/// Look up a vtable slot for an object. Reads type_id from the object header
-/// (first 8 bytes), then returns the closure pointer for the given slot.
-///
-/// THROWS rather than returning 0 when the lookup cannot be satisfied. Every
-/// caller (the three interface-dispatch sites in hir_to_mir) emits a
-/// `call_indirect` straight onto this result with no null check, so returning
-/// 0 turned every dispatch failure — null receiver, unregistered type_id,
-/// out-of-range slot — into an unexplainable SIGSEGV inside JIT'd code with
-/// no symbol and no message. A thrown Haxe exception names the failure at the
-/// point it happens instead.
-///
-/// Hot path is unchanged: two array indexes, no locks, no hash lookups. The
-/// throws sit only on paths that previously produced a guaranteed crash.
-#[unsafe(no_mangle)]
 #[inline(never)]
 /// Is dispatch instrumentation on? Resolved once.
 ///
@@ -5283,6 +5269,8 @@ fn vtable_stats_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("RAYZOR_VTABLE_STATS").is_some())
 }
 
+/// Look up an object's vtable slot, throwing if the receiver or slot is invalid.
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64 {
     if obj_ptr.is_null() {
         crate::exception::throw_with_message(format!(

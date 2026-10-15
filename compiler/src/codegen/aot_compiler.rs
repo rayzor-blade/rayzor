@@ -61,6 +61,10 @@ pub struct AotCompiler {
     pub sysroot: Option<PathBuf>,
     /// Strip debug symbols from binary
     pub strip_symbols: bool,
+    /// Enable BLADE incremental compilation.
+    pub enable_cache: bool,
+    /// Directory for BLADE artifacts.
+    pub cache_dir: Option<PathBuf>,
     /// Extra source directories (class paths) for import resolution
     pub extra_source_dirs: Vec<PathBuf>,
     /// Native libraries that provide symbols for compiler plugins
@@ -79,6 +83,8 @@ impl Default for AotCompiler {
             runtime_dir: None,
             sysroot: None,
             strip_symbols: false,
+            enable_cache: true,
+            cache_dir: None,
             extra_source_dirs: Vec::new(),
             native_link_libs: Vec::new(),
         }
@@ -91,7 +97,11 @@ impl AotCompiler {
         source_files: &[String],
         plugins: Vec<Box<dyn CompilerPlugin + 'static>>,
     ) -> Result<Vec<IrModule>, String> {
-        let mut config = CompilationConfig::default();
+        let mut config = CompilationConfig {
+            enable_cache: self.enable_cache,
+            cache_dir: self.cache_dir.clone(),
+            ..CompilationConfig::default()
+        };
         config.pipeline_config = config.pipeline_config.skip_analysis();
         config.emit_safety_warnings = false;
         let mut unit = CompilationUnit::new(config);
@@ -220,6 +230,11 @@ impl AotCompiler {
         }
 
         // --- Phase 5: LLVM compilation ---
+        if std::env::var_os("RAYZOR_DUMP_MIR").is_some() {
+            for module in &modules {
+                eprintln!("{}", crate::ir::dump::dump_module(module));
+            }
+        }
         if self.verbose {
             println!("  Compiling to LLVM IR...");
         }

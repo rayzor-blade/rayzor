@@ -74,6 +74,11 @@ jobs:
         # that nothing here calls.
         run: cargo build --release --no-default-features --features llvm-backend,llvm-dynamic
 
+      - name: Check AOT manifest resolution
+        env:
+          RAYZOR_STD_PATH: ${{ github.workspace }}/compiler/haxe-std
+        run: python3 haxe-conformance/check-aot-manifest.py
+
       - name: Record runner and LLVM environment
         run: |
           mkdir -p conformance-out

@@ -22,21 +22,31 @@
 
 package sys.io;
 
-extern class Process {
+import sys.io.FileInput;
+import sys.io.FileOutput;
+
+class Process {
+	var handle:NativeProcess;
+
+	function live():NativeProcess {
+		if (handle == null) throw "Process is closed";
+		return handle;
+	}
+
 	/**
 		Standard output. The output stream where a process writes its output data.
 	**/
-	var stdout(default, null):haxe.io.Input;
+	public var stdout(default, null):haxe.io.Input;
 
 	/**
 		Standard error. The output stream to output error messages or diagnostics.
 	**/
-	var stderr(default, null):haxe.io.Input;
+	public var stderr(default, null):haxe.io.Input;
 
 	/**
 		Standard input. The stream data going into a process.
 	**/
-	var stdin(default, null):haxe.io.Output;
+	public var stdin(default, null):haxe.io.Output;
 
 	/**
 		Construct a `Process` object, which run the given command immediately.
@@ -53,12 +63,19 @@ extern class Process {
 
 		`close()` should be called when the `Process` is no longer used.
 	**/
-	function new(cmd:String, ?args:Array<String>, ?detached:Bool):Void;
+	public function new(cmd:String, ?args:Array<String>, detached:Bool = false):Void {
+		handle = new NativeProcess(cmd, args, detached);
+		if (!detached) {
+			stdout = new ProcessInput(handle.takeStdout());
+			stderr = new ProcessInput(handle.takeStderr());
+			stdin = new ProcessOutput(handle.takeStdin());
+		}
+	}
 
 	/**
 		Return the process ID.
 	**/
-	function getPid():Int;
+	public function getPid():Int return live().getPid();
 
 	/**
 		Query the exit code of the process.
@@ -66,16 +83,59 @@ extern class Process {
 		If `block` is false, it will return either the process exit code if it's already terminated or null if it's still running.
 		If the process has already exited, return the exit code immediately.
 	**/
-	function exitCode(block:Bool = true):Null<Int>;
+	public function exitCode(block:Bool = true):Null<Int> {
+		var process = live();
+		if (!block && !process.hasExited()) return null;
+		return process.waitForExit();
+	}
 
 	/**
 		Close the process handle and release the associated resources.
 		All `Process` fields should not be used after `close()` is called.
 	**/
-	function close():Void;
+	public function close():Void {
+		if (handle == null) return;
+		if (stdin != null) stdin.close();
+		if (stdout != null) stdout.close();
+		if (stderr != null) stderr.close();
+		handle.close();
+		handle = null;
+	}
 
 	/**
 		Kill the process.
 	**/
-	function kill():Void;
+	public function kill():Void live().kill();
+}
+
+private class ProcessInput extends haxe.io.Input {
+	var stream:FileInput;
+	public function new(stream:FileInput) { this.stream = stream; }
+	function live():FileInput {
+		if (stream == null) throw "Process input is closed";
+		return stream;
+	}
+	public override function readByte():Int return live().readByte();
+	public override function readBytes(bytes:haxe.io.Bytes, pos:Int, len:Int):Int
+		return live().readBytes(bytes, pos, len);
+	public override function readAll(?bufsize:Int):haxe.io.Bytes return live().readAll(bufsize);
+	public override function close():Void {
+		if (stream != null) { stream.close(); stream = null; }
+	}
+}
+
+private class ProcessOutput extends haxe.io.Output {
+	var stream:FileOutput;
+	public function new(stream:FileOutput) { this.stream = stream; }
+	function live():FileOutput {
+		if (stream == null) throw "Process output is closed";
+		return stream;
+	}
+	public override function writeByte(value:Int):Void live().writeByte(value);
+	public override function writeBytes(bytes:haxe.io.Bytes, pos:Int, len:Int):Int
+		return live().writeBytes(bytes, pos, len);
+	public override function flush():Void live().flush();
+	public override function close():Void {
+		if (stream != null) { stream.close(); stream = null; }
+	}
 }

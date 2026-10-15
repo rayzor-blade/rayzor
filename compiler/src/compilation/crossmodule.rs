@@ -365,6 +365,17 @@ impl CompilationUnit {
                 .iter()
                 .map(|(id, ext)| (*id, (ext.name.clone(), ext.signature.clone())))
                 .collect();
+            let resolved_names: BTreeMap<_, _> = ext_names
+                .iter()
+                .filter_map(|(id, name)| {
+                    let target = stdlib_map.get(name).copied().or_else(|| {
+                        ext_sigs.get(id).and_then(|sig| {
+                            unique_bare_match(name, sig, real_funcs_by_bare_name, None)
+                        })
+                    })?;
+                    Some((*id, target))
+                })
+                .collect();
             let own_ids: std::collections::BTreeSet<crate::ir::IrFunctionId> = module
                 .functions
                 .keys()
@@ -407,17 +418,8 @@ impl CompilationUnit {
                                 // the named target. Name-first resolution
                                 // makes the fixup robust against any
                                 // import-order-dependent id assignment.
-                                if let Some(name) = ext_names.get(func_id) {
-                                    let resolved = stdlib_map.get(name).copied().or_else(|| {
-                                        ext_sigs.get(func_id).and_then(|sig| {
-                                            unique_bare_match(
-                                                name,
-                                                sig,
-                                                real_funcs_by_bare_name,
-                                                None,
-                                            )
-                                        })
-                                    });
+                                if ext_names.contains_key(func_id) {
+                                    let resolved = resolved_names.get(func_id).copied();
                                     match resolved {
                                         Some(target) if foreign(target) => {}
                                         Some(target) => {
@@ -472,6 +474,12 @@ impl CompilationUnit {
                     }
                 }
             }
+            // Keep names attached to the rewritten references so another
+            // repair pass cannot interpret a current id as a stale one.
+            module.external_function_names = ext_names
+                .into_iter()
+                .map(|(id, name)| (resolved_names.get(&id).copied().unwrap_or(id), name))
+                .collect();
         };
 
         // Clear the cfg of every runtime-intrinsic stub picked above so codegen
@@ -720,7 +728,7 @@ impl CompilationUnit {
         for (old_id, name) in old_ext_names {
             let new_id = local_functions_by_name
                 .get(&name)
-                .or_else(|| id_map.get(&old_id))
+                .or_else(|| self.stdlib_function_name_map.get(&name))
                 .copied()
                 .unwrap_or(old_id);
             import_mir.external_function_names.insert(new_id, name);
@@ -800,5 +808,67 @@ impl CompilationUnit {
         }
 
         self.import_mir_modules.push(import_mir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{FunctionSignatureBuilder, IrFunction, IrId, IrInstruction};
+
+    #[test]
+    fn imported_names_follow_rebound_references() {
+        for resolve_before_import in [false, true] {
+            let mut unit = CompilationUnit::new(CompilationConfig::default());
+            let mut module = IrModule::new("caller".into(), "Caller.hx".into());
+            let mut caller = IrFunction::new(
+                IrFunctionId(0),
+                crate::tast::SymbolId::from_raw(0),
+                "caller".into(),
+                FunctionSignatureBuilder::new()
+                    .returns(crate::ir::IrType::Void)
+                    .build(),
+            );
+            let block = caller.cfg.blocks.values_mut().next().unwrap();
+            for (index, id) in [350002, 360002].into_iter().enumerate() {
+                block.instructions.push(IrInstruction::FunctionRef {
+                    dest: IrId::new(index as u32),
+                    func_id: IrFunctionId(id),
+                });
+            }
+            module.functions.insert(caller.id, caller);
+            module
+                .external_function_names
+                .insert(IrFunctionId(350002), "Map.keys".into());
+            module
+                .external_function_names
+                .insert(IrFunctionId(360002), "Tree.set".into());
+            let current = BTreeMap::from([
+                ("Map.keys".into(), IrFunctionId(360002)),
+                ("Tree.set".into(), IrFunctionId(370002)),
+            ]);
+            if resolve_before_import {
+                unit.stdlib_function_name_map = current.clone();
+            }
+            unit.renumber_and_push_import_mir(module);
+            unit.stdlib_function_name_map = current;
+            for _ in 0..2 {
+                unit.fixup_stale_cross_module_refs();
+                let module = &unit.import_mir_modules[0];
+                let targets: Vec<_> = module
+                    .functions
+                    .values()
+                    .flat_map(|f| f.cfg.blocks.values())
+                    .flat_map(|b| &b.instructions)
+                    .filter_map(|inst| match inst {
+                        IrInstruction::FunctionRef { func_id, .. } => Some(*func_id),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(targets, [IrFunctionId(360002), IrFunctionId(370002)]);
+                assert_eq!(module.external_function_names[&targets[0]], "Map.keys");
+                assert_eq!(module.external_function_names[&targets[1]], "Tree.set");
+            }
+        }
     }
 }

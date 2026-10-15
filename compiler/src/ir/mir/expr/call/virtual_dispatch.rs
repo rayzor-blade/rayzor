@@ -42,6 +42,20 @@ impl<'a> HirToMirContext<'a> {
             return None;
         };
         if *is_method && !args.is_empty() && !receiver_is_super {
+            // Native handles have no object header, even when their Haxe base
+            // declares virtual methods. Their mapped calls use the native ABI.
+            let native_receiver = self
+                .resolve_receiver_class_symbol(args[0].ty)
+                .and_then(|id| self.symbol_table.get_symbol(id))
+                .is_some_and(|class| class.flags.contains(SymbolFlags::EXTERN));
+            if native_receiver
+                && self
+                    .get_stdlib_runtime_info(*symbol, args[0].ty, Some(args.len() - 1), None)
+                    .is_some()
+            {
+                *fell_through = true;
+                return None;
+            }
             let vtable_slot = self
                 .virtual_dispatch_info
                 .get(symbol)

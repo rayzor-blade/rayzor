@@ -1386,7 +1386,10 @@ pub extern "C" fn haxe_sys_environment() -> *mut HaxeStringMap {
 pub extern "C" fn haxe_sys_get_cwd() -> *mut HaxeString {
     match std::env::current_dir() {
         Ok(path) => {
-            let path_str = path.to_string_lossy().into_owned();
+            let mut path_str = path.to_string_lossy().into_owned();
+            if !path_str.ends_with(std::path::MAIN_SEPARATOR) {
+                path_str.push(std::path::MAIN_SEPARATOR);
+            }
             let bytes = path_str.into_bytes();
             let len = bytes.len();
             let cap = bytes.capacity();
@@ -1560,6 +1563,158 @@ pub extern "C" fn haxe_sys_command_args(
         match process.status() {
             Ok(status) => status.code().unwrap_or(-1),
             Err(_) => -1,
+        }
+    }
+}
+
+/// Child process; stream ownership transfers to the Haxe Input/Output wrappers.
+pub struct HaxeProcess {
+    child: std::process::Child,
+}
+
+fn process_result<T>(result: std::io::Result<T>) -> T {
+    result.unwrap_or_else(|error| crate::exception::throw_with_message(error.to_string()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_process_new(
+    cmd: *const HaxeString,
+    args: *const crate::haxe_array::HaxeArray,
+    detached: bool,
+) -> *mut HaxeProcess {
+    use std::process::{Command, Stdio};
+    let command = unsafe { haxe_string_to_rust(cmd) }
+        .unwrap_or_else(|| crate::exception::throw_with_message("Invalid process command".into()));
+    let mut process = if args.is_null() {
+        #[cfg(windows)]
+        let mut process = Command::new("cmd");
+        #[cfg(not(windows))]
+        let mut process = Command::new("sh");
+        #[cfg(windows)]
+        process.arg("/C");
+        #[cfg(not(windows))]
+        process.arg("-c");
+        process.arg(command);
+        process
+    } else {
+        let mut process = Command::new(command);
+        for index in 0..unsafe { (*args).len } {
+            let value = crate::haxe_array::haxe_array_get_typed(
+                args,
+                index as i64,
+                crate::type_system::ValueTag::String as i32,
+            ) as *const HaxeString;
+            let value = unsafe { haxe_string_to_rust(value) }.unwrap_or_else(|| {
+                crate::exception::throw_with_message("Invalid process argument".into())
+            });
+            process.arg(value);
+        }
+        process
+    };
+    if detached {
+        process
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // Only an async-signal-safe system call runs between fork and exec.
+            unsafe {
+                process.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                });
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            process.creation_flags(0x00000008);
+        }
+    } else {
+        process
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    }
+    Box::into_raw(Box::new(HaxeProcess {
+        child: process_result(process.spawn()),
+    }))
+}
+
+#[cfg(unix)]
+fn process_pipe_file(pipe: impl Into<std::os::fd::OwnedFd>) -> File {
+    File::from(pipe.into())
+}
+#[cfg(windows)]
+fn process_pipe_file(pipe: impl Into<std::os::windows::io::OwnedHandle>) -> File {
+    File::from(pipe.into())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_process_stdin(handle: *mut HaxeProcess) -> *mut HaxeFileOutput {
+    let Some(pipe) = (unsafe { &mut *handle }).child.stdin.take() else {
+        return std::ptr::null_mut();
+    };
+    Box::into_raw(Box::new(HaxeFileOutput {
+        writer: BufWriter::new(process_pipe_file(pipe)),
+    }))
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_process_stdout(handle: *mut HaxeProcess) -> *mut HaxeFileInput {
+    let Some(pipe) = (unsafe { &mut *handle }).child.stdout.take() else {
+        return std::ptr::null_mut();
+    };
+    Box::into_raw(Box::new(HaxeFileInput {
+        reader: BufReader::new(process_pipe_file(pipe)),
+        eof_reached: false,
+    }))
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_process_stderr(handle: *mut HaxeProcess) -> *mut HaxeFileInput {
+    let Some(pipe) = (unsafe { &mut *handle }).child.stderr.take() else {
+        return std::ptr::null_mut();
+    };
+    Box::into_raw(Box::new(HaxeFileInput {
+        reader: BufReader::new(process_pipe_file(pipe)),
+        eof_reached: false,
+    }))
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_process_pid(handle: *mut HaxeProcess) -> i32 {
+    unsafe { (*handle).child.id() as i32 }
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_process_has_exited(handle: *mut HaxeProcess) -> bool {
+    process_result(unsafe { (*handle).child.try_wait() }).is_some()
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_process_wait(handle: *mut HaxeProcess) -> i32 {
+    let status = process_result(unsafe { (*handle).child.wait() });
+    if let Some(code) = status.code() {
+        return code;
+    }
+    crate::exception::throw_with_message("Process terminated by signal".into())
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_process_kill(handle: *mut HaxeProcess) {
+    process_result(unsafe { (*handle).child.kill() });
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_process_close(handle: *mut HaxeProcess) {
+    if !handle.is_null() {
+        // Reap finished children without waiting for a running child to exit.
+        let mut process = unsafe { Box::from_raw(handle) };
+        if matches!(process.child.try_wait(), Ok(None)) {
+            let _ = std::thread::Builder::new()
+                .name("process-reaper".into())
+                .spawn(move || {
+                    let _ = process.child.wait();
+                });
         }
     }
 }

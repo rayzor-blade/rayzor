@@ -909,8 +909,6 @@ pub extern "C" fn haxe_string_free(s: *mut HaxeString) {
 // I/O and Conversion
 // ============================================================================
 
-/// Print string to stdout
-#[unsafe(no_mangle)]
 /// `Sys.print`/`Sys.println` are declared `(v:Dynamic)`, so the compiler boxes
 /// a non-String argument (`haxe_box_int_ptr` etc.) but passes a String RAW as a
 /// `*HaxeString`. Both then arrive here. Reading a boxed `DynamicValue` as a
@@ -957,6 +955,8 @@ unsafe fn printable_bytes<'a>(s: *const HaxeString) -> Option<&'a [u8]> {
     }
 }
 
+/// Print string to stdout.
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_print(s: *const HaxeString) {
     if let Some(slice) = unsafe { printable_bytes(s) } {
         write_stdout_buffered(slice, slice.contains(&b'\n'));

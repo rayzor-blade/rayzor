@@ -6,6 +6,7 @@ that hangs would otherwise stall the whole corpus.
 """
 import json
 import os
+import signal
 import subprocess
 import sys
 
@@ -17,15 +18,26 @@ cmd = sys.argv[2:]
 if os.environ.get("RUNWITH_ARGS"):
     with open(os.environ["RUNWITH_ARGS"], encoding="utf-8") as f:
         cmd += ["--"] + json.load(f)
-try:
-    p = subprocess.run(cmd, capture_output=True, timeout=limit)
-except subprocess.TimeoutExpired as e:
-    for chunk in (e.stdout, e.stderr):
-        if chunk:
+# A timed-out native subprocess test can leave descendants holding its pipes.
+# Give each case its own process group so the deadline covers the whole case.
+with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                      start_new_session=os.name == "posix") as p:
+    try:
+        stdout, stderr = p.communicate(timeout=limit)
+    except subprocess.TimeoutExpired:
+        if os.name == "posix":
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            p.kill()
+        stdout, stderr = p.communicate()
+        for chunk in (stdout, stderr):
             sys.stdout.write(chunk.decode("utf-8", "replace"))
-    sys.exit(124)
-sys.stdout.write(p.stdout.decode("utf-8", "replace"))
-sys.stdout.write(p.stderr.decode("utf-8", "replace"))
+        sys.exit(124)
+sys.stdout.write(stdout.decode("utf-8", "replace"))
+sys.stdout.write(stderr.decode("utf-8", "replace"))
 # A signal comes back negative here, and exiting with it wraps: SIGSEGV
 # arrives as -11 and leaves as 245, which reads as an ordinary failure
 # and files a crash under whatever bucket that number lands in. Report

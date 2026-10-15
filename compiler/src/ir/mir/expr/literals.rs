@@ -1180,12 +1180,14 @@ impl<'a> HirToMirContext<'a> {
             let mut parts = Vec::with_capacity(named_fields.len());
             for (name, source) in &named_fields {
                 parts.push(match source {
-                    // A `Null<Int>` target holds the box the store below makes.
+                    // Nullable Int fields use the declared slot representation.
                     Some(orig_idx) => {
                         let target = field_target_types.get(name).copied();
                         let ty = target
                             .filter(|t| {
                                 self.is_null_int_type(*t)
+                                    || (self.is_null_int_type(fields[*orig_idx].1.ty)
+                                        && self.convert_type(*t) == IrType::I32)
                                     || matches!(fields[*orig_idx].1.kind, HirExprKind::Null)
                             })
                             .unwrap_or(fields[*orig_idx].1.ty);
@@ -1290,6 +1292,13 @@ impl<'a> HirToMirContext<'a> {
                     let val_as_i64 = if let Some(target_ty) = null_int_target {
                         // A `Null<Int>` anon slot holds a box or null.
                         self.coerce_to_i64(field_val, target_ty)?
+                    } else if self.builder.get_register_type(field_val) == Some(IrType::NullInt)
+                        && field_target_types
+                            .get(field_name)
+                            .is_some_and(|t| self.convert_type(*t) == IrType::I32)
+                    {
+                        // A concrete Int slot stores the payload, not the nullable box.
+                        self.null_int_to_ir(field_val, &IrType::I64)?
                     } else if erased_target
                         && self.builder.get_register_type(field_val) == Some(IrType::NullInt)
                     {

@@ -708,6 +708,19 @@ register_symbol!(
 );
 
 // ============================================================================
+register_symbol!("haxe_process_new", crate::haxe_sys::haxe_process_new);
+register_symbol!("haxe_process_stdin", crate::haxe_sys::haxe_process_stdin);
+register_symbol!("haxe_process_stdout", crate::haxe_sys::haxe_process_stdout);
+register_symbol!("haxe_process_stderr", crate::haxe_sys::haxe_process_stderr);
+register_symbol!("haxe_process_pid", crate::haxe_sys::haxe_process_pid);
+register_symbol!(
+    "haxe_process_has_exited",
+    crate::haxe_sys::haxe_process_has_exited
+);
+register_symbol!("haxe_process_wait", crate::haxe_sys::haxe_process_wait);
+register_symbol!("haxe_process_kill", crate::haxe_sys::haxe_process_kill);
+register_symbol!("haxe_process_close", crate::haxe_sys::haxe_process_close);
+
 // FileInput (sys.io.FileInput)
 // ============================================================================
 register_symbol!(

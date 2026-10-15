@@ -601,6 +601,15 @@ sys.io.FileOutput seek static=false ctor=false params=2 -> haxe_fileoutput_seek
 sys.io.FileOutput tell static=false ctor=false params=0 -> haxe_fileoutput_tell
 sys.io.FileOutput writeByte static=false ctor=false params=1 -> haxe_fileoutput_write_byte
 sys.io.FileOutput writeBytes static=false ctor=false params=3 -> haxe_fileoutput_write_bytes_buf
+sys.io.NativeProcess close static=false ctor=false params=0 -> haxe_process_close
+sys.io.NativeProcess getPid static=false ctor=false params=0 -> haxe_process_pid
+sys.io.NativeProcess hasExited static=false ctor=false params=0 -> haxe_process_has_exited
+sys.io.NativeProcess kill static=false ctor=false params=0 -> haxe_process_kill
+sys.io.NativeProcess new static=true ctor=true params=3 -> haxe_process_new
+sys.io.NativeProcess takeStderr static=false ctor=false params=0 -> haxe_process_stderr
+sys.io.NativeProcess takeStdin static=false ctor=false params=0 -> haxe_process_stdin
+sys.io.NativeProcess takeStdout static=false ctor=false params=0 -> haxe_process_stdout
+sys.io.NativeProcess waitForExit static=false ctor=false params=0 -> haxe_process_wait
 sys.net.Host localhost static=true ctor=false params=0 -> sys_net_Host_localhost
 sys.net.Host new static=true ctor=true params=1 -> sys_net_Host_new
 sys.net.Host reverse static=false ctor=false params=0 -> sys_net_Host_reverse

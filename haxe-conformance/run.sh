@@ -217,6 +217,29 @@ list_cases() {
 total=$(list_cases | wc -l | tr -d ' ')
 [[ "$LIMIT" != 0 && $LIMIT -lt $total ]] && total=$LIMIT
 
+# Upstream's sys suite launches a target-native UtilityProcess executable.
+SYS_UTILITY="${SYS_UTILITY:-}"
+SYS_UTILITY_NAME="UtilityProcess"
+[[ "${OS:-}" == Windows_NT ]] && SYS_UTILITY_NAME="UtilityProcess.exe"
+if suite_on sys && { [[ -z "$CASE_FILTER" ]] || [[ TestSys =~ $CASE_FILTER ]] || [[ TestUnicode =~ $CASE_FILTER ]]; }; then
+  python3 "$HERE/sys-target.py" "$RAYZOR" "$SHARED/UtilityProcess.hx" || exit 2
+  if [[ -z "$SYS_UTILITY" ]]; then
+    utility_dir="$WORK/sys-utility"
+    mkdir -p "$utility_dir"
+    utility_dir="$(cd "$utility_dir" && pwd)"
+    SYS_UTILITY="$utility_dir/$SYS_UTILITY_NAME"
+    rm -f "$SYS_UTILITY"
+    python3 - "$utility_dir/rayzor.toml" "$SHARED" <<'PYUTILITY'
+import json, os, sys
+root = os.path.abspath(sys.argv[2])
+with open(sys.argv[1], 'w', encoding='utf-8') as out:
+    out.write('[project]\nname = "sys-utility"\nentry = ' + json.dumps(root + '/UtilityProcess.hx') + '\n')
+    out.write('[build]\nclass-paths = [' + json.dumps(root) + ']\n')
+PYUTILITY
+    (cd "$utility_dir" && python3 "$HERE/runwith.py" 120 "$RAYZOR" aot --no-cache --strip -o "$SYS_UTILITY") > "$WORK/sys-utility.log" 2>&1
+  fi
+fi
+
 seen=0
 queued=0
 c_PASS=0; c_WRONG_ANSWER=0; c_NO_OUTPUT=0; c_NO_ASSERTIONS=0
@@ -356,6 +379,7 @@ process_one() { # process_one <source> <result-file>
     "$THREADS_SRC"/*) cp "$THREADS_SRC/import.hx" "$d/" 2>/dev/null || true ;;
     "$SYS_SRC"/*)     cp "$SYS_SRC/import.hx" "$d/" 2>/dev/null || true
                       cp "$SYS_SRC/../compile.hxml" "$d/" 2>/dev/null || true
+                      cp "$SYS_SRC/../gen_test_res.py" "$d/" 2>/dev/null || true
                       mkdir -p "$d/temp" ;;
   esac
   # The corpus is not self-contained: tests reference siblings that upstream
@@ -496,12 +520,16 @@ for i in range(start, len(lines)):
 # Members sit one brace deep in the class; a `function test()` nested in a
 # method body (TestInt64.testCapture) is a local function, not a member.
 methods = []
+class_hooks = set()
 depth = 0
 for i in range(start, last):
     depth_before = depth
     depth += code[i].count('{') - code[i].count('}')
     if not live[i] or depth_before != 1:
         continue
+    hook = re.search(r'\bfunction\s+(setupClass|teardownClass)\s*\(', code[i])
+    if hook:
+        class_hooks.add(hook.group(1))
     m = re.search(r'\bfunction\s+(test[A-Za-z0-9_]*)\s*\(', code[i])
     if not m or any(name == m.group(1) for name, _ in methods):
         continue
@@ -519,12 +547,16 @@ if not methods:
 utest_case = re.search(r'extends\s+(utest\.Test|ThreadTestBase|TestCommandBase)\b', code[start]) is not None
 main = ['    public static function main():Void {',
         '        var inst = new %s();' % cls]
+if 'setupClass' in class_hooks:
+    main.append('        inst.setupClass();')
 for name, takes_async in methods:
     call = ('{ var a = new utest.Async(); inst.%s(a); a.wait(); }' % name) if takes_async \
         else 'inst.%s();' % name
     if utest_case:
         call = 'inst.setup(); %s inst.teardown();' % call
     main.append('        ' + call)
+if 'teardownClass' in class_hooks:
+    main.append('        inst.teardownClass();')
 main += ['        unit.ConfCheck.summary();', '    }']
 open(dst, 'w', encoding='utf-8').write('\n'.join(lines[:last] + main + lines[last:]))
 
@@ -621,6 +653,23 @@ PYGEN
   # class path compiles the siblings too.
   printf '[project]\nname = "conformance"\nentry = "%s%s.hx"\n\n[build]\nclass-paths = ["%s", "%s"]\n' \
     "${rel:+$rel/}" "$base" "$cp" "$SHARED" > "$d/rayzor.toml"
+  if [[ "$suite" == sys && "$base" == TestUnicode ]]; then
+    # Exercise the upstream CI-only IPC assertions discovered above.
+    printf '\n[build.defines]\ngithub = true\n' >> "$d/rayzor.toml"
+  fi
+  if [[ "$suite" == sys && ( "$base" == TestSys || "$base" == TestUnicode ) ]]; then
+    if [[ ! -x "$SYS_UTILITY" ]]; then
+      cp "$WORK/sys-utility.log" "$LOGS/$base.log" 2>/dev/null || true
+      emit_result "$result" "$base" COMPILE_FAIL "native sys utility unavailable; see sys-utility.log"
+      return
+    fi
+    mkdir -p "$d/bin/rayzor"
+    cp "$SYS_UTILITY" "$d/bin/rayzor/$SYS_UTILITY_NAME"
+    python3 "$HERE/sys-target.py" "$RAYZOR" "$d/$base.hx" "$d/gen_test_res.py" || {
+      emit_result "$result" "$base" COMPILE_FAIL "could not adapt sys target"
+      return
+    }
+  fi
   case "$suite" in
     issues|features) [[ -n "$UNIT_RESOURCES" ]] && printf '%s\n' "$UNIT_RESOURCES" >> "$d/rayzor.toml" ;;
   esac
@@ -636,6 +685,8 @@ PYGEN
   # Written without an array: `set -u` is on and bash 3.2, which is what macOS
   # ships, treats "${empty[@]}" as an unbound variable -- which fails EVERY
   # invocation and scores the whole corpus COMPILE_FAIL.
+  # Upstream's sys runner supplies this variable for environment assertions.
+  [[ "$suite" == sys ]] && export EXISTS=1
   if [[ "$LLVM" != 0 ]]; then
     out=$( cd "$d" && RUNWITH_ARGS="$args_file" python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" --llvm 2>&1 )
   elif [[ "$CRANELIFT" != 0 ]]; then

@@ -1003,8 +1003,8 @@ fn main() {
             )
         }),
         Commands::Aot {
-            mut files,
-            mut output,
+            files,
+            output,
             target,
             emit,
             opt_level,
@@ -1017,41 +1017,21 @@ fn main() {
             cache_dir,
             verbose,
         } => run_artifact_build_on_large_stack("rayzor-aot", move || {
-            if files.is_empty()
-                && let Ok((entry, manifest)) = resolve_from_manifest()
-            {
-                files.push(entry);
-                if output.is_none()
-                    && let Some(project) = manifest
-                {
-                    output = project.output_path().map(|p| {
-                        p.with_extension(if emit == "gcc" || emit == "exe" {
-                            ""
-                        } else {
-                            emit.as_str()
-                        })
-                    });
-                }
-            }
-            if files.is_empty() {
-                Err("No source files provided and no rayzor.toml found".to_string())
-            } else {
-                cmd_aot(
-                    files,
-                    output,
-                    target,
-                    emit,
-                    opt_level,
-                    strip,
-                    strip_symbols,
-                    runtime_dir,
-                    linker,
-                    sysroot,
-                    !no_cache,
-                    cache_dir,
-                    verbose,
-                )
-            }
+            cmd_aot(
+                files,
+                output,
+                target,
+                emit,
+                opt_level,
+                strip,
+                strip_symbols,
+                runtime_dir,
+                linker,
+                sysroot,
+                !no_cache,
+                cache_dir,
+                verbose,
+            )
         }),
         Commands::Init {
             name,
@@ -3557,6 +3537,8 @@ fn cmd_aot(
             linker,
             sysroot,
             runtime_dir,
+            enable_cache: _cache,
+            cache_dir: _cache_dir,
             extra_source_dirs,
             native_link_libs: native_link_libs.clone(),
             strip,

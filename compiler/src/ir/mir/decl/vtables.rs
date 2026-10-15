@@ -53,7 +53,7 @@ impl<'a> HirToMirContext<'a> {
         symbol: SymbolId,
         ref_ty: TypeId,
     ) -> Option<IrFunctionId> {
-        let (runtime_name, param_count) = {
+        let (runtime_name, param_count, declared_type) = {
             let sym = self.symbol_table.get_symbol(symbol)?;
             if sym.kind != crate::tast::SymbolKind::Function {
                 return None;
@@ -68,10 +68,11 @@ impl<'a> HirToMirContext<'a> {
             if !sig.is_static || sig.is_constructor || call.is_mir_wrapper {
                 return None;
             }
-            (call.runtime_name, call.param_count)
+            (call.runtime_name, call.param_count, sym.type_id)
         };
         let (param_tys, ret_ty) = self.resolve_function_type_signature(ref_ty)?;
-        if param_tys.len() != param_count {
+        let (declared_params, _) = self.resolve_function_type_signature(declared_type)?;
+        if param_tys.len() != param_count || declared_params.len() != param_count {
             return None;
         }
         let (native_params, native_ret) = self
@@ -141,13 +142,22 @@ impl<'a> HirToMirContext<'a> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let dynamic = self.type_table.dynamic_type();
         let mut args = Vec::with_capacity(param_count);
-        for ((reg, ty), expected) in params
+        for (((reg, ty), expected), declared) in params
             .into_iter()
             .zip(param_tys.iter())
             .zip(native_params.iter())
+            .zip(declared_params.iter())
         {
             let actual = self.convert_type(*ty);
-            let arg = if matches!(expected, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void))
+            let declared = self.resolve_through_aliases(*declared);
+            let dynamic_param = matches!(
+                self.type_table.get(declared).map(|t| &t.kind),
+                Some(TypeKind::Dynamic | TypeKind::TypeParameter { .. })
+            );
+            // Opaque native pointers also represent raw strings and handles.
+            // Only a declared Dynamic parameter consumes a boxed value.
+            let arg = if dynamic_param
+                && matches!(expected, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void))
             {
                 let boxed = self.maybe_box_value(reg, *ty, dynamic).unwrap_or(reg);
                 // Erased scalar slots still need a Dynamic box for pointer formals.
