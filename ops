@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1792164660,"nonce":"huUAK6xY/k2bKXMrWoO3iZEjGZ0=","added":["bug","area:mir"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1792164678,"nonce":"ym0BcsQdvJB26GXbEiubM6lT8G8=","message":"Landed in 97c60304. Gate: 1088/1092 (base 1086 + the runtime-lib environment fix), nothing lost; suite 202/5/1 as at base; all fixtures pass incl. StructuralStorage.","files":null}]}
