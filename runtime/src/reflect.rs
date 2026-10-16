@@ -152,6 +152,35 @@ unsafe fn read_class_type_id(obj: *mut u8) -> u32 {
     unsafe { std::ptr::read_unaligned(obj as *const u32) }
 }
 
+/// The object a structure-typed value is: the anonymous handle or class
+/// instance behind `ptr`, with any Dynamic box removed.
+pub(crate) fn structural_target(ptr: *mut u8) -> *mut u8 {
+    unsafe { unwrap_anon_dynamic(ptr) }
+}
+
+/// The slot of instance field `name` when `obj` is a class instance, with its kind.
+pub(crate) fn class_instance_slot(obj: *mut u8, name: &str) -> Option<(*mut u64, ParamType)> {
+    unsafe {
+        let type_id = read_class_type_id(obj);
+        if !is_class_type(type_id) {
+            return None;
+        }
+        let (offset, ty) = lookup_class_field(type_id, name)?;
+        Some((obj.add(offset) as *mut u64, ty))
+    }
+}
+
+/// The name a field-name argument holds.
+pub(crate) fn field_name_str<'a>(field: *mut u8) -> Option<&'a str> {
+    unsafe {
+        let (ptr, len) = extract_field_name(field)?;
+        Some(std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+            ptr,
+            len as usize,
+        )))
+    }
+}
+
 /// Reflect.hasField(obj, field) -> Bool
 ///
 /// Handles class instances (via `lookup_class_field`) and anon

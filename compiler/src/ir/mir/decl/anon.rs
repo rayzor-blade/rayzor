@@ -57,6 +57,85 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// The shape id of an object built in structure `ty`'s own layout.
+    pub(crate) fn structural_shape_id(&self, ty: TypeId) -> Option<u32> {
+        let Some(TypeKind::Anonymous { fields }) = self.type_table.get(ty).map(|t| &t.kind) else {
+            return None;
+        };
+        let mut named: Vec<(String, TypeId)> = fields
+            .iter()
+            .filter_map(|f| {
+                self.string_interner
+                    .get(f.name)
+                    .map(|name| (name.to_string(), f.type_id))
+            })
+            .collect();
+        named.sort_by(|a, b| a.0.cmp(&b.0));
+        let descriptor = named
+            .iter()
+            .map(|(name, ty)| self.anon_field_descriptor(name, *ty))
+            .collect::<Vec<_>>()
+            .join(",");
+        Some(Self::anon_shape_id(&descriptor))
+    }
+
+    /// Read field `name` of a structure-typed value: by `index` when the object
+    /// has the structure's layout, else by name (a wider object, a class).
+    pub(crate) fn structural_field_get(
+        &mut self,
+        obj: IrId,
+        structure: TypeId,
+        index: usize,
+        name: &str,
+    ) -> Option<IrId> {
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let get = self.get_or_register_extern_function(
+            "rayzor_anon_get_struct_field",
+            vec![ptr.clone(), IrType::I32, IrType::I32, ptr],
+            IrType::I64,
+        );
+        let args = self.structural_access_args(obj, structure, index, name)?;
+        self.builder.build_call_direct(get, args, IrType::I64)
+    }
+
+    /// Store `bits` into field `name` of a structure-typed value.
+    pub(crate) fn structural_field_set(
+        &mut self,
+        obj: IrId,
+        structure: TypeId,
+        index: usize,
+        name: &str,
+        bits: IrId,
+    ) -> Option<()> {
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let set = self.get_or_register_extern_function(
+            "rayzor_anon_set_struct_field",
+            vec![ptr.clone(), IrType::I32, IrType::I32, ptr, IrType::I64],
+            IrType::Void,
+        );
+        let mut args = self.structural_access_args(obj, structure, index, name)?;
+        args.push(bits);
+        self.builder.build_call_direct(set, args, IrType::Void);
+        Some(())
+    }
+
+    fn structural_access_args(
+        &mut self,
+        obj: IrId,
+        structure: TypeId,
+        index: usize,
+        name: &str,
+    ) -> Option<Vec<IrId>> {
+        let shape = self.structural_shape_id(structure).unwrap_or(0);
+        self.dynamic_member_names.insert(name.to_string());
+        let index = self.builder.build_const(IrValue::I32(index as i32))?;
+        let shape = self.builder.build_const(IrValue::I32(shape as i32))?;
+        let name = self
+            .builder
+            .build_const(IrValue::String(name.to_string()))?;
+        Some(vec![obj, index, shape, name])
+    }
+
     /// Materialize an anon-backed variable into a real AnonObject handle.
     /// Called at escape points (function call args, return) where the callee
     /// expects a real `rayzor_anon_*`-compatible handle.

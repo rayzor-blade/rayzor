@@ -600,12 +600,6 @@ impl<'a> HirToMirContext<'a> {
                     };
 
                     if let Some(sorted_idx) = sorted_index {
-                        let anon_set_id = self.get_or_register_extern_function(
-                            "rayzor_anon_set_field_by_index",
-                            vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32, IrType::I64],
-                            IrType::Void,
-                        );
-
                         // Anon storage is i64; coerce via the field's
                         // declared type when the symbol has one.
                         let field_type_id = self
@@ -637,14 +631,13 @@ impl<'a> HirToMirContext<'a> {
                             _ => self.coerce_to_i64(value, field_type_id).unwrap_or(value),
                         };
 
-                        let idx_val = self.builder.build_const(IrValue::I32(sorted_idx as i32));
-                        if let Some(idx_val) = idx_val {
-                            self.builder.build_call_direct(
-                                anon_set_id,
-                                vec![obj_reg, idx_val, val_i64],
-                                IrType::Void,
-                            );
-                        }
+                        self.structural_field_set(
+                            obj_reg,
+                            resolved_obj_ty,
+                            sorted_idx,
+                            &field_name,
+                            val_i64,
+                        );
                         return Some(value);
                     }
                 }

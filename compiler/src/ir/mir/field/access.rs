@@ -883,17 +883,11 @@ impl<'a> HirToMirContext<'a> {
                         return self.builder.build_bitcast(closure, to);
                     }
                     if let Some((sorted_idx, actual_field_ty)) = sorted_result {
-                        let anon_get_id = self.get_or_register_extern_function(
-                            "rayzor_anon_get_field_by_index",
-                            vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
-                            IrType::I64,
-                        );
-
-                        let idx_val = self.builder.build_const(IrValue::I32(sorted_idx as i32))?;
-                        let raw_val = self.builder.build_call_direct(
-                            anon_get_id,
-                            vec![obj, idx_val],
-                            IrType::I64,
+                        let raw_val = self.structural_field_get(
+                            obj,
+                            resolved_receiver_ty,
+                            sorted_idx,
+                            &field_name,
                         )?;
 
                         // Coerce with the struct's field type; the expression-level

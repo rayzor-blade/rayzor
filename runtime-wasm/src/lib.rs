@@ -2779,6 +2779,24 @@ pub extern "C" fn rayzor_anon_set_field_by_index(obj: i32, idx: i32, val: i64) {
     }
 }
 
+/// A structure's field; wasm objects are always anonymous in the structure's layout.
+#[unsafe(no_mangle)]
+pub extern "C" fn rayzor_anon_get_struct_field(obj: i32, idx: i32, _shape: i32, _name: i32) -> i64 {
+    rayzor_anon_get_field_by_index(obj, idx)
+}
+
+/// Store into a structure's field; see `rayzor_anon_get_struct_field`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rayzor_anon_set_struct_field(
+    obj: i32,
+    idx: i32,
+    _shape: i32,
+    _name: i32,
+    val: i64,
+) {
+    rayzor_anon_set_field_by_index(obj, idx, val)
+}
+
 /// Check whether a shaped anonymous object contains a named field.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_has_field(obj: i32, name: i32) -> i32 {

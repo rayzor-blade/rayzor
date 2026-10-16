@@ -450,6 +450,20 @@ impl CompileCtx {
             "rayzor_anon_get_field_by_index" => {
                 (vec![ValType::I32, ValType::I32], vec![ValType::I64])
             }
+            "rayzor_anon_set_struct_field" => (
+                vec![
+                    ValType::I32,
+                    ValType::I32,
+                    ValType::I32,
+                    ValType::I32,
+                    ValType::I64,
+                ],
+                vec![],
+            ),
+            "rayzor_anon_get_struct_field" => (
+                vec![ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+                vec![ValType::I64],
+            ),
             "rayzor_anon_new" => (vec![ValType::I32, ValType::I32], vec![ValType::I32]),
             "rayzor_ensure_shape" => (vec![ValType::I32, ValType::I32], vec![]),
             "rayzor_anon_clone" | "rayzor_anon_copy" => (vec![ValType::I32], vec![ValType::I32]),

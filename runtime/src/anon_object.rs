@@ -348,6 +348,100 @@ fn map_nth_value(map: &HashMap<String, (u32, u64, u64)>, index: usize) -> Option
         .map(|&(_, value, _)| value)
 }
 
+/// A structure's field `name` out of `ptr`. `index` is where an object of
+/// shape `shape`, the structure's own layout, keeps it; any other anonymous
+/// object is searched by name, and a class instance read through its fields.
+#[unsafe(no_mangle)]
+pub extern "C" fn rayzor_anon_get_struct_field(
+    ptr: *mut u8,
+    index: u32,
+    shape: u32,
+    name: *mut u8,
+) -> u64 {
+    if ptr.is_null() {
+        return rayzor_anon_get_field_by_index(ptr, index);
+    }
+    let target = crate::reflect::structural_target(ptr);
+    if is_anon_handle(target) {
+        let arc = unsafe { borrow_arc(target) };
+        if let AnonData::Inline(fields) = &arc.data
+            && arc.shape_id == shape
+        {
+            return fields.get(index as usize).copied().unwrap_or(0);
+        }
+        return crate::reflect::field_name_str(name)
+            .and_then(|name| anon_raw_field(target, name))
+            .unwrap_or(0);
+    }
+    // A class holds `Null<Int>` unboxed where a structure's slot holds the box.
+    crate::reflect::field_name_str(name)
+        .and_then(|name| crate::reflect::class_instance_slot(target, name))
+        .map_or(0, |(slot, ty)| {
+            let bits = unsafe { std::ptr::read_unaligned(slot) };
+            match ty {
+                crate::type_system::ParamType::NullInt => {
+                    crate::type_system::haxe_null_int_to_dynamic(bits as i64) as u64
+                }
+                _ => bits,
+            }
+        })
+}
+
+/// Store `value` into a structure's field `name`; see `rayzor_anon_get_struct_field`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rayzor_anon_set_struct_field(
+    ptr: *mut u8,
+    index: u32,
+    shape: u32,
+    name: *mut u8,
+    value: u64,
+) {
+    if ptr.is_null() {
+        return;
+    }
+    let target = crate::reflect::structural_target(ptr);
+    if !is_anon_handle(target) {
+        if let Some((slot, ty)) = crate::reflect::field_name_str(name)
+            .and_then(|name| crate::reflect::class_instance_slot(target, name))
+        {
+            let bits = match ty {
+                crate::type_system::ParamType::NullInt => {
+                    crate::type_system::haxe_null_int_from_dynamic(value as *mut u8) as u64
+                }
+                _ => value,
+            };
+            unsafe { std::ptr::write_unaligned(slot, bits) };
+        }
+        return;
+    }
+    let obj = Arc::make_mut(unsafe { borrow_arc_mut(target) });
+    if obj.shape_id == shape
+        && let AnonData::Inline(fields) = &mut obj.data
+    {
+        if let Some(slot) = fields.get_mut(index as usize) {
+            *slot = value;
+        }
+        return;
+    }
+    let Some(name) = crate::reflect::field_name_str(name) else {
+        return;
+    };
+    match &mut obj.data {
+        AnonData::Inline(fields) => {
+            let position = get_shape(obj.shape_id)
+                .and_then(|shape| shape.field_names.iter().position(|n| n == name));
+            if let Some(slot) = position.and_then(|i| fields.get_mut(i)) {
+                *slot = value;
+            }
+        }
+        AnonData::Map(map) => {
+            if let Some(entry) = map.get_mut(name) {
+                entry.1 = value;
+            }
+        }
+    }
+}
+
 /// Set field by index with COW (optimized path for known shapes)
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_set_field_by_index(ptr: *mut u8, index: u32, value: u64) {

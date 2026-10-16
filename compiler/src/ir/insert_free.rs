@@ -421,7 +421,12 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
             // Setters store their VALUE arg inside the receiver — track
             // them so `pointer_escapes` can flag value-as-escape even
             // when the call is otherwise "safe" for the receiver.
-            if name == "rayzor_anon_set_field_by_index" || name == "rayzor_anon_set_field_by_name" {
+            if matches!(
+                name,
+                "rayzor_anon_set_field_by_index"
+                    | "rayzor_anon_set_field_by_name"
+                    | "rayzor_anon_set_struct_field"
+            ) {
                 ids.anon_setter_ids.insert(fid);
             }
         }
@@ -3084,7 +3089,7 @@ fn pointer_escapes_ex(
                         // the caller reads a dangling pointer → SIGSEGV on
                         // first nested field access.
                         if args.len() >= 3 {
-                            let value_arg = args[2];
+                            let value_arg = args[args.len() - 1];
                             if value_arg == alloc_id || derived.contains(&value_arg) {
                                 return true;
                             }

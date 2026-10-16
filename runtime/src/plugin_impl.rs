@@ -1961,6 +1961,14 @@ register_symbol!(
     crate::anon_object::rayzor_anon_set_field_by_index
 );
 register_symbol!(
+    "rayzor_anon_get_struct_field",
+    crate::anon_object::rayzor_anon_get_struct_field
+);
+register_symbol!(
+    "rayzor_anon_set_struct_field",
+    crate::anon_object::rayzor_anon_set_struct_field
+);
+register_symbol!(
     "rayzor_anon_has_field",
     crate::anon_object::rayzor_anon_has_field
 );
