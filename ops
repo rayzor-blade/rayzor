@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1792169343,"nonce":"zr7SWE8K9RWJGEmKT6ZyQRZSXG8=","message":"0708bfa3 landed the join/override/Map-follow fixes listed above.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1792184166,"nonce":"bfWv00MWXlv5zNfbHzGmK58B8Xc=","message":"Fixed in 4756993ac3b946273d008ca8b51f6fc05b776428. Gate typ5: 1090/1092, nothing lost, fixtures pass.","files":null}]}
