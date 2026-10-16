@@ -5517,17 +5517,21 @@ impl<'a> AstLowering<'a> {
         if mentioned.is_subset(&direct) && primitive_directs && !generic_callback {
             return Vec::new();
         }
-        // A structure argument (`{iterator: ..}`) is iterated through the
-        // runtime's stepper, whose values the erased body already reads.
-        let structural_argument = arguments.iter().any(|a| {
-            matches!(
-                self.context
-                    .type_table
-                    .borrow()
-                    .get(a.expr_type)
-                    .map(|t| &t.kind),
-                Some(TypeKind::Anonymous { .. })
-            )
+        // A structure argument (`{iterator: ..}`) for a generic parameter is
+        // iterated through the runtime's stepper, whose values the erased
+        // body already reads.
+        let structural_argument = params.iter().zip(arguments.iter()).any(|(p, a)| {
+            let mut vars = std::collections::BTreeSet::new();
+            self.collect_type_param_symbols(*p, 0, &mut vars);
+            !vars.is_empty()
+                && matches!(
+                    self.context
+                        .type_table
+                        .borrow()
+                        .get(a.expr_type)
+                        .map(|t| &t.kind),
+                    Some(TypeKind::Anonymous { .. })
+                )
         });
         if structural_argument {
             return Vec::new();

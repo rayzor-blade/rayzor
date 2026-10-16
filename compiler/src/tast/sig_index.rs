@@ -510,6 +510,29 @@ impl StaticSigIndex {
             .unwrap_or_default()
     }
 
+    /// The signatures of `owner`'s `@:op` methods under `key`.
+    pub(crate) fn operator_signatures(&mut self, owner: &str, key: &str) -> Vec<StaticMethodSig> {
+        let methods = self.operator_methods(owner, key);
+        let class = self.classes.get(owner).or_else(|| {
+            let names = self.bare_to_qualified.get(owner)?;
+            self.classes.get(names.first()?)
+        });
+        let Some(class) = class else {
+            return Vec::new();
+        };
+        methods
+            .iter()
+            .filter_map(|(name, is_static, _)| {
+                let table = if *is_static {
+                    &class.statics
+                } else {
+                    &class.instances
+                };
+                table.get(name).cloned()
+            })
+            .collect()
+    }
+
     /// Whether the static `method` of an already-indexed class has a body,
     /// so a forward reference to `owner.method` will bind once its module
     /// lowers.

@@ -6630,7 +6630,7 @@ impl<'a> TastToHirContext<'a> {
                     self.current_lifetime,
                     location,
                 )),
-                type_args: Vec::new(),
+                type_args: self.abstract_method_type_args(receiver.expr_type, method, arguments),
                 args,
                 is_method: true,
             },
@@ -6638,6 +6638,44 @@ impl<'a> TastToHirContext<'a> {
             self.current_lifetime,
             location,
         )
+    }
+
+    /// The type argument of a method whose one type parameter is the whole
+    /// type of some of its parameters, bound by the first such argument.
+    /// A Dynamic argument binds it too, so its box reaches the body as a box.
+    /// Only over a receiver without type arguments, whose method signature
+    /// can mention no type parameter but the method's own.
+    fn abstract_method_type_args(
+        &self,
+        receiver: TypeId,
+        method: SymbolId,
+        arguments: &[TypedExpression],
+    ) -> Vec<TypeId> {
+        let Some(fn_type) = self.symbol_table.get_symbol(method).map(|s| s.type_id) else {
+            return Vec::new();
+        };
+        let table = self.type_table.borrow();
+        match table.get(receiver).map(|t| &t.kind) {
+            Some(TypeKind::Abstract { type_args, .. }) if type_args.is_empty() => {}
+            _ => return Vec::new(),
+        }
+        let Some(TypeKind::Function { params, .. }) = table.get(fn_type).map(|t| &t.kind) else {
+            return Vec::new();
+        };
+        let mut bound: Option<(SymbolId, TypeId)> = None;
+        for (param, argument) in params.iter().zip(arguments) {
+            let Some(TypeKind::TypeParameter { symbol_id, .. }) =
+                table.get(*param).map(|t| &t.kind)
+            else {
+                continue;
+            };
+            match bound {
+                None => bound = Some((*symbol_id, argument.expr_type)),
+                Some((var, _)) if var == *symbol_id => {}
+                Some(_) => return Vec::new(),
+            }
+        }
+        bound.map(|(_, ty)| vec![ty]).unwrap_or_default()
     }
 
     /// `get`/`set` of `EnumValueMap`, the map class written in Haxe:

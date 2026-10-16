@@ -216,6 +216,172 @@ impl<'a> AstLowering<'a> {
         methods.len()
     }
 
+    /// The non-enum abstract `ty` names, its index name, and the bare name
+    /// of its underlying type when that is a basic type.
+    fn operand_abstract(&self, ty: TypeId) -> Option<(String, Option<&'static str>)> {
+        let (symbol, underlying) = {
+            let tt = self.context.type_table.borrow();
+            let mut ty = Self::resolve_alias_chain(&tt, ty);
+            if let Some(TypeKind::GenericInstance { base_type, .. }) = tt.get(ty).map(|t| &t.kind) {
+                ty = *base_type;
+            }
+            let Some(TypeKind::Abstract {
+                symbol_id,
+                underlying,
+                ..
+            }) = tt.get(ty).map(|t| &t.kind)
+            else {
+                return None;
+            };
+            let underlying = underlying.and_then(|u| {
+                match tt.get(Self::resolve_alias_chain(&tt, u)).map(|t| &t.kind) {
+                    Some(TypeKind::Int) => Some("Int"),
+                    Some(TypeKind::Float) => Some("Float"),
+                    Some(TypeKind::Bool) => Some("Bool"),
+                    Some(TypeKind::String) => Some("String"),
+                    _ => None,
+                }
+            });
+            (*symbol_id, underlying)
+        };
+        if self.context.symbol_table.is_enum_abstract(symbol) {
+            return None;
+        }
+        let symbol = self.context.symbol_table.get_symbol(symbol)?;
+        let name = self
+            .context
+            .string_interner
+            .get(symbol.qualified_name.unwrap_or(symbol.name))?
+            .to_string();
+        Some((name, underlying))
+    }
+
+    fn operator_signatures(
+        &self,
+        owner: &str,
+        key: &str,
+    ) -> Vec<crate::tast::sig_index::StaticMethodSig> {
+        self.static_sig_index
+            .as_ref()
+            .map(|index| index.borrow_mut().operator_signatures(owner, key))
+            .unwrap_or_default()
+    }
+
+    /// Operators Haxe rejects on abstracts, checked only under a macro probe
+    /// (`typeError`): an arithmetic operator neither abstract declares over
+    /// a String, and a bodyless `@:op` whose declared return type differs
+    /// from the underlying operation's.
+    pub(crate) fn probe_abstract_binary_error(
+        &mut self,
+        operator: BinaryOperator,
+        left: &TypedExpression,
+        right: &TypedExpression,
+    ) -> Option<String> {
+        let key = match operator {
+            BinaryOperator::Add => "Add",
+            BinaryOperator::Sub => "Sub",
+            BinaryOperator::Mul => "Mul",
+            BinaryOperator::Div => "Div",
+            BinaryOperator::Mod => "Mod",
+            _ => return None,
+        };
+        let operands = [left.expr_type, right.expr_type].map(|ty| self.operand_abstract(ty));
+        if operands.iter().all(Option::is_none) {
+            return None;
+        }
+        let basic = |ty: TypeId, abstract_info: &Option<(String, Option<&'static str>)>| {
+            if let Some((_, underlying)) = abstract_info {
+                return *underlying;
+            }
+            let tt = self.context.type_table.borrow();
+            match tt.get(Self::resolve_alias_chain(&tt, ty)).map(|t| &t.kind) {
+                Some(TypeKind::Int) => Some("Int"),
+                Some(TypeKind::Float) => Some("Float"),
+                Some(TypeKind::Bool) => Some("Bool"),
+                Some(TypeKind::String) => Some("String"),
+                _ => None,
+            }
+        };
+        let kinds = [
+            basic(left.expr_type, &operands[0]),
+            basic(right.expr_type, &operands[1]),
+        ];
+        let names: Vec<Option<String>> = operands
+            .iter()
+            .zip(kinds)
+            .map(|(info, kind)| match info {
+                Some((name, _)) => Some(name.rsplit('.').next().unwrap_or(name).to_string()),
+                None => kind.map(str::to_string),
+            })
+            .collect();
+        let signatures: Vec<_> = operands
+            .iter()
+            .flatten()
+            .flat_map(|(owner, _)| self.operator_signatures(owner, key))
+            .collect();
+        if signatures.is_empty() {
+            let string = kinds.contains(&Some("String"));
+            return (key != "Add" && string).then(|| format!("Cannot apply {key} to String"));
+        }
+        let result = if kinds.contains(&Some("String")) {
+            "String"
+        } else if kinds.contains(&Some("Float")) {
+            "Float"
+        } else {
+            "Int"
+        };
+        let bare = |ty: &Option<parser::Type>| match ty {
+            Some(parser::Type::Path { path, .. }) if path.package.is_empty() => {
+                Some(path.name.clone())
+            }
+            _ => None,
+        };
+        let chosen = signatures.iter().find(|sig| {
+            sig.param_kinds.len() == 2
+                && sig.param_kinds[0].is_some()
+                && sig.param_kinds[0] == names[0]
+                && sig.param_kinds[1].is_some()
+                && sig.param_kinds[1] == names[1]
+        })?;
+        let declared = bare(&chosen.return_type)?;
+        let mismatched = !chosen.has_body
+            && matches!(declared.as_str(), "Int" | "Float" | "Bool" | "String")
+            && declared != result
+            && !(declared == "Float" && result == "Int");
+        mismatched.then(|| format!("{result} should be {declared}"))
+    }
+
+    /// A unary operator on an abstract that declares none for it: `!` over
+    /// a non-Bool, or `++`/`--` in the fixity the abstract does not declare.
+    /// Checked only under a macro probe.
+    pub(crate) fn probe_abstract_unary_error(
+        &mut self,
+        op: &UnaryOp,
+        operand: &TypedExpression,
+    ) -> Option<String> {
+        let (owner, underlying) = self.operand_abstract(operand.expr_type)?;
+        let declared = |this: &Self, op: &UnaryOp| {
+            !this
+                .operator_signatures(&owner, &format!("Unary{op:?}"))
+                .is_empty()
+        };
+        if declared(self, op) {
+            return None;
+        }
+        let other_fixity = match op {
+            UnaryOp::PostIncr => Some(UnaryOp::PreIncr),
+            UnaryOp::PreIncr => Some(UnaryOp::PostIncr),
+            UnaryOp::PostDecr => Some(UnaryOp::PreDecr),
+            UnaryOp::PreDecr => Some(UnaryOp::PostDecr),
+            _ => None,
+        };
+        let rejected = match op {
+            UnaryOp::Not => underlying.is_some_and(|u| u != "Bool"),
+            _ => other_fixity.is_some_and(|other| declared(self, &other)),
+        };
+        rejected.then(|| format!("{owner} has no {op:?} operator"))
+    }
+
     /// The `@:op(A!)` method of an abstract: (name, is_static).
     fn postfix_not_method(&self, owner: SymbolId) -> Option<(String, bool)> {
         if let Some(found) = self.abstract_postfix_not.get(&owner) {

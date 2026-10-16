@@ -882,6 +882,15 @@ impl<'a> AstLowering<'a> {
                     }
                     let right_expr = right_result?;
                     let typed_op = self.lower_binary_operator(op)?;
+                    if self.macro_probe_depth > 0
+                        && let Some(message) =
+                            self.probe_abstract_binary_error(typed_op, &left_expr, &right_expr)
+                    {
+                        return Err(LoweringError::SemanticError {
+                            message,
+                            location: self.context.create_location_from_span(expression.span),
+                        });
+                    }
                     let (left_expr, right_expr) = if matches!(op, BinaryOp::Eq | BinaryOp::NotEq) {
                         self.coerce_eq_operands_via_abstract_from(left_expr, right_expr)
                     } else {
@@ -922,6 +931,14 @@ impl<'a> AstLowering<'a> {
             ExprKind::Unary { op, expr } => {
                 let operand_expr = self.lower_expression(expr)?;
                 let typed_op = self.lower_unary_operator(op)?;
+                if self.macro_probe_depth > 0
+                    && let Some(message) = self.probe_abstract_unary_error(op, &operand_expr)
+                {
+                    return Err(LoweringError::SemanticError {
+                        message,
+                        location: self.context.create_location_from_span(expression.span),
+                    });
+                }
 
                 TypedExpressionKind::UnaryOp {
                     operator: typed_op,
