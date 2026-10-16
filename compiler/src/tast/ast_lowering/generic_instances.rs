@@ -5,7 +5,7 @@
 //! Arguments that are not concrete leave the use on the erased template.
 
 use super::const_generics::Substitution;
-use super::{AstLowering, LoweringResult};
+use super::{AstLowering, LoweringError, LoweringResult};
 use crate::tast::core::TypeKind;
 use crate::tast::node::{TypedClass, TypedExpression};
 use crate::tast::{InternedString, ScopeId, SymbolFlags, SymbolId, SymbolKind, TypeId, Visibility};
@@ -121,7 +121,7 @@ impl AstLowering<'_> {
     }
 
     /// The type as a specialisation's name spells it; None when it is not
-    /// concrete (a type parameter, a monomorph, Dynamic, a function type).
+    /// concrete (a type parameter, a monomorph, Dynamic).
     fn generic_type_name(&self, ty: TypeId, depth: u32) -> Option<String> {
         if depth > 8 {
             return None;
@@ -170,6 +170,39 @@ impl AstLowering<'_> {
                     .unwrap_or(&path)
                     .replace('.', "_");
                 (path, type_args)
+            }
+            // haxe spells a structure by its fields, last name first.
+            TypeKind::Anonymous { fields } => {
+                let mut fields: Vec<(String, TypeId)> = fields
+                    .iter()
+                    .filter_map(|f| {
+                        self.context
+                            .string_interner
+                            .get(f.name)
+                            .map(|n| (n.to_string(), f.type_id))
+                    })
+                    .collect();
+                fields.sort_by(|a, b| b.0.cmp(&a.0));
+                let mut name = "anon".to_string();
+                for (field, ty) in fields {
+                    name.push('_');
+                    name.push_str(&field);
+                    name.push('_');
+                    name.push_str(&self.generic_type_name(ty, depth + 1)?);
+                }
+                return Some(name);
+            }
+            TypeKind::Function {
+                params,
+                return_type,
+                ..
+            } => {
+                let mut name = "func".to_string();
+                for ty in params.iter().chain(std::iter::once(&return_type)) {
+                    name.push('_');
+                    name.push_str(&self.generic_type_name(*ty, depth + 1)?);
+                }
+                return Some(name);
             }
             _ => return None,
         };
@@ -682,12 +715,41 @@ impl AstLowering<'_> {
     /// rewritten to the specialisation its arguments select. Method type
     /// parameters bind from the argument types, then through their
     /// constraints; one that no argument mentions takes its sole constraint.
+    /// A type parameter of the generic method `name` that only `null`
+    /// arguments reach: a monomorph, which haxe cannot specialise on.
+    fn generic_parameter_left_open(&self, name: &str, args: &[Expr]) -> Option<String> {
+        let generic = self
+            .generic_method_templates
+            .iter()
+            .find(|((_, method), _)| method == name)
+            .map(|(_, generic)| generic)?;
+        let ClassFieldKind::Function(function) = &generic.field.kind else {
+            return None;
+        };
+        function
+            .type_params
+            .iter()
+            .map(|tp| tp.name.clone())
+            .find(|param| {
+                let mut fed = function.params.iter().zip(args).filter(|(p, _)| {
+                    matches!(&p.type_hint, Some(parser::Type::Path { path, params, .. })
+                    if params.is_empty() && path.package.is_empty() && path.name == *param)
+                });
+                let mut any = false;
+                let all_null = fed.all(|(_, arg)| {
+                    any = true;
+                    matches!(arg.kind, ExprKind::Null)
+                });
+                any && all_null
+            })
+    }
+
     pub(crate) fn generic_method_callee(
         &mut self,
         callee: &Expr,
         args: &[Expr],
     ) -> LoweringResult<Option<Expr>> {
-        if self.generic_method_templates.is_empty() || self.macro_probe_depth > 0 {
+        if self.generic_method_templates.is_empty() {
             return Ok(None);
         }
         let (receiver, name): (Option<&Expr>, String) = match &callee.kind {
@@ -695,6 +757,15 @@ impl AstLowering<'_> {
             ExprKind::Ident(name) => (None, name.clone()),
             _ => return Ok(None),
         };
+        if self.macro_probe_depth > 0 {
+            return match self.generic_parameter_left_open(&name, args) {
+                Some(param) => Err(LoweringError::SemanticError {
+                    message: format!("Could not determine type for parameter {param}"),
+                    location: self.context.span_to_location(&callee.span),
+                }),
+                None => Ok(None),
+            };
+        }
         if self.generic_overridden_methods.contains(&name)
             || !self
                 .generic_method_templates
@@ -797,10 +868,6 @@ impl AstLowering<'_> {
         self.context.pop_type_parameters();
 
         let own: BTreeSet<SymbolId> = method_params.iter().copied().collect();
-        let mut in_values = BTreeSet::new();
-        for ty in declared.iter().flatten() {
-            self.collect_type_param_symbols(*ty, 0, &mut in_values);
-        }
         let mut bindings = receiver_type
             .map(|ty| self.receiver_param_bindings(class, ty))
             .unwrap_or_default();
@@ -814,12 +881,19 @@ impl AstLowering<'_> {
             let Some(Some(declared)) = declared.get(index) else {
                 continue;
             };
-            // A literal function's parameters are typed by the parameter it
-            // is passed to, so it binds nothing on its own.
-            if matches!(
-                arg.kind,
-                ExprKind::Null | ExprKind::Function(_) | ExprKind::Arrow { .. }
-            ) {
+            // A literal function's untyped parameters are typed by the
+            // parameter it is passed to, so only a fully typed one binds.
+            let typed_literal = matches!(&arg.kind, ExprKind::Function(f)
+                if f.return_type.is_some() && f.params.iter().all(|p| p.type_hint.is_some()));
+            // `[]` is an array of a monomorph: its constraint types it.
+            let empty_array = matches!(&arg.kind, ExprKind::Array(items) if items.is_empty());
+            if empty_array
+                || !typed_literal
+                    && matches!(
+                        arg.kind,
+                        ExprKind::Null | ExprKind::Function(_) | ExprKind::Arrow { .. }
+                    )
+            {
                 continue;
             }
             let mut mentioned = BTreeSet::new();
@@ -843,7 +917,7 @@ impl AstLowering<'_> {
                             self.unify_type_args(*constraint, ty, 0, &mut bindings);
                         }
                     }
-                    None if !in_values.contains(symbol) && constraints[index].len() == 1 => {
+                    None if constraints[index].len() == 1 => {
                         let concrete: Vec<(SymbolId, TypeId)> = bindings
                             .iter()
                             .copied()
@@ -886,6 +960,12 @@ impl AstLowering<'_> {
         {
             Some(true) => {}
             Some(false) => return Ok(None),
+            // A method the class declares under that name is the
+            // specialisation, as haxe takes it.
+            None if self.class_methods.get(&class).is_some_and(|methods| {
+                let declared = self.context.intern_string(&specialised);
+                methods.iter().any(|(method, _, _)| *method == declared)
+            }) => {}
             None => {
                 if !self.instantiate_generic_method(
                     class,

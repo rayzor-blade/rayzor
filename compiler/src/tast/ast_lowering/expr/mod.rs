@@ -600,6 +600,19 @@ impl<'a> AstLowering<'a> {
                 if let Some(variant) = self.visible_enum_variant(symbol_id) {
                     symbol_id = variant;
                 }
+                // A `var m = new Map()` passed where a concrete map is expected
+                // takes that map's type.
+                if self.inferred_maps.contains_key(&symbol_id)
+                    && let Some(expected) = prefer
+                    && matches!(
+                        self.map_class_name(expected).as_deref(),
+                        Some("StringMap" | "IntMap" | "ObjectMap" | "EnumValueMap")
+                    )
+                {
+                    self.context
+                        .symbol_table
+                        .update_symbol_type(symbol_id, expected);
+                }
                 if let Some(expected_ty) = prefer {
                     if let Some(variant) = self.expected_enum_variant(symbol_id, expected_ty) {
                         symbol_id = variant;
@@ -3280,7 +3293,16 @@ impl<'a> AstLowering<'a> {
             ExprKind::Untyped(expr) => {
                 // Untyped expression: untyped expr
                 // Just lower the inner expression, the "untyped" is more of a compiler hint
-                self.lower_expression(expr)?.kind
+                let inner = self.lower_expression(expr)?;
+                // A macro probe types it as haxe does: unconstrained.
+                if self.macro_probe_depth > 0 {
+                    let dynamic = self.context.type_table.borrow().dynamic_type();
+                    return Ok(TypedExpression {
+                        expr_type: dynamic,
+                        ..inner
+                    });
+                }
+                inner.kind
             }
             ExprKind::MacroType(ty) => {
                 // Outside a macro body, `macro : T` is a ComplexType built at run time.

@@ -892,19 +892,24 @@ impl<'a> HirToMirContext<'a> {
                 .get(self.resolve_through_aliases(ty))
                 .map(|t| &t.kind)
         };
-        let rules = self.abstract_to_rules.get(&abs_name)?;
         let (symbol, args) = self.abstract_and_args(source_type)?;
+        let rules: Vec<&HirCastRule> = self
+            .abstract_to_rules
+            .get(&abs_name)?
+            .iter()
+            .filter(|r| self.static_to_rule_applies(r, symbol, &args))
+            .collect();
         let bound_type = |ty| {
             self.substitute_abstract_type_arg(symbol, ty, &args)
                 .unwrap_or(ty)
         };
-        let exact = |r: &&HirCastRule| kind_of(bound_type(r.to_type)) == Some(target_kind);
+        let exact = |r: &&&HirCastRule| kind_of(bound_type(r.to_type)) == Some(target_kind);
         if let Some(rule) = rules
             .iter()
             .filter(&exact)
             .find(|r| r.cast_function.is_some())
         {
-            let mut rule = rule.clone();
+            let mut rule = (*rule).clone();
             rule.to_type = bound_type(rule.to_type);
             return Some((rule, false));
         }
@@ -923,7 +928,43 @@ impl<'a> HirToMirContext<'a> {
                     && matches!(kind_of(r.to_type), Some(TypeKind::Optional { inner_type })
                         if kind_of(*inner_type) == Some(target_kind))
             })
-            .map(|r| (r.clone(), true))
+            .map(|r| ((*r).clone(), true))
+    }
+
+    /// Whether a `@:to` rule converts the abstract instantiated with `args`:
+    /// a static one only when its parameter's type arguments are those.
+    fn static_to_rule_applies(
+        &self,
+        rule: &HirCastRule,
+        abstract_symbol: SymbolId,
+        args: &[TypeId],
+    ) -> bool {
+        let own = self
+            .symbol_table
+            .get_symbol(abstract_symbol)
+            .map(|s| s.type_id);
+        let from = self.resolve_through_aliases(rule.from_type);
+        if own == Some(rule.from_type) || args.is_empty() {
+            return true;
+        }
+        let from_args = match self.type_table.get(from).map(|t| &t.kind) {
+            Some(TypeKind::Class { type_args, .. } | TypeKind::Abstract { type_args, .. }) => {
+                type_args.clone()
+            }
+            Some(TypeKind::Abstract { .. }) | None => return true,
+            _ => return true,
+        };
+        if from_args.len() != args.len() {
+            return true;
+        }
+        let kind = |ty: TypeId| {
+            self.type_table
+                .get(self.resolve_through_aliases(ty))
+                .map(|t| t.kind.clone())
+        };
+        from_args.iter().zip(args).all(|(&want, &have)| {
+            self.type_table.is_type_parameter(want) || kind(want) == kind(have)
+        })
     }
 
     pub(crate) fn maybe_abstract_to_convert(

@@ -639,6 +639,8 @@ pub struct SymbolTable {
     private_type_paths: BTreeMap<SymbolId, InternedString>,
     /// Abstracts declared `enum abstract`, whichever module declared them.
     enum_abstracts: BTreeSet<SymbolId>,
+    /// Static `@:to` methods, whose parameter is the underlying value.
+    static_to_conversions: BTreeSet<SymbolId>,
     /// Enhanced symbol resolution cache
     symbol_cache: Rc<SymbolResolutionCache>,
 }
@@ -665,6 +667,7 @@ impl SymbolTable {
             class_constructor_symbols: BTreeMap::new(),
             private_type_paths: BTreeMap::new(),
             enum_abstracts: BTreeSet::new(),
+            static_to_conversions: BTreeSet::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::new(1000)),
         }
     }
@@ -690,6 +693,7 @@ impl SymbolTable {
             class_constructor_symbols: BTreeMap::new(),
             private_type_paths: BTreeMap::new(),
             enum_abstracts: BTreeSet::new(),
+            static_to_conversions: BTreeSet::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::with_sizes(capacity, capacity / 2)),
         }
     }
@@ -1489,6 +1493,16 @@ impl SymbolTable {
     /// Record that `abstract_symbol` is an `enum abstract`.
     pub fn mark_enum_abstract(&mut self, abstract_symbol: SymbolId) {
         self.enum_abstracts.insert(abstract_symbol);
+    }
+
+    /// Record a static `@:to` method.
+    pub fn mark_static_to_conversion(&mut self, method: SymbolId) {
+        self.static_to_conversions.insert(method);
+    }
+
+    /// Whether `method` is a static `@:to` method.
+    pub fn is_static_to_conversion(&self, method: SymbolId) -> bool {
+        self.static_to_conversions.contains(&method)
     }
 
     /// Whether `abstract_symbol` is an `enum abstract`.

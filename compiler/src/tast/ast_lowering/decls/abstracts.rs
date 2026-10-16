@@ -457,6 +457,9 @@ impl<'a> AstLowering<'a> {
                             crate::tast::symbols::SymbolFlags::TO_CONVERSION,
                         );
                     }
+                    if is_static && field.meta.iter().any(|m| m.name == ":to" || m.name == "to") {
+                        self.context.symbol_table.mark_static_to_conversion(sym);
+                    }
                     if is_static
                         && field.meta.iter().any(|m| m.name == ":to" || m.name == "to")
                         && abstract_decl

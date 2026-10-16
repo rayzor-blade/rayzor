@@ -1009,6 +1009,17 @@ impl<'a> TastToHirContext<'a> {
                     });
                 }
             }
+            // A static `@:to` takes the underlying value; its parameter says
+            // which instantiations it converts.
+            if method.metadata.is_to_conversion && method.is_static && method.parameters.len() == 1
+            {
+                to_rules.push(HirCastRule {
+                    from_type: method.parameters[0].param_type,
+                    to_type: method.return_type,
+                    is_implicit: true,
+                    cast_function: Some(method.symbol_id),
+                });
+            }
             if method.metadata.is_to_conversion && !method.is_static {
                 // @:to instance function: return type is the target type
                 let target_type = method.return_type;

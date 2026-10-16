@@ -1044,9 +1044,10 @@ impl<'a> HirToMirContext<'a> {
                     // Source is subclass of target (upcast) → always true
                     let _value = self.lower_expression(expr);
                     self.builder.build_const(IrValue::Bool(true))
-                } else if self.is_subclass_of(*expected, expr.ty) {
-                    // Downcast: runtime check via the object header. The header
-                    // (written by the New handler) and this comparison both use
+                } else {
+                    // Downcast, or a hierarchy declared outside this module:
+                    // runtime check via the object header. The header (written
+                    // by the New handler) and this comparison both use
                     // `runtime_type_id` directly.
                     let value_reg = self.lower_expression(expr)?;
                     let target_type_id = self.runtime_type_id(*expected) as i64;
@@ -1065,10 +1066,6 @@ impl<'a> HirToMirContext<'a> {
                     // Convert i64 (0/1) to Bool
                     let zero = self.builder.build_const(IrValue::I64(0))?;
                     self.builder.build_cmp(CompareOp::Ne, result_i64, zero)
-                } else {
-                    // Unrelated classes → false
-                    let _value = self.lower_expression(expr);
-                    self.builder.build_const(IrValue::Bool(false))
                 }
             }
             // Class -> Interface: runtime check against registered interface impl map.
