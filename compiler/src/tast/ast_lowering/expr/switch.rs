@@ -266,6 +266,140 @@ impl<'a> AstLowering<'a> {
         })
     }
 
+    /// The switch with each top-level extractor call evaluated at most once,
+    /// when a case first needs it, as haxe's matcher does; `None` when it has
+    /// none left to share.
+    pub(crate) fn cache_switch_extractors(
+        &mut self,
+        subject: &parser::Expr,
+        cases: &[parser::Case],
+        default: &Option<Box<parser::Expr>>,
+        span: parser::Span,
+    ) -> Option<parser::Expr> {
+        use parser::{BlockElement, Expr, ExprKind as K, Pattern};
+        fn cached(expr: &Expr) -> bool {
+            matches!(&expr.kind, K::Block(items) if matches!(items.last(),
+                Some(BlockElement::Expr(Expr { kind: K::Index { expr, .. }, .. }))
+                    if matches!(&expr.kind, K::Ident(name) if name.starts_with("__extractor"))))
+        }
+        // The same call written twice is one extractor, wherever it is written.
+        fn shape(expr: &Expr) -> String {
+            let text = format!("{:?}", expr.kind);
+            let mut out = String::with_capacity(text.len());
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find("Span {") {
+                out.push_str(&rest[..at]);
+                rest = rest[at..].find('}').map_or("", |end| &rest[at + end + 1..]);
+            }
+            out.push_str(rest);
+            out
+        }
+        fn collect<'p>(pattern: &'p Pattern, found: &mut Vec<(&'p Expr, String)>) {
+            match pattern {
+                Pattern::Extractor { expr, .. } if !cached(expr) => {
+                    let key = shape(expr);
+                    if !found.iter().any(|(_, k)| *k == key) {
+                        found.push((expr, key));
+                    }
+                }
+                Pattern::Or(alternatives) => alternatives.iter().for_each(|p| collect(p, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for case in cases {
+            for pattern in &case.patterns {
+                collect(pattern, &mut found);
+            }
+        }
+        if found.is_empty() {
+            return None;
+        }
+        let at = |kind: K| Expr { kind, span };
+        // The cache is an array: a guard computes it, and a guard's
+        // assignments to locals do not reach later cases.
+        let mut elements = Vec::new();
+        let mut replacements: Vec<(String, Expr)> = Vec::new();
+        for (extractor, key) in found {
+            let base = format!("__extractor{}", self.context.next_scope_id());
+            let applied = Self::substitute_extractor_placeholder(extractor, subject);
+            let name = || at(K::Ident(base.clone()));
+            elements.push(BlockElement::Expr(at(K::Var {
+                name: base.clone(),
+                type_hint: None,
+                expr: Some(Box::new(at(K::Array(Vec::new())))),
+                attrs: Default::default(),
+            })));
+            // The first case to need the value computes it; the rest reuse it.
+            let compute = at(K::If {
+                cond: Box::new(at(K::Binary {
+                    left: Box::new(at(K::Field {
+                        expr: Box::new(name()),
+                        field: "length".to_string(),
+                        is_optional: false,
+                    })),
+                    op: parser::BinaryOp::Eq,
+                    right: Box::new(at(K::Int(0))),
+                })),
+                then_branch: Box::new(at(K::Call {
+                    expr: Box::new(at(K::Field {
+                        expr: Box::new(name()),
+                        field: "push".to_string(),
+                        is_optional: false,
+                    })),
+                    args: vec![applied],
+                })),
+                else_branch: None,
+            });
+            let reuse = at(K::Block(vec![
+                BlockElement::Expr(compute),
+                BlockElement::Expr(at(K::Index {
+                    expr: Box::new(name()),
+                    index: Box::new(at(K::Int(0))),
+                })),
+            ]));
+            replacements.push((key, reuse));
+        }
+        fn rewrite(pattern: &Pattern, replacements: &[(String, Expr)]) -> Pattern {
+            match pattern {
+                Pattern::Extractor { expr, value } => Pattern::Extractor {
+                    expr: Box::new({
+                        let key = shape(expr);
+                        replacements
+                            .iter()
+                            .find(|(from, _)| *from == key)
+                            .map_or_else(|| (**expr).clone(), |(_, to)| to.clone())
+                    }),
+                    value: value.clone(),
+                },
+                Pattern::Or(alternatives) => Pattern::Or(
+                    alternatives
+                        .iter()
+                        .map(|p| rewrite(p, replacements))
+                        .collect(),
+                ),
+                other => other.clone(),
+            }
+        }
+        let cases = cases
+            .iter()
+            .map(|case| parser::Case {
+                patterns: case
+                    .patterns
+                    .iter()
+                    .map(|p| rewrite(p, &replacements))
+                    .collect(),
+                ..case.clone()
+            })
+            .collect();
+        elements.push(BlockElement::Expr(at(K::Switch {
+            expr: Box::new(subject.clone()),
+            cases,
+            default: default.clone(),
+        })));
+        Some(at(K::Block(elements)))
+    }
+
     /// `_` inside an extractor stands for the value being switched on.
     fn substitute_extractor_placeholder(
         expr: &parser::Expr,

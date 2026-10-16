@@ -719,6 +719,26 @@ pub(crate) fn has_bare_return(body: &Expr) -> bool {
     found
 }
 
+/// The expressions a pattern runs: its extractors' calls.
+fn walk_pattern_exprs<'a>(pattern: &'a parser::Pattern, go: &mut dyn FnMut(&'a Expr)) {
+    use parser::Pattern;
+    match pattern {
+        Pattern::Extractor { expr, value } => {
+            go(expr);
+            walk_pattern_exprs(value, go);
+        }
+        Pattern::Constructor { params: parts, .. }
+        | Pattern::Array(parts)
+        | Pattern::Or(parts)
+        | Pattern::ArrayRest {
+            elements: parts, ..
+        } => parts.iter().for_each(|p| walk_pattern_exprs(p, go)),
+        Pattern::Object { fields } => fields.iter().for_each(|(_, p)| walk_pattern_exprs(p, go)),
+        Pattern::Bind { pattern, .. } => walk_pattern_exprs(pattern, go),
+        _ => {}
+    }
+}
+
 /// `walk_expr`, descending below a node only when `f` returns true for it.
 pub(crate) fn walk_expr_pruned<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr) -> bool) {
     if !f(expr) {
@@ -816,6 +836,9 @@ pub(crate) fn walk_expr_pruned<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr) -
         } => {
             go(subject);
             for case in cases {
+                for pattern in &case.patterns {
+                    walk_pattern_exprs(pattern, &mut go);
+                }
                 if let Some(g) = &case.guard {
                     go(g);
                 }
@@ -890,6 +913,10 @@ fn collect_same_class_calls<'a>(
                         out.insert(field.as_str());
                     }
                     ExprKind::Ident(cls) if cls == class_name => {
+                        out.insert(field.as_str());
+                    }
+                    // An extractor's `_.m()` may be a static extension from this class.
+                    ExprKind::Ident(subject) if subject == "_" => {
                         out.insert(field.as_str());
                     }
                     _ if any_receiver => {

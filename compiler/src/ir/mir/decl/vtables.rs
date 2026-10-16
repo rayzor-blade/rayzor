@@ -1093,7 +1093,11 @@ impl<'a> HirToMirContext<'a> {
                         return self.builder.build_call_direct(f, vec![bits, tag], ptr_u8);
                     }
                     SlotKind::Scalar(_) | SlotKind::Erased => (
-                        "haxe_box_int_ptr",
+                        if matches!(kind, SlotKind::Erased) {
+                            "haxe_box_erased_ptr"
+                        } else {
+                            "haxe_box_int_ptr"
+                        },
                         IrType::I64,
                         if matches!(ret_ty, IrType::I64) {
                             Some(r)

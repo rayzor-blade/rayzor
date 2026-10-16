@@ -3861,6 +3861,18 @@ pub extern "C" fn haxe_dynamic_tag(ptr: *mut u8) -> u32 {
 /// tells the box from the object without a heuristic.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_if_tag(ptr: *mut u8, tag: u32) -> *mut u8 {
+    // Erased bits are what the reader's type says: a String's are the string,
+    // a scalar's are read from the box's cell.
+    if let Some(bits) = erased_box_bits(ptr) {
+        if tag == TYPE_STRING.0 {
+            return bits as *mut u8;
+        }
+        if [TYPE_INT.0, TYPE_FLOAT.0, TYPE_BOOL.0].contains(&tag)
+            && let Some(d) = dynamic_box_at(ptr)
+        {
+            return d.value_ptr;
+        }
+    }
     match dynamic_box_at(ptr) {
         Some(d) if d.type_id.0 == tag => d.value_ptr,
         Some(d) if d.type_id == TYPE_NULL => std::ptr::null_mut(),
@@ -3960,6 +3972,9 @@ pub extern "C" fn haxe_coerce_dynamic_to_float(ptr: *mut u8) -> f64 {
 pub extern "C" fn haxe_unbox_float_ptr(ptr: *mut u8) -> f64 {
     if ptr.is_null() {
         return 0.0;
+    }
+    if let Some(bits) = erased_box_bits(ptr) {
+        return f64::from_bits(bits as u64);
     }
     unsafe {
         let dynamic_ptr = ptr as *const DynamicValue;
@@ -4368,6 +4383,25 @@ pub extern "C" fn haxe_box_generic_ptr(value: i64, type_tag: i32, metadata: u64)
 /// shares its first word with a box over it, but its header is an i64 whose
 /// high half is zero, so this word tells the two apart.
 const REFERENCE_BOX_MARK: u32 = 0x5258_4258;
+
+/// Written into the padding word of a box holding an erased type parameter's
+/// bits. It reads as an Int; a reader whose own type is known reads the bits.
+const ERASED_BOX_MARK: u32 = 0x4552_4153;
+
+/// Box the bits of an erased type parameter's value.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_box_erased_ptr(bits: i64) -> *mut u8 {
+    let boxed = haxe_box_int_ptr(bits);
+    unsafe { *(boxed as *mut u32).add(1) = ERASED_BOX_MARK };
+    boxed
+}
+
+/// The bits a box from `haxe_box_erased_ptr` holds.
+fn erased_box_bits(ptr: *mut u8) -> Option<i64> {
+    let d = dynamic_box_at(ptr)?;
+    let marked = d.type_id == TYPE_INT && unsafe { *(ptr as *const u32).add(1) } == ERASED_BOX_MARK;
+    marked.then(|| boxed_integer_value(d)).flatten()
+}
 
 /// Whether `obj` is a box made by `haxe_box_reference_ptr`.
 pub(crate) fn is_reference_box(obj: *mut u8) -> bool {

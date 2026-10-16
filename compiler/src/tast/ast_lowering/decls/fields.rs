@@ -1095,6 +1095,7 @@ impl<'a> AstLowering<'a> {
             ExprKind::Ident(name) => {
                 let name = self.context.string_interner.get_id(name)?;
                 let symbol = self.resolve_symbol_in_scope_hierarchy(name)?;
+                let symbol = self.visible_enum_variant(symbol).unwrap_or(symbol);
                 let symbol = self.context.symbol_table.get_symbol(symbol)?;
                 matches!(
                     tt.get(symbol.type_id).map(|ty| &ty.kind),

@@ -869,6 +869,12 @@ unsafe fn read_dynamic(ptr: i32) -> (u32, u32) {
     (*base, *base.add(1))
 }
 
+/// Box an erased type parameter's bits; on wasm an Int box.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_box_erased_ptr(val: i32) -> i32 {
+    haxe_box_int_ptr(val)
+}
+
 /// Box an Int as DynamicValue. Allocates 4 bytes for the int value,
 /// then 8 bytes for the DynamicValue header.
 #[unsafe(no_mangle)]

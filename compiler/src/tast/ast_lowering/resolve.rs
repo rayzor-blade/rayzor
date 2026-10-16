@@ -689,6 +689,90 @@ impl<'a> AstLowering<'a> {
         None
     }
 
+    /// Whether the module being lowered declares or imports enum `enum_symbol`:
+    /// by its path, or by a wildcard over its package.
+    pub(crate) fn enum_visible_here(&self, enum_symbol: SymbolId) -> bool {
+        let Some(symbol) = self.context.symbol_table.get_symbol(enum_symbol) else {
+            return false;
+        };
+        let file = symbol.definition_location.file_id;
+        if file != u32::MAX && file == self.context.create_location().file_id {
+            return true;
+        }
+        let Some(qualified) = symbol
+            .qualified_name
+            .or(Some(symbol.name))
+            .and_then(|q| self.context.string_interner.get(q))
+        else {
+            return false;
+        };
+        let package = qualified
+            .rsplit_once('.')
+            .map_or("", |(package, _)| package);
+        let mut scope = Some(self.context.current_scope);
+        while let Some(id) = scope {
+            for entry in self.context.import_resolver.get_imports(id) {
+                let mut segments: Vec<&str> = entry
+                    .package_path
+                    .package
+                    .iter()
+                    .filter_map(|s| self.context.string_interner.get(*s))
+                    .collect();
+                let name = self.context.string_interner.get(entry.package_path.name);
+                if entry.is_wildcard {
+                    if name.is_some_and(|n| n != "*") {
+                        segments.extend(name);
+                    }
+                    if segments.join(".") == package {
+                        return true;
+                    }
+                } else {
+                    segments.extend(name);
+                    if segments.join(".") == qualified {
+                        return true;
+                    }
+                }
+            }
+            scope = self
+                .context
+                .scope_tree
+                .get_scope(id)
+                .and_then(|s| s.parent_id);
+        }
+        false
+    }
+
+    /// The same-named constructor of the one enum this module declares or
+    /// imports, when the scope walk picked `variant` of an enum it does not.
+    pub(crate) fn visible_enum_variant(&self, variant: SymbolId) -> Option<SymbolId> {
+        let symbols = &self.context.symbol_table;
+        let symbol = symbols.get_symbol(variant)?;
+        if symbol.kind != crate::tast::symbols::SymbolKind::EnumVariant {
+            return None;
+        }
+        let parent = symbols.find_parent_enum_for_constructor(variant)?;
+        if self.enum_visible_here(parent) {
+            return None;
+        }
+        let name = symbol.name;
+        let visible: Vec<SymbolId> = symbols
+            .find_symbols(|s| {
+                s.kind == crate::tast::symbols::SymbolKind::EnumVariant && s.name == name
+            })
+            .into_iter()
+            .map(|s| s.id)
+            .filter(|&v| {
+                symbols
+                    .find_parent_enum_for_constructor(v)
+                    .is_some_and(|p| p != parent && self.enum_visible_here(p))
+            })
+            .collect();
+        match visible.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        }
+    }
+
     /// The type the surrounding context expects of the expression being
     /// lowered: the argument slot, else the enclosing return type.
     pub(crate) fn expected_value_type(&self) -> Option<TypeId> {

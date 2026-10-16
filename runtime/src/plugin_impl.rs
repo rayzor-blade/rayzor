@@ -1961,6 +1961,10 @@ register_symbol!(
     crate::anon_object::rayzor_anon_set_field_by_index
 );
 register_symbol!(
+    "haxe_box_erased_ptr",
+    crate::type_system::haxe_box_erased_ptr
+);
+register_symbol!(
     "rayzor_anon_get_struct_field",
     crate::anon_object::rayzor_anon_get_struct_field
 );

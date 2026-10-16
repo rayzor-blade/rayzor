@@ -595,6 +595,11 @@ impl<'a> AstLowering<'a> {
                 // collision (confirmed: `nue`'s `inferDType():DType` with
                 // `return F32;` resolved to `MetaValue.F32`, a boxed variant
                 // from an unrelated 13-variant enum, instead of `DType.F32`).
+                // A constructor of an enum this module does not see gives way to
+                // the same-named one of an enum it imports.
+                if let Some(variant) = self.visible_enum_variant(symbol_id) {
+                    symbol_id = variant;
+                }
                 if let Some(expected_ty) = prefer {
                     if let Some(variant) = self.expected_enum_variant(symbol_id, expected_ty) {
                         symbol_id = variant;
@@ -2038,6 +2043,11 @@ impl<'a> AstLowering<'a> {
                         span: expression.span,
                     };
                     return self.lower_expression(&block);
+                }
+                if let Some(cached) =
+                    self.cache_switch_extractors(expr, cases, default, expression.span)
+                {
+                    return self.lower_expression(&cached);
                 }
                 // Lower the discriminant expression
                 let discriminant = Box::new(self.lower_expression(expr)?);
