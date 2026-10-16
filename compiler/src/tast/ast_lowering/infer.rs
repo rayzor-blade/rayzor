@@ -629,9 +629,18 @@ impl<'a> AstLowering<'a> {
             TypedExpressionKind::This { this_type } => Ok(*this_type),
             TypedExpressionKind::Super { super_type } => Ok(*super_type),
             TypedExpressionKind::ObjectLiteral { fields } => {
-                // For anonymous objects, infer type from fields
-                let field_types: Vec<(InternedString, TypeId)> =
-                    fields.iter().map(|f| (f.name, f.value.expr_type)).collect();
+                // For anonymous objects, infer type from fields; a quoted name
+                // that is not an identifier is a key, not a member of the type.
+                let field_types: Vec<(InternedString, TypeId)> = fields
+                    .iter()
+                    .filter(|f| {
+                        self.context
+                            .string_interner
+                            .get(f.name)
+                            .is_none_or(Self::is_identifier)
+                    })
+                    .map(|f| (f.name, f.value.expr_type))
+                    .collect();
                 Ok(type_resolution::create_anonymous_object_type(
                     &self.context.type_table,
                     field_types,
@@ -1184,9 +1193,20 @@ impl<'a> AstLowering<'a> {
                     return Ok(void_type);
                 }
 
-                // Branches of different classes type as the class they all extend.
+                // Branches meet at a class, a structure or an interface of their
+                // classes; a `null` branch beside scalars makes them `Null<T>`.
+                let branches: Vec<&TypedExpression> = cases
+                    .iter()
+                    .filter_map(|case| match &case.body {
+                        TypedStatement::Expression { expression, .. } => Some(expression),
+                        _ => None,
+                    })
+                    .chain(default_case.iter().map(|d| &**d))
+                    .filter(|e| e.expr_type != void_type)
+                    .collect();
                 Ok(self
-                    .common_branch_class(&non_void_types)
+                    .join_branches(&branches)
+                    .or_else(|| self.common_branch_class(&non_void_types))
                     .unwrap_or(non_void_types[0]))
             }
             TypedExpressionKind::Try {
@@ -1840,6 +1860,54 @@ impl<'a> AstLowering<'a> {
         )
     }
 
+    /// The type values of `branches` share: a `null` beside scalars of one type
+    /// makes them `Null<T>`; objects meet at a class or structure, or at an
+    /// interface when every branch is a class. `None` when nothing is found.
+    fn join_branches(&self, branches: &[&TypedExpression]) -> Option<TypeId> {
+        let values: Vec<&TypedExpression> = branches
+            .iter()
+            .copied()
+            .filter(|e| !matches!(e.kind, TypedExpressionKind::Null))
+            .collect();
+        let had_null = values.len() != branches.len();
+        // Only a macro probe types a `null` branch as `Null<T>`; compiled code
+        // keeps the branches' own type.
+        if had_null && self.macro_probe_depth == 0 {
+            return None;
+        }
+        let types: Vec<TypeId> = values.iter().map(|e| e.expr_type).collect();
+        let first = *types.first()?;
+        let kinds: Vec<Option<TypeKind>> = {
+            let tt = self.context.type_table.borrow();
+            types
+                .iter()
+                .map(|&t| tt.get(t).map(|t| t.kind.clone()))
+                .collect()
+        };
+        let scalar = |kind: &Option<TypeKind>| {
+            matches!(kind, Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool))
+        };
+        if had_null && kinds.iter().all(scalar) && types.iter().all(|&t| self.same_type(t, first)) {
+            return self.nullable_slot(first);
+        }
+        let all_classes = kinds
+            .iter()
+            .all(|k| matches!(k, Some(TypeKind::Class { .. })));
+        let joined = self.unify_min(&types).filter(|&ty| {
+            match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Class { .. } | TypeKind::Anonymous { .. }) => true,
+                Some(TypeKind::Interface { .. }) => all_classes,
+                _ => false,
+            }
+        });
+        let joined = joined?;
+        Some(if had_null {
+            self.nullable_slot(joined).unwrap_or(joined)
+        } else {
+            joined
+        })
+    }
+
     /// The element type of a literal holding `values`: their common function
     /// type, else their `unify_min`, made `Null<T>` for a reference type when
     /// a `null` is among them.
@@ -1958,6 +2026,9 @@ impl<'a> AstLowering<'a> {
                 .instantiated_class_chain(from)
                 .into_iter()
                 .any(|base| self.same_type(base, to)),
+            (TypeKind::Class { symbol_id, .. }, TypeKind::Anonymous { fields }) => {
+                self.class_has_fields(*symbol_id, fields)
+            }
             (
                 TypeKind::Class {
                     symbol_id: class,
@@ -2001,7 +2072,30 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    fn same_type(&self, a: TypeId, b: TypeId) -> bool {
+    fn is_identifier(name: &str) -> bool {
+        let mut chars = name.chars();
+        chars.next().is_some_and(|c| c == '_' || c.is_alphabetic())
+            && chars.all(|c| c == '_' || c.is_alphanumeric())
+    }
+
+    /// Whether instances of `class` have every public field `fields` names, with its type.
+    fn class_has_fields(&self, class: SymbolId, fields: &[AnonymousField]) -> bool {
+        !fields.is_empty()
+            && fields.iter().all(|want| {
+                let Some(symbol) = self.lookup_data_field(class, want.name) else {
+                    return false;
+                };
+                self.context
+                    .symbol_table
+                    .get_symbol(symbol)
+                    .is_some_and(|field| {
+                        field.visibility == crate::tast::symbols::Visibility::Public
+                            && self.same_type(field.type_id, want.type_id)
+                    })
+            })
+    }
+
+    pub(crate) fn same_type(&self, a: TypeId, b: TypeId) -> bool {
         let (a, b) = (self.unalias(a), self.unalias(b));
         let tt = self.context.type_table.borrow();
         a == b || tt.get(a).map(|t| &t.kind) == tt.get(b).map(|t| &t.kind)
@@ -2216,7 +2310,13 @@ impl<'a> AstLowering<'a> {
     fn nullable_slot(&self, ty: TypeId) -> Option<TypeId> {
         let wraps = matches!(
             self.context.type_table.borrow().get(ty).map(|t| &t.kind),
-            Some(TypeKind::Class { .. } | TypeKind::Interface { .. })
+            Some(
+                TypeKind::Class { .. }
+                    | TypeKind::Interface { .. }
+                    | TypeKind::Int
+                    | TypeKind::Float
+                    | TypeKind::Bool
+            )
         );
         wraps.then(|| {
             self.context

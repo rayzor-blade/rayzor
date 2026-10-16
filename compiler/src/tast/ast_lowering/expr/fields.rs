@@ -793,13 +793,27 @@ impl<'a> AstLowering<'a> {
         // so we must check both to resolve instance method calls like `obj.lock()`.
         let resolve_in_class =
             |this: &Self, class_sym: &SymbolId, name: InternedString| -> Option<SymbolId> {
-                if let Some(field) = this.lookup_data_field(*class_sym, name) {
-                    return Some(field);
-                }
-                if let Some(methods) = this.class_methods.get(class_sym) {
-                    if let Some((_, sym, _)) = methods.iter().find(|(n, _, _)| *n == name) {
-                        return Some(*sym);
+                // The most derived declaration wins: an override in a subclass
+                // is found before the member it replaces in a parent.
+                let mut current = Some(*class_sym);
+                let mut visited = std::collections::BTreeSet::new();
+                while let Some(class) = current.filter(|class| visited.insert(*class)) {
+                    if let Some(methods) = this.class_methods.get(&class) {
+                        if let Some((_, sym, _)) = methods.iter().find(|(n, _, _)| *n == name) {
+                            return Some(*sym);
+                        }
+                    } else if let Some(sym) = this.declared_method_symbol(class, name) {
+                        // A class lowered elsewhere has no local method table.
+                        return Some(sym);
                     }
+                    if let Some(field) = this
+                        .class_fields
+                        .get(&class)
+                        .and_then(|fields| fields.iter().find(|(n, _, _)| *n == name))
+                    {
+                        return Some(field.1);
+                    }
+                    current = this.parent_class_symbol(class);
                 }
                 // An interface's methods live in its own scope, not these tables.
                 let is_interface = this

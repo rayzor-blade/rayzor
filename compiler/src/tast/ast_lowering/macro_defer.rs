@@ -1372,6 +1372,70 @@ impl DeferredMacroTyper<'_, '_> {
             })
             .unwrap_or_default()
     }
+
+    /// The toplevel `Map<K, V>` typedef over a key-specific map `concrete`.
+    fn map_typedef_view(&mut self, concrete: TypeId) -> Option<TypeId> {
+        use crate::tast::core::TypeKind;
+        let (symbol_id, args) = match self
+            .lowering
+            .context
+            .type_table
+            .borrow()
+            .get(concrete)
+            .map(|t| t.kind.clone())
+        {
+            Some(TypeKind::Class {
+                symbol_id,
+                type_args,
+            }) => (symbol_id, type_args),
+            _ => return None,
+        };
+        let name = self
+            .lowering
+            .context
+            .symbol_table
+            .get_symbol(symbol_id)
+            .and_then(|s| s.qualified_name)
+            .and_then(|q| self.lowering.context.string_interner.get(q))?
+            .to_string();
+        let (key, value) = {
+            let table = self.lowering.context.type_table.borrow();
+            match (name.rsplit('.').next().unwrap_or(&name), args.as_slice()) {
+                ("StringMap", [v]) => (table.string_type(), *v),
+                ("IntMap", [v]) => (table.int_type(), *v),
+                ("ObjectMap" | "EnumValueMap", [k, v]) => (*k, *v),
+                _ => return None,
+            }
+        };
+        let cache_key = ("Map".to_owned(), vec![key, value]);
+        if let Some(Some(ty)) = self.lowering.macro_declared_types.get(&cache_key) {
+            return Some(*ty);
+        }
+        let map = self.lowering.context.intern_string("Map");
+        let scope = self.lowering.context.current_scope;
+        let alias = self
+            .lowering
+            .context
+            .symbol_table
+            .create_type_alias_in_scope(map, scope);
+        if let Some(symbol) = self.lowering.context.symbol_table.get_symbol_mut(alias) {
+            symbol.qualified_name = Some(map);
+        }
+        let view = self
+            .lowering
+            .context
+            .type_table
+            .borrow_mut()
+            .create_type(TypeKind::TypeAlias {
+                symbol_id: alias,
+                target_type: concrete,
+                type_args: vec![key, value],
+            });
+        self.lowering
+            .macro_declared_types
+            .insert(cache_key, Some(view));
+        Some(view)
+    }
 }
 
 impl MacroTyper for DeferredMacroTyper<'_, '_> {
@@ -2231,6 +2295,7 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 }
                 continue;
             }
+            let from_alias = matches!(kind, Some(TypeKind::TypeAlias { .. }));
             let (next, parameterization) = match kind {
                 Some(TypeKind::TypeAlias {
                     target_type,
@@ -2272,6 +2337,14 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
             if let Some((symbol, args)) = parameterization {
                 let params = self.definition_parameters(symbol);
                 next = self.apply_type_parameters(next, &params, &args);
+            }
+            // `Map<K, V>` is lowered to its container; one step from a typedef
+            // of it stops at the `Map` typedef, as in haxe.
+            if once
+                && from_alias
+                && let Some(view) = self.map_typedef_view(next)
+            {
+                next = view;
             }
             current = next;
             if once {

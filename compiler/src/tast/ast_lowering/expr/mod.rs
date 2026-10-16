@@ -2053,6 +2053,15 @@ impl<'a> AstLowering<'a> {
                     self.context.switch_discriminant_type = prev_switch_type;
                     return Err(error);
                 }
+                // A macro probe types the switch as a value: its patterns must
+                // bind consistently and cover the subject.
+                if self.macro_probe_depth > 0
+                    && let Err(error) =
+                        self.macro_probe_check_patterns(&discriminant, cases, default.is_some())
+                {
+                    self.context.switch_discriminant_type = prev_switch_type;
+                    return Err(error);
+                }
 
                 // Check if this is a switch expression or switch statement
                 // In a switch expression, all cases must have expression values
@@ -2933,6 +2942,12 @@ impl<'a> AstLowering<'a> {
                     self.context.current_scope,
                     var_type,
                 );
+                // A macro sees an enum abstract value's variable as the abstract.
+                if declared_type.is_none()
+                    && let Some(abstract_type) = self.enum_abstract_value_type(&initializer)
+                {
+                    self.macro_source_types.insert(var_symbol, abstract_type);
+                }
 
                 // Add the variable to the current scope so it can be resolved later
                 if let Some(scope) = self

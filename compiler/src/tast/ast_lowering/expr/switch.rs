@@ -905,6 +905,18 @@ impl<'a> AstLowering<'a> {
     /// the value as its abstract, so a bare case name resolves to one of its
     /// values ahead of a same-named local.
     pub(crate) fn enum_abstract_value_type(&self, subject: &TypedExpression) -> Option<TypeId> {
+        // A value reached through its abstract, which another module may declare.
+        if let TypedExpressionKind::StaticFieldAccess { class_symbol, .. } = &subject.kind
+            && self.context.symbol_table.is_enum_abstract(*class_symbol)
+        {
+            let ty = self.context.symbol_table.get_symbol(*class_symbol)?.type_id;
+            if matches!(
+                self.context.type_table.borrow().get(ty).map(|t| &t.kind),
+                Some(TypeKind::Abstract { .. })
+            ) {
+                return Some(ty);
+            }
+        }
         let field = match &subject.kind {
             TypedExpressionKind::Variable { symbol_id } => *symbol_id,
             TypedExpressionKind::StaticFieldAccess { field_symbol, .. } => *field_symbol,

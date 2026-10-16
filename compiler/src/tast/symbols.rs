@@ -637,6 +637,8 @@ pub struct SymbolTable {
     class_constructor_symbols: BTreeMap<SymbolId, SymbolId>,
     /// Module-private type → the path Haxe prints for it (`pack._Module.Name`).
     private_type_paths: BTreeMap<SymbolId, InternedString>,
+    /// Abstracts declared `enum abstract`, whichever module declared them.
+    enum_abstracts: BTreeSet<SymbolId>,
     /// Enhanced symbol resolution cache
     symbol_cache: Rc<SymbolResolutionCache>,
 }
@@ -662,6 +664,7 @@ impl SymbolTable {
             class_type_param_defaults: BTreeMap::new(),
             class_constructor_symbols: BTreeMap::new(),
             private_type_paths: BTreeMap::new(),
+            enum_abstracts: BTreeSet::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::new(1000)),
         }
     }
@@ -686,6 +689,7 @@ impl SymbolTable {
             class_type_param_defaults: BTreeMap::new(),
             class_constructor_symbols: BTreeMap::new(),
             private_type_paths: BTreeMap::new(),
+            enum_abstracts: BTreeSet::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::with_sizes(capacity, capacity / 2)),
         }
     }
@@ -1480,6 +1484,16 @@ impl SymbolTable {
     /// Look up a class's constructor SymbolId.
     pub fn get_class_constructor(&self, class_symbol: SymbolId) -> Option<SymbolId> {
         self.class_constructor_symbols.get(&class_symbol).copied()
+    }
+
+    /// Record that `abstract_symbol` is an `enum abstract`.
+    pub fn mark_enum_abstract(&mut self, abstract_symbol: SymbolId) {
+        self.enum_abstracts.insert(abstract_symbol);
+    }
+
+    /// Whether `abstract_symbol` is an `enum abstract`.
+    pub fn is_enum_abstract(&self, abstract_symbol: SymbolId) -> bool {
+        self.enum_abstracts.contains(&abstract_symbol)
     }
 
     /// Record that a type is private to its module, with the path Haxe prints for it.

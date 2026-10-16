@@ -1126,6 +1126,9 @@ impl<'a> AstLowering<'a> {
         self.class_fields.entry(abstract_symbol).or_default();
         if abstract_decl.is_enum_abstract {
             self.enum_abstracts.insert(abstract_symbol);
+            self.context
+                .symbol_table
+                .mark_enum_abstract(abstract_symbol);
         }
         for field in &abstract_decl.fields {
             if !abstract_decl.is_enum_abstract

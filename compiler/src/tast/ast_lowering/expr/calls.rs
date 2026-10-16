@@ -760,6 +760,32 @@ impl<'a> AstLowering<'a> {
         new_symbol
     }
 
+    /// The method `class` itself declares, by exact qualified name.
+    pub(crate) fn declared_method_symbol(
+        &self,
+        class: SymbolId,
+        name: InternedString,
+    ) -> Option<SymbolId> {
+        let class_sym = self.context.symbol_table.get_symbol(class)?;
+        let class_name = class_sym
+            .qualified_name
+            .or(Some(class_sym.name))
+            .and_then(|q| self.context.string_interner.get(q))?;
+        let expected = format!("{}.{}", class_name, self.context.string_interner.get(name)?);
+        self.context
+            .symbol_table
+            .find_symbols(|sym| {
+                sym.kind == crate::tast::symbols::SymbolKind::Function
+                    && sym.name == name
+                    && sym
+                        .qualified_name
+                        .and_then(|q| self.context.string_interner.get(q))
+                        == Some(expected.as_str())
+            })
+            .first()
+            .map(|sym| sym.id)
+    }
+
     /// Resolve a method symbol within a specific class context, preferring
     /// qualified-name matching to avoid cross-class collisions on short names.
     pub(crate) fn resolve_class_method_symbol(

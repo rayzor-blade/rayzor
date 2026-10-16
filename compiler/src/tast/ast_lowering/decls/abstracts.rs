@@ -359,6 +359,9 @@ impl<'a> AstLowering<'a> {
         self.class_fields.entry(abstract_symbol).or_default();
         if abstract_decl.is_enum_abstract {
             self.enum_abstracts.insert(abstract_symbol);
+            self.context
+                .symbol_table
+                .mark_enum_abstract(abstract_symbol);
         }
         // Initialize class_methods so the pre-pass-typed abstract methods are
         // reachable by resolve_class_method_symbol Strategy 1 at call sites.

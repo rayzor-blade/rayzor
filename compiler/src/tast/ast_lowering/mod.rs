@@ -1841,6 +1841,7 @@ mod macro_probe;
 mod metadata;
 pub(crate) mod module_statics;
 mod overloads;
+mod pattern_diagnostics;
 mod resolve;
 mod stdlib;
 mod stmt;
