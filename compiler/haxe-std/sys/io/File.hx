@@ -22,6 +22,10 @@
 
 package sys.io;
 
+import sys.io.FileInput;
+import sys.io.FileOutput;
+import sys.io.NativeFile;
+
 /**
 	API for reading and writing files.
 
@@ -83,7 +87,9 @@ extern class File {
 
 		If `path` is null, the result is unspecified.
 	**/
-	static function read(path:String, binary:Bool = true):FileInput;
+	static function read(path:String, binary:Bool = true):FileInput {
+		return new FileInput(NativeFile.read(path, binary));
+	}
 
 	/**
 		Returns an `FileOutput` handle to the file specified by `path`.
@@ -101,13 +107,17 @@ extern class File {
 
 		If `path` is null, the result is unspecified.
 	**/
-	static function write(path:String, binary:Bool = true):FileOutput;
+	static function write(path:String, binary:Bool = true):FileOutput {
+		return new FileOutput(NativeFile.write(path, binary));
+	}
 
 	/**
 		Similar to `sys.io.File.write`, but appends to the file if it exists
 		instead of overwriting its contents.
 	**/
-	static function append(path:String, binary:Bool = true):FileOutput;
+	static function append(path:String, binary:Bool = true):FileOutput {
+		return new FileOutput(NativeFile.append(path, binary));
+	}
 
 	/**
 		Similar to `sys.io.File.append`. While `append` can only seek or write
@@ -115,7 +125,9 @@ extern class File {
 		seek to any position, so the file's previous contents can be
 		selectively overwritten.
 	**/
-	static function update(path:String, binary:Bool = true):FileOutput;
+	static function update(path:String, binary:Bool = true):FileOutput {
+		return new FileOutput(NativeFile.update(path, binary));
+	}
 
 	/**
 		Copies the contents of the file specified by `srcPath` to the file

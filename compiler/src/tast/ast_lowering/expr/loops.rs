@@ -508,10 +508,11 @@ impl<'a> AstLowering<'a> {
             // INLINE ARRAY ITERATOR PATTERN:
             // for (x in arr) becomes:
             // {
+            //     var _array = arr;
             //     var _i = 0;
-            //     var _len = arr.length;
+            //     var _len = _array.length;
             //     while (_i < _len) {
-            //         var x = arr[_i];
+            //         var x = _array[_i];
             //         body;
             //         _i++;
             //     }
@@ -522,6 +523,53 @@ impl<'a> AstLowering<'a> {
             let int_type = self.context.type_table.borrow().int_type();
             let bool_type = self.context.type_table.borrow().bool_type();
             let element_type = self.infer_element_type_from_iterable(&iterable_expr);
+
+            // Calls and getters are evaluated once; local variables retain Haxe's
+            // direct array access semantics when reassigned inside the body.
+            let is_local = match iterable_expr.kind {
+                TypedExpressionKind::Variable { symbol_id } => self
+                    .context
+                    .symbol_table
+                    .get_symbol(symbol_id)
+                    .is_some_and(|symbol| {
+                        matches!(symbol.kind, SymbolKind::Variable | SymbolKind::Parameter)
+                            && !symbol.is_static()
+                            && !self.class_fields.values().any(|fields| {
+                                fields.iter().any(|(_, field, _)| *field == symbol_id)
+                            })
+                    }),
+                _ => false,
+            };
+            let (array_init, array_ref) = if is_local {
+                (None, iterable_expr)
+            } else {
+                let array_type = iterable_expr.expr_type;
+                let array_name = self.context.intern_string("_array");
+                let array_symbol = self.context.symbol_table.create_variable_with_type(
+                    array_name,
+                    loop_body_scope_id,
+                    array_type,
+                );
+                let array_init = TypedStatement::VarDeclaration {
+                    symbol_id: array_symbol,
+                    var_type: array_type,
+                    initializer: Some(iterable_expr),
+                    source_location,
+                    mutability: crate::tast::Mutability::Immutable,
+                };
+                let array_ref = TypedExpression {
+                    expr_type: array_type,
+                    kind: TypedExpressionKind::Variable {
+                        symbol_id: array_symbol,
+                    },
+                    usage: VariableUsage::Copy,
+                    lifetime_id: LifetimeId::static_lifetime(),
+                    source_location,
+                    metadata: ExpressionMetadata::default(),
+                };
+
+                (Some(array_init), array_ref)
+            };
 
             // Create loop variable
             let var_name = self.context.intern_string(var);
@@ -575,7 +623,7 @@ impl<'a> AstLowering<'a> {
             let length_access = TypedExpression {
                 expr_type: int_type,
                 kind: TypedExpressionKind::FieldAccess {
-                    object: Box::new(iterable_expr.clone()),
+                    object: Box::new(array_ref.clone()),
                     field_symbol: length_symbol,
                     is_optional: false,
                 },
@@ -630,7 +678,7 @@ impl<'a> AstLowering<'a> {
             let array_access = TypedExpression {
                 expr_type: element_type,
                 kind: TypedExpressionKind::ArrayAccess {
-                    array: Box::new(iterable_expr),
+                    array: Box::new(array_ref),
                     index: Box::new(counter_ref.clone()),
                 },
                 usage: VariableUsage::Copy,
@@ -696,11 +744,16 @@ impl<'a> AstLowering<'a> {
                 source_location,
             };
 
+            let mut statements = vec![counter_init, len_init, for_stmt];
+            if let Some(array_init) = array_init {
+                statements.insert(0, array_init);
+            }
+
             // Return block: { var _i = 0; var _len = arr.length; for (...) }
             return Ok(TypedExpression {
                 expr_type: self.context.type_table.borrow().void_type(),
                 kind: TypedExpressionKind::Block {
-                    statements: vec![counter_init, len_init, for_stmt],
+                    statements,
                     scope_id: ScopeId::from_raw(self.context.next_scope_id()),
                 },
                 usage: VariableUsage::Move,

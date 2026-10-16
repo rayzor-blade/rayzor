@@ -22,14 +22,23 @@
 
 package sys.io;
 
-/**
-	Use `sys.io.File.write` to create a `FileOutput`.
-**/
-extern class FileOutput extends haxe.io.Output {
-	function writeByte(c:Int):Void;
-	function writeBytes(s:haxe.io.Bytes, pos:Int, len:Int):Int;
-	function flush():Void;
-	function close():Void;
-	function seek(p:Int, pos:FileSeek):Void;
-	function tell():Int;
+import sys.io.NativeFileOutput;
+import sys.io.FileSeek;
+
+class FileOutput extends haxe.io.Output {
+	var stream:NativeFileOutput;
+	public function new(stream:NativeFileOutput) { this.stream = stream; }
+	function live():NativeFileOutput {
+		if (stream == null) throw "Output is closed";
+		return stream;
+	}
+	public override function writeByte(value:Int):Void live().writeByte(value);
+	public override function writeBytes(bytes:haxe.io.Bytes, pos:Int, len:Int):Int
+		return live().writeBytes(bytes, pos, len);
+	public override function flush():Void live().flush();
+	public override function close():Void {
+		if (stream != null) { stream.close(); stream = null; }
+	}
+	public function seek(position:Int, origin:FileSeek):Void live().seek(position, origin);
+	public function tell():Int return live().tell();
 }

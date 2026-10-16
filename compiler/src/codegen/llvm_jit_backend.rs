@@ -2513,6 +2513,34 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .collect()
     }
 
+    /// Namespace Haxe definitions after references are resolved, before native linking.
+    pub fn namespace_aot_functions(&self) {
+        assert!(self.aot_mode);
+        let extern_names: BTreeSet<_> = self
+            .extern_function_ids
+            .iter()
+            .filter_map(|id| self.function_map.get(id))
+            .map(|function| function.get_name().to_string_lossy().into_owned())
+            .collect();
+        for (id, name) in self.get_function_symbols() {
+            if extern_names.contains(&name)
+                || name == "__init__"
+                || name.starts_with("__init___")
+                || name == "__vtable_init__"
+                || name.starts_with("__vtable_init___")
+            {
+                continue;
+            }
+            if let Some(function) = self.module.get_function(&name)
+                && function.count_basic_blocks() > 0
+            {
+                function
+                    .as_global_value()
+                    .set_name(&format!("__rayzor_haxe_{}_{}", name, id.0));
+            }
+        }
+    }
+
     /// Declare an external function for FFI
     fn declare_external_function(&self, name: &str) -> Result<FunctionValue<'ctx>, String> {
         // Check if already declared

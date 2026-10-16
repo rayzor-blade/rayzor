@@ -260,6 +260,8 @@ impl AotCompiler {
             backend.compile_module_bodies(module)?;
         }
 
+        backend.namespace_aot_functions();
+
         // Find the LLVM function name for the entry point
         let entry_llvm_name = find_entry_llvm_name(&backend, &modules, &entry_function_name)?;
         let startup_llvm_names = find_startup_llvm_names(&backend, &modules);

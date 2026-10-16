@@ -22,6 +22,9 @@
 
 package sys.io;
 
+import haxe.io.Input;
+import haxe.io.Output;
+
 import sys.io.FileInput;
 import sys.io.FileOutput;
 
@@ -36,17 +39,17 @@ class Process {
 	/**
 		Standard output. The output stream where a process writes its output data.
 	**/
-	public var stdout(default, null):haxe.io.Input;
+	public var stdout(default, null):Input;
 
 	/**
 		Standard error. The output stream to output error messages or diagnostics.
 	**/
-	public var stderr(default, null):haxe.io.Input;
+	public var stderr(default, null):Input;
 
 	/**
 		Standard input. The stream data going into a process.
 	**/
-	public var stdin(default, null):haxe.io.Output;
+	public var stdin(default, null):Output;
 
 	/**
 		Construct a `Process` object, which run the given command immediately.
@@ -66,9 +69,9 @@ class Process {
 	public function new(cmd:String, ?args:Array<String>, detached:Bool = false):Void {
 		handle = new NativeProcess(cmd, args, detached);
 		if (!detached) {
-			stdout = new ProcessInput(handle.takeStdout());
-			stderr = new ProcessInput(handle.takeStderr());
-			stdin = new ProcessOutput(handle.takeStdin());
+			stdout = new FileInput(handle.takeStdout());
+			stderr = new FileInput(handle.takeStderr());
+			stdin = new FileOutput(handle.takeStdin());
 		}
 	}
 
@@ -106,36 +109,4 @@ class Process {
 		Kill the process.
 	**/
 	public function kill():Void live().kill();
-}
-
-private class ProcessInput extends haxe.io.Input {
-	var stream:FileInput;
-	public function new(stream:FileInput) { this.stream = stream; }
-	function live():FileInput {
-		if (stream == null) throw "Process input is closed";
-		return stream;
-	}
-	public override function readByte():Int return live().readByte();
-	public override function readBytes(bytes:haxe.io.Bytes, pos:Int, len:Int):Int
-		return live().readBytes(bytes, pos, len);
-	public override function readAll(?bufsize:Int):haxe.io.Bytes return live().readAll(bufsize);
-	public override function close():Void {
-		if (stream != null) { stream.close(); stream = null; }
-	}
-}
-
-private class ProcessOutput extends haxe.io.Output {
-	var stream:FileOutput;
-	public function new(stream:FileOutput) { this.stream = stream; }
-	function live():FileOutput {
-		if (stream == null) throw "Process output is closed";
-		return stream;
-	}
-	public override function writeByte(value:Int):Void live().writeByte(value);
-	public override function writeBytes(bytes:haxe.io.Bytes, pos:Int, len:Int):Int
-		return live().writeBytes(bytes, pos, len);
-	public override function flush():Void live().flush();
-	public override function close():Void {
-		if (stream != null) { stream.close(); stream = null; }
-	}
 }

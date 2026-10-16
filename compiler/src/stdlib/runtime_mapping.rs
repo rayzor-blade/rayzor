@@ -2159,11 +2159,11 @@ impl StdlibMapping {
             map_method!(static "Sys", "args" => "haxe_sys_args", params: 0, returns: complex,
                 types: &[] => PtrVoid),
             // Standard streams
-            map_method!(static "Sys", "stdin" => "haxe_sys_stdin", params: 0, returns: complex,
+            map_method!(static "sys.io.NativeStdio", "stdin" => "haxe_sys_stdin", params: 0, returns: primitive,
                 types: &[] => PtrVoid),
-            map_method!(static "Sys", "stdout" => "haxe_sys_stdout", params: 0, returns: complex,
+            map_method!(static "sys.io.NativeStdio", "stdout" => "haxe_sys_stdout", params: 0, returns: primitive,
                 types: &[] => PtrVoid),
-            map_method!(static "Sys", "stderr" => "haxe_sys_stderr", params: 0, returns: complex,
+            map_method!(static "sys.io.NativeStdio", "stderr" => "haxe_sys_stderr", params: 0, returns: primitive,
                 types: &[] => PtrVoid),
         ];
 
@@ -2227,19 +2227,14 @@ impl StdlibMapping {
             // File.copy(srcPath: String, dstPath: String) -> Void
             map_method!(static "sys.io.File", "copy" => "haxe_file_copy", params: 2, returns: void,
                 types: &[PtrVoid, PtrVoid]),
-            // File.read(path: String, ?binary: Bool = true) -> FileInput
-            // Uses MIR wrapper that defaults binary=true (1-param variant)
-            map_method!(static "sys.io.File", "read" => "file_read_default", params: 1, returns: primitive,
-                types: &[PtrVoid] => PtrVoid),
-            // File.write(path: String, ?binary: Bool = true) -> FileOutput
-            map_method!(static "sys.io.File", "write" => "file_write_default", params: 1, returns: primitive,
-                types: &[PtrVoid] => PtrVoid),
-            // File.append(path: String, ?binary: Bool = true) -> FileOutput
-            map_method!(static "sys.io.File", "append" => "file_append_default", params: 1, returns: primitive,
-                types: &[PtrVoid] => PtrVoid),
-            // File.update(path: String, ?binary: Bool = true) -> FileOutput
-            map_method!(static "sys.io.File", "update" => "file_update_default", params: 1, returns: primitive,
-                types: &[PtrVoid] => PtrVoid),
+            map_method!(static "sys.io.NativeFile", "read" => "haxe_file_read", params: 2, returns: primitive,
+                types: &[PtrVoid, Bool] => PtrVoid),
+            map_method!(static "sys.io.NativeFile", "write" => "haxe_file_write", params: 2, returns: primitive,
+                types: &[PtrVoid, Bool] => PtrVoid),
+            map_method!(static "sys.io.NativeFile", "append" => "haxe_file_append", params: 2, returns: primitive,
+                types: &[PtrVoid, Bool] => PtrVoid),
+            map_method!(static "sys.io.NativeFile", "update" => "haxe_file_update", params: 2, returns: primitive,
+                types: &[PtrVoid, Bool] => PtrVoid),
             // File.getBytes(path: String) -> haxe.io.Bytes
             map_method!(static "sys.io.File", "getBytes" => "haxe_file_get_bytes", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
@@ -2260,28 +2255,28 @@ impl StdlibMapping {
 
         let mappings = vec![
             // FileInput.readByte() -> Int
-            map_method!(instance "sys.io.FileInput", "readByte" => "haxe_fileinput_read_byte", params: 0, returns: primitive,
+            map_method!(instance "sys.io.NativeFileInput", "readByte" => "haxe_fileinput_read_byte", params: 0, returns: primitive,
                 types: &[PtrVoid] => I32),
             // FileInput.seek(p: Int, pos: FileSeek) -> Void
-            map_method!(instance "sys.io.FileInput", "seek" => "haxe_fileinput_seek", params: 2, returns: void,
-                types: &[PtrVoid, I64, I32]),
+            map_method!(instance "sys.io.NativeFileInput", "seek" => "haxe_fileinput_seek", params: 2, returns: void,
+                types: &[PtrVoid, I32, I32]),
             // FileInput.tell() -> Int
-            map_method!(instance "sys.io.FileInput", "tell" => "haxe_fileinput_tell", params: 0, returns: primitive,
-                types: &[PtrVoid] => I64),
+            map_method!(instance "sys.io.NativeFileInput", "tell" => "haxe_fileinput_tell", params: 0, returns: primitive,
+                types: &[PtrVoid] => I32),
             // FileInput.eof() -> Bool
-            map_method!(instance "sys.io.FileInput", "eof" => "haxe_fileinput_eof", params: 0, returns: primitive,
+            map_method!(instance "sys.io.NativeFileInput", "eof" => "haxe_fileinput_eof", params: 0, returns: primitive,
                 types: &[PtrVoid] => Bool),
             // FileInput.close() -> Void
-            map_method!(instance "sys.io.FileInput", "close" => "haxe_fileinput_close", params: 0, returns: void,
+            map_method!(instance "sys.io.NativeFileInput", "close" => "haxe_fileinput_close", params: 0, returns: void,
                 types: &[PtrVoid]),
             // FileInput.readBytes(s: Bytes, pos: Int, len: Int) -> Int
-            map_method!(instance "sys.io.FileInput", "readBytes" => "haxe_fileinput_read_bytes_buf", params: 3, returns: primitive,
+            map_method!(instance "sys.io.NativeFileInput", "readBytes" => "haxe_fileinput_read_bytes_buf", params: 3, returns: primitive,
                 types: &[PtrVoid, PtrVoid, I32, I32] => I32),
             // FileInput.readLine() -> String
-            map_method!(instance "sys.io.FileInput", "readLine" => "haxe_fileinput_read_line", params: 0, returns: primitive,
+            map_method!(instance "sys.io.NativeFileInput", "readLine" => "haxe_fileinput_read_line", params: 0, returns: primitive,
                 types: &[PtrVoid] => PtrString),
             // FileInput.readAll() -> Bytes
-            map_method!(instance "sys.io.FileInput", "readAll" => "haxe_fileinput_read_all", params: 0, returns: primitive,
+            map_method!(instance "sys.io.NativeFileInput", "readAll" => "haxe_fileinput_read_all", params: 0, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
         ];
 
@@ -2297,22 +2292,22 @@ impl StdlibMapping {
 
         let mappings = vec![
             // FileOutput.writeByte(c: Int) -> Void
-            map_method!(instance "sys.io.FileOutput", "writeByte" => "haxe_fileoutput_write_byte", params: 1, returns: void,
+            map_method!(instance "sys.io.NativeFileOutput", "writeByte" => "haxe_fileoutput_write_byte", params: 1, returns: void,
                 types: &[PtrVoid, I32]),
             // FileOutput.seek(p: Int, pos: FileSeek) -> Void
-            map_method!(instance "sys.io.FileOutput", "seek" => "haxe_fileoutput_seek", params: 2, returns: void,
-                types: &[PtrVoid, I64, I32]),
+            map_method!(instance "sys.io.NativeFileOutput", "seek" => "haxe_fileoutput_seek", params: 2, returns: void,
+                types: &[PtrVoid, I32, I32]),
             // FileOutput.tell() -> Int
-            map_method!(instance "sys.io.FileOutput", "tell" => "haxe_fileoutput_tell", params: 0, returns: primitive,
-                types: &[PtrVoid] => I64),
+            map_method!(instance "sys.io.NativeFileOutput", "tell" => "haxe_fileoutput_tell", params: 0, returns: primitive,
+                types: &[PtrVoid] => I32),
             // FileOutput.flush() -> Void
-            map_method!(instance "sys.io.FileOutput", "flush" => "haxe_fileoutput_flush", params: 0, returns: void,
+            map_method!(instance "sys.io.NativeFileOutput", "flush" => "haxe_fileoutput_flush", params: 0, returns: void,
                 types: &[PtrVoid]),
             // FileOutput.close() -> Void
-            map_method!(instance "sys.io.FileOutput", "close" => "haxe_fileoutput_close", params: 0, returns: void,
+            map_method!(instance "sys.io.NativeFileOutput", "close" => "haxe_fileoutput_close", params: 0, returns: void,
                 types: &[PtrVoid]),
             // FileOutput.writeBytes(s: Bytes, pos: Int, len: Int) -> Int
-            map_method!(instance "sys.io.FileOutput", "writeBytes" => "haxe_fileoutput_write_bytes_buf", params: 3, returns: primitive,
+            map_method!(instance "sys.io.NativeFileOutput", "writeBytes" => "haxe_fileoutput_write_bytes_buf", params: 3, returns: primitive,
                 types: &[PtrVoid, PtrVoid, I32, I32] => I32),
         ];
 

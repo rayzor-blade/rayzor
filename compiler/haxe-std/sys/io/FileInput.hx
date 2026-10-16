@@ -22,16 +22,25 @@
 
 package sys.io;
 
-/**
-	Use `sys.io.File.read` to create a `FileInput`.
-**/
-extern class FileInput extends haxe.io.Input {
-	function readByte():Int;
-	function readBytes(s:haxe.io.Bytes, pos:Int, len:Int):Int;
-	function readLine():String;
-	function readAll(?bufsize:Int):haxe.io.Bytes;
-	function close():Void;
-	function seek(p:Int, pos:FileSeek):Void;
-	function tell():Int;
-	function eof():Bool;
+import sys.io.NativeFileInput;
+import sys.io.FileSeek;
+
+class FileInput extends haxe.io.Input {
+	var stream:NativeFileInput;
+	public function new(stream:NativeFileInput) { this.stream = stream; }
+	function live():NativeFileInput {
+		if (stream == null) throw "Input is closed";
+		return stream;
+	}
+	public override function readByte():Int return live().readByte();
+	public override function readBytes(bytes:haxe.io.Bytes, pos:Int, len:Int):Int
+		return live().readBytes(bytes, pos, len);
+	public override function readAll(?bufsize:Int):haxe.io.Bytes return live().readAll();
+	public override function close():Void {
+		if (stream != null) { stream.close(); stream = null; }
+	}
+	public function seek(position:Int, origin:FileSeek):Void live().seek(position, origin);
+	public function tell():Int return live().tell();
+	public function eof():Bool return live().eof();
+	public override function readLine():String return live().readLine();
 }

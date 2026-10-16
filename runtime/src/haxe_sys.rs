@@ -693,18 +693,12 @@ pub extern "C" fn haxe_value_to_string_with_metadata(
 /// Convert String to String (identity, but normalizes representation)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_from_string(ptr: *const u8, len: usize) -> *mut HaxeString {
-    // Create a copy of the string data
-    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-    let vec = slice.to_vec();
-    let cap = vec.capacity();
-    let new_ptr = vec.as_ptr() as *mut u8;
-    std::mem::forget(vec);
-
-    Box::into_raw(Box::new(HaxeString {
-        ptr: new_ptr,
-        len,
-        cap,
-    }))
+    let bytes = if len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
+    };
+    crate::haxe_string::boxed_string(bytes)
 }
 
 /// Convert null to String - returns heap-allocated HaxeString pointer
@@ -1314,14 +1308,7 @@ pub extern "C" fn haxe_sys_get_env(name: *const HaxeString) -> *mut HaxeString {
         };
 
         match std::env::var(var_name) {
-            Ok(value) => {
-                let bytes = value.into_bytes();
-                let len = bytes.len();
-                let cap = bytes.capacity();
-                let ptr = bytes.as_ptr() as *mut u8;
-                std::mem::forget(bytes);
-                Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
-            }
+            Ok(value) => rust_string_to_haxe(value),
             Err(_) => std::ptr::null_mut(), // Variable not found
         }
     }
@@ -1350,16 +1337,8 @@ pub extern "C" fn haxe_sys_put_env(name: *const HaxeString, value: *const HaxeSt
         if value.is_null() {
             // Remove the environment variable
             std::env::remove_var(var_name);
-        } else {
-            let value_ref = &*value;
-            if value_ref.ptr.is_null() {
-                std::env::remove_var(var_name);
-            } else {
-                let value_slice = std::slice::from_raw_parts(value_ref.ptr, value_ref.len);
-                if let Ok(val_str) = std::str::from_utf8(value_slice) {
-                    std::env::set_var(var_name, val_str);
-                }
-            }
+        } else if let Some(value) = haxe_string_to_rust(value) {
+            std::env::set_var(var_name, value);
         }
     }
 }
@@ -1758,12 +1737,7 @@ unsafe fn haxe_string_to_rust(s: *const HaxeString) -> Option<String> {
 
 /// Helper to create HaxeString from Rust String
 fn rust_string_to_haxe(s: String) -> *mut HaxeString {
-    let bytes = s.into_bytes();
-    let len = bytes.len();
-    let cap = bytes.capacity();
-    let ptr = bytes.as_ptr() as *mut u8;
-    std::mem::forget(bytes);
-    Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+    crate::haxe_string::boxed_string(s.into_bytes())
 }
 
 /// Read entire file content as string
@@ -2327,7 +2301,7 @@ pub extern "C" fn haxe_file_update(path: *const HaxeString, _binary: bool) -> *m
                     .read(true)
                     .write(true)
                     .create(true)
-                    .truncate(true)
+                    .truncate(false)
                     .open(&path_str)
                 {
                     Ok(file) => Box::into_raw(Box::new(HaxeFileOutput {

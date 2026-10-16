@@ -20,6 +20,9 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+import haxe.io.Input;
+import haxe.io.Output;
+
 /**
 	This class provides access to various base functions of system platforms.
 	Look in the `sys` package for more system APIs.
@@ -204,18 +207,21 @@ extern class Sys {
 		Usually it will block until the user sends a full input line.
 		See `getChar` for an alternative.
 	**/
-	@:native("haxe_sys_stdin")
-	static function stdin():haxe.io.Input;
+	static function stdin():Input {
+		return new sys.io.FileInput(sys.io.NativeStdio.stdin());
+	}
 
 	/**
 		Returns the standard output of the process, to which program output can be written.
 	**/
-	@:native("haxe_sys_stdout")
-	static function stdout():haxe.io.Output;
+	static function stdout():Output {
+		return new sys.io.FileOutput(sys.io.NativeStdio.stdout());
+	}
 
 	/**
 		Returns the standard error of the process, to which program errors can be written.
 	**/
-	@:native("haxe_sys_stderr")
-	static function stderr():haxe.io.Output;
+	static function stderr():Output {
+		return new sys.io.FileOutput(sys.io.NativeStdio.stderr());
+	}
 }

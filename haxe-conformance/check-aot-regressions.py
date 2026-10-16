@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Check AOT manifest class paths when the entry is outside the project."""
+"""Check native AOT project configuration and runtime boundaries."""
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 root = Path(__file__).resolve().parent.parent
@@ -25,7 +26,25 @@ with tempfile.TemporaryDirectory(prefix="rayzor-aot-manifest-") as directory:
         [binary, "aot", "--no-cache", "--cache-dir", str(cache), "--strip", "-o", str(output)],
         cwd=work, check=True, timeout=120,
     )
-    result = subprocess.run([str(output)], capture_output=True, text=True, check=True, timeout=30)
+    result = subprocess.run([str(output)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
     assert "CONFORMANCE_OK" in result.stdout, result.stdout + result.stderr
     assert not cache.exists(), "--no-cache created a cache directory"
     print("PASS AOT external manifest entry")
+
+for fixture in ["ProcessPipes", "StandardStreams", "EmptyNativeStrings", "FileStreams", "ArrayIterationSource"]:
+    with tempfile.TemporaryDirectory(prefix="rayzor-aot-runtime-") as directory:
+        work = Path(directory)
+        output = work / (fixture + (".exe" if os.name == "nt" else ""))
+        source = root / "haxe-conformance/regressions" / (fixture + ".hx")
+        subprocess.run(
+            [binary, "aot", str(source), "--no-cache", "--strip", "-o", str(output)],
+            cwd=work, check=True, timeout=120,
+        )
+        result = subprocess.run(
+            [sys.executable, str(root / "haxe-conformance/runwith.py"), "30", str(output)],
+            capture_output=True, text=True, timeout=40,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "CONFORMANCE_OK" in result.stdout, result.stdout + result.stderr
+        print("PASS AOT " + fixture)
