@@ -205,24 +205,11 @@ impl AotCompiler {
         }
 
         // --- Phase 4: MIR optimizations ---
-        // Check if system LLVM tools are available for optimization.
-        // When they are, cap MIR at O2 because MIR O3's GVN pass changes FP
-        // operation ordering, and system LLVM (newer version) optimizes differently
-        // with the reordered ops, producing different FP results. System opt -O3
-        // handles GVN/vectorization/etc. natively anyway.
-        let has_system_tools = (self.output_format == OutputFormat::Executable
-            || self.output_format == OutputFormat::ObjectFile)
-            && llvm_aot_backend::has_system_llvm_tools();
-        let mir_opt = if has_system_tools && self.opt_level == OptimizationLevel::O3 {
-            OptimizationLevel::O2
-        } else {
-            self.opt_level
-        };
-        if mir_opt != OptimizationLevel::O0 {
+        if self.opt_level != OptimizationLevel::O0 {
             if self.verbose {
-                println!("  Applying MIR optimizations ({:?})...", mir_opt);
+                println!("  Applying MIR optimizations ({:?})...", self.opt_level);
             }
-            let mut pass_manager = PassManager::for_level(mir_opt);
+            let mut pass_manager = PassManager::for_level(self.opt_level);
             for module in &mut modules {
                 let _ = pass_manager.run(module);
                 let _ = strip_stack_trace_updates(module);
@@ -270,28 +257,9 @@ impl AotCompiler {
         let module = backend.get_module();
         let target_triple_str = self.target_triple.as_deref();
 
-        // For executables and object files, try system LLVM tools (opt + llc) first.
-        // System LLVM (typically v19-21) has better inlining heuristics than the
-        // bundled LLVM 18, producing ~2.7x faster code for hot-loop benchmarks.
-        let opt_flag = match self.opt_level {
-            OptimizationLevel::O0 => "-O0",
-            OptimizationLevel::O1 => "-O1",
-            OptimizationLevel::O2 => "-O2",
-            OptimizationLevel::O3 => "-O3",
-        };
-
         if self.output_format == OutputFormat::Executable
             || self.output_format == OutputFormat::ObjectFile
         {
-            // Dump IR WITHOUT main wrapper — optimization should see user code only.
-            // The main wrapper will be linked separately as a tiny C file so that
-            // system opt doesn't inline the entry into the C main() (which changes
-            // the optimization context for inner functions and alters FP results).
-            //
-            // Set data layout + triple first so opt has accurate type size info.
-            llvm_aot_backend::set_module_target(module, target_triple_str)?;
-            let ir_text = module.print_to_string().to_string();
-
             let obj_path = if self.output_format == OutputFormat::Executable {
                 output_path.with_extension("o")
             } else {
@@ -302,56 +270,29 @@ impl AotCompiler {
                 println!("  Optimizing and emitting object file...");
             }
 
-            let rename_entry = if self.output_format == OutputFormat::Executable {
-                Some(entry_llvm_name.as_str())
-            } else {
-                None
-            };
-            let used_system = llvm_aot_backend::compile_ir_with_system_tools(
-                &ir_text,
-                &obj_path,
-                opt_flag,
-                rename_entry,
-            )?;
-
-            if !used_system {
-                // Fall back to inkwell optimization + codegen
-                if self.verbose {
-                    println!("  (using built-in LLVM optimization)");
-                }
-                llvm_aot_backend::optimize_module(module, target_triple_str, llvm_opt)?;
-                // Generate main() wrapper after inkwell optimization
-                if self.output_format == OutputFormat::Executable {
-                    llvm_aot_backend::generate_main_wrapper(
-                        module,
-                        &entry_llvm_name,
-                        &startup_llvm_names,
-                    )?;
-                }
-                llvm_aot_backend::compile_to_object_file(
+            llvm_aot_backend::optimize_module(module, target_triple_str, llvm_opt)?;
+            // The main() wrapper is added after optimization, so the entry
+            // is optimized in the same context as under the JIT.
+            if self.output_format == OutputFormat::Executable {
+                llvm_aot_backend::generate_main_wrapper(
                     module,
-                    &obj_path,
-                    target_triple_str,
-                    RelocMode::PIC,
-                    llvm_opt,
+                    &entry_llvm_name,
+                    &startup_llvm_names,
                 )?;
             }
+            llvm_aot_backend::compile_to_object_file(
+                module,
+                &obj_path,
+                target_triple_str,
+                RelocMode::PIC,
+                llvm_opt,
+            )?;
 
             if self.output_format == OutputFormat::Executable {
                 if self.verbose {
                     println!("  Linking...");
                 }
-                // When using system tools, link a C main() wrapper separately
-                if used_system {
-                    self.link_executable_with_entry(
-                        &obj_path,
-                        output_path,
-                        &entry_llvm_name,
-                        &startup_llvm_names,
-                    )?;
-                } else {
-                    self.link_executable(&obj_path, output_path)?;
-                }
+                self.link_executable(&obj_path, output_path)?;
                 let _ = std::fs::remove_file(&obj_path);
             }
         } else {
@@ -484,96 +425,6 @@ impl AotCompiler {
         let output = cmd
             .output()
             .map_err(|e| format!("Failed to run linker: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Linking failed:\n{}", stderr));
-        }
-
-        Ok(())
-    }
-
-    /// Link an object file into a native executable with a C main() entry point.
-    /// Used when system LLVM tools handle optimization (so the main wrapper isn't
-    /// baked into the LLVM IR). The C main calls the Haxe entry function.
-    fn link_executable_with_entry(
-        &self,
-        obj_path: &Path,
-        output_path: &Path,
-        entry_func_name: &str,
-        startup_func_names: &[String],
-    ) -> Result<(), String> {
-        // Write a tiny C main() that calls the Haxe entry point.
-        // If the entry was "main", it was renamed to "_haxe_main" in the IR.
-        let actual_entry = if entry_func_name == "main" {
-            "_haxe_main"
-        } else {
-            entry_func_name
-        };
-        let main_c_path = output_path.with_extension("_main.c");
-        let mut main_c = String::from("extern void rayzor_init_args_from_argv(int, char**);\n");
-        for startup in startup_func_names {
-            main_c.push_str(&format!("extern void {}(long);\n", startup));
-        }
-        main_c.push_str(&format!("extern void {}(long);\n", actual_entry));
-        main_c
-            .push_str("int main(int argc, char** argv) { rayzor_init_args_from_argv(argc, argv);");
-        for startup in startup_func_names {
-            main_c.push_str(&format!(" {}(0);", startup));
-        }
-        main_c.push_str(&format!(" {}(0); return 0; }}\n", actual_entry));
-        std::fs::write(&main_c_path, &main_c)
-            .map_err(|e| format!("Failed to write main wrapper: {}", e))?;
-
-        let linker = self.find_linker()?;
-        let runtime_path = self.find_runtime()?;
-
-        let mut cmd = Command::new(&linker);
-        cmd.arg("-o").arg(output_path);
-        cmd.arg(obj_path);
-        cmd.arg(&main_c_path);
-        cmd.arg(&runtime_path);
-        for native_lib in &self.native_link_libs {
-            cmd.arg(native_lib);
-        }
-
-        let opt_flag = match self.opt_level {
-            OptimizationLevel::O0 => "-O0",
-            OptimizationLevel::O1 => "-O1",
-            OptimizationLevel::O2 => "-O2",
-            OptimizationLevel::O3 => "-O3",
-        };
-        cmd.arg(opt_flag);
-
-        if let Some(ref triple) = self.target_triple {
-            cmd.arg(format!("--target={}", triple));
-        }
-
-        let triple_str = self.target_triple.as_deref().unwrap_or("");
-        self.configure_toolchain_sysroot(&mut cmd, triple_str)?;
-        if triple_str.contains("darwin") || triple_str.is_empty() && cfg!(target_os = "macos") {
-            cmd.args(["-lSystem", "-lc", "-lm", "-lpthread"]);
-            cmd.args(["-framework", "CoreFoundation", "-framework", "Security"]);
-        } else if triple_str.contains("windows") {
-            cmd.args(["kernel32.lib", "ws2_32.lib", "userenv.lib", "bcrypt.lib"]);
-        } else {
-            cmd.args(["-lc", "-lm", "-lpthread", "-ldl"]);
-        }
-
-        if self.strip_symbols {
-            cmd.arg("-s");
-        }
-
-        if self.verbose {
-            println!("    {}", format_command(&cmd));
-        }
-
-        let output = cmd
-            .output()
-            .map_err(|e| format!("Failed to run linker: {}", e))?;
-
-        // Cleanup
-        let _ = std::fs::remove_file(&main_c_path);
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
