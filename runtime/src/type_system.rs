@@ -4976,9 +4976,70 @@ pub extern "C" fn haxe_object_is_instance(obj_ptr: *const u8, target_type_id: i6
 static VTABLE_REGISTRY: RwLock<Option<HashMap<u32, Vec<i64>>>> = RwLock::new(None);
 
 /// Flat vtable entry: pointer to start of slots array + slot count.
+#[derive(Clone, Copy)]
 struct FlatVtable {
     slots: *const i64,
     len: usize,
+}
+
+/// The vtables of type ids past the dense table's cap -- every class whose id
+/// is hashed from its name -- frozen in an open-addressed table, so a dispatch
+/// costs a multiply and a probe or two rather than a SipHash lookup.
+struct SparseVtables {
+    keys: Vec<u32>,
+    entries: Vec<FlatVtable>,
+    mask: usize,
+}
+
+impl SparseVtables {
+    const EMPTY: u32 = u32::MAX;
+
+    fn build(items: Vec<(u32, FlatVtable)>) -> Self {
+        let cap = (items.len() * 2).next_power_of_two().max(8);
+        let mut table = SparseVtables {
+            keys: vec![Self::EMPTY; cap],
+            entries: vec![
+                FlatVtable {
+                    slots: std::ptr::null(),
+                    len: 0,
+                };
+                cap
+            ],
+            mask: cap - 1,
+        };
+        for (id, entry) in items {
+            if id == Self::EMPTY {
+                continue;
+            }
+            let mut i = Self::home(id) & table.mask;
+            while table.keys[i] != Self::EMPTY {
+                i = (i + 1) & table.mask;
+            }
+            table.keys[i] = id;
+            table.entries[i] = entry;
+        }
+        table
+    }
+
+    #[inline]
+    fn home(id: u32) -> usize {
+        id.wrapping_mul(0x9E37_79B1) as usize
+    }
+
+    #[inline]
+    fn get(&self, id: u32) -> Option<&FlatVtable> {
+        let mut i = Self::home(id) & self.mask;
+        loop {
+            let key = self.keys[i];
+            if key == id {
+                return Some(&self.entries[i]);
+            }
+            if key == Self::EMPTY {
+                return None;
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
 }
 
 /// Fast flat vtable array indexed by type_id. Populated lazily on first
@@ -4997,7 +5058,7 @@ pub extern "C" fn haxe_vtable_init(type_id: i32, slot_count: i32) {
     unsafe {
         let old_slots = VTABLE_FLAT_SLOTS as *mut Vec<Vec<i64>>;
         let old_flat = VTABLE_FLAT as *mut Vec<FlatVtable>;
-        let old_sparse = VTABLE_SPARSE as *mut HashMap<u32, FlatVtable>;
+        let old_sparse = VTABLE_SPARSE as *mut SparseVtables;
         VTABLE_FLAT = std::ptr::null();
         VTABLE_FLAT_SLOTS = std::ptr::null();
         VTABLE_SPARSE = std::ptr::null();
@@ -5217,7 +5278,7 @@ pub static VT_REBUILD: AtomicU64 = AtomicU64::new(0);
 pub static VT_NANOS: AtomicU64 = AtomicU64::new(0);
 pub static VT_MAX_NANOS: AtomicU64 = AtomicU64::new(0);
 /// Frozen alongside VTABLE_FLAT: entries whose type_id exceeds the dense cap.
-static mut VTABLE_SPARSE: *const HashMap<u32, FlatVtable> = std::ptr::null();
+static mut VTABLE_SPARSE: *const SparseVtables = std::ptr::null();
 
 /// Called at exit when `RAYZOR_VTABLE_STATS=1`.
 pub fn report_vtable_stats() {
@@ -5274,7 +5335,7 @@ fn ensure_flat_vtable() {
             // outlier ids) into them.
             let owned_ptr = Box::into_raw(Box::new(owned_slots));
             let owned_ref = &*owned_ptr;
-            let mut sparse: HashMap<u32, FlatVtable> = HashMap::new();
+            let mut sparse: Vec<(u32, FlatVtable)> = Vec::new();
             for (slot_idx, (&type_id, _vtable)) in map.iter().enumerate() {
                 let owned_vec = &owned_ref[slot_idx];
                 let entry = FlatVtable {
@@ -5284,17 +5345,16 @@ fn ensure_flat_vtable() {
                 if (type_id as usize) < DENSE_CAP {
                     flat[type_id as usize] = entry;
                 } else {
-                    sparse.insert(type_id, entry);
+                    sparse.push((type_id, entry));
                 }
             }
             VTABLE_FLAT_SLOTS = owned_ptr as *const Vec<Vec<i64>>;
-            VTABLE_SPARSE = Box::into_raw(Box::new(sparse));
+            VTABLE_SPARSE = Box::into_raw(Box::new(SparseVtables::build(sparse)));
             VTABLE_FLAT = Box::into_raw(Box::new(flat));
         }
     }
 }
 
-#[inline(never)]
 /// Is dispatch instrumentation on? Resolved once.
 ///
 /// The counters below are cheap; the TIMESTAMPS are not. `Instant::now()` is a
@@ -5308,8 +5368,35 @@ fn vtable_stats_enabled() -> bool {
 }
 
 /// Look up an object's vtable slot, throwing if the receiver or slot is invalid.
+///
+/// Every virtual call goes through here, so the common case -- frozen tables,
+/// no instrumentation -- is a few loads; everything else is out of line.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64 {
+    unsafe {
+        if !obj_ptr.is_null() && !VTABLE_FLAT.is_null() && !vtable_stats_enabled() {
+            let type_id = *(obj_ptr as *const i64) as usize;
+            let flat = &*VTABLE_FLAT;
+            let entry = if type_id < flat.len() {
+                Some(&flat[type_id])
+            } else if !VTABLE_SPARSE.is_null() {
+                (*VTABLE_SPARSE).get(type_id as u32)
+            } else {
+                None
+            };
+            if let Some(entry) = entry
+                && (slot_index as usize) < entry.len
+            {
+                return *entry.slots.add(slot_index as usize);
+            }
+        }
+    }
+    vtable_lookup_slow(obj_ptr, slot_index)
+}
+
+#[cold]
+#[inline(never)]
+fn vtable_lookup_slow(obj_ptr: *const u8, slot_index: i32) -> i64 {
     if obj_ptr.is_null() {
         crate::exception::throw_with_message(format!(
             "interface call on a null receiver (vtable slot {slot_index}) — \
@@ -5381,7 +5468,7 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
                 // Outlier type_id (bigger than the dense cap): frozen at the
                 // same freeze as the flat table, read without a lock.
                 let sparse = &*VTABLE_SPARSE;
-                if let Some(entry) = sparse.get(&(type_id as u32))
+                if let Some(entry) = sparse.get(type_id as u32)
                     && slot < entry.len
                 {
                     let v = *entry.slots.add(slot);
