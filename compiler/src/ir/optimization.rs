@@ -2117,6 +2117,10 @@ impl PassManager {
     pub fn for_level(level: OptimizationLevel) -> Self {
         let mut manager = Self::new();
         manager.add_pass(UnreachableBlockEliminationPass::new());
+        // Before free insertion, which would release the temporary it folds.
+        if matches!(level, OptimizationLevel::O2 | OptimizationLevel::O3) {
+            manager.add_pass(super::tree_fusion::TreeFusionPass::new());
+        }
 
         // InsertFreePass runs at ALL optimization levels — it's a correctness pass
         // that inserts Free instructions for non-escaping heap allocations.
