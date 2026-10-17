@@ -14,6 +14,7 @@ impl CompilationUnit {
             filename, source, true, true, &config,
         )?;
         crate::tast::ast_lowering::module_statics::desugar(&mut file);
+        crate::tast::ast_lowering::coroutines::desugar(&mut file);
         // Every canonical parse feeds the static-signature index so call
         // sites can type not-yet-lowered statics from their declarations.
         {
@@ -61,6 +62,7 @@ impl CompilationUnit {
         )
         .ok()?;
         crate::tast::ast_lowering::module_statics::desugar(&mut parsed);
+        crate::tast::ast_lowering::coroutines::desugar(&mut parsed);
         Some(parsed)
     }
 

@@ -274,11 +274,21 @@ impl<'a> AstLowering<'a> {
         &mut self,
         expression: &Expr,
     ) -> LoweringResult<TypedExpression> {
+        if let ExprKind::Meta { meta, expr } = &expression.kind
+            && meta.name.trim_start_matches(':') == super::coroutines::BODY_META
+        {
+            self.pending_coroutine_body = true;
+            return self.lower_expression(expr);
+        }
         let closure = matches!(
             expression.kind,
             ExprKind::Function(_) | ExprKind::Arrow { .. }
         );
         self.closure_depth += usize::from(closure);
+        if closure {
+            let body = std::mem::take(&mut self.pending_coroutine_body);
+            self.coroutine_scopes.push(body);
+        }
         let private_access = self.macro_private_access;
         if self.macro_probe_depth > 0
             && let ExprKind::Meta { meta, .. } = &expression.kind
@@ -324,12 +334,25 @@ impl<'a> AstLowering<'a> {
         };
         self.macro_private_access = private_access;
         self.closure_depth -= usize::from(closure);
+        if closure {
+            self.coroutine_scopes.pop();
+        }
         result
     }
 
     fn lower_expression_unnested(&mut self, expression: &Expr) -> LoweringResult<TypedExpression> {
         if let Some(qualified) = self.qualify_module_static(expression) {
             return self.lower_expression_unnested(&qualified);
+        }
+        if let ExprKind::For {
+            var,
+            key_var: None,
+            iter,
+            body,
+        } = &expression.kind
+            && let Some(lowered) = self.async_for(expression.span, var, iter, body)?
+        {
+            return Ok(lowered);
         }
         let kind = match &expression.kind {
             ExprKind::Int(value) => TypedExpressionKind::Literal {
@@ -953,6 +976,9 @@ impl<'a> AstLowering<'a> {
                 return self.lower_expression(&table);
             }
             ExprKind::Call { expr, args } => {
+                if let Some(call) = self.coroutine_call(expression, expr, args)? {
+                    return Ok(call);
+                }
                 if let ExprKind::Field {
                     expr: receiver,
                     field,
@@ -977,6 +1003,7 @@ impl<'a> AstLowering<'a> {
                     }
                 }
                 let mut call = self.lower_call_expression(expression, expr, args)?;
+                self.upcast_call_args_to_abstract_interfaces(&mut call);
                 // Type's field-name APIs return raw Array<String> values. The
                 // Type token can resolve through the method-call path, where
                 // its placeholder signature loses the array element type.
@@ -1195,6 +1222,27 @@ impl<'a> AstLowering<'a> {
                             location: self.context.create_location_from_span(expression.span),
                         });
                     }
+                }
+                // `new Alias()` over an Array typedef is an empty array of the target type.
+                let array_target = {
+                    let table = self.context.type_table.borrow();
+                    let target = Self::resolve_alias_chain(&table, base_class_type_id);
+                    (target != base_class_type_id
+                        && matches!(
+                            table.get(target).map(|t| &t.kind),
+                            Some(TypeKind::Array { .. })
+                        ))
+                    .then_some(target)
+                };
+                if let Some(target) = array_target
+                    && args.is_empty()
+                {
+                    let mut empty = self.lower_expression(&Expr {
+                        kind: ExprKind::Array(Vec::new()),
+                        span: expression.span,
+                    })?;
+                    empty.expr_type = target;
+                    return Ok(empty);
                 }
                 // `new Alias(...)` over a plain class alias constructs that class.
                 let mut aliased_class_name: Option<String> = None;

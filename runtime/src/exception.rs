@@ -50,6 +50,15 @@ thread_local! {
     }) };
 }
 
+/// A thread's exception handlers, held aside while another fiber runs.
+#[derive(Default)]
+pub(crate) struct HandlerStack(Vec<ExceptionHandler>);
+
+/// Install `stack` as this thread's handlers, returning the ones it replaces.
+pub(crate) fn replace_handlers(stack: HandlerStack) -> HandlerStack {
+    STATE.with(|state| HandlerStack(std::mem::replace(&mut state.borrow_mut().handlers, stack.0)))
+}
+
 /// Push a new exception handler. Returns a pointer to the jmp_buf
 /// that the compiler should pass to _setjmp.
 #[unsafe(no_mangle)]

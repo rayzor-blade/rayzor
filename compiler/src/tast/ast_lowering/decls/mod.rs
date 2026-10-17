@@ -25,6 +25,7 @@ impl<'a> AstLowering<'a> {
             .then(|| {
                 let mut file = file.clone();
                 super::module_statics::desugar(&mut file);
+                super::coroutines::desugar(&mut file);
                 file
             });
         let file = with_statics.as_ref().unwrap_or(file);
@@ -59,6 +60,7 @@ impl<'a> AstLowering<'a> {
         // dump prints `typed_file=` blank.
         typed_file.metadata.file_path = file.filename.clone();
         self.pos_file_name = crate::tast::type_resolution::pos_infos_file_name(&file.filename);
+        self.file_uses_coroutines = super::coroutines::file_uses_coroutines(&file.filename);
         self.current_module_types = module_type_names(&file.declarations);
         let file_name = file
             .filename

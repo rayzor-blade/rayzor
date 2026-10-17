@@ -47,7 +47,9 @@ pub mod compress; // DEFLATE compression/decompression (haxe.zip.Compress/Uncomp
 pub mod concurrency; // Concurrency primitives (Thread, Arc, Mutex, Channel)
 pub mod ereg; // EReg regular expressions (regex crate)
 pub mod exception;
+pub mod fiber; // Stackful fibers for Haxe coroutines
 pub mod future; // Future<T> — lazy async futures
+pub mod gc; // eval.vm.Gc finalisation over reference counts
 pub mod iter_handle; // Structural iterables and iterators read at run time
 pub mod socket; // Networking (Socket, Host — TCP/DNS)
 pub mod ssl; // SSL/TLS (sys.ssl.Socket, Certificate, Key, Digest)

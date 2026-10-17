@@ -1058,6 +1058,12 @@ impl<'a> HirToMirContext<'a> {
                                 self.type_table.get(receiver_type).map(|t| &t.kind),
                                 Some(TypeKind::Anonymous { .. })
                             );
+                            // A structure with a coroutine member (an
+                            // `AsyncIterator`) is no runtime class's view.
+                            if structural_receiver && self.has_coroutine_member(receiver_type) {
+                                *fell_through = true;
+                                return None;
+                            }
                             if method_sym.qualified_name.is_some() && !structural_receiver {
                                 *fell_through = true;
                                 return None;
@@ -1914,5 +1920,41 @@ impl<'a> HirToMirContext<'a> {
         }
         *fell_through = true;
         None
+    }
+}
+
+impl<'a> HirToMirContext<'a> {
+    /// A structure with a member whose type is an expanded coroutine: its
+    /// first parameter is `rayzor.coro.CoroCont`.
+    pub(crate) fn has_coroutine_member(&self, receiver_type: TypeId) -> bool {
+        let Some(TypeKind::Anonymous { fields }) =
+            self.type_table.get(receiver_type).map(|t| &t.kind)
+        else {
+            return false;
+        };
+        fields.iter().any(|field| {
+            let Some(TypeKind::Function { params, .. }) = self
+                .type_table
+                .get(self.resolve_through_aliases(field.type_id))
+                .map(|t| &t.kind)
+            else {
+                return false;
+            };
+            let Some(first) = params.first() else {
+                return false;
+            };
+            let symbol = match self
+                .type_table
+                .get(self.resolve_through_aliases(*first))
+                .map(|t| &t.kind)
+            {
+                Some(TypeKind::Abstract { symbol_id, .. }) => *symbol_id,
+                _ => return false,
+            };
+            self.symbol_table
+                .get_symbol(symbol)
+                .and_then(|s| self.string_interner.get(s.name))
+                == Some("CoroCont")
+        })
     }
 }

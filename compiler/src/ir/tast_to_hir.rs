@@ -3157,8 +3157,12 @@ impl<'a> TastToHirContext<'a> {
                 statements,
                 scope_id,
             } => {
+                let live = Self::live_len(statements);
                 let hir_block = HirBlock {
-                    statements: statements.iter().map(|s| self.lower_statement(s)).collect(),
+                    statements: statements[..live]
+                        .iter()
+                        .map(|s| self.lower_statement(s))
+                        .collect(),
                     expr: None, // Block expression result handled separately
                     scope: *scope_id,
                 };
@@ -3999,7 +4003,13 @@ impl<'a> TastToHirContext<'a> {
             // debug!(" TAST statement {}: {}", i, stmt_type);
         }
 
-        let hir_stmts: Vec<_> = statements.iter().map(|s| self.lower_statement(s)).collect();
+        // Statements after an unconditional exit never run; lowering them
+        // would let a dead `return` replace the live one's value.
+        let live = Self::live_len(statements);
+        let hir_stmts: Vec<_> = statements[..live]
+            .iter()
+            .map(|s| self.lower_statement(s))
+            .collect();
 
         // Debug: Print HIR statement types
         for (i, stmt) in hir_stmts.iter().enumerate() {
@@ -4019,6 +4029,33 @@ impl<'a> TastToHirContext<'a> {
     }
 
     // Helper methods...
+
+    /// How many of `statements` can run: up to and including the first
+    /// unconditional exit.
+    fn live_len(statements: &[TypedStatement]) -> usize {
+        statements
+            .iter()
+            .position(Self::exits_unconditionally)
+            .map_or(statements.len(), |exit| exit + 1)
+    }
+
+    /// A `return`, `throw`, `break` or `continue` statement.
+    fn exits_unconditionally(statement: &TypedStatement) -> bool {
+        match statement {
+            TypedStatement::Return { .. }
+            | TypedStatement::Throw { .. }
+            | TypedStatement::Break { .. }
+            | TypedStatement::Continue { .. } => true,
+            TypedStatement::Expression { expression, .. } => matches!(
+                expression.kind,
+                TypedExpressionKind::Return { .. }
+                    | TypedExpressionKind::Throw { .. }
+                    | TypedExpressionKind::Break
+                    | TypedExpressionKind::Continue
+            ),
+            _ => false,
+        }
+    }
 
     fn lower_pattern(&mut self, pattern: &TypedPattern) -> HirPattern {
         match pattern {
@@ -5384,7 +5421,7 @@ impl<'a> TastToHirContext<'a> {
         statements: &[TypedStatement],
         result_symbol: SymbolId,
     ) -> HirBlock {
-        let mut leading = statements.to_vec();
+        let mut leading = statements[..Self::live_len(statements)].to_vec();
         let trailing_expr = match leading.last() {
             Some(TypedStatement::Expression { expression, .. }) => {
                 let e = expression.clone();
@@ -5458,7 +5495,7 @@ impl<'a> TastToHirContext<'a> {
         statements: &[TypedStatement],
         result_ty: crate::tast::TypeId,
     ) -> HirExpr {
-        let mut leading = statements.to_vec();
+        let mut leading = statements[..Self::live_len(statements)].to_vec();
         let trailing_expr = match leading.last() {
             Some(TypedStatement::Expression { expression, .. }) => {
                 let e = expression.clone();
@@ -9943,6 +9980,10 @@ impl<'a> TastToHirContext<'a> {
             TypedExpressionKind::This { this_type } => {
                 refs.insert(SymbolId::from_raw(0), *this_type);
             }
+            // `super.m()` dispatches on the receiver too.
+            TypedExpressionKind::Super { .. } => {
+                refs.entry(SymbolId::from_raw(0)).or_insert(expr.expr_type);
+            }
             TypedExpressionKind::FieldAccess { object, .. } => {
                 // Field access like msg.value - need to capture the object (msg)
                 self.collect_var_refs_expr(object, refs);
@@ -10147,7 +10188,6 @@ impl<'a> TastToHirContext<'a> {
             }
             // Leaf / non-variable-referencing kinds.
             TypedExpressionKind::Literal { .. }
-            | TypedExpressionKind::Super { .. }
             | TypedExpressionKind::Null
             | TypedExpressionKind::Break
             | TypedExpressionKind::Continue

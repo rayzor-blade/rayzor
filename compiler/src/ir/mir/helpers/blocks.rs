@@ -150,6 +150,7 @@ impl<'a> HirToMirContext<'a> {
             move_event_order: self.move_event_order,
             move_events_func: self.move_events_func,
             borrow_roots: self.borrow_roots.clone(),
+            interface_wrapped_args: self.interface_wrapped_args.clone(),
             current_function_return_type: self.current_function_return_type,
         }
     }
@@ -180,6 +181,7 @@ impl<'a> HirToMirContext<'a> {
         self.move_event_order = state.move_event_order;
         self.move_events_func = state.move_events_func;
         self.borrow_roots = state.borrow_roots;
+        self.interface_wrapped_args = state.interface_wrapped_args;
     }
 
     /// Emit a while loop that calls hasNext/next on an iterator object.

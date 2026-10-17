@@ -1661,6 +1661,17 @@ register_symbol!(
 );
 
 // sys.thread.ThreadImpl
+register_symbol!("rayzor_gc_finalise", crate::gc::rayzor_gc_finalise);
+register_symbol!("rayzor_gc_collect", crate::gc::rayzor_gc_collect);
+register_symbol!("rayzor_fiber_new", crate::fiber::rayzor_fiber_new);
+register_symbol!("rayzor_fiber_resume", crate::fiber::rayzor_fiber_resume);
+register_symbol!("rayzor_fiber_yield", crate::fiber::rayzor_fiber_yield);
+register_symbol!("rayzor_fiber_free", crate::fiber::rayzor_fiber_free);
+register_symbol!("rayzor_fiber_set_data", crate::fiber::rayzor_fiber_set_data);
+register_symbol!(
+    "rayzor_fiber_current_data",
+    crate::fiber::rayzor_fiber_current_data
+);
 register_symbol!(
     "sys_thread_impl_create",
     crate::concurrency::sys_thread_impl_create

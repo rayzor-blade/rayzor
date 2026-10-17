@@ -28,6 +28,8 @@ rustls = "0.23"
 webpki-roots = "0.26"
 rustls-pemfile = "2"
 ariadne = "0.4"
+# Stackful fibers for Haxe coroutines; same spec and rev as ash.
+krio-fiber = { git = "https://github.com/darmie/krio.git", rev = "286f5e0710e20772179fc2ca96f6fda8d13e3a70" }
 
 
 # topology/windows.rs has always used these bindings; the dependency was never

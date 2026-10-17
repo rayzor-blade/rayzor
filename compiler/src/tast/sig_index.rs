@@ -510,6 +510,20 @@ impl StaticSigIndex {
             .unwrap_or_default()
     }
 
+    /// The declared signature of `owner`'s instance method `method`.
+    pub(crate) fn instance_method_sig(
+        &mut self,
+        owner: &str,
+        method: &str,
+    ) -> Option<StaticMethodSig> {
+        self.ensure_indexed_from_known_files(owner);
+        let class = self.classes.get(owner).or_else(|| {
+            let names = self.bare_to_qualified.get(owner)?;
+            self.classes.get(names.first()?)
+        })?;
+        class.instances.get(method).cloned()
+    }
+
     /// The signatures of `owner`'s `@:op` methods under `key`.
     pub(crate) fn operator_signatures(&mut self, owner: &str, key: &str) -> Vec<StaticMethodSig> {
         let methods = self.operator_methods(owner, key);
@@ -1201,6 +1215,7 @@ impl StaticSigIndex {
         match parsed {
             Some(mut file) => {
                 crate::tast::ast_lowering::module_statics::desugar(&mut file);
+                crate::tast::ast_lowering::coroutines::desugar(&mut file);
                 self.index_file(&file);
             }
             None => {

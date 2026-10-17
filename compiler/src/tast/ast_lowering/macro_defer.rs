@@ -641,6 +641,7 @@ impl AstLowering<'_> {
         let static_method = self.in_static_method;
         let callee = self.lowering_callee;
         let closure_depth = self.closure_depth;
+        let coroutine_scopes = std::mem::take(&mut self.coroutine_scopes);
         let lambda_params = std::mem::take(&mut self.expected_lambda_params_stack);
         let arg_types = std::mem::take(&mut self.expected_arg_type_stack);
         let map_uses = std::mem::take(&mut self.map_first_uses);
@@ -662,6 +663,7 @@ impl AstLowering<'_> {
         self.in_static_method = static_method;
         self.lowering_callee = callee;
         self.closure_depth = closure_depth;
+        self.coroutine_scopes = coroutine_scopes;
         self.expected_lambda_params_stack = lambda_params;
         self.expected_arg_type_stack = arg_types;
         self.map_first_uses = map_uses;

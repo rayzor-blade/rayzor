@@ -316,6 +316,8 @@ impl StdlibMapping {
         mapping.register_bytes_methods();
         // sys.thread.* mappings (standard Haxe threading API)
         mapping.register_sys_thread_methods();
+        mapping.register_coro_fiber_methods();
+        mapping.register_eval_gc_methods();
         mapping.register_sys_mutex_methods();
         mapping.register_sys_lock_methods();
         mapping.register_sys_semaphore_methods();
@@ -3283,6 +3285,57 @@ impl StdlibMapping {
                 types: &[PtrU8] => PtrString),
             map_method!(static "sys.thread.ThreadImpl", "setName" => "sys_thread_impl_set_name", params: 2, returns: void,
                 types: &[PtrU8, PtrVoid]),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // eval.vm.Gc: finalisation over reference counts
+    // ============================================================================
+
+    fn register_eval_gc_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        // Every collection request runs the finalisers that are due.
+        let mappings = vec![
+            map_method!(static "eval.vm.Gc", "finalise" => "rayzor_gc_finalise", params: 2, returns: void,
+                types: &[PtrU8, PtrU8]),
+            map_method!(static "eval.vm.Gc", "full_major" => "rayzor_gc_collect", params: 0, returns: void,
+                types: &[]),
+            map_method!(static "eval.vm.Gc", "major" => "rayzor_gc_collect", params: 0, returns: void,
+                types: &[]),
+            map_method!(static "eval.vm.Gc", "minor" => "rayzor_gc_collect", params: 0, returns: void,
+                types: &[]),
+            map_method!(static "eval.vm.Gc", "major_slice" => "rayzor_gc_collect", params: 0, returns: void,
+                types: &[]),
+            map_method!(static "eval.vm.Gc", "compact" => "rayzor_gc_collect", params: 0, returns: void,
+                types: &[]),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // rayzor.coro.FiberNative: the fibers under Haxe coroutines
+    // ============================================================================
+
+    fn register_coro_fiber_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            map_method!(static "rayzor.coro.FiberNative", "create" => "rayzor_fiber_new", params: 1, returns: primitive,
+                types: &[PtrU8] => PtrU8),
+            map_method!(static "rayzor.coro.FiberNative", "resume" => "rayzor_fiber_resume", params: 1, returns: primitive,
+                types: &[PtrU8] => I32),
+            map_method!(static "rayzor.coro.FiberNative", "yieldNow" => "rayzor_fiber_yield", params: 0, returns: void,
+                types: &[]),
+            map_method!(static "rayzor.coro.FiberNative", "free" => "rayzor_fiber_free", params: 1, returns: void,
+                types: &[PtrU8]),
+            map_method!(static "rayzor.coro.FiberNative", "setData" => "rayzor_fiber_set_data", params: 2, returns: void,
+                types: &[PtrU8, PtrU8]),
+            map_method!(static "rayzor.coro.FiberNative", "currentData" => "rayzor_fiber_current_data", params: 0, returns: primitive,
+                types: &[] => PtrU8),
         ];
 
         self.register_from_tuples(mappings);

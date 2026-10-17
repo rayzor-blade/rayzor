@@ -346,14 +346,27 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 self.stream.expect(TokenKind::Colon)?;
                 let ret = self.parse_type()?;
                 let field_span = self.stream.span_from(field_start);
+                let mut type_hint = Type::Function {
+                    params,
+                    ret: Box::new(ret),
+                    span: field_span,
+                };
+                // A `@:coroutine` method's type is `haxe.coro.Coroutine<F>`.
+                if meta.iter().any(|m| m.name == "coroutine") {
+                    type_hint = Type::Path {
+                        path: TypePath {
+                            package: vec!["haxe".to_string(), "coro".to_string()],
+                            name: "Coroutine".to_string(),
+                            sub: None,
+                        },
+                        params: vec![type_hint],
+                        span: field_span,
+                    };
+                }
                 fields.push(AnonField {
                     name: field_name,
                     optional: optional_from_meta,
-                    type_hint: Type::Function {
-                        params,
-                        ret: Box::new(ret),
-                        span: field_span,
-                    },
+                    type_hint,
                     span: field_span,
                 });
                 if !self.stream.at(TokenKind::RBrace) && self.stream.eat(TokenKind::Comma).is_none()

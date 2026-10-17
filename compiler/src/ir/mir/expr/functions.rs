@@ -169,6 +169,7 @@ impl<'a> HirToMirContext<'a> {
         // from the previous body would collide with unrelated registers.
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
+        self.interface_wrapped_args.clear();
         self.strict_move_locals.clear();
         self.reset_move_recorder();
         self.block_map.clear();
@@ -486,6 +487,7 @@ impl<'a> HirToMirContext<'a> {
         // from the previous body would collide with unrelated registers.
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
+        self.interface_wrapped_args.clear();
         // strict_move_locals holds IrIds in THIS function's SSA namespace;
         // stale entries would mis-emit MarkMoved/CheckLive in the next one.
         self.strict_move_locals.clear();
@@ -545,7 +547,7 @@ impl<'a> HirToMirContext<'a> {
             // from the previous body would collide with unrelated registers.
             self.interface_call_result_types.clear();
             self.boxed_value_regs.clear();
-            self.boxed_value_regs.clear();
+            self.interface_wrapped_args.clear();
             // Per-function isolation: inner async closure has its own SSA namespace;
             // saved_state already snapshotted strict_move_locals for restore.
             self.strict_move_locals.clear();
@@ -835,6 +837,7 @@ impl<'a> HirToMirContext<'a> {
         // from the previous body would collide with unrelated registers.
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
+        self.interface_wrapped_args.clear();
         self.strict_move_locals.clear();
         self.reset_move_recorder();
         self.block_map.clear();
@@ -1222,6 +1225,7 @@ impl<'a> HirToMirContext<'a> {
         // from the previous body would collide with unrelated registers.
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
+        self.interface_wrapped_args.clear();
         self.strict_move_locals.clear();
         self.reset_move_recorder();
         self.block_map.clear();

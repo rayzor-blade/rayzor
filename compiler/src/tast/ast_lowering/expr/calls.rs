@@ -1658,6 +1658,110 @@ impl<'a> AstLowering<'a> {
             .collect()
     }
 
+    /// An abstract over an interface holds the interface's value, so a class
+    /// instance passed for one is upcast to the interface first.
+    pub(crate) fn upcast_to_abstract_interface(
+        &self,
+        arg: TypedExpression,
+        formal: TypeId,
+    ) -> TypedExpression {
+        use crate::tast::core::TypeKind;
+        let interface = {
+            let tt = self.context.type_table.borrow();
+            let formal = Self::resolve_alias_chain(&tt, formal);
+            // A generic abstract's instance leaves its underlying type to the
+            // declaration.
+            let underlying = match tt.get(formal).map(|t| &t.kind) {
+                Some(TypeKind::Abstract {
+                    underlying: Some(underlying),
+                    ..
+                }) => Some(*underlying),
+                Some(TypeKind::Abstract { symbol_id, .. }) => self
+                    .context
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|s| match tt.get(s.type_id).map(|t| &t.kind) {
+                        Some(TypeKind::Abstract { underlying, .. }) => *underlying,
+                        _ => None,
+                    }),
+                _ => None,
+            }
+            .map(|u| Self::resolve_alias_chain(&tt, u));
+            let actual = Self::resolve_alias_chain(&tt, arg.expr_type);
+            let base = |ty: TypeId| match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::GenericInstance { base_type, .. }) => {
+                    tt.get(*base_type).map(|t| &t.kind)
+                }
+                kind => kind,
+            };
+            underlying.filter(|u| {
+                matches!(base(*u), Some(TypeKind::Interface { .. }))
+                    && matches!(base(actual), Some(TypeKind::Class { .. }))
+            })
+        };
+        let Some(interface) = interface else {
+            return arg;
+        };
+        TypedExpression {
+            expr_type: interface,
+            source_location: arg.source_location,
+            usage: arg.usage.clone(),
+            lifetime_id: arg.lifetime_id,
+            metadata: arg.metadata.clone(),
+            kind: TypedExpressionKind::Cast {
+                expression: Box::new(arg),
+                target_type: interface,
+                cast_kind: CastKind::Implicit,
+            },
+        }
+    }
+
+    /// `upcast_to_abstract_interface` for each argument of a lowered call.
+    pub(crate) fn upcast_call_args_to_abstract_interfaces(&self, call: &mut TypedExpression) {
+        use crate::tast::core::TypeKind;
+        let (callee_type, arguments) = match &mut call.kind {
+            TypedExpressionKind::FunctionCall {
+                function,
+                arguments,
+                ..
+            } => (Some(function.expr_type), arguments),
+            TypedExpressionKind::MethodCall {
+                method_symbol,
+                arguments,
+                ..
+            }
+            | TypedExpressionKind::StaticMethodCall {
+                method_symbol,
+                arguments,
+                ..
+            } => (
+                self.context
+                    .symbol_table
+                    .get_symbol(*method_symbol)
+                    .map(|s| s.type_id),
+                arguments,
+            ),
+            _ => return,
+        };
+        let Some(callee_type) = callee_type else {
+            return;
+        };
+        let params = {
+            let tt = self.context.type_table.borrow();
+            match tt
+                .get(Self::resolve_alias_chain(&tt, callee_type))
+                .map(|t| &t.kind)
+            {
+                Some(TypeKind::Function { params, .. }) => params.clone(),
+                _ => return,
+            }
+        };
+        for (argument, formal) in arguments.iter_mut().zip(params) {
+            let taken = std::mem::replace(argument, argument.clone());
+            *argument = self.upcast_to_abstract_interface(taken, formal);
+        }
+    }
+
     pub(crate) fn coerce_arg_via_abstract_from(
         &mut self,
         arg: TypedExpression,
@@ -1667,6 +1771,7 @@ impl<'a> AstLowering<'a> {
         let Some(formal_ty) = formal else {
             return arg;
         };
+        let arg = self.upcast_to_abstract_interface(arg, formal_ty);
         // The formal's abstract symbol, through generic instantiation.
         let abstract_symbol = {
             let tt = self.context.type_table.borrow();

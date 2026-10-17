@@ -31,7 +31,9 @@ target
 # Haxe platform-specific standard libraries (not needed for Rayzor target)
 compiler/haxe-std/cpp/
 compiler/haxe-std/cs/
-compiler/haxe-std/eval/
+compiler/haxe-std/eval/*
+# rayzor defines `eval`, so eval.vm.Gc is part of its std.
+!compiler/haxe-std/eval/vm/
 compiler/haxe-std/flash/
 compiler/haxe-std/hl/
 compiler/haxe-std/java/

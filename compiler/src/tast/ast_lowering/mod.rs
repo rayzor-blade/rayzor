@@ -1671,6 +1671,18 @@ pub struct AstLowering<'a> {
     alias_extensions: BTreeMap<SymbolId, Vec<TypeId>>,
     /// How many function literals enclose the expression being lowered.
     closure_depth: usize,
+    /// One entry per enclosing function literal: true for a coroutine body
+    /// (`coroutines::BODY_META`), whose coroutine calls suspend its fiber.
+    pub(crate) coroutine_scopes: Vec<bool>,
+    /// The next function literal is a coroutine body.
+    pub(crate) pending_coroutine_body: bool,
+    /// Calls `coroutine_call` already rewrote, by span: their rewritten
+    /// form contains a call with the same span that must lower as written.
+    pub(crate) coroutine_rewritten: std::collections::BTreeSet<(usize, usize)>,
+    /// Callees whose type `coroutine_call` is computing, by span.
+    pub(crate) coroutine_probing: std::collections::BTreeSet<(usize, usize)>,
+    /// The file lowering declares coroutines (`coroutines::file_uses_coroutines`).
+    pub(crate) file_uses_coroutines: bool,
     /// `haxe.Rest`'s abstract symbol once looked up (`None` inside = not found).
     rest_symbol_cache: Option<Option<SymbolId>>,
     /// Subset of `empty_array_inferred` that was USED (pushed/index-assigned)
@@ -1855,6 +1867,7 @@ pub(crate) enum TypeSubstitutionResult {
 mod call_overload;
 mod const_generics;
 mod context;
+pub(crate) mod coroutines;
 mod decls;
 mod dynamic_methods;
 mod expr;

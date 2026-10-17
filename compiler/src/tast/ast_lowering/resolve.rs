@@ -488,7 +488,23 @@ impl<'a> AstLowering<'a> {
         if sym.kind == crate::tast::symbols::SymbolKind::Function {
             return None;
         }
-        let fn_type = self.substitute_receiver_type(sym.type_id, receiver_type);
+        let mut fn_type = self.substitute_receiver_type(sym.type_id, receiver_type);
+        // A `Null<F>` field is called as its function.
+        {
+            let table = self.context.type_table.borrow();
+            let resolved = Self::resolve_alias_chain(&table, fn_type);
+            if let Some(crate::tast::core::TypeKind::Optional { inner_type }) =
+                table.get(resolved).map(|t| &t.kind)
+            {
+                let inner = Self::resolve_alias_chain(&table, *inner_type);
+                if matches!(
+                    table.get(inner).map(|t| &t.kind),
+                    Some(crate::tast::core::TypeKind::Function { .. })
+                ) {
+                    fn_type = inner;
+                }
+            }
+        }
         let is_fn = self
             .context
             .type_table

@@ -297,6 +297,7 @@ impl<'a> HirToMirContext<'a> {
         // from the previous body would collide with unrelated registers.
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
+        self.interface_wrapped_args.clear();
         // Per-function isolation: lambda body has its own SSA register namespace;
         // saved_state already snapshotted strict_move_locals for restore on exit.
         self.strict_move_locals.clear();

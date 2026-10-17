@@ -263,6 +263,11 @@ pub(crate) fn is_anon_handle(ptr: *mut u8) -> bool {
     addr >= 0x1000 && addr & 7 == 0 && unsafe { *(ptr as *const u64) } == ANON_HANDLE_TAG
 }
 
+/// A weak reference to the object behind an anonymous-object handle.
+pub(crate) fn weak_of_handle(ptr: *mut u8) -> Option<std::sync::Weak<AnonObject>> {
+    is_anon_handle(ptr).then(|| Arc::downgrade(unsafe { borrow_arc(ptr) }))
+}
+
 /// Borrow the Arc from a handle pointer (does NOT take ownership)
 ///
 /// # Safety

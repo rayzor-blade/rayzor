@@ -2313,6 +2313,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
+name = "krio-core"
+version = "0.1.0"
+source = "git+https://github.com/darmie/krio.git?rev=286f5e0710e20772179fc2ca96f6fda8d13e3a70#286f5e0710e20772179fc2ca96f6fda8d13e3a70"
+
+[[package]]
+name = "krio-fiber"
+version = "0.1.0"
+source = "git+https://github.com/darmie/krio.git?rev=286f5e0710e20772179fc2ca96f6fda8d13e3a70#286f5e0710e20772179fc2ca96f6fda8d13e3a70"
+dependencies = [
+ "krio-core",
+ "libc",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3187,6 +3201,7 @@ dependencies = [
  "flate2",
  "half",
  "inventory",
+ "krio-fiber",
  "lazy_static",
  "libc",
  "log",

@@ -524,6 +524,19 @@ impl<'a> AstLowering<'a> {
         field: &ClassField,
         func: &Function,
     ) -> LoweringResult<TypedFunction> {
+        // A method body is never inside the coroutine body that lowering
+        // may have been in when it reached this method.
+        let coroutine_scopes = std::mem::take(&mut self.coroutine_scopes);
+        let result = self.lower_function_from_field_inner(field, func);
+        self.coroutine_scopes = coroutine_scopes;
+        result
+    }
+
+    fn lower_function_from_field_inner(
+        &mut self,
+        field: &ClassField,
+        func: &Function,
+    ) -> LoweringResult<TypedFunction> {
         let function_name = self.context.intern_string(&func.name);
 
         // Get function symbol - may have been pre-registered during class declaration

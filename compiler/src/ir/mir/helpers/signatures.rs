@@ -1302,7 +1302,9 @@ impl<'a> HirToMirContext<'a> {
                         // again would resolve a class through the drift-prone
                         // type→SymbolId path and overwrite the real vtable with an empty
                         // one, so pass it through.
-                        if self.get_interface_symbol(resolved_arg) == Some(iface_sym) {
+                        if self.get_interface_symbol(resolved_arg) == Some(iface_sym)
+                            || self.is_abstract_over_interface(resolved_arg)
+                        {
                             return arg_reg;
                         }
                         // A syntactic `new ClassName()` (optionally behind a Cast) carries
@@ -1456,5 +1458,32 @@ impl<'a> HirToMirContext<'a> {
         }
 
         arg_reg
+    }
+}
+
+impl<'a> HirToMirContext<'a> {
+    /// An abstract whose underlying type is an interface: its values are
+    /// already interface fat pointers. A generic abstract's instance leaves
+    /// the underlying type to its declaration.
+    pub(crate) fn is_abstract_over_interface(&self, ty: TypeId) -> bool {
+        let Some(TypeKind::Abstract {
+            symbol_id,
+            underlying,
+            ..
+        }) = self.type_table.get(ty).map(|t| &t.kind)
+        else {
+            return false;
+        };
+        let underlying = underlying.or_else(|| {
+            let declared = self.symbol_table.get_symbol(*symbol_id)?.type_id;
+            match self.type_table.get(declared).map(|t| &t.kind) {
+                Some(TypeKind::Abstract { underlying, .. }) => *underlying,
+                _ => None,
+            }
+        });
+        underlying.is_some_and(|u| {
+            self.get_interface_symbol(self.resolve_through_aliases(u))
+                .is_some()
+        })
     }
 }

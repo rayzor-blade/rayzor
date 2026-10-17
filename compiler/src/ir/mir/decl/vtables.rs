@@ -604,6 +604,7 @@ impl<'a> HirToMirContext<'a> {
         }
         let saved = self.save_state();
         let saved_boxes = std::mem::take(&mut self.boxed_value_regs);
+        let saved_wrapped = std::mem::take(&mut self.interface_wrapped_args);
         let saved_results = std::mem::take(&mut self.interface_call_result_types);
         self.symbol_map.clear();
         self.strict_move_locals.clear();
@@ -657,6 +658,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder.finish_function();
         self.restore_state(saved);
         self.boxed_value_regs = saved_boxes;
+        self.interface_wrapped_args = saved_wrapped;
         self.interface_call_result_types = saved_results;
         body?;
         self.closure_targets.insert(id, Some(fn_type));

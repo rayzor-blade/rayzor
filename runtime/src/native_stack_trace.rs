@@ -322,6 +322,15 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// A thread's shadow call stack, held aside while another fiber runs.
+#[derive(Default)]
+pub(crate) struct ShadowStack(Vec<ShadowFrame>);
+
+/// Install `stack` as this thread's shadow stack, returning the one it replaces.
+pub(crate) fn replace_shadow_stack(stack: ShadowStack) -> ShadowStack {
+    SHADOW_STACK.with(|s| ShadowStack(std::mem::replace(&mut *s.borrow_mut(), stack.0)))
+}
+
 /// Push a call frame onto the shadow stack (called at function entry in debug mode).
 /// The `func_id` is the compiler-assigned IrFunctionId.
 ///

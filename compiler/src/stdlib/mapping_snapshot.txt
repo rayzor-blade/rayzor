@@ -240,6 +240,12 @@ _Internal to_upper_case static=true ctor=false params=1 -> haxe_string_to_upper_
 _Internal unbox_bool static=true ctor=false params=1 -> haxe_unbox_bool_ptr
 _Internal unbox_float static=true ctor=false params=1 -> haxe_unbox_float_ptr
 _Internal unbox_int static=true ctor=false params=1 -> haxe_unbox_int_ptr
+eval.vm.Gc compact static=true ctor=false params=0 -> rayzor_gc_collect
+eval.vm.Gc finalise static=true ctor=false params=2 -> rayzor_gc_finalise
+eval.vm.Gc full_major static=true ctor=false params=0 -> rayzor_gc_collect
+eval.vm.Gc major static=true ctor=false params=0 -> rayzor_gc_collect
+eval.vm.Gc major_slice static=true ctor=false params=0 -> rayzor_gc_collect
+eval.vm.Gc minor static=true ctor=false params=0 -> rayzor_gc_collect
 haxe.Int64 add static=true ctor=false params=2 -> Int64_add
 haxe.Int64 and static=true ctor=false params=2 -> Int64_and
 haxe.Int64 compare static=true ctor=false params=2 -> Int64_compare
@@ -551,6 +557,12 @@ rayzor.concurrent.Thread sleep static=true ctor=false params=1 -> Thread_sleep
 rayzor.concurrent.Thread spawn static=true ctor=false params=1 -> Thread_spawn
 rayzor.concurrent.Thread unpark static=true ctor=false params=1 -> Thread_unpark
 rayzor.concurrent.Thread yieldNow static=true ctor=false params=0 -> Thread_yieldNow
+rayzor.coro.FiberNative create static=true ctor=false params=1 -> rayzor_fiber_new
+rayzor.coro.FiberNative currentData static=true ctor=false params=0 -> rayzor_fiber_current_data
+rayzor.coro.FiberNative free static=true ctor=false params=1 -> rayzor_fiber_free
+rayzor.coro.FiberNative resume static=true ctor=false params=1 -> rayzor_fiber_resume
+rayzor.coro.FiberNative setData static=true ctor=false params=2 -> rayzor_fiber_set_data
+rayzor.coro.FiberNative yieldNow static=true ctor=false params=0 -> rayzor_fiber_yield
 rayzor.runtime.CC addFile static=false ctor=false params=1 -> rayzor_tcc_add_file
 rayzor.runtime.CC addFramework static=false ctor=false params=1 -> rayzor_tcc_add_framework
 rayzor.runtime.CC addIncludePath static=false ctor=false params=1 -> rayzor_tcc_add_include_path

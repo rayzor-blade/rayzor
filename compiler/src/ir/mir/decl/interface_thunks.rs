@@ -353,6 +353,7 @@ impl<'a> HirToMirContext<'a> {
         let saved_moves = std::mem::take(&mut self.strict_move_locals);
         let saved_results = std::mem::take(&mut self.interface_call_result_types);
         let saved_boxes = std::mem::take(&mut self.boxed_value_regs);
+        let saved_wrapped = std::mem::take(&mut self.interface_wrapped_args);
         self.reset_move_recorder();
         let id = self
             .builder
@@ -384,6 +385,7 @@ impl<'a> HirToMirContext<'a> {
         self.strict_move_locals = saved_moves;
         self.interface_call_result_types = saved_results;
         self.boxed_value_regs = saved_boxes;
+        self.interface_wrapped_args = saved_wrapped;
         emitted.map(|()| id)
     }
 }
