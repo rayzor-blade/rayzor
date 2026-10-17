@@ -2160,6 +2160,8 @@ impl PassManager {
             }
             OptimizationLevel::O2 => {
                 // Standard optimizations
+                // Before inlining, while a self-call is still a call.
+                manager.add_pass(super::tail_recursion::TailRecursionPass::new());
                 manager.add_pass(super::inlining::InliningPass::new());
                 manager.add_pass(DeadCodeEliminationPass::new());
                 manager.add_pass(super::devirtualize::DevirtualizationPass::new());
@@ -2177,6 +2179,9 @@ impl PassManager {
                 // dominator-tree value numbering (phi nodes properly updated).
                 manager.add_pass(GVNPass::new());
                 manager.add_pass(CSEPass::new());
+                // Before LICM: a phi that only carries a value through the loop
+                // hides that the value is invariant.
+                manager.add_pass(super::trivial_phi::TrivialPhiEliminationPass::new());
                 manager.add_pass(LICMPass::new());
                 // After LICM, whose hoisting makes the conditions invariant.
                 manager.add_pass(super::loop_unswitch::LoopUnswitchPass::new());
@@ -2193,6 +2198,7 @@ impl PassManager {
             }
             OptimizationLevel::O3 => {
                 // Aggressive optimizations
+                manager.add_pass(super::tail_recursion::TailRecursionPass::new());
                 // Inlining first to expose more optimization opportunities
                 manager.add_pass(super::inlining::InliningPass::new());
                 manager.add_pass(GlobalLoadCachingPass::new());
@@ -2206,6 +2212,9 @@ impl PassManager {
                     .add_pass(super::bounds_check_elimination::BoundsCheckEliminationPass::new());
                 manager.add_pass(GVNPass::new());
                 manager.add_pass(CSEPass::new());
+                // Before LICM: a phi that only carries a value through the loop
+                // hides that the value is invariant.
+                manager.add_pass(super::trivial_phi::TrivialPhiEliminationPass::new());
                 manager.add_pass(LICMPass::new());
                 // After LICM, whose hoisting makes the conditions invariant.
                 manager.add_pass(super::loop_unswitch::LoopUnswitchPass::new());

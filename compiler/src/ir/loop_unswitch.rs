@@ -295,18 +295,30 @@ struct Induction {
 /// What must hold for a branch in the fast copy to be decided.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Need {
-    /// The loop at this index counts within the array's length.
-    InBounds(usize, IrId),
+    /// An index derived from the loop at this position stays within the
+    /// array's length on every iteration.
+    InBounds(usize, Index, IrId),
+    /// A constant index is within the array's length.
+    ConstIndex(i64, IrId),
     /// The array is plain (zero flags).
     Plain(IrId),
     /// The array is not null.
     NotNull(IrId),
 }
 
+/// How an array index follows a loop's induction variable `iv`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Index {
+    /// `iv + c`.
+    Shift(i64),
+    /// `k - iv`, `k` fixed for the nest.
+    Mirror(IrId),
+}
+
 /// Registers that only rename another: a copy, or a phi whose inputs are all
 /// one value or the phi itself. Lowering leaves many such phis, carrying a
 /// loop-invariant value through every block of a loop.
-fn renamings(function: &IrFunction) -> BTreeMap<IrId, IrId> {
+pub(super) fn renamings(function: &IrFunction) -> BTreeMap<IrId, IrId> {
     let mut alias: BTreeMap<IrId, IrId> = BTreeMap::new();
     for inst in function
         .cfg
@@ -347,7 +359,7 @@ fn renamings(function: &IrFunction) -> BTreeMap<IrId, IrId> {
     }
 }
 
-fn canonical(alias: &BTreeMap<IrId, IrId>, mut reg: IrId) -> IrId {
+pub(super) fn canonical(alias: &BTreeMap<IrId, IrId>, mut reg: IrId) -> IrId {
     for _ in 0..64 {
         match alias.get(&reg) {
             Some(next) if *next != reg => reg = *next,
@@ -506,24 +518,32 @@ fn plan_version(
                 right,
                 ..
             } => {
-                let index = match ctx.def_of.get(&(ctx.canon)(*left)) {
-                    Some(IrInstruction::Cast { src, .. }) => (ctx.canon)(*src),
-                    _ => (ctx.canon)(*left),
-                };
-                let (k, _) =
-                    ctx.inductions.iter().enumerate().find(|(_, ind)| {
-                        ind.iv == index && ctx.domtree.dominates(ind.body, block)
-                    })?;
-                match ctx.def_of.get(&(ctx.canon)(*right))? {
+                let array = match ctx.def_of.get(&(ctx.canon)(*right))? {
                     IrInstruction::ArrayHeader {
                         array,
                         field: ArrayField::Len,
                         ..
-                    } if (ctx.outside)(*array) => {
-                        Some((vec![Need::InBounds(k, (ctx.canon)(*array))], true))
-                    }
-                    _ => None,
+                    } if (ctx.outside)(*array) => (ctx.canon)(*array),
+                    _ => return None,
+                };
+                let index = match ctx.def_of.get(&(ctx.canon)(*left)) {
+                    Some(IrInstruction::Cast { src, .. }) => (ctx.canon)(*src),
+                    _ => (ctx.canon)(*left),
+                };
+                if let Some(c) = (ctx.constant)(index) {
+                    return (c >= 0).then(|| (vec![Need::ConstIndex(c, array)], true));
                 }
+                let (k, form) = affine_index(ctx, block, index)?;
+                // A constant start fixes the lowest index now; a register
+                // start is checked in the precondition.
+                if let (Index::Shift(c), Some(start)) =
+                    (form, (ctx.constant)(ctx.inductions[k].start))
+                {
+                    if start + c < 0 {
+                        return None;
+                    }
+                }
+                Some((vec![Need::InBounds(k, form, array)], true))
             }
             IrInstruction::Cmp {
                 op: CompareOp::Eq,
@@ -544,6 +564,46 @@ fn plan_version(
             _ => None,
         }
     }
+    /// `index` as a function of a loop's induction variable, for a loop whose
+    /// body dominates `block`.
+    fn affine_index(ctx: &Ctx, block: IrBlockId, index: IrId) -> Option<(usize, Index)> {
+        let loop_of = |reg: IrId| {
+            ctx.inductions.iter().position(|ind| {
+                ind.iv == (ctx.canon)(reg) && ctx.domtree.dominates(ind.body, block)
+            })
+        };
+        if let Some(k) = loop_of(index) {
+            return Some((k, Index::Shift(0)));
+        }
+        match ctx.def_of.get(&index)? {
+            IrInstruction::BinOp {
+                op: BinaryOp::Add,
+                left,
+                right,
+                ..
+            } => {
+                if let (Some(k), Some(c)) = (loop_of(*left), (ctx.constant)(*right)) {
+                    return Some((k, Index::Shift(c)));
+                }
+                let (k, c) = (loop_of(*right)?, (ctx.constant)(*left)?);
+                Some((k, Index::Shift(c)))
+            }
+            IrInstruction::BinOp {
+                op: BinaryOp::Sub,
+                left,
+                right,
+                ..
+            } => {
+                if let (Some(k), Some(c)) = (loop_of(*left), (ctx.constant)(*right)) {
+                    return Some((k, Index::Shift(-c)));
+                }
+                let k = loop_of(*right)?;
+                (ctx.outside)(*left).then(|| (k, Index::Mirror((ctx.canon)(*left))))
+            }
+            _ => None,
+        }
+    }
+
     let ctx = Ctx {
         def_of: &def_of,
         inductions: &inductions,
@@ -591,14 +651,34 @@ fn plan_version(
                 let flags = pre.header(array, ArrayField::Flags);
                 facts.push(pre.push_cmp(CompareOp::Eq, flags, zero));
             }
-            Need::InBounds(k, array) => {
+            Need::ConstIndex(c, array) => {
+                let len = pre.header(array, ArrayField::Len);
+                let index = pre.push_const(c);
+                facts.push(pre.push_cmp(CompareOp::Lt, index, len));
+            }
+            Need::InBounds(k, form, array) => {
+                // With start <= iv < bound: the highest index must be below
+                // the length and the lowest must not be negative.
                 let ind = &inductions[k];
                 let len = pre.header(array, ArrayField::Len);
                 let bound = pre.widen(ind.bound, function.register_types.get(&ind.bound));
-                facts.push(pre.push_cmp(CompareOp::Le, bound, len));
-                if constant(ind.start).is_none() {
-                    let start = pre.widen(ind.start, function.register_types.get(&ind.start));
-                    facts.push(pre.push_cmp(CompareOp::Ge, start, zero));
+                let start = pre.widen(ind.start, function.register_types.get(&ind.start));
+                match form {
+                    Index::Shift(c) => {
+                        let shifted = pre.offset(bound, c);
+                        facts.push(pre.push_cmp(CompareOp::Le, shifted, len));
+                        if constant(ind.start).is_none() {
+                            let lowest = pre.offset(start, c);
+                            facts.push(pre.push_cmp(CompareOp::Ge, lowest, zero));
+                        }
+                    }
+                    Index::Mirror(base) => {
+                        let base = pre.widen(base, function.register_types.get(&base));
+                        let highest = pre.push_binop(BinaryOp::Sub, base, start);
+                        facts.push(pre.push_cmp(CompareOp::Lt, highest, len));
+                        let above = pre.offset(base, 1);
+                        facts.push(pre.push_cmp(CompareOp::Le, bound, above));
+                    }
                 }
             }
         }
@@ -657,6 +737,26 @@ impl Prelude {
             right,
         });
         dest
+    }
+
+    fn push_binop(&mut self, op: BinaryOp, left: IrId, right: IrId) -> IrId {
+        let dest = self.fresh();
+        self.insts.push(IrInstruction::BinOp {
+            dest,
+            op,
+            left,
+            right,
+        });
+        dest
+    }
+
+    /// `reg + c`, or `reg` itself when `c` is zero.
+    fn offset(&mut self, reg: IrId, c: i64) -> IrId {
+        if c == 0 {
+            return reg;
+        }
+        let amount = self.push_const(c);
+        self.push_binop(BinaryOp::Add, reg, amount)
     }
 
     fn push_and(&mut self, left: IrId, right: IrId) -> IrId {
@@ -801,7 +901,10 @@ fn apply(function: &mut IrFunction, natural: &NaturalLoop, split: Split) {
     for inst in &split.prelude {
         if let Some(dest) = inst.dest() {
             let ty = match inst {
-                IrInstruction::Cmp { .. } | IrInstruction::BinOp { .. } => IrType::Bool,
+                IrInstruction::Cmp { .. }
+                | IrInstruction::BinOp {
+                    op: BinaryOp::And, ..
+                } => IrType::Bool,
                 IrInstruction::ArrayHeader { field, .. } => field.ir_type(),
                 _ => IrType::I64,
             };

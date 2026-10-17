@@ -41,7 +41,9 @@ pub mod optimizable; // Generic optimization trait for different IR levels
 pub mod optimization;
 pub mod osr; // On-stack replacement: a second entry point into a hot loop
 pub mod scalar_replacement; // Scalar Replacement of Aggregates (SRA)
-pub mod snapshot; // Standard library lowered at build time and carried in the binary
+pub mod snapshot;
+pub mod tail_recursion;
+pub mod trivial_phi; // Phis that only rename one value // Self-recursion turned into loops // Standard library lowered at build time and carried in the binary
 // Shaders lower from HIR to WGSL source, which is a lowering step and not
 // code generation — it reads HIR and types, and nothing a backend provides.
 pub mod tree_shake; // Dead-code elimination for .rzb bundles
