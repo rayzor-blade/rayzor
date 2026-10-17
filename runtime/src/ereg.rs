@@ -50,11 +50,7 @@ unsafe fn hs_to_str<'a>(s: *const HaxeString) -> &'a str {
 
 /// Create a new heap-allocated HaxeString from a Rust &str, return as *mut u8 (i64-sized pointer)
 pub fn rust_str_to_hs(s: &str) -> *mut u8 {
-    let hs = Box::new(HaxeString {
-        ptr: ptr::null_mut(),
-        len: 0,
-        cap: 0,
-    });
+    let hs = Box::new(HaxeString::EMPTY);
     let hs_ptr = Box::into_raw(hs);
     haxe_string_from_bytes(hs_ptr, s.as_ptr(), s.len());
     hs_ptr as *mut u8

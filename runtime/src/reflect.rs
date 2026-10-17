@@ -1546,11 +1546,7 @@ mod tests {
 
     #[test]
     fn test_typeof_string_is_tclass_with_payload() {
-        let mut hs = Box::new(crate::haxe_string::HaxeString {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        });
+        let mut hs = Box::new(crate::haxe_string::HaxeString::EMPTY);
         crate::haxe_string::haxe_string_from_bytes(hs.as_mut(), b"x".as_ptr(), 1);
         let s = Box::into_raw(hs) as *mut u8;
         let dv = Box::into_raw(Box::new(DynamicValue {

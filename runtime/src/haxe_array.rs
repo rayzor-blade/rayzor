@@ -1309,9 +1309,10 @@ pub extern "C" fn haxe_array_join(
         *buf_ptr.add(offset) = 0;
 
         // Set up result HaxeString
-        (*result_ptr).ptr = buf_ptr;
-        (*result_ptr).len = total_len;
-        (*result_ptr).cap = buf_cap;
+        ptr::write(
+            result_ptr,
+            HaxeString::from_parts(buf_ptr, total_len, buf_cap),
+        );
 
         result_ptr
     }
@@ -1401,9 +1402,10 @@ pub extern "C" fn haxe_array_join_typed(
         }
         *buf_ptr.add(offset) = 0;
 
-        (*result_ptr).ptr = buf_ptr;
-        (*result_ptr).len = total_len;
-        (*result_ptr).cap = buf_cap;
+        ptr::write(
+            result_ptr,
+            HaxeString::from_parts(buf_ptr, total_len, buf_cap),
+        );
         result_ptr
     }
 }

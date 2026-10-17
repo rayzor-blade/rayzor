@@ -19,6 +19,31 @@ pub struct HaxeString {
     pub ptr: *mut u8, // Pointer to string data (UTF-8)
     pub len: usize,   // Length in bytes
     pub cap: usize,   // Capacity in bytes
+    /// Characters in the bytes, or `CHARS_UNKNOWN` until first counted.
+    /// Whoever changes `ptr` or `len` resets it.
+    pub chars: usize,
+}
+
+/// `HaxeString::chars` before the characters are counted.
+pub const CHARS_UNKNOWN: usize = usize::MAX;
+
+impl HaxeString {
+    pub const EMPTY: HaxeString = HaxeString {
+        ptr: ptr::null_mut(),
+        len: 0,
+        cap: 0,
+        chars: 0,
+    };
+
+    /// A string over `ptr[..len]`, its characters not yet counted.
+    pub const fn from_parts(ptr: *mut u8, len: usize, cap: usize) -> HaxeString {
+        HaxeString {
+            ptr,
+            len,
+            cap,
+            chars: CHARS_UNKNOWN,
+        }
+    }
 }
 
 const INITIAL_CAPACITY: usize = 32;
@@ -127,9 +152,7 @@ pub extern "C" fn haxe_string_new(out: *mut HaxeString) {
 
         *ptr = 0; // Null terminator
 
-        (*out).ptr = ptr;
-        (*out).len = 0;
-        (*out).cap = INITIAL_CAPACITY;
+        ptr::write(out, HaxeString::from_parts(ptr, 0, INITIAL_CAPACITY));
     })
 }
 
@@ -160,9 +183,7 @@ pub extern "C" fn haxe_string_from_cstr(out: *mut HaxeString, cstr: *const u8) {
         ptr::copy_nonoverlapping(cstr, ptr, len);
         *ptr.add(len) = 0; // Null terminator
 
-        (*out).ptr = ptr;
-        (*out).len = len;
-        (*out).cap = cap;
+        ptr::write(out, HaxeString::from_parts(ptr, len, cap));
     }
 }
 
@@ -186,9 +207,7 @@ pub extern "C" fn haxe_string_from_bytes(out: *mut HaxeString, bytes: *const u8,
         ptr::copy_nonoverlapping(bytes, ptr, len);
         *ptr.add(len) = 0; // Null terminator
 
-        (*out).ptr = ptr;
-        (*out).len = len;
-        (*out).cap = cap;
+        ptr::write(out, HaxeString::from_parts(ptr, len, cap));
     }
 }
 
@@ -299,6 +318,105 @@ pub(crate) fn byte_to_char(b: &[u8], offset: usize) -> usize {
     n
 }
 
+/// A string's bytes with its character count. Where every character is one
+/// byte, character and byte offsets coincide and need no scan.
+#[derive(Clone, Copy)]
+pub(crate) struct Text<'a> {
+    pub bytes: &'a [u8],
+    pub chars: usize,
+}
+
+impl Text<'_> {
+    #[inline]
+    pub fn one_byte_chars(&self) -> bool {
+        self.chars == self.bytes.len()
+    }
+
+    /// Byte offset of character `index`, clamped to the length.
+    #[inline]
+    pub fn char_to_byte(&self, index: usize) -> usize {
+        if self.one_byte_chars() {
+            index.min(self.bytes.len())
+        } else {
+            char_to_byte(self.bytes, index)
+        }
+    }
+
+    /// Character index of byte offset `offset`.
+    #[inline]
+    pub fn byte_to_char(&self, offset: usize) -> usize {
+        if self.one_byte_chars() {
+            offset.min(self.bytes.len())
+        } else {
+            byte_to_char(self.bytes, offset)
+        }
+    }
+
+    /// Byte offset `count` characters past byte `from`, clamped.
+    #[inline]
+    pub fn advance_chars(&self, from: usize, count: usize) -> usize {
+        if self.one_byte_chars() {
+            from.saturating_add(count).min(self.bytes.len())
+        } else {
+            advance_chars(self.bytes, from, count)
+        }
+    }
+}
+
+/// The character count cached in `s`, or `CHARS_UNKNOWN`.
+///
+/// # Safety
+/// `s` must point to a valid `HaxeString`.
+pub(crate) unsafe fn cached_chars(s: *const HaxeString) -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    unsafe { AtomicUsize::from_ptr(&raw const (*s).chars as *mut usize).load(Ordering::Relaxed) }
+}
+
+/// Under `RZT_DBG_STRCHARS`, name a string header whose count is impossible.
+/// Diagnostic only; safe to leave unset.
+#[cold]
+fn report_bad_chars(s: *const HaxeString, chars: usize) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("RZT_DBG_STRCHARS").is_some()) {
+        let len = unsafe { (*s).len };
+        eprintln!("[strchars] {s:p}: chars {chars:#x} > len {len}");
+    }
+}
+
+/// The text of `s`, counting its characters once and caching the count.
+///
+/// # Safety
+/// `s` must be null or a valid, writable `HaxeString` whose buffer outlives
+/// the borrow.
+pub(crate) unsafe fn string_text<'a>(s: *const HaxeString) -> Text<'a> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    unsafe {
+        let bytes = string_bytes(s);
+        if bytes.is_empty() {
+            return Text { bytes, chars: 0 };
+        }
+        // Strings are shared across threads; every thread computes the same
+        // count, so a relaxed atomic access suffices.
+        let chars = cached_chars(s);
+        if chars <= bytes.len() {
+            return Text { bytes, chars };
+        }
+        let counted = char_count(bytes);
+        if chars == CHARS_UNKNOWN {
+            AtomicUsize::from_ptr(&raw const (*s).chars as *mut usize)
+                .store(counted, Ordering::Relaxed);
+        } else {
+            // A count past the length is not a count: the header is some
+            // shorter struct read as a string, so its tail is left alone.
+            report_bad_chars(s, chars);
+        }
+        Text {
+            bytes,
+            chars: counted,
+        }
+    }
+}
+
 /// First byte offset at or after `from` where `needle` occurs.
 pub(crate) fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if from > hay.len() {
@@ -341,18 +459,18 @@ pub(crate) fn rfind_bytes(hay: &[u8], needle: &[u8], max_start: usize) -> Option
 /// `String.length`: the number of code points.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_length(s: *const HaxeString) -> usize {
-    char_count(unsafe { string_bytes(s) })
+    unsafe { string_text(s) }.chars
 }
 
 /// Code point at character `index`, or -1 out of range.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_char_at(s: *const HaxeString, index: usize) -> i32 {
-    let b = unsafe { string_bytes(s) };
-    let at = char_to_byte(b, index);
-    if at >= b.len() {
+    let text = unsafe { string_text(s) };
+    let at = text.char_to_byte(index);
+    if at >= text.bytes.len() {
         return -1;
     }
-    decode_char(b, at).0 as i32
+    decode_char(text.bytes, at).0 as i32
 }
 
 /// Get character code at index
@@ -402,9 +520,7 @@ pub extern "C" fn haxe_string_concat_sret(
 
         *ptr.add(total_len) = 0; // Null terminator
 
-        (*out).ptr = ptr;
-        (*out).len = total_len;
-        (*out).cap = cap;
+        ptr::write(out, HaxeString::from_parts(ptr, total_len, cap));
     })
 }
 
@@ -443,9 +559,7 @@ pub extern "C" fn haxe_string_substring(
         ptr::copy_nonoverlapping(s_ref.ptr.add(actual_start), ptr, len);
         *ptr.add(len) = 0;
 
-        (*out).ptr = ptr;
-        (*out).len = len;
-        (*out).cap = cap;
+        ptr::write(out, HaxeString::from_parts(ptr, len, cap));
     }
 }
 
@@ -709,11 +823,7 @@ pub extern "C" fn haxe_string_split_array(
             }
             let slots = data_ptr as *mut i64;
             for (i, pair) in bounds.windows(2).enumerate() {
-                let part = Box::into_raw(Box::new(HaxeString {
-                    ptr: ptr::null_mut(),
-                    len: 0,
-                    cap: 0,
-                }));
+                let part = Box::into_raw(Box::new(HaxeString::EMPTY));
                 haxe_string_substring(part, s, pair[0], pair[1]);
                 *slots.add(i) = part as i64;
             }
@@ -759,11 +869,7 @@ pub extern "C" fn haxe_string_split_array(
             let idx = haxe_string_index_of(s, delimiter, start);
             if idx < 0 {
                 // Last part - allocate and store substring
-                let substring = Box::new(HaxeString {
-                    ptr: ptr::null_mut(),
-                    len: 0,
-                    cap: 0,
-                });
+                let substring = Box::new(HaxeString::EMPTY);
                 let substr_ptr = Box::into_raw(substring);
                 haxe_string_substring(substr_ptr, s, start, s_ref.len);
                 *i64_ptr.add(array_idx) = substr_ptr as i64;
@@ -771,11 +877,7 @@ pub extern "C" fn haxe_string_split_array(
             }
 
             // Allocate and store substring
-            let substring = Box::new(HaxeString {
-                ptr: ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            });
+            let substring = Box::new(HaxeString::EMPTY);
             let substr_ptr = Box::into_raw(substring);
             haxe_string_substring(substr_ptr, s, start, idx as usize);
             *i64_ptr.add(array_idx) = substr_ptr as i64;
@@ -879,9 +981,7 @@ pub extern "C" fn haxe_string_free(s: *mut HaxeString) {
             }
             let buf_ptr = (*s).ptr;
             let buf_cap = (*s).cap;
-            (*s).ptr = std::ptr::null_mut();
-            (*s).len = FREED_MARK;
-            (*s).cap = 0;
+            ptr::write(s, HaxeString::from_parts(ptr::null_mut(), FREED_MARK, 0));
             if !buf_ptr.is_null() && buf_cap > 0 {
                 dealloc(buf_ptr, Layout::from_size_align_unchecked(buf_cap, 1));
             }
@@ -890,9 +990,7 @@ pub extern "C" fn haxe_string_free(s: *mut HaxeString) {
 
         let buf_ptr = (*s).ptr;
         let buf_cap = (*s).cap;
-        (*s).ptr = std::ptr::null_mut();
-        (*s).len = 0;
-        (*s).cap = 0;
+        ptr::write(s, HaxeString::EMPTY);
 
         if !buf_ptr.is_null() && buf_cap > 0 {
             let layout = Layout::from_size_align_unchecked(buf_cap, 1);
@@ -981,11 +1079,7 @@ pub extern "C" fn haxe_string_replace(
     needle: *const HaxeString,
     replacement: *const HaxeString,
 ) -> *mut HaxeString {
-    let result = Box::new(HaxeString {
-        ptr: ptr::null_mut(),
-        len: 0,
-        cap: 0,
-    });
+    let result = Box::new(HaxeString::EMPTY);
     let result_ptr = Box::into_raw(result);
     haxe_string_new(result_ptr);
 
@@ -1077,19 +1171,27 @@ pub extern "C" fn haxe_string_hash(s: *const HaxeString) -> i32 {
 
 /// A heap `HaxeString` owning `bytes`.
 pub(crate) fn boxed_string(bytes: Vec<u8>) -> *mut HaxeString {
+    boxed_text(bytes, CHARS_UNKNOWN)
+}
+
+/// A heap `HaxeString` owning `bytes`, which hold `chars` characters (or
+/// `CHARS_UNKNOWN`).
+pub(crate) fn boxed_text(bytes: Vec<u8>, chars: usize) -> *mut HaxeString {
     if bytes.is_empty() {
-        return Box::into_raw(Box::new(HaxeString {
-            ptr: ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        }));
+        return Box::into_raw(Box::new(HaxeString::EMPTY));
     }
     let mut bytes = std::mem::ManuallyDrop::new(bytes);
     Box::into_raw(Box::new(HaxeString {
         ptr: bytes.as_mut_ptr(),
         len: bytes.len(),
         cap: bytes.capacity(),
+        chars,
     }))
+}
+
+/// A heap copy of `text.bytes[start..end]`, which holds `chars` characters.
+pub(crate) fn sub_text(text: Text, start: usize, end: usize, chars: usize) -> *mut HaxeString {
+    boxed_text(text.bytes[start..end].to_vec(), chars)
 }
 
 /// `StringTools.urlEncode`: percent-encodes each UTF-8 byte outside

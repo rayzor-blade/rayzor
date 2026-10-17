@@ -5,15 +5,8 @@
 use std::alloc::{Layout, alloc, dealloc};
 use std::ptr;
 
-/// Haxe String representation: { ptr: *mut u8, len: usize, cap: usize }
-/// Same as HaxeVec but guarantees valid UTF-8
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct HaxeString {
-    pub ptr: *mut u8,
-    pub len: usize,
-    pub cap: usize,
-}
+pub use crate::haxe_string::HaxeString;
+use crate::haxe_string::{CHARS_UNKNOWN, cached_chars};
 
 /// Create a new empty string (internal helper, not exported)
 pub fn haxe_string_new() -> HaxeString {
@@ -27,11 +20,7 @@ pub fn haxe_string_new() -> HaxeString {
             panic!("Failed to allocate memory for String");
         }
 
-        HaxeString {
-            ptr,
-            len: 0,
-            cap: INITIAL_CAPACITY,
-        }
+        HaxeString::from_parts(ptr, 0, INITIAL_CAPACITY)
     }
 }
 
@@ -61,7 +50,7 @@ fn haxe_string_from_cstr(cstr: *const u8) -> HaxeString {
         // Copy
         ptr::copy_nonoverlapping(cstr, ptr, len);
 
-        HaxeString { ptr, len, cap }
+        HaxeString::from_parts(ptr, len, cap)
     }
 }
 
@@ -84,7 +73,7 @@ fn haxe_string_from_bytes(bytes: *const u8, len: usize) -> HaxeString {
         // Copy
         ptr::copy_nonoverlapping(bytes, ptr, len);
 
-        HaxeString { ptr, len, cap }
+        HaxeString::from_parts(ptr, len, cap)
     }
 }
 
@@ -141,11 +130,7 @@ pub extern "C" fn haxe_string_concat_ptr(
 /// Concatenate two strings (returns value - may have ABI issues with large structs)
 fn haxe_string_concat_impl(a: *const HaxeString, b: *const HaxeString) -> HaxeString {
     unsafe {
-        let null_string = HaxeString {
-            ptr: b"null".as_ptr() as *mut u8,
-            len: 4,
-            cap: 0,
-        };
+        let null_string = HaxeString::from_parts(b"null".as_ptr() as *mut u8, 4, 0);
         let a_ref = if a.is_null() { &null_string } else { &*a };
 
         let b_ref = if b.is_null() { &null_string } else { &*b };
@@ -153,6 +138,12 @@ fn haxe_string_concat_impl(a: *const HaxeString, b: *const HaxeString) -> HaxeSt
         // Guard against corrupted HaxeString structs
         let a_len = if a_ref.ptr.is_null() { 0 } else { a_ref.len };
         let b_len = if b_ref.ptr.is_null() { 0 } else { b_ref.len };
+        let chars_of = |s: &HaxeString, len: usize| match cached_chars(s) {
+            _ if len == 0 => 0,
+            c if c <= len => c,
+            _ => CHARS_UNKNOWN,
+        };
+        let (a_chars, b_chars) = (chars_of(a_ref, a_len), chars_of(b_ref, b_len));
 
         let new_len = a_len + b_len;
         let new_cap = if new_len < 16 { 16 } else { new_len };
@@ -172,11 +163,11 @@ fn haxe_string_concat_impl(a: *const HaxeString, b: *const HaxeString) -> HaxeSt
             ptr::copy_nonoverlapping(b_ref.ptr, new_ptr.add(a_len), b_len);
         }
 
-        HaxeString {
-            ptr: new_ptr,
-            len: new_len,
-            cap: new_cap,
+        let mut result = HaxeString::from_parts(new_ptr, new_len, new_cap);
+        if a_chars != CHARS_UNKNOWN && b_chars != CHARS_UNKNOWN {
+            result.chars = a_chars + b_chars;
         }
+        result
     }
 }
 
@@ -263,9 +254,7 @@ fn haxe_string_free(s: *mut HaxeString) {
             dealloc(str_ref.ptr, layout);
         }
 
-        (*s).ptr = ptr::null_mut();
-        (*s).len = 0;
-        (*s).cap = 0;
+        ptr::write(s, HaxeString::EMPTY);
     }
 }
 

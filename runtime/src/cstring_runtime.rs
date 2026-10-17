@@ -45,11 +45,7 @@ pub extern "C" fn rayzor_cstring_from(source: *const HaxeString) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_cstring_to_string(cstr_addr: i64) -> *mut HaxeString {
     let cstr = cstr_addr as *const u8;
-    let hs = Box::new(HaxeString {
-        ptr: ptr::null_mut(),
-        len: 0,
-        cap: 0,
-    });
+    let hs = Box::new(HaxeString::EMPTY);
     let hs_ptr = Box::into_raw(hs);
 
     if cstr.is_null() {

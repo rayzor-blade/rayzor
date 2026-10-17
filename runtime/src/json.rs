@@ -579,28 +579,13 @@ fn box_bool(value: bool) -> *mut u8 {
 }
 
 fn box_string(s: &str) -> *mut u8 {
-    let bytes = s.as_bytes().to_vec();
-    let len = bytes.len();
-    let ptr = bytes.as_ptr();
-    std::mem::forget(bytes);
-
-    let sp = Box::into_raw(Box::new(StringPtr { ptr, len })) as *mut u8;
-
-    let dv = DynamicValue {
-        type_id: TYPE_STRING,
-        value_ptr: sp,
-    };
-    Box::into_raw(Box::new(dv)) as *mut u8
+    box_string_from_bytes(s.as_bytes())
 }
 
 /// Box a string from raw bytes — avoids the intermediate Rust String allocation.
+/// The payload is a `HaxeString`, which is what unboxing a String reads.
 fn box_string_from_bytes(bytes: &[u8]) -> *mut u8 {
-    let owned = bytes.to_vec();
-    let len = owned.len();
-    let ptr = owned.as_ptr();
-    std::mem::forget(owned);
-
-    let sp = Box::into_raw(Box::new(StringPtr { ptr, len })) as *mut u8;
+    let sp = crate::haxe_string::boxed_string(bytes.to_vec()) as *mut u8;
 
     let dv = DynamicValue {
         type_id: TYPE_STRING,
@@ -644,7 +629,7 @@ fn alloc_haxe_string(s: &str) -> *mut u8 {
     let cap = bytes.capacity();
     let ptr = bytes.as_ptr() as *mut u8;
     std::mem::forget(bytes);
-    Box::into_raw(Box::new(HaxeString { ptr, len, cap })) as *mut u8
+    Box::into_raw(Box::new(HaxeString::from_parts(ptr, len, cap))) as *mut u8
 }
 
 // ---------------------------------------------------------------------------

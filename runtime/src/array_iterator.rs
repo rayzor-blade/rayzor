@@ -32,11 +32,7 @@ static KV_SHAPE_INIT: Once = Once::new();
 
 /// Create a heap-allocated HaxeString from a Rust &str
 fn str_to_hs(s: &str) -> *mut u8 {
-    let hs = Box::new(HaxeString {
-        ptr: ptr::null_mut(),
-        len: 0,
-        cap: 0,
-    });
+    let hs = Box::new(HaxeString::EMPTY);
     let hs_ptr = Box::into_raw(hs);
     crate::haxe_string::haxe_string_from_bytes(hs_ptr, s.as_ptr(), s.len());
     hs_ptr as *mut u8
@@ -79,7 +75,11 @@ pub extern "C" fn haxe_array_iterator_has_next(iter: *mut u8) -> i32 {
         if iter.array.is_null() {
             return 0;
         }
-        let result = if iter.current < (*iter.array).len { 1 } else { 0 };
+        let result = if iter.current < (*iter.array).len {
+            1
+        } else {
+            0
+        };
         // eprintln!("[DEBUG] has_next returning {}", result);
         result
     }

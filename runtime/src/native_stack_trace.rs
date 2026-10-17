@@ -568,11 +568,7 @@ pub fn make_haxe_string(s: String) -> *mut HaxeString {
         }
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len);
         *ptr.add(len) = 0; // null terminator
-        Box::into_raw(Box::new(HaxeString {
-            ptr,
-            len,
-            cap: len + 1,
-        }))
+        Box::into_raw(Box::new(HaxeString::from_parts(ptr, len, len + 1)))
     }
 }
 

@@ -10,11 +10,7 @@ fn main() {
 
     // Construct HaxeString on the stack
     let mut code_buf = b"int add(int a, int b) { return a + b; }".to_vec();
-    let hs_code = HaxeString {
-        ptr: code_buf.as_mut_ptr(),
-        len: code_buf.len(),
-        cap: code_buf.len(),
-    };
+    let hs_code = HaxeString::from_parts(code_buf.as_mut_ptr(), code_buf.len(), code_buf.len());
 
     println!("Compiling...");
     let ok = rayzor_tcc_compile(state, &hs_code as *const HaxeString);
@@ -25,11 +21,7 @@ fn main() {
     println!("  result: {}", relocated);
 
     let mut name_buf = b"add".to_vec();
-    let hs_name = HaxeString {
-        ptr: name_buf.as_mut_ptr(),
-        len: name_buf.len(),
-        cap: name_buf.len(),
-    };
+    let hs_name = HaxeString::from_parts(name_buf.as_mut_ptr(), name_buf.len(), name_buf.len());
     let sym = rayzor_tcc_get_symbol(state, &hs_name as *const HaxeString);
     println!("  add addr: {}", sym);
 

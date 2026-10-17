@@ -1940,11 +1940,11 @@ pub extern "C" fn haxe_enum_variant_name(
     if let Some(name) = get_enum_variant_name(TypeId(type_id), discriminant) {
         // Create a HaxeString from the static variant name
         // cap=0 indicates static/borrowed string that shouldn't be freed
-        let result = Box::new(HaxeString {
-            ptr: name.as_ptr() as *mut u8,
-            len: name.len(),
-            cap: 0, // Static string, don't free
-        });
+        let result = Box::new(HaxeString::from_parts(
+            name.as_ptr() as *mut u8,
+            name.len(),
+            0,
+        ));
         Box::into_raw(result)
     } else {
         std::ptr::null_mut()
@@ -2970,8 +2970,11 @@ pub extern "C" fn haxe_box_bool(value: bool) -> DynamicValue {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_string(str_ptr: *const u8, len: usize) -> DynamicValue {
     unsafe {
-        let ptr = libc::malloc(std::mem::size_of::<StringPtr>()) as *mut StringPtr;
-        *ptr = StringPtr { ptr: str_ptr, len };
+        // The payload is a `HaxeString`, which is what unboxing a String reads;
+        // cap 0 borrows the bytes.
+        use crate::haxe_string::HaxeString;
+        let ptr = libc::malloc(std::mem::size_of::<HaxeString>()) as *mut HaxeString;
+        ptr.write(HaxeString::from_parts(str_ptr as *mut u8, len, 0));
         DynamicValue {
             type_id: TYPE_STRING,
             value_ptr: ptr as *mut u8,
@@ -3101,11 +3104,11 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
     if dynamic_ptr.is_null() {
         // Return "null" for null pointer
         let s = "null";
-        return Box::into_raw(Box::new(HaxeString {
-            ptr: s.as_ptr() as *mut u8,
-            len: s.len(),
-            cap: 0,
-        }));
+        return Box::into_raw(Box::new(HaxeString::from_parts(
+            s.as_ptr() as *mut u8,
+            s.len(),
+            0,
+        )));
     }
 
     if let Some(type_id) = ENUM_VALUE_TYPES
@@ -3156,11 +3159,11 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
         };
         if let Some(text) = text {
             let leaked = Box::leak(text.into_boxed_str());
-            return Box::into_raw(Box::new(HaxeString {
-                ptr: leaked.as_ptr() as *mut u8,
-                len: leaked.len(),
-                cap: 0,
-            }));
+            return Box::into_raw(Box::new(HaxeString::from_parts(
+                leaked.as_ptr() as *mut u8,
+                leaked.len(),
+                0,
+            )));
         }
     }
 
@@ -3168,11 +3171,11 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
         // Handle null type
         if dynamic.type_id == TYPE_NULL || dynamic.value_ptr.is_null() {
             let s = "null";
-            return Box::into_raw(Box::new(HaxeString {
-                ptr: s.as_ptr() as *mut u8,
-                len: s.len(),
-                cap: 0,
-            }));
+            return Box::into_raw(Box::new(HaxeString::from_parts(
+                s.as_ptr() as *mut u8,
+                s.len(),
+                0,
+            )));
         }
 
         // Look up type info and call toString, then convert to HaxeString
@@ -3189,11 +3192,12 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
                 (type_info.to_string)(dynamic.value_ptr)
             };
             // Convert StringPtr to HaxeString (adding cap=0)
-            Box::into_raw(Box::new(HaxeString {
-                ptr: str_ptr.ptr as *mut u8,
-                len: str_ptr.len,
-                cap: 0, // StringPtr strings are either static or leaked
-            }))
+            // cap=0: StringPtr strings are either static or leaked
+            Box::into_raw(Box::new(HaxeString::from_parts(
+                str_ptr.ptr as *mut u8,
+                str_ptr.len,
+                0,
+            )))
         } else {
             // type_id not recognized — this pointer may be a raw HaxeArray*, not a DynamicValue*.
             // When the compiler passes Array pointers through Std.string(), they arrive unboxed.
@@ -3216,7 +3220,7 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
             let cap = bytes.capacity();
             let ptr = bytes.as_ptr() as *mut u8;
             std::mem::forget(bytes);
-            Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+            Box::into_raw(Box::new(HaxeString::from_parts(ptr, len, cap)))
         }
     }
 }
@@ -5446,11 +5450,8 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
 static RUNTIME_METADATA: RwLock<Option<HashMap<(u32, String), usize>>> = RwLock::new(None);
 
 pub fn register_runtime_metadata(type_id: u32, kind: &str, json: &str) {
-    let string = crate::haxe_string::HaxeString {
-        ptr: json.as_ptr() as *mut u8,
-        len: json.len(),
-        cap: 0,
-    };
+    let string =
+        crate::haxe_string::HaxeString::from_parts(json.as_ptr() as *mut u8, json.len(), 0);
     let value = crate::json::haxe_json_parse(&string as *const _ as *const u8);
     RUNTIME_METADATA
         .write()
@@ -5469,11 +5470,7 @@ fn runtime_metadata(type_id: i64, kind: &str) -> *mut u8 {
         return value as *mut u8;
     }
     let empty = b"{}";
-    let string = crate::haxe_string::HaxeString {
-        ptr: empty.as_ptr() as *mut u8,
-        len: 2,
-        cap: 0,
-    };
+    let string = crate::haxe_string::HaxeString::from_parts(empty.as_ptr() as *mut u8, 2, 0);
     crate::json::haxe_json_parse(&string as *const _ as *const u8)
 }
 #[unsafe(no_mangle)]
@@ -5605,16 +5602,8 @@ mod value_tag_tests {
         );
         let mut a_bytes = b"equal text".to_vec();
         let mut b_bytes = b"equal text".to_vec();
-        let mut a = HaxeString {
-            ptr: a_bytes.as_mut_ptr(),
-            len: a_bytes.len(),
-            cap: a_bytes.capacity(),
-        };
-        let mut b = HaxeString {
-            ptr: b_bytes.as_mut_ptr(),
-            len: b_bytes.len(),
-            cap: b_bytes.capacity(),
-        };
+        let mut a = HaxeString::from_parts(a_bytes.as_mut_ptr(), a_bytes.len(), a_bytes.capacity());
+        let mut b = HaxeString::from_parts(b_bytes.as_mut_ptr(), b_bytes.len(), b_bytes.capacity());
         let left = haxe_adapt_generic_value(&mut a as *mut HaxeString as i64, string, dynamic, 0);
         let right = haxe_adapt_generic_value(&mut b as *mut HaxeString as i64, string, dynamic, 0);
         assert_eq!(

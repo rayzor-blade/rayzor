@@ -22,11 +22,7 @@ pub extern "C" fn rayzor_plugin_string_len(value: *const u8) -> usize {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_plugin_string_new(data: *const u8, len: usize) -> *mut u8 {
-    let out = Box::into_raw(Box::new(HaxeString {
-        ptr: ptr::null_mut(),
-        len: 0,
-        cap: 0,
-    }));
+    let out = Box::into_raw(Box::new(HaxeString::EMPTY));
     crate::haxe_string::haxe_string_from_bytes(out, data, len);
     out.cast()
 }

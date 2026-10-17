@@ -12,7 +12,7 @@
 //! Performance: allocation is O(1) — just a pointer bump + overflow check.
 //! No per-object free, no atomic refcount ops, no fragmentation.
 
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 use std::cell::RefCell;
 use std::ptr;
 
@@ -170,11 +170,7 @@ mod tests {
 
     #[test]
     fn test_arena_alloc_haxe_string() {
-        let hs = HaxeString {
-            ptr: ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        };
+        let hs = HaxeString::EMPTY;
         let p = arena_alloc_haxe_string(hs);
         assert!(!p.is_null());
         unsafe {
@@ -196,11 +192,7 @@ mod tests {
     fn test_arena_alignment() {
         // HaxeString needs 8-byte alignment
         for _ in 0..100 {
-            let p = arena_alloc_haxe_string(HaxeString {
-                ptr: ptr::null_mut(),
-                len: 42,
-                cap: 0,
-            });
+            let p = arena_alloc_haxe_string(HaxeString::from_parts(ptr::null_mut(), 42, 0));
             assert_eq!((p as usize) % 8, 0, "HaxeString not 8-byte aligned");
             unsafe {
                 assert_eq!((*p).len, 42);
