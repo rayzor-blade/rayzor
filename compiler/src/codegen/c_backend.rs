@@ -592,6 +592,7 @@ impl CBackend {
             | IrInstruction::CreateStruct { ty, .. }
             | IrInstruction::PtrAdd { ty, .. }
             | IrInstruction::Undef { ty, .. } => ty.clone(),
+            IrInstruction::ArrayHeader { field, .. } => field.ir_type(),
             IrInstruction::Cast { to_ty, .. } => to_ty.clone(),
             IrInstruction::Cmp { .. } => IrType::Bool,
             IrInstruction::VectorLoad { vec_ty, .. }
@@ -970,6 +971,18 @@ impl CBackend {
                     dest_c,
                     ptr.as_u32(),
                     offset.as_u32()
+                ));
+            }
+
+            IrInstruction::ArrayHeader { dest, array, field } => {
+                // A null array reads a zeroed header.
+                let dest_c = Self::type_to_c(&field.ir_type());
+                self.emit_line(&format!(
+                    "r{d} = ({c})(r{a} ? *(int64_t*)((char*)r{a} + {off}) : 0);",
+                    d = dest.as_u32(),
+                    c = dest_c,
+                    a = array.as_u32(),
+                    off = field.byte_offset()
                 ));
             }
 

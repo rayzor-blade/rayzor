@@ -4,7 +4,7 @@ use super::*;
 use crate::ir::drop_analysis::{DropBehavior, DropPointAnalyzer, DropPoints};
 use crate::ir::hir::*;
 use crate::ir::{
-    BinaryOp, CallingConvention, CompareOp, EnvironmentLayout, FunctionKind,
+    ArrayField, BinaryOp, CallingConvention, CompareOp, EnvironmentLayout, FunctionKind,
     FunctionSignatureBuilder, IrBasicBlock, IrBlockId, IrBuilder, IrEnumVariant, IrField,
     IrFunction, IrFunctionId, IrFunctionSignature, IrGlobal, IrGlobalId, IrId, IrInstruction,
     IrLocal, IrModule, IrParameter, IrPhiNode, IrSourceLocation, IrTerminator, IrType, IrTypeDef,
@@ -1286,15 +1286,11 @@ impl<'a> HirToMirContext<'a> {
         set_fn: IrFunctionId,
         element_ty: Option<TypeId>,
     ) {
-        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        // Header reads never fault; a null array is reported on the slow path.
         let in_bounds = (|| {
-            let len_off = self.builder.build_const(IrValue::I64(8))?;
-            let len_ptr = self.builder.build_ptr_add(obj, len_off, ptr_u8.clone())?;
-            let len = self.builder.build_load(len_ptr, IrType::I64)?;
+            let len = self.builder.build_array_header(obj, ArrayField::Len)?;
             let below_len = self.builder.build_cmp(CompareOp::ULt, idx64, len)?;
-            let flags_off = self.builder.build_const(IrValue::I64(32))?;
-            let flags_ptr = self.builder.build_ptr_add(obj, flags_off, ptr_u8.clone())?;
-            let flags = self.builder.build_load(flags_ptr, IrType::I64)?;
+            let flags = self.builder.build_array_header(obj, ArrayField::Flags)?;
             let zero = self.builder.build_const(IrValue::I64(0))?;
             let plain = self.builder.build_cmp(CompareOp::Eq, flags, zero)?;
             self.builder.build_binop(BinaryOp::And, below_len, plain)
@@ -1312,7 +1308,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_cond_branch(in_bounds, fast, slow);
 
         self.builder.switch_to_block(fast);
-        if let Some(data) = self.builder.build_load(obj, ptr_u8) {
+        if let Some(data) = self.builder.build_array_header(obj, ArrayField::Data) {
             if let Some(slot) = self.builder.build_gep(data, vec![idx64], slot_type) {
                 self.builder.build_store(slot, value);
             }
@@ -1320,6 +1316,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_branch(merge);
 
         self.builder.switch_to_block(slow);
+        let _ = self.build_null_array_check(obj);
         let descriptor = element_ty.and_then(|ty| self.array_element_descriptor(ty));
         if let Some((tag, metadata)) = descriptor {
             let bits = self.coerce_reg_to(value, &IrType::I64).unwrap_or(value);

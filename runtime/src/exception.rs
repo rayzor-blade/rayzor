@@ -203,6 +203,18 @@ pub(crate) fn has_handler() -> bool {
 
 /// Throw an exception with a string message (used by panic guard).
 /// Creates a HaxeString, boxes it as DynamicValue, and throws as TYPE_STRING.
+/// A null array reached by compiled code that reads its header without
+/// faulting: the outcome of the fault it replaces, a `Null Object Reference`
+/// throw inside a `try` and a fatal crash outside one.
+#[unsafe(no_mangle)]
+pub extern "C" fn rayzor_null_access() {
+    if has_handler() {
+        throw_with_message("Null Object Reference".to_string());
+    }
+    eprintln!("rayzor: null object reference");
+    std::process::abort();
+}
+
 pub fn throw_with_message(msg: String) -> ! {
     let haxe_str = crate::native_stack_trace::make_haxe_string(msg);
     let boxed = crate::type_system::haxe_box_reference_ptr(haxe_str as *mut u8, 5); // TYPE_STRING = TypeId(5)

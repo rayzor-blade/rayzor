@@ -32,6 +32,7 @@ pub mod insert_free; // Insert Free instructions for non-escaping allocations
 pub mod instructions;
 pub mod loop_analysis; // Loop analysis: dominators, natural loops, nesting
 pub mod loop_unrolling; // Loop unrolling for constant-trip-count loops
+pub mod loop_unswitch; // Loop copies specialised on an invariant branch
 pub mod lowering; // Legacy TAST to MIR (being phased out)
 pub mod mir_builder; // Programmatic MIR construction API
 pub mod modules;

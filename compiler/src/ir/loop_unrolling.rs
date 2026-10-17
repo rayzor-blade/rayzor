@@ -767,6 +767,11 @@ fn remap_instruction(
             offset: map_use(*offset, reg_map),
             ty: ty.clone(),
         },
+        IrInstruction::ArrayHeader { dest, array, field } => IrInstruction::ArrayHeader {
+            dest: alloc_new(*dest, next_reg, reg_map, register_types),
+            array: map_use(*array, reg_map),
+            field: *field,
+        },
         IrInstruction::Cmp {
             dest,
             op,
@@ -822,6 +827,7 @@ fn is_remappable(inst: &IrInstruction) -> bool {
             | IrInstruction::Cast { .. }
             | IrInstruction::BitCast { .. }
             | IrInstruction::PtrAdd { .. }
+            | IrInstruction::ArrayHeader { .. }
             | IrInstruction::Cmp { .. }
             | IrInstruction::FunctionRef { .. }
             | IrInstruction::LoadGlobal { .. }

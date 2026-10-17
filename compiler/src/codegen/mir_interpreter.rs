@@ -557,8 +557,9 @@ pub enum Opcode {
     VectorShuffle = 64,
     VectorConvert = 65,
     VectorNarrow = 66,
+    ArrayHeader = 67,
     // Sentinel for table size
-    _Count = 67,
+    _Count = 68,
 }
 
 impl Opcode {
@@ -637,6 +638,7 @@ impl Opcode {
             IrInstruction::AtomicStore { .. } => Opcode::AtomicStore,
             IrInstruction::AtomicRmw { .. } => Opcode::AtomicRmw,
             IrInstruction::AtomicCas { .. } => Opcode::AtomicCas,
+            IrInstruction::ArrayHeader { .. } => Opcode::ArrayHeader,
         }
     }
 }
@@ -1521,6 +1523,27 @@ impl MirInterpreter {
                 self.current_frame_mut()
                     .registers
                     .set(*dest, NanBoxedValue::from_ptr(base_ptr + offset));
+            }
+
+            IrInstruction::ArrayHeader { dest, array, field } => {
+                let array_val = self.current_frame().registers.get(*array);
+                let base = if array_val.is_ptr() {
+                    array_val.as_ptr()
+                } else {
+                    InterpValue::from_nan_boxed(array_val, &self.object_heap).to_usize()?
+                };
+                // A null array reads a zeroed header.
+                let result = if base == 0 {
+                    match field {
+                        crate::ir::ArrayField::Data => InterpValue::Ptr(0),
+                        _ => InterpValue::I64(0),
+                    }
+                } else {
+                    let word = InterpValue::Ptr(base + field.byte_offset() as usize);
+                    self.load_from_ptr(word, &field.ir_type())?
+                };
+                let boxed = result.to_nan_boxed(&mut self.object_heap);
+                self.current_frame_mut().registers.set(*dest, boxed);
             }
 
             IrInstruction::PtrAdd {

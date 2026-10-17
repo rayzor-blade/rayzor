@@ -539,6 +539,45 @@ pub enum IrInstruction {
         src_ty: IrType,
         result_ty: IrType,
     },
+
+    /// Read one word of a `HaxeArray` header. Reads 0 when `array` is null, so
+    /// it never faults and passes may hoist or reuse it; only a call that can
+    /// resize an array (see `ArrayField`) changes what it reads.
+    ArrayHeader {
+        dest: IrId,
+        array: IrId,
+        field: ArrayField,
+    },
+}
+
+/// A word of the `HaxeArray` header `{ ptr@0, len@8, cap@16, elem_size@24,
+/// flags@32 }` that compiled code reads inline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ArrayField {
+    /// The element buffer.
+    Data,
+    /// The element count.
+    Len,
+    /// Nonzero for arrays whose elements compiled code may not touch inline.
+    Flags,
+}
+
+impl ArrayField {
+    pub fn byte_offset(self) -> i64 {
+        match self {
+            ArrayField::Data => 0,
+            ArrayField::Len => 8,
+            ArrayField::Flags => 32,
+        }
+    }
+
+    /// The register type of the word read.
+    pub fn ir_type(self) -> IrType {
+        match self {
+            ArrayField::Data => IrType::Ptr(Box::new(IrType::U8)),
+            ArrayField::Len | ArrayField::Flags => IrType::I64,
+        }
+    }
 }
 
 /// Binary operations
@@ -702,6 +741,7 @@ impl IrInstruction {
             IrInstruction::ExtractUnionValue { dest, .. } |
             IrInstruction::CreateStruct { dest, .. } |
             IrInstruction::PtrAdd { dest, .. } |
+            IrInstruction::ArrayHeader { dest, .. } |
             IrInstruction::Undef { dest, .. } |
             IrInstruction::FunctionRef { dest, .. } |
             // Vector instructions
@@ -764,6 +804,7 @@ impl IrInstruction {
             | IrInstruction::ExtractUnionValue { dest, .. }
             | IrInstruction::CreateStruct { dest, .. }
             | IrInstruction::PtrAdd { dest, .. }
+            | IrInstruction::ArrayHeader { dest, .. }
             | IrInstruction::Undef { dest, .. }
             | IrInstruction::FunctionRef { dest, .. }
             | IrInstruction::VectorLoad { dest, .. }
@@ -883,6 +924,7 @@ impl IrInstruction {
             IrInstruction::CreateStruct { fields, .. } => fields.clone(),
             // Pointer arithmetic
             IrInstruction::PtrAdd { ptr, offset, .. } => vec![*ptr, *offset],
+            IrInstruction::ArrayHeader { array, .. } => vec![*array],
             // Global variable access
             IrInstruction::LoadGlobal { .. } => vec![], // No register uses, just global_id
             IrInstruction::StoreGlobal { value, .. } => vec![*value],

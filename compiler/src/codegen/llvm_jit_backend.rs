@@ -5310,6 +5310,61 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 self.value_map.insert(*dest, result.into());
             }
 
+            IrInstruction::ArrayHeader { dest, array, field } => {
+                let raw = self.get_value(*array)?;
+                let array_ptr = if raw.is_int_value() {
+                    self.address_as_pointer(*array, raw.into_int_value(), "array")?
+                } else {
+                    raw.into_pointer_value()
+                };
+                // A null array reads a zeroed header, so the read never faults.
+                let i64_type = self.context.i64_type();
+                let empty = match self.module.get_global("rayzor_empty_array_header") {
+                    Some(global) => global,
+                    None => {
+                        let header_ty = i64_type.array_type(5);
+                        let global =
+                            self.module
+                                .add_global(header_ty, None, "rayzor_empty_array_header");
+                        global.set_linkage(inkwell::module::Linkage::Private);
+                        global.set_constant(true);
+                        global.set_initializer(&header_ty.const_zero());
+                        global.set_alignment(8);
+                        global
+                    }
+                };
+                let is_null = self
+                    .builder
+                    .build_is_null(array_ptr, "array_is_null")
+                    .map_err(|e| format!("ArrayHeader null test: {}", e))?;
+                let base = self
+                    .builder
+                    .build_select(is_null, empty.as_pointer_value(), array_ptr, "array_hdr")
+                    .map_err(|e| format!("ArrayHeader select: {}", e))?
+                    .into_pointer_value();
+                let word = unsafe {
+                    self.builder
+                        .build_gep(
+                            self.context.i8_type(),
+                            base,
+                            &[i64_type.const_int(field.byte_offset() as u64, false)],
+                            "array_hdr_word",
+                        )
+                        .map_err(|e| format!("ArrayHeader gep: {}", e))?
+                };
+                let word_ty: inkwell::types::BasicTypeEnum = match field {
+                    crate::ir::ArrayField::Data => {
+                        self.context.ptr_type(AddressSpace::default()).into()
+                    }
+                    _ => i64_type.into(),
+                };
+                let loaded = self
+                    .builder
+                    .build_load(word_ty, word, &format!("array_hdr_{}", dest.as_u32()))
+                    .map_err(|e| format!("ArrayHeader load: {}", e))?;
+                self.value_map.insert(*dest, loaded);
+            }
+
             // Special values
             IrInstruction::Undef { dest, ty } => {
                 // Handle void undef with placeholder

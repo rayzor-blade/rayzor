@@ -2141,6 +2141,9 @@ fn alias_closure(
                     IrInstruction::Load { dest, ptr, .. } if through_loads => {
                         set.contains(ptr).then_some(*dest)
                     }
+                    IrInstruction::ArrayHeader { dest, array, .. } if through_loads => {
+                        set.contains(array).then_some(*dest)
+                    }
                     IrInstruction::CallDirect {
                         dest: Some(d),
                         func_id,
@@ -2193,6 +2196,9 @@ fn read_out_closure(
         for inst in &block.instructions {
             match inst {
                 IrInstruction::Load { dest, ptr, .. } if derived.contains(ptr) => {
+                    seed.insert(*dest);
+                }
+                IrInstruction::ArrayHeader { dest, array, .. } if derived.contains(array) => {
                     seed.insert(*dest);
                 }
                 // An accessor hands back a child without ever emitting a Load
@@ -2405,6 +2411,7 @@ fn param_to_field_map(
                     // from the parameter to the store; anything else is a use
                     // this walk has not accounted for.
                     IrInstruction::Load { .. }
+                    | IrInstruction::ArrayHeader { .. }
                     | IrInstruction::GetElementPtr { .. }
                     | IrInstruction::PtrAdd { .. }
                     | IrInstruction::Cast { .. }
@@ -3156,6 +3163,7 @@ fn pointer_escapes_ex(
                 // already folded into `derived`. Releasing it is what a Free
                 // does, not an escape.
                 IrInstruction::Load { .. }
+                | IrInstruction::ArrayHeader { .. }
                 | IrInstruction::GetElementPtr { .. }
                 | IrInstruction::PtrAdd { .. }
                 | IrInstruction::Cast { .. }
@@ -3479,6 +3487,7 @@ fn param_leaks_children(
         for inst in &block.instructions {
             match inst {
                 IrInstruction::Load { .. }
+                | IrInstruction::ArrayHeader { .. }
                 | IrInstruction::GetElementPtr { .. }
                 | IrInstruction::PtrAdd { .. }
                 | IrInstruction::Cast { .. }
@@ -3730,6 +3739,11 @@ fn param_retained(
                 // object can ever be handed to a field.
                 IrInstruction::Load { dest, ptr, .. }
                     if in_set(ptr) && reads_of(*dest, function) > 0 =>
+                {
+                    return true;
+                }
+                IrInstruction::ArrayHeader { dest, array, .. }
+                    if in_set(array) && reads_of(*dest, function) > 0 =>
                 {
                     return true;
                 }
@@ -4074,7 +4088,7 @@ fn classify_escape_owner(
                 | IrInstruction::Select { .. } => {}
 
                 // Reads of / through x are not escapes.
-                IrInstruction::Load { .. } => {}
+                IrInstruction::Load { .. } | IrInstruction::ArrayHeader { .. } => {}
                 IrInstruction::Cmp { .. } | IrInstruction::BinOp { .. } => {}
 
                 IrInstruction::Store { ptr, value, .. } => {
@@ -4251,6 +4265,7 @@ fn owner_loads_confined(
         for inst in &block.instructions {
             match inst {
                 IrInstruction::Load { .. }
+                | IrInstruction::ArrayHeader { .. }
                 | IrInstruction::GetElementPtr { .. }
                 | IrInstruction::PtrAdd { .. }
                 | IrInstruction::Cast { .. }

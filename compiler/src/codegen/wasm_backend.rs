@@ -2265,6 +2265,10 @@ impl<'a> FunctionLowerer<'a> {
                             .and_then(|d| self.ir_func.register_types.get(&d))
                             .map(|t| ir_type_to_wasm(t)),
 
+                        IrInstruction::ArrayHeader { field, .. } => {
+                            Some(ir_type_to_wasm(&field.ir_type()))
+                        }
+
                         // GEP, PtrAdd, Alloc: always i32 (pointer)
                         IrInstruction::GetElementPtr { .. }
                         | IrInstruction::PtrAdd { .. }
@@ -4193,6 +4197,33 @@ impl<'a> FunctionLowerer<'a> {
                     }
                     f.instruction(&Instruction::I32Add);
                 }
+                self.set_reg(f, *dest);
+            }
+
+            // === ArrayHeader: 0 for a null array, else the header word ===
+            IrInstruction::ArrayHeader { dest, array, field } => {
+                let word_ty = ir_type_to_wasm(&field.ir_type());
+                let ma = MemArg {
+                    offset: field.byte_offset() as u64,
+                    align: 0,
+                    memory_index: 0,
+                };
+                self.get_reg(f, *array);
+                f.instruction(&Instruction::I32Eqz);
+                f.instruction(&Instruction::If(BlockType::Result(word_ty)));
+                if word_ty == ValType::I64 {
+                    f.instruction(&Instruction::I64Const(0));
+                } else {
+                    f.instruction(&Instruction::I32Const(0));
+                }
+                f.instruction(&Instruction::Else);
+                self.get_reg(f, *array);
+                if word_ty == ValType::I64 {
+                    f.instruction(&Instruction::I64Load(ma));
+                } else {
+                    f.instruction(&Instruction::I32Load(ma));
+                }
+                f.instruction(&Instruction::End);
                 self.set_reg(f, *dest);
             }
 

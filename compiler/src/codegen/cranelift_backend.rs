@@ -157,6 +157,26 @@ fn jit_reloc_debug_enabled() -> bool {
     std::env::var_os("RAYZOR_JIT_RELOC_DEBUG").is_some()
 }
 
+/// `RAYZOR_PERF_MAP=1` writes `/tmp/perf-<pid>.map`, which `perf report`
+/// reads to name JIT code. Safe to run with; off by default.
+pub(crate) fn perf_map_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RAYZOR_PERF_MAP").is_some_and(|v| v == "1"))
+}
+
+/// Append `start size name` lines to this process's perf map.
+pub(crate) fn append_perf_map(lines: &str) {
+    use std::io::Write;
+    let path = format!("/tmp/perf-{}.map", std::process::id());
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = f.write_all(lines.as_bytes());
+    }
+}
+
 impl CraneliftBackend {
     /// Whether a generic function's body still depends on its type parameters.
     fn references_type_params(function: &IrFunction) -> bool {
@@ -1286,6 +1306,7 @@ impl CraneliftBackend {
     /// repeated calls (tier-up's per-function finalise path) only emit new
     /// rows.
     fn maybe_dump_jit_symbols(&mut self) {
+        let mut perf_lines = String::new();
         for &fid in &self.defined_functions {
             let addr = self.module.get_finalized_function(fid) as usize;
             if self.crash_registered.get(&fid) != Some(&addr) {
@@ -1295,8 +1316,14 @@ impl CraneliftBackend {
                 ) {
                     rayzor_runtime::crash_diagnostics::register_code(addr, *size, name);
                     self.crash_registered.insert(fid, addr);
+                    if perf_map_enabled() {
+                        perf_lines.push_str(&format!("{addr:x} {size:x} cl:{name}\n"));
+                    }
                 }
             }
+        }
+        if !perf_lines.is_empty() {
+            append_perf_map(&perf_lines);
         }
         if std::env::var_os("RAYZOR_DUMP_JIT_MAP").as_deref() != Some(std::ffi::OsStr::new("1")) {
             return;
@@ -2557,6 +2584,10 @@ impl CraneliftBackend {
                 self.ctx.func.display()
             );
         }
+        // `asm` prints the machine code Cranelift emits for the function.
+        if dump_matches && dump_stage == "asm" {
+            self.ctx.set_disasm(true);
+        }
         // Refusing malformed CLIF costs more than it saves in release: several
         // functions the verifier rejects lower and run correctly today, and a
         // stub in their place aborts the program. Debug builds still reject,
@@ -2604,6 +2635,14 @@ impl CraneliftBackend {
         // elaboration dump above; default `both` shows both, matched
         // by RAYZOR_DUMP_CLIF substring. See the rationale at the
         // pre-dump site for why two dumps matter.
+        if dump_matches && dump_stage == "asm" {
+            if let Some(asm) = self.ctx.compiled_code().and_then(|c| c.vcode.as_ref()) {
+                eprintln!(
+                    "\n=== ASM for {} (mir={:?}, cl={:?}) ===\n{}\n=== /ASM ===\n",
+                    function.name, mir_func_id, func_id, asm
+                );
+            }
+        }
         if dump_matches && (dump_stage == "post" || dump_stage == "both") {
             eprintln!(
                 "\n=== CLIF[post-elaboration] for {} (mir={:?}, cl={:?}) ===\n{}\n=== /CLIF[post] ===\n",
@@ -4787,6 +4826,39 @@ impl CraneliftBackend {
                 // Add to pointer
                 let result_ptr = builder.ins().iadd(ptr_val, byte_offset);
                 value_map.insert(*dest, result_ptr);
+            }
+
+            IrInstruction::ArrayHeader { dest, array, field } => {
+                let array_val = *value_map
+                    .get(array)
+                    .ok_or_else(|| format!("ArrayHeader array {:?} not found", array))?;
+                // A null array reads a zeroed header, so the read never faults.
+                let key = "\0rayzor_empty_array_header".to_string();
+                let data_id = if let Some(&id) = string_data.get(&key) {
+                    id
+                } else {
+                    let id = module
+                        .declare_data("rayzor_empty_array_header", Linkage::Local, false, false)
+                        .map_err(|e| format!("Failed to declare the empty array header: {}", e))?;
+                    let mut desc = DataDescription::new();
+                    desc.define_zeroinit(40);
+                    desc.set_align(8);
+                    module
+                        .define_data(id, &desc)
+                        .map_err(|e| format!("Failed to define the empty array header: {}", e))?;
+                    string_data.insert(key, id);
+                    id
+                };
+                let gv = module.declare_data_in_func(data_id, builder.func);
+                let empty = builder.ins().symbol_value(types::I64, gv);
+                let base = builder.ins().select(array_val, array_val, empty);
+                let value = builder.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    base,
+                    field.byte_offset() as i32,
+                );
+                value_map.insert(*dest, value);
             }
 
             IrInstruction::Free { ptr } => {

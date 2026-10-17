@@ -2213,6 +2213,7 @@ register_symbol!(
     crate::exception::rayzor_exception_pop_handler
 );
 register_symbol!("rayzor_throw", crate::exception::rayzor_throw);
+register_symbol!("rayzor_null_access", crate::exception::rayzor_null_access);
 register_symbol!("rayzor_throw_typed", crate::exception::rayzor_throw_typed);
 register_symbol!(
     "rayzor_get_exception",

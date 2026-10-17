@@ -4,7 +4,7 @@ use super::*;
 use crate::ir::drop_analysis::{DropBehavior, DropPointAnalyzer, DropPoints};
 use crate::ir::hir::*;
 use crate::ir::{
-    BinaryOp, CallingConvention, CompareOp, EnvironmentLayout, FunctionKind,
+    ArrayField, BinaryOp, CallingConvention, CompareOp, EnvironmentLayout, FunctionKind,
     FunctionSignatureBuilder, IrBasicBlock, IrBlockId, IrBuilder, IrEnumVariant, IrField,
     IrFunction, IrFunctionId, IrFunctionSignature, IrGlobal, IrGlobalId, IrId, IrInstruction,
     IrLocal, IrModule, IrParameter, IrPhiNode, IrSourceLocation, IrTerminator, IrType, IrTypeDef,
@@ -1416,9 +1416,9 @@ impl<'a> HirToMirContext<'a> {
             Some(from) => self.builder.build_cast(idx, from, IrType::I64)?,
             None => idx,
         };
-        let len_off = self.builder.build_const(IrValue::I64(8))?;
-        let len_ptr = self.builder.build_ptr_add(obj, len_off, ptr_u8.clone())?;
-        let len = self.builder.build_load(len_ptr, IrType::I64)?;
+        // Header reads never fault (a null array reads as empty), so passes
+        // may hoist them; a null array is reported on the out-of-bounds path.
+        let len = self.builder.build_array_header(obj, ArrayField::Len)?;
         let in_bounds = self.builder.build_cmp(CompareOp::ULt, idx64, len)?;
 
         // Slots are always 8 bytes, so load the storage type and narrow after
@@ -1464,16 +1464,19 @@ impl<'a> HirToMirContext<'a> {
             _ => self.builder.build_const(IrValue::I64(0))?,
         };
         let (tag, _) = self.array_element_descriptor(ty)?;
-        let check_block = self.builder.current_block()?;
         let read_block = self.builder.create_block()?;
+        let out_of_bounds = self.builder.create_block()?;
         let merge = self.builder.create_block()?;
         self.builder
-            .build_cond_branch(in_bounds, read_block, merge)?;
+            .build_cond_branch(in_bounds, read_block, out_of_bounds)?;
+
+        self.builder.switch_to_block(out_of_bounds);
+        self.build_null_array_check(obj)?;
+        let oob_exit = self.builder.current_block()?;
+        self.builder.build_branch(merge)?;
 
         self.builder.switch_to_block(read_block);
-        let flags_off = self.builder.build_const(IrValue::I64(32))?;
-        let flags_ptr = self.builder.build_ptr_add(obj, flags_off, ptr_u8.clone())?;
-        let flags = self.builder.build_load(flags_ptr, IrType::I64)?;
+        let flags = self.builder.build_array_header(obj, ArrayField::Flags)?;
         let zero_flags = self.builder.build_const(IrValue::I64(0))?;
         let plain = self.builder.build_cmp(CompareOp::Eq, flags, zero_flags)?;
         let fast_block = self.builder.create_block()?;
@@ -1481,7 +1484,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder
             .build_cond_branch(plain, fast_block, slow_block)?;
         self.builder.switch_to_block(fast_block);
-        let data_ptr = self.builder.build_load(obj, ptr_u8.clone())?;
+        let data_ptr = self.builder.build_array_header(obj, ArrayField::Data)?;
         let elem_ptr = self.builder.build_gep(data_ptr, vec![idx64], IrType::I64)?;
         let loaded = self.builder.build_load(elem_ptr, load_type.clone())?;
         self.builder.build_branch(merge)?;
@@ -1512,7 +1515,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder
             .add_phi_incoming(merge, value, slow_block, converted)?;
         self.builder
-            .add_phi_incoming(merge, value, check_block, zero)?;
+            .add_phi_incoming(merge, value, oob_exit, zero)?;
 
         let semantic_type = self.convert_type_or_type_var(ty, &self.current_type_param_names());
         if matches!(semantic_type, IrType::TypeVar(_)) {
@@ -1527,6 +1530,24 @@ impl<'a> HirToMirContext<'a> {
             self.boxed_value_regs.insert(value);
         }
         Some(value)
+    }
+
+    /// On a path that reached an array's out-of-bounds case: raise the
+    /// null access when the array itself is null, as dereferencing it would.
+    /// Leaves the builder in the block where the non-null case continues.
+    pub(crate) fn build_null_array_check(&mut self, array: IrId) -> Option<()> {
+        let null = self.builder.build_const(IrValue::I64(0))?;
+        let is_null = self.builder.build_cmp(CompareOp::Eq, array, null)?;
+        let null_block = self.builder.create_block()?;
+        let rest = self.builder.create_block()?;
+        self.builder.build_cond_branch(is_null, null_block, rest)?;
+        self.builder.switch_to_block(null_block);
+        let raise =
+            self.get_or_register_extern_function("rayzor_null_access", vec![], IrType::Void);
+        self.builder.build_call_direct(raise, vec![], IrType::Void);
+        self.builder.build_branch(rest)?;
+        self.builder.switch_to_block(rest);
+        Some(())
     }
 
     pub(crate) fn lower_field_expr(&mut self, expr: &HirExpr) -> Option<IrId> {

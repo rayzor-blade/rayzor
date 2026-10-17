@@ -233,6 +233,9 @@ pub fn dump_instruction(inst: &IrInstruction) -> String {
                 idx_str.join(", ")
             )
         }
+        IrInstruction::ArrayHeader { dest, array, field } => {
+            format!("{} = array_header {:?} {}", dest, field, array)
+        }
         IrInstruction::PtrAdd {
             dest,
             ptr,

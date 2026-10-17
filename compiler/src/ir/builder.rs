@@ -1000,6 +1000,14 @@ impl IrBuilder {
         Some(dest)
     }
 
+    /// Read one word of the `HaxeArray` header of `array`; 0 when it is null.
+    pub fn build_array_header(&mut self, array: IrId, field: super::ArrayField) -> Option<IrId> {
+        let dest = self.alloc_reg()?;
+        self.set_register_type(dest, field.ir_type());
+        self.add_instruction(IrInstruction::ArrayHeader { dest, array, field })?;
+        Some(dest)
+    }
+
     /// Build a function reference (get a function pointer)
     pub fn build_function_ref(&mut self, func_id: super::IrFunctionId) -> Option<IrId> {
         let dest = self.alloc_reg()?;

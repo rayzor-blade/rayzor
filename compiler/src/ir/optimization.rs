@@ -817,6 +817,7 @@ impl InstructionExt for IrInstruction {
                 replace(ptr);
                 replace(offset);
             }
+            IrInstruction::ArrayHeader { array, .. } => replace(array),
             IrInstruction::MakeClosure {
                 captured_values, ..
             } => {
@@ -968,6 +969,30 @@ struct LoopClobbers {
     any_call: bool,
     any_store: bool,
     stored_globals: BTreeSet<IrGlobalId>,
+    /// A call that may resize an array, changing what an `ArrayHeader` reads.
+    /// Stores cannot: compiled code writes a header only while building a
+    /// new array, whose pointer is defined inside the loop.
+    resizes_arrays: bool,
+}
+
+/// Runtime functions a loop may call without changing any array's header:
+/// the element read behind `a[i]` and the null-array report.
+const PRESERVES_ARRAY_HEADERS: &[&str] = &["haxe_array_get_typed", "rayzor_null_access"];
+
+/// The functions of `module` whose calls change no array header.
+pub(super) fn header_preserving_functions(module: &IrModule) -> BTreeSet<IrFunctionId> {
+    let named = |name: &str| PRESERVES_ARRAY_HEADERS.contains(&name);
+    let externs = module
+        .extern_functions
+        .iter()
+        .filter(|(_, f)| named(&f.name))
+        .map(|(id, _)| *id);
+    let declarations = module
+        .functions
+        .iter()
+        .filter(|(_, f)| f.cfg.blocks.is_empty() && named(&f.name))
+        .map(|(id, _)| *id);
+    externs.chain(declarations).collect()
 }
 
 impl LICMPass {
@@ -977,6 +1002,7 @@ impl LICMPass {
     fn loop_clobbers(
         cfg: &super::IrControlFlowGraph,
         loop_blocks: &BTreeSet<IrBlockId>,
+        preserves_headers: &BTreeSet<IrFunctionId>,
     ) -> LoopClobbers {
         let mut c = LoopClobbers::default();
         for &block_id in loop_blocks {
@@ -985,8 +1011,15 @@ impl LICMPass {
             };
             for inst in &block.instructions {
                 match inst {
-                    IrInstruction::CallDirect { .. } | IrInstruction::CallIndirect { .. } => {
+                    IrInstruction::CallDirect { func_id, .. } => {
                         c.any_call = true;
+                        if !preserves_headers.contains(func_id) {
+                            c.resizes_arrays = true;
+                        }
+                    }
+                    IrInstruction::CallIndirect { .. } => {
+                        c.any_call = true;
+                        c.resizes_arrays = true;
                     }
                     IrInstruction::StoreGlobal { global_id, .. } => {
                         c.stored_globals.insert(*global_id);
@@ -1033,6 +1066,11 @@ impl LICMPass {
                     return false;
                 }
             }
+            IrInstruction::ArrayHeader { .. } => {
+                if clobbers.resizes_arrays {
+                    return false;
+                }
+            }
             _ => {}
         }
 
@@ -1055,6 +1093,31 @@ impl LICMPass {
         loop_info: &super::loop_analysis::NaturalLoop,
         domtree: &super::loop_analysis::DominatorTree,
     ) -> bool {
+        // These never fault and write nothing, so they may run where the loop
+        // would not: a header read, and arithmetic that cannot trap. A cast is
+        // left out (float-to-int conversion traps on some backends), and so is
+        // a constant: a backend rebuilds one where it is used, and hoisting it
+        // only keeps a register busy across the loop.
+        match inst {
+            IrInstruction::ArrayHeader { .. }
+            | IrInstruction::Copy { .. }
+            | IrInstruction::Cmp { .. }
+            | IrInstruction::UnOp { .. }
+            | IrInstruction::BitCast { .. }
+            | IrInstruction::Select { .. }
+            | IrInstruction::PtrAdd { .. }
+            | IrInstruction::GetElementPtr { .. } => return true,
+            IrInstruction::BinOp { op, .. }
+                if !matches!(
+                    op,
+                    BinaryOp::Div | BinaryOp::Rem | BinaryOp::FDiv | BinaryOp::FRem
+                ) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+
         // Must dominate all exit blocks
         for &exit in &loop_info.exit_blocks {
             if !domtree.dominates(inst_block, exit) {
@@ -1165,6 +1228,7 @@ impl OptimizationPass for LICMPass {
         use super::loop_analysis::{DominatorTree, LoopNestInfo};
 
         let mut result = OptimizationResult::unchanged();
+        let preserves_headers = header_preserving_functions(module);
 
         for function in module.functions.values_mut() {
             let domtree = DominatorTree::compute(function);
@@ -1189,7 +1253,8 @@ impl OptimizationPass for LICMPass {
 
             // Process loops from innermost to outermost
             for loop_data in loop_info.loops_innermost_first() {
-                let clobbers = Self::loop_clobbers(&function.cfg, &loop_data.blocks);
+                let clobbers =
+                    Self::loop_clobbers(&function.cfg, &loop_data.blocks, &preserves_headers);
                 let mut invariant_defs: BTreeSet<IrId> = BTreeSet::new();
                 let mut to_hoist: Vec<(IrBlockId, usize, IrInstruction)> = Vec::new();
 
@@ -2109,6 +2174,8 @@ impl PassManager {
                 manager.add_pass(GVNPass::new());
                 manager.add_pass(CSEPass::new());
                 manager.add_pass(LICMPass::new());
+                // After LICM, whose hoisting makes the conditions invariant.
+                manager.add_pass(super::loop_unswitch::LoopUnswitchPass::new());
                 // Loop unrolling after LICM (invariants hoisted, trip counts visible)
                 manager.add_pass(super::loop_unrolling::LoopUnrollingPass::new());
                 // Before ControlFlowSimplification -- see the O3 note.
@@ -2136,6 +2203,8 @@ impl PassManager {
                 manager.add_pass(GVNPass::new());
                 manager.add_pass(CSEPass::new());
                 manager.add_pass(LICMPass::new());
+                // After LICM, whose hoisting makes the conditions invariant.
+                manager.add_pass(super::loop_unswitch::LoopUnswitchPass::new());
                 // Loop unrolling after LICM
                 manager.add_pass(super::loop_unrolling::LoopUnrollingPass::new());
                 // Vectorize before control flow simplification: running it
