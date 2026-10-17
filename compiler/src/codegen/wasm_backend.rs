@@ -4200,8 +4200,11 @@ impl<'a> FunctionLowerer<'a> {
                 self.set_reg(f, *dest);
             }
 
-            // === ArrayHeader: 0 for a null array, else the header word ===
-            IrInstruction::ArrayHeader { dest, array, field } => {
+            // === ArrayHeader: 0 for a null array, else the header word. Always
+            // guarded: wasm reads address 0 without faulting. ===
+            IrInstruction::ArrayHeader {
+                dest, array, field, ..
+            } => {
                 let word_ty = ir_type_to_wasm(&field.ir_type());
                 let ma = MemArg {
                     offset: field.byte_offset() as u64,

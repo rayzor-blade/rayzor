@@ -1000,11 +1000,16 @@ impl IrBuilder {
         Some(dest)
     }
 
-    /// Read one word of the `HaxeArray` header of `array`; 0 when it is null.
+    /// Read one word of the `HaxeArray` header of `array`, where it stands.
     pub fn build_array_header(&mut self, array: IrId, field: super::ArrayField) -> Option<IrId> {
         let dest = self.alloc_reg()?;
         self.set_register_type(dest, field.ir_type());
-        self.add_instruction(IrInstruction::ArrayHeader { dest, array, field })?;
+        self.add_instruction(IrInstruction::ArrayHeader {
+            dest,
+            array,
+            field,
+            guarded: false,
+        })?;
         Some(dest)
     }
 

@@ -974,16 +974,25 @@ impl CBackend {
                 ));
             }
 
-            IrInstruction::ArrayHeader { dest, array, field } => {
-                // A null array reads a zeroed header.
+            IrInstruction::ArrayHeader {
+                dest,
+                array,
+                field,
+                guarded,
+            } => {
+                // A guarded read of a null array reads a zeroed header.
                 let dest_c = Self::type_to_c(&field.ir_type());
-                self.emit_line(&format!(
-                    "r{d} = ({c})(r{a} ? *(int64_t*)((char*)r{a} + {off}) : 0);",
-                    d = dest.as_u32(),
-                    c = dest_c,
+                let read = format!(
+                    "*(int64_t*)((char*)r{a} + {off})",
                     a = array.as_u32(),
                     off = field.byte_offset()
-                ));
+                );
+                let value = if *guarded {
+                    format!("(r{} ? {} : 0)", array.as_u32(), read)
+                } else {
+                    read
+                };
+                self.emit_line(&format!("r{} = ({})({});", dest.as_u32(), dest_c, value));
             }
 
             IrInstruction::MemCopy { dest, src, size } => {

@@ -1386,7 +1386,11 @@ impl OptimizationPass for LICMPass {
 
                 // Add regular hoisted instructions to preheader
                 if let Some(preheader_block) = function.cfg.get_block_mut(preheader) {
-                    for (_, _, inst) in to_hoist {
+                    for (_, _, mut inst) in to_hoist {
+                        // The preheader runs even when the loop does not.
+                        if let IrInstruction::ArrayHeader { guarded, .. } = &mut inst {
+                            *guarded = true;
+                        }
                         preheader_block.instructions.push(inst);
                         result.modified = true;
                         *result

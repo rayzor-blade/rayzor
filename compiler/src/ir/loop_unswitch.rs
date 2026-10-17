@@ -89,6 +89,7 @@ fn split_one(function: &mut IrFunction, preserving: &BTreeSet<IrFunctionId>) -> 
     // a copy per condition.
     for natural in loops.iter().rev() {
         if let Some(split) = plan_version(function, &domtree, natural, &loops, preserving) {
+            log_split(function, "version", natural, &split);
             let natural = (*natural).clone();
             apply(function, &natural, split);
             return true;
@@ -106,12 +107,28 @@ fn split_one(function: &mut IrFunction, preserving: &BTreeSet<IrFunctionId>) -> 
             continue;
         }
         if let Some(split) = plan_unswitch(function, natural) {
+            log_split(function, "unswitch", natural, &split);
             let natural = (*natural).clone();
             apply(function, &natural, split);
             return true;
         }
     }
     false
+}
+
+/// `RAYZOR_LOOP_SPLIT_LOG=1` names each split loop. Diagnostic only.
+fn log_split(function: &IrFunction, kind: &str, natural: &NaturalLoop, split: &Split) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("RAYZOR_LOOP_SPLIT_LOG").is_some()) {
+        eprintln!(
+            "[loop-split] {kind} {} header={:?} blocks={} decided={} prelude={}",
+            function.name,
+            natural.header,
+            natural.blocks.len(),
+            split.when_true.len(),
+            split.prelude.len()
+        );
+    }
 }
 
 /// The loop's dedicated preheader and the registers it defines, when the loop
@@ -186,6 +203,16 @@ fn copyable(
 
 fn plan_unswitch(function: &IrFunction, natural: &NaturalLoop) -> Option<Split> {
     let (preheader, defs) = copyable(function, natural, MAX_LOOP_SIZE)?;
+    let any_call = |inst: &IrInstruction| {
+        matches!(
+            inst,
+            IrInstruction::CallDirect { .. } | IrInstruction::CallIndirect { .. }
+        )
+    };
+    // Worth a copy only when one outcome leaves the loop with no call at all.
+    if !reaches_call(function, natural, &BTreeMap::new(), &any_call) {
+        return None;
+    }
     for id in &natural.blocks {
         let block = function.cfg.get_block(*id)?;
         if let IrTerminator::CondBranch {
@@ -194,7 +221,14 @@ fn plan_unswitch(function: &IrFunction, natural: &NaturalLoop) -> Option<Split> 
             false_target,
         } = block.terminator
         {
-            if true_target != false_target && !defs.contains(&condition) {
+            if true_target == false_target || defs.contains(&condition) {
+                continue;
+            }
+            let frees = [true, false].iter().any(|outcome| {
+                let decided = BTreeMap::from([(*id, *outcome)]);
+                !reaches_call(function, natural, &decided, &any_call)
+            });
+            if frees {
                 return Some(Split {
                     preheader,
                     prelude: Vec::new(),
@@ -207,6 +241,45 @@ fn plan_unswitch(function: &IrFunction, natural: &NaturalLoop) -> Option<Split> 
         }
     }
     None
+}
+
+/// Whether an iteration of `natural`, with the branches in `decided` taken as
+/// given, can reach an instruction `counts` accepts.
+fn reaches_call(
+    function: &IrFunction,
+    natural: &NaturalLoop,
+    decided: &BTreeMap<IrBlockId, bool>,
+    counts: &dyn Fn(&IrInstruction) -> bool,
+) -> bool {
+    let mut seen: BTreeSet<IrBlockId> = BTreeSet::new();
+    let mut work = vec![natural.header];
+    while let Some(id) = work.pop() {
+        if !natural.blocks.contains(&id) || !seen.insert(id) {
+            continue;
+        }
+        let Some(block) = function.cfg.get_block(id) else {
+            continue;
+        };
+        if block.instructions.iter().any(counts) {
+            return true;
+        }
+        match (&block.terminator, decided.get(&id)) {
+            (
+                IrTerminator::CondBranch {
+                    true_target,
+                    false_target,
+                    ..
+                },
+                Some(take_true),
+            ) => work.push(if *take_true {
+                *true_target
+            } else {
+                *false_target
+            }),
+            (term, _) => work.extend(successors(term)),
+        }
+    }
+    false
 }
 
 /// A loop counting `iv` up by one from `start` while `iv < bound`, `bound`
@@ -498,36 +571,13 @@ fn plan_version(
 
     // The fast copy must call nothing that can resize an array.
     let taken: BTreeMap<IrBlockId, bool> = decided.iter().copied().collect();
-    let mut seen: BTreeSet<IrBlockId> = BTreeSet::new();
-    let mut work = vec![nest.header];
-    while let Some(id) = work.pop() {
-        if !nest.blocks.contains(&id) || !seen.insert(id) {
-            continue;
-        }
-        let block = function.cfg.get_block(id)?;
-        let resizes = block.instructions.iter().any(|inst| match inst {
-            IrInstruction::CallDirect { func_id, .. } => !preserving.contains(func_id),
-            IrInstruction::CallIndirect { .. } => true,
-            _ => false,
-        });
-        if resizes {
-            return None;
-        }
-        match (&block.terminator, taken.get(&id)) {
-            (
-                IrTerminator::CondBranch {
-                    true_target,
-                    false_target,
-                    ..
-                },
-                Some(take_true),
-            ) => work.push(if *take_true {
-                *true_target
-            } else {
-                *false_target
-            }),
-            (term, _) => work.extend(successors(term)),
-        }
+    let resizes = |inst: &IrInstruction| match inst {
+        IrInstruction::CallDirect { func_id, .. } => !preserving.contains(func_id),
+        IrInstruction::CallIndirect { .. } => true,
+        _ => false,
+    };
+    if reaches_call(function, nest, &taken, &resizes) {
+        return None;
     }
 
     // The precondition, computed before the nest.
@@ -625,8 +675,12 @@ impl Prelude {
             return *reg;
         }
         let dest = self.fresh();
-        self.insts
-            .push(IrInstruction::ArrayHeader { dest, array, field });
+        self.insts.push(IrInstruction::ArrayHeader {
+            dest,
+            array,
+            field,
+            guarded: true,
+        });
         self.headers.insert((array, field), dest);
         dest
     }

@@ -1514,10 +1514,16 @@ impl LoopVectorizationPass {
                 offset: map_use(*offset, reg_map),
                 ty: ty.clone(),
             },
-            IrInstruction::ArrayHeader { dest, array, field } => IrInstruction::ArrayHeader {
+            IrInstruction::ArrayHeader {
+                dest,
+                array,
+                field,
+                guarded,
+            } => IrInstruction::ArrayHeader {
                 dest: alloc_new(*dest, next_reg, reg_map, function),
                 array: map_use(*array, reg_map),
                 field: *field,
+                guarded: *guarded,
             },
             other => other.clone(),
         }

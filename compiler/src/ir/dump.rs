@@ -233,8 +233,14 @@ pub fn dump_instruction(inst: &IrInstruction) -> String {
                 idx_str.join(", ")
             )
         }
-        IrInstruction::ArrayHeader { dest, array, field } => {
-            format!("{} = array_header {:?} {}", dest, field, array)
+        IrInstruction::ArrayHeader {
+            dest,
+            array,
+            field,
+            guarded,
+        } => {
+            let guard = if *guarded { " guarded" } else { "" };
+            format!("{} = array_header{} {:?} {}", dest, guard, field, array)
         }
         IrInstruction::PtrAdd {
             dest,

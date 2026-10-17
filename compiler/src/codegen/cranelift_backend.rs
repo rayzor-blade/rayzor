@@ -4828,11 +4828,26 @@ impl CraneliftBackend {
                 value_map.insert(*dest, result_ptr);
             }
 
-            IrInstruction::ArrayHeader { dest, array, field } => {
+            IrInstruction::ArrayHeader {
+                dest,
+                array,
+                field,
+                guarded,
+            } => {
                 let array_val = *value_map
                     .get(array)
                     .ok_or_else(|| format!("ArrayHeader array {:?} not found", array))?;
-                // A null array reads a zeroed header, so the read never faults.
+                if !*guarded {
+                    let value = builder.ins().load(
+                        types::I64,
+                        MemFlagsData::trusted(),
+                        array_val,
+                        field.byte_offset() as i32,
+                    );
+                    value_map.insert(*dest, value);
+                    return Ok(());
+                }
+                // A guarded read of a null array reads a zeroed header.
                 let key = "\0rayzor_empty_array_header".to_string();
                 let data_id = if let Some(&id) = string_data.get(&key) {
                     id

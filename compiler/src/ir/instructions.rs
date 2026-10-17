@@ -540,13 +540,16 @@ pub enum IrInstruction {
         result_ty: IrType,
     },
 
-    /// Read one word of a `HaxeArray` header. Reads 0 when `array` is null, so
-    /// it never faults and passes may hoist or reuse it; only a call that can
-    /// resize an array (see `ArrayField`) changes what it reads.
+    /// Read one word of a `HaxeArray` header; only a call that can resize an
+    /// array changes what it reads. A `guarded` read gives 0 for a null array
+    /// instead of faulting, so it may run where the program would not have
+    /// read: a pass that moves the read sets it. An unguarded read stays where
+    /// the program reads, and faults on null as any field read does.
     ArrayHeader {
         dest: IrId,
         array: IrId,
         field: ArrayField,
+        guarded: bool,
     },
 }
 

@@ -1525,7 +1525,9 @@ impl MirInterpreter {
                     .set(*dest, NanBoxedValue::from_ptr(base_ptr + offset));
             }
 
-            IrInstruction::ArrayHeader { dest, array, field } => {
+            IrInstruction::ArrayHeader {
+                dest, array, field, ..
+            } => {
                 let array_val = self.current_frame().registers.get(*array);
                 let base = if array_val.is_ptr() {
                     array_val.as_ptr()
