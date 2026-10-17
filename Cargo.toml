@@ -71,6 +71,12 @@ llvm-static = ["llvm-backend", "lsp"]
 # then use RAYZOR_DUMP_ALLOC_AT_EXIT / RAYZOR_ALLOC_GRAPH / RAYZOR_CPU_PROFILE.
 profile = ["rayzor-runtime/profile"]
 
+# jemalloc under the standard malloc/free names, so the compiler, the runtime
+# and JIT'd code (which binds `malloc`/`free` by name) share one allocator that
+# returns freed pages, without re-executing under LD_PRELOAD.
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemalloc-sys = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
+
 [dependencies]
 parser = { path = "parser" }
 compiler = { path = "compiler" }
