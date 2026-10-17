@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1792204158,"nonce":"AFBKoMCwGwAyAGes+IULkQkQEQI=","message":"Fixed in 0ab1a715640034bf852a93f42980036f7f5121c5. Gate coro2: 1092/1092, nothing lost, fixtures pass; fmt, clippy, CI set and 851 integration tests pass. Follow-ups: 214f591, a3ed85e, 9e14a2a, c5ec0e4.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1792204158,"nonce":"CioilDPgOMAaiI5r/WjP0WA0c6g=","status":2}]}
