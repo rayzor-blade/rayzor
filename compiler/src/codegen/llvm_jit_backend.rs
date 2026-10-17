@@ -410,13 +410,19 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         }
     }
 
-    /// Create a backend in AOT mode. In AOT mode, struct→ptr coercion for
-    /// extern (C ABI) calls uses alloca+store instead of field extraction.
+    /// Create a backend in AOT mode for `target`. In AOT mode, struct→ptr
+    /// coercion for extern (C ABI) calls uses alloca+store instead of field
+    /// extraction. The module takes the target's triple and data layout before
+    /// anything is lowered, so sizes and alignments are the target's.
     pub fn with_aot_mode(
         context: &'ctx Context,
         opt_level: OptimizationLevel,
+        target: &crate::codegen::llvm_aot_backend::AotTarget,
     ) -> Result<Self, String> {
         let mut backend = Self::with_opt_level(context, opt_level)?;
+        let machine = target.target_machine(RelocMode::PIC, opt_level)?;
+        target.apply_to_module(&backend.module, &machine);
+        backend.target_data = Some(machine.get_target_data());
         backend.aot_mode = true;
         Ok(backend)
     }
@@ -8883,7 +8889,9 @@ mod tests {
     #[test]
     fn aot_heap_calls_are_relocatable() {
         let context = Context::create();
-        let backend = LLVMJitBackend::with_aot_mode(&context, OptimizationLevel::None).unwrap();
+        let target = crate::codegen::llvm_aot_backend::AotTarget::new(None);
+        let backend =
+            LLVMJitBackend::with_aot_mode(&context, OptimizationLevel::None, &target).unwrap();
         let function = backend.module.add_function(
             "allocate_and_free",
             context.void_type().fn_type(&[], false),

@@ -33,47 +33,104 @@ pub fn init_llvm_aot() {
     });
 }
 
+/// The machine an AOT build emits code for: the requested triple, or this
+/// host's. A build for this host compiles for its CPU, as the JIT does; a
+/// cross build gets a generic CPU, because the machine it will run on cannot
+/// be asked. Every target-dependent step takes its machine from here, so the
+/// module's layout, the optimizer and the object file agree.
 #[cfg(feature = "llvm-backend")]
-fn create_target_machine(
-    target_triple: Option<&str>,
-    cpu: &str,
-    features: &str,
-    reloc_mode: RelocMode,
-    opt_level: OptimizationLevel,
-) -> Result<TargetMachine, String> {
-    let triple = if let Some(triple_str) = target_triple {
-        TargetTriple::create(triple_str)
-    } else {
-        TargetMachine::get_default_triple()
-    };
-
-    let target = Target::from_triple(&triple)
-        .map_err(|e| format!("Failed to get target for triple: {}", e))?;
-
-    target
-        .create_target_machine(
-            &triple,
-            cpu,
-            features,
-            opt_level,
-            reloc_mode,
-            CodeModel::Default,
-        )
-        .ok_or_else(|| "Failed to create target machine".to_string())
+#[derive(Clone, Debug)]
+pub struct AotTarget {
+    triple: String,
+    native: bool,
 }
 
-/// Get host CPU name and feature string
+/// Whether two normalized triples name the same machine. The vendor is
+/// skipped when either side leaves it generic: `x86_64-unknown-linux-gnu` and
+/// LLVM's own `x86_64-pc-linux-gnu` are one host.
 #[cfg(feature = "llvm-backend")]
-fn get_host_cpu_info() -> (String, String) {
-    let cpu = TargetMachine::get_host_cpu_name()
-        .to_str()
-        .unwrap_or("generic")
-        .to_string();
-    let features = TargetMachine::get_host_cpu_features()
-        .to_str()
-        .unwrap_or("")
-        .to_string();
-    (cpu, features)
+fn same_machine(a: &str, b: &str) -> bool {
+    let a: Vec<&str> = a.split('-').collect();
+    let b: Vec<&str> = b.split('-').collect();
+    if a.len() != b.len() || a.len() < 3 {
+        return a == b;
+    }
+    let generic = |v: &str| v == "unknown" || v == "pc";
+    a[0] == b[0] && (a[1] == b[1] || generic(a[1]) && generic(b[1])) && a[2..] == b[2..]
+}
+
+#[cfg(feature = "llvm-backend")]
+impl AotTarget {
+    pub fn new(requested: Option<&str>) -> AotTarget {
+        init_llvm_aot();
+        let host = TargetMachine::get_default_triple();
+        let Some(requested) = requested else {
+            return AotTarget {
+                triple: host.as_str().to_string_lossy().into_owned(),
+                native: true,
+            };
+        };
+        let normalized = TargetMachine::normalize_triple(&TargetTriple::create(requested))
+            .as_str()
+            .to_string_lossy()
+            .into_owned();
+        let host_normalized = TargetMachine::normalize_triple(&host)
+            .as_str()
+            .to_string_lossy()
+            .into_owned();
+        AotTarget {
+            native: same_machine(&normalized, &host_normalized),
+            triple: normalized,
+        }
+    }
+
+    pub fn triple(&self) -> &str {
+        &self.triple
+    }
+
+    /// Whether the output runs on this machine, and so may use its CPU.
+    pub fn is_native(&self) -> bool {
+        self.native
+    }
+
+    pub fn target_machine(
+        &self,
+        reloc_mode: RelocMode,
+        opt_level: OptimizationLevel,
+    ) -> Result<TargetMachine, String> {
+        let triple = TargetTriple::create(&self.triple);
+        let target = Target::from_triple(&triple)
+            .map_err(|e| format!("No LLVM target for {}: {}", self.triple, e))?;
+        let (cpu, features) = if self.native {
+            (
+                TargetMachine::get_host_cpu_name()
+                    .to_string_lossy()
+                    .into_owned(),
+                TargetMachine::get_host_cpu_features()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        } else {
+            ("generic".to_string(), String::new())
+        };
+        target
+            .create_target_machine(
+                &triple,
+                &cpu,
+                &features,
+                opt_level,
+                reloc_mode,
+                CodeModel::Default,
+            )
+            .ok_or_else(|| format!("Could not create a target machine for {}", self.triple))
+    }
+
+    /// Install the triple and data layout on `module`. Done before any body
+    /// is lowered, so type sizes are the target's and not the host's.
+    pub fn apply_to_module(&self, module: &Module, machine: &TargetMachine) {
+        module.set_triple(&TargetTriple::create(&self.triple));
+        module.set_data_layout(&machine.get_target_data().get_data_layout());
+    }
 }
 
 #[cfg(feature = "llvm-backend")]
@@ -113,7 +170,7 @@ fn run_opt_passes(
 #[cfg(feature = "llvm-backend")]
 pub fn optimize_module(
     module: &Module,
-    target_triple: Option<&str>,
+    target: &AotTarget,
     opt_level: OptimizationLevel,
 ) -> Result<(), String> {
     if let Err(msg) = module.verify() {
@@ -122,24 +179,9 @@ pub fn optimize_module(
             msg.to_string()
         ));
     }
-
-    let (host_cpu, host_features) = get_host_cpu_info();
-    let (cpu, features) = if target_triple.is_some() {
-        ("generic", "")
-    } else {
-        (host_cpu.as_str(), host_features.as_str())
-    };
     // RelocMode doesn't affect optimization, only codegen
-    let target_machine =
-        create_target_machine(target_triple, cpu, features, RelocMode::Default, opt_level)?;
-
-    // Set data layout from the target machine — this provides type size information
-    // that the optimizer needs for accurate inlining cost analysis.
-    let data_layout = target_machine.get_target_data().get_data_layout();
-    module.set_data_layout(&data_layout);
-
-    run_opt_passes(module, &target_machine, opt_level)?;
-    Ok(())
+    let target_machine = target.target_machine(RelocMode::Default, opt_level)?;
+    run_opt_passes(module, &target_machine, opt_level)
 }
 
 /// Compile to object file with configurable target and relocation mode.
@@ -148,27 +190,12 @@ pub fn optimize_module(
 pub fn compile_to_object_file(
     module: &Module,
     output_path: &Path,
-    target_triple: Option<&str>,
+    target: &AotTarget,
     reloc_mode: RelocMode,
     opt_level: OptimizationLevel,
 ) -> Result<(), String> {
-    let (host_cpu, host_features) = get_host_cpu_info();
-    let (cpu, features) = if target_triple.is_some() {
-        ("generic", "")
-    } else {
-        (host_cpu.as_str(), host_features.as_str())
-    };
-    let target_machine =
-        create_target_machine(target_triple, cpu, features, reloc_mode, opt_level)?;
-
-    let triple = if let Some(t) = target_triple {
-        TargetTriple::create(t)
-    } else {
-        TargetMachine::get_default_triple()
-    };
-    module.set_triple(&triple);
-
-    target_machine
+    target
+        .target_machine(reloc_mode, opt_level)?
         .write_to_file(module, FileType::Object, output_path)
         .map_err(|e| format!("Failed to write object file: {}", e))
 }
@@ -208,26 +235,11 @@ pub fn emit_llvm_bitcode(module: &Module, output_path: &Path) -> Result<(), Stri
 pub fn emit_assembly(
     module: &Module,
     output_path: &Path,
-    target_triple: Option<&str>,
+    target: &AotTarget,
     opt_level: OptimizationLevel,
 ) -> Result<(), String> {
-    let (host_cpu, host_features) = get_host_cpu_info();
-    let (cpu, features) = if target_triple.is_some() {
-        ("generic", "")
-    } else {
-        (host_cpu.as_str(), host_features.as_str())
-    };
-    let target_machine =
-        create_target_machine(target_triple, cpu, features, RelocMode::Default, opt_level)?;
-
-    let triple = if let Some(t) = target_triple {
-        TargetTriple::create(t)
-    } else {
-        TargetMachine::get_default_triple()
-    };
-    module.set_triple(&triple);
-
-    target_machine
+    target
+        .target_machine(RelocMode::Default, opt_level)?
         .write_to_file(module, FileType::Assembly, output_path)
         .map_err(|e| format!("Failed to write assembly: {}", e))
 }
@@ -316,4 +328,30 @@ pub fn generate_main_wrapper(
         .map_err(|e| format!("Failed to build return: {}", e))?;
 
     Ok(())
+}
+
+#[cfg(all(test, feature = "llvm-backend"))]
+mod tests {
+    use super::same_machine;
+
+    #[test]
+    fn generic_vendors_name_one_machine() {
+        assert!(same_machine(
+            "x86_64-unknown-linux-gnu",
+            "x86_64-pc-linux-gnu"
+        ));
+        assert!(same_machine("aarch64-apple-darwin", "aarch64-apple-darwin"));
+        assert!(!same_machine(
+            "aarch64-unknown-linux-gnu",
+            "x86_64-pc-linux-gnu"
+        ));
+        assert!(!same_machine(
+            "x86_64-pc-windows-msvc",
+            "x86_64-pc-linux-gnu"
+        ));
+        assert!(!same_machine(
+            "x86_64-unknown-linux-musl",
+            "x86_64-pc-linux-gnu"
+        ));
+    }
 }

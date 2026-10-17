@@ -327,15 +327,12 @@ impl MirBuilder {
     /// Call a function directly
     pub fn call(&mut self, func_id: IrFunctionId, args: Vec<IrId>) -> Option<IrId> {
         // Clone the function signature data we need before any mutable borrows
-        let (return_ty, is_c_extern, _param_types, is_extern_linkage) = {
+        let (return_ty, _param_types, is_extern_linkage) = {
             let func = self
                 .module
                 .functions
                 .get(&func_id)
                 .expect("Function not found");
-            let is_c_extern = func.signature.calling_convention == CallingConvention::C
-                && func.attributes.linkage == Linkage::External
-                && !cfg!(target_os = "windows");
             let is_extern_linkage = func.attributes.linkage == Linkage::External;
             let params: Vec<IrType> = func
                 .signature
@@ -345,12 +342,10 @@ impl MirBuilder {
                 .collect();
             (
                 func.signature.return_type.clone(),
-                is_c_extern,
                 params,
                 is_extern_linkage,
             )
         };
-        let _ = is_c_extern; // kept for future ABI-extension policy decisions
 
         let has_return = !matches!(return_ty, IrType::Void);
         let call_dest = if has_return {

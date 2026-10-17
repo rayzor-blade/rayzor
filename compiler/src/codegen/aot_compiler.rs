@@ -235,8 +235,9 @@ impl AotCompiler {
             OptimizationLevel::O3 => inkwell::OptimizationLevel::Aggressive,
         };
 
+        let target = llvm_aot_backend::AotTarget::new(self.target_triple.as_deref());
         let context = Context::create();
-        let mut backend = LLVMJitBackend::with_aot_mode(&context, llvm_opt)?;
+        let mut backend = LLVMJitBackend::with_aot_mode(&context, llvm_opt, &target)?;
 
         // Two-pass: declare all, then compile all bodies
         backend.seed_indirect_targets(&modules);
@@ -255,7 +256,6 @@ impl AotCompiler {
 
         // --- Phase 6: AOT-specific emit via llvm_aot_backend ---
         let module = backend.get_module();
-        let target_triple_str = self.target_triple.as_deref();
 
         if self.output_format == OutputFormat::Executable
             || self.output_format == OutputFormat::ObjectFile
@@ -270,7 +270,7 @@ impl AotCompiler {
                 println!("  Optimizing and emitting object file...");
             }
 
-            llvm_aot_backend::optimize_module(module, target_triple_str, llvm_opt)?;
+            llvm_aot_backend::optimize_module(module, &target, llvm_opt)?;
             // The main() wrapper is added after optimization, so the entry
             // is optimized in the same context as under the JIT.
             if self.output_format == OutputFormat::Executable {
@@ -283,7 +283,7 @@ impl AotCompiler {
             llvm_aot_backend::compile_to_object_file(
                 module,
                 &obj_path,
-                target_triple_str,
+                &target,
                 RelocMode::PIC,
                 llvm_opt,
             )?;
@@ -297,7 +297,7 @@ impl AotCompiler {
             }
         } else {
             // For IR/bitcode/asm output, use inkwell directly
-            llvm_aot_backend::optimize_module(module, target_triple_str, llvm_opt)?;
+            llvm_aot_backend::optimize_module(module, &target, llvm_opt)?;
 
             if self.output_format == OutputFormat::Executable {
                 llvm_aot_backend::generate_main_wrapper(
@@ -324,12 +324,7 @@ impl AotCompiler {
                     if self.verbose {
                         println!("  Emitting assembly...");
                     }
-                    llvm_aot_backend::emit_assembly(
-                        module,
-                        output_path,
-                        target_triple_str,
-                        llvm_opt,
-                    )?;
+                    llvm_aot_backend::emit_assembly(module, output_path, &target, llvm_opt)?;
                 }
                 _ => unreachable!(),
             }
@@ -338,21 +333,6 @@ impl AotCompiler {
         let elapsed = t0.elapsed();
         let code_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
 
-        let actual_triple = self.target_triple.clone().unwrap_or_else(|| {
-            #[cfg(feature = "llvm-backend")]
-            {
-                use inkwell::targets::TargetMachine;
-                TargetMachine::get_default_triple()
-                    .as_str()
-                    .to_string_lossy()
-                    .to_string()
-            }
-            #[cfg(not(feature = "llvm-backend"))]
-            {
-                "unknown".to_string()
-            }
-        });
-
         if self.verbose {
             println!("  Done in {:?}", elapsed);
         }
@@ -360,7 +340,7 @@ impl AotCompiler {
         Ok(AotOutput {
             path: output_path.to_path_buf(),
             format: self.output_format,
-            target_triple: actual_triple,
+            target_triple: target.triple().to_string(),
             code_size,
         })
     }
@@ -394,7 +374,8 @@ impl AotCompiler {
         cmd.arg(opt_flag);
 
         // Cross-compilation target
-        if let Some(ref triple) = self.target_triple {
+        // Only a cross link names the target; gcc rejects `--target`.
+        if let Some(triple) = self.cross_triple() {
             cmd.arg(format!("--target={}", triple));
         }
 
@@ -516,6 +497,16 @@ impl AotCompiler {
         Ok(None)
     }
 
+    /// The requested triple when it is not this host's.
+    fn cross_triple(&self) -> Option<&str> {
+        let triple = self.target_triple.as_deref()?;
+        #[cfg(feature = "llvm-backend")]
+        if crate::codegen::llvm_aot_backend::AotTarget::new(Some(triple)).is_native() {
+            return None;
+        }
+        Some(triple)
+    }
+
     /// Find the runtime static library
     fn find_runtime(&self) -> Result<PathBuf, String> {
         // 1. Explicit --runtime-dir
@@ -536,6 +527,37 @@ impl AotCompiler {
             if path.exists() {
                 return Ok(path);
             }
+        }
+
+        // A cross build links the runtime built for its triple, which Cargo
+        // writes under `target/<triple>/<profile>/`; the host's archive would
+        // only fail at link time.
+        if let Some(triple) = self.cross_triple() {
+            let mut roots = vec![PathBuf::from("target")];
+            if let Some(target_dir) = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent()?.parent().map(Path::to_path_buf))
+            {
+                roots.insert(0, target_dir);
+            }
+            for root in &roots {
+                for profile in &["release", "debug"] {
+                    let dir = root.join(triple).join(profile);
+                    for path in [
+                        dir.join("deps/librayzor_runtime.a"),
+                        dir.join("librayzor_runtime.a"),
+                    ] {
+                        if path.exists() {
+                            return Ok(path);
+                        }
+                    }
+                }
+            }
+            return Err(format!(
+                "librayzor_runtime.a for {triple} not found. Build it with:\n  \
+                 cargo build --release -p rayzor-runtime --target {triple}\n\
+                 Or pass --runtime-dir <path>"
+            ));
         }
 
         // 3. Check relative to executable location first so release binaries prefer
@@ -715,7 +737,8 @@ impl AotCompiler {
         cmd.arg("-Wno-incompatible-pointer-types");
         cmd.arg("-lm");
 
-        if let Some(ref triple) = self.target_triple {
+        // Only a cross link names the target; gcc rejects `--target`.
+        if let Some(triple) = self.cross_triple() {
             cmd.arg(format!("--target={}", triple));
         }
         let triple_str = self.target_triple.as_deref().unwrap_or("");
