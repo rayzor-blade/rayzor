@@ -44,6 +44,9 @@ impl OptimizationPass for PureRecursionPass {
 
     fn run_on_module(&mut self, module: &mut IrModule) -> OptimizationResult {
         let mut result = OptimizationResult::unchanged();
+        if disabled() {
+            return result;
+        }
         let pure = pure_functions(module);
         let candidates: Vec<IrFunctionId> = pure
             .iter()
@@ -65,6 +68,12 @@ impl OptimizationPass for PureRecursionPass {
         }
         result
     }
+}
+
+/// `RAYZOR_NO_PURE_REUSE=1` turns the pass off, so a benchmark of call cost
+/// makes every call it is written to make. Safe either way.
+fn disabled() -> bool {
+    std::env::var("RAYZOR_NO_PURE_REUSE").is_ok_and(|v| !matches!(v.as_str(), "" | "0" | "false"))
 }
 
 /// Functions that only compute from their arguments: no memory, no globals,

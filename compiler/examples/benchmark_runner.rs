@@ -616,6 +616,22 @@ struct TieredBenchmarkState {
     compile_time: Duration,
 }
 
+/// fibonacci measures call cost: every engine makes the calls it is written
+/// to make, with no reuse of a repeated pure call.
+fn set_call_cost_flags(bench_name: &str) {
+    let call_cost = bench_name == "fibonacci";
+    for flag in ["RAYZOR_NO_PURE_REUSE", "ASH_NO_PURE_CSE"] {
+        // SAFETY: called before any target process or thread is started.
+        unsafe {
+            if call_cost {
+                std::env::set_var(flag, "1");
+            } else {
+                std::env::remove_var(flag);
+            }
+        }
+    }
+}
+
 /// Per-benchmark repetition counts: (warmup, timed).
 ///
 /// An allocation kernel's whole working set currently leaks per iteration --
@@ -2045,6 +2061,7 @@ fn main() {
             eprintln!("--single-target requires a benchmark");
             std::process::exit(2);
         };
+        set_call_cost_flags(bench_name);
         let Some(bench) = load_benchmark(bench_name) else {
             eprintln!("failed to load benchmark: {bench_name}");
             std::process::exit(2);
@@ -2180,6 +2197,8 @@ fn main() {
                 continue;
             }
         };
+
+        set_call_cost_flags(bench_name);
 
         // Filter targets for this benchmark
         // Skip standalone interpreter for heavy benchmarks (millions of iterations too slow)

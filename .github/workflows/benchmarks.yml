@@ -68,7 +68,8 @@ jobs:
       - name: Generate precompiled bundles and stdlib symbol cache
         run: |
           ./target/release/rayzor bundle compiler/benchmarks/src/deltablue.hx -o compiler/benchmarks/precompiled/deltablue.rzb --strip
-          ./target/release/rayzor bundle compiler/benchmarks/src/fibonacci.hx -o compiler/benchmarks/precompiled/fibonacci.rzb --strip
+          # fibonacci measures call cost, so no repeated pure call is reused.
+          RAYZOR_NO_PURE_REUSE=1 ./target/release/rayzor bundle compiler/benchmarks/src/fibonacci.hx -o compiler/benchmarks/precompiled/fibonacci.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/mandelbrot.hx -o compiler/benchmarks/precompiled/mandelbrot.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/nbody.hx -o compiler/benchmarks/precompiled/nbody.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/binarytrees.hx -o compiler/benchmarks/precompiled/binarytrees.rzb --strip
