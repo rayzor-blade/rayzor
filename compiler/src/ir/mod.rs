@@ -40,6 +40,7 @@ pub mod monomorphize; // Monomorphization pass for generics
 pub mod optimizable; // Generic optimization trait for different IR levels
 pub mod optimization;
 pub mod osr; // On-stack replacement: a second entry point into a hot loop
+pub mod pure_recursion; // Repeated pure self-calls computed once
 pub mod scalar_replacement; // Scalar Replacement of Aggregates (SRA)
 pub mod snapshot; // Standard library lowered at build time and carried in the binary
 pub mod tail_recursion; // Self-recursion turned into loops

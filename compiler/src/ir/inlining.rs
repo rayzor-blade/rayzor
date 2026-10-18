@@ -321,7 +321,7 @@ impl InliningPass {
     }
 
     /// Inline a specific call site.
-    fn inline_call_site(
+    pub(super) fn inline_call_site(
         module: &mut IrModule,
         call_site: &CallSite,
         next_reg_id: &mut u32,
