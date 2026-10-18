@@ -4576,6 +4576,30 @@ pub extern "C" fn haxe_stringmap_get_typed(
     }
 }
 
+/// `haxe_stringmap_get_typed` for an Int read as `Null<Int>`: the Int, or
+/// `NULL_INT` for an absent key, in one probe.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_stringmap_get_null_int(
+    map_ptr: *mut HaxeStringMap,
+    key: *const HaxeString,
+    tag: i32,
+    metadata: u64,
+) -> i64 {
+    if map_ptr.is_null() {
+        return crate::type_system::NULL_INT;
+    }
+    unsafe {
+        let map = &*map_ptr;
+        map_key(key)
+            .and_then(|key| map.map.get(key))
+            .map_or(crate::type_system::NULL_INT, |bits| {
+                map.value_layout
+                    .transcode(*bits, MapValueLayout { tag, metadata }) as i32
+                    as i64
+            })
+    }
+}
+
 /// Get a value from the StringMap
 /// Returns raw u64 bits (compiler handles type conversion)
 /// Returns 0 if key doesn't exist (caller should use exists() to distinguish)
@@ -4919,6 +4943,30 @@ pub extern "C" fn haxe_intmap_get_typed(
             .map_or(0, |bits| {
                 map.value_layout
                     .transcode(*bits, MapValueLayout { tag, metadata })
+            })
+    }
+}
+
+/// `haxe_intmap_get_typed` for an Int read as `Null<Int>`: the Int, or
+/// `NULL_INT` for an absent key, in one probe.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_intmap_get_null_int(
+    map_ptr: *mut HaxeIntMap,
+    key: i64,
+    tag: i32,
+    metadata: u64,
+) -> i64 {
+    if map_ptr.is_null() {
+        return crate::type_system::NULL_INT;
+    }
+    unsafe {
+        let map = &*map_ptr;
+        map.map
+            .get(&key)
+            .map_or(crate::type_system::NULL_INT, |bits| {
+                map.value_layout
+                    .transcode(*bits, MapValueLayout { tag, metadata }) as i32
+                    as i64
             })
     }
 }

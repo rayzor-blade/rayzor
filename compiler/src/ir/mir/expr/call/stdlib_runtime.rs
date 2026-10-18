@@ -85,6 +85,12 @@ impl<'a> HirToMirContext<'a> {
             self.store_index_with_regs(object, key, receiver.ty, value);
             return None;
         }
+        if let Some(value) =
+            self.load_map_null_int(object, key, receiver.ty, runtime, element, expr.ty)
+        {
+            let target = self.convert_type(expr.ty);
+            return self.coerce_reg_to(value, &target);
+        }
         let value = self.load_map_index_with_regs(object, key, receiver.ty)?;
         let exists = self.get_or_register_extern_function(
             &runtime.replace("_get", "_exists"),
@@ -100,6 +106,39 @@ impl<'a> HirToMirContext<'a> {
             };
         let target = self.convert_type(expr.ty);
         self.coerce_reg_to(value, &target)
+    }
+
+    /// `m.get(k)` read as `Null<Int>` from a map of Ints: one probe that
+    /// answers the Int, or `NULL_INT` for an absent key.
+    fn load_map_null_int(
+        &mut self,
+        object: IrId,
+        key: IrId,
+        receiver: TypeId,
+        runtime: &str,
+        element: TypeId,
+        result: TypeId,
+    ) -> Option<IrId> {
+        if !matches!(runtime, "haxe_stringmap_get" | "haxe_intmap_get") {
+            return None;
+        }
+        let inner = match self.type_table.get(result).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => *inner_type,
+            _ => return None,
+        };
+        if !self.optional_inner_is_null_int(inner) || self.convert_type(element) != IrType::I32 {
+            return None;
+        }
+        let (_, key_type, _) = self.map_index_info(receiver)?;
+        let mut values = vec![object, key];
+        let mut types = vec![IrType::Ptr(Box::new(IrType::Void)), key_type];
+        self.append_native_map_layout(runtime, receiver, &mut values, &mut types)?;
+        let get = self.get_or_register_extern_function(
+            &format!("{runtime}_null_int"),
+            types,
+            IrType::NullInt,
+        );
+        self.builder.build_call_direct(get, values, IrType::NullInt)
     }
 
     pub(crate) fn append_native_map_layout(

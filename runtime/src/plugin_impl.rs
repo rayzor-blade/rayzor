@@ -1000,12 +1000,20 @@ register_symbol!(
     crate::haxe_sys::haxe_stringmap_get_typed
 );
 register_symbol!(
+    "haxe_stringmap_get_null_int",
+    crate::haxe_sys::haxe_stringmap_get_null_int
+);
+register_symbol!(
     "haxe_stringmap_set_typed",
     crate::haxe_sys::haxe_stringmap_set_typed
 );
 register_symbol!(
     "haxe_intmap_get_typed",
     crate::haxe_sys::haxe_intmap_get_typed
+);
+register_symbol!(
+    "haxe_intmap_get_null_int",
+    crate::haxe_sys::haxe_intmap_get_null_int
 );
 register_symbol!(
     "haxe_intmap_set_typed",
