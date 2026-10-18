@@ -973,16 +973,101 @@ struct LoopClobbers {
     /// Stores cannot: compiled code writes a header only while building a
     /// new array, whose pointer is defined inside the loop.
     resizes_arrays: bool,
+    /// Object field slots stored, whatever the object and element type.
+    field_stores: BTreeSet<i64>,
+    /// A store through an address that is neither a field nor an array element.
+    unknown_store: bool,
 }
 
-/// Runtime functions a loop may call without changing any array's header:
-/// the element read behind `a[i]`, the length read, the null-array report and
-/// the stack-trace line update.
+/// The object, slot and element type a field address `gep T base, [k]` names.
+/// `base` must be an object, not itself a computed address, so two fields
+/// overlap only at the same slot. A `*i8` GEP indexes bytes, not slots, so it
+/// names no field.
+fn field_address(defs: &BTreeMap<IrId, IrInstruction>, ptr: IrId) -> Option<(IrId, i64, IrType)> {
+    let IrInstruction::GetElementPtr {
+        ptr: base,
+        indices,
+        ty,
+        ..
+    } = defs.get(&ptr)?
+    else {
+        return None;
+    };
+    if matches!(ty, IrType::Ptr(inner) if **inner == IrType::I8) {
+        return None;
+    }
+    let [index] = indices[..] else {
+        return None;
+    };
+    let slot = match defs.get(&index)? {
+        IrInstruction::Const { value, .. } => match *value {
+            IrValue::I32(v) => i64::from(v),
+            IrValue::I64(v) => v,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let computed = matches!(
+        defs.get(base),
+        Some(
+            IrInstruction::GetElementPtr { .. }
+                | IrInstruction::PtrAdd { .. }
+                | IrInstruction::BinOp { .. }
+                | IrInstruction::ArrayHeader { .. }
+        )
+    );
+    (!computed).then(|| (*base, slot, ty.clone()))
+}
+
+/// An address inside an array's element buffer, which no object field shares.
+fn array_element_address(defs: &BTreeMap<IrId, IrInstruction>, ptr: IrId) -> bool {
+    let base = match defs.get(&ptr) {
+        Some(
+            IrInstruction::GetElementPtr { ptr: base, .. }
+            | IrInstruction::PtrAdd { ptr: base, .. },
+        ) => *base,
+        _ => return false,
+    };
+    matches!(
+        defs.get(&base),
+        Some(IrInstruction::ArrayHeader {
+            field: super::ArrayField::Data,
+            ..
+        })
+    )
+}
+
+/// Runtime functions a loop may call without writing memory a program reads:
+/// the element read behind `a[i]`, the length read, the null-array report,
+/// the stack-trace line update and `Math`.
 const PRESERVES_ARRAY_HEADERS: &[&str] = &[
     "haxe_array_get_typed",
     "haxe_array_length",
     "rayzor_null_access",
     "rayzor_update_call_frame_location",
+    "haxe_math_abs",
+    "haxe_math_acos",
+    "haxe_math_asin",
+    "haxe_math_atan",
+    "haxe_math_atan2",
+    "haxe_math_ceil",
+    "haxe_math_cos",
+    "haxe_math_exp",
+    "haxe_math_fceil",
+    "haxe_math_ffloor",
+    "haxe_math_floor",
+    "haxe_math_fround",
+    "haxe_math_is_finite",
+    "haxe_math_is_nan",
+    "haxe_math_log",
+    "haxe_math_max",
+    "haxe_math_min",
+    "haxe_math_pow",
+    "haxe_math_random",
+    "haxe_math_round",
+    "haxe_math_sin",
+    "haxe_math_sqrt",
+    "haxe_math_tan",
 ];
 
 /// The functions of `module` whose calls change no array header.
@@ -1009,6 +1094,7 @@ impl LICMPass {
         cfg: &super::IrControlFlowGraph,
         loop_blocks: &BTreeSet<IrBlockId>,
         preserves_headers: &BTreeSet<IrFunctionId>,
+        defs: &BTreeMap<IrId, IrInstruction>,
     ) -> LoopClobbers {
         let mut c = LoopClobbers::default();
         for &block_id in loop_blocks {
@@ -1030,8 +1116,24 @@ impl LICMPass {
                     IrInstruction::StoreGlobal { global_id, .. } => {
                         c.stored_globals.insert(*global_id);
                     }
-                    IrInstruction::Store { .. } => {
+                    IrInstruction::Store { ptr, .. } => {
                         c.any_store = true;
+                        if let Some((_, slot, _)) = field_address(defs, *ptr) {
+                            c.field_stores.insert(slot);
+                        } else if !array_element_address(defs, *ptr) {
+                            c.unknown_store = true;
+                        }
+                    }
+                    IrInstruction::MemCopy { .. }
+                    | IrInstruction::MemSet { .. }
+                    | IrInstruction::Free { .. }
+                    | IrInstruction::AtomicStore { .. }
+                    | IrInstruction::AtomicRmw { .. }
+                    | IrInstruction::AtomicCas { .. }
+                    | IrInstruction::VectorStore { .. }
+                    | IrInstruction::InlineAsm { .. } => {
+                        c.any_store = true;
+                        c.unknown_store = true;
                     }
                     _ => {}
                 }
@@ -1050,6 +1152,7 @@ impl LICMPass {
         def_block: &BTreeMap<IrId, IrBlockId>,
         invariant_defs: &BTreeSet<IrId>,
         clobbers: &LoopClobbers,
+        defs: &BTreeMap<IrId, IrInstruction>,
     ) -> bool {
         // Instructions with side effects are not loop-invariant
         if inst.has_side_effects() {
@@ -1067,11 +1170,23 @@ impl LICMPass {
                     return false;
                 }
             }
-            IrInstruction::Load { .. } => {
-                if clobbers.any_call || clobbers.any_store {
-                    return false;
+            // A field read survives stores to other fields and to array
+            // elements, and calls that write no memory.
+            IrInstruction::Load { ptr, .. } => match field_address(defs, *ptr) {
+                Some((_, slot, _)) => {
+                    if clobbers.resizes_arrays
+                        || clobbers.unknown_store
+                        || clobbers.field_stores.contains(&slot)
+                    {
+                        return false;
+                    }
                 }
-            }
+                None => {
+                    if clobbers.any_call || clobbers.any_store {
+                        return false;
+                    }
+                }
+            },
             IrInstruction::ArrayHeader { .. } => {
                 if clobbers.resizes_arrays {
                     return false;
@@ -1080,10 +1195,13 @@ impl LICMPass {
             _ => {}
         }
 
-        // Check if all uses are defined outside the loop or are invariant
+        // Check if all uses are defined outside the loop or are invariant. A
+        // constant is invariant; it moves out with whatever needs it.
         for use_id in inst.uses() {
             if let Some(&def_blk) = def_block.get(&use_id) {
-                if loop_blocks.contains(&def_blk) && !invariant_defs.contains(&use_id) {
+                let constant = matches!(defs.get(&use_id), Some(IrInstruction::Const { .. }));
+                if loop_blocks.contains(&def_blk) && !invariant_defs.contains(&use_id) && !constant
+                {
                     return false;
                 }
             }
@@ -1098,7 +1216,15 @@ impl LICMPass {
         inst_block: IrBlockId,
         loop_info: &super::loop_analysis::NaturalLoop,
         domtree: &super::loop_analysis::DominatorTree,
+        defs: &BTreeMap<IrId, IrInstruction>,
+        non_null: &BTreeSet<IrId>,
     ) -> bool {
+        // A field of an object already accessed before the loop cannot fault.
+        if let IrInstruction::Load { ptr, .. } = inst {
+            if field_address(defs, *ptr).is_some_and(|(base, _, _)| non_null.contains(&base)) {
+                return true;
+            }
+        }
         // These never fault and write nothing, so they may run where the loop
         // would not: a header read, and arithmetic that cannot trap. A cast is
         // left out (float-to-int conversion traps on some backends), and so is
@@ -1257,10 +1383,41 @@ impl OptimizationPass for LICMPass {
                 }
             }
 
+            let defs: BTreeMap<IrId, IrInstruction> = function
+                .cfg
+                .blocks
+                .values()
+                .flat_map(|b| &b.instructions)
+                .filter_map(|i| i.dest().map(|d| (d, i.clone())))
+                .collect();
+
             // Process loops from innermost to outermost
             for loop_data in loop_info.loops_innermost_first() {
-                let clobbers =
-                    Self::loop_clobbers(&function.cfg, &loop_data.blocks, &preserves_headers);
+                let clobbers = Self::loop_clobbers(
+                    &function.cfg,
+                    &loop_data.blocks,
+                    &preserves_headers,
+                    &defs,
+                );
+                // Objects accessed before the loop: dereferenced already, so a
+                // field read of one may move ahead of the loop.
+                let mut non_null: BTreeSet<IrId> = BTreeSet::new();
+                for (block_id, block) in &function.cfg.blocks {
+                    if loop_data.blocks.contains(block_id)
+                        || !domtree.dominates(*block_id, loop_data.header)
+                    {
+                        continue;
+                    }
+                    for inst in &block.instructions {
+                        if let IrInstruction::Load { ptr, .. } | IrInstruction::Store { ptr, .. } =
+                            inst
+                        {
+                            if let Some((base, _, _)) = field_address(&defs, *ptr) {
+                                non_null.insert(base);
+                            }
+                        }
+                    }
+                }
                 let mut invariant_defs: BTreeSet<IrId> = BTreeSet::new();
                 let mut to_hoist: Vec<(IrBlockId, usize, IrInstruction)> = Vec::new();
 
@@ -1287,9 +1444,55 @@ impl OptimizationPass for LICMPass {
                                         &def_block,
                                         &invariant_defs,
                                         &clobbers,
+                                        &defs,
                                     ) && Self::is_safe_to_hoist(
-                                        inst, block_id, loop_data, &domtree,
+                                        inst, block_id, loop_data, &domtree, &defs, &non_null,
                                     ) {
+                                        // Constants it reads from inside the loop go first;
+                                        // one no longer where it was recorded (an inner
+                                        // loop moved it) keeps the instruction in place.
+                                        let mut constants = Vec::new();
+                                        let mut located = true;
+                                        for used in inst.uses() {
+                                            if invariant_defs.contains(&used)
+                                                || !matches!(
+                                                    defs.get(&used),
+                                                    Some(IrInstruction::Const { .. })
+                                                )
+                                            {
+                                                continue;
+                                            }
+                                            let Some(&const_block) = def_block.get(&used) else {
+                                                continue;
+                                            };
+                                            if !loop_data.blocks.contains(&const_block) {
+                                                continue;
+                                            }
+                                            match function.cfg.get_block(const_block).and_then(
+                                                |b| {
+                                                    b.instructions
+                                                        .iter()
+                                                        .position(|i| i.dest() == Some(used))
+                                                },
+                                            ) {
+                                                Some(const_idx) => {
+                                                    constants.push((const_block, const_idx, used))
+                                                }
+                                                None => located = false,
+                                            }
+                                        }
+                                        if !located {
+                                            continue;
+                                        }
+                                        for (const_block, const_idx, used) in constants {
+                                            if invariant_defs.insert(used) {
+                                                to_hoist.push((
+                                                    const_block,
+                                                    const_idx,
+                                                    defs[&used].clone(),
+                                                ));
+                                            }
+                                        }
                                         invariant_defs.insert(dest);
                                         to_hoist.push((block_id, idx, inst.clone()));
                                         changed = true;
