@@ -347,6 +347,9 @@ impl CraneliftBackend {
         let mut symbol_addr_range: Option<(usize, usize)> = None;
         for (name, ptr) in symbols {
             builder.symbol(*name, *ptr);
+            if *name == "rayzor_global_slot" {
+                let _ = GLOBAL_SLOT_FN.set(*ptr as usize);
+            }
             let a = *ptr as usize;
             symbol_addr_range = Some(match symbol_addr_range {
                 Some((lo, hi)) => (lo.min(a), hi.max(a)),
@@ -2847,6 +2850,156 @@ impl CraneliftBackend {
         Ok(())
     }
 
+    /// `String.charCodeAt`: a byte read in place when the string is ASCII
+    /// (its counted characters equal its bytes) and the index is in range;
+    /// anything else, a null string included, calls the runtime.
+    /// `HaxeString` is `{ ptr (0), len (8), cap (16), chars (24) }`.
+    fn lower_char_code_at(
+        builder: &mut FunctionBuilder,
+        runtime: cranelift_codegen::ir::FuncRef,
+        args: &[Value],
+    ) -> Option<Value> {
+        let [s, index] = args[..] else {
+            return None;
+        };
+        let at = match builder.func.dfg.value_type(index) {
+            types::I64 => index,
+            t if t.is_int() => builder.ins().sextend(types::I64, index),
+            _ => return None,
+        };
+        let fast = builder.create_block();
+        let slow = builder.create_block();
+        let check = builder.create_block();
+        let done = builder.create_block();
+        builder.append_block_param(done, types::I64);
+
+        let present =
+            builder
+                .ins()
+                .icmp_imm_u(cranelift_codegen::ir::condcodes::IntCC::NotEqual, s, 0);
+        builder.ins().brif(present, check, &[], slow, &[]);
+
+        builder.switch_to_block(check);
+        builder.seal_block(check);
+        let len = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), s, 8i32);
+        let chars = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), s, 24i32);
+        let ascii = builder
+            .ins()
+            .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, chars, len);
+        let in_range = builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::UnsignedLessThan,
+            at,
+            len,
+        );
+        let ok = builder.ins().band(ascii, in_range);
+        builder.ins().brif(ok, fast, &[], slow, &[]);
+
+        builder.switch_to_block(fast);
+        builder.seal_block(fast);
+        let data = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), s, 0i32);
+        let addr = builder.ins().iadd(data, at);
+        let byte = builder
+            .ins()
+            .uload8(types::I64, MemFlagsData::trusted(), addr, 0i32);
+        builder.ins().jump(done, &[byte.into()]);
+
+        builder.switch_to_block(slow);
+        builder.seal_block(slow);
+        let call = builder.ins().call(runtime, args);
+        let code = builder.inst_results(call)[0];
+        builder.ins().jump(done, &[code.into()]);
+
+        builder.switch_to_block(done);
+        builder.seal_block(done);
+        Some(builder.block_params(done)[0])
+    }
+
+    /// `Array.push` stored in place when the array is plain (no flags), has
+    /// 8-byte slots, already holds an element and has room, and the value is
+    /// not a Dynamic box, which is when the runtime would store the bits
+    /// unchanged. Anything else calls the runtime.
+    /// `HaxeArray` is `{ ptr (0), len (8), cap (16), elem_size (24), flags (32) }`.
+    fn lower_array_push(
+        builder: &mut FunctionBuilder,
+        runtime: cranelift_codegen::ir::FuncRef,
+        args: &[Value],
+    ) -> Option<Value> {
+        use cranelift_codegen::ir::condcodes::IntCC;
+        let [arr, bits, tag, _metadata] = args[..] else {
+            return None;
+        };
+        if builder.func.dfg.value_type(bits) != types::I64 {
+            return None;
+        }
+        let call_result = builder.func.dfg.signatures
+            [builder.func.dfg.ext_funcs[runtime].signature]
+            .returns
+            .first()
+            .map(|r| r.value_type)?;
+        let fast = builder.create_block();
+        let slow = builder.create_block();
+        let check = builder.create_block();
+        let done = builder.create_block();
+        builder.append_block_param(done, call_result);
+
+        let present = builder.ins().icmp_imm_u(IntCC::NotEqual, arr, 0);
+        builder.ins().brif(present, check, &[], slow, &[]);
+
+        builder.switch_to_block(check);
+        builder.seal_block(check);
+        let flags = MemFlagsData::trusted();
+        let len = builder.ins().load(types::I64, flags, arr, 8i32);
+        let cap = builder.ins().load(types::I64, flags, arr, 16i32);
+        let elem_size = builder.ins().load(types::I64, flags, arr, 24i32);
+        let array_flags = builder.ins().load(types::I64, flags, arr, 32i32);
+        let plain = builder.ins().icmp_imm_u(IntCC::Equal, array_flags, 0);
+        let slots = builder.ins().icmp_imm_u(IntCC::Equal, elem_size, 8);
+        let started = builder.ins().icmp_imm_u(IntCC::NotEqual, len, 0);
+        let room = builder.ins().icmp(IntCC::UnsignedLessThan, len, cap);
+        let tag = match builder.func.dfg.value_type(tag) {
+            types::I32 => tag,
+            t if t.is_int() => builder.ins().ireduce(types::I32, tag),
+            _ => return None,
+        };
+        let concrete = builder.ins().icmp_imm_u(IntCC::NotEqual, tag, 12);
+        let a = builder.ins().band(plain, slots);
+        let b = builder.ins().band(started, room);
+        let c = builder.ins().band(a, b);
+        let ok = builder.ins().band(c, concrete);
+        builder.ins().brif(ok, fast, &[], slow, &[]);
+
+        builder.switch_to_block(fast);
+        builder.seal_block(fast);
+        let data = builder.ins().load(types::I64, flags, arr, 0i32);
+        let offset = builder.ins().ishl_imm_u(len, 3);
+        let slot = builder.ins().iadd(data, offset);
+        builder.ins().store(flags, bits, slot, 0i32);
+        let new_len = builder.ins().iadd_imm_u(len, 1);
+        builder.ins().store(flags, new_len, arr, 8i32);
+        let result = if call_result == types::I64 {
+            new_len
+        } else {
+            builder.ins().ireduce(call_result, new_len)
+        };
+        builder.ins().jump(done, &[result.into()]);
+
+        builder.switch_to_block(slow);
+        builder.seal_block(slow);
+        let call = builder.ins().call(runtime, args);
+        let pushed = builder.inst_results(call)[0];
+        builder.ins().jump(done, &[pushed.into()]);
+
+        builder.switch_to_block(done);
+        builder.seal_block(done);
+        Some(builder.block_params(done)[0])
+    }
+
     /// Lower selected hot runtime calls as inline Cranelift instructions.
     ///
     /// This keeps parity for both true extern-table calls and tree-shaken
@@ -3605,11 +3758,17 @@ impl CraneliftBackend {
                         arg_values.push(cl_value);
                     }
 
-                    let intrinsic_result = Self::try_lower_runtime_intrinsic(
-                        builder,
-                        extern_func.name.as_str(),
-                        &arg_values,
-                    );
+                    let intrinsic_result = if extern_func.name == CHAR_CODE_AT {
+                        Self::lower_char_code_at(builder, func_ref, &arg_values)
+                    } else if extern_func.name == ARRAY_PUSH {
+                        Self::lower_array_push(builder, func_ref, &arg_values)
+                    } else {
+                        Self::try_lower_runtime_intrinsic(
+                            builder,
+                            extern_func.name.as_str(),
+                            &arg_values,
+                        )
+                    };
 
                     if let Some(result) = intrinsic_result {
                         if let Some(dest_reg) = dest {
@@ -3831,11 +3990,20 @@ impl CraneliftBackend {
                     }
 
                     if is_extern_func {
-                        if let Some(intrinsic) = Self::try_lower_runtime_intrinsic(
-                            builder,
-                            called_func.name.as_str(),
-                            &call_args,
-                        ) {
+                        let intrinsic = if called_func.name == CHAR_CODE_AT {
+                            let func_ref = module.declare_func_in_func(cl_func_id, builder.func);
+                            Self::lower_char_code_at(builder, func_ref, &call_args)
+                        } else if called_func.name == ARRAY_PUSH {
+                            let func_ref = module.declare_func_in_func(cl_func_id, builder.func);
+                            Self::lower_array_push(builder, func_ref, &call_args)
+                        } else {
+                            Self::try_lower_runtime_intrinsic(
+                                builder,
+                                called_func.name.as_str(),
+                                &call_args,
+                            )
+                        };
+                        if let Some(intrinsic) = intrinsic {
                             if let Some(dest_reg) = dest {
                                 value_map.insert(*dest_reg, intrinsic);
                             }
@@ -5322,26 +5490,30 @@ impl CraneliftBackend {
                 global_id,
                 ty,
             } => {
-                // Call rayzor_global_load(global_id) to get the stored value
-                let global_id_val = builder
-                    .ins()
-                    .iconst(cranelift_codegen::ir::types::I64, global_id.0 as i64);
-
-                // Get or declare the runtime function
-                let load_func_id = if let Some(&func_id) =
-                    runtime_functions.get("rayzor_global_load")
-                {
-                    func_id
+                let result = if let Some(slot) = global_slot_address(global_id.0) {
+                    let addr = builder
+                        .ins()
+                        .iconst(cranelift_codegen::ir::types::I64, slot as i64);
+                    builder.ins().load(
+                        cranelift_codegen::ir::types::I64,
+                        cranelift_codegen::ir::MemFlagsData::trusted(),
+                        addr,
+                        0,
+                    )
                 } else {
-                    // Function not pre-declared, can't call it
-                    let placeholder = builder.ins().iconst(cranelift_codegen::ir::types::I64, 0);
-                    value_map.insert(*dest, placeholder);
-                    return Ok(());
+                    let global_id_val = builder
+                        .ins()
+                        .iconst(cranelift_codegen::ir::types::I64, global_id.0 as i64);
+                    let Some(&load_func_id) = runtime_functions.get("rayzor_global_load") else {
+                        let placeholder =
+                            builder.ins().iconst(cranelift_codegen::ir::types::I64, 0);
+                        value_map.insert(*dest, placeholder);
+                        return Ok(());
+                    };
+                    let load_func_ref = module.declare_func_in_func(load_func_id, builder.func);
+                    let call = builder.ins().call(load_func_ref, &[global_id_val]);
+                    builder.inst_results(call)[0]
                 };
-
-                let load_func_ref = module.declare_func_in_func(load_func_id, builder.func);
-                let call = builder.ins().call(load_func_ref, &[global_id_val]);
-                let result = builder.inst_results(call)[0];
 
                 // Cast result to the expected type if needed
                 let cl_ty = match ty {
@@ -5363,12 +5535,10 @@ impl CraneliftBackend {
                     builder.ins().ireduce(cl_ty, result)
                 };
 
-                tracing::debug!("[CRANELIFT] LoadGlobal {:?} - calling runtime", global_id);
                 value_map.insert(*dest, final_val);
             }
 
             IrInstruction::StoreGlobal { global_id, value } => {
-                // Call rayzor_global_store(global_id, value)
                 let global_id_val = builder
                     .ins()
                     .iconst(cranelift_codegen::ir::types::I64, global_id.0 as i64);
@@ -5392,8 +5562,17 @@ impl CraneliftBackend {
                         .uextend(cranelift_codegen::ir::types::I64, val)
                 };
 
-                // Get or declare the runtime function
-                if let Some(&store_func_id) = runtime_functions.get("rayzor_global_store") {
+                if let Some(slot) = global_slot_address(global_id.0) {
+                    let addr = builder
+                        .ins()
+                        .iconst(cranelift_codegen::ir::types::I64, slot as i64);
+                    builder.ins().store(
+                        cranelift_codegen::ir::MemFlagsData::trusted(),
+                        val_i64,
+                        addr,
+                        0,
+                    );
+                } else if let Some(&store_func_id) = runtime_functions.get("rayzor_global_store") {
                     let store_func_ref = module.declare_func_in_func(store_func_id, builder.func);
                     builder
                         .ins()
@@ -6531,3 +6710,21 @@ mod tests {
         assert!(backend.function_map.is_empty());
     }
 }
+
+/// `rayzor_global_slot` of the runtime this process links, once a backend has
+/// been given the runtime's symbols.
+static GLOBAL_SLOT_FN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// The address of a static's slot in the runtime store. Slots never move, so
+/// JIT code reads and writes them in place instead of calling the runtime.
+fn global_slot_address(global_id: u32) -> Option<usize> {
+    let slot_fn = *GLOBAL_SLOT_FN.get()?;
+    let slot_fn: extern "C" fn(i64) -> *mut u64 = unsafe { std::mem::transmute(slot_fn) };
+    Some(slot_fn(i64::from(global_id)) as usize)
+}
+
+/// The runtime behind `String.charCodeAt`, lowered with an inline ASCII path.
+const CHAR_CODE_AT: &str = "haxe_string_char_code_at_null_int";
+
+/// The runtime behind `Array.push`, lowered with an inline in-place path.
+const ARRAY_PUSH: &str = "haxe_array_push_typed";

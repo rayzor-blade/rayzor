@@ -844,6 +844,13 @@ pub extern "C" fn haxe_string_char_code_at_null_int(s: *const HaxeString, index:
     }
 }
 
+/// `haxe_string_char_code_at_null_int` under a second name, for the slow path
+/// of the inline form the LLVM tier emits under the first.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_string_char_code_at_null_int_slow(s: *const HaxeString, index: i32) -> i64 {
+    haxe_string_char_code_at_null_int(s, index)
+}
+
 /// Find index of substring, starting from startIndex
 /// Returns -1 if not found
 #[unsafe(no_mangle)]

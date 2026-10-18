@@ -162,6 +162,10 @@ register_symbol!(
     crate::haxe_array::haxe_array_push_typed
 );
 register_symbol!(
+    "haxe_array_push_typed_slow",
+    crate::haxe_array::haxe_array_push_typed_slow
+);
+register_symbol!(
     "haxe_array_push_typed_f64",
     crate::haxe_array::haxe_array_push_typed_f64
 );
@@ -609,6 +613,10 @@ register_symbol!(
 register_symbol!(
     "haxe_string_char_code_at_null_int",
     crate::haxe_sys::haxe_string_char_code_at_null_int
+);
+register_symbol!(
+    "haxe_string_char_code_at_null_int_slow",
+    crate::haxe_sys::haxe_string_char_code_at_null_int_slow
 );
 register_symbol!(
     "haxe_string_index_of_ptr",

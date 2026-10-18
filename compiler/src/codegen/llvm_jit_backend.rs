@@ -1394,6 +1394,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             self.function_map.insert(func_id, llvm_func);
             return Ok(llvm_func);
         }
+        if let Some(llvm_func) = self.try_create_string_intrinsic(&func_name, &fn_type)? {
+            self.function_map.insert(func_id, llvm_func);
+            return Ok(llvm_func);
+        }
 
         // Check if already declared with MATCHING signature
         if let Some(existing_func) = self.module.get_function(&func_name) {
@@ -1740,6 +1744,272 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .build_return(Some(&result))
             .map_err(|e| format!("Failed to build return: {}", e))?;
 
+        Ok(Some(wrapper))
+    }
+
+    /// `String.charCodeAt` with the byte read in place when the string is
+    /// ASCII (its counted characters equal its bytes) and the index is in
+    /// range; anything else, a null string included, calls the runtime's
+    /// copy of the same function.
+    /// `HaxeString` is `{ ptr (0), len (8), cap (16), chars (24) }`.
+    fn try_create_string_intrinsic(
+        &self,
+        func_name: &str,
+        fn_type: &inkwell::types::FunctionType<'ctx>,
+    ) -> Result<Option<FunctionValue<'ctx>>, String> {
+        if func_name == "haxe_array_push_typed" {
+            return self.try_create_array_push_intrinsic(func_name, fn_type);
+        }
+        if func_name != "haxe_string_char_code_at_null_int" || fn_type.count_param_types() != 2 {
+            return Ok(None);
+        }
+        if let Some(existing) = self.module.get_function(func_name) {
+            if existing.get_linkage() == inkwell::module::Linkage::Internal {
+                return Ok(Some(existing));
+            }
+        }
+        let Some(ret_type) = fn_type
+            .get_return_type()
+            .filter(|t| t.is_int_type())
+            .map(|t| t.into_int_type())
+        else {
+            return Ok(None);
+        };
+        let i8_type = self.context.i8_type();
+        let i64_type = self.context.i64_type();
+        let slow_name = "haxe_string_char_code_at_null_int_slow";
+        let slow = self
+            .module
+            .get_function(slow_name)
+            .unwrap_or_else(|| self.module.add_function(slow_name, *fn_type, None));
+        let wrapper = self.module.add_function(
+            func_name,
+            *fn_type,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        wrapper.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            self.context.create_enum_attribute(
+                inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline"),
+                0,
+            ),
+        );
+        let entry = self.context.append_basic_block(wrapper, "entry");
+        let check = self.context.append_basic_block(wrapper, "check");
+        let fast = self.context.append_basic_block(wrapper, "ascii");
+        let general = self.context.append_basic_block(wrapper, "general");
+        let builder = self.context.create_builder();
+        let err = |e: inkwell::builder::BuilderError| format!("charCodeAt intrinsic: {e}");
+
+        builder.position_at_end(entry);
+        let s = wrapper
+            .get_nth_param(0)
+            .ok_or("charCodeAt intrinsic: missing string")?
+            .into_pointer_value();
+        let index = wrapper
+            .get_nth_param(1)
+            .ok_or("charCodeAt intrinsic: missing index")?
+            .into_int_value();
+        let null = builder.build_is_null(s, "null").map_err(err)?;
+        builder
+            .build_conditional_branch(null, general, check)
+            .map_err(err)?;
+
+        builder.position_at_end(check);
+        let field = |at: u64, name: &str| -> Result<inkwell::values::IntValue<'ctx>, String> {
+            let ptr = unsafe {
+                builder
+                    .build_gep(i64_type, s, &[i64_type.const_int(at, false)], name)
+                    .map_err(err)?
+            };
+            Ok(builder
+                .build_load(i64_type, ptr, name)
+                .map_err(err)?
+                .into_int_value())
+        };
+        let len = field(1, "len")?;
+        let chars = field(3, "chars")?;
+        let at = builder
+            .build_int_s_extend_or_bit_cast(index, i64_type, "at")
+            .map_err(err)?;
+        let ascii = builder
+            .build_int_compare(inkwell::IntPredicate::EQ, chars, len, "ascii")
+            .map_err(err)?;
+        let in_range = builder
+            .build_int_compare(inkwell::IntPredicate::ULT, at, len, "in_range")
+            .map_err(err)?;
+        let ok = builder.build_and(ascii, in_range, "ok").map_err(err)?;
+        builder
+            .build_conditional_branch(ok, fast, general)
+            .map_err(err)?;
+
+        builder.position_at_end(fast);
+        let data = builder
+            .build_load(self.context.ptr_type(AddressSpace::default()), s, "data")
+            .map_err(err)?
+            .into_pointer_value();
+        let byte_ptr = unsafe {
+            builder
+                .build_gep(i8_type, data, &[at], "byte_ptr")
+                .map_err(err)?
+        };
+        let byte = builder
+            .build_load(i8_type, byte_ptr, "byte")
+            .map_err(err)?
+            .into_int_value();
+        let code = builder
+            .build_int_z_extend(byte, ret_type, "code")
+            .map_err(err)?;
+        builder.build_return(Some(&code)).map_err(err)?;
+
+        builder.position_at_end(general);
+        let call = builder
+            .build_call(slow, &[s.into(), index.into()], "code")
+            .map_err(err)?;
+        let code = call
+            .try_as_basic_value()
+            .basic()
+            .ok_or("charCodeAt intrinsic: runtime returned nothing")?;
+        builder.build_return(Some(&code)).map_err(err)?;
+        Ok(Some(wrapper))
+    }
+
+    /// `Array.push` stored in place when the array is plain (no flags), has
+    /// 8-byte slots, already holds an element and has room, and the value is
+    /// not a Dynamic box, which is when the runtime would store the bits
+    /// unchanged. Anything else calls the runtime's copy of the function.
+    /// `HaxeArray` is `{ ptr (0), len (8), cap (16), elem_size (24), flags (32) }`.
+    fn try_create_array_push_intrinsic(
+        &self,
+        func_name: &str,
+        fn_type: &inkwell::types::FunctionType<'ctx>,
+    ) -> Result<Option<FunctionValue<'ctx>>, String> {
+        let params = fn_type.get_param_types();
+        let ints = |i: usize| params.get(i).is_some_and(|t| t.is_int_type());
+        if params.len() != 4 || !params[0].is_pointer_type() || !ints(1) || !ints(2) {
+            return Ok(None);
+        }
+        if params[1].into_int_type().get_bit_width() != 64 {
+            return Ok(None);
+        }
+        if let Some(existing) = self.module.get_function(func_name) {
+            if existing.get_linkage() == inkwell::module::Linkage::Internal {
+                return Ok(Some(existing));
+            }
+        }
+        let Some(ret_type) = fn_type
+            .get_return_type()
+            .filter(|t| t.is_int_type())
+            .map(|t| t.into_int_type())
+        else {
+            return Ok(None);
+        };
+        let i64_type = self.context.i64_type();
+        let slow_name = "haxe_array_push_typed_slow";
+        let slow = self
+            .module
+            .get_function(slow_name)
+            .unwrap_or_else(|| self.module.add_function(slow_name, *fn_type, None));
+        let wrapper = self.module.add_function(
+            func_name,
+            *fn_type,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        wrapper.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            self.context.create_enum_attribute(
+                inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline"),
+                0,
+            ),
+        );
+        let entry = self.context.append_basic_block(wrapper, "entry");
+        let check = self.context.append_basic_block(wrapper, "check");
+        let fast = self.context.append_basic_block(wrapper, "in_place");
+        let general = self.context.append_basic_block(wrapper, "general");
+        let builder = self.context.create_builder();
+        let err = |e: inkwell::builder::BuilderError| format!("push intrinsic: {e}");
+        let param = |i: u32| {
+            wrapper
+                .get_nth_param(i)
+                .ok_or_else(|| format!("push intrinsic: missing param {i}"))
+        };
+        let arr = param(0)?.into_pointer_value();
+        let bits = param(1)?.into_int_value();
+        let tag = param(2)?.into_int_value();
+        let metadata = param(3)?;
+
+        builder.position_at_end(entry);
+        let null = builder.build_is_null(arr, "null").map_err(err)?;
+        builder
+            .build_conditional_branch(null, general, check)
+            .map_err(err)?;
+
+        builder.position_at_end(check);
+        let field_ptr = |at: u64, name: &str| unsafe {
+            builder
+                .build_gep(i64_type, arr, &[i64_type.const_int(at, false)], name)
+                .map_err(err)
+        };
+        let load = |at: u64, name: &str| -> Result<inkwell::values::IntValue<'ctx>, String> {
+            Ok(builder
+                .build_load(i64_type, field_ptr(at, name)?, name)
+                .map_err(err)?
+                .into_int_value())
+        };
+        let len = load(1, "len")?;
+        let cap = load(2, "cap")?;
+        let elem_size = load(3, "elem_size")?;
+        let flags = load(4, "flags")?;
+        let cmp = |pred, a, b, name: &str| builder.build_int_compare(pred, a, b, name).map_err(err);
+        use inkwell::IntPredicate::{EQ, NE, ULT};
+        let plain = cmp(EQ, flags, i64_type.const_zero(), "plain")?;
+        let slots = cmp(EQ, elem_size, i64_type.const_int(8, false), "slots")?;
+        let started = cmp(NE, len, i64_type.const_zero(), "started")?;
+        let room = cmp(ULT, len, cap, "room")?;
+        let concrete = cmp(NE, tag, tag.get_type().const_int(12, false), "concrete")?;
+        let mut ok = builder.build_and(plain, slots, "ok").map_err(err)?;
+        for c in [started, room, concrete] {
+            ok = builder.build_and(ok, c, "ok").map_err(err)?;
+        }
+        builder
+            .build_conditional_branch(ok, fast, general)
+            .map_err(err)?;
+
+        builder.position_at_end(fast);
+        let data = builder
+            .build_load(self.context.ptr_type(AddressSpace::default()), arr, "data")
+            .map_err(err)?
+            .into_pointer_value();
+        let slot = unsafe {
+            builder
+                .build_gep(i64_type, data, &[len], "slot")
+                .map_err(err)?
+        };
+        builder.build_store(slot, bits).map_err(err)?;
+        let new_len = builder
+            .build_int_add(len, i64_type.const_int(1, false), "new_len")
+            .map_err(err)?;
+        builder
+            .build_store(field_ptr(1, "len_slot")?, new_len)
+            .map_err(err)?;
+        let result = builder
+            .build_int_truncate_or_bit_cast(new_len, ret_type, "pushed")
+            .map_err(err)?;
+        builder.build_return(Some(&result)).map_err(err)?;
+
+        builder.position_at_end(general);
+        let call = builder
+            .build_call(
+                slow,
+                &[arr.into(), bits.into(), tag.into(), metadata.into()],
+                "pushed",
+            )
+            .map_err(err)?;
+        let pushed = call
+            .try_as_basic_value()
+            .basic()
+            .ok_or("push intrinsic: runtime returned nothing")?;
+        builder.build_return(Some(&pushed)).map_err(err)?;
         Ok(Some(wrapper))
     }
 
@@ -2915,6 +3185,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             // Replace array operations with inline implementations
             // (e.g. haxe_array_length → inline load from offset 8)
             if let Some(llvm_func) = self.try_create_array_intrinsic(&func_name, &fn_type)? {
+                self.bind_declaration(func_id, llvm_func, function);
+                return Ok(llvm_func);
+            }
+            if let Some(llvm_func) = self.try_create_string_intrinsic(&func_name, &fn_type)? {
                 self.bind_declaration(func_id, llvm_func, function);
                 return Ok(llvm_func);
             }

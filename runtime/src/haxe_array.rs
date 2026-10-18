@@ -204,6 +204,18 @@ pub extern "C" fn haxe_array_push_typed(
     unsafe { (*arr).len as i32 }
 }
 
+/// `haxe_array_push_typed` under a second name, for the slow path of the
+/// inline form the LLVM tier emits under the first.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_push_typed_slow(
+    arr: *mut HaxeArray,
+    bits: i64,
+    tag: i32,
+    metadata: u64,
+) -> i32 {
+    haxe_array_push_typed(arr, bits, tag, metadata)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_push_typed_f64(arr: *mut HaxeArray, value: f64) -> i32 {
     if arr.is_null() {
