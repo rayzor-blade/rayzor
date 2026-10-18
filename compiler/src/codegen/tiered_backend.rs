@@ -2600,6 +2600,72 @@ impl TieredBackend {
     /// In debug mode, this adds `rayzor_push_call_frame(func_id)` at each function's
     /// entry block and `rayzor_pop_call_frame()` before every return terminator.
     /// This enables source-mapped stack traces by maintaining a thread-local shadow stack.
+    /// Functions that can neither throw nor fault and call only one another:
+    /// no trace can include their frame, so they get none.
+    fn frameless_functions(module: &IrModule) -> BTreeSet<IrFunctionId> {
+        use crate::ir::BinaryOp;
+        use crate::ir::blocks::IrTerminator;
+        let frame_update = |id: &IrFunctionId| {
+            module
+                .extern_functions
+                .get(id)
+                .is_some_and(|f| f.name == "rayzor_update_call_frame_location")
+        };
+        let mut frameless: BTreeSet<IrFunctionId> = module
+            .functions
+            .iter()
+            .filter(|(_, f)| !f.cfg.blocks.is_empty())
+            .filter(|(_, f)| {
+                f.cfg.blocks.values().all(|block| {
+                    matches!(
+                        block.terminator,
+                        IrTerminator::Branch { .. }
+                            | IrTerminator::CondBranch { .. }
+                            | IrTerminator::Switch { .. }
+                            | IrTerminator::Return { .. }
+                    ) && block.instructions.iter().all(|inst| match inst {
+                        IrInstruction::BinOp { op, .. } => !matches!(
+                            op,
+                            BinaryOp::Div | BinaryOp::Rem | BinaryOp::FDiv | BinaryOp::FRem
+                        ),
+                        IrInstruction::CallDirect { func_id, .. } => {
+                            module.functions.contains_key(func_id) || frame_update(func_id)
+                        }
+                        IrInstruction::Const { .. }
+                        | IrInstruction::Copy { .. }
+                        | IrInstruction::UnOp { .. }
+                        | IrInstruction::Cmp { .. }
+                        | IrInstruction::Select { .. }
+                        | IrInstruction::Undef { .. }
+                        | IrInstruction::DebugLoc { .. } => true,
+                        _ => false,
+                    })
+                })
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        loop {
+            let calls_out: Vec<IrFunctionId> = frameless
+                .iter()
+                .copied()
+                .filter(|id| {
+                    module.functions[id].cfg.blocks.values().any(|block| {
+                        block.instructions.iter().any(|inst| {
+                            matches!(inst, IrInstruction::CallDirect { func_id, .. }
+                                if !frame_update(func_id) && !frameless.contains(func_id))
+                        })
+                    })
+                })
+                .collect();
+            if calls_out.is_empty() {
+                return frameless;
+            }
+            for id in calls_out {
+                frameless.remove(&id);
+            }
+        }
+    }
+
     fn instrument_modules_for_stack_traces(modules: &mut [IrModule]) {
         use crate::ir::blocks::{IrBasicBlock, IrBlockId, IrTerminator};
         use crate::ir::functions::{IrFunctionSignature, IrParameter};
@@ -2609,6 +2675,12 @@ impl TieredBackend {
         use crate::tast::id_types::SymbolId;
 
         for module in modules.iter_mut() {
+            let frame_updates: BTreeSet<IrFunctionId> = module
+                .extern_functions
+                .values()
+                .filter(|f| f.name == "rayzor_update_call_frame_location")
+                .map(|f| f.id)
+                .collect();
             // Allocate function IDs for the two extern functions in this module
             let push_fn_id = module.alloc_function_id();
             let pop_fn_id = module.alloc_function_id();
@@ -2650,6 +2722,8 @@ impl TieredBackend {
                 source: "runtime".to_string(),
             });
 
+            let frameless = Self::frameless_functions(module);
+
             // Collect function IDs that need instrumentation (non-extern functions with bodies)
             let func_ids: Vec<(crate::ir::IrFunctionId, u32)> = module
                 .functions
@@ -2663,6 +2737,16 @@ impl TieredBackend {
                     Some(f) => f,
                     None => continue,
                 };
+                if frameless.contains(&func_id) {
+                    // A line update here would land on the caller's frame.
+                    for block in function.cfg.blocks.values_mut() {
+                        block.instructions.retain(|inst| {
+                            !matches!(inst, IrInstruction::CallDirect { func_id, .. }
+                                if frame_updates.contains(func_id))
+                        });
+                    }
+                    continue;
+                }
 
                 // Allocate registers for the push call
                 let const_reg = IrId::new(function.next_reg_id);
