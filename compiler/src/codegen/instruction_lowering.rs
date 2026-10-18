@@ -1104,7 +1104,7 @@ impl CraneliftBackend {
     /// through memory (store/load), since SRA + CopyProp can expose fmul results
     /// across block boundaries that were previously hidden by memory operations.
     fn try_extract_fmul(builder: &FunctionBuilder, value: Value) -> Option<(Value, Value)> {
-        if crate::codegen::instruction_lowering::fma_disabled() {
+        if !crate::codegen::instruction_lowering::scalar_fma_enabled() {
             return None;
         }
         use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
@@ -1174,4 +1174,15 @@ pub(crate) fn fma_disabled() -> bool {
         Ok(v) => !matches!(v.as_str(), "" | "0" | "false"),
         Err(_) => false,
     }
+}
+
+/// `RAYZOR_FMA=1` fuses scalar `a * b + c`. Haxe rounds each Float operation,
+/// so fusing changes results; off by default.
+pub(crate) fn scalar_fma_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let on =
+            std::env::var("RAYZOR_FMA").is_ok_and(|v| !matches!(v.as_str(), "" | "0" | "false"));
+        on && !fma_disabled()
+    })
 }

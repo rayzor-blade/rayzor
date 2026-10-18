@@ -732,7 +732,7 @@ impl AotCompiler {
         }
         cmd.arg(opt_flag);
         cmd.arg("-pipe"); // Use pipes instead of temp files for speed
-        cmd.arg("-ffp-contract=on");
+        cmd.arg("-ffp-contract=off");
         cmd.arg("-Wno-int-conversion");
         cmd.arg("-Wno-incompatible-pointer-types");
         cmd.arg("-lm");

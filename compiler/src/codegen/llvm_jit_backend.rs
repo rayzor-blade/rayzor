@@ -477,22 +477,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         }
     }
 
-    /// Fast-math flags bitmask for floating-point optimizations.
-    /// LLVM FastMathFlags: AllowReassoc(1) | NoNaNs(2) | NoInfs(4) | NoSignedZeros(8) |
-    ///                     AllowReciprocal(16) | AllowContract(32) | ApproxFunc(64)
-    ///
-    /// Using conservative flags WITHOUT AllowContract:
-    /// - NoNaNs(2) + NoInfs(4) + NoSignedZeros(8) = 14
-    /// - AllowContract is DISABLED because LLVM's O3 pass manager will perform
-    ///   cross-block FMA fusion when it's enabled, changing FP results in
-    ///   iteration-heavy loops (e.g. mandelbrot checksum 112798515 → 112798531).
-    ///   Same-block FMA is handled explicitly via llvm.fma.f64 intrinsics in
-    ///   try_extract_fmul_llvm(), which doesn't require AllowContract.
-    /// - AllowReassoc is DISABLED as it can change results due to FP non-associativity
-    /// - ApproxFunc is DISABLED as it uses approximations for math functions
-    /// - AllowReciprocal is DISABLED as it can change division precision
-    const FAST_MATH_FLAGS: u32 = 0x0E; // NoNaNs + NoInfs + NoSignedZeros (14)
-
     /// Alias tag for an access at `byte_offset` within an object.
     ///
     /// Two accesses at different offsets cannot be the same address: within one
@@ -634,21 +618,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         opts
     }
 
-    /// Apply fast-math flags to a float instruction for aggressive optimization.
-    /// This enables LLVM to perform optimizations like:
-    /// - Reassociation of floating-point operations
-    /// - Use of reciprocals instead of division
-    /// - Contraction of multiply-add sequences into FMA
-    /// - Approximation of transcendental functions
-    #[inline]
-    fn apply_fast_math(&self, result: inkwell::values::FloatValue<'ctx>) {
-        // Get the instruction that produced this value and set fast-math flags
-        // This is safe to call on any FloatValue - returns None if not an instruction
-        if let Some(inst) = result.as_instruction_value() {
-            inst.set_fast_math_flags(Self::FAST_MATH_FLAGS);
-        }
-    }
-
     /// Check if an LLVM float value was produced by an fmul in the same basic block.
     /// Returns the two fmul operands if so, enabling FMA fusion.
     /// Only fuses same-block to match Cranelift backend behavior and hxcpp results.
@@ -659,7 +628,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         inkwell::values::FloatValue<'ctx>,
         inkwell::values::FloatValue<'ctx>,
     )> {
-        if crate::codegen::instruction_lowering::fma_disabled() {
+        if !crate::codegen::instruction_lowering::scalar_fma_enabled() {
             return None;
         }
         let inst = value.as_instruction_value()?;
@@ -851,7 +820,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 .builder
                 .build_float_add(m, c, name)
                 .map_err(|e| format!("Failed to build fadd: {}", e))?;
-            self.apply_fast_math(r);
             return Ok(r);
         }
         let name_f = if float_ty == self.context.f32_type() {
@@ -872,7 +840,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .basic()
             .ok_or("fma intrinsic returned void")?
             .into_float_value();
-        self.apply_fast_math(result);
         Ok(result)
     }
 
@@ -7247,7 +7214,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             .builder
                             .build_float_add(left_f, right_f, &name)
                             .map_err(|e| format!("Failed to build fadd: {}", e))?;
-                        self.apply_fast_math(r);
                         r
                     };
                     Ok(result.into())
@@ -7281,7 +7247,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             .builder
                             .build_float_sub(left_f, right_f, &name)
                             .map_err(|e| format!("Failed to build fsub: {}", e))?;
-                        self.apply_fast_math(r);
                         r
                     };
                     Ok(result.into())
@@ -7301,7 +7266,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         .builder
                         .build_float_mul(left_f, right_f, &name)
                         .map_err(|e| format!("Failed to build fmul: {}", e))?;
-                    self.apply_fast_math(result);
                     Ok(result.into())
                 } else {
                     let result = self
@@ -7319,7 +7283,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         .builder
                         .build_float_div(left_f, right_f, &name)
                         .map_err(|e| format!("Failed to build fdiv: {}", e))?;
-                    self.apply_fast_math(result);
                     Ok(result.into())
                 } else {
                     let result = self
@@ -7337,7 +7300,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         .builder
                         .build_float_rem(left_f, right_f, &name)
                         .map_err(|e| format!("Failed to build frem: {}", e))?;
-                    self.apply_fast_math(result);
                     Ok(result.into())
                 } else {
                     let result = self
@@ -7542,7 +7504,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         .builder
                         .build_float_add(left_f, right_f, &name)
                         .map_err(|e| format!("Failed to build fadd: {}", e))?;
-                    self.apply_fast_math(r);
                     r
                 };
                 Ok(result.into())
@@ -7568,7 +7529,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         .builder
                         .build_float_sub(left_f, right_f, &name)
                         .map_err(|e| format!("Failed to build fsub: {}", e))?;
-                    self.apply_fast_math(r);
                     r
                 };
                 Ok(result.into())
@@ -7578,7 +7538,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .builder
                     .build_float_mul(left.into_float_value(), right.into_float_value(), &name)
                     .map_err(|e| format!("Failed to build fmul: {}", e))?;
-                self.apply_fast_math(result);
                 Ok(result.into())
             }
             BinaryOp::FDiv => {
@@ -7586,7 +7545,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .builder
                     .build_float_div(left.into_float_value(), right.into_float_value(), &name)
                     .map_err(|e| format!("Failed to build fdiv: {}", e))?;
-                self.apply_fast_math(result);
                 Ok(result.into())
             }
             BinaryOp::FRem => {
@@ -7594,7 +7552,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .builder
                     .build_float_rem(left.into_float_value(), right.into_float_value(), &name)
                     .map_err(|e| format!("Failed to build frem: {}", e))?;
-                self.apply_fast_math(result);
                 Ok(result.into())
             }
         }
@@ -7627,7 +7584,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         .builder
                         .build_float_neg(operand.into_float_value(), &name)
                         .map_err(|e| format!("Failed to build fneg: {}", e))?;
-                    self.apply_fast_math(result);
                     Ok(result.into())
                 } else {
                     if operand.is_pointer_value() {
@@ -7700,7 +7656,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .builder
                     .build_float_neg(operand.into_float_value(), &name)
                     .map_err(|e| format!("Failed to build fneg: {}", e))?;
-                self.apply_fast_math(result);
                 Ok(result.into())
             }
         }
@@ -7861,7 +7816,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     let right_f = to_float(right, &self.builder, "ne_r_f")?;
                     let result = self
                         .builder
-                        .build_float_compare(FloatPredicate::ONE, left_f, right_f, &name)
+                        .build_float_compare(FloatPredicate::UNE, left_f, right_f, &name)
                         .map_err(|e| format!("Failed to build fne: {}", e))?;
                     to_i8(result, &self.builder, &format!("{}_i8", name))
                 } else {
@@ -7980,7 +7935,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 to_i8(result, &self.builder, &format!("{}_i8", name))
             }
 
-            // Float comparisons (ordered)
+            // Float comparisons: ordered, except `!=`, which is true for NaN.
             CompareOp::FEq => {
                 let result = self
                     .builder
@@ -7997,7 +7952,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 let result = self
                     .builder
                     .build_float_compare(
-                        FloatPredicate::ONE,
+                        FloatPredicate::UNE,
                         left.into_float_value(),
                         right.into_float_value(),
                         &name,
