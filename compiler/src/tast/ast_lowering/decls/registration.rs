@@ -835,6 +835,27 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Recover function field signatures before callers in earlier classes are lowered.
+    /// The type of a literal initializer, known before any body is lowered, so
+    /// a class earlier in the file sees `static var n = 0` as an Int. An
+    /// integer outside the Int range is left to the initializer's lowering.
+    fn literal_field_type(&self, initializer: &parser::Expr) -> Option<TypeId> {
+        let table = self.context.type_table.borrow();
+        let number = |expr: &parser::Expr| match expr.kind {
+            parser::ExprKind::Int(v) if i32::try_from(v).is_ok() => Some(table.int_type()),
+            parser::ExprKind::Float(_) => Some(table.float_type()),
+            _ => None,
+        };
+        match &initializer.kind {
+            parser::ExprKind::String(_) => Some(table.string_type()),
+            parser::ExprKind::Bool(_) => Some(table.bool_type()),
+            parser::ExprKind::Unary {
+                op: parser::UnaryOp::Neg,
+                expr,
+            } => number(expr),
+            _ => number(initializer),
+        }
+    }
+
     fn function_field_signature(&mut self, initializer: &parser::Expr) -> Option<TypeId> {
         let parser::ExprKind::Function(function) = &initializer.kind else {
             return None;
@@ -997,7 +1018,10 @@ impl<'a> AstLowering<'a> {
                     .unwrap_or_else(|_| self.context.type_table.borrow().dynamic_type())
             } else {
                 initializer
-                    .and_then(|expr| self.function_field_signature(expr))
+                    .and_then(|expr| {
+                        self.function_field_signature(expr)
+                            .or_else(|| self.literal_field_type(expr))
+                    })
                     .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type())
             };
             let field_type =
