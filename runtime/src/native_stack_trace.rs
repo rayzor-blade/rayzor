@@ -308,6 +308,7 @@ pub fn resolve_backtrace_to_source(bt: &backtrace::Backtrace) -> String {
 /// `rayzor_push_call_frame` is a cheap lock-free thread-local push.
 /// The func_id → registry_index resolution happens only in `capture_shadow_stack`,
 /// which is called exclusively at exception throw time.
+#[repr(C)]
 struct ShadowFrame {
     /// Compiler-assigned IrFunctionId (resolved to FUNCTION_REGISTRY at capture time)
     func_id: u32,
@@ -317,14 +318,78 @@ struct ShadowFrame {
     column: u32,
 }
 
+/// Frames per chunk of a shadow stack.
+const FRAME_CHUNK: usize = 1024;
+
+/// A shadow stack whose frames never move: compiled code keeps the address of
+/// its own frame and writes the current line into it directly.
+#[derive(Default)]
+pub(crate) struct ShadowFrames {
+    chunks: Vec<Box<[ShadowFrame]>>,
+    len: usize,
+}
+
+impl ShadowFrames {
+    const fn new() -> Self {
+        ShadowFrames {
+            chunks: Vec::new(),
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, frame: ShadowFrame) -> *mut ShadowFrame {
+        let (chunk, slot) = (self.len / FRAME_CHUNK, self.len % FRAME_CHUNK);
+        if chunk == self.chunks.len() {
+            self.chunks.push(
+                (0..FRAME_CHUNK)
+                    .map(|_| ShadowFrame {
+                        func_id: 0,
+                        line: 0,
+                        column: 0,
+                    })
+                    .collect(),
+            );
+        }
+        let at = &mut self.chunks[chunk][slot];
+        *at = frame;
+        self.len += 1;
+        at
+    }
+
+    fn pop(&mut self) {
+        self.len = self.len.saturating_sub(1);
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.len = self.len.min(len);
+    }
+
+    fn last_mut(&mut self) -> Option<&mut ShadowFrame> {
+        let i = self.len.checked_sub(1)?;
+        Some(&mut self.chunks[i / FRAME_CHUNK][i % FRAME_CHUNK])
+    }
+
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &ShadowFrame> {
+        (0..self.len).map(|i| &self.chunks[i / FRAME_CHUNK][i % FRAME_CHUNK])
+    }
+}
+
 thread_local! {
-    static SHADOW_STACK: std::cell::RefCell<Vec<ShadowFrame>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+    static SHADOW_STACK: std::cell::RefCell<ShadowFrames> =
+        const { std::cell::RefCell::new(ShadowFrames::new()) };
 }
 
 /// A thread's shadow call stack, held aside while another fiber runs.
 #[derive(Default)]
-pub(crate) struct ShadowStack(Vec<ShadowFrame>);
+pub(crate) struct ShadowStack(ShadowFrames);
 
 /// Install `stack` as this thread's shadow stack, returning the one it replaces.
 pub(crate) fn replace_shadow_stack(stack: ShadowStack) -> ShadowStack {
@@ -340,13 +405,22 @@ pub(crate) fn replace_shadow_stack(stack: ShadowStack) -> ShadowStack {
 /// an exception is thrown.
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_push_call_frame(func_id: u32) {
+    rayzor_push_call_frame_at(func_id);
+}
+
+/// Push a call frame and return the address of its line, with the column in
+/// the next 4 bytes. The frame stays at that address until it is popped, so
+/// compiled code updates the current line with two stores instead of a call.
+#[unsafe(no_mangle)]
+pub extern "C" fn rayzor_push_call_frame_at(func_id: u32) -> *mut u32 {
     SHADOW_STACK.with(|stack| {
-        stack.borrow_mut().push(ShadowFrame {
+        let frame = stack.borrow_mut().push(ShadowFrame {
             func_id,
             line: 0,
             column: 0,
         });
-    });
+        unsafe { std::ptr::addr_of_mut!((*frame).line) }
+    })
 }
 
 /// Pop a call frame from the shadow stack (called at function return in debug mode).

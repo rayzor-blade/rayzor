@@ -2284,6 +2284,10 @@ register_symbol!(
     crate::native_stack_trace::rayzor_push_call_frame
 );
 register_symbol!(
+    "rayzor_push_call_frame_at",
+    crate::native_stack_trace::rayzor_push_call_frame_at
+);
+register_symbol!(
     "rayzor_pop_call_frame",
     crate::native_stack_trace::rayzor_pop_call_frame
 );

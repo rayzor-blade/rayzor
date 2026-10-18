@@ -2600,17 +2600,32 @@ impl TieredBackend {
     /// In debug mode, this adds `rayzor_push_call_frame(func_id)` at each function's
     /// entry block and `rayzor_pop_call_frame()` before every return terminator.
     /// This enables source-mapped stack traces by maintaining a thread-local shadow stack.
+    /// `rayzor_update_call_frame_location` as an extern or as a bodiless
+    /// declaration: calls name either.
+    fn frame_update_ids(module: &IrModule) -> BTreeSet<IrFunctionId> {
+        let name = "rayzor_update_call_frame_location";
+        module
+            .extern_functions
+            .values()
+            .filter(|f| f.name == name)
+            .map(|f| f.id)
+            .chain(
+                module
+                    .functions
+                    .values()
+                    .filter(|f| f.cfg.blocks.is_empty() && f.name == name)
+                    .map(|f| f.id),
+            )
+            .collect()
+    }
+
     /// Functions that can neither throw nor fault and call only one another:
     /// no trace can include their frame, so they get none.
     fn frameless_functions(module: &IrModule) -> BTreeSet<IrFunctionId> {
         use crate::ir::BinaryOp;
         use crate::ir::blocks::IrTerminator;
-        let frame_update = |id: &IrFunctionId| {
-            module
-                .extern_functions
-                .get(id)
-                .is_some_and(|f| f.name == "rayzor_update_call_frame_location")
-        };
+        let updates = Self::frame_update_ids(module);
+        let frame_update = |id: &IrFunctionId| updates.contains(id);
         let mut frameless: BTreeSet<IrFunctionId> = module
             .functions
             .iter()
@@ -2675,20 +2690,15 @@ impl TieredBackend {
         use crate::tast::id_types::SymbolId;
 
         for module in modules.iter_mut() {
-            let frame_updates: BTreeSet<IrFunctionId> = module
-                .extern_functions
-                .values()
-                .filter(|f| f.name == "rayzor_update_call_frame_location")
-                .map(|f| f.id)
-                .collect();
+            let frame_updates = Self::frame_update_ids(module);
             // Allocate function IDs for the two extern functions in this module
             let push_fn_id = module.alloc_function_id();
             let pop_fn_id = module.alloc_function_id();
 
-            // Register rayzor_push_call_frame(func_id: u32) -> void
+            // rayzor_push_call_frame_at(func_id: u32) -> the frame's line slot
             module.add_extern_function(IrExternFunction {
                 id: push_fn_id,
-                name: "rayzor_push_call_frame".to_string(),
+                name: "rayzor_push_call_frame_at".to_string(),
                 symbol_id: SymbolId::from_raw(u32::MAX - 10),
                 signature: IrFunctionSignature {
                     parameters: vec![IrParameter {
@@ -2697,7 +2707,7 @@ impl TieredBackend {
                         reg: IrId::new(0),
                         by_ref: false,
                     }],
-                    return_type: IrType::Void,
+                    return_type: IrType::I64,
                     calling_convention: CallingConvention::C,
                     can_throw: false,
                     type_params: vec![],
@@ -2750,7 +2760,9 @@ impl TieredBackend {
 
                 // Allocate registers for the push call
                 let const_reg = IrId::new(function.next_reg_id);
-                function.next_reg_id += 1;
+                let frame = IrId::new(function.next_reg_id + 1);
+                function.next_reg_id += 2;
+                function.register_types.insert(frame, IrType::I64);
 
                 // Prepend to entry block: Const(reg, U32(func_id)) + CallDirect(push, [reg])
                 let entry_block_id = function.cfg.entry_block;
@@ -2761,7 +2773,7 @@ impl TieredBackend {
                             value: IrValue::U32(raw_id),
                         },
                         IrInstruction::CallDirect {
-                            dest: None,
+                            dest: Some(frame),
                             func_id: push_fn_id,
                             args: vec![const_reg],
                             arg_ownership: vec![OwnershipMode::Copy],
@@ -2775,6 +2787,8 @@ impl TieredBackend {
                     new_instructions.append(&mut entry_block.instructions);
                     entry_block.instructions = new_instructions;
                 }
+
+                Self::store_line_updates(function, frame, &frame_updates);
 
                 // For every block with a Return terminator, insert pop before it
                 let return_block_ids: Vec<IrBlockId> = function
@@ -2799,6 +2813,87 @@ impl TieredBackend {
                 }
             }
         }
+    }
+
+    /// Turns each line update in `function` into two stores into its own
+    /// frame, the line at `frame` and the column 4 bytes on.
+    fn store_line_updates(
+        function: &mut IrFunction,
+        frame: crate::ir::IrId,
+        frame_updates: &BTreeSet<IrFunctionId>,
+    ) {
+        use crate::ir::types::{IrType, IrValue};
+        use crate::ir::{BinaryOp, IrId};
+        let mut next = function.next_reg_id;
+        let mut fresh = |types: &mut BTreeMap<IrId, IrType>, ty: IrType| {
+            let reg = IrId::new(next);
+            next += 1;
+            types.insert(reg, ty);
+            reg
+        };
+        let block_ids: Vec<_> = function.cfg.blocks.keys().copied().collect();
+        for block_id in block_ids {
+            let old =
+                std::mem::take(&mut function.cfg.blocks.get_mut(&block_id).unwrap().instructions);
+            let mut new = Vec::with_capacity(old.len());
+            for inst in old {
+                let IrInstruction::CallDirect { func_id, args, .. } = &inst else {
+                    new.push(inst);
+                    continue;
+                };
+                let [line, column] = args[..] else {
+                    new.push(inst);
+                    continue;
+                };
+                if !frame_updates.contains(func_id) {
+                    new.push(inst);
+                    continue;
+                }
+                let mut word = |reg: IrId, new: &mut Vec<IrInstruction>| match function
+                    .register_types
+                    .get(&reg)
+                    .cloned()
+                {
+                    Some(IrType::I32 | IrType::U32) => reg,
+                    other => {
+                        let cast = fresh(&mut function.register_types, IrType::I32);
+                        new.push(IrInstruction::Cast {
+                            dest: cast,
+                            src: reg,
+                            from_ty: other.unwrap_or(IrType::I64),
+                            to_ty: IrType::I32,
+                        });
+                        cast
+                    }
+                };
+                let line = word(line, &mut new);
+                let column = word(column, &mut new);
+                let four = fresh(&mut function.register_types, IrType::I64);
+                let column_at = fresh(&mut function.register_types, IrType::I64);
+                new.push(IrInstruction::Store {
+                    ptr: frame,
+                    value: line,
+                    store_ty: Some(IrType::I32),
+                });
+                new.push(IrInstruction::Const {
+                    dest: four,
+                    value: IrValue::I64(4),
+                });
+                new.push(IrInstruction::BinOp {
+                    dest: column_at,
+                    op: BinaryOp::Add,
+                    left: frame,
+                    right: four,
+                });
+                new.push(IrInstruction::Store {
+                    ptr: column_at,
+                    value: column,
+                    store_ty: Some(IrType::I32),
+                });
+            }
+            function.cfg.blocks.get_mut(&block_id).unwrap().instructions = new;
+        }
+        function.next_reg_id = next;
     }
 
     /// Strip `rayzor_update_call_frame_location` calls from MIR when stack traces are disabled.
