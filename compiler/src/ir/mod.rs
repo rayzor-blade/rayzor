@@ -30,6 +30,7 @@ pub mod init_order; // Order of per-file `__init__`s in a merged module
 pub mod inlining; // Function inlining and call graph analysis
 pub mod insert_free; // Insert Free instructions for non-escaping allocations
 pub mod instructions;
+pub mod int_quotient; // Std.int of an Int divided by a constant, in integers
 pub mod loop_analysis; // Loop analysis: dominators, natural loops, nesting
 pub mod loop_unrolling; // Loop unrolling for constant-trip-count loops
 pub mod loop_unswitch; // Loop copies specialised on an invariant branch

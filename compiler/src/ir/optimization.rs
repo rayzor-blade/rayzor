@@ -2174,6 +2174,7 @@ impl PassManager {
                 // SRA enabled - regular SRA doesn't modify phi nodes, phi-aware SRA remains disabled
                 manager.add_pass(super::scalar_replacement::ScalarReplacementPass::new());
                 manager.add_pass(ConstantFoldingPass::new());
+                manager.add_pass(super::int_quotient::IntQuotientPass::new());
                 manager.add_pass(CopyPropagationPass::new());
                 // GlobalLoadCachingPass: caches repeated global loads within functions
                 // Provides ~1.67x speedup on nbody by eliminating redundant BTreeMap lookups
@@ -2213,6 +2214,7 @@ impl PassManager {
                 manager.add_pass(super::devirtualize::DevirtualizationPass::new());
                 manager.add_pass(super::scalar_replacement::ScalarReplacementPass::new());
                 manager.add_pass(ConstantFoldingPass::new());
+                manager.add_pass(super::int_quotient::IntQuotientPass::new());
                 manager.add_pass(CopyPropagationPass::new());
                 // BCE: eliminate redundant bounds checks in for-in loops
                 manager
