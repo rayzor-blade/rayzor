@@ -976,8 +976,14 @@ struct LoopClobbers {
 }
 
 /// Runtime functions a loop may call without changing any array's header:
-/// the element read behind `a[i]` and the null-array report.
-const PRESERVES_ARRAY_HEADERS: &[&str] = &["haxe_array_get_typed", "rayzor_null_access"];
+/// the element read behind `a[i]`, the length read, the null-array report and
+/// the stack-trace line update.
+const PRESERVES_ARRAY_HEADERS: &[&str] = &[
+    "haxe_array_get_typed",
+    "haxe_array_length",
+    "rayzor_null_access",
+    "rayzor_update_call_frame_location",
+];
 
 /// The functions of `module` whose calls change no array header.
 pub(super) fn header_preserving_functions(module: &IrModule) -> BTreeSet<IrFunctionId> {

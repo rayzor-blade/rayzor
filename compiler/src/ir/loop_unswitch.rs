@@ -14,7 +14,7 @@ use super::loop_analysis::{DominatorTree, LoopNestInfo, NaturalLoop};
 use super::optimization::{InstructionExt, OptimizationPass, OptimizationResult};
 use super::{
     ArrayField, BinaryOp, CompareOp, IrBlockId, IrFunction, IrFunctionId, IrId, IrInstruction,
-    IrModule, IrTerminator, IrType, IrValue, OptimizationHint,
+    IrModule, IrPhiNode, IrTerminator, IrType, IrValue, OptimizationHint,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,6 +51,7 @@ impl OptimizationPass for LoopUnswitchPass {
         let mut result = OptimizationResult::unchanged();
         let preserving = super::optimization::header_preserving_functions(module);
         for function in module.functions.values_mut() {
+            close_loops(function);
             let mut done = 0;
             while done < MAX_COPIES_PER_FUNCTION && split_one(function, &preserving) {
                 done += 1;
@@ -62,6 +63,147 @@ impl OptimizationPass for LoopUnswitchPass {
         }
         result
     }
+}
+
+/// Gives every value a single-exit loop defines and uses after it a phi in the
+/// exit block, so the loop can be copied: after a split, either copy may be
+/// the one that defined it, and only a phi in the exit can say which.
+fn close_loops(function: &mut IrFunction) {
+    for _ in 0..32 {
+        let Some((exit, values, inside)) = unclosed_loop(function) else {
+            return;
+        };
+        let preds = function.cfg.blocks[&exit].predecessors.clone();
+        let mut replace: BTreeMap<IrId, IrId> = BTreeMap::new();
+        for value in values {
+            let phi = IrId::new(function.next_reg_id);
+            function.next_reg_id += 1;
+            let ty = function
+                .register_types
+                .get(&value)
+                .cloned()
+                .unwrap_or(IrType::I64);
+            function.register_types.insert(phi, ty.clone());
+            function
+                .cfg
+                .blocks
+                .get_mut(&exit)
+                .unwrap()
+                .phi_nodes
+                .push(IrPhiNode {
+                    dest: phi,
+                    incoming: preds.iter().map(|p| (*p, value)).collect(),
+                    ty,
+                });
+            replace.insert(value, phi);
+        }
+        let get = |reg: &mut IrId| {
+            if let Some(value) = replace.get(reg) {
+                *reg = *value;
+            }
+        };
+        let new_phis: BTreeSet<IrId> = replace.values().copied().collect();
+        for (id, block) in function.cfg.blocks.iter_mut() {
+            if inside.contains(id) {
+                continue;
+            }
+            for phi in &mut block.phi_nodes {
+                if new_phis.contains(&phi.dest) {
+                    continue;
+                }
+                for (from, value) in &mut phi.incoming {
+                    if !inside.contains(from) {
+                        get(value);
+                    }
+                }
+            }
+            for inst in &mut block.instructions {
+                inst.replace_uses(&replace);
+            }
+            match &mut block.terminator {
+                IrTerminator::CondBranch { condition, .. } => get(condition),
+                IrTerminator::Switch { value, .. } => get(value),
+                IrTerminator::Return { value: Some(v) } => get(v),
+                IrTerminator::NoReturn { call } => get(call),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// A loop with one exit block, entered only from the loop, whose values are
+/// used past it other than through that block's phis: the exit block, those
+/// values and the loop's blocks.
+fn unclosed_loop(function: &IrFunction) -> Option<(IrBlockId, Vec<IrId>, BTreeSet<IrBlockId>)> {
+    let domtree = DominatorTree::compute(function);
+    let nest = LoopNestInfo::analyze(function, &domtree);
+    for natural in nest.loops_innermost_first().into_iter().rev() {
+        let cfg = &function.cfg;
+        let exits: BTreeSet<IrBlockId> = natural
+            .blocks
+            .iter()
+            .filter_map(|b| cfg.get_block(*b))
+            .flat_map(|b| successors(&b.terminator))
+            .filter(|s| !natural.blocks.contains(s))
+            .collect();
+        let [exit] = exits.iter().copied().collect::<Vec<_>>()[..] else {
+            continue;
+        };
+        let Some(exit_block) = cfg.get_block(exit) else {
+            continue;
+        };
+        if exit_block.predecessors.is_empty()
+            || !exit_block
+                .predecessors
+                .iter()
+                .all(|p| natural.blocks.contains(p))
+        {
+            continue;
+        }
+        let mut defs: BTreeSet<IrId> = BTreeSet::new();
+        for id in &natural.blocks {
+            if let Some(block) = cfg.get_block(*id) {
+                defs.extend(block.phi_nodes.iter().map(|p| p.dest));
+                defs.extend(block.instructions.iter().filter_map(|i| i.dest()));
+            }
+        }
+        let mut escaping: BTreeSet<IrId> = BTreeSet::new();
+        let mut dominated = true;
+        for (id, block) in &cfg.blocks {
+            if natural.blocks.contains(id) {
+                continue;
+            }
+            let mut note = |reg: IrId, at: IrBlockId| {
+                if defs.contains(&reg) {
+                    escaping.insert(reg);
+                    dominated &= domtree.dominates(exit, at);
+                }
+            };
+            for phi in &block.phi_nodes {
+                for (from, value) in &phi.incoming {
+                    if !natural.blocks.contains(from) {
+                        note(*value, *from);
+                    }
+                }
+            }
+            for reg in block
+                .instructions
+                .iter()
+                .flat_map(|inst| inst.uses())
+                .chain(terminator_uses(&block.terminator))
+            {
+                note(reg, *id);
+            }
+        }
+        if !escaping.is_empty() && dominated {
+            return Some((
+                exit,
+                escaping.into_iter().collect(),
+                natural.blocks.iter().copied().collect(),
+            ));
+        }
+    }
+    None
 }
 
 /// How one loop is split.
@@ -300,6 +442,9 @@ enum Need {
     InBounds(usize, Index, IrId),
     /// A constant index is within the array's length.
     ConstIndex(i64, IrId),
+    /// An index `iv + c`, already checked against the length by a branch the
+    /// access sits under, is not negative.
+    NonNegative(usize, i64),
     /// The array is plain (zero flags).
     Plain(IrId),
     /// The array is not null.
@@ -486,9 +631,51 @@ fn plan_version(
         .filter(|array| outside(*array))
         .collect();
 
+    // Blocks entered only when `index < array.length` holds: (block, index,
+    // array). Within one iteration of the fast copy the length cannot change.
+    let strip = |reg: IrId| match def_of.get(&canon(reg)) {
+        Some(IrInstruction::Cast { src, .. }) => canon(*src),
+        _ => canon(reg),
+    };
+    let mut guards: Vec<(IrBlockId, IrId, IrId)> = Vec::new();
+    for id in &nest.blocks {
+        let Some(IrTerminator::CondBranch {
+            condition,
+            true_target,
+            ..
+        }) = function.cfg.get_block(*id).map(|b| &b.terminator)
+        else {
+            continue;
+        };
+        let single_entry = function
+            .cfg
+            .get_block(*true_target)
+            .is_some_and(|t| t.predecessors.len() == 1);
+        if let (
+            true,
+            Some(IrInstruction::Cmp {
+                op: CompareOp::Lt,
+                left,
+                right,
+                ..
+            }),
+        ) = (single_entry, def_of.get(&canon(*condition)).copied())
+        {
+            if let Some(IrInstruction::ArrayHeader {
+                array,
+                field: ArrayField::Len,
+                ..
+            }) = def_of.get(&strip(*right)).copied()
+            {
+                guards.push((*true_target, strip(*left), canon(*array)));
+            }
+        }
+    }
+
     // What a branch condition needs to be decided, and the value it then has.
     struct Ctx<'a> {
         def_of: &'a BTreeMap<IrId, &'a IrInstruction>,
+        guards: &'a [(IrBlockId, IrId, IrId)],
         inductions: &'a [Induction],
         arrays: &'a BTreeSet<IrId>,
         domtree: &'a DominatorTree,
@@ -534,6 +721,15 @@ fn plan_version(
                     return (c >= 0).then(|| (vec![Need::ConstIndex(c, array)], true));
                 }
                 let (k, form) = affine_index(ctx, block, index)?;
+                let guarded = ctx.guards.iter().any(|(entered, i, a)| {
+                    *i == index && *a == array && ctx.domtree.dominates(*entered, block)
+                });
+                if let (true, Index::Shift(c)) = (guarded, form) {
+                    return match (ctx.constant)(ctx.inductions[k].start) {
+                        Some(start) => (start + c >= 0).then(|| (Vec::new(), true)),
+                        None => Some((vec![Need::NonNegative(k, c)], true)),
+                    };
+                }
                 // A constant start fixes the lowest index now; a register
                 // start is checked in the precondition.
                 if let (Index::Shift(c), Some(start)) =
@@ -606,6 +802,7 @@ fn plan_version(
 
     let ctx = Ctx {
         def_of: &def_of,
+        guards: &guards,
         inductions: &inductions,
         arrays: &arrays,
         domtree,
@@ -655,6 +852,12 @@ fn plan_version(
                 let len = pre.header(array, ArrayField::Len);
                 let index = pre.push_const(c);
                 facts.push(pre.push_cmp(CompareOp::Lt, index, len));
+            }
+            Need::NonNegative(k, c) => {
+                let ind = &inductions[k];
+                let start = pre.widen(ind.start, function.register_types.get(&ind.start));
+                let lowest = pre.offset(start, c);
+                facts.push(pre.push_cmp(CompareOp::Ge, lowest, zero));
             }
             Need::InBounds(k, form, array) => {
                 // With start <= iv < bound: the highest index must be below
