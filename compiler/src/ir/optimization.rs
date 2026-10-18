@@ -2171,6 +2171,7 @@ impl PassManager {
             OptimizationLevel::O2 => {
                 // Standard optimizations
                 // Before tail recursion folds the repeated self-call away.
+                manager.add_pass(super::guarded_devirt::GuardedDevirtualizationPass::new());
                 manager.add_pass(super::pure_recursion::PureRecursionPass::new());
                 // Before inlining, while a self-call is still a call.
                 manager.add_pass(super::tail_recursion::TailRecursionPass::new());
@@ -2211,6 +2212,7 @@ impl PassManager {
             }
             OptimizationLevel::O3 => {
                 // Aggressive optimizations
+                manager.add_pass(super::guarded_devirt::GuardedDevirtualizationPass::new());
                 manager.add_pass(super::pure_recursion::PureRecursionPass::new());
                 manager.add_pass(super::tail_recursion::TailRecursionPass::new());
                 // Inlining first to expose more optimization opportunities

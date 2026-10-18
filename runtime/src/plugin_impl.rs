@@ -2098,6 +2098,10 @@ register_symbol!(
 );
 register_symbol!("haxe_vtable_lookup", crate::type_system::haxe_vtable_lookup);
 register_symbol!(
+    "haxe_vtable_lookup_in",
+    crate::type_system::haxe_vtable_lookup_in
+);
+register_symbol!(
     "haxe_iface_vtable_set_slot",
     crate::type_system::haxe_iface_vtable_set_slot
 );

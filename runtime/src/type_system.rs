@@ -5394,6 +5394,13 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
     vtable_lookup_slow(obj_ptr, slot_index)
 }
 
+/// `haxe_vtable_lookup` for a receiver whose static class the compiler knew;
+/// the class only guides compile-time devirtualization.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_vtable_lookup_in(obj_ptr: *const u8, slot_index: i32, _class: i32) -> i64 {
+    haxe_vtable_lookup(obj_ptr, slot_index)
+}
+
 #[cold]
 #[inline(never)]
 fn vtable_lookup_slow(obj_ptr: *const u8, slot_index: i32) -> i64 {

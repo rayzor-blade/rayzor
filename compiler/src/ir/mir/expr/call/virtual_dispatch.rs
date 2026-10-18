@@ -116,17 +116,39 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(func_id) = func_id {
                     self.fill_default_args(func_id, &mut call_args, true);
                 }
-                let lookup_fn = self.get_or_register_extern_function(
-                    "haxe_vtable_lookup",
-                    vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
-                    IrType::I64,
-                );
+                // The receiver's static class rides along so a whole-program
+                // pass can call its few possible implementations directly.
+                let static_class = self
+                    .resolve_receiver_class_symbol(args[0].ty)
+                    .and_then(|class| self.deterministic_class_type_id(class));
                 let slot_reg = self.builder.build_const(IrValue::I32(slot_index as i32))?;
-                let fn_ptr = self.builder.build_call_direct(
-                    lookup_fn,
-                    vec![obj_reg, slot_reg],
-                    IrType::I64,
-                )?;
+                let fn_ptr = match static_class {
+                    Some(class) => {
+                        let lookup_fn = self.get_or_register_extern_function(
+                            "haxe_vtable_lookup_in",
+                            vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32, IrType::I32],
+                            IrType::I64,
+                        );
+                        let class_reg = self.builder.build_const(IrValue::I32(class as i32))?;
+                        self.builder.build_call_direct(
+                            lookup_fn,
+                            vec![obj_reg, slot_reg, class_reg],
+                            IrType::I64,
+                        )?
+                    }
+                    None => {
+                        let lookup_fn = self.get_or_register_extern_function(
+                            "haxe_vtable_lookup",
+                            vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
+                            IrType::I64,
+                        );
+                        self.builder.build_call_direct(
+                            lookup_fn,
+                            vec![obj_reg, slot_reg],
+                            IrType::I64,
+                        )?
+                    }
+                };
                 // Declared formals distinguish numeric slots from erased values;
                 // omitted defaults use their register type as a fallback.
                 let mut param_types = vec![IrType::Ptr(Box::new(IrType::Void))];
