@@ -532,7 +532,27 @@ fn plan_version(
         .flat_map(|b| b.instructions.iter())
         .filter_map(|inst| inst.dest().map(|d| (d, inst)))
         .collect();
-    let alias = renamings(function);
+    // A pointer cast to another pointer type is the same array.
+    let mut alias = renamings(function);
+    for inst in function
+        .cfg
+        .blocks
+        .values()
+        .flat_map(|b| b.instructions.iter())
+    {
+        if let IrInstruction::Cast {
+            dest,
+            src,
+            from_ty,
+            to_ty,
+        } = inst
+        {
+            let pointer = |t: &IrType| matches!(t, IrType::Ptr(_) | IrType::Any);
+            if pointer(from_ty) && pointer(to_ty) {
+                alias.entry(*dest).or_insert(*src);
+            }
+        }
+    }
     let canon = |reg: IrId| canonical(&alias, reg);
     let constant = |reg: IrId| -> Option<i64> {
         match def_of.get(&canon(reg))? {
@@ -559,12 +579,19 @@ fn plan_version(
         let IrTerminator::CondBranch {
             condition,
             true_target,
-            false_target,
+            ..
         } = header.terminator
         else {
             continue;
         };
-        if !natural.blocks.contains(&true_target) || natural.blocks.contains(&false_target) {
+        // Only the true edge matters: blocks it dominates see `iv < bound`,
+        // provided the header is the only way in. The false edge may stay in
+        // the loop, as `iv < bound && more` does.
+        let entered_from_header = function
+            .cfg
+            .get_block(true_target)
+            .is_some_and(|b| b.predecessors == [natural.header]);
+        if !natural.blocks.contains(&true_target) || !entered_from_header {
             continue;
         }
         let Some(IrInstruction::Cmp {
