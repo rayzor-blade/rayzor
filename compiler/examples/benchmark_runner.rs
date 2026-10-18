@@ -170,6 +170,7 @@ enum Target {
     HaxeInterp,    // haxe --interp
     HaxeHashLink,  // haxe -hl → hl
     HaxeHashLinkC, // haxe -hl → hlc (compile to C → gcc native)
+    Ash,           // haxe -hl → ash (HashLink bytecode, hybrid JIT)
     HaxeCpp,       // haxe -cpp → compiled binary
     HaxeJvm,       // haxe -java → JVM bytecode
     #[cfg(feature = "llvm-backend")]
@@ -190,6 +191,7 @@ impl Target {
             Target::HaxeInterp => "haxe-interp",
             Target::HaxeHashLink => "haxe-hashlink",
             Target::HaxeHashLinkC => "haxe-hashlink-c",
+            Target::Ash => "ash",
             Target::HaxeCpp => "haxe-cpp",
             Target::HaxeJvm => "haxe-jvm",
             #[cfg(feature = "llvm-backend")]
@@ -210,6 +212,7 @@ impl Target {
             Target::HaxeInterp => "Haxe --interp (eval interpreter)",
             Target::HaxeHashLink => "Haxe HashLink JIT",
             Target::HaxeHashLinkC => "Haxe HashLink/C (native via gcc)",
+            Target::Ash => "Ash (HashLink bytecode, hybrid JIT)",
             Target::HaxeCpp => "Haxe C++ (hxcpp)",
             Target::HaxeJvm => "Haxe JVM (java bytecode)",
             #[cfg(feature = "llvm-backend")]
@@ -224,6 +227,7 @@ impl Target {
             Target::HaxeInterp
                 | Target::HaxeHashLink
                 | Target::HaxeHashLinkC
+                | Target::Ash
                 | Target::HaxeCpp
                 | Target::HaxeJvm
         )
@@ -1055,6 +1059,19 @@ fn hashlink_lib_dir() -> String {
     std::env::var("HASHLINK_LIB").unwrap_or_else(|_| "/usr/local/lib".to_string())
 }
 
+/// The Ash VM: `ASH` names a particular binary, else `ash` on the PATH.
+fn ash_binary() -> String {
+    std::env::var("ASH").unwrap_or_else(|_| "ash".to_string())
+}
+
+fn ash_available() -> bool {
+    Command::new(ash_binary())
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn java_available() -> bool {
     Command::new("java")
         .arg("-version")
@@ -1102,7 +1119,7 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
             Ok((Duration::ZERO, elapsed))
         }
 
-        Target::HaxeHashLink => {
+        Target::HaxeHashLink | Target::Ash => {
             // Step 1: Compile to .hl bytecode
             let hl_path = tmp_dir.join(format!("{}.hl", bench_name));
             let compile_start = Instant::now();
@@ -1122,17 +1139,22 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
                 return Err(format!("haxe -hl compile failed: {}", stderr));
             }
 
-            // Step 2: Run with hl
+            // Step 2: Run the bytecode on its VM
+            let vm = if target == Target::Ash {
+                ash_binary()
+            } else {
+                "hl".to_string()
+            };
             let exec_start = Instant::now();
-            let output = Command::new("hl")
+            let output = Command::new(&vm)
                 .arg(&hl_path)
                 .output()
-                .map_err(|e| format!("Failed to run hl: {}", e))?;
+                .map_err(|e| format!("Failed to run {}: {}", vm, e))?;
             let exec_time = exec_start.elapsed();
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("hl execution failed: {}", stderr));
+                return Err(format!("{} execution failed: {}", vm, stderr));
             }
 
             Ok((compile_time, exec_time))
@@ -1515,6 +1537,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
         Target::HaxeInterp
         | Target::HaxeHashLink
         | Target::HaxeHashLinkC
+        | Target::Ash
         | Target::HaxeCpp
         | Target::HaxeJvm => {
             // No warmup for Haxe targets — matches Haxe benchmark methodology
@@ -1957,6 +1980,9 @@ fn main() {
         }
         if hashlink_c_available() {
             all_targets_list.push(Target::HaxeHashLinkC);
+        }
+        if ash_available() {
+            all_targets_list.push(Target::Ash);
         }
         all_targets_list.push(Target::HaxeCpp);
         if java_available() {

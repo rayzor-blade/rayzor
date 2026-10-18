@@ -915,6 +915,7 @@ const CHART_TARGETS = [
   ["haxe-jvm", "Haxe/JVM", false],
   ["haxe-hashlink-c", "HashLink/C", false],
   ["haxe-hashlink", "HashLink", false],
+  ["ash", "Ash", false],
 ];
 
 const RAYZOR_FALLBACKS = [

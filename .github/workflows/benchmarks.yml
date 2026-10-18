@@ -158,6 +158,18 @@ jobs:
           sudo ldconfig
           hl --version
 
+      # Ash runs the same .hl bytecode as the HashLink row. Its latest release,
+      # the build its installer hands users.
+      - name: Install Ash
+        run: |
+          sudo apt-get install -y libzstd1 zlib1g libxml2 libtinfo6 libedit2 libffi8
+          mkdir -p ~/.ash/bin
+          curl -fsSL https://github.com/rayzor-blade/ash/releases/latest/download/ash-linux-x86_64.tar.gz \
+            | tar -xz -C ~/.ash/bin
+          chmod +x ~/.ash/bin/ash
+          echo "$HOME/.ash/bin" >> "$GITHUB_PATH"
+          ~/.ash/bin/ash --version
+
       - name: Cache Haxe target packages
         uses: actions/cache@v4
         with:
