@@ -33,25 +33,34 @@ impl LspContext {
         }
     }
 
-    /// Load workspace configuration from rayzor.toml if present.
+    /// Load class paths from rayzor.toml if present. The workspace root comes
+    /// last, as haxe always searches the working directory.
     pub fn load_workspace_config(&mut self) {
-        let manifest_path = self.root.join("rayzor.toml");
-        let content = match std::fs::read_to_string(&manifest_path) {
-            Ok(c) => c,
-            Err(_) => return,
+        self.class_paths = self.manifest_class_paths();
+        if !self.class_paths.contains(&self.root) {
+            self.class_paths.push(self.root.clone());
+        }
+    }
+
+    fn manifest_class_paths(&self) -> Vec<PathBuf> {
+        let Ok(content) = std::fs::read_to_string(self.root.join("rayzor.toml")) else {
+            return Vec::new();
         };
-        let manifest = match compiler::workspace::manifest::parse_manifest(&content) {
-            Ok(m) => m,
-            Err(_) => return,
+        let Ok(manifest) = compiler::workspace::manifest::parse_manifest(&content) else {
+            return Vec::new();
         };
-        if let compiler::workspace::manifest::RayzorManifest::SingleProject(project) = manifest
-            && let Some(ref build) = project.build
-        {
-            self.class_paths = build
-                .class_paths
-                .iter()
-                .map(|cp| self.root.join(cp))
-                .collect();
+        match manifest {
+            compiler::workspace::manifest::RayzorManifest::SingleProject(project) => project
+                .build
+                .map(|build| {
+                    build
+                        .class_paths
+                        .iter()
+                        .map(|cp| self.root.join(cp))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
         }
     }
 
@@ -62,6 +71,7 @@ impl LspContext {
         let mut config = CompilationConfig {
             load_stdlib: true,
             emit_safety_warnings: false,
+            record_references: true,
             ..Default::default()
         };
         config.pipeline_config = config.pipeline_config.skip_analysis();
@@ -113,8 +123,13 @@ impl LspContext {
                 .collect(),
         };
 
-        // Build symbol index for this file (file_id 0 for the main user file)
-        let index = FileSymbolIndex::build(&unit.symbol_table, 0);
+        let file_id = unit.file_id_of(&filename).unwrap_or(u32::MAX);
+        let index = FileSymbolIndex::build(
+            &unit.symbol_table,
+            &unit.string_interner,
+            &unit.symbol_references,
+            file_id,
+        );
         self.file_indices.insert(uri.to_string(), index);
         self.last_unit = Some(unit);
 
@@ -126,7 +141,7 @@ impl LspContext {
         let index = self.file_indices.get(uri)?;
         let unit = self.last_unit.as_ref()?;
 
-        let sym_id = index.find_symbol_at(line, col, &unit.symbol_table, &unit.string_interner)?;
+        let sym_id = index.find_symbol_at(line, col)?;
 
         analysis::format_hover(
             sym_id,
@@ -141,7 +156,7 @@ impl LspContext {
         let index = self.file_indices.get(uri)?;
         let unit = self.last_unit.as_ref()?;
 
-        let sym_id = index.find_symbol_at(line, col, &unit.symbol_table, &unit.string_interner)?;
+        let sym_id = index.find_symbol_at(line, col)?;
         let sym = unit.symbol_table.get_symbol(sym_id)?;
         let loc = sym.definition_location;
 
@@ -149,30 +164,59 @@ impl LspContext {
             return None;
         }
 
-        // For now, file_id 0 = the current file. Cross-file navigation
-        // needs a file_id → path map (TODO: populate from compilation).
-        let file = if loc.file_id == 0 {
-            uri_to_path(uri)
-        } else {
-            // Try to find the file path from the URI
-            uri_to_path(uri)
-        };
-
+        let file = unit.file_path_of(loc.file_id)?.to_string();
         Some((file, loc.line, loc.column))
     }
 
+    /// Every place the symbol at a position is named, across the compiled
+    /// files: (path, line, column, length), 1-based.
+    pub fn references(
+        &self,
+        uri: &str,
+        line: u32,
+        col: u32,
+        include_declaration: bool,
+    ) -> Vec<(String, u32, u32, u32)> {
+        let (Some(index), Some(unit)) = (self.file_indices.get(uri), self.last_unit.as_ref())
+        else {
+            return Vec::new();
+        };
+        let Some(sym_id) = index.find_symbol_at(line, col) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let place = |at: compiler::tast::SourceLocation, len: u32| {
+            unit.file_path_of(at.file_id)
+                .map(|path| (path.to_string(), at.line, at.column, len))
+        };
+        if include_declaration
+            && let Some(sym) = unit.symbol_table.get_symbol(sym_id)
+            && sym.definition_location.is_valid()
+        {
+            let len = unit
+                .string_interner
+                .get(sym.name)
+                .map_or(1, |n| n.len() as u32);
+            out.extend(place(sym.definition_location, len));
+        }
+        for r in unit.symbol_references.iter().filter(|r| r.symbol == sym_id) {
+            out.extend(place(r.at, r.len));
+        }
+        out
+    }
+
     /// Get completion entries for a position.
-    pub fn completions(&self, _uri: &str) -> Vec<CompletionEntry> {
-        let unit = match self.last_unit.as_ref() {
-            Some(u) => u,
-            None => return Vec::new(),
+    pub fn completions(&self, uri: &str) -> Vec<CompletionEntry> {
+        let (Some(unit), Some(index)) = (self.last_unit.as_ref(), self.file_indices.get(uri))
+        else {
+            return Vec::new();
         };
 
         analysis::collect_completions(
             &unit.symbol_table,
             &unit.type_table,
             &unit.string_interner,
-            0,
+            index.file_id,
         )
     }
 
@@ -180,11 +224,7 @@ impl LspContext {
     pub fn semantic_tokens(&self, uri: &str) -> Option<Vec<analysis::SemanticToken>> {
         let unit = self.last_unit.as_ref()?;
         let index = self.file_indices.get(uri)?;
-        Some(analysis::build_semantic_tokens(
-            &unit.symbol_table,
-            &unit.string_interner,
-            index.file_id,
-        ))
+        Some(analysis::build_semantic_tokens(&unit.symbol_table, index))
     }
 
     /// Build document symbols for the outline panel.
@@ -210,7 +250,7 @@ impl LspContext {
         let unit = self.last_unit.as_ref()?;
 
         // Find the function symbol at or near the cursor
-        let sym_id = index.find_symbol_at(line, col, &unit.symbol_table, &unit.string_interner)?;
+        let sym_id = index.find_symbol_at(line, col)?;
 
         // TODO: determine active parameter from cursor position (count commas before cursor)
         analysis::build_signature_help(

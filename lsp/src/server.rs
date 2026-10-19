@@ -1,7 +1,8 @@
 //! LSP server main loop using lsp-server crate (stdio transport).
 //!
-//! Supports: diagnostics, hover, goto-definition, completions,
-//! semantic tokens, document symbols, and signature help.
+//! Answers diagnostics, hover, definition, references, document highlight,
+//! completion, semantic tokens, document symbols, signature help and inlay
+//! hints; tests/session.rs checks which of them answer correctly.
 
 use crate::analysis;
 use crate::context::LspContext;
@@ -11,18 +12,19 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, InlayHintRequest,
-    SemanticTokensFullRequest, SignatureHelpRequest,
+    Completion, DocumentHighlightRequest, DocumentSymbolRequest, GotoDefinition, HoverRequest,
+    InlayHintRequest, References, SemanticTokensFullRequest, SignatureHelpRequest,
 };
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemTag, CompletionOptions, CompletionParams,
-    CompletionResponse, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, InlayHint, InlayHintKind,
-    InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind, OneOf,
-    ParameterInformation, ParameterLabel, Position, PublishDiagnosticsParams, Range, SemanticToken,
-    SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    CompletionResponse, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams,
+    Location, MarkupContent, MarkupKind, OneOf, ParameterInformation, ParameterLabel, Position,
+    PublishDiagnosticsParams, Range, ReferenceParams, SemanticToken, SemanticTokenModifier,
+    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
     SignatureHelpParams, SignatureInformation, TextDocumentSyncCapability, TextDocumentSyncKind,
     Uri,
@@ -32,7 +34,14 @@ use std::path::PathBuf;
 /// Run the LSP server on stdio. Blocks until the client disconnects.
 pub fn run_lsp() -> Result<(), String> {
     let (connection, io_threads) = Connection::stdio();
+    serve(&connection)?;
+    io_threads
+        .join()
+        .map_err(|e| format!("IO thread error: {}", e))
+}
 
+/// Serve one session on `connection`, from `initialize` to `shutdown`.
+pub fn serve(connection: &Connection) -> Result<(), String> {
     let (id, params) = connection
         .initialize_start()
         .map_err(|e| format!("Initialize failed: {}", e))?;
@@ -76,6 +85,8 @@ pub fn run_lsp() -> Result<(), String> {
             work_done_progress_options: Default::default(),
         }),
         inlay_hint_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
 
@@ -114,18 +125,14 @@ pub fn run_lsp() -> Result<(), String> {
                 {
                     break;
                 }
-                handle_request(&connection, &ctx, req);
+                handle_request(connection, &ctx, req);
             }
             Message::Notification(not) => {
-                handle_notification(&connection, &mut ctx, not);
+                handle_notification(connection, &mut ctx, not);
             }
             Message::Response(_) => {}
         }
     }
-
-    io_threads
-        .join()
-        .map_err(|e| format!("IO thread error: {}", e))?;
     Ok(())
 }
 
@@ -148,6 +155,10 @@ fn handle_request(conn: &Connection, ctx: &LspContext, req: Request) {
         send_response(conn, id, handle_signature_help(ctx, params));
     } else if let Some((id, params)) = cast_request::<InlayHintRequest>(&req) {
         send_response(conn, id, handle_inlay_hints(ctx, params));
+    } else if let Some((id, params)) = cast_request::<References>(&req) {
+        send_response(conn, id, handle_references(ctx, params));
+    } else if let Some((id, params)) = cast_request::<DocumentHighlightRequest>(&req) {
+        send_response(conn, id, handle_document_highlight(ctx, params));
     } else {
         send_response::<serde_json::Value>(conn, req.id, None);
     }
@@ -260,6 +271,56 @@ fn handle_goto_definition(
         uri: target_uri,
         range: Range::new(target_pos, target_pos),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// References and highlights
+// ---------------------------------------------------------------------------
+
+fn name_range(line: u32, column: u32, len: u32) -> Range {
+    let start = Position::new(line.saturating_sub(1), column.saturating_sub(1));
+    Range::new(start, Position::new(start.line, start.character + len))
+}
+
+fn handle_references(ctx: &LspContext, params: ReferenceParams) -> Option<Vec<Location>> {
+    let doc = &params.text_document_position;
+    let pos = doc.position;
+    let found = ctx.references(
+        doc.text_document.uri.as_str(),
+        pos.line + 1,
+        pos.character + 1,
+        params.context.include_declaration,
+    );
+    let locations: Vec<Location> = found
+        .into_iter()
+        .filter_map(|(file, line, column, len)| {
+            Some(Location {
+                uri: format!("file://{}", file).parse().ok()?,
+                range: name_range(line, column, len),
+            })
+        })
+        .collect();
+    (!locations.is_empty()).then_some(locations)
+}
+
+fn handle_document_highlight(
+    ctx: &LspContext,
+    params: DocumentHighlightParams,
+) -> Option<Vec<DocumentHighlight>> {
+    let doc = &params.text_document_position_params;
+    let uri = doc.text_document.uri.as_str();
+    let path = uri_to_file_path(uri)?;
+    let pos = doc.position;
+    let highlights: Vec<DocumentHighlight> = ctx
+        .references(uri, pos.line + 1, pos.character + 1, true)
+        .into_iter()
+        .filter(|(file, ..)| std::path::Path::new(file) == path)
+        .map(|(_, line, column, len)| DocumentHighlight {
+            range: name_range(line, column, len),
+            kind: Some(DocumentHighlightKind::TEXT),
+        })
+        .collect();
+    (!highlights.is_empty()).then_some(highlights)
 }
 
 // ---------------------------------------------------------------------------

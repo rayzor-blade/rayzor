@@ -1,10 +1,10 @@
 //! Symbol analysis for LSP features.
 //!
-//! Provides position→symbol resolution, hover formatting, completions,
-//! semantic tokens, document outline, signature help, and inlay hints.
-//! Covers ALL Haxe language features from the rayzor parser and TAST.
+//! Position→symbol resolution over the names the compiler recorded, hover
+//! formatting, completions, semantic tokens, outline and signature help.
 
 use compiler::tast::TypeKind;
+use compiler::tast::references::SymbolReference;
 use compiler::tast::symbols::{Symbol, SymbolFlags, SymbolKind, Visibility};
 use compiler::tast::{StringInterner, SymbolId, SymbolTable, TypeId, TypeTable};
 use std::cell::RefCell;
@@ -15,74 +15,39 @@ use std::rc::Rc;
 // FileSymbolIndex — position ↔ symbol mapping
 // ---------------------------------------------------------------------------
 
-/// Index mapping source positions to symbols for a single file.
+/// The names written in one file, by position: where its symbols are
+/// declared and where resolved names refer to them.
 pub struct FileSymbolIndex {
     pub file_id: u32,
-    /// (line, col) → SymbolId for definitions in this file
-    pub definitions: BTreeMap<(u32, u32), SymbolId>,
-    /// All symbols defined in this file
-    pub defined_symbols: Vec<SymbolId>,
+    /// (line, start column) → (length, symbol), both 1-based.
+    pub names: BTreeMap<(u32, u32), (u32, SymbolId)>,
 }
 
 impl FileSymbolIndex {
-    /// Build the index from the symbol table for a given file_id.
-    pub fn build(symbol_table: &SymbolTable, file_id: u32) -> Self {
-        let mut definitions = BTreeMap::new();
-        let mut defined_symbols = Vec::new();
-
+    pub fn build(
+        symbol_table: &SymbolTable,
+        interner: &StringInterner,
+        references: &[SymbolReference],
+        file_id: u32,
+    ) -> Self {
+        let mut names = BTreeMap::new();
+        for r in references.iter().filter(|r| r.at.file_id == file_id) {
+            names.insert((r.at.line, r.at.column), (r.len, r.symbol));
+        }
         for sym in symbol_table.all_symbols() {
             let loc = sym.definition_location;
             if loc.file_id == file_id && loc.is_valid() {
-                definitions.insert((loc.line, loc.column), sym.id);
-                defined_symbols.push(sym.id);
+                let len = interner.get(sym.name).map_or(1, |n| n.len() as u32);
+                names.insert((loc.line, loc.column), (len, sym.id));
             }
         }
-
-        Self {
-            file_id,
-            definitions,
-            defined_symbols,
-        }
+        Self { file_id, names }
     }
 
-    /// Find the symbol at or nearest to (line, col).
-    pub fn find_symbol_at(
-        &self,
-        line: u32,
-        col: u32,
-        symbol_table: &SymbolTable,
-        interner: &StringInterner,
-    ) -> Option<SymbolId> {
-        // Exact match
-        if let Some(&sym_id) = self.definitions.get(&(line, col)) {
-            return Some(sym_id);
-        }
-
-        // Search same line: find symbol whose name spans the cursor
-        let mut best: Option<(u32, SymbolId)> = None;
-        for (&(def_line, def_col), &sym_id) in &self.definitions {
-            if def_line != line {
-                continue;
-            }
-            let name_len = symbol_table
-                .get_symbol(sym_id)
-                .and_then(|s| interner.get(s.name))
-                .map(|n| n.len() as u32)
-                .unwrap_or(1);
-
-            if col >= def_col && col < def_col + name_len {
-                return Some(sym_id);
-            }
-
-            if def_col <= col {
-                let dist = col - def_col;
-                if best.map(|(d, _)| dist < d).unwrap_or(true) {
-                    best = Some((dist, sym_id));
-                }
-            }
-        }
-
-        best.filter(|(dist, _)| *dist < 15).map(|(_, id)| id)
+    /// The symbol whose name covers (line, col), both 1-based.
+    pub fn find_symbol_at(&self, line: u32, col: u32) -> Option<SymbolId> {
+        let (&(l, start), &(len, sym)) = self.names.range(..=(line, col)).next_back()?;
+        (l == line && col < start + len).then_some(sym)
     }
 }
 
@@ -212,7 +177,7 @@ fn format_symbol_signature(
             } else {
                 "var"
             };
-            format!("{}{}{} {}:{}", vis, static_kw, kw, name, type_str)
+            format!("{} {}:{}", kw, name, type_str)
         }
         SymbolKind::Field => {
             let type_str = format_type_name(sym.type_id, type_table, interner);
@@ -576,21 +541,19 @@ pub struct SemanticToken {
     pub token_modifiers: u32, // bitmask into SEMANTIC_TOKEN_MODIFIERS
 }
 
-/// Build semantic tokens from the symbol table for a file.
+/// Semantic tokens for every declared or resolved name in the file.
 pub fn build_semantic_tokens(
     symbol_table: &SymbolTable,
-    interner: &StringInterner,
-    file_id: u32,
+    index: &FileSymbolIndex,
 ) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
 
-    for sym in symbol_table.all_symbols() {
-        let loc = sym.definition_location;
-        if loc.file_id != file_id || !loc.is_valid() {
+    for (&(line, column), &(name_len, sym_id)) in &index.names {
+        let Some(sym) = symbol_table.get_symbol(sym_id) else {
             continue;
-        }
-
-        let name_len = interner.get(sym.name).map(|n| n.len() as u32).unwrap_or(1);
+        };
+        let loc = sym.definition_location;
+        let declaration = loc.file_id == index.file_id && (loc.line, loc.column) == (line, column);
 
         let token_type = match sym.kind {
             SymbolKind::Class => 2,
@@ -609,7 +572,9 @@ pub fn build_semantic_tokens(
         };
 
         let mut modifiers: u32 = 0;
-        modifiers |= 1 << 0; // declaration
+        if declaration {
+            modifiers |= 1 << 0;
+        }
         if sym.flags.contains(SymbolFlags::FINAL) {
             modifiers |= 1 << 2; // readonly
         }
@@ -624,16 +589,15 @@ pub fn build_semantic_tokens(
         }
 
         tokens.push(SemanticToken {
-            line: loc.line.saturating_sub(1), // LSP is 0-based
-            start_char: loc.column.saturating_sub(1),
+            line: line.saturating_sub(1), // LSP is 0-based
+            start_char: column.saturating_sub(1),
             length: name_len,
             token_type,
             token_modifiers: modifiers,
         });
     }
 
-    // Sort by position (required by LSP delta encoding)
-    tokens.sort_by(|a, b| a.line.cmp(&b.line).then(a.start_char.cmp(&b.start_char)));
+    // `names` is ordered by position, as LSP delta encoding requires.
     tokens
 }
 

@@ -112,6 +112,12 @@ jobs:
       - name: Compiler integration tests
         run: cargo test -p compiler --tests ${{ matrix.compiler_features }}
 
+      # The server links the compiler with its default LLVM tier, which the
+      # Windows runner cannot build (see the matrix above).
+      - name: Language server tests
+        if: matrix.os != 'windows-latest'
+        run: cargo test -p rayzor-lsp
+
       - name: Diagnostics tests
         run: cargo test -p diagnostics
 
