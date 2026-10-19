@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1792397964,"nonce":"psZwOG8dMh/rGRBarR0wUSogt3Q=","added":["bug","area:lsp"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1792402483,"nonce":"/vobvDqns5ir1Y9iS30ugslfvsE=","message":"Fixed in cba09ef6 (on top of 84e8abee); covered by lsp/tests/session.rs.","files":null}]}
