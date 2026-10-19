@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1792397966,"nonce":"FQntlQHnc/EwE7MkEM7yK0n9CWs=","added":["debt","area:lsp"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1792402483,"nonce":"mE1g2pj6dSIOnDGsuwlAx3gooZc=","message":"Fixed in cba09ef6 (on top of 84e8abee); covered by lsp/tests/session.rs.","files":null}]}
