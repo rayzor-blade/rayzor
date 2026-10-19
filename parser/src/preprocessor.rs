@@ -162,21 +162,15 @@ pub fn preprocess(source: &str, config: &PreprocessorConfig) -> String {
             // would leak through as raw tokens and break downstream parsing.
             let joined: String = selected_lines.join("\n");
             let nested = preprocess(&joined, config);
-            let emitted = if nested.is_empty() {
-                0
-            } else {
-                nested.lines().count()
-            };
+            // A blank line stands in for the `#if` and for every line not
+            // taken, so each line keeps its source number for diagnostics and
+            // editor positions.
+            result.push('\n');
             result.push_str(&nested);
-            if !nested.is_empty() {
+            if !selected_lines.is_empty() {
                 result.push('\n');
             }
-            // Stand a blank line in for every line this block did not emit --
-            // the directives themselves and the branches not taken. Deleting
-            // them shifts every line after the block, and the diagnostic then
-            // cites the wrong source line: an error inside `MacroStringTools`
-            // at line 70 was reported at 51, exactly the 19 lines its `#if
-            // macro` block occupies.
+            let emitted = 1 + selected_lines.len();
             let consumed = end_idx.saturating_sub(i) + 1;
             for _ in emitted..consumed {
                 result.push('\n');
@@ -338,7 +332,9 @@ fn process_inline_conditionals(line: &str, config: &PreprocessorConfig) -> Strin
     result
 }
 
-/// Process a conditional block and return the lines from the active branch
+/// The lines between a block's `#if` and `#end`, one entry per source line:
+/// the taken branch's own lines, and an empty line for every directive and
+/// every line of a branch not taken, so each kept line stays at its number.
 fn process_conditional_block<'a>(
     block_lines: &[&'a str],
     initial_condition: &str,
@@ -350,30 +346,23 @@ fn process_conditional_block<'a>(
     let mut in_active_branch = condition_met;
     let mut depth = 0; // Track nested #if blocks
 
-    while i < block_lines.len() - 1 {
+    while i + 1 < block_lines.len() {
         // Skip the #end line
         let line = block_lines[i];
         let trimmed = line.trim_start();
+        i += 1;
 
-        // Handle nested #if blocks
+        // A nested block passes through whole, to be resolved recursively.
         if trimmed.starts_with("#if ") {
             depth += 1;
-            if in_active_branch {
-                result.push(line);
-            }
-            i += 1;
+            result.push(if in_active_branch { line } else { "" });
             continue;
         }
-
         if depth > 0 {
-            // We're inside a nested block, just pass through if we're in the active branch
             if trimmed.starts_with("#end") {
                 depth -= 1;
             }
-            if in_active_branch {
-                result.push(line);
-            }
-            i += 1;
+            result.push(if in_active_branch { line } else { "" });
             continue;
         }
 
@@ -387,22 +376,18 @@ fn process_conditional_block<'a>(
                     in_active_branch = true;
                 }
             }
-            i += 1;
+            result.push("");
             continue;
         }
 
         if trimmed.starts_with("#else") {
             in_active_branch = !condition_met;
-            i += 1;
+            result.push("");
             continue;
         }
 
-        // Regular line - add if we're in the active branch and it's not an #error
-        if in_active_branch && !trimmed.starts_with("#error") {
-            result.push(line);
-        }
-
-        i += 1;
+        let keep = in_active_branch && !trimmed.starts_with("#error");
+        result.push(if keep { line } else { "" });
     }
 
     result
@@ -745,6 +730,21 @@ var x = 42;
 
         // rayzor block should be kept
         assert!(result.contains("var x = 42"));
+    }
+
+    #[test]
+    fn every_kept_line_stays_at_its_source_line() {
+        let src = "a\n#if missing\nb\nc\n#elseif sys\nd\n  #if missing\n  e\n  #else\n  f\n  #end\n#else\ng\n#end\nh\n";
+        let out = preprocess(src, &cfg(&[]));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), src.lines().count(), "{out:?}");
+        for kept in ["a", "d", "  f", "h"] {
+            let at = src.lines().position(|l| l == kept).unwrap();
+            assert_eq!(lines[at], kept, "{out:?}");
+        }
+        for dropped in ["b", "c", "  e", "g"] {
+            assert!(!lines.contains(&dropped), "{out:?}");
+        }
     }
 
     #[test]
