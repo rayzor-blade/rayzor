@@ -726,7 +726,7 @@ impl<'a> AstLowering<'a> {
             for cand in self
                 .context
                 .symbol_table
-                .find_symbols(|s| s.name == method_name)
+                .find_symbols_named(method_name, |s| s.name == method_name)
                 .into_iter()
                 .take(8)
             {
@@ -774,7 +774,7 @@ impl<'a> AstLowering<'a> {
         let expected = format!("{}.{}", class_name, self.context.string_interner.get(name)?);
         self.context
             .symbol_table
-            .find_symbols(|sym| {
+            .find_symbols_named(name, |sym| {
                 sym.kind == crate::tast::symbols::SymbolKind::Function
                     && sym.name == name
                     && sym
@@ -815,7 +815,7 @@ impl<'a> AstLowering<'a> {
             if let Some(sym) = self
                 .context
                 .symbol_table
-                .find_symbols(|sym| {
+                .find_symbols_named(method_name, |sym| {
                     sym.kind == crate::tast::symbols::SymbolKind::Function
                         && sym.name == method_name
                         && sym
@@ -844,7 +844,7 @@ impl<'a> AstLowering<'a> {
             if let Some(sym) = self
                 .context
                 .symbol_table
-                .find_symbols(|sym| {
+                .find_symbols_named(method_name, |sym| {
                     sym.kind == crate::tast::symbols::SymbolKind::Function
                         && sym.name == method_name
                         && sym.type_id.is_valid()
@@ -897,11 +897,14 @@ impl<'a> AstLowering<'a> {
         // symbol table for ALL same-named classes and pick one whose scope
         // does have this method.
         let short_class_name = class_sym.name;
-        let mut candidates = self.context.symbol_table.find_symbols(|s| {
-            s.kind == crate::tast::symbols::SymbolKind::Class
-                && s.name == short_class_name
-                && s.id != class_symbol
-        });
+        let mut candidates = self
+            .context
+            .symbol_table
+            .find_symbols_named(short_class_name, |s| {
+                s.kind == crate::tast::symbols::SymbolKind::Class
+                    && s.name == short_class_name
+                    && s.id != class_symbol
+            });
         candidates.sort_by_key(|s| s.id);
         for cand in candidates {
             if let Some(sym) = self

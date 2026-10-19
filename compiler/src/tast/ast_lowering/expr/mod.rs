@@ -667,13 +667,14 @@ impl<'a> AstLowering<'a> {
                             // A constructor bound only under its qualified name
                             // is not reachable as a bare `Some` here, so it is
                             // not a candidate the scope walk could have picked.
-                            let same_named = self.context.symbol_table.find_symbols(|s| {
-                                s.kind == crate::tast::symbols::SymbolKind::EnumVariant
-                                    && s.name == vname
-                                    && !s
-                                        .flags
-                                        .contains(crate::tast::symbols::SymbolFlags::QUALIFIED_ONLY)
-                            });
+                            let same_named =
+                                self.context.symbol_table.find_symbols_named(vname, |s| {
+                                    s.kind == crate::tast::symbols::SymbolKind::EnumVariant
+                                        && s.name == vname
+                                        && !s.flags.contains(
+                                            crate::tast::symbols::SymbolFlags::QUALIFIED_ONLY,
+                                        )
+                                });
                             for v in same_named {
                                 let parent = self
                                     .context

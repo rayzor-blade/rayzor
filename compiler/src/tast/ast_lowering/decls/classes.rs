@@ -1997,14 +1997,17 @@ impl<'a> AstLowering<'a> {
                     let placeholder_name = *name;
 
                     // Try exact match first (bare name like "Bytes")
-                    let results = self.context.symbol_table.find_symbols(|sym| {
-                        sym.name == placeholder_name
-                            && matches!(
-                                sym.kind,
-                                crate::tast::symbols::SymbolKind::Class
-                                    | crate::tast::symbols::SymbolKind::Interface
-                            )
-                    });
+                    let results =
+                        self.context
+                            .symbol_table
+                            .find_symbols_named(placeholder_name, |sym| {
+                                sym.name == placeholder_name
+                                    && matches!(
+                                        sym.kind,
+                                        crate::tast::symbols::SymbolKind::Class
+                                            | crate::tast::symbols::SymbolKind::Interface
+                                    )
+                            });
                     if let Some(sym) = results.first() {
                         return Some(sym.id);
                     }
@@ -2032,14 +2035,17 @@ impl<'a> AstLowering<'a> {
                     let bare_name = name_str.rsplit('.').next().unwrap_or(name_str);
                     if bare_name != name_str {
                         let bare_interned = self.context.string_interner.intern(bare_name);
-                        let results = self.context.symbol_table.find_symbols(|sym| {
-                            sym.name == bare_interned
-                                && matches!(
-                                    sym.kind,
-                                    crate::tast::symbols::SymbolKind::Class
-                                        | crate::tast::symbols::SymbolKind::Interface
-                                )
-                        });
+                        let results =
+                            self.context
+                                .symbol_table
+                                .find_symbols_named(bare_interned, |sym| {
+                                    sym.name == bare_interned
+                                        && matches!(
+                                            sym.kind,
+                                            crate::tast::symbols::SymbolKind::Class
+                                                | crate::tast::symbols::SymbolKind::Interface
+                                        )
+                                });
                         if let Some(sym) = results.first() {
                             return Some(sym.id);
                         }

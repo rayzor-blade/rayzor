@@ -1458,7 +1458,7 @@ impl<'a> HirToMirContext<'a> {
                     .join(", ");
                 let loc = self
                     .symbol_table
-                    .find_symbols(|s| s.name == field_name)
+                    .find_symbols_named(field_name, |s| s.name == field_name)
                     .first()
                     .map(|s| s.definition_location)
                     .unwrap_or(SourceLocation::unknown());

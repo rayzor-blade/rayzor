@@ -97,7 +97,7 @@ impl<'a> AstLowering<'a> {
             _ => return None,
         };
         let tt = self.context.type_table.borrow();
-        let matches = self.context.symbol_table.find_symbols(|s| {
+        let matches = self.context.symbol_table.find_symbols_named(name, |s| {
             s.name == name
                 && matches!(
                     tt.get(s.type_id).map(|t| &t.kind),
@@ -556,7 +556,7 @@ impl<'a> AstLowering<'a> {
             }
         }
 
-        let mut matches = self.context.symbol_table.find_symbols(|sym| {
+        let mut matches = self.context.symbol_table.find_symbols_named(name, |sym| {
             sym.name == name
                 && matches!(
                     sym.kind,
@@ -772,7 +772,7 @@ impl<'a> AstLowering<'a> {
         }
         let name = symbol.name;
         let visible: Vec<SymbolId> = symbols
-            .find_symbols(|s| {
+            .find_symbols_named(name, |s| {
                 s.kind == crate::tast::symbols::SymbolKind::EnumVariant && s.name == name
             })
             .into_iter()

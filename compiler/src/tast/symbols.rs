@@ -14,7 +14,7 @@ use super::{
     InternedString, LifetimeId, ScopeId, StringInterner, SymbolId, TypeId, TypedArena,
     symbol_cache::SymbolResolutionCache,
 };
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::rc::Rc;
 
@@ -604,6 +604,9 @@ pub struct SymbolTable {
     symbols_by_scope: BTreeMap<ScopeId, Vec<SymbolId>>,
     /// Symbols grouped by kind
     symbols_by_kind: BTreeMap<SymbolKind, Vec<SymbolId>>,
+    /// Every symbol a simple name has been given, in creation order. A
+    /// renamed symbol stays under its old name too; lookups check the name.
+    symbols_by_simple_name: HashMap<InternedString, Vec<SymbolId>>,
     /// Separate usage tracking (more cache-friendly than interior mutability)
     used_symbols: BTreeSet<SymbolId>,
     /// Statistics
@@ -654,6 +657,7 @@ impl SymbolTable {
             symbols_by_name: BTreeMap::new(),
             symbols_by_scope: BTreeMap::new(),
             symbols_by_kind: BTreeMap::new(),
+            symbols_by_simple_name: HashMap::new(),
             used_symbols: BTreeSet::new(),
             total_symbols: 0,
             class_hierarchies: BTreeMap::new(),
@@ -680,6 +684,7 @@ impl SymbolTable {
             symbols_by_name: BTreeMap::new(),
             symbols_by_scope: BTreeMap::new(), // Estimate 10 symbols per scope
             symbols_by_kind: BTreeMap::new(),
+            symbols_by_simple_name: HashMap::new(),
             used_symbols: BTreeSet::new(), // Estimate half of symbols get used
             total_symbols: 0,
             class_hierarchies: BTreeMap::new(),
@@ -723,6 +728,10 @@ impl SymbolTable {
         self.symbols_by_kind
             .entry(kind)
             .or_insert_with(Vec::new)
+            .push(id);
+        self.symbols_by_simple_name
+            .entry(name)
+            .or_default()
             .push(id);
 
         self.total_symbols += 1;
@@ -946,6 +955,36 @@ impl SymbolTable {
     }
 
     /// Get symbols matching a predicate
+    /// Give symbol `id` the simple name `name`. Names change only through
+    /// this, so `find_symbols_named` keeps finding the symbol.
+    pub fn rename(&mut self, id: SymbolId, name: InternedString) {
+        if let Some(sym) = self.get_symbol_mut(id) {
+            sym.name = name;
+            self.symbols_by_simple_name
+                .entry(name)
+                .or_default()
+                .push(id);
+        }
+    }
+
+    /// [`Self::find_symbols`] over the symbols called `name` only: the same
+    /// symbols in the same order, without visiting the rest of the table.
+    pub fn find_symbols_named<F>(&self, name: InternedString, predicate: F) -> Vec<&Symbol>
+    where
+        F: Fn(&Symbol) -> bool,
+    {
+        let Some(ids) = self.symbols_by_simple_name.get(&name) else {
+            return Vec::new();
+        };
+        let mut ids = ids.clone();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.into_iter()
+            .filter_map(|id| self.get_symbol(id))
+            .filter(|s| s.name == name && predicate(s))
+            .collect()
+    }
+
     pub fn find_symbols<F>(&self, predicate: F) -> Vec<&Symbol>
     where
         F: Fn(&Symbol) -> bool,

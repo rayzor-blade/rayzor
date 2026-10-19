@@ -285,8 +285,8 @@ impl CompilationUnit {
         self.index_manifest_short_name(&class_info.package, short_name, symbol_id);
 
         // Update symbol metadata including the class scope
+        self.symbol_table.rename(symbol_id, short_name);
         if let Some(sym) = self.symbol_table.get_symbol_mut(symbol_id) {
-            sym.name = short_name;
             sym.qualified_name = Some(qualified_interned);
             sym.is_exported = true;
             sym.scope_id = class_scope; // Set the scope where members are registered
@@ -639,8 +639,8 @@ impl CompilationUnit {
         self.index_manifest_short_name(&enum_info.package, short_name, symbol_id);
 
         // Update symbol metadata
+        self.symbol_table.rename(symbol_id, short_name);
         if let Some(sym) = self.symbol_table.get_symbol_mut(symbol_id) {
-            sym.name = short_name;
             sym.qualified_name = Some(qualified_interned);
             sym.is_exported = true;
             if enum_info.is_extern {
@@ -692,8 +692,8 @@ impl CompilationUnit {
                 symbol_id,
             );
             if variant_root_name != variant_name {
+                self.symbol_table.rename(variant_symbol, variant_name);
                 if let Some(sym) = self.symbol_table.get_symbol_mut(variant_symbol) {
-                    sym.name = variant_name;
                     sym.flags = sym.flags.union(SymbolFlags::QUALIFIED_ONLY);
                 }
             }
@@ -765,8 +765,8 @@ impl CompilationUnit {
         self.index_manifest_short_name(&alias_info.package, short_name, symbol_id);
 
         // Update symbol metadata
+        self.symbol_table.rename(symbol_id, short_name);
         if let Some(sym) = self.symbol_table.get_symbol_mut(symbol_id) {
-            sym.name = short_name;
             sym.qualified_name = Some(qualified_interned);
             sym.is_exported = true;
         }
@@ -853,8 +853,8 @@ impl CompilationUnit {
         self.manifest_type_params = outer_abstract_params;
 
         // Update symbol metadata including the abstract scope
+        self.symbol_table.rename(symbol_id, short_name);
         if let Some(sym) = self.symbol_table.get_symbol_mut(symbol_id) {
-            sym.name = short_name;
             sym.qualified_name = Some(qualified_interned);
             sym.is_exported = true;
             sym.scope_id = abstract_scope; // Set the scope where methods are registered
