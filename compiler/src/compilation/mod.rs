@@ -272,6 +272,11 @@ pub struct CompilationUnit {
     pub macro_expansions: Vec<crate::macro_system::expander::ExpansionOrigin>,
     /// Where each resolved name in a compiled file sits, and what it names.
     pub symbol_references: Vec<crate::tast::references::SymbolReference>,
+    /// Errors held back until the end of `lower_to_tast`, for files whose
+    /// lowering went on past them (`continue_after_macro_errors`).
+    deferred_errors: Vec<CompilationError>,
+    /// Function symbols by qualified name, while a BLADE manifest loads.
+    blade_functions: Option<std::collections::HashMap<crate::tast::InternedString, SymbolId>>,
     /// Macro-time statics for the whole compile. Modules expand in compile
     /// order (dependencies first), so shared values are deterministic.
     pub(crate) macro_statics: crate::macro_system::class_registry::MacroStatics,
@@ -568,6 +573,15 @@ pub struct CompilationConfig {
     /// branches must not follow.
     pub user_defines: Vec<String>,
 
+    /// Lower a file whose macros failed instead of stopping at their errors,
+    /// which are then returned with the rest. For editors: a failed build
+    /// macro leaves its class as written.
+    pub continue_after_macro_errors: bool,
+
+    /// Stop each file after type checking: no HIR or MIR. For tools that
+    /// read the typed program only.
+    pub typecheck_only: bool,
+
     /// Extra preprocessor defines (e.g., "wasm" for WASM target builds).
     /// Added to the default set ("rayzor", "sys").
     pub extra_defines: Vec<String>,
@@ -636,6 +650,8 @@ impl CompilationUnit {
             manifest_type_params: BTreeMap::new(),
             macro_expansions: Vec::new(),
             symbol_references: Vec::new(),
+            deferred_errors: Vec::new(),
+            blade_functions: None,
             macro_statics: Default::default(),
             macro_hooks: Vec::new(),
             macro_state_by_file: std::collections::BTreeMap::new(),

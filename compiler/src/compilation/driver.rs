@@ -349,7 +349,12 @@ impl CompilationUnit {
             if !macro_errors.is_empty() {
                 // Definitions are stripped by expansion. Lowering the failed
                 // call afterwards would replace its cause with a name error.
-                return Err(macro_errors);
+                // An editor lowers anyway, so the rest of the file still
+                // answers; the errors are reported with the compile's.
+                if !self.config.continue_after_macro_errors {
+                    return Err(macro_errors);
+                }
+                self.deferred_errors.extend(macro_errors);
             }
             if expansion.expansions_count > 0 {
                 debug!(
@@ -640,6 +645,12 @@ impl CompilationUnit {
             }
         }
         add_profile_ms(&mut self.typecheck_timings.ownership_ms, t_ownership);
+
+        if self.config.typecheck_only {
+            self.compiled_files
+                .insert(source_file_identity(filename), typed_file.clone());
+            return Ok(typed_file);
+        }
 
         // Lower to HIR — pass loaded stdlib typed files so cross-file
         // static inline var references can be resolved
@@ -1488,6 +1499,8 @@ impl CompilationUnit {
         add_profile_ms(&mut self.typecheck_timings.user_files_ms, t_user_files);
 
         // Step 5: Report all errors if any were found
+        let deferred = std::mem::take(&mut self.deferred_errors);
+        all_errors.splice(0..0, deferred);
         if !all_errors.is_empty() {
             self.print_compilation_errors(&all_errors);
             return Err(all_errors);

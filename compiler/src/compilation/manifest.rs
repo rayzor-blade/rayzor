@@ -126,6 +126,23 @@ impl CompilationUnit {
 
     /// Register all symbols from a loaded manifest
     pub(crate) fn register_symbols_from_manifest(&mut self, manifest: &BladeSymbolManifest) {
+        // Methods are matched to existing symbols by qualified name; one map
+        // for the whole load instead of a scan of the table per method.
+        let mut functions = std::collections::HashMap::new();
+        for s in self.symbol_table.all_symbols() {
+            if s.kind == crate::tast::SymbolKind::Function
+                && let Some(name) = s.qualified_name
+            {
+                // The lowest id first, as a scan of the table would find.
+                functions.entry(name).or_insert(s.id);
+            }
+        }
+        self.blade_functions = Some(functions);
+        self.register_manifest_contents(manifest);
+        self.blade_functions = None;
+    }
+
+    fn register_manifest_contents(&mut self, manifest: &BladeSymbolManifest) {
         let mut total_classes = 0;
         let mut total_enums = 0;
         let mut total_aliases = 0;
@@ -432,20 +449,26 @@ impl CompilationUnit {
         });
         // Existing call sites keep their method symbol when its signature is
         // refined from the compiled import.
+        let existing = |unit: &Self, name| match &unit.blade_functions {
+            Some(index) => index.get(&name).copied(),
+            None => unit
+                .symbol_table
+                .find_symbols(|symbol| {
+                    symbol.kind == crate::tast::SymbolKind::Function
+                        && symbol.qualified_name == Some(name)
+                })
+                .first()
+                .map(|symbol| symbol.id),
+        };
         let method_symbol = qualified_method_name
-            .and_then(|name| {
-                self.symbol_table
-                    .find_symbols(|symbol| {
-                        symbol.kind == crate::tast::SymbolKind::Function
-                            && symbol.qualified_name == Some(name)
-                    })
-                    .first()
-                    .map(|symbol| symbol.id)
-            })
+            .and_then(|name| existing(self, name))
             .unwrap_or_else(|| {
                 self.symbol_table
                     .create_function_in_scope(method_name, class_scope)
             });
+        if let (Some(index), Some(name)) = (&mut self.blade_functions, qualified_method_name) {
+            index.entry(name).or_insert(method_symbol);
+        }
 
         // Method parameters shadow the enclosing class's generic parameters.
         let method_type_params = self.register_manifest_type_params(&method.type_params);
