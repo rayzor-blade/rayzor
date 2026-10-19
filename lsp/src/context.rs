@@ -5,6 +5,7 @@
 
 use crate::analysis::{self, CompletionEntry, FileSymbolIndex};
 use compiler::compilation::{CompilationConfig, CompilationUnit};
+use compiler::tast::SymbolId;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -14,12 +15,35 @@ pub struct LspContext {
     pub root: PathBuf,
     /// Open file contents (URI → source text).
     pub open_files: HashMap<String, String>,
-    /// Class paths from rayzor.toml.
+    /// Where imports are searched: the project's class paths, its
+    /// libraries', then the workspace root.
     pub class_paths: Vec<PathBuf>,
-    /// Per-file symbol indices (URI → index).
-    file_indices: HashMap<String, FileSymbolIndex>,
-    /// Last compilation unit (reused for symbol lookups).
-    last_unit: Option<CompilationUnit>,
+    /// The project's defines, seen by its own files only.
+    pub defines: Vec<String>,
+    /// The build file the configuration came from, if any.
+    pub hxml: Option<PathBuf>,
+    /// What could not be applied from the configuration.
+    pub config_problems: Vec<String>,
+    /// The last analysis of each open document that produced an index.
+    analyses: HashMap<String, Analysis>,
+}
+
+/// A compiled document: the unit its symbols live in and its position index.
+pub struct Analysis {
+    pub unit: CompilationUnit,
+    pub index: FileSymbolIndex,
+}
+
+impl Analysis {
+    /// Whether `symbol` is called `name`: an index of earlier text can hold
+    /// another name at a position that has since been edited.
+    fn names(&self, symbol: SymbolId, name: &str) -> bool {
+        self.unit
+            .symbol_table
+            .get_symbol(symbol)
+            .and_then(|s| self.unit.string_interner.get(s.name))
+            == Some(name)
+    }
 }
 
 impl LspContext {
@@ -28,17 +52,73 @@ impl LspContext {
             root,
             open_files: HashMap::new(),
             class_paths: Vec::new(),
-            file_indices: HashMap::new(),
-            last_unit: None,
+            defines: Vec::new(),
+            hxml: None,
+            config_problems: Vec::new(),
+            analyses: HashMap::new(),
         }
     }
 
-    /// Load class paths from rayzor.toml if present. The workspace root comes
-    /// last, as haxe always searches the working directory.
-    pub fn load_workspace_config(&mut self) {
-        self.class_paths = self.manifest_class_paths();
+    /// Configure the project from its build file: `hxml` when the client
+    /// names one, else `build.hxml`, else the first `.hxml` in the root, else
+    /// `rayzor.toml`. The workspace root comes last, as haxe always searches
+    /// the working directory.
+    pub fn load_workspace_config(&mut self, hxml: Option<&str>) {
+        self.class_paths.clear();
+        self.defines.clear();
+        self.config_problems.clear();
+        self.hxml = hxml.map(|h| self.root.join(h)).or_else(|| self.find_hxml());
+        match self.hxml.clone() {
+            Some(path) => self.apply_hxml(&path),
+            None => self.class_paths = self.manifest_class_paths(),
+        }
         if !self.class_paths.contains(&self.root) {
             self.class_paths.push(self.root.clone());
+        }
+    }
+
+    fn find_hxml(&self) -> Option<PathBuf> {
+        let build = self.root.join("build.hxml");
+        if build.is_file() {
+            return Some(build);
+        }
+        let mut found: Vec<PathBuf> = std::fs::read_dir(&self.root)
+            .ok()?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "hxml"))
+            .collect();
+        found.sort();
+        found.into_iter().next()
+    }
+
+    /// The first build the file describes; a `--next` build only differs in
+    /// output or target, and one view of the sources is what an editor shows.
+    fn apply_hxml(&mut self, path: &std::path::Path) {
+        use compiler::hxml::HxmlConfig;
+        let build = match HxmlConfig::builds_from_file(path) {
+            Ok(builds) => builds.into_iter().next().unwrap_or_default(),
+            Err(e) => {
+                self.config_problems.push(e);
+                return;
+            }
+        };
+        for (file, line, message) in &build.warnings {
+            self.config_problems
+                .push(format!("{}:{}: {}", file.display(), line, message));
+        }
+        self.class_paths = build.class_paths.clone();
+        self.defines = build
+            .defines
+            .iter()
+            .map(|(name, _)| name.clone())
+            .chain(build.target_defines().into_iter().map(str::to_string))
+            .collect();
+        let (libraries, problems) = compiler::haxelib::resolve(&build.libraries, &self.root);
+        self.config_problems.extend(problems);
+        for lib in libraries {
+            self.class_paths.extend(lib.class_paths);
+            self.defines
+                .extend(lib.defines.into_iter().map(|(name, _)| name));
         }
     }
 
@@ -72,9 +152,19 @@ impl LspContext {
             load_stdlib: true,
             emit_safety_warnings: false,
             record_references: true,
+            user_defines: self.defines.clone(),
             ..Default::default()
         };
         config.pipeline_config = config.pipeline_config.skip_analysis();
+
+        // A syntax error is reported as such, and the last analysis is kept:
+        // compiling text the parser rejects yields a partial program and no
+        // error, because a fallback parser recovers by dropping what it cannot
+        // read.
+        let syntax = self.syntax_errors(&filename, source);
+        if !syntax.is_empty() {
+            return syntax;
+        }
 
         let mut unit = CompilationUnit::new(config);
 
@@ -130,19 +220,54 @@ impl LspContext {
             &unit.symbol_references,
             file_id,
         );
-        self.file_indices.insert(uri.to_string(), index);
-        self.last_unit = Some(unit);
+        // A document mid-edit often fails to type; until it does again, the
+        // last analysis still holds for the text before the edit.
+        if !index.names.is_empty() || !self.analyses.contains_key(uri) {
+            self.analyses
+                .insert(uri.to_string(), Analysis { unit, index });
+        }
 
         result
     }
 
+    fn syntax_errors(&self, filename: &str, source: &str) -> Vec<LspDiagnostic> {
+        let mut config = parser::preprocessor::PreprocessorConfig::default();
+        config.defines.insert("eval".to_string());
+        config.defines.extend(self.defines.iter().cloned());
+        let text = parser::preprocessor::preprocess(source, &config);
+        let import_file = filename.ends_with("import.hx");
+        let Err(errors) = parser::rd::rd_parse(&text, filename, import_file, false) else {
+            return Vec::new();
+        };
+        errors
+            .iter()
+            .map(|e| {
+                let (line, column) = line_column(&text, e.span.start);
+                let (end_line, end_column) = line_column(&text, e.span.end.max(e.span.start + 1));
+                LspDiagnostic {
+                    file: filename.to_string(),
+                    line,
+                    column,
+                    end_line,
+                    end_column,
+                    severity: DiagSeverity::Error,
+                    message: e.message.clone(),
+                    suggestion: None,
+                    related: Vec::new(),
+                }
+            })
+            .collect()
+    }
+
+    fn symbol_at(&self, uri: &str, line: u32, col: u32) -> Option<(&Analysis, SymbolId)> {
+        let a = self.analyses.get(uri)?;
+        Some((a, a.index.find_symbol_at(line, col)?))
+    }
+
     /// Look up type/doc info for a symbol at a given position.
     pub fn hover_info(&self, uri: &str, line: u32, col: u32) -> Option<String> {
-        let index = self.file_indices.get(uri)?;
-        let unit = self.last_unit.as_ref()?;
-
-        let sym_id = index.find_symbol_at(line, col)?;
-
+        let (a, sym_id) = self.symbol_at(uri, line, col)?;
+        let unit = &a.unit;
         analysis::format_hover(
             sym_id,
             &unit.symbol_table,
@@ -153,18 +278,12 @@ impl LspContext {
 
     /// Find definition location for a symbol at a given position.
     pub fn goto_definition(&self, uri: &str, line: u32, col: u32) -> Option<(String, u32, u32)> {
-        let index = self.file_indices.get(uri)?;
-        let unit = self.last_unit.as_ref()?;
-
-        let sym_id = index.find_symbol_at(line, col)?;
-        let sym = unit.symbol_table.get_symbol(sym_id)?;
-        let loc = sym.definition_location;
-
+        let (a, sym_id) = self.symbol_at(uri, line, col)?;
+        let loc = a.unit.symbol_table.get_symbol(sym_id)?.definition_location;
         if !loc.is_valid() {
             return None;
         }
-
-        let file = unit.file_path_of(loc.file_id)?.to_string();
+        let file = a.unit.file_path_of(loc.file_id)?.to_string();
         Some((file, loc.line, loc.column))
     }
 
@@ -177,13 +296,10 @@ impl LspContext {
         col: u32,
         include_declaration: bool,
     ) -> Vec<(String, u32, u32, u32)> {
-        let (Some(index), Some(unit)) = (self.file_indices.get(uri), self.last_unit.as_ref())
-        else {
+        let Some((a, sym_id)) = self.symbol_at(uri, line, col) else {
             return Vec::new();
         };
-        let Some(sym_id) = index.find_symbol_at(line, col) else {
-            return Vec::new();
-        };
+        let unit = &a.unit;
         let mut out = Vec::new();
         let place = |at: compiler::tast::SourceLocation, len: u32| {
             unit.file_path_of(at.file_id)
@@ -205,76 +321,110 @@ impl LspContext {
         out
     }
 
-    /// Get completion entries for a position.
-    pub fn completions(&self, uri: &str) -> Vec<CompletionEntry> {
-        let (Some(unit), Some(index)) = (self.last_unit.as_ref(), self.file_indices.get(uri))
-        else {
-            return Vec::new();
+    /// Completions at (line, col), 1-based: the members of the receiver
+    /// when the cursor follows `receiver.`, otherwise every visible name.
+    pub fn completions(&self, uri: &str, line: u32, col: u32) -> Completions {
+        let Some(a) = self.analyses.get(uri) else {
+            return Completions::Names(Vec::new());
         };
-
-        analysis::collect_completions(
+        let unit = &a.unit;
+        if let Some(text) = self.open_files.get(uri)
+            && let Some((rline, rcol, name)) = analysis::receiver_before(text, line, col)
+        {
+            let members = a
+                .index
+                .find_symbol_at(rline, rcol)
+                .filter(|&s| a.names(s, &name))
+                .or_else(|| {
+                    let (st, interner) = (&unit.symbol_table, &unit.string_interner);
+                    analysis::resolve_name(&name, a.index.file_id, rline, rcol, st, interner)
+                })
+                .map(|receiver| {
+                    analysis::member_completions(
+                        receiver,
+                        &unit.symbol_table,
+                        &unit.type_table,
+                        &unit.string_interner,
+                        |class| {
+                            unit.class_fields(class)
+                                .iter()
+                                .map(|f| (f.1, f.2))
+                                .collect()
+                        },
+                    )
+                })
+                .unwrap_or_default();
+            return Completions::Members(members);
+        }
+        Completions::Names(analysis::collect_completions(
             &unit.symbol_table,
             &unit.type_table,
             &unit.string_interner,
-            index.file_id,
-        )
+            a.index.file_id,
+        ))
     }
 
     /// Build semantic tokens for syntax highlighting.
     pub fn semantic_tokens(&self, uri: &str) -> Option<Vec<analysis::SemanticToken>> {
-        let unit = self.last_unit.as_ref()?;
-        let index = self.file_indices.get(uri)?;
-        Some(analysis::build_semantic_tokens(&unit.symbol_table, index))
+        let a = self.analyses.get(uri)?;
+        Some(analysis::build_semantic_tokens(
+            &a.unit.symbol_table,
+            &a.index,
+        ))
     }
 
     /// Build document symbols for the outline panel.
     pub fn document_symbols(&self, uri: &str) -> Option<Vec<analysis::DocumentSymbolEntry>> {
-        let unit = self.last_unit.as_ref()?;
-        let index = self.file_indices.get(uri)?;
+        let a = self.analyses.get(uri)?;
         Some(analysis::build_document_symbols(
-            &unit.symbol_table,
-            &unit.type_table,
-            &unit.string_interner,
-            index.file_id,
+            &a.unit.symbol_table,
+            &a.unit.type_table,
+            &a.unit.string_interner,
+            a.index.file_id,
         ))
     }
 
-    /// Build signature help for a function call.
+    /// The signature of the call whose argument list holds (line, col),
+    /// 1-based, with the argument the cursor is in.
     pub fn signature_help(
         &self,
         uri: &str,
         line: u32,
         col: u32,
     ) -> Option<analysis::SignatureInfo> {
-        let index = self.file_indices.get(uri)?;
-        let unit = self.last_unit.as_ref()?;
-
-        // Find the function symbol at or near the cursor
-        let sym_id = index.find_symbol_at(line, col)?;
-
-        // TODO: determine active parameter from cursor position (count commas before cursor)
+        let text = self.open_files.get(uri)?;
+        let call = analysis::enclosing_call(text, line, col)?;
+        let a = self.analyses.get(uri)?;
+        let (st, interner) = (&a.unit.symbol_table, &a.unit.string_interner);
+        let callee = a
+            .index
+            .find_symbol_at(call.callee_line, call.callee_col)
+            .filter(|&s| a.names(s, &call.callee))
+            .or_else(|| {
+                let (l, c) = (call.callee_line, call.callee_col);
+                analysis::resolve_name(&call.callee, a.index.file_id, l, c, st, interner)
+            })?;
         analysis::build_signature_help(
-            sym_id,
-            &unit.symbol_table,
-            &unit.type_table,
-            &unit.string_interner,
-            0,
+            callee,
+            &a.unit.symbol_table,
+            &a.unit.type_table,
+            &a.unit.string_interner,
+            call.argument,
         )
     }
 
-    /// Get macro expansion hints for inlay hints display.
-    pub fn macro_expansion_hints(&self) -> Vec<MacroExpansionHint> {
-        let unit = match self.last_unit.as_ref() {
-            Some(u) => u,
-            None => return Vec::new(),
+    /// The macro expansions in the document, for inlay hints.
+    pub fn macro_expansion_hints(&self, uri: &str) -> Vec<MacroExpansionHint> {
+        let Some(a) = self.analyses.get(uri) else {
+            return Vec::new();
         };
-
-        unit.macro_expansions
+        a.unit
+            .macro_expansions
             .iter()
             .filter_map(|origin| {
                 let text = origin.expanded_text.as_ref()?;
                 let loc = &origin.call_site;
-                if !loc.is_valid() {
+                if !loc.is_valid() || loc.file_id != a.index.file_id {
                     return None;
                 }
                 Some(MacroExpansionHint {
@@ -286,6 +436,14 @@ impl LspContext {
             })
             .collect()
     }
+}
+
+/// What completion offers at a position.
+pub enum Completions {
+    /// After `receiver.`: only what the receiver has.
+    Members(Vec<CompletionEntry>),
+    /// Anywhere else: every name in reach, with keywords.
+    Names(Vec<CompletionEntry>),
 }
 
 /// A macro expansion hint for display as an inlay hint.
@@ -332,6 +490,17 @@ pub enum DiagSeverity {
     Warning,
     Info,
     Hint,
+}
+
+/// The 1-based (line, column) of byte `offset` in `text`, clamped to its end.
+fn line_column(text: &str, offset: usize) -> (u32, u32) {
+    let before = &text.as_bytes()[..offset.min(text.len())];
+    let line = before.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
+    let start = before
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |p| p + 1);
+    (line, (before.len() - start) as u32 + 1)
 }
 
 fn uri_to_path(uri: &str) -> String {

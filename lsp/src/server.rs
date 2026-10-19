@@ -5,7 +5,7 @@
 //! hints; tests/session.rs checks which of them answer correctly.
 
 use crate::analysis;
-use crate::context::LspContext;
+use crate::context::{Completions, LspContext};
 use crate::diagnostics::to_lsp_diagnostics;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
@@ -114,7 +114,15 @@ pub fn serve(connection: &Connection) -> Result<(), String> {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     let mut ctx = LspContext::new(root);
-    ctx.load_workspace_config();
+    let hxml = init_params
+        .initialization_options
+        .as_ref()
+        .and_then(|o| o.get("hxml"))
+        .and_then(|h| h.as_str());
+    ctx.load_workspace_config(hxml);
+    for problem in &ctx.config_problems {
+        log_message(connection, problem);
+    }
 
     for msg in &connection.receiver {
         match msg {
@@ -216,6 +224,15 @@ fn publish_diagnostics(conn: &Connection, ctx: &mut LspContext, uri: &str, sourc
         version: None,
     };
     send_notification::<PublishDiagnostics>(conn, params);
+}
+
+/// Tells the client about a configuration problem it can show in its log.
+fn log_message(conn: &Connection, message: &str) {
+    let params = lsp_types::LogMessageParams {
+        typ: lsp_types::MessageType::WARNING,
+        message: message.to_string(),
+    };
+    send_notification::<lsp_types::notification::LogMessage>(conn, params);
 }
 
 fn send_notification<N: lsp_types::notification::Notification>(conn: &Connection, params: N::Params)
@@ -328,21 +345,10 @@ fn handle_document_highlight(
 // ---------------------------------------------------------------------------
 
 fn handle_completion(ctx: &LspContext, params: CompletionParams) -> Option<CompletionResponse> {
-    let uri = params.text_document_position.text_document.uri.as_str();
-
-    // Keywords from the parser
-    let mut items: Vec<CompletionItem> = parser::HAXE_KEYWORDS
-        .iter()
-        .map(|kw| CompletionItem {
-            label: kw.to_string(),
-            kind: Some(CompletionItemKind::KEYWORD),
-            sort_text: Some(format!("9_{}", kw)),
-            ..Default::default()
-        })
-        .collect();
-
-    // Symbols from last compilation
-    for entry in ctx.completions(uri) {
+    let doc = &params.text_document_position;
+    let uri = doc.text_document.uri.as_str();
+    let pos = doc.position;
+    let to_item = |entry: analysis::CompletionEntry| {
         let mut item = CompletionItem {
             label: entry.label.clone(),
             kind: Some(entry.kind.to_lsp()),
@@ -356,14 +362,24 @@ fn handle_completion(ctx: &LspContext, params: CompletionParams) -> Option<Compl
             sort_text: Some(format!("{}_{}", entry.sort_priority, entry.label)),
             ..Default::default()
         };
-
         if entry.deprecated {
             item.tags = Some(vec![CompletionItemTag::DEPRECATED]);
         }
-
-        items.push(item);
-    }
-
+        item
+    };
+    let items = match ctx.completions(uri, pos.line + 1, pos.character + 1) {
+        Completions::Members(members) => members.into_iter().map(to_item).collect(),
+        Completions::Names(names) => parser::HAXE_KEYWORDS
+            .iter()
+            .map(|kw| CompletionItem {
+                label: kw.to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                sort_text: Some(format!("9_{}", kw)),
+                ..Default::default()
+            })
+            .chain(names.into_iter().map(to_item))
+            .collect(),
+    };
     Some(CompletionResponse::Array(items))
 }
 
@@ -502,13 +518,13 @@ fn handle_signature_help(ctx: &LspContext, params: SignatureHelpParams) -> Optio
 // ---------------------------------------------------------------------------
 
 fn handle_inlay_hints(ctx: &LspContext, params: InlayHintParams) -> Option<Vec<InlayHint>> {
-    let _uri = params.text_document.uri.as_str();
+    let uri = params.text_document.uri.as_str();
     let range = params.range;
 
     let mut hints = Vec::new();
 
     // Macro expansion hints: show expanded result after macro call sites
-    for hint in ctx.macro_expansion_hints() {
+    for hint in ctx.macro_expansion_hints(uri) {
         let line = hint.line.saturating_sub(1); // LSP is 0-based
         let col = hint.column.saturating_sub(1);
 

@@ -25,7 +25,9 @@ impl Session {
         ));
         std::fs::create_dir_all(&root).unwrap();
         for (name, text) in files {
-            std::fs::write(root.join(name), text).unwrap();
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
         }
         let (server_end, client) = Connection::memory();
         let server = std::thread::spawn(move || rayzor_lsp::serve(&server_end));
@@ -91,6 +93,37 @@ impl Session {
                     .unwrap_or_default();
             }
         }
+    }
+
+    /// Replaces `name`'s text in the editor (not on disk) and returns its
+    /// diagnostics.
+    fn change(&mut self, name: &str, text: &str) -> Vec<Value> {
+        self.next_id += 1;
+        self.notify(
+            "textDocument/didChange",
+            json!({"textDocument": {"uri": self.uri(name), "version": self.next_id}, "contentChanges": [{"text": text}]}),
+        );
+        loop {
+            if let Message::Notification(n) = self.client.receiver.recv().unwrap()
+                && n.method == "textDocument/publishDiagnostics"
+            {
+                return n.params["diagnostics"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+            }
+        }
+    }
+
+    fn labels(&mut self, name: &str, line: u32, character: u32) -> Vec<String> {
+        let at = self.at(name, line, character);
+        let items = self.request("textDocument/completion", at);
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["label"].as_str().unwrap().to_string())
+            .collect()
     }
 
     fn at(&self, name: &str, line: u32, character: u32) -> Value {
@@ -296,4 +329,122 @@ fn diagnostics_point_at_the_error() {
             .contains("undefinedThing")
     );
     assert_eq!(start(&diags[0]), (2, 8));
+}
+
+#[test]
+fn an_hxml_project_gets_its_class_paths_libraries_and_target() {
+    let main = "class Main {
+    static function main() {
+        #if js
+        var v = Lib.answer();
+        #else
+        var v = onlyWhenNotJs();
+        #end
+        trace(v);
+    }
+}
+";
+    let lib = "class Lib {
+    public static function answer():Int {
+        return 42;
+    }
+}
+";
+    let mut s = Session::start(&[
+        (
+            "build.hxml",
+            "-cp src\n-lib mylib\n-main Main\n--js out.js\n",
+        ),
+        ("src/Main.hx", main),
+        (".haxelib/mylib/.current", "1.0.0"),
+        (
+            ".haxelib/mylib/1,0,0/haxelib.json",
+            r#"{"name":"mylib","classPath":"src"}"#,
+        ),
+        (".haxelib/mylib/1,0,0/src/Lib.hx", lib),
+    ]);
+    let diags = s.open("src/Main.hx");
+    assert!(diags.is_empty(), "{diags:?}");
+
+    let at = s.at("src/Main.hx", 3, 22);
+    let def = s.request("textDocument/definition", at);
+    let uri = def["uri"].as_str().unwrap_or("");
+    assert!(uri.ends_with("/.haxelib/mylib/1,0,0/src/Lib.hx"), "{def}");
+}
+
+const POINT: &str = "class Point {
+    public var x:Int;
+    public static var origin:Point = null;
+    public function new(x:Int) {
+        this.x = x;
+    }
+    public function moved(by:Int, scale:Float):Point {
+        return new Point(x + by);
+    }
+    public static function make():Point {
+        return new Point(0);
+    }
+}
+class Main {
+    static function main() {
+        var p = Point.make();
+        var s = \"hi\";
+        trace(p.x + s.length);
+    }
+}
+";
+
+#[test]
+fn completion_after_a_dot_lists_the_receivers_members_while_editing() {
+    let mut s = Session::start(&[("Main.hx", POINT)]);
+    assert!(s.open("Main.hx").is_empty());
+
+    let editing = POINT.replace("trace(p.x + s.length);", "trace(p.mo");
+    s.change("Main.hx", &editing);
+    let line = 17;
+    let col = "        trace(p.mo".len() as u32;
+    let members = s.labels("Main.hx", line, col);
+    assert!(
+        members.contains(&"moved".into()) && members.contains(&"x".into()),
+        "{members:?}"
+    );
+    assert!(
+        !members.contains(&"make".into()) && !members.contains(&"class".into()),
+        "{members:?}"
+    );
+
+    let editing = POINT.replace("trace(p.x + s.length);", "Point.");
+    s.change("Main.hx", &editing);
+    let statics = s.labels("Main.hx", line, "        Point.".len() as u32);
+    assert!(
+        statics.contains(&"make".into()) && statics.contains(&"origin".into()),
+        "{statics:?}"
+    );
+    assert!(!statics.contains(&"moved".into()), "{statics:?}");
+
+    let editing = POINT.replace("trace(p.x + s.length);", "s.");
+    s.change("Main.hx", &editing);
+    let string = s.labels("Main.hx", line, "        s.".len() as u32);
+    assert!(
+        string.contains(&"charAt".into()) && string.contains(&"length".into()),
+        "{string:?}"
+    );
+}
+
+#[test]
+fn signature_help_follows_the_argument_being_typed() {
+    let mut s = Session::start(&[("Main.hx", POINT)]);
+    s.open("Main.hx");
+    let editing = POINT.replace("trace(p.x + s.length);", "p.moved(1, ");
+    s.change("Main.hx", &editing);
+    let at = s.at("Main.hx", 17, "        p.moved(1, ".len() as u32);
+    let help = s.request("textDocument/signatureHelp", at);
+    assert!(
+        help["signatures"][0]["label"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("moved("),
+        "{help}"
+    );
+    assert_eq!(help["activeParameter"], 1, "{help}");
 }

@@ -769,3 +769,324 @@ pub fn build_signature_help(
         active_parameter: active_param,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Member completion and calls under the cursor
+// ---------------------------------------------------------------------------
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// The byte offset of (line, col), both 1-based, in `text`.
+fn offset_of(text: &str, line: u32, col: u32) -> Option<usize> {
+    let start: usize = text
+        .split_inclusive('\n')
+        .take(line.checked_sub(1)? as usize)
+        .map(str::len)
+        .sum();
+    let at = start + col.checked_sub(1)? as usize;
+    (at <= text.len()).then_some(at)
+}
+
+/// The (line, col), both 1-based, of byte offset `at` in `text`.
+fn position_of(text: &str, at: usize) -> (u32, u32) {
+    let before = &text.as_bytes()[..at];
+    let line = before.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
+    let line_start = before
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |p| p + 1);
+    (line, (at - line_start) as u32 + 1)
+}
+
+/// When the cursor at (line, col) follows `receiver.` and part of a member
+/// name, where `receiver` starts and the name itself.
+pub fn receiver_before(text: &str, line: u32, col: u32) -> Option<(u32, u32, String)> {
+    let bytes = text.as_bytes();
+    let mut i = offset_of(text, line, col)?;
+    while i > 0 && is_ident_byte(bytes[i - 1]) {
+        i -= 1;
+    }
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i == 0 || bytes[i - 1] != b'.' {
+        return None;
+    }
+    i -= 1;
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    let end = i;
+    while i > 0 && is_ident_byte(bytes[i - 1]) {
+        i -= 1;
+    }
+    let name = &text[i..end];
+    (i < end && name != "this").then(|| {
+        let (line, col) = position_of(text, i);
+        (line, col, name.to_string())
+    })
+}
+
+/// The symbol `name` most likely means at (line, col): the closest earlier
+/// declaration of it in the file, else a type of that name, else any member
+/// of that name. For a name the last analysis did not record where it is
+/// written, as in text being typed.
+pub fn resolve_name(
+    name: &str,
+    file_id: u32,
+    line: u32,
+    col: u32,
+    symbol_table: &SymbolTable,
+    interner: &StringInterner,
+) -> Option<SymbolId> {
+    let named = symbol_table.find_symbols(|s| interner.get(s.name) == Some(name));
+    let earlier = named
+        .iter()
+        .filter(|s| {
+            let at = s.definition_location;
+            at.file_id == file_id && (at.line, at.column) < (line, col)
+        })
+        .max_by_key(|s| (s.definition_location.line, s.definition_location.column));
+    let is_type = |s: &&&Symbol| {
+        matches!(
+            s.kind,
+            SymbolKind::Class | SymbolKind::Interface | SymbolKind::Abstract | SymbolKind::Enum
+        )
+    };
+    earlier
+        .or_else(|| named.iter().find(is_type))
+        .or_else(|| named.first())
+        .map(|s| s.id)
+}
+
+/// The class a value of type `type_id` is an instance of.
+fn class_of_type(
+    type_id: TypeId,
+    symbol_table: &SymbolTable,
+    type_table: &TypeTable,
+    interner: &StringInterner,
+) -> Option<SymbolId> {
+    let named = |name: &str| {
+        symbol_table
+            .find_symbols(|s| {
+                s.kind == SymbolKind::Class
+                    && interner.get(s.name) == Some(name)
+                    && s.qualified_name.and_then(|q| interner.get(q)) == Some(name)
+            })
+            .first()
+            .map(|s| s.id)
+    };
+    match &type_table.get(type_id)?.kind {
+        TypeKind::Class { symbol_id, .. }
+        | TypeKind::Interface { symbol_id, .. }
+        | TypeKind::Enum { symbol_id, .. }
+        | TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
+        TypeKind::GenericInstance { base_type, .. } => {
+            class_of_type(*base_type, symbol_table, type_table, interner)
+        }
+        TypeKind::Optional { inner_type, .. } => {
+            class_of_type(*inner_type, symbol_table, type_table, interner)
+        }
+        TypeKind::TypeAlias { target_type, .. } | TypeKind::Reference { target_type, .. } => {
+            class_of_type(*target_type, symbol_table, type_table, interner)
+        }
+        TypeKind::String => named("String"),
+        TypeKind::Array { .. } => named("Array"),
+        _ => None,
+    }
+}
+
+/// What can follow `receiver.`: a type's statics and constructors, or an
+/// instance's fields and methods, its superclasses' included.
+pub fn member_completions(
+    receiver: SymbolId,
+    symbol_table: &SymbolTable,
+    type_table: &Rc<RefCell<TypeTable>>,
+    interner: &StringInterner,
+    class_fields: impl Fn(SymbolId) -> Vec<(SymbolId, bool)>,
+) -> Vec<CompletionEntry> {
+    let tt = type_table.borrow();
+    let Some(sym) = symbol_table.get_symbol(receiver) else {
+        return Vec::new();
+    };
+    let is_type = matches!(
+        sym.kind,
+        SymbolKind::Class | SymbolKind::Interface | SymbolKind::Abstract | SymbolKind::Enum
+    );
+    let mut class = if is_type {
+        Some(sym.id)
+    } else {
+        class_of_type(sym.type_id, symbol_table, &tt, interner)
+    };
+    let mut entries: Vec<CompletionEntry> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(class_id) = class {
+        let Some(prefix) = symbol_table
+            .get_symbol(class_id)
+            .and_then(|c| c.qualified_name.or(Some(c.name)))
+            .and_then(|q| interner.get(q))
+            .map(|q| format!("{q}."))
+        else {
+            break;
+        };
+        let fields = class_fields(class_id);
+        let declared = symbol_table.all_symbols().filter(|m| {
+            m.qualified_name
+                .and_then(|q| interner.get(q))
+                .and_then(|q| q.strip_prefix(prefix.as_str()))
+                .is_some_and(|rest| Some(rest) == interner.get(m.name))
+        });
+        // A field's entry says whether it is static; a declared member's
+        // flags do.
+        let members = fields
+            .iter()
+            .filter_map(|&(f, is_static)| Some((symbol_table.get_symbol(f)?, Some(is_static))))
+            .chain(declared.map(|m| (m, None)));
+        for (member, is_static) in members {
+            let wanted = match (member.kind, is_static) {
+                (_, Some(is_static)) => is_static == is_type,
+                (SymbolKind::Field | SymbolKind::Property | SymbolKind::Function, None) => {
+                    member.flags.contains(SymbolFlags::STATIC) == is_type
+                }
+                (SymbolKind::EnumVariant, None) => is_type,
+                _ => false,
+            };
+            let Some(name) = interner.get(member.name) else {
+                continue;
+            };
+            if !wanted || name.starts_with("__") || name == "new" || !seen.insert(name.to_string())
+            {
+                continue;
+            }
+            entries.push(CompletionEntry {
+                label: name.to_string(),
+                kind: symbol_kind_to_completion(member.kind),
+                detail: format_type_name(member.type_id, &tt, interner),
+                documentation: member
+                    .documentation
+                    .and_then(|d| interner.get(d))
+                    .map(str::to_string),
+                deprecated: member.flags.contains(SymbolFlags::DEPRECATED),
+                sort_priority: completion_sort_priority(member),
+            });
+        }
+        // An instance has its superclasses' members; Haxe does not inherit
+        // statics, so `Sub.baseStatic` is not offered.
+        class = (!is_type)
+            .then(|| symbol_table.get_class_super_type(class_id))
+            .flatten()
+            .and_then(|t| class_of_type(t, symbol_table, &tt, interner));
+    }
+    entries
+}
+
+/// A call whose argument list the cursor is in.
+pub struct CallAtCursor {
+    /// Where the callee's name starts, 1-based.
+    pub callee_line: u32,
+    pub callee_col: u32,
+    pub callee: String,
+    /// Which argument, from 0.
+    pub argument: u32,
+}
+
+/// The innermost call whose `(` is open at (line, col), 1-based, skipping
+/// strings and comments.
+pub fn enclosing_call(text: &str, line: u32, col: u32) -> Option<CallAtCursor> {
+    let end = offset_of(text, line, col)?;
+    let bytes = text.as_bytes();
+    // (bracket, offset, commas seen at its depth)
+    let mut open: Vec<(u8, usize, u32)> = Vec::new();
+    let mut i = 0;
+    while i < end {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < end && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < end && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                while i < end && bytes[i] != q {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b @ (b'(' | b'[' | b'{') => open.push((b, i, 0)),
+            b')' | b']' | b'}' => {
+                open.pop();
+            }
+            b',' => {
+                if let Some(top) = open.last_mut() {
+                    top.2 += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let &(bracket, paren, argument) = open.last()?;
+    if bracket != b'(' {
+        return None;
+    }
+    let mut j = paren;
+    while j > 0 && bytes[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+    let name_end = j;
+    while j > 0 && is_ident_byte(bytes[j - 1]) {
+        j -= 1;
+    }
+    let name = &text[j..name_end];
+    const NOT_CALLS: &[&str] = &[
+        "if", "while", "for", "switch", "catch", "function", "return",
+    ];
+    if name.is_empty() || NOT_CALLS.contains(&name) {
+        return None;
+    }
+    let (callee_line, callee_col) = position_of(text, j);
+    Some(CallAtCursor {
+        callee_line,
+        callee_col,
+        callee: name.to_string(),
+        argument,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_receiver_before_a_dot() {
+        let text = "var a = 1;\nfoo.ba";
+        assert_eq!(receiver_before(text, 2, 7), Some((2, 1, "foo".into())));
+        assert_eq!(receiver_before("foo . ", 1, 7), Some((1, 1, "foo".into())));
+        assert_eq!(receiver_before("foo", 1, 4), None);
+        assert_eq!(receiver_before("this.x", 1, 7), None);
+    }
+
+    #[test]
+    fn finds_the_open_call_and_argument() {
+        let text = "x(1, f(\"a,(\", [2, 3]), ";
+        let call = enclosing_call(text, 1, text.len() as u32 + 1).unwrap();
+        assert_eq!(
+            (call.callee_line, call.callee_col, call.argument),
+            (1, 1, 2)
+        );
+        let call = enclosing_call(text, 1, 9).unwrap();
+        assert_eq!((call.callee_col, call.argument), (6, 0));
+        assert!(enclosing_call("if (a, ", 1, 8).is_none());
+        assert!(enclosing_call("f(a) ", 1, 6).is_none());
+    }
+}
