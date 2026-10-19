@@ -270,6 +270,8 @@ pub struct CompilationUnit {
 
     /// Macro expansion origins (for IDE hints showing expanded results)
     pub macro_expansions: Vec<crate::macro_system::expander::ExpansionOrigin>,
+    /// Where each resolved name in a compiled file sits, and what it names.
+    pub symbol_references: Vec<crate::tast::references::SymbolReference>,
     /// Macro-time statics for the whole compile. Modules expand in compile
     /// order (dependencies first), so shared values are deterministic.
     pub(crate) macro_statics: crate::macro_system::class_registry::MacroStatics,
@@ -557,6 +559,10 @@ pub struct CompilationConfig {
     /// Whether to emit safety warnings (use-after-move, etc.)
     pub emit_safety_warnings: bool,
 
+    /// Record where each resolved name sits in non-stdlib files
+    /// (`CompilationUnit::symbol_references`), for editor tooling.
+    pub record_references: bool,
+
     /// Extra preprocessor defines (e.g., "wasm" for WASM target builds).
     /// Added to the default set ("rayzor", "sys").
     pub extra_defines: Vec<String>,
@@ -624,6 +630,7 @@ impl CompilationUnit {
             manifest_types_by_short_name: BTreeMap::new(),
             manifest_type_params: BTreeMap::new(),
             macro_expansions: Vec::new(),
+            symbol_references: Vec::new(),
             macro_statics: Default::default(),
             macro_hooks: Vec::new(),
             macro_state_by_file: std::collections::BTreeMap::new(),

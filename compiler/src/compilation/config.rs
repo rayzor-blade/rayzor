@@ -32,6 +32,7 @@ impl Default for CompilationConfig {
             pipeline_config: PipelineConfig::default(),
             hdll_search_paths: vec![PathBuf::from(".")],
             emit_safety_warnings: true,
+            record_references: false,
             extra_defines: Vec::new(),
             profile_typecheck: false,
             resources: Default::default(),

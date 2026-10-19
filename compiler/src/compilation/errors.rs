@@ -31,6 +31,19 @@ impl CompilationUnit {
         }
     }
 
+    /// The id the lowering pipeline gave the file compiled from `path`.
+    pub fn file_id_of(&self, path: &str) -> Option<u32> {
+        self.file_id_by_filename.get(path).copied()
+    }
+
+    /// The path of the file compiled under `file_id`.
+    pub fn file_path_of(&self, file_id: u32) -> Option<&str> {
+        self.file_id_by_filename
+            .iter()
+            .find(|(_, id)| **id == file_id)
+            .map(|(path, _)| path.as_str())
+    }
+
     /// Extract the type name from an unresolved type error message
     pub(crate) fn extract_type_name_from_error(&self, message: &str) -> Option<String> {
         // Try to extract type name from error message formats:

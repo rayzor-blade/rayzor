@@ -322,6 +322,10 @@ impl<'a> AstLowering<'a> {
                     };
                 }
                 typed.expr_type = refined;
+                // A node built without a position takes its own syntax's.
+                if !typed.source_location.is_valid() {
+                    typed.source_location = self.context.create_location_from_span(expression.span);
+                }
                 if self.macro_probe_depth > 0 {
                     self.validate_macro_probe_expression(&typed)?;
                 }
@@ -694,16 +698,16 @@ impl<'a> AstLowering<'a> {
                                 }
                             }
                         }
-                        // An enum of this very module outranks every other,
-                        // as Haxe resolves a bare name.
-                        let current_file = self.context.create_location().file_id;
-                        let declared_here = self
+                        // The constructor the scope walk found stands, as in
+                        // Haxe, where a later import shadows an earlier one;
+                        // only one that belongs to no enum is ambiguous.
+                        let has_enum = self
                             .context
                             .symbol_table
                             .find_parent_enum_for_constructor(symbol_id)
                             .and_then(|p| self.context.symbol_table.get_symbol(p))
-                            .is_some_and(|p| p.definition_location.file_id == current_file);
-                        if parent_enum_names.len() > 1 && !declared_here {
+                            .is_some();
+                        if parent_enum_names.len() > 1 && !has_enum {
                             let candidates = parent_enum_names
                                 .iter()
                                 .map(|p| format!("{}.{}", p, name))

@@ -527,8 +527,24 @@ impl CompilationUnit {
             });
         }
 
+        crate::tast::definition_locations::record_definition_locations(
+            &typed_file,
+            source,
+            &mut self.symbol_table,
+            &self.string_interner,
+        );
+
         // Send/Sync validation — check thread safety constraints (user files only)
         let is_stdlib = filename.contains("haxe-std/") || filename.contains("haxe-std\\");
+        if self.config.record_references && !is_stdlib {
+            let references = crate::tast::references::collect_references(
+                &typed_file,
+                source,
+                &self.symbol_table,
+                &self.string_interner,
+            );
+            self.symbol_references.extend(references);
+        }
         let t_send_sync = profile_timer(self.config.profile_typecheck);
         if !is_stdlib {
             use crate::tast::send_sync_validator::SendSyncValidator;

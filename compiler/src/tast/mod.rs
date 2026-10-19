@@ -5,6 +5,7 @@ pub mod constraint_solver;
 pub mod control_flow_analysis;
 pub mod core;
 pub mod core_types;
+pub mod definition_locations;
 pub mod effect_analysis;
 pub mod generic_instantiation;
 pub mod generics;
@@ -14,6 +15,7 @@ pub mod node;
 pub mod node_extensions;
 pub mod null_safety_analysis;
 pub mod package_access;
+pub mod references;
 pub mod scopes;
 pub mod send_sync_validator;
 pub mod sig_index;
@@ -32,6 +34,7 @@ pub mod type_diagnostics;
 pub mod type_flow_guard;
 pub mod type_resolution;
 pub mod type_resolution_helpers;
+pub mod walk;
 // pub mod type_inference;
 
 #[cfg(test)]
