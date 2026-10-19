@@ -65,6 +65,10 @@ pub enum MacroError {
     /// swallow it would expand the macro to a wrong constant instead.
     NeedsTyper { location: SourceLocation },
 
+    /// Macro evaluation ran past the time budget set for it
+    /// (`budget::limit`). Not catchable by the macro's own try/catch.
+    TimeBudgetExceeded { location: SourceLocation },
+
     /// Circular macro dependency detected
     CircularDependency {
         chain: Vec<String>,
@@ -137,6 +141,7 @@ impl MacroError {
             MacroError::InvalidDefinition { location, .. } => *location,
             MacroError::ContextError { location, .. } => *location,
             MacroError::NeedsTyper { location } => *location,
+            MacroError::TimeBudgetExceeded { location } => *location,
             MacroError::UndefinedVariable { location, .. } => *location,
             MacroError::UnsupportedOperation { location, .. } => *location,
             MacroError::DivisionByZero { location } => *location,
@@ -183,6 +188,7 @@ impl MacroError {
             MacroError::InvalidDefinition { .. } => "E0708",
             MacroError::ContextError { .. } => "E0709",
             MacroError::NeedsTyper { .. } => "E0709",
+            MacroError::TimeBudgetExceeded { .. } => "E0713",
             MacroError::UndefinedVariable { .. } => "E0710",
             MacroError::UnsupportedOperation { .. } => "E0711",
             MacroError::DivisionByZero { .. } => "E0712",
@@ -245,6 +251,9 @@ impl fmt::Display for MacroError {
             }
             MacroError::NeedsTyper { .. } => {
                 write!(f, "needs the live typer; deferred to lowering")
+            }
+            MacroError::TimeBudgetExceeded { .. } => {
+                write!(f, "macro ran past its time budget and was stopped")
             }
             MacroError::Thrown { value, .. } => {
                 write!(f, "uncaught exception: {}", value.to_display_string())

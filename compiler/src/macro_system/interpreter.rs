@@ -453,6 +453,7 @@ impl MacroInterpreter {
             // --- While loop ---
             ExprKind::While { cond, body } => {
                 loop {
+                    self.check_budget(expr)?;
                     let cond_val = self.eval_expr(cond)?;
                     if !cond_val.is_truthy() {
                         break;
@@ -470,6 +471,7 @@ impl MacroInterpreter {
             // --- Do-while loop ---
             ExprKind::DoWhile { body, cond } => {
                 loop {
+                    self.check_budget(expr)?;
                     match self.eval_expr(body) {
                         Err(MacroError::Break) => break,
                         Err(MacroError::Continue) => {}
@@ -548,6 +550,10 @@ impl MacroInterpreter {
 
                 self.env.push_scope();
                 for (key, item) in items {
+                    if let Err(e) = self.check_budget(expr) {
+                        self.env.pop_scope();
+                        return Err(e);
+                    }
                     if let Some(key_var) = key_var {
                         self.env.define(key_var, key);
                     }
@@ -645,7 +651,10 @@ impl MacroInterpreter {
                     // becomes uncatchable so the probe answers for real.
                     // A catch that reads the error would answer from the
                     // signal's own text, so an expression macro defers then.
-                    Err(e) if !e.is_control_flow() => {
+                    Err(e)
+                        if !e.is_control_flow()
+                            && !matches!(e, MacroError::TimeBudgetExceeded { .. }) =>
+                    {
                         // The first catch whose type admits the error takes it.
                         let err_val = Self::caught_value(&e);
                         let defers = matches!(e, MacroError::NeedsTyper { .. })
@@ -1657,6 +1666,16 @@ impl MacroInterpreter {
         }
     }
 
+    /// Stops a loop whose macro has run past its time budget.
+    fn check_budget(&self, at: &Expr) -> Result<(), MacroError> {
+        if super::budget::exhausted() {
+            return Err(MacroError::TimeBudgetExceeded {
+                location: span_to_location(at.span),
+            });
+        }
+        Ok(())
+    }
+
     /// Execute a MacroFunction with given arguments
     fn call_function(
         &mut self,
@@ -1664,6 +1683,9 @@ impl MacroInterpreter {
         args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        if super::budget::exhausted() {
+            return Err(MacroError::TimeBudgetExceeded { location });
+        }
         self.call_depth += 1;
         if self.call_depth > self.max_call_depth {
             self.call_depth -= 1;

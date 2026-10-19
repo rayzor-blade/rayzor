@@ -120,6 +120,11 @@ impl MacroVm {
     /// Main execution loop.
     fn run(&mut self) -> Result<MacroValue, VmError> {
         loop {
+            if crate::macro_system::budget::exhausted() {
+                return Err(VmError::new(
+                    "macro ran past its time budget and was stopped",
+                ));
+            }
             let frame_idx = self.frames.len() - 1;
             let frame = &mut self.frames[frame_idx];
             let chunk = &frame.chunk;

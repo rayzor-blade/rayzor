@@ -57,6 +57,7 @@
 //! - **`errors`**: Macro-specific error types and diagnostics
 
 pub mod ast_bridge;
+pub mod budget;
 pub mod build_macros;
 pub mod bytecode;
 pub mod class_registry;
