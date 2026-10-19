@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1792406943,"nonce":"UwgKe7A825VtvuqUMU8hgNRtIf4=","message":"Fixed in 7a023320: hints come from the document's own analysis and only its own file's expansions.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1792406943,"nonce":"XuFerzfdOYpqSWqrowdi/ouc5m0=","status":2}]}
