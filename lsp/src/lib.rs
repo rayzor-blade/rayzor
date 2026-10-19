@@ -11,5 +11,6 @@ pub mod analysis;
 mod context;
 mod diagnostics;
 mod server;
+mod transport;
 
-pub use server::{run_lsp, serve};
+pub use server::{run_lsp, serve, spawn_session};

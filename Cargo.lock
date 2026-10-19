@@ -3176,7 +3176,9 @@ name = "rayzor-lsp"
 version = "0.1.0"
 dependencies = [
  "compiler",
+ "crossbeam-channel",
  "diagnostics",
+ "libc",
  "log",
  "lsp-server",
  "lsp-types",

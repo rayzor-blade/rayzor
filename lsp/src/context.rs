@@ -24,6 +24,8 @@ pub struct LspContext {
     pub hxml: Option<PathBuf>,
     /// What could not be applied from the configuration.
     pub config_problems: Vec<String>,
+    /// How long the macros of one compile may run in all.
+    pub macro_budget: std::time::Duration,
     /// The last analysis of each open document that produced an index.
     analyses: HashMap<String, Analysis>,
 }
@@ -55,6 +57,7 @@ impl LspContext {
             defines: Vec::new(),
             hxml: None,
             config_problems: Vec::new(),
+            macro_budget: std::time::Duration::from_secs(5),
             analyses: HashMap::new(),
         }
     }
@@ -153,6 +156,8 @@ impl LspContext {
             emit_safety_warnings: false,
             record_references: true,
             user_defines: self.defines.clone(),
+            continue_after_macro_errors: true,
+            typecheck_only: true,
             ..Default::default()
         };
         config.pipeline_config = config.pipeline_config.skip_analysis();
@@ -228,6 +233,12 @@ impl LspContext {
         }
 
         result
+    }
+
+    /// Forget a closed document and its analysis.
+    pub fn close(&mut self, uri: &str) {
+        self.open_files.remove(uri);
+        self.analyses.remove(uri);
     }
 
     fn syntax_errors(&self, filename: &str, source: &str) -> Vec<LspDiagnostic> {

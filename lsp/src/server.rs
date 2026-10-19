@@ -7,7 +7,7 @@
 use crate::analysis;
 use crate::context::{Completions, LspContext};
 use crate::diagnostics::to_lsp_diagnostics;
-use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, PublishDiagnostics,
 };
@@ -31,13 +31,38 @@ use lsp_types::{
 };
 use std::path::PathBuf;
 
+/// Deep recursion in the compiler cannot be caught, so the session runs on a
+/// stack large enough for any program the command line compiles.
+const SESSION_STACK: usize = 256 << 20;
+
+/// How long all the macros of one compile may run before they are stopped,
+/// unless the client sets `initializationOptions.macroBudgetMs`.
+const MACRO_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Run the LSP server on stdio. Blocks until the client disconnects.
 pub fn run_lsp() -> Result<(), String> {
-    let (connection, io_threads) = Connection::stdio();
-    serve(&connection)?;
-    io_threads
+    let (connection, io_threads) = crate::transport::stdio();
+    let result = spawn_session(connection)
+        .map_err(|e| format!("Cannot start the session: {e}"))?
         .join()
-        .map_err(|e| format!("IO thread error: {}", e))
+        .unwrap_or_else(|_| Err("the session panicked".to_string()));
+    // The writer ends when the session drops its sender; the reader when the
+    // client sends `exit` or closes stdin.
+    for thread in io_threads {
+        let _ = thread.join();
+    }
+    result
+}
+
+/// Serve one session on `connection` on its own thread, with the stack the
+/// compiler needs.
+pub fn spawn_session(
+    connection: Connection,
+) -> std::io::Result<std::thread::JoinHandle<Result<(), String>>> {
+    std::thread::Builder::new()
+        .name("lsp-session".into())
+        .stack_size(SESSION_STACK)
+        .spawn(move || serve(&connection))
 }
 
 /// Serve one session on `connection`, from `initialize` to `shutdown`.
@@ -120,28 +145,62 @@ pub fn serve(connection: &Connection) -> Result<(), String> {
         .and_then(|o| o.get("hxml"))
         .and_then(|h| h.as_str());
     ctx.load_workspace_config(hxml);
+    ctx.macro_budget = init_params
+        .initialization_options
+        .as_ref()
+        .and_then(|o| o.get("macroBudgetMs"))
+        .and_then(|ms| ms.as_u64())
+        .map_or(MACRO_BUDGET, std::time::Duration::from_millis);
     for problem in &ctx.config_problems {
         log_message(connection, problem);
     }
 
-    for msg in &connection.receiver {
-        match msg {
-            Message::Request(req) => {
-                if connection
-                    .handle_shutdown(&req)
-                    .map_err(|e| e.to_string())?
-                {
-                    break;
+    // Everything queued is taken at once: the edits first, each changed
+    // document compiled once at its latest text, then the requests, which so
+    // see that text.
+    let mut changed: Vec<String> = Vec::new();
+    while let Ok(first) = connection.receiver.recv() {
+        let mut requests = Vec::new();
+        for msg in std::iter::once(first).chain(connection.receiver.try_iter()) {
+            match msg {
+                Message::Request(req) => requests.push(req),
+                Message::Notification(not) => {
+                    handle_notification(connection, &mut ctx, not, &mut changed)
                 }
-                handle_request(connection, &ctx, req);
+                Message::Response(_) => {}
             }
-            Message::Notification(not) => {
-                handle_notification(connection, &mut ctx, not);
+        }
+        for uri in changed.drain(..) {
+            publish_diagnostics(connection, &mut ctx, &uri);
+        }
+        for req in requests {
+            if connection
+                .handle_shutdown(&req)
+                .map_err(|e| e.to_string())?
+            {
+                return Ok(());
             }
-            Message::Response(_) => {}
+            let id = req.id.clone();
+            let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handle_request(connection, &ctx, req)
+            }));
+            if let Err(payload) = answered {
+                let message = format!("internal error: {}", panic_message(&payload));
+                log_message(connection, &message);
+                let failed = Response::new_err(id, ErrorCode::InternalError as i32, message);
+                let _ = connection.sender.send(Message::Response(failed));
+            }
         }
     }
     Ok(())
+}
+
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -184,21 +243,34 @@ fn send_response<T: serde::Serialize>(conn: &Connection, id: RequestId, result: 
 // Notifications
 // ---------------------------------------------------------------------------
 
-fn handle_notification(conn: &Connection, ctx: &mut LspContext, not: Notification) {
+/// Applies a notification; a document whose text changed is added to
+/// `changed` once, to be compiled after the batch.
+fn handle_notification(
+    conn: &Connection,
+    ctx: &mut LspContext,
+    not: Notification,
+    changed: &mut Vec<String>,
+) {
+    let mut mark = |uri: &str| {
+        if !changed.iter().any(|u| u == uri) {
+            changed.push(uri.to_string());
+        }
+    };
     if let Some(params) = cast_notification::<DidOpenTextDocument>(&not) {
         let uri = params.text_document.uri.as_str().to_string();
-        let text = params.text_document.text;
-        ctx.open_files.insert(uri.clone(), text.clone());
-        publish_diagnostics(conn, ctx, &uri, &text);
+        ctx.open_files
+            .insert(uri.clone(), params.text_document.text);
+        mark(&uri);
     } else if let Some(params) = cast_notification::<DidChangeTextDocument>(&not) {
         let uri = params.text_document.uri.as_str().to_string();
         if let Some(change) = params.content_changes.into_iter().last() {
-            ctx.open_files.insert(uri.clone(), change.text.clone());
-            publish_diagnostics(conn, ctx, &uri, &change.text);
+            ctx.open_files.insert(uri.clone(), change.text);
+            mark(&uri);
         }
     } else if let Some(params) = cast_notification::<DidCloseTextDocument>(&not) {
         let uri = params.text_document.uri.as_str().to_string();
-        ctx.open_files.remove(&uri);
+        ctx.close(&uri);
+        changed.retain(|u| *u != uri);
         let params = PublishDiagnosticsParams {
             uri: params.text_document.uri,
             diagnostics: vec![],
@@ -208,8 +280,21 @@ fn handle_notification(conn: &Connection, ctx: &mut LspContext, not: Notificatio
     }
 }
 
-fn publish_diagnostics(conn: &Connection, ctx: &mut LspContext, uri: &str, source: &str) {
-    let diags = ctx.compile_file(uri, source);
+/// Compiles `uri` at its current text and publishes what it finds. A panic
+/// inside the compiler becomes a diagnostic; the last analysis stays.
+fn publish_diagnostics(conn: &Connection, ctx: &mut LspContext, uri: &str) {
+    let Some(source) = ctx.open_files.get(uri).cloned() else {
+        return;
+    };
+    let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _budget = compiler::macro_system::budget::limit(Some(ctx.macro_budget));
+        ctx.compile_file(uri, &source)
+    }));
+    let diags = compiled.unwrap_or_else(|payload| {
+        let message = format!("internal compiler error: {}", panic_message(&payload));
+        log_message(conn, &message);
+        vec![crate::context::LspDiagnostic::error(uri, 1, 1, message)]
+    });
     let lsp_diags = to_lsp_diagnostics(&diags);
 
     let lsp_uri: Uri = uri.parse().unwrap_or_else(|_| {

@@ -17,6 +17,10 @@ struct Session {
 impl Session {
     /// Writes `files` into a fresh workspace and initialises a server on it.
     fn start(files: &[(&str, &str)]) -> Self {
+        Self::start_with(files, json!({}))
+    }
+
+    fn start_with(files: &[(&str, &str)], options: Value) -> Self {
         static N: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "rayzor-lsp-{}-{}",
@@ -30,7 +34,7 @@ impl Session {
             std::fs::write(path, text).unwrap();
         }
         let (server_end, client) = Connection::memory();
-        let server = std::thread::spawn(move || rayzor_lsp::serve(&server_end));
+        let server = rayzor_lsp::spawn_session(server_end).unwrap();
         let mut session = Session {
             client,
             server: Some(server),
@@ -41,7 +45,7 @@ impl Session {
         let root_uri = session.uri("");
         session.request(
             "initialize",
-            json!({"processId": null, "rootUri": root_uri, "capabilities": {}}),
+            json!({"processId": null, "rootUri": root_uri, "capabilities": {}, "initializationOptions": options}),
         );
         session.notify("initialized", json!({}));
         session
@@ -447,4 +451,74 @@ fn signature_help_follows_the_argument_being_typed() {
         "{help}"
     );
     assert_eq!(help["activeParameter"], 1, "{help}");
+}
+
+/// A build macro that never finishes, one that throws and one that recurses
+/// without end each produce a diagnostic, and the server keeps answering.
+#[test]
+fn failing_macros_are_reported_and_the_server_survives() {
+    let use_macro = |m: &str| {
+        format!(
+            "@:build({m}.build())\nclass Use{m} {{\n    static function main() {{\n        var x = 1;\n        trace(x);\n    }}\n}}\n"
+        )
+    };
+    let field = "Array<haxe.macro.Expr.Field>";
+    let macros = [
+        (
+            "MLoops",
+            format!("macro static function build():{field} {{ while (true) {{}} return null; }}"),
+        ),
+        (
+            "MCatches",
+            format!(
+                "macro static function build():{field} {{ while (true) try {{ while (true) {{}} }} catch (e:Dynamic) {{}} return null; }}"
+            ),
+        ),
+        (
+            "MThrows",
+            format!("macro static function build():{field} {{ throw \"boom\"; }}"),
+        ),
+        (
+            "MRecurses",
+            format!(
+                "macro static function build():{field} {{ return deep(0); }}\n    static function deep(n:Int):{field} {{ return deep(n + 1); }}"
+            ),
+        ),
+    ];
+    let mut files = Vec::new();
+    for (name, body) in &macros {
+        files.push((
+            format!("{name}.hx"),
+            format!("class {name} {{\n    {body}\n}}\n"),
+        ));
+        files.push((format!("Use{name}.hx"), use_macro(name)));
+    }
+    files.push(("Main.hx".into(), MAIN.into()));
+    let borrowed: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let mut s = Session::start_with(&borrowed, json!({"macroBudgetMs": 300}));
+
+    for (name, _) in &macros {
+        let started = std::time::Instant::now();
+        let diags = s.open(&format!("Use{name}.hx"));
+        assert!(!diags.is_empty(), "{name} gave no diagnostic");
+        assert!(
+            started.elapsed().as_secs() < 10,
+            "{name} took {:?}",
+            started.elapsed()
+        );
+        // The class stays as written, so the rest of the file still answers.
+        let at = s.at(&format!("Use{name}.hx"), 3, 12);
+        let hover = s.request("textDocument/hover", at);
+        assert!(hover_text(&hover).contains("var x:Int"), "{name}: {hover}");
+    }
+    s.open("Main.hx");
+    let at = s.at("Main.hx", 1, 21);
+    let hover = s.request("textDocument/hover", at);
+    assert!(
+        hover_text(&hover).contains("function add"),
+        "server stopped answering: {hover}"
+    );
 }
