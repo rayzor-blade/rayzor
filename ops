@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1792402483,"nonce":"3z6N45OfvwetCzYu36Q3quNAJ5s=","status":2}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1792402484,"nonce":"FtP5Mheah+x3r/O6hz4RkCjuvH0=","message":"Remaining: the returned range is a point at the name's start, not the name's span.","files":null}]}
