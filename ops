@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1792402484,"nonce":"QVpYSvxm5C4q9Dn09zk6ODNz36Y=","message":"Fixed in cba09ef6 (on top of 84e8abee); covered by lsp/tests/session.rs.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1792402484,"nonce":"BO77FqfZP4XAXl/ez/B9Gi87mQo=","status":2}]}
