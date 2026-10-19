@@ -42,6 +42,10 @@ pub struct CraneliftBackend {
     /// for the JIT-symbol-map dump (RAYZOR_DUMP_JIT_MAP=1). Prefers
     /// `IrFunction.qualified_name` and falls back to `IrFunction.name`.
     funcid_display_name: BTreeMap<FuncId, String>,
+    /// Functions translated to CLIF whose machine code is generated together,
+    /// in parallel, at the end of a whole-module compile. `None` defines each
+    /// function as it is translated.
+    deferred_defines: Option<Vec<(FuncId, IrFunctionId, Function)>>,
     code_sizes: BTreeMap<FuncId, usize>,
     crash_registered: BTreeMap<FuncId, usize>,
 
@@ -404,6 +408,7 @@ impl CraneliftBackend {
             function_map: BTreeMap::new(),
             stub_name_data: BTreeMap::new(),
             funcid_display_name: BTreeMap::new(),
+            deferred_defines: None,
             code_sizes: BTreeMap::new(),
             crash_registered: BTreeMap::new(),
             funcid_source_loc: BTreeMap::new(),
@@ -821,6 +826,7 @@ impl CraneliftBackend {
                 failed_funcs.insert(*func_id);
             }
         }
+        self.deferred_defines = Some(Vec::new());
         for (func_id, function) in &mir_module.functions {
             // Skip extern functions (empty CFG means extern declaration)
             if function.cfg.blocks.is_empty() {
@@ -946,6 +952,7 @@ impl CraneliftBackend {
                 }
             }
         }
+        self.flush_deferred_defines(mir_module);
 
         // Install trap stubs for any forward-ref stub whose Cranelift FuncId
         // never received a body during this compile (i.e. no real impl
@@ -1126,6 +1133,7 @@ impl CraneliftBackend {
                 failed_funcs.insert(*func_id);
             }
         }
+        self.deferred_defines = Some(Vec::new());
         for (func_id, function) in &mir_module.functions {
             if function.cfg.blocks.is_empty() {
                 debug!("Skipping extern function: {}", function.name);
@@ -1245,9 +1253,91 @@ impl CraneliftBackend {
                 }
             }
         }
+        self.flush_deferred_defines(mir_module);
 
         // NOTE: Do NOT call finalize_definitions() here - caller must call finalize() after all modules
         Ok(())
+    }
+
+    /// Generate machine code for the deferred functions on all cores, then
+    /// install it in translation order. One that fails gets a trap stub, as
+    /// it would have on the immediate path.
+    fn flush_deferred_defines(&mut self, mir_module: &IrModule) {
+        use rayon::prelude::*;
+        let Some(queue) = self.deferred_defines.take() else {
+            return;
+        };
+        let isa = self.module.isa();
+        let compiled: Vec<_> = queue
+            .into_par_iter()
+            .map(|(func_id, mir_func_id, func)| {
+                type Generated = (u64, Vec<u8>, Vec<cranelift_module::ModuleReloc>);
+                let generated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || -> Result<Generated, String> {
+                        let mut ctx = codegen::Context::for_function(func);
+                        let alignment = ctx
+                            .compile(isa, &mut codegen::control::ControlPlane::default())
+                            .map_err(|e| e.inner.to_string())?
+                            .buffer
+                            .alignment as u64;
+                        let code = ctx.compiled_code().expect("just compiled");
+                        let relocs: Vec<_> = code
+                            .buffer
+                            .relocs()
+                            .iter()
+                            .map(|r| {
+                                cranelift_module::ModuleReloc::from_mach_reloc(
+                                    r, &ctx.func, func_id,
+                                )
+                            })
+                            .collect();
+                        Ok((alignment, code.code_buffer().to_vec(), relocs))
+                    },
+                ))
+                .unwrap_or_else(|payload| {
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("<non-string panic>");
+                    Err(format!("Cranelift panicked: {msg}"))
+                });
+                (func_id, mir_func_id, generated)
+            })
+            .collect();
+
+        for (func_id, mir_func_id, generated) in compiled {
+            let installed = generated.and_then(|(alignment, bytes, relocs)| {
+                self.module
+                    .define_function_bytes(func_id, alignment, &bytes, &relocs)
+                    .map(|()| bytes.len())
+                    .map_err(|e| e.to_string())
+            });
+            match installed {
+                Ok(size) => {
+                    self.code_sizes.insert(func_id, size);
+                }
+                Err(e) => {
+                    self.defined_functions.remove(&func_id);
+                    let Some(function) = mir_module.functions.get(&mir_func_id) else {
+                        continue;
+                    };
+                    let qn = function.qualified_name.as_deref().unwrap_or(&function.name);
+                    eprintln!(
+                        "\x1b[33mWarning:\x1b[0m [W0020] cannot compile `{}`; runtime calls will SIGILL.\n  \
+                         reason: {}\n  \
+                         set RAYZOR_DUMP_FN_PTRS=1 for the full trap-stub install log.",
+                        qn, e
+                    );
+                    if let Err(e2) = self.define_trap_stub(mir_func_id, function) {
+                        warn!(
+                            "[COMPILE_FAIL] Failed to define trap stub for '{}': {}",
+                            function.name, e2
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// True iff this IrFunction looks like a forward-reference stub: exactly
@@ -2612,6 +2702,16 @@ impl CraneliftBackend {
                 cranelift_codegen::verify_function(&self.ctx.func, self.module.isa())
             {
                 return Err(format!("Verifier errors in {}: {}", function.name, errors));
+            }
+        }
+
+        if !dump_matches {
+            if let Some(queue) = self.deferred_defines.as_mut() {
+                let func = std::mem::replace(&mut self.ctx.func, Function::new());
+                queue.push((func_id, mir_func_id, func));
+                self.defined_functions.insert(func_id);
+                self.module.clear_context(&mut self.ctx);
+                return Ok(());
             }
         }
 
