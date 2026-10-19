@@ -2300,6 +2300,13 @@ impl TieredBackend {
         Err("LLVM backend not enabled".to_string())
     }
 
+    /// Whether baseline code carries OSR probes. Set before `compile_module`.
+    /// Only functions entered through `execute_function` are counted, so an
+    /// embedder that enters once can turn them off: nothing will arm them.
+    pub fn set_osr_probes(&mut self, on: bool) {
+        self.baseline_backend.lock().unwrap().set_osr_probes(on);
+    }
+
     /// Record a function call (for profiling and tier promotion)
     /// This should be called before executing a function
     pub fn record_call(&self, func_id: IrFunctionId) {
@@ -2492,6 +2499,7 @@ impl TieredBackend {
 
         // Create a fresh Cranelift backend with runtime symbols
         let mut backend = CraneliftBackend::with_symbols(&symbols)?;
+        backend.set_osr_probes(self.baseline_backend.lock().unwrap().osr_probes());
 
         // Compile all modules to the same backend WITHOUT finalizing between modules
         let modules = self.modules.read().unwrap();

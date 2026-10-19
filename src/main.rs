@@ -1190,6 +1190,8 @@ fn run_bundle(
     let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry || llvm;
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
+    // main is entered once and any LLVM upgrade happens before it runs.
+    backend.set_osr_probes(false);
 
     for module in bundle.modules().iter() {
         backend
@@ -2068,6 +2070,9 @@ fn run_file(
 
     // Set up tiered JIT backend.
     let mut backend = TieredBackend::with_symbols(resolved_tier_config, &symbols_ref)?;
+    // main is entered once and any LLVM upgrade happens before it runs, so no
+    // running baseline loop ever has optimised code to move into.
+    backend.set_osr_probes(false);
 
     // Compile module with tiered JIT
     if let Some(ref h) = progress_handle {

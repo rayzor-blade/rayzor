@@ -193,6 +193,16 @@ impl CraneliftBackend {
         Self::with_symbols_and_opt("speed", symbols)
     }
 
+    /// Whether loop headers get OSR probes. Off when nothing will publish a
+    /// helper for them, since a probe keeps a call in every loop.
+    pub fn set_osr_probes(&mut self, on: bool) {
+        self.emit_osr_probes = on && crate::ir::osr::osr_enabled();
+    }
+
+    pub fn osr_probes(&self) -> bool {
+        self.emit_osr_probes
+    }
+
     /// Create a new Cranelift backend with specified optimization level
     ///
     /// Optimization levels:
