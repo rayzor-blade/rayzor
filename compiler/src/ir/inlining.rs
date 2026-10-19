@@ -195,11 +195,14 @@ const SELF_INLINE_MAX_SITES: usize = 4;
 
 impl InliningCostModel {
     /// Calculate the cost of inlining a function at a call site.
+    /// `line_updates` are the calls that record the current source line, which
+    /// cost nothing in a release build.
     pub fn should_inline(
         &self,
         callee: &IrFunction,
         call_site: &CallSite,
         call_graph: &CallGraph,
+        line_updates: &BTreeSet<IrFunctionId>,
     ) -> bool {
         // Recursion: expanding a self-call once replaces two calls with the
         // work of three smaller ones, so the recurrence grows more slowly —
@@ -270,11 +273,32 @@ impl InliningCostModel {
             return true;
         }
 
-        // Count instructions and blocks
-        let mut inst_count = 0;
-        for block in callee.cfg.blocks.values() {
-            inst_count += block.instructions.len();
+        // A body that allocates a closure costs more than the call it would
+        // save, and its spilled references would stay in the caller's frame,
+        // where the conservative stack scan keeps them alive.
+        let makes_closure = callee
+            .cfg
+            .blocks
+            .values()
+            .flat_map(|b| &b.instructions)
+            .any(|inst| matches!(inst, IrInstruction::MakeClosure { .. }));
+        if makes_closure {
+            return false;
         }
+
+        // Count the instructions that become code: constants fold into their
+        // users and line updates vanish in release.
+        let inst_count = callee
+            .cfg
+            .blocks
+            .values()
+            .flat_map(|b| &b.instructions)
+            .filter(|inst| match inst {
+                IrInstruction::Const { .. } | IrInstruction::DebugLoc { .. } => false,
+                IrInstruction::CallDirect { func_id, .. } => !line_updates.contains(func_id),
+                _ => true,
+            })
+            .count();
         let block_count = callee.cfg.blocks.len();
 
         // Calculate adjusted threshold based on call site context
@@ -966,6 +990,20 @@ impl OptimizationPass for InliningPass {
         // a budget the next iteration expands those too and the body doubles
         // every round. One expansion per function is where the win is.
         let mut self_inlined: BTreeSet<IrFunctionId> = BTreeSet::new();
+        let line_update = "rayzor_update_call_frame_location";
+        let line_updates: BTreeSet<IrFunctionId> = module
+            .extern_functions
+            .values()
+            .filter(|f| f.name == line_update)
+            .map(|f| f.id)
+            .chain(
+                module
+                    .functions
+                    .values()
+                    .filter(|f| f.cfg.blocks.is_empty() && f.name == line_update)
+                    .map(|f| f.id),
+            )
+            .collect();
 
         for _iteration in 0..self.max_iterations {
             let call_graph = CallGraph::build(module);
@@ -978,7 +1016,10 @@ impl OptimizationPass for InliningPass {
                     continue;
                 }
                 if let Some(callee) = module.functions.get(&site.callee) {
-                    if self.cost_model.should_inline(callee, site, &call_graph) {
+                    if self
+                        .cost_model
+                        .should_inline(callee, site, &call_graph, &line_updates)
+                    {
                         candidates.push(site.clone());
                     }
                 }
