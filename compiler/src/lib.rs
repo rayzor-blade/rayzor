@@ -106,6 +106,7 @@ pub mod compiler_plugin; // Compiler-level plugin system for stdlib method mappi
 pub mod debug_flags;
 pub mod dependency_graph;
 pub mod error_codes;
+pub mod haxelib;
 pub mod hxml;
 pub mod ir;
 pub mod logging;

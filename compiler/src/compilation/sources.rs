@@ -9,7 +9,7 @@ impl CompilationUnit {
         filename: &str,
         source: &str,
     ) -> Result<parser::HaxeFile, String> {
-        let config = self.preprocessor_config();
+        let config = self.preprocessor_config_for(filename);
         let mut file = parser::haxe_parser::parse_haxe_file_with_config(
             filename, source, true, true, &config,
         )?;

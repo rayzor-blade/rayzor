@@ -2539,7 +2539,7 @@ fn build_from_hxml(
     println!("📦 Building from HXML: {}", file.display());
 
     // Parse HXML file
-    let config = HxmlConfig::from_file(&file.to_path_buf())?;
+    let config = HxmlConfig::from_file(file)?;
 
     if verbose {
         println!("\n{}", config.summary());

@@ -563,6 +563,11 @@ pub struct CompilationConfig {
     /// (`CompilationUnit::symbol_references`), for editor tooling.
     pub record_references: bool,
 
+    /// Defines seen only by files outside the standard library: a project's
+    /// own `-D` flags and its haxe target's, which the stdlib's `#if`
+    /// branches must not follow.
+    pub user_defines: Vec<String>,
+
     /// Extra preprocessor defines (e.g., "wasm" for WASM target builds).
     /// Added to the default set ("rayzor", "sys").
     pub extra_defines: Vec<String>,
@@ -719,6 +724,24 @@ impl CompilationUnit {
         config.defines.insert("rayzor".to_string());
         for define in &self.config.extra_defines {
             config.defines.insert(define.clone());
+        }
+        config
+    }
+
+    /// The preprocessor config for `filename`: [`Self::preprocessor_config`],
+    /// plus `user_defines` unless the file belongs to the standard library.
+    pub(crate) fn preprocessor_config_for(
+        &self,
+        filename: &str,
+    ) -> parser::preprocessor::PreprocessorConfig {
+        let mut config = self.preprocessor_config();
+        let stdlib = self.is_stdlib_source(filename)
+            || filename.contains("haxe-std/")
+            || filename.contains("haxe-std\\");
+        if !stdlib {
+            config
+                .defines
+                .extend(self.config.user_defines.iter().cloned());
         }
         config
     }

@@ -250,7 +250,13 @@ impl CompilationUnit {
         let mut defines: Vec<String> = if self.is_stdlib_source(source_path) {
             self.config.stdlib_relevant_defines()
         } else {
-            self.config.extra_defines.clone()
+            let user = self.config.user_defines.iter();
+            self.config
+                .extra_defines
+                .iter()
+                .chain(user)
+                .cloned()
+                .collect()
         };
         defines.sort();
         defines.hash(&mut hasher);

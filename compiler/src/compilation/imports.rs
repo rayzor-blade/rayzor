@@ -781,7 +781,7 @@ impl CompilationUnit {
                 &source,
                 false,
                 false,
-                &self.preprocessor_config(),
+                &self.preprocessor_config_for(&filename),
             ) {
                 Ok(mut ast) => {
                     crate::tast::ast_lowering::module_statics::desugar(&mut ast);

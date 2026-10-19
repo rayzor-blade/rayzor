@@ -44,6 +44,16 @@ impl CompilationUnit {
             .map(|(path, _)| path.as_str())
     }
 
+    /// The fields a compiled class declares: (name, symbol, is static).
+    pub fn class_fields(
+        &self,
+        class: crate::tast::SymbolId,
+    ) -> &[(crate::tast::InternedString, crate::tast::SymbolId, bool)] {
+        self.global_class_fields
+            .get(&class)
+            .map_or(&[], |fields| fields.as_slice())
+    }
+
     /// Extract the type name from an unresolved type error message
     pub(crate) fn extract_type_name_from_error(&self, message: &str) -> Option<String> {
         // Try to extract type name from error message formats:
