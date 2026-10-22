@@ -1,0 +1,14 @@
+date	commit	prompt_tok	ttft_s	prefill_tok_s	decode_tok_s	cpp_pp	cpp_tg	prefill_ratio	decode_ratio	free_pct	quiet	mem_ours_mb	mem_cpp_mb	model	subject
+2026-08-10	8e3f1fbd	795	21.369073152542114	37.20	6.11	43.35	14.60	1.17	2.39	57	NO(964%)	NA	NA	mistral-7b-instruct-v0.2.Q4_K_M.gguf	fix(tensors): drop the address-keyed f16 weight cache for a 
+2026-08-10	8e3f1fbd+dirty	795	20.27703094482422	39.21	18.25	46.66	10.52	1.19	0.58	64	NO(941%)	NA	NA	mistral-7b-instruct-v0.2.Q4_K_M.gguf	fix(tensors): drop the address-keyed f16 weight cache for a 
+2026-08-10	a3432810+dirty	795	17.09431004524231	46.51	18.81	48.57	17.26	1.04	0.92	73	NO(945%)+mem2	NA	NA	mistral-7b-instruct-v0.2.Q4_K_M.gguf	fix(runtime): wire large model mappings on macOS so 7B survi
+2026-08-10	a3432810+dirty	795	16.667652130126953	47.70	18.99	43.09	15.30	0.90	0.81	72	NO(941%)+mem2	NA	NA	mistral-7b-instruct-v0.2.Q4_K_M.gguf	fix(runtime): wire large model mappings on macOS so 7B survi
+2026-08-10	a3432810+dirty	795	17.26069712638855	46.06	19.56	45.40	14.27	0.99	0.73	70	NO(392%)+mem2	NA	NA	mistral-7b-instruct-v0.2.Q4_K_M.gguf	fix(runtime): wire large model mappings on macOS so 7B survi
+2026-08-10	a3432810+dirty	795	17.592643976211548	45.19	18.64	49.70	16.82	1.10	0.90	72	NO(mem-pressure-2)	4866	4309	mistral-7b-instruct-v0.2.Q4_K_M.gguf	fix(runtime): wire large model mappings on macOS so 7B survi
+2026-08-10	a3432810+dirty	795	16.801901817321777	47.32	17.39	52.94	17.82	1.12	1.02	69	yes	4868	4309	mistral-7b-instruct-v0.2.Q4_K_M.gguf	fix(runtime): wire large model mappings on macOS so 7B survi
+2026-08-10	15f53874+dirty	795	16.84484887123108	47.20	21.08	49.07	18.32	1.04	0.87	71	yes	4868	4308	mistral-7b-instruct-v0.2.Q4_K_M.gguf	fix(bench): stop the head-to-head gate flagging itself, and 
+2026-08-11	15f53874+dirty	795	17.325945138931274	45.88	17.95	44.26	16.95	0.96	0.94	56	yes	4870	4309	mistral-7b-instruct-v0.2.Q4_K_M.gguf	fix(bench): stop the head-to-head gate flagging itself, and 
+2026-08-11	64cedb1b+dirty	795	16.70132088661194	47.60	20.23	49.92	17.97	1.05	0.89	53	yes	4845	4309	mistral-7b-instruct-v0.2.Q4_K_M.gguf	fix(runtime): record that pressure_relief reclaims nothing o
+2026-08-11	7ab05b3f+dirty	795	17.426888942718506	45.62	18.30	40.11	8.09	0.88	0.44	57	NO(683%)	4858	4307	mistral-7b-instruct-v0.2.Q4_K_M.gguf	Reapply "perf(nue): hand back the prefill-only f16 scratch w
+2026-08-11	0ac40a59+dirty	795	20.146852016448975	39.46	17.52	38.60	13.63	0.98	0.78	50	NO(373%)+mem2	4822	4310	mistral-7b-instruct-v0.2.Q4_K_M.gguf	docs: keep comments to what the code does
+2026-08-14	966215a1+dirty	795	18.191	43.70	12.95	34.84	12.54	0.80	0.97	45	NO(441%)+mem2	4843	4309	mistral-7b-instruct-v0.2.Q4_K_M.gguf	perf(llvm): give field accesses alias metadata so invariant 
