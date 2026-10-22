@@ -3932,6 +3932,29 @@ impl<'a> AstLowering<'a> {
                 } else {
                     // Method was found on the receiver, use it
                     let mut arg_exprs = arg_exprs;
+                    let signature =
+                        self.context
+                            .symbol_table
+                            .get_symbol(method_symbol)
+                            .map(|symbol| {
+                                self.substitute_receiver_type(
+                                    symbol.type_id,
+                                    receiver_expr.expr_type,
+                                )
+                            });
+                    let params = signature.and_then(|signature| {
+                        let types = self.context.type_table.borrow();
+                        match types.get(signature).map(|ty| &ty.kind) {
+                            Some(TypeKind::Function { params, .. }) => Some(params.clone()),
+                            _ => None,
+                        }
+                    });
+                    if let Some(params) = params {
+                        for (argument, formal) in arg_exprs.iter_mut().zip(params) {
+                            *argument =
+                                self.coerce_arg_via_abstract_from(argument.clone(), Some(formal));
+                        }
+                    }
                     self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
                     let type_arguments = self.infer_call_type_arguments(method_symbol, &arg_exprs);
                     self.coerce_inferred_call_arguments(
@@ -4625,174 +4648,12 @@ impl<'a> AstLowering<'a> {
         bindings: &[(SymbolId, TypeId)],
         expand_bindings: bool,
     ) -> TypeId {
-        use crate::tast::core::{AnonymousField, TypeKind};
-        if bindings.is_empty() {
-            return ty;
+        crate::tast::type_substitution::TypeSubstitutions {
+            type_table: self.context.type_table,
+            symbol_table: self.context.symbol_table,
+            class_type_params: Some(&self.class_type_params),
         }
-        let kind = self
-            .context
-            .type_table
-            .borrow()
-            .get(ty)
-            .map(|i| i.kind.clone());
-        let sub = |ids: &[TypeId]| -> Vec<TypeId> {
-            ids.iter()
-                .map(|t| self.substitute_type_bindings(*t, bindings, expand_bindings))
-                .collect()
-        };
-        let rebuilt = match kind {
-            Some(TypeKind::TypeParameter { symbol_id, .. }) => {
-                return match bindings.iter().find(|(p, _)| *p == symbol_id) {
-                    Some((_, a)) if expand_bindings && *a != ty => {
-                        // A binding expands once along each substitution path.
-                        let remaining: Vec<_> = bindings
-                            .iter()
-                            .copied()
-                            .filter(|(parameter, _)| *parameter != symbol_id)
-                            .collect();
-                        self.substitute_type_bindings(*a, &remaining, expand_bindings)
-                    }
-                    Some((_, a)) => *a,
-                    None => ty,
-                };
-            }
-            Some(TypeKind::TypeAlias {
-                symbol_id,
-                target_type,
-                type_args,
-            }) => {
-                let args = sub(&type_args);
-                if args == type_args {
-                    return ty;
-                }
-                TypeKind::TypeAlias {
-                    symbol_id,
-                    target_type,
-                    type_args: args,
-                }
-            }
-            Some(TypeKind::GenericInstance {
-                base_type,
-                type_args,
-                instantiation_cache_id,
-            }) => {
-                let args = sub(&type_args);
-                if args == type_args {
-                    return ty;
-                }
-                TypeKind::GenericInstance {
-                    base_type,
-                    type_args: args,
-                    instantiation_cache_id,
-                }
-            }
-            Some(TypeKind::Abstract {
-                symbol_id,
-                underlying,
-                type_args,
-            }) => {
-                let args = sub(&type_args);
-                if args == type_args {
-                    return ty;
-                }
-                TypeKind::Abstract {
-                    symbol_id,
-                    underlying,
-                    type_args: args,
-                }
-            }
-            Some(TypeKind::Array { element_type }) => {
-                let elem = self.substitute_type_bindings(element_type, bindings, expand_bindings);
-                if elem == element_type {
-                    return ty;
-                }
-                TypeKind::Array { element_type: elem }
-            }
-            Some(TypeKind::Function {
-                params,
-                return_type,
-                effects,
-                labels,
-            }) => {
-                let p = sub(&params);
-                let r = self.substitute_type_bindings(return_type, bindings, expand_bindings);
-                if p == params && r == return_type {
-                    return ty;
-                }
-                TypeKind::Function {
-                    params: p,
-                    return_type: r,
-                    effects,
-                    labels,
-                }
-            }
-            Some(TypeKind::Anonymous { fields }) => {
-                let rebuilt: Vec<AnonymousField> = fields
-                    .iter()
-                    .map(|f| AnonymousField {
-                        name: f.name,
-                        type_id: self.substitute_type_bindings(
-                            f.type_id,
-                            bindings,
-                            expand_bindings,
-                        ),
-                        is_public: f.is_public,
-                        optional: f.optional,
-                    })
-                    .collect();
-                if rebuilt
-                    .iter()
-                    .zip(&fields)
-                    .all(|(a, b)| a.type_id == b.type_id)
-                {
-                    return ty;
-                }
-                TypeKind::Anonymous { fields: rebuilt }
-            }
-            // A typedef pre-registered as a class instantiates as a Class
-            // node over the alias's parameters.
-            Some(TypeKind::Class {
-                symbol_id,
-                type_args,
-            }) => {
-                let args = sub(&type_args);
-                if args == type_args {
-                    return ty;
-                }
-                return self
-                    .context
-                    .type_table
-                    .borrow_mut()
-                    .create_class_type(symbol_id, args);
-            }
-            Some(TypeKind::Enum {
-                symbol_id,
-                type_args,
-            }) => {
-                let args = sub(&type_args);
-                if args == type_args {
-                    return ty;
-                }
-                return self
-                    .context
-                    .type_table
-                    .borrow_mut()
-                    .create_enum_type(symbol_id, args);
-            }
-            Some(TypeKind::Optional { inner_type }) => {
-                let inner = self.substitute_type_bindings(inner_type, bindings, expand_bindings);
-                if inner == inner_type {
-                    return ty;
-                }
-                return self
-                    .context
-                    .type_table
-                    .borrow_mut()
-                    .create_optional_type(inner);
-            }
-            _ => return ty,
-        };
-        self.context.type_table.borrow_mut().create_type(rebuilt)
+        .substitute_type_bindings(ty, bindings, expand_bindings)
     }
 
     /// Whether the expression being lowered is expected to be an object: its
@@ -5717,42 +5578,12 @@ impl<'a> AstLowering<'a> {
         depth: u32,
         out: &mut std::collections::BTreeSet<SymbolId>,
     ) {
-        use crate::tast::core::TypeKind;
-        if depth > 8 {
-            return;
+        crate::tast::type_substitution::TypeSubstitutions {
+            type_table: self.context.type_table,
+            symbol_table: self.context.symbol_table,
+            class_type_params: Some(&self.class_type_params),
         }
-        let kind = self
-            .context
-            .type_table
-            .borrow()
-            .get(ty)
-            .map(|t| t.kind.clone());
-        let children: Vec<TypeId> = match kind {
-            Some(TypeKind::TypeParameter { symbol_id, .. }) => {
-                out.insert(symbol_id);
-                Vec::new()
-            }
-            Some(TypeKind::Array { element_type }) => vec![element_type],
-            Some(TypeKind::Optional { inner_type }) => vec![inner_type],
-            Some(TypeKind::Function {
-                params,
-                return_type,
-                ..
-            }) => params
-                .into_iter()
-                .chain(std::iter::once(return_type))
-                .collect(),
-            Some(TypeKind::Anonymous { fields }) => fields.iter().map(|f| f.type_id).collect(),
-            Some(TypeKind::Class { type_args, .. })
-            | Some(TypeKind::Enum { type_args, .. })
-            | Some(TypeKind::Abstract { type_args, .. })
-            | Some(TypeKind::TypeAlias { type_args, .. })
-            | Some(TypeKind::GenericInstance { type_args, .. }) => type_args,
-            _ => Vec::new(),
-        };
-        for child in children {
-            self.collect_type_param_symbols(child, depth + 1, out);
-        }
+        .collect_type_param_symbols(ty, depth, out)
     }
 
     /// A class literal carries its instance type; `Class<T>` binds T to that type.

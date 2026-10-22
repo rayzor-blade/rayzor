@@ -492,11 +492,18 @@ impl<'a> AstLowering<'a> {
         // it invalid types the result as unknown, so a value returned into a Dynamic
         // parameter is passed without being boxed and is read back as a pointer.
         let param_types: Vec<TypeId> = parameters.iter().map(|p| p.param_type).collect();
+        let labels = parameters
+            .iter()
+            .map(|p| crate::tast::core::FunctionArgLabel {
+                name: None,
+                optional: p.is_optional || p.default_value.is_some(),
+            })
+            .collect();
         let function_type = self
             .context
             .type_table
             .borrow_mut()
-            .create_function_type(param_types, return_type);
+            .create_labelled_function_type(param_types, return_type, Default::default(), labels);
         self.context
             .symbol_table
             .update_symbol_type(function_symbol, function_type);
@@ -1085,6 +1092,11 @@ impl<'a> AstLowering<'a> {
             .symbol_table
             .update_symbol_type(param_symbol, param_type);
 
+        let location = self.context.create_location_from_span(parameter.span);
+        if let Some(symbol) = self.context.symbol_table.get_symbol_mut(param_symbol) {
+            symbol.definition_location = location;
+        }
+
         Ok(TypedParameter {
             symbol_id: param_symbol,
             name: param_name,
@@ -1146,6 +1158,10 @@ impl<'a> AstLowering<'a> {
         self.context
             .symbol_table
             .update_symbol_type(param_symbol, param_type);
+        let location = self.context.span_to_location(&param.span);
+        if let Some(symbol) = self.context.symbol_table.get_symbol_mut(param_symbol) {
+            symbol.definition_location = location;
+        }
 
         let default_value = if let Some(default_expr) = &param.default_value {
             Some(self.lower_expression(default_expr)?)

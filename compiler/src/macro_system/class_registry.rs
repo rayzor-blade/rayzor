@@ -83,6 +83,7 @@ pub struct ClassRegistry {
     /// Static variables' current values, `Class.field` → value. Shared by
     /// every macro call of the compile, as macro-time statics are.
     statics: MacroStatics,
+    dependencies: super::dependencies::Dependencies,
     class_paths: Vec<std::path::PathBuf>,
     defines: BTreeMap<String, String>,
 }
@@ -95,6 +96,7 @@ impl ClassRegistry {
             type_definitions: BTreeMap::new(),
             generic_builds: BTreeMap::new(),
             statics: MacroStatics::default(),
+            dependencies: Default::default(),
             class_paths: Vec::new(),
             defines: BTreeMap::new(),
         }
@@ -104,6 +106,10 @@ impl ClassRegistry {
     /// store, instead of a store of this registry's own.
     pub fn use_statics(&mut self, statics: MacroStatics) {
         self.statics = statics;
+    }
+
+    pub fn use_dependencies(&mut self, dependencies: super::dependencies::Dependencies) {
+        self.dependencies = dependencies;
     }
 
     pub fn set_class_paths(&mut self, paths: Vec<std::path::PathBuf>) {
@@ -118,6 +124,7 @@ impl ClassRegistry {
         let mut context = super::context_api::MacroContext::new();
         context.class_paths = self.class_paths.clone();
         context.defines = self.defines.clone();
+        context.dependencies = self.dependencies.clone();
         context
     }
 

@@ -61,3 +61,5 @@ pub use type_checker::{AccessLevel, TypeCheckError, TypeCheckResult, TypeChecker
 pub use type_flow_guard::{FlowAnalysisMetrics, FlowSafetyError, FlowSafetyResults, TypeFlowGuard};
 // pub use type_resolution::*;
 // pub use type_inference::*;
+
+pub(crate) mod type_substitution;

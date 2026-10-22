@@ -489,6 +489,7 @@ pub(crate) fn apply_build_macro(
     module: &str,
     typer: Option<(&mut dyn super::context_api::MacroTyper, crate::tast::TypeId)>,
 ) -> Result<Vec<MacroDiagnostic>, MacroError> {
+    let _budget = super::budget::invocation();
     let location = super::errors::span_to_location(meta.span);
 
     // Step 1: Extract macro function name

@@ -56,6 +56,7 @@ pub(crate) use crate::tast::node;
 pub(crate) use crate::tast::symbols::SymbolKind;
 
 mod access;
+mod calls;
 mod casts;
 mod constraints;
 mod contracts;

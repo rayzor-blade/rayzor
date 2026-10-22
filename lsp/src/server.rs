@@ -35,7 +35,7 @@ use std::path::PathBuf;
 /// stack large enough for any program the command line compiles.
 const SESSION_STACK: usize = 256 << 20;
 
-/// How long all the macros of one compile may run before they are stopped,
+/// How long one macro invocation may run before it is stopped,
 /// unless the client sets `initializationOptions.macroBudgetMs`.
 const MACRO_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -432,11 +432,11 @@ fn analyze_document(conn: &Connection, ctx: &mut LspContext, uri: &str, allow_in
             .lookup(uri)
             .filter(|snapshot| snapshot.complete)
     {
-        let notification = Notification::new(
-            "textDocument/publishDiagnostics".into(),
-            serde_json::json!({"uri":uri,"version":version,"diagnostics":snapshot.diagnostics}),
+        publish_diagnostic_updates(
+            conn,
+            ctx.update_diagnostics(uri, snapshot.diagnostics.clone()),
+            version.map(|version| (uri, version)),
         );
-        let _ = conn.sender.send(Message::Notification(notification));
         analysis_status(conn, uri, version, "ready");
         return;
     }
@@ -466,15 +466,7 @@ fn analyze_document(conn: &Connection, ctx: &mut LspContext, uri: &str, allow_in
             message,
         )]
     });
-    let root_diagnostics: Vec<_> = diags
-        .iter()
-        .filter(|diagnostic| diagnostic.file == crate::context::uri_to_path(uri))
-        .cloned()
-        .collect();
-    let cached_diagnostics = serde_json::to_value(to_lsp_diagnostics(&root_diagnostics))
-        .ok()
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default();
+    let cached_diagnostics = diags.clone();
     publish_diagnostic_updates(
         conn,
         ctx.update_diagnostics(uri, diags),
@@ -510,7 +502,7 @@ fn build_editor_snapshot(
     ctx: &LspContext,
     uri: &str,
     input_hash: u64,
-    diagnostics: Vec<serde_json::Value>,
+    diagnostics: Vec<crate::context::LspDiagnostic>,
 ) -> crate::editor_cache::Snapshot {
     use serde_json::{Value, json};
     let (server, client) = Connection::memory();
@@ -523,6 +515,7 @@ fn build_editor_snapshot(
     };
     let mut snapshot = crate::editor_cache::Snapshot {
         diagnostics,
+        dependencies: ctx.macro_dependencies(uri),
         expansions: ctx.indexed_expansions(uri),
         ..Default::default()
     };

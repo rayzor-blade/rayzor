@@ -36,7 +36,8 @@ pub(crate) struct Snapshot {
     pub member_results: Vec<Value>,
     pub document: BTreeMap<String, Value>,
     pub expansions: Vec<Value>,
-    pub diagnostics: Vec<Value>,
+    pub diagnostics: Vec<crate::context::LspDiagnostic>,
+    pub dependencies: Vec<compiler::macro_system::dependencies::Dependency>,
 }
 
 impl Snapshot {
@@ -230,11 +231,25 @@ impl EditorCache {
         {
             let entry = state.retained.remove(index)?;
             let result = entry.snapshot.clone();
+            if !result
+                .dependencies
+                .iter()
+                .all(|dependency| dependency.is_current())
+            {
+                return None;
+            }
             state.retained.push_back(entry);
             return Some(result);
         }
         let bytes = compiler::ir::blade::load_editor_index(path, &build_id, input_hash).ok()??;
         let snapshot = Arc::new(serde_json::from_slice::<Snapshot>(&bytes).ok()?);
+        if !snapshot
+            .dependencies
+            .iter()
+            .all(|dependency| dependency.is_current())
+        {
+            return None;
+        }
         state.retain(uri, input_hash, snapshot.clone(), bytes.len());
         Some(snapshot)
     }
@@ -362,6 +377,12 @@ mod tests {
             complete: true,
             ..Default::default()
         };
+        let asset = root.with_extension("asset");
+        std::fs::write(&asset, "original asset").unwrap();
+        let asset_time = std::fs::metadata(&asset).unwrap().modified().unwrap();
+        let dependencies = compiler::macro_system::dependencies::Dependencies::default();
+        dependencies.register("Main".into(), asset.clone());
+        snapshot.dependencies = dependencies.snapshot();
         snapshot.names.push(Name {
             line: 0,
             column: 6,
@@ -385,6 +406,15 @@ mod tests {
             restarted.answer(&request).unwrap()["contents"],
             "class Main"
         );
+        std::fs::write(&asset, "changed external asset").unwrap();
+        assert!(restarted.answer(&request).is_none());
+        let stale = EditorCache::default();
+        stale.configure(key.clone(), &root);
+        stale.track(&open);
+        assert!(stale.answer(&request).is_none());
+        std::fs::write(&asset, "original asset").unwrap();
+        std::fs::File::options().write(true).open(&asset).unwrap().set_modified(asset_time).unwrap();
+        assert!(restarted.answer(&request).is_some());
         restarted.track(&Notification::new(
             "textDocument/didChange".into(),
             json!({"textDocument":{"uri":uri},"contentChanges":[{"text":"class Other {}"}]}),
@@ -399,6 +429,7 @@ mod tests {
         changed.configure(key, &root);
         changed.track(&open);
         assert!(changed.answer(&request).is_none());
+        std::fs::remove_file(asset).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 }

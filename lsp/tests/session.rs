@@ -1258,6 +1258,40 @@ fn completion_after_a_dot_lists_the_receivers_members_while_editing() {
 }
 
 #[test]
+fn local_function_parameters_complete_names_and_imported_typedef_members() {
+    let main = r#"import Actions.CenterAction;
+class Main {
+    static function main() {
+        function row(a:CenterAction, recordingNow:Bool):String {
+            return a.id;
+        }
+        row({id:"record", title:"Record"}, false);
+    }
+}
+"#;
+    let mut s = Session::start(&[
+        ("Main.hx", main),
+        (
+            "Actions.hx",
+            "class Actions {}\ntypedef CenterAction = {id:String, title:String};",
+        ),
+    ]);
+    assert!(s.open("Main.hx").is_empty());
+    let names = s.labels("Main.hx", 4, 12);
+    assert!(
+        names.contains(&"a".into()) && names.contains(&"recordingNow".into()),
+        "{names:?}"
+    );
+    let editing = main.replace("return a.id;", "a.");
+    s.change("Main.hx", &editing);
+    let members = s.labels("Main.hx", 4, "            a.".len() as u32);
+    assert!(
+        members.contains(&"id".into()) && members.contains(&"title".into()),
+        "{members:?}"
+    );
+}
+
+#[test]
 fn signature_help_follows_the_argument_being_typed() {
     let mut s = Session::start(&[("Main.hx", POINT)]);
     s.open("Main.hx");
@@ -1611,6 +1645,7 @@ class Assets {
         var entries = FileSystem.readDirectory(directory);
         if (entries.length != 1 || entries[0] != "value.txt") throw "directory entries";
         var file = Context.resolvePath(Context.definedValue("asset_root") + "/" + Context.definedValue("asset_file"));
+        Context.registerModuleDependency(Context.getLocalModule(), file);
         if (FileSystem.isDirectory(file)) throw "not a file";
         if (!FileSystem.exists(FileSystem.fullPath(file))) throw "full path";
         if (Context.resolvePath(FileSystem.fullPath(file)) != FileSystem.fullPath(file)) throw "absolute resource";
@@ -1853,6 +1888,222 @@ fn missing_libraries_and_failed_documents_keep_the_session_alive() {
         s.labels("Main.hx", 2, 15)
             .iter()
             .any(|label| label == "updated")
+    );
+}
+
+#[test]
+fn generic_receivers_nullable_strings_and_optional_local_calls_are_valid() {
+    let main = r#"class Main {
+    static function identity<T>(value:T):T return value;
+    static function main() {
+        var seen = new Map<String, Bool>();
+        function add(path:Null<String>, ?name:String):Void {
+            if (path == null || path == "" || "" == path || !sys.FileSystem.exists(path)) return;
+            var label = name != null ? name : StringTools.replace(haxe.io.Path.withoutDirectory(path), ".exe", "");
+            if (seen.exists(label)) return;
+            seen.set(label, true);
+        }
+        add(Sys.getEnv("SHELL"));
+        add("/bin/sh", "sh");
+        var value = identity(true);
+        var child = new Child();
+        child.store(value);
+        var callback:Dynamic = function() return 1;
+        callback();
+    }
+}
+class Parent<T> {
+    public function new() {}
+    public function store(value:T):Void {}
+}
+class Child extends Parent<Bool> {}
+"#;
+    let mut s = Session::start(&[("Main.hx", main)]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn chained_calls_convert_generic_abstract_arguments() {
+    let main = r#"import controls.Identity;
+class Main {
+    static function main() {
+        Identity.of().setClasses(["hover-docs"]);
+    }
+}"#;
+    let mut s = Session::start(&[
+        ("Main.hx", main),
+        (
+            "controls/Identity.hx",
+            r#"package controls;
+class Identity {
+    public function new() {}
+    public static function of():Identity return new Identity();
+    public function setClasses(value:Reactive<Array<String>>):Void {}
+}
+abstract Reactive<T>(T) {
+    @:from public static function constant<T>(value:T):Reactive<T> return cast value;
+}"#,
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn fully_qualified_project_types_work_without_an_import() {
+    let main = r#"class Main {
+    static function main() {
+        var scroll = widgets.input.Scroll.of(1);
+        scroll.move(2);
+    }
+}"#;
+    let mut s = Session::start(&[
+        ("Main.hx", main),
+        (
+            "widgets/input/Scroll.hx",
+            r#"package widgets.input;
+class Scroll {
+    public function new() {}
+    public static function of(id:Int):Scroll return new Scroll();
+    public function move(value:Int):Void {}
+}"#,
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn build_macros_load_helpers_and_their_macro_only_dependencies() {
+    let mut s = Session::start(&[
+        (
+            "Main.hx",
+            "@:build(Build.fields())\nclass Main { static function main() { var value = generated; } }",
+        ),
+        (
+            "Build.hx",
+            r#"class Build {
+    #if macro
+    public static function fields():Array<haxe.macro.Expr.Field> {
+        var fields = haxe.macro.Context.getBuildFields();
+        var name = Helpers.name();
+        fields.push({name:name, access:[APublic, AStatic], kind:FVar(macro:String, macro "generated"), pos:haxe.macro.Context.currentPos()});
+        return fields;
+    }
+    #end
+}"#,
+        ),
+        (
+            "Helpers.hx",
+            r#"class Helpers {
+    #if macro
+    public static function name():String {
+        var document = Xml.parse('<asset name="generated"><child/></asset>');
+        var root = document.firstElement();
+        if (root.nodeName != "asset" || root.elements().next().nodeName != "child") throw "XML traversal";
+        return root.get("name");
+    }
+    #end
+}"#,
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{:#?}", s.diagnostics);
+    assert!(s.labels("Main.hx", 1, 30).contains(&"generated".into()));
+}
+
+#[test]
+fn instantiated_receivers_still_reject_wrong_values_and_required_arguments() {
+    let main = r#"class Main {
+    static function main() {
+        var seen = new Map<String, Bool>();
+        seen.set("bad", 123);
+        function add(path:Null<String>, ?name:String):Void {}
+        add();
+        var number = 123;
+        number();
+    }
+}"#;
+    let mut s = Session::start(&[("Main.hx", main)]);
+    let diagnostics = s.open("Main.hx");
+    for line in [3, 5, 7] {
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d["range"]["start"]["line"] == line),
+            "missing error on line {line}: {diagnostics:#?}"
+        );
+    }
+    assert!(
+        diagnostics
+            .iter()
+            .filter_map(|d| d["message"].as_str())
+            .all(|message| !message.contains("expected `T`")),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn initialization_failures_belong_to_configuration_and_survive_cache_reuse() {
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp .\n--macro Setup.install()\n"),
+        (
+            "Setup.hx",
+            "class Setup { public static function install() { throw \"setup failed\"; } }",
+        ),
+        ("Main.hx", "class Main { public static var value:Int = 1; }"),
+        (
+            "Other.hx",
+            "class Other { public static var value:Int = 2; }",
+        ),
+    ]);
+    assert!(s.open("Main.hx").is_empty());
+    let config = s.uri("build.hxml");
+    assert!(
+        s.diagnostics.iter().any(|update| update["uri"] == config
+            && update["diagnostics"]
+                .as_array()
+                .is_some_and(|diags| diags.iter().any(|diag| diag["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("setup failed"))
+                    && diag["range"]["start"]["line"] == 1))),
+        "{:?}",
+        s.diagnostics
+    );
+    assert!(s.open("Other.hx").is_empty());
+    let root = s.root.clone();
+    s.temporary = false;
+    drop(s);
+    let mut restarted = Session::connect(root, json!({}), true);
+    assert!(restarted.open("Main.hx").is_empty());
+    assert!(
+        restarted
+            .activity
+            .iter()
+            .all(|event| event["state"] != "checking")
+    );
+    assert!(
+        restarted
+            .diagnostics
+            .iter()
+            .any(|update| update["uri"] == config
+                && !update["diagnostics"].as_array().unwrap().is_empty()),
+        "{:?}",
+        restarted.diagnostics
+    );
+    let uri = restarted.uri("Main.hx");
+    restarted.notify("textDocument/didClose", json!({"textDocument":{"uri":uri}}));
+    restarted.request("workspace/symbol", json!({"query":"Main"}));
+    assert!(
+        restarted
+            .diagnostics
+            .iter()
+            .rfind(|update| update["uri"] == config)
+            .unwrap()["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
 }
 

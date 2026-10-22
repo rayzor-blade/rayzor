@@ -209,6 +209,7 @@ pub struct MacroContext {
 
     /// Resource lookup order, shared with the compilation's module resolver.
     pub class_paths: Vec<std::path::PathBuf>,
+    pub dependencies: super::dependencies::Dependencies,
 
     // --- Output collectors ---
     /// Diagnostics emitted by the macro
@@ -375,6 +376,7 @@ impl MacroContext {
             call_arguments: None,
             defines: BTreeMap::new(),
             class_paths: Vec::new(),
+            dependencies: Default::default(),
             typer: None,
             monomorphs: std::collections::BTreeSet::new(),
             mono_bindings: BTreeMap::new(),
@@ -408,6 +410,7 @@ impl MacroContext {
                 call_arguments: None,
                 defines: BTreeMap::new(),
                 class_paths: Vec::new(),
+                dependencies: Default::default(),
                 typer: None,
                 monomorphs: std::collections::BTreeSet::new(),
                 mono_bindings: BTreeMap::new(),
@@ -1141,6 +1144,12 @@ impl MacroContext {
                     })
                     .collect(),
             ))),
+            "registerModuleDependency" => {
+                let module = arg_as_string(args, 0, method, location)?;
+                let file = arg_as_string(args, 1, method, location)?;
+                self.dependencies.register(module, file.into());
+                Ok(MacroValue::Null)
+            }
             "resolvePath" => {
                 let name = arg_as_string(args, 0, "resolvePath", location)?;
                 let requested = std::path::Path::new(&name);

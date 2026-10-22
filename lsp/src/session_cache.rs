@@ -112,7 +112,7 @@ pub(crate) struct SessionCache {
     pub key: SessionKey,
     pub inputs: Inputs,
     pub unit: Rc<RefCell<CompilationUnit>>,
-    pub initialization_errors: Vec<String>,
+    pub initialization_errors: Vec<LspDiagnostic>,
     pub diagnostics: Vec<LspDiagnostic>,
     pub indexes: HashMap<String, crate::analysis::FileSymbolIndex>,
 }
@@ -122,7 +122,7 @@ impl SessionCache {
         key: SessionKey,
         inputs: Inputs,
         unit: CompilationUnit,
-        initialization_errors: Vec<String>,
+        initialization_errors: Vec<LspDiagnostic>,
     ) -> Self {
         Self {
             key,
@@ -136,6 +136,9 @@ impl SessionCache {
 
     pub fn can_extend(&self, filename: &str) -> bool {
         let unit = self.unit.borrow();
+        if !unit.macro_dependencies.is_current() {
+            return false;
+        }
         // One graph can contain a large dependency closure; bound how many
         // unrelated pages may keep extending it before starting a new graph.
         unit.user_files.iter().any(|file| file.filename == filename)

@@ -296,6 +296,7 @@ pub struct CompilationUnit {
     /// Macro-time statics for the whole compile. Modules expand in compile
     /// order (dependencies first), so shared values are deterministic.
     pub(crate) macro_statics: crate::macro_system::class_registry::MacroStatics,
+    pub macro_dependencies: crate::macro_system::dependencies::Dependencies,
     /// `onAfterTyping`/`onGenerate` callbacks registered by expanded macros.
     pub(crate) macro_hooks: Vec<(String, crate::macro_system::MacroValue)>,
     pub(crate) global_metadata: Vec<crate::macro_system::compiler_api::GlobalMetadata>,
@@ -679,6 +680,7 @@ impl CompilationUnit {
             deferred_errors: Vec::new(),
             blade_functions: None,
             macro_statics: Default::default(),
+            macro_dependencies: Default::default(),
             macro_hooks: Vec::new(),
             global_metadata: Vec::new(),
             initialization_macro_files: Vec::new(),

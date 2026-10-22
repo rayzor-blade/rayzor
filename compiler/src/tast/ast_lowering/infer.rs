@@ -1092,11 +1092,23 @@ impl<'a> AstLowering<'a> {
             } => {
                 // Create a function type: (param1_type, param2_type, ...) -> return_type
                 let param_types: Vec<TypeId> = parameters.iter().map(|p| p.param_type).collect();
+                let labels = parameters
+                    .iter()
+                    .map(|p| crate::tast::core::FunctionArgLabel {
+                        name: None,
+                        optional: p.is_optional || p.default_value.is_some(),
+                    })
+                    .collect();
                 Ok(self
                     .context
                     .type_table
                     .borrow_mut()
-                    .create_function_type(param_types, *return_type))
+                    .create_labelled_function_type(
+                        param_types,
+                        *return_type,
+                        Default::default(),
+                        labels,
+                    ))
             }
             TypedExpressionKind::Return { .. } => Ok(self.context.type_table.borrow().void_type()),
             TypedExpressionKind::Throw { .. } => Ok(self.context.type_table.borrow().void_type()),

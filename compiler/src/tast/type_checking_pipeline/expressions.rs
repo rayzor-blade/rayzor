@@ -33,9 +33,14 @@ impl<'a> TypeCheckingPhase<'a> {
             TypedExpressionKind::FunctionCall {
                 function,
                 arguments,
-                type_arguments: _,
+                type_arguments,
             } => {
-                self.check_function_call_expr(function, arguments, expr.source_location)?;
+                self.check_function_call_expr(
+                    function,
+                    arguments,
+                    type_arguments,
+                    expr.source_location,
+                )?;
             }
             TypedExpressionKind::FieldAccess {
                 object,
@@ -69,7 +74,7 @@ impl<'a> TypeCheckingPhase<'a> {
                 class_symbol,
                 method_symbol,
                 arguments,
-                type_arguments: _,
+                type_arguments,
             } => {
                 // Check argument types
                 let mut arg_types = Vec::new();
@@ -122,6 +127,8 @@ impl<'a> TypeCheckingPhase<'a> {
                     .get_symbol(*method_symbol)
                     .map(|s| s.type_id);
                 if let Some(method_type_id) = method_type_id {
+                    let method_type_id =
+                        self.call_signature(method_type_id, None, type_arguments, &arg_types);
                     let param_info = {
                         let type_table = self.type_checker.type_table.borrow();
                         type_table.get(method_type_id).and_then(|t| {
@@ -133,7 +140,7 @@ impl<'a> TypeCheckingPhase<'a> {
                         })
                     };
                     if let Some(param_types) = param_info {
-                        if param_types.len() != arg_types.len() {
+                        if !self.accepts_argument_count(method_type_id, arg_types.len()) {
                             self.emit_error(TypeCheckError {
                                 kind: TypeErrorKind::TypeMismatch {
                                     expected: method_type_id,
@@ -328,12 +335,14 @@ impl<'a> TypeCheckingPhase<'a> {
                 receiver,
                 method_symbol,
                 arguments,
+                type_arguments,
                 ..
             } => {
                 self.check_method_call_expr(
                     receiver,
                     *method_symbol,
                     arguments,
+                    type_arguments,
                     expr.source_location,
                 )?;
             }
@@ -1076,7 +1085,12 @@ impl<'a> TypeCheckingPhase<'a> {
             BinaryOperator::Eq | BinaryOperator::Ne => {
                 // Equality - just check types are compatible
                 let compatibility = self.type_checker.check_compatibility(lhs_type, rhs_type);
-                if matches!(compatibility, TypeCompatibility::Incompatible) {
+                if matches!(compatibility, TypeCompatibility::Incompatible)
+                    && matches!(
+                        self.type_checker.check_compatibility(rhs_type, lhs_type),
+                        TypeCompatibility::Incompatible
+                    )
+                {
                     self.emit_error(TypeCheckError {
                         kind: TypeErrorKind::TypeMismatch {
                             expected: lhs_type,
@@ -1101,20 +1115,24 @@ impl<'a> TypeCheckingPhase<'a> {
         &mut self,
         function: &TypedExpression,
         arguments: &[TypedExpression],
+        type_arguments: &[TypeId],
         source_location: SourceLocation,
     ) -> Result<(), String> {
         let callee_type = self.check_expression(function)?;
-        let callee_type = self
-            .type_checker
-            .type_table
-            .borrow()
-            .resolve_alias_type(callee_type);
 
         // Check argument types first
         let mut arg_types = Vec::new();
         for arg in arguments {
             let arg_type = self.check_expression(arg)?;
             arg_types.push(arg_type);
+        }
+        let callee_type = self.call_signature(callee_type, None, type_arguments, &arg_types);
+
+        if matches!(
+            self.type_table.borrow().get(callee_type).map(|ty| &ty.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            return Ok(());
         }
 
         // Check function signature matches arguments
@@ -1132,7 +1150,7 @@ impl<'a> TypeCheckingPhase<'a> {
 
         if is_function {
             // Check parameter count
-            if param_types.len() != arg_types.len() {
+            if !self.accepts_argument_count(callee_type, arg_types.len()) {
                 self.emit_error(TypeCheckError {
                     kind: TypeErrorKind::TypeMismatch {
                         expected: callee_type, // Not ideal but best we can do
@@ -1162,7 +1180,7 @@ impl<'a> TypeCheckingPhase<'a> {
                         self.emit_enhanced_type_error(
                             *actual_type,
                             *expected_type,
-                            source_location,
+                            arguments[i].source_location,
                             &format!("Argument {} type mismatch", i + 1),
                             &TypeErrorContext::FunctionCall {
                                 param_index: i,
@@ -1206,6 +1224,7 @@ impl<'a> TypeCheckingPhase<'a> {
         receiver: &TypedExpression,
         method_symbol: SymbolId,
         arguments: &[TypedExpression],
+        type_arguments: &[TypeId],
         source_location: SourceLocation,
     ) -> Result<(), String> {
         // Check receiver type
@@ -1219,8 +1238,13 @@ impl<'a> TypeCheckingPhase<'a> {
         }
 
         // Check if method is not static (instance method call)
-        let type_table = self.type_checker.type_table.borrow();
-        if let Some(type_info) = type_table.get(receiver_type) {
+        let type_info = self
+            .type_checker
+            .type_table
+            .borrow()
+            .get(receiver_type)
+            .cloned();
+        if let Some(type_info) = type_info {
             if let super::TypeKind::Class {
                 symbol_id: class_symbol,
                 ..
@@ -1228,7 +1252,6 @@ impl<'a> TypeCheckingPhase<'a> {
             {
                 // Copy the class data to avoid borrow checker issues
                 let class_symbol_copy = *class_symbol;
-                drop(type_table); // Release borrow before calling method
 
                 // Check if method is static (instance method call)
                 let class_and_method_data =
@@ -1273,7 +1296,12 @@ impl<'a> TypeCheckingPhase<'a> {
         // Look up the method's function type from the symbol
         if let Some(method_info) = self.type_checker.symbol_table.get_symbol(method_symbol) {
             // Get the method's function type
-            let method_type = method_info.type_id;
+            let method_type = self.call_signature(
+                method_info.type_id,
+                Some(receiver_type),
+                type_arguments,
+                &arg_types,
+            );
 
             // Check if it's a function type
             let (param_types, is_function) = {
@@ -1290,15 +1318,21 @@ impl<'a> TypeCheckingPhase<'a> {
 
             if is_function {
                 // First try the main signature
-                let main_signature_matches =
-                    self.check_signature_compatibility(&param_types, &arg_types);
+                let main_signature_matches = self
+                    .accepts_argument_count(method_type, arg_types.len())
+                    && self.check_signature_compatibility(
+                        &param_types[..arg_types.len().min(param_types.len())],
+                        &arg_types,
+                    );
 
                 if !main_signature_matches {
                     // If main signature doesn't match, try overloads
                     let overload_match_found =
                         self.check_method_overloads(method_symbol, &arg_types, source_location);
 
-                    if !overload_match_found && param_types.len() == arg_types.len() {
+                    if !overload_match_found
+                        && self.accepts_argument_count(method_type, arg_types.len())
+                    {
                         for (i, (&actual, &expected)) in
                             arg_types.iter().zip(&param_types).enumerate()
                         {

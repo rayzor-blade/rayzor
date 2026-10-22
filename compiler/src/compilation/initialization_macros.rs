@@ -7,6 +7,7 @@ impl CompilationUnit {
     pub(crate) fn macro_class_registry(&self) -> ClassRegistry {
         let mut classes = ClassRegistry::new();
         classes.use_statics(self.macro_statics.clone());
+        classes.use_dependencies(self.macro_dependencies.clone());
         classes.set_class_paths(
             self.namespace_resolver
                 .get_source_paths()
@@ -87,6 +88,7 @@ impl CompilationUnit {
             std::sync::Arc::new(classes),
         );
         interpreter.macro_context = Some(context);
+        let _budget = crate::macro_system::budget::invocation();
         let result = interpreter.eval_expr(&expr).map_err(|e| e.to_string());
         self.global_metadata.extend(interpreter.global_metadata);
         self.macro_hooks.extend(interpreter.hooks);
@@ -99,7 +101,7 @@ impl CompilationUnit {
         result.map(|_| ())
     }
 
-    fn load_initialization_macro_modules(&mut self, root: &str) -> Result<(), String> {
+    pub(crate) fn load_initialization_macro_modules(&mut self, root: &str) -> Result<(), String> {
         let mut pending = vec![root.to_string()];
         let mut visited = BTreeSet::new();
         while let Some(mut name) = pending.pop() {

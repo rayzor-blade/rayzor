@@ -63,6 +63,7 @@ pub mod bytecode;
 pub mod class_registry;
 pub mod compiler_api;
 pub mod context_api;
+pub mod dependencies;
 pub mod environment;
 pub mod errors;
 pub mod expander;

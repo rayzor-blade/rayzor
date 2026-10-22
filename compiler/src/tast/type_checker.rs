@@ -1181,9 +1181,27 @@ impl<'a> TypeChecker<'a> {
                 }
             }
 
-            (TypeKind::Optional { inner_type }, _) => {
-                // T? is assignable to T only with explicit null check
-                TypeCompatibility::Incompatible // Requires explicit unwrapping
+            (TypeKind::Optional { inner_type }, target) => {
+                // Haxe reference types are already nullable. Null<T> only
+                // changes the representation of non-nullable value types.
+                if matches!(
+                    target,
+                    TypeKind::String
+                        | TypeKind::Array { .. }
+                        | TypeKind::Map { .. }
+                        | TypeKind::Class { .. }
+                        | TypeKind::Interface { .. }
+                        | TypeKind::Enum { .. }
+                        | TypeKind::Anonymous { .. }
+                        | TypeKind::Function { .. }
+                ) {
+                    match self.check_compatibility(*inner_type, _target_id) {
+                        TypeCompatibility::Incompatible => TypeCompatibility::Incompatible,
+                        _ => TypeCompatibility::Assignable,
+                    }
+                } else {
+                    TypeCompatibility::Incompatible
+                }
             }
 
             (TypeKind::Union { .. }, _) => {

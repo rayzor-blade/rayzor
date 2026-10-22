@@ -1139,6 +1139,7 @@ impl MacroExpander {
         args: &[Expr],
         call_expr: &Expr,
     ) -> Result<Expr, MacroError> {
+        let _budget = super::budget::invocation();
         let location = super::errors::span_to_location(call_expr.span);
 
         // Expand nested macro calls in arguments BEFORE entering expansion tracking.

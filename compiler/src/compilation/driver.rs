@@ -197,11 +197,6 @@ impl CompilationUnit {
             // Macros read user and import files as macro code sees them,
             // `#if macro` members included; the file being compiled keeps
             // its own parse.
-            let view = |f: &HaxeFile| {
-                self.macro_context_view(f, None)
-                    .unwrap_or_else(|| f.clone())
-            };
-            let current_view = self.macro_context_view(ast_file, None);
             let generic_build_modules: Vec<HaxeFile> = ast_file
                 .imports
                 .iter()
@@ -216,6 +211,22 @@ impl CompilationUnit {
                     self.parse_file(&file.to_string_lossy(), &source).ok()
                 })
                 .collect();
+            // Build helpers have dependencies that exist only under `#if macro`.
+            // Load that graph before making the interpreter's class registry.
+            let build_roots: BTreeSet<_> = std::iter::once(ast_file)
+                .chain(generic_build_modules.iter())
+                .flat_map(build_macro_module_paths)
+                .collect();
+            for root in &build_roots {
+                if let Err(error) = self.load_initialization_macro_modules(root) {
+                    debug!("Cannot load macro dependencies for {root}: {error}");
+                }
+            }
+            let view = |f: &HaxeFile| {
+                self.macro_context_view(f, None)
+                    .unwrap_or_else(|| f.clone())
+            };
+            let current_view = self.macro_context_view(ast_file, None);
             // A module named only in `@:build(pkg.Mod.f())` is never imported,
             // so its macros would be unknown when the build runs.
             let build_modules: Vec<HaxeFile> = std::iter::once(ast_file)

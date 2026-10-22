@@ -271,6 +271,7 @@ impl LspContext {
                 Rc::ptr_eq(&session.unit, &analysis.unit)
                     && session.key == key
                     && session.inputs == inputs
+                    && session.unit.borrow().macro_dependencies.is_current()
             })
         });
         let reusable = self.sessions.iter().rposition(|session| {
@@ -295,8 +296,30 @@ impl LspContext {
                         format!("Stdlib: {error}"),
                     )];
                 }
-                let initialization_errors =
-                    unit.run_initialization_macros(&self.initialization_macros);
+                let settings = self
+                    .hxml
+                    .clone()
+                    .unwrap_or_else(|| self.root.join("haxelib.json"));
+                let settings_source = std::fs::read_to_string(&settings).unwrap_or_default();
+                let mut initialization_errors = Vec::new();
+                for call in &self.initialization_macros {
+                    let (line, column) = settings_source
+                        .find(call)
+                        .map(|offset| line_column(&settings_source, offset))
+                        .unwrap_or((1, 1));
+                    initialization_errors.extend(
+                        unit.run_initialization_macros(std::slice::from_ref(call))
+                            .into_iter()
+                            .map(|message| {
+                                LspDiagnostic::error(
+                                    &settings.to_string_lossy(),
+                                    line,
+                                    column,
+                                    message,
+                                )
+                            }),
+                    );
+                }
                 crate::session_cache::SessionCache::new(key, inputs, unit, initialization_errors)
             }
         };
@@ -422,11 +445,7 @@ impl LspContext {
             }
             Some(item)
         }));
-        result.extend(
-            initialization_errors
-                .into_iter()
-                .map(|message| LspDiagnostic::error(&filename, 0, 0, message)),
-        );
+        result.extend(initialization_errors);
 
         let file_id = unit.file_id_of(&filename).unwrap_or(u32::MAX);
         let mut preprocessor = parser::preprocessor::PreprocessorConfig::default();
@@ -578,17 +597,16 @@ impl LspContext {
 
     pub fn needs_analysis(&mut self, uri: &str) -> bool {
         self.open_files.contains_key(uri)
-            && !self.analyses.contains_key(uri)
+            && !self.has_current_analysis(uri)
             && !self.failed_analyses.contains(uri)
     }
 
     pub fn has_current_analysis(&self, uri: &str) -> bool {
         self.analyses.get(uri).is_some_and(|analysis| {
             self.open_files.get(uri).is_some_and(|source| {
-                analysis
-                    .unit
-                    .borrow()
-                    .source_matches(analysis.index.file_id, source)
+                let unit = analysis.unit.borrow();
+                unit.source_matches(analysis.index.file_id, source)
+                    && unit.macro_dependencies.is_current()
             })
         })
     }
@@ -623,6 +641,16 @@ impl LspContext {
                 self.expand_macro(uri, lsp_types::Position::new(line - 1, column - 1))
             })
             .collect()
+    }
+
+    pub(crate) fn macro_dependencies(
+        &self,
+        uri: &str,
+    ) -> Vec<compiler::macro_system::dependencies::Dependency> {
+        self.analyses
+            .get(uri)
+            .map(|analysis| analysis.unit.borrow().macro_dependencies.snapshot())
+            .unwrap_or_default()
     }
 
     /// A changed dependency, newly created module, or compiler panic makes
@@ -1068,7 +1096,7 @@ pub struct MacroExpansionHint {
 
 /// A diagnostic ready for LSP conversion.
 #[allow(dead_code)]
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct LspDiagnostic {
     pub file: String,
     pub line: u32,
@@ -1100,7 +1128,7 @@ impl LspDiagnostic {
 }
 
 #[allow(dead_code)]
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum DiagSeverity {
     Error,
     Warning,
