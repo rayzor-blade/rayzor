@@ -78,13 +78,18 @@ impl Environment {
 
     /// Pattern and loop bindings retain the identity of objects inside field arrays.
     pub(crate) fn replace_references(&mut self, old: &MacroValue, new: &MacroValue) {
-        let mut updates = super::value::ReferenceUpdates::new();
+        self.replace_references_with(old, new, &mut super::value::ReferenceUpdates::new());
+    }
+
+    pub(crate) fn replace_references_with(
+        &mut self,
+        old: &MacroValue,
+        new: &MacroValue,
+        updates: &mut super::value::ReferenceUpdates,
+    ) {
         for scope in &mut self.scopes {
             for binding in scope.values() {
-                binding
-                    .lock()
-                    .expect("macro variable lock poisoned")
-                    .replace_reference(old, new, &mut updates);
+                updates.replace_binding(binding, old, new);
             }
         }
     }

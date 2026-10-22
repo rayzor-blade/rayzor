@@ -1676,6 +1676,14 @@ impl CompilationUnit {
         let hooks = std::mem::take(&mut self.macro_hooks);
         let mut files = self.user_files.clone();
         files.extend(self.loaded_import_haxe_files.iter().cloned());
+        let mut class_registry = self.macro_class_registry();
+        class_registry.register_files(&files);
+        for file in &files {
+            if let Some(view) = self.macro_context_view(file, None) {
+                class_registry.register_file(&view);
+            }
+        }
+        class_registry.register_files(&self.initialization_macro_files);
         let to_error = |message: String, location| CompilationError {
             message: format!("[E0700] {}", message),
             location,
@@ -1683,12 +1691,9 @@ impl CompilationUnit {
             suggestion: None,
             related_errors: Vec::new(),
         };
-        let diagnostics = crate::macro_system::expander::run_generation_hooks(
-            &hooks,
-            &files,
-            self.macro_class_registry(),
-        )
-        .map_err(|e| vec![to_error(format!("macro hook failed: {}", e), e.location())])?;
+        let diagnostics =
+            crate::macro_system::expander::run_generation_hooks(&hooks, &files, class_registry)
+                .map_err(|e| vec![to_error(format!("macro hook failed: {}", e), e.location())])?;
         let mut errors = Vec::new();
         for diag in diagnostics {
             match diag.severity {

@@ -12,6 +12,7 @@ struct Session {
     root: PathBuf,
     next_id: i32,
     diagnostics: Vec<Value>,
+    logs: Vec<String>,
     temporary: bool,
 }
 
@@ -46,6 +47,7 @@ impl Session {
             root,
             next_id: 0,
             diagnostics: Vec::new(),
+            logs: Vec::new(),
             temporary,
         };
         let root_uri = session.uri("");
@@ -83,6 +85,10 @@ impl Session {
                 Message::Response(resp) if resp.id == id => {
                     return resp.result.unwrap_or(Value::Null);
                 }
+                Message::Notification(n) if n.method == "window/logMessage" => {
+                    self.logs
+                        .push(n.params["message"].as_str().unwrap_or("").into());
+                }
                 Message::Notification(n) if n.method == "textDocument/publishDiagnostics" => {
                     self.diagnostics.push(n.params);
                 }
@@ -99,9 +105,15 @@ impl Session {
             json!({"textDocument": {"uri": self.uri(name), "languageId": "haxe", "version": 1, "text": text}}),
         );
         loop {
-            if let Message::Notification(n) = self.client.receiver.recv().unwrap()
-                && n.method == "textDocument/publishDiagnostics"
-            {
+            if let Message::Notification(n) = self.client.receiver.recv().unwrap() {
+                if n.method == "window/logMessage" {
+                    self.logs
+                        .push(n.params["message"].as_str().unwrap_or("").into());
+                    continue;
+                }
+                if n.method != "textDocument/publishDiagnostics" {
+                    continue;
+                }
                 if n.params["uri"] == self.uri(name) {
                     return n.params["diagnostics"]
                         .as_array()
@@ -306,6 +318,7 @@ class DocTools {
         ("add(DocTools", "Adds a value."),
         ("add(value", "**Parameter** `value`: The amount to add."),
         ("amount)", "Default amount."),
+        ("DocTools.amount", "Shared utilities."),
         ("twice(count", "Doubles the input."),
         ("twice(count", "**Returns**\n\n`Int` Twice the amount."),
         ("Count =", "Named integer type."),
@@ -324,6 +337,111 @@ class DocTools {
     let hover = hover_at(&mut s, &changed, "count +");
     assert!(hover.contains("Current total."), "{hover}");
     assert!(!hover.contains("Stored count."), "{hover}");
+}
+
+#[test]
+fn workspace_index_finds_unopened_types_and_refreshes_files() {
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp src\n"),
+        (
+            "src/tools/Unopened.hx",
+            "#if rayzor\npackage tools; /** Available without opening this file. */ class Unopened {}\n#end",
+        ),
+        ("target/Ignored.hx", "class Ignored {}"),
+    ]);
+    let symbols = s.request("workspace/symbol", json!({"query":"Unopened"}));
+    let symbols = symbols.as_array().unwrap();
+    assert_eq!(symbols.len(), 1, "{symbols:?}");
+    assert_eq!(
+        symbols[0]["location"]["uri"],
+        s.uri("src/tools/Unopened.hx")
+    );
+    assert!(
+        s.request("workspace/symbol", json!({"query":"Ignored"}))
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::write(
+        s.root.join("src/tools/Unopened.hx"),
+        "package tools; class Replacement {}",
+    )
+    .unwrap();
+    s.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes":[{"uri":s.uri("src/tools/Unopened.hx"),"type":2}]}),
+    );
+    assert!(
+        s.request("workspace/symbol", json!({"query":"Unopened"}))
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["name"] != "Unopened")
+    );
+    assert_eq!(
+        s.request("workspace/symbol", json!({"query":"Replacement"}))[0]["name"],
+        "Replacement"
+    );
+    std::fs::remove_file(s.root.join("src/tools/Unopened.hx")).unwrap();
+    s.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes":[{"uri":s.uri("src/tools/Unopened.hx"),"type":3}]}),
+    );
+    assert!(
+        s.request("workspace/symbol", json!({"query":"Replacement"}))
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn imported_type_docs_and_named_signatures_survive_across_modules() {
+    let box_source = "package models;\n/** A reusable box. */\nclass Box<T> {\n public var value:T;\n public function new(value:T) { this.value = value; }\n}";
+    let api_source = "package models;\n/** Box operations. */\nclass Api {\n /** Wrap a box in an array. */\n public static function wrap(box:Box<String>):Array<Box<String>> return [box];\n}";
+    let main = "import models.Box;\nimport models.Api;\nclass Main {\n static function main() {\n  var box = new Box(\"hi\");\n  var result = Api.wrap(box);\n }\n}";
+    let mut s = Session::start(&[
+        ("Main.hx", main),
+        ("models/Box.hx", box_source),
+        ("models/Api.hx", api_source),
+    ]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    for (line, column, expected) in [
+        (0, 15, "A reusable box."),
+        (1, 15, "Box operations."),
+        (4, 17, "A reusable box."),
+        (5, 15, "Box operations."),
+    ] {
+        let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", line, column)));
+        assert!(hover.contains(expected), "{line}:{column}: {hover}");
+    }
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 5, 20)));
+    assert!(hover.contains("Wrap a box in an array."), "{hover}");
+    assert!(hover.contains("models.Box<String>"), "{hover}");
+    assert!(
+        !hover.contains("SymbolId") && !hover.contains("TypeId"),
+        "{hover}"
+    );
+    let signature = s.request("textDocument/signatureHelp", s.at("Main.hx", 5, 25));
+    assert!(
+        signature.to_string().contains("models.Box<String>"),
+        "{signature}"
+    );
+    assert!(!signature.to_string().contains("SymbolId"), "{signature}");
+    std::fs::write(
+        s.root.join("models/Box.hx"),
+        box_source.replace("A reusable box.", "Updated box documentation."),
+    )
+    .unwrap();
+    s.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes":[{"uri":s.uri("models/Box.hx"),"type":2}]}),
+    );
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 4, 17)));
+    assert!(
+        hover.contains("Updated box documentation.") && !hover.contains("A reusable box."),
+        "{hover}"
+    );
 }
 
 #[test]
@@ -693,9 +811,11 @@ enum MacroProject {
 }
 
 fn check_initialization_macro_editor_services(project: MacroProject) {
-    let main = "class Main {\n    static function view():Int { var first = 1, second = 2; return <counter/>; }\n    static function main() { var count = view(); }\n    static var count(default, never):Int = 3;\n    static final LIMIT:Int = 10;\n}\n";
-    let macros = r#"import haxe.macro.Context;
+    let main = "class Main {\n    #if eval\n    static function view():Int { var first = \"🦀\", second = 2; return <counter/>; }\n    static function main() { var count = view(); }\n    static var count(default, never):Int = 3;\n    static final LIMIT:Int = 10;\n    #end\n}\n";
+    let macros = r#"#if macro
+import haxe.macro.Context;
 import haxe.macro.Expr;
+#end
 class Setup {
     public static function enable() {
         haxe.macro.Compiler.addGlobalMetadata("Main", "@:build(Setup.build())");
@@ -754,21 +874,53 @@ class Setup {
     let mut s = Session::start(&files);
     let diagnostics = s.open("Main.hx");
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
-    let labels = s.labels("Main.hx", 2, 44);
+    let view_line = main
+        .lines()
+        .position(|line| line.contains("function view"))
+        .unwrap() as u32;
+    let main_line = main
+        .lines()
+        .position(|line| line.contains("function main"))
+        .unwrap() as u32;
+    let labels = s.labels("Main.hx", main_line, 44);
     assert!(labels.iter().any(|l| l == "generated"), "{labels:?}");
-    let hover = s.request("textDocument/hover", s.at("Main.hx", 2, 41));
+    let hover = s.request("textDocument/hover", s.at("Main.hx", main_line, 41));
     assert!(!hover.is_null(), "missing hover after markup expansion");
-    let preview = s.request("rayzor/expandMacro", s.at("Main.hx", 1, 30));
-    assert!(
-        preview["expansion"].as_str().unwrap().contains("return 42"),
-        "{preview}"
+    let line = main.lines().nth(view_line as usize).unwrap();
+    let column = line[..line.find("<counter/>").unwrap()]
+        .encode_utf16()
+        .count() as u32;
+    let preview = s.request("rayzor/expandMacro", s.at("Main.hx", view_line, column + 1));
+    assert_eq!(preview["expansion"], "42", "{preview}");
+    assert_eq!(
+        preview["range"],
+        json!({"start":{"line":view_line,"character":column},"end":{"line":view_line,"character":column + 10}})
     );
     assert!(
-        preview["expansion"]
-            .as_str()
-            .unwrap()
-            .contains("count(default, never):Int"),
-        "{preview}"
+        s.request("rayzor/expandMacro", s.at("Main.hx", view_line, 30))
+            .is_null()
+    );
+    assert!(
+        s.request(
+            "rayzor/expandMacro",
+            s.at("Main.hx", view_line, column + 10)
+        )
+        .is_null()
+    );
+    let generated = s.request("rayzor/expandMacro", s.at("Main.hx", 0, 2));
+    let generated = generated["expansion"].as_str().unwrap();
+    assert!(generated.contains("generated"), "{generated}");
+    assert!(
+        !generated.contains("class Main")
+            && !generated.contains("count(")
+            && !generated.contains("view("),
+        "{generated}"
+    );
+    let hints = s.request("textDocument/inlayHint", json!({"textDocument":{"uri":s.uri("Main.hx")},"range":{"start":{"line":view_line,"character":0},"end":{"line":view_line,"character":1000}}}));
+    assert_eq!(hints.as_array().unwrap().len(), 1, "{hints}");
+    assert_eq!(
+        hints[0]["position"],
+        json!({"line":view_line,"character":column+10})
     );
     assert!(
         preview["definition"]["uri"]
@@ -777,6 +929,94 @@ class Setup {
             .ends_with("Setup.hx"),
         "{preview}"
     );
+    assert_eq!(
+        preview["definition"]["range"]["start"]["line"],
+        macros
+            .lines()
+            .position(|line| line.contains("function build"))
+            .unwrap() as u32,
+        "{preview}"
+    );
+}
+
+#[test]
+fn global_build_without_changes_has_no_expansion_preview() {
+    let macros = r#"import haxe.macro.Context;
+class Setup {
+    public static function enable() {
+        haxe.macro.Compiler.addGlobalMetadata("KeyMap", "@:build(Setup.build())");
+    }
+    public static function build() return Context.getBuildFields();
+}"#;
+    let main = "class KeyMap {\n public static function encode(key:String):String return key;\n static var count(default, never):Int = 3;\n}";
+    let mut s = Session::start(&[
+        ("build.hxml", "--macro Setup.enable()\n"),
+        ("Setup.hx", macros),
+        ("KeyMap.hx", main),
+    ]);
+    assert!(s.open("KeyMap.hx").is_empty(), "{:#?}", s.diagnostics);
+    for (line, column) in [(0, 2), (0, 7), (1, 26), (2, 13)] {
+        assert!(
+            s.request("rayzor/expandMacro", s.at("KeyMap.hx", line, column))
+                .is_null()
+        );
+    }
+    let hover = s.request("textDocument/hover", s.at("KeyMap.hx", 1, 26));
+    assert!(!hover_text(&hover).contains("Macro expansion"), "{hover}");
+    let hints = s.request("textDocument/inlayHint", json!({"textDocument":{"uri":s.uri("KeyMap.hx")},"range":{"start":{"line":0,"character":0},"end":{"line":4,"character":0}}}));
+    assert!(
+        hints.is_null() || hints.as_array().is_some_and(Vec::is_empty),
+        "{hints}"
+    );
+}
+
+#[test]
+fn nested_macro_helpers_generate_fields_and_expansions() {
+    let macros = r#"import haxe.macro.Context;
+import haxe.macro.Expr;
+class DepthMacros {
+    #if macro
+    public static function enable() {
+        if (!MapDepth.check()) throw "initialization maps";
+        haxe.macro.Compiler.addGlobalMetadata("Main", "@:build(DepthMacros.build())");
+        Context.onGenerate(function(_) { if (!MapDepth.check()) throw "generation maps"; });
+    }
+    public static function build():Array<Field> {
+        if (!MapDepth.check()) throw "build maps";
+        var fields = Context.getBuildFields();
+        fields.push({name:"generated", access:[APublic, AStatic], kind:FVar(macro:Bool, macro true), pos:Context.currentPos()});
+        return fields;
+    }
+    #end
+    public static macro function value():Expr {
+        if (!MapDepth.check()) throw "expression maps";
+        return macro true;
+    }
+}"#;
+    let main = "class Main {\n static function main() { var value = DepthMacros.value(); }\n}";
+    let mut s = Session::start(&[
+        ("build.hxml", "--macro DepthMacros.enable()\n"),
+        (
+            "MapDepth.hx",
+            include_str!("../../compiler/tests/haxe/macro_map_depth/MapDepth.hx"),
+        ),
+        ("DepthMacros.hx", macros),
+        ("Main.hx", main),
+    ]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    assert!(
+        s.labels("Main.hx", 1, 36)
+            .iter()
+            .any(|label| label == "generated")
+    );
+    let column = main
+        .lines()
+        .nth(1)
+        .unwrap()
+        .find("DepthMacros.value")
+        .unwrap() as u32;
+    let preview = s.request("rayzor/expandMacro", s.at("Main.hx", 1, column + 12));
+    assert_eq!(preview["expansion"], "true", "{preview}");
 }
 
 #[test]
@@ -932,6 +1172,22 @@ fn macro_previews_hints_and_definition_errors_have_source_positions() {
     assert_eq!(hints[0]["position"]["line"], 1);
     let hover = s.request("textDocument/hover", s.at("Main.hx", 1, column + 8));
     assert!(hover_text(&hover).contains("21 + 21"), "{hover}");
+    let edited = main
+        .replace("Macros.value()", "ordinaryValue")
+        .replace("class Main", "class MainNew");
+    let edited = edited.strip_suffix('}').unwrap();
+    assert!(!s.change("Main.hx", edited).is_empty());
+    assert!(
+        s.request("textDocument/hover", s.at("Main.hx", 0, 7))
+            .is_null()
+    );
+    assert!(
+        s.request("rayzor/expandMacro", s.at("Main.hx", 1, column + 8))
+            .is_null()
+    );
+    let stale_hints = s.request("textDocument/inlayHint", json!({"textDocument":{"uri":s.uri("Main.hx")},"range":{"start":{"line":0,"character":0},"end":{"line":4,"character":0}}}));
+    assert!(stale_hints.is_null(), "{stale_hints}");
+    assert!(s.change("Main.hx", main).is_empty());
     let before = s.diagnostics.len();
     s.change(
         "Main.hx",
@@ -955,5 +1211,93 @@ fn macro_previews_hints_and_definition_errors_have_source_positions() {
             .as_str()
             .unwrap()
             .contains("macro failed")
+    );
+}
+
+#[test]
+fn missing_libraries_and_failed_documents_keep_the_session_alive() {
+    let main = "class Main {\n /** The useful field. */ public static var available:Int = 42;\n static function main() {}\n}";
+    let mut s = Session::start(&[
+        (
+            "build.hxml",
+            "-lib rayzor_lsp_test_missing_a04356\n-lib rayzor_lsp_test_missing_b04356\n",
+        ),
+        (
+            "Broken.hx",
+            "class Broken { static function f() return Unknown.field; }",
+        ),
+        ("Main.hx", main),
+    ]);
+    assert!(!s.open("Broken.hx").is_empty());
+    assert!(
+        s.logs
+            .iter()
+            .any(|message| message.contains("rayzor_lsp_test_missing_a04356")),
+        "{:?}",
+        s.logs
+    );
+    assert!(
+        s.logs
+            .iter()
+            .any(|message| message.contains("rayzor_lsp_test_missing_b04356")),
+        "{:?}",
+        s.logs
+    );
+    assert!(s.open("Main.hx").is_empty());
+    assert!(
+        s.labels("Main.hx", 2, 15)
+            .iter()
+            .any(|label| label == "available")
+    );
+    let column = main.lines().nth(1).unwrap().find("available").unwrap() as u32;
+    let hover = s.request("textDocument/hover", s.at("Main.hx", 1, column + 1));
+    assert!(hover_text(&hover).contains("The useful field"), "{hover}");
+    s.change("Main.hx", &main.replace("available", "updated"));
+    assert!(
+        s.labels("Main.hx", 2, 15)
+            .iter()
+            .any(|label| label == "updated")
+    );
+}
+
+#[test]
+fn enum_constructor_and_static_method_values_do_not_reenter_lookup() {
+    let main = r#"import haxe.io.Bytes;
+import haxe.io.BytesInput;
+class Main {
+    static function main() {
+        var input = new BytesInput(Bytes.ofString("value"));
+        var readByte = input.readByte;
+        var alias = Target;
+        var Target = alias;
+        var read = Target.value;
+        var enumType = Choice;
+        var choice = enumType.Item;
+    }
+}
+class Target { public static function value():Int return 42; }
+enum Choice { Item; }"#;
+    let mut s = Session::start(&[("Main.hx", main)]);
+    let diagnostics = s.open("Main.hx");
+    assert!(
+        !diagnostics.iter().any(|item| item["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("internal compiler error")),
+        "{diagnostics:#?}"
+    );
+    let symbols = s.request(
+        "textDocument/documentSymbol",
+        json!({"textDocument":{"uri":s.uri("Main.hx")}}),
+    );
+    assert!(!symbols.as_array().unwrap().is_empty());
+    s.change(
+        "Main.hx",
+        "class Main { public static var alive:Int = 42; }",
+    );
+    assert!(
+        s.labels("Main.hx", 0, 30)
+            .iter()
+            .any(|label| label == "alive")
     );
 }

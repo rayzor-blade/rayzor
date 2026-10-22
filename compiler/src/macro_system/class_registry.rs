@@ -16,6 +16,7 @@ pub struct MethodInfo {
     pub params: Vec<FunctionParam>,
     pub body: Arc<Expr>,
     pub is_static: bool,
+    pub location: crate::tast::SourceLocation,
 }
 
 /// Info about a single field variable
@@ -27,7 +28,7 @@ pub struct FieldVarInfo {
 
 /// Info about a registered class
 pub struct ClassInfo {
-    /// Path of the defining file; method spans are byte offsets in this file.
+    /// Path of the defining file.
     pub source_file: String,
     pub name: String,
     pub qualified_name: String,
@@ -153,6 +154,19 @@ impl ClassRegistry {
     pub fn set_static(&self, key: String, value: super::value::MacroValue) {
         if let Ok(mut statics) = self.statics.lock() {
             statics.insert(key, value);
+        }
+    }
+
+    pub(crate) fn replace_static_references(
+        &self,
+        old: &super::value::MacroValue,
+        new: &super::value::MacroValue,
+        updates: &mut super::value::ReferenceUpdates,
+    ) {
+        if let Ok(mut statics) = self.statics.lock() {
+            for value in statics.values_mut() {
+                value.replace_reference(old, new, updates);
+            }
         }
     }
 
@@ -323,6 +337,10 @@ impl ClassRegistry {
                                 params: func.params.clone(),
                                 body,
                                 is_static,
+                                location: super::errors::location_in_source(
+                                    file.input.as_deref(),
+                                    func.span,
+                                ),
                             };
 
                             if func.name == "new" {

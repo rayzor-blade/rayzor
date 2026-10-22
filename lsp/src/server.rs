@@ -112,6 +112,7 @@ pub fn serve(connection: &Connection) -> Result<(), String> {
         inlay_hint_provider: Some(OneOf::Left(true)),
         experimental: Some(serde_json::json!({"macroExpansionProvider":true})),
         references_provider: Some(OneOf::Left(true)),
+        workspace_symbol_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
@@ -154,6 +155,21 @@ pub fn serve(connection: &Connection) -> Result<(), String> {
         .map_or(MACRO_BUDGET, std::time::Duration::from_millis);
     for problem in &ctx.config_problems {
         log_message(connection, problem);
+    }
+    if init_params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|w| w.did_change_watched_files.as_ref())
+        .and_then(|w| w.dynamic_registration)
+        == Some(true)
+    {
+        let request = Request::new(
+            "rayzor-file-watch".to_string().into(),
+            "client/registerCapability".into(),
+            serde_json::json!({"registrations":[{"id":"rayzor-haxe-files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.hx"}]}}]}),
+        );
+        let _ = connection.sender.send(Message::Request(request));
     }
 
     // Everything queued is taken at once: the edits first, each changed
@@ -209,7 +225,14 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 // ---------------------------------------------------------------------------
 
 fn handle_request(conn: &Connection, ctx: &LspContext, req: Request) {
-    if req.method == "rayzor/expandMacro" {
+    if req.method == "workspace/symbol" {
+        let query = req
+            .params
+            .get("query")
+            .and_then(|q| q.as_str())
+            .unwrap_or_default();
+        send_response(conn, req.id, Some(ctx.workspace_symbols(query)));
+    } else if req.method == "rayzor/expandMacro" {
         let preview = serde_json::from_value::<lsp_types::TextDocumentPositionParams>(req.params)
             .ok()
             .and_then(|p| ctx.expand_macro(p.text_document.uri.as_str(), p.position));
@@ -284,6 +307,12 @@ fn handle_notification(
             version: None,
         };
         send_notification::<PublishDiagnostics>(conn, params);
+    } else if let Some(params) =
+        cast_notification::<lsp_types::notification::DidChangeWatchedFiles>(&not)
+    {
+        for change in params.changes {
+            ctx.index_disk_file(change.uri.as_str());
+        }
     }
 }
 

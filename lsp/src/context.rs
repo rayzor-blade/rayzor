@@ -30,6 +30,7 @@ pub struct LspContext {
     /// The last analysis of each open document that produced an index.
     analyses: HashMap<String, Analysis>,
     diagnostics: HashMap<String, Vec<LspDiagnostic>>,
+    workspace_index: crate::workspace_index::WorkspaceIndex,
 }
 
 /// A compiled document: the unit its symbols live in and its position index.
@@ -63,6 +64,7 @@ impl LspContext {
             macro_budget: std::time::Duration::from_secs(5),
             analyses: HashMap::new(),
             diagnostics: HashMap::new(),
+            workspace_index: Default::default(),
         }
     }
 
@@ -130,6 +132,10 @@ impl LspContext {
         let mut seen = std::collections::HashSet::new();
         self.class_paths
             .retain(|p| seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())));
+        self.workspace_index = crate::workspace_index::WorkspaceIndex::start(
+            self.class_paths.clone(),
+            self.defines.clone(),
+        );
     }
 
     /// Use one build; merging `--next` builds would mix incompatible targets.
@@ -194,6 +200,8 @@ impl LspContext {
     /// Compile a file and return diagnostics. Also builds the symbol index.
     pub fn compile_file(&mut self, uri: &str, source: &str) -> Vec<LspDiagnostic> {
         let filename = uri_to_path(uri);
+        self.workspace_index
+            .update(std::path::Path::new(&filename), Some(source));
 
         let mut config = CompilationConfig {
             load_stdlib: true,
@@ -328,9 +336,13 @@ impl LspContext {
         preprocessor.defines.insert("eval".into());
         let text = parser::preprocessor::preprocess(source, &preprocessor);
         if let Ok(file) = parser::rd::rd_parse(&text, &filename, false, false) {
-            FileSymbolIndex::record_source_declarations(&file, source, file_id, &mut unit);
+            FileSymbolIndex::record_source_declarations(&file, &text, file_id, &mut unit);
+            crate::type_references::record(&file, &text, file_id, &mut unit);
         }
         crate::documentation::record(&mut unit);
+        for file in unit.stdlib_files.iter().chain(&unit.user_files) {
+            self.workspace_index.ensure_parsed_file(file);
+        }
         let index = FileSymbolIndex::build(
             &unit.symbol_table,
             &unit.string_interner,
@@ -386,6 +398,21 @@ impl LspContext {
         self.open_files.remove(uri);
         self.analyses.remove(uri);
         self.diagnostics.remove(uri);
+        self.index_disk_file(uri);
+    }
+
+    pub fn index_disk_file(&self, uri: &str) {
+        let path = PathBuf::from(uri_to_path(uri));
+        let source = self
+            .open_files
+            .get(uri)
+            .cloned()
+            .or_else(|| std::fs::read_to_string(&path).ok());
+        self.workspace_index.update(&path, source.as_deref());
+    }
+
+    pub fn workspace_symbols(&self, query: &str) -> Vec<serde_json::Value> {
+        self.workspace_index.search(query)
     }
 
     fn syntax_errors(&self, filename: &str, source: &str) -> Vec<LspDiagnostic> {
@@ -424,6 +451,39 @@ impl LspContext {
 
     fn symbol_at(&self, uri: &str, line: u32, col: u32) -> Option<(&Analysis, SymbolId)> {
         let a = self.analyses.get(uri)?;
+        let current = self.open_files.get(uri)?;
+        let original = a.unit.source_of(a.index.file_id)?;
+        if current != original {
+            let (&(row, start), &(len, _)) = a.index.names.range(..=(line, col)).next_back()?;
+            let old = original.lines().nth(row.checked_sub(1)? as usize)?;
+            let new = current.lines().nth(row.checked_sub(1)? as usize)?;
+            let begins = start.saturating_sub(1) as usize;
+            let is_name = |unit: Option<u16>| {
+                unit.and_then(|c| char::from_u32(c as u32))
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$')
+            };
+            for boundary in [begins.checked_sub(1), Some(begins + len as usize)]
+                .into_iter()
+                .flatten()
+            {
+                if is_name(new.encode_utf16().nth(boundary))
+                    && !is_name(old.encode_utf16().nth(boundary))
+                {
+                    return None;
+                }
+            }
+            if !old
+                .encode_utf16()
+                .skip(start.saturating_sub(1) as usize)
+                .take(len as usize)
+                .eq(new
+                    .encode_utf16()
+                    .skip(start.saturating_sub(1) as usize)
+                    .take(len as usize))
+            {
+                return None;
+            }
+        }
         Some((a, a.index.find_symbol_at(line, col)?))
     }
 
@@ -431,12 +491,68 @@ impl LspContext {
     pub fn hover_info(&self, uri: &str, line: u32, col: u32) -> Option<String> {
         let (a, sym_id) = self.symbol_at(uri, line, col)?;
         let unit = &a.unit;
-        analysis::format_hover(
+        let mut hover = analysis::format_hover(
             sym_id,
             &unit.symbol_table,
             &unit.type_table,
             &unit.string_interner,
-        )
+        )?;
+        let symbol = unit.symbol_table.get_symbol(sym_id)?;
+        let qualified = symbol.qualified_name.unwrap_or_else(|| {
+            unit.symbol_table
+                .build_qualified_name(sym_id, &unit.scope_tree, &unit.string_interner)
+        });
+        if let Some(declaration) = unit
+            .string_interner
+            .get(qualified)
+            .and_then(|name| self.workspace_index.declaration(name))
+            .or_else(|| {
+                let text = self.open_files.get(uri)?;
+                let (rline, rcol, _) = analysis::receiver_before(text, line, col)?;
+                let receiver = a.index.find_symbol_at(rline, rcol)?;
+                let receiver_type = unit.symbol_table.get_symbol(receiver)?.type_id;
+                let owner = analysis::class_of_type(
+                    receiver_type,
+                    &unit.symbol_table,
+                    &unit.type_table.borrow(),
+                    &unit.string_interner,
+                )?;
+                let path = unit
+                    .symbol_table
+                    .display_type_path(owner, &unit.string_interner)?;
+                if let Some(source) = unit
+                    .namespace_resolver
+                    .resolve_qualified_path_to_file_force(&path)
+                {
+                    self.workspace_index.ensure_disk_file(&source);
+                }
+                let member = unit.string_interner.get(symbol.name)?;
+                self.workspace_index
+                    .declaration(&format!("{path}.{member}"))
+            })
+        {
+            if let Some(old) = symbol
+                .documentation
+                .and_then(|doc| unit.string_interner.get(doc))
+                && hover.ends_with(old)
+            {
+                hover.truncate(hover.len() - old.len());
+                hover = hover.trim_end().to_string();
+            }
+            if let Some(doc) = declaration.documentation {
+                hover.push_str("\n\n");
+                hover.push_str(&doc);
+            }
+            if symbol.kind == compiler::tast::symbols::SymbolKind::Function
+                && hover.contains("*Signature not yet resolved.*")
+                && declaration.signature.contains("function ")
+                && let Some(end) = hover.find("\n```")
+            {
+                hover.replace_range("```haxe\n".len()..end, &declaration.signature);
+                hover = hover.replace("\n\n*Signature not yet resolved.*", "");
+            }
+        }
+        Some(hover)
     }
 
     /// Find definition location for a symbol at a given position.
@@ -588,6 +704,10 @@ impl LspContext {
     ) -> Option<serde_json::Value> {
         let analysis = self.analyses.get(uri)?;
         let source = self.open_files.get(uri)?;
+        if !analysis.unit.source_matches(analysis.index.file_id, source) {
+            return None;
+        }
+        let source = analysis.unit.source_of(analysis.index.file_id)?;
         let line_start = source
             .split_inclusive('\n')
             .take(position.line as usize)
@@ -614,7 +734,7 @@ impl LspContext {
             .filter(|o| {
                 o.call_site.file_id == analysis.index.file_id
                     && o.call_span.start <= offset
-                    && offset <= o.call_span.end
+                    && offset < o.call_span.end
             })
             .min_by_key(|o| o.call_span.end.saturating_sub(o.call_span.start))?;
         let pos = |at| {
@@ -626,8 +746,10 @@ impl LspContext {
             "expansion": origin.expanded_text,
             "range": {"start":pos(origin.call_span.start),"end":pos(origin.call_span.end)},
             "definition": origin.definition_file.as_ref().zip(origin.definition_site).and_then(|(file, at)| {
-                let text = std::fs::read_to_string(file).ok()?;
-                let (line, character) = line_column(&text, at.byte_offset as usize);
+                let (line, character) = if at.line > 0 && at.column > 0 { (at.line, at.column) } else {
+                    let text = std::fs::read_to_string(file).ok()?;
+                    line_column(&text, at.byte_offset as usize)
+                };
                 Some(serde_json::json!({"uri":file_uri(file),"range":{"start":{"line":line-1,"character":character-1},"end":{"line":line-1,"character":character}}}))
             })
         }))
@@ -638,6 +760,13 @@ impl LspContext {
         let Some(a) = self.analyses.get(uri) else {
             return Vec::new();
         };
+        if !self
+            .open_files
+            .get(uri)
+            .is_some_and(|source| a.unit.source_matches(a.index.file_id, source))
+        {
+            return Vec::new();
+        }
         a.unit
             .macro_expansions
             .iter()
@@ -647,7 +776,7 @@ impl LspContext {
                 if !loc.is_valid() || loc.file_id != a.index.file_id {
                     return None;
                 }
-                let source = self.open_files.get(uri)?;
+                let source = a.unit.source_of(a.index.file_id)?;
                 let (line, column) = line_column(source, origin.call_span.end);
                 Some(MacroExpansionHint {
                     line,

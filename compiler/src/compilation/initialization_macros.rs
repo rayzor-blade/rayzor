@@ -139,8 +139,9 @@ impl CompilationUnit {
             let parsed = parser::haxe_parser::parse_haxe_file_with_config(
                 &filename, &source, true, true, &config,
             )?;
-            pending.extend(parsed.imports.iter().map(|i| i.path.join(".")));
-            pending.extend(parsed.using.iter().map(|u| u.path.join(".")));
+            let dependencies = Self::extract_all_dependencies(&parsed);
+            pending.extend(Self::enclosing_package_candidates(&parsed, &dependencies));
+            pending.extend(dependencies);
             self.initialization_macro_files.push(parsed);
         }
         Ok(())

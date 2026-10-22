@@ -15,5 +15,7 @@ mod project;
 mod server;
 mod stdlib;
 mod transport;
+mod type_references;
+mod workspace_index;
 
 pub use server::{run_lsp, serve, spawn_session};

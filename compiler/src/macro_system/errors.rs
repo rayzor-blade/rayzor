@@ -443,3 +443,22 @@ pub fn span_to_location(span: Span) -> SourceLocation {
     }
     SourceLocation::new(0, 0, 0, span.start as u32)
 }
+
+/// A position in the exact source view that produced an AST span.
+pub(crate) fn location_in_source(source: Option<&str>, span: Span) -> SourceLocation {
+    let mut location = span_to_location(span);
+    if location.file_id != 0 {
+        return location;
+    }
+    if let Some(before) = source.and_then(|text| text.get(..span.start)) {
+        location.line = before.bytes().filter(|&b| b == b'\n').count() as u32 + 1;
+        location.column = before
+            .rsplit('\n')
+            .next()
+            .unwrap_or("")
+            .encode_utf16()
+            .count() as u32
+            + 1;
+    }
+    location
+}

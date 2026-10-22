@@ -45,6 +45,8 @@ impl<'a> Lexer<'a> {
     /// Tokenize the entire source. O(n) single pass.
     pub fn tokenize(mut self) -> Result<Vec<Token>, LexError> {
         let mut tokens = Vec::with_capacity(self.source.len() / 4); // rough estimate
+        let mut paren_headers = Vec::new();
+        let mut after_control_header = false;
 
         loop {
             self.skip_whitespace_and_comments();
@@ -53,28 +55,47 @@ impl<'a> Lexer<'a> {
                 break;
             }
             // A tag starts an operand, never a type argument or a comparison.
-            let operand = tokens.last().is_none_or(|t: &Token| {
-                matches!(
-                    t.kind,
-                    TokenKind::Assign
-                        | TokenKind::KwReturn
-                        | TokenKind::LParen
-                        | TokenKind::LBracket
-                        | TokenKind::LBrace
-                        | TokenKind::Comma
-                        | TokenKind::Colon
-                        | TokenKind::Arrow
-                        | TokenKind::KwElse
-                        | TokenKind::KwThrow
-                        | TokenKind::KwMacro
-                )
-            });
+            let operand = after_control_header
+                || tokens.last().is_none_or(|t: &Token| {
+                    matches!(
+                        t.kind,
+                        TokenKind::Assign
+                            | TokenKind::KwReturn
+                            | TokenKind::LParen
+                            | TokenKind::LBracket
+                            | TokenKind::LBrace
+                            | TokenKind::Comma
+                            | TokenKind::Colon
+                            | TokenKind::Question
+                            | TokenKind::Arrow
+                            | TokenKind::KwElse
+                            | TokenKind::KwThrow
+                            | TokenKind::KwMacro
+                    )
+                });
             let token = if operand && self.peek() == b'<' && self.peek_at(1).is_ascii_alphabetic() {
                 let start = self.pos;
                 self.pos = crate::markup::scan(self.source, start)?;
                 Token::new(TokenKind::MarkupLit, start, self.pos)
             } else {
                 self.next_token()?
+            };
+            // A control header starts a body; an ordinary ')' ends an operand.
+            after_control_header = match token.kind {
+                TokenKind::LParen => {
+                    paren_headers.push(tokens.last().is_some_and(|previous| {
+                        matches!(
+                            previous.kind,
+                            TokenKind::KwIf
+                                | TokenKind::KwFor
+                                | TokenKind::KwWhile
+                                | TokenKind::KwCatch
+                        )
+                    }));
+                    false
+                }
+                TokenKind::RParen => paren_headers.pop().unwrap_or(false),
+                _ => false,
             };
             tokens.push(token);
         }

@@ -60,6 +60,21 @@ impl CompilationUnit {
             })
     }
 
+    /// Whether editor text still produces the source used for this file's spans.
+    pub fn source_matches(&self, file_id: u32, source: &str) -> bool {
+        let Some(original) = self.source_of(file_id) else {
+            return false;
+        };
+        if original == source {
+            return true;
+        }
+        let Some(filename) = self.file_path_of(file_id) else {
+            return false;
+        };
+        original
+            == parser::preprocessor::preprocess(source, &self.preprocessor_config_for(filename))
+    }
+
     /// The fields a compiled class declares: (name, symbol, is static).
     pub fn class_fields(
         &self,

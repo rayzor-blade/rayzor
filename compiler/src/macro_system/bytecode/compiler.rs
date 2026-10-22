@@ -986,7 +986,9 @@ impl BytecodeCompiler {
                 field: method,
                 ..
             } => {
-                if let ExprKind::Ident(class_name) = &base.kind {
+                if let ExprKind::Ident(class_name) = &base.kind
+                    && self.locals.resolve(class_name).is_none()
+                {
                     // Check if this is a known static call pattern
                     let class_idx = self.chunk.intern_string(class_name);
                     let method_idx = self.chunk.intern_string(method);

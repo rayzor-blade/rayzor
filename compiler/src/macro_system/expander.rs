@@ -1314,7 +1314,7 @@ impl MacroExpander {
             call_site: location,
             call_span: call_expr.span,
             definition_file: Some(macro_def.source_file.clone()),
-            definition_site: Some(super::errors::span_to_location(macro_def.body.span)),
+            definition_site: Some(macro_def.definition_site),
             expanded_span: expanded.span,
             expanded_text: Some(expanded_expr_source(&expanded)),
         });
@@ -1342,9 +1342,8 @@ impl Default for MacroExpander {
 pub fn run_generation_hooks(
     hooks: &[(String, MacroValue)],
     files: &[HaxeFile],
-    mut class_registry: ClassRegistry,
+    class_registry: ClassRegistry,
 ) -> Result<Vec<MacroDiagnostic>, MacroError> {
-    class_registry.register_files(files);
     let context = class_registry.macro_context();
     let types = MacroValue::Array(Arc::new(files.iter().flat_map(module_types).collect()));
     let mut interp = MacroInterpreter::with_class_registry(

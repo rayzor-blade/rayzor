@@ -1027,17 +1027,28 @@ impl<'a> AstLowering<'a> {
                 .filter(|s| s.is_static())
                 .and_then(|_| self.resolve_type_to_class_symbol(obj_expr.expr_type));
             if let Some(owner) = static_owner.filter(|_| receiver_is_local) {
-                if let Some(owner_expr) = self.class_path_expr(owner, expression.span) {
-                    let direct = Expr {
-                        kind: ExprKind::Field {
-                            expr: Box::new(owner_expr),
-                            field: field.to_string(),
-                            is_optional: false,
-                        },
-                        span: expression.span,
-                    };
-                    return self.lower_expression(&direct);
-                }
+                // Use the resolved symbols: the class's source spelling may
+                // itself be shadowed by the variable holding its value.
+                let expr_type = self
+                    .context
+                    .symbol_table
+                    .get_symbol(field_symbol)
+                    .map(|symbol| symbol.type_id)
+                    .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+                let kind = TypedExpressionKind::StaticFieldAccess {
+                    class_symbol: owner,
+                    field_symbol,
+                };
+                let lifetime_id = self.assign_lifetime(&kind, &expr_type);
+                let metadata = self.analyze_expression_metadata(&kind);
+                return Ok(TypedExpression {
+                    expr_type,
+                    kind,
+                    usage: VariableUsage::Copy,
+                    lifetime_id,
+                    source_location: self.context.create_location_from_span(expression.span),
+                    metadata,
+                });
             }
             // The expression's type is the method's function type,
             // which the symbol already carries (or Dynamic as a
@@ -1365,28 +1376,31 @@ impl<'a> AstLowering<'a> {
             _ => None,
         };
         if let Some(enum_symbol) = enum_symbol {
-            let is_variant = self
+            let variant = self
                 .context
                 .symbol_table
                 .get_symbol(enum_symbol)
-                .and_then(|e| {
+                .and_then(|enum_decl| {
                     self.context
                         .symbol_table
-                        .lookup_symbol(e.scope_id, method_name)
+                        .lookup_symbol(enum_decl.scope_id, method_name)
                 })
-                .is_some_and(|v| v.kind == crate::tast::symbols::SymbolKind::EnumVariant);
-            if is_variant {
-                if let Some(enum_expr) = self.class_path_expr(enum_symbol, expression.span) {
-                    let direct = Expr {
-                        kind: ExprKind::Field {
-                            expr: Box::new(enum_expr),
-                            field: method.to_string(),
-                            is_optional: false,
-                        },
-                        span: expression.span,
-                    };
-                    return self.lower_expression(&direct).map(Some);
-                }
+                .filter(|symbol| symbol.kind == crate::tast::symbols::SymbolKind::EnumVariant)
+                .map(|symbol| (symbol.id, symbol.type_id));
+            if let Some((symbol_id, expr_type)) = variant {
+                // A resolved constructor must not be looked up again through
+                // a qualified spelling that may still name an import placeholder.
+                let kind = TypedExpressionKind::Variable { symbol_id };
+                let lifetime_id = self.assign_lifetime(&kind, &expr_type);
+                let metadata = self.analyze_expression_metadata(&kind);
+                return Ok(Some(TypedExpression {
+                    expr_type,
+                    kind,
+                    usage: VariableUsage::Borrow,
+                    lifetime_id,
+                    source_location: self.context.create_location_from_span(expression.span),
+                    metadata,
+                }));
             }
         }
 
@@ -1423,33 +1437,6 @@ impl<'a> AstLowering<'a> {
                 .map(Some);
         }
         Ok(None)
-    }
-
-    /// The expression naming a class by its qualified path (`a.b.C`).
-    fn class_path_expr(&self, class: SymbolId, span: parser::Span) -> Option<Expr> {
-        let sym = self.context.symbol_table.get_symbol(class)?;
-        let path = sym
-            .qualified_name
-            .or(Some(sym.name))
-            .and_then(|n| self.context.string_interner.get(n))?
-            .to_string();
-        let mut parts = path.split('.');
-        let first = parts.next()?;
-        let mut expr = Expr {
-            kind: ExprKind::Ident(first.to_string()),
-            span,
-        };
-        for part in parts {
-            expr = Expr {
-                kind: ExprKind::Field {
-                    expr: Box::new(expr),
-                    field: part.to_string(),
-                    is_optional: false,
-                },
-                span,
-            };
-        }
-        Some(expr)
     }
 
     fn method_returns_void(&self, method: SymbolId) -> bool {

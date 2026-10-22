@@ -183,8 +183,15 @@ pub fn format_hover(
     let mut parts = Vec::new();
 
     // Code block with full signature
-    let sig = format_symbol_signature(sym, &tt, interner);
+    let sig = format_symbol_signature(sym, &tt, interner, symbol_table);
     parts.push(format!("```haxe\n{}\n```", sig));
+    if sym.kind == SymbolKind::Function
+        && !tt
+            .get(sym.type_id)
+            .is_some_and(|t| matches!(t.kind, TypeKind::Function { .. }))
+    {
+        parts.push("*Signature not yet resolved.*".to_string());
+    }
 
     // Qualified context
     if let Some(qn) = sym.qualified_name.and_then(|qn| interner.get(qn))
@@ -249,6 +256,7 @@ fn format_symbol_signature(
     sym: &Symbol,
     type_table: &TypeTable,
     interner: &StringInterner,
+    symbol_table: &SymbolTable,
 ) -> String {
     let name = interner.get(sym.name).unwrap_or("?");
     let vis = match sym.visibility {
@@ -279,14 +287,14 @@ fn format_symbol_signature(
 
     match sym.kind {
         SymbolKind::Function => {
-            let type_str = format_function_type(sym.type_id, type_table, interner);
+            let type_str = format_function_type(sym.type_id, type_table, interner, symbol_table);
             format!(
                 "{}{}{}{}{}function {}{}",
                 vis, static_kw, inline_kw, override_kw, final_kw, name, type_str
             )
         }
         SymbolKind::Variable => {
-            let type_str = format_type_name(sym.type_id, type_table, interner);
+            let type_str = format_type_name(sym.type_id, type_table, interner, symbol_table);
             let kw = if sym.flags.contains(SymbolFlags::FINAL) {
                 "final"
             } else {
@@ -295,7 +303,7 @@ fn format_symbol_signature(
             format!("{} {}:{}", kw, name, type_str)
         }
         SymbolKind::Field => {
-            let type_str = format_type_name(sym.type_id, type_table, interner);
+            let type_str = format_type_name(sym.type_id, type_table, interner, symbol_table);
             let kw = if sym.flags.contains(SymbolFlags::FINAL) {
                 "final"
             } else {
@@ -304,11 +312,11 @@ fn format_symbol_signature(
             format!("{}{}{} {}:{}", vis, static_kw, kw, name, type_str)
         }
         SymbolKind::Property => {
-            let type_str = format_type_name(sym.type_id, type_table, interner);
+            let type_str = format_type_name(sym.type_id, type_table, interner, symbol_table);
             format!("{}{}var {}(get, set):{}", vis, static_kw, name, type_str)
         }
         SymbolKind::Parameter => {
-            let type_str = format_type_name(sym.type_id, type_table, interner);
+            let type_str = format_type_name(sym.type_id, type_table, interner, symbol_table);
             let opt = if sym.flags.contains(SymbolFlags::OPTIONAL) {
                 "?"
             } else {
@@ -335,11 +343,18 @@ fn format_symbol_signature(
             format!("{}{}abstract {}", vis, ea, name)
         }
         SymbolKind::TypeAlias => {
-            let type_str = format_type_name(sym.type_id, type_table, interner);
+            let target = type_table
+                .get(sym.type_id)
+                .and_then(|ty| match ty.kind {
+                    TypeKind::TypeAlias { target_type, .. } => Some(target_type),
+                    _ => None,
+                })
+                .unwrap_or(sym.type_id);
+            let type_str = format_type_name(target, type_table, interner, symbol_table);
             format!("typedef {} = {}", name, type_str)
         }
         SymbolKind::EnumVariant => {
-            let type_str = format_type_name(sym.type_id, type_table, interner);
+            let type_str = format_type_name(sym.type_id, type_table, interner, symbol_table);
             if type_str == "Void" {
                 name.to_string()
             } else {
@@ -350,7 +365,7 @@ fn format_symbol_signature(
         SymbolKind::Macro => format!("macro {}", name),
         SymbolKind::Module => format!("package {}", name),
         _ => {
-            let type_str = format_type_name(sym.type_id, type_table, interner);
+            let type_str = format_type_name(sym.type_id, type_table, interner, symbol_table);
             format!("{}:{}", name, type_str)
         }
     }
@@ -365,6 +380,7 @@ fn format_function_type(
     type_id: TypeId,
     type_table: &TypeTable,
     interner: &StringInterner,
+    symbol_table: &SymbolTable,
 ) -> String {
     if let Some(ti) = type_table.get(type_id)
         && let TypeKind::Function {
@@ -375,25 +391,56 @@ fn format_function_type(
     {
         let param_strs: Vec<String> = params
             .iter()
-            .map(|p| format_type_name(*p, type_table, interner))
+            .map(|p| format_type_name(*p, type_table, interner, symbol_table))
             .collect();
-        let ret = format_type_name(*return_type, type_table, interner);
+        let ret = format_type_name(*return_type, type_table, interner, symbol_table);
         return format!("({}):{}", param_strs.join(", "), ret);
     }
-    format_type_name(type_id, type_table, interner)
+    "(…)".to_string()
 }
 
-/// Format a type as a human-readable Haxe type name.
+/// Format a type using declaration names from the analysis that owns its IDs.
 pub fn format_type_name(
     type_id: TypeId,
     type_table: &TypeTable,
     interner: &StringInterner,
+    symbol_table: &SymbolTable,
 ) -> String {
-    let ti = match type_table.get(type_id) {
-        Some(ti) => ti,
-        None => return "Unknown".to_string(),
+    format_type_at(type_id, type_table, interner, symbol_table, 0)
+}
+
+fn format_type_at(
+    type_id: TypeId,
+    type_table: &TypeTable,
+    interner: &StringInterner,
+    symbols: &SymbolTable,
+    depth: usize,
+) -> String {
+    if depth >= 64 {
+        return "…".into();
+    }
+    let Some(ty) = type_table.get(type_id) else {
+        return "Unknown".into();
     };
-    match &ti.kind {
+    let nested = |id| format_type_at(id, type_table, interner, symbols, depth + 1);
+    let named = |symbol, args: &[TypeId]| {
+        let name = symbols
+            .display_type_path(symbol, interner)
+            .unwrap_or_else(|| "_".into());
+        if args.is_empty() {
+            name
+        } else {
+            format!(
+                "{}<{}>",
+                name,
+                args.iter()
+                    .map(|&id| nested(id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    };
+    match &ty.kind {
         TypeKind::Void => "Void".into(),
         TypeKind::Bool => "Bool".into(),
         TypeKind::Int => "Int".into(),
@@ -402,82 +449,99 @@ pub fn format_type_name(
         TypeKind::Char => "Char".into(),
         TypeKind::Dynamic => "Dynamic".into(),
         TypeKind::Unknown => "Unknown".into(),
-        TypeKind::Class { .. } => {
-            // Try to get the class name from the Display impl
-            format!("{}", ti.kind)
+        TypeKind::Error => "<error>".into(),
+        TypeKind::Class {
+            symbol_id,
+            type_args,
         }
-        TypeKind::Interface { .. } => "Interface".into(),
-        TypeKind::Enum { .. } => "Enum".into(),
-        TypeKind::Array { element_type, .. } => {
-            format!(
-                "Array<{}>",
-                format_type_name(*element_type, type_table, interner)
-            )
+        | TypeKind::Interface {
+            symbol_id,
+            type_args,
         }
+        | TypeKind::Enum {
+            symbol_id,
+            type_args,
+        }
+        | TypeKind::Abstract {
+            symbol_id,
+            type_args,
+            ..
+        }
+        | TypeKind::TypeAlias {
+            symbol_id,
+            type_args,
+            ..
+        } => named(*symbol_id, type_args),
+        TypeKind::TypeParameter { symbol_id, .. } => symbols
+            .get_symbol(*symbol_id)
+            .and_then(|s| interner.get(s.name))
+            .unwrap_or("T")
+            .into(),
+        TypeKind::Placeholder { name } | TypeKind::ConstArgument { value: name } => {
+            interner.get(*name).unwrap_or("_").into()
+        }
+        TypeKind::Array { element_type } => format!("Array<{}>", nested(*element_type)),
         TypeKind::Map {
             key_type,
             value_type,
-            ..
-        } => {
-            format!(
-                "Map<{}, {}>",
-                format_type_name(*key_type, type_table, interner),
-                format_type_name(*value_type, type_table, interner)
-            )
-        }
-        TypeKind::Optional { inner_type, .. } => {
-            format!(
-                "Null<{}>",
-                format_type_name(*inner_type, type_table, interner)
-            )
-        }
+        } => format!("Map<{}, {}>", nested(*key_type), nested(*value_type)),
+        TypeKind::Optional { inner_type } => format!("Null<{}>", nested(*inner_type)),
         TypeKind::Function {
             params,
             return_type,
             ..
-        } => {
-            let ps: Vec<String> = params
+        } => format!(
+            "({}) -> {}",
+            params
                 .iter()
-                .map(|p| format_type_name(*p, type_table, interner))
-                .collect();
-            format!(
-                "({}) -> {}",
-                ps.join(", "),
-                format_type_name(*return_type, type_table, interner)
-            )
-        }
-        TypeKind::TypeParameter { .. } => "T".to_string(),
+                .map(|&p| nested(p))
+                .collect::<Vec<_>>()
+                .join(", "),
+            nested(*return_type)
+        ),
         TypeKind::GenericInstance {
             base_type,
             type_args,
             ..
         } => {
-            let base = format_type_name(*base_type, type_table, interner);
-            let args: Vec<String> = type_args
-                .iter()
-                .map(|a| format_type_name(*a, type_table, interner))
-                .collect();
-            if args.is_empty() {
+            let base = nested(*base_type);
+            if type_args.is_empty() {
                 base
             } else {
-                format!("{}<{}>", base, args.join(", "))
+                format!(
+                    "{}<{}>",
+                    base,
+                    type_args
+                        .iter()
+                        .map(|&a| nested(a))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
         }
-        TypeKind::TypeAlias { target_type, .. } => {
-            format_type_name(*target_type, type_table, interner)
-        }
-        TypeKind::Anonymous { fields, .. } => {
-            let fs: Vec<String> = fields
+        TypeKind::Anonymous { fields } => format!(
+            "{{ {} }}",
+            fields
                 .iter()
-                .map(|f| {
-                    let fname = interner.get(f.name).unwrap_or("?");
-                    let ftype = format_type_name(f.type_id, type_table, interner);
-                    format!("{}:{}", fname, ftype)
-                })
-                .collect();
-            format!("{{ {} }}", fs.join(", "))
-        }
-        _ => format!("{}", ti.kind),
+                .map(|f| format!(
+                    "{}:{}",
+                    interner.get(f.name).unwrap_or("_"),
+                    nested(f.type_id)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TypeKind::Union { types } => types
+            .iter()
+            .map(|&t| nested(t))
+            .collect::<Vec<_>>()
+            .join(" | "),
+        TypeKind::Intersection { types } => types
+            .iter()
+            .map(|&t| nested(t))
+            .collect::<Vec<_>>()
+            .join(" & "),
+        TypeKind::Reference { target_type, .. } => nested(*target_type),
     }
 }
 
@@ -512,7 +576,7 @@ pub fn collect_completions(
         }
 
         let kind = symbol_kind_to_completion(sym.kind);
-        let detail = format_type_name(sym.type_id, &tt, interner);
+        let detail = format_type_name(sym.type_id, &tt, interner, symbol_table);
         let doc = sym
             .documentation
             .and_then(|d| interner.get(d))
@@ -757,7 +821,7 @@ pub fn build_document_symbols(
             Some(n) if !n.is_empty() && !n.starts_with("__") => n.to_string(),
             _ => continue,
         };
-        let detail = format_type_name(sym.type_id, &tt, interner);
+        let detail = format_type_name(sym.type_id, &tt, interner, symbol_table);
         let loc = sym.definition_location;
 
         let entry = DocumentSymbolEntry {
@@ -860,9 +924,9 @@ pub fn build_signature_help(
     let name = interner.get(sym.name)?;
     let param_strs: Vec<String> = params
         .iter()
-        .map(|p| format_type_name(*p, &tt, interner))
+        .map(|p| format_type_name(*p, &tt, interner, symbol_table))
         .collect();
-    let ret_str = format_type_name(ret, &tt, interner);
+    let ret_str = format_type_name(ret, &tt, interner, symbol_table);
 
     let label = format!("{}({}):{}", name, param_strs.join(", "), ret_str);
 
@@ -977,7 +1041,7 @@ pub fn resolve_name(
 }
 
 /// The class a value of type `type_id` is an instance of.
-fn class_of_type(
+pub(crate) fn class_of_type(
     type_id: TypeId,
     symbol_table: &SymbolTable,
     type_table: &TypeTable,
@@ -1188,7 +1252,7 @@ pub fn member_completions(
             entries.push(CompletionEntry {
                 label: name.to_string(),
                 kind: symbol_kind_to_completion(member.kind),
-                detail: format_type_name(member.type_id, &tt, interner),
+                detail: format_type_name(member.type_id, &tt, interner, symbol_table),
                 documentation: member
                     .documentation
                     .and_then(|d| interner.get(d))
@@ -1291,6 +1355,21 @@ pub fn enclosing_call(text: &str, line: u32, col: u32) -> Option<CallAtCursor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unresolved_function_hover_keeps_the_name_and_explains_missing_signature() {
+        let interner = StringInterner::new();
+        let mut symbols = SymbolTable::new();
+        let method = symbols.create_function(interner.intern("getUI16"));
+        let types = Rc::new(RefCell::new(TypeTable::new()));
+        for ty in [TypeId::invalid(), types.borrow().unknown_type()] {
+            symbols.get_symbol_mut(method).unwrap().type_id = ty;
+            let hover = format_hover(method, &symbols, &types, &interner).unwrap();
+            assert!(hover.contains("public function getUI16(…)"), "{hover}");
+            assert!(hover.contains("Signature not yet resolved"), "{hover}");
+            assert!(!hover.contains("getUI16Unknown"), "{hover}");
+        }
+    }
 
     #[test]
     fn finds_the_receiver_before_a_dot() {

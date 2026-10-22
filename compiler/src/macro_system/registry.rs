@@ -98,6 +98,8 @@ pub struct MacroDefinition {
     pub imports: std::sync::Arc<std::collections::BTreeMap<String, String>>,
     /// Source location of the definition
     pub location: SourceLocation,
+    /// Logical editor position in the source view used during registration.
+    pub definition_site: SourceLocation,
 }
 
 impl MacroDefinition {
@@ -248,6 +250,17 @@ impl MacroRegistry {
             }
         }
 
+        for definition in self.macros.values_mut().filter(|d| {
+            d.source_file == source_file
+                && d.definition_site.line == 0
+                && d.definition_site.file_id == 0
+        }) {
+            let offset = definition.definition_site.byte_offset as usize;
+            definition.definition_site = super::errors::location_in_source(
+                file.input.as_deref(),
+                parser::Span::new(offset, offset),
+            );
+        }
         Ok(())
     }
 
@@ -359,6 +372,7 @@ impl MacroRegistry {
                 source_file: source_file.to_string(),
                 imports: file_imports.clone(),
                 location: SourceLocation::new(0, 0, 0, field.span.start as u32),
+                definition_site: super::errors::span_to_location(field.span),
             };
 
             // Bytecode compilation is deferred — the tiering scheduler in the

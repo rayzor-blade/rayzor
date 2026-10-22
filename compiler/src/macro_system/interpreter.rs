@@ -914,9 +914,12 @@ impl MacroInterpreter {
 
                 // Special handling for known types
                 match resolved_name.as_str() {
-                    "Map" | "haxe.ds.Map" => Ok(MacroValue::Object(Arc::new(
-                        std::collections::BTreeMap::new(),
-                    ))),
+                    "Map"
+                    | "haxe.ds.Map"
+                    | "haxe.ds.StringMap"
+                    | "haxe.ds.IntMap"
+                    | "haxe.ds.ObjectMap"
+                    | "haxe.ds.EnumValueMap" => Ok(MacroValue::Map(Arc::new(Vec::new()))),
                     "Array" => Ok(MacroValue::Array(Arc::new(Vec::new()))),
                     "sys.io.Process" => self.construct_process(arg_vals, location),
                     "sys.io.File" => self.construct_file(arg_vals, location),
@@ -1169,7 +1172,7 @@ impl MacroInterpreter {
                 let mut base_val = self.eval_expr(base)?;
                 let old = base_val.clone();
                 if base_val.set_field(field, new_val.clone()) {
-                    self.env.replace_references(&old, &base_val);
+                    self.replace_references(&old, &base_val);
                     // Re-assign the modified object back
                     self.assign_base(base, base_val)?;
                     Ok(new_val)
@@ -1187,6 +1190,7 @@ impl MacroInterpreter {
             ExprKind::Index { expr: base, index } => {
                 let mut base_val = self.eval_expr(base)?;
                 let idx = self.eval_expr(index)?;
+                let old = base_val.clone();
                 match (&mut base_val, &idx) {
                     (MacroValue::Array(arc_arr), MacroValue::Int(i)) => {
                         let idx = *i as usize;
@@ -1194,11 +1198,13 @@ impl MacroInterpreter {
                         if idx < arr.len() {
                             arr[idx] = new_val.clone();
                         }
+                        self.replace_references(&old, &base_val);
                         self.assign_base(base, base_val)?;
                         Ok(new_val)
                     }
                     (MacroValue::Object(arc_map), _) => {
                         Arc::make_mut(arc_map).insert(idx.to_display_string(), new_val.clone());
+                        self.replace_references(&old, &base_val);
                         self.assign_base(base, base_val)?;
                         Ok(new_val)
                     }
@@ -1208,6 +1214,7 @@ impl MacroInterpreter {
                             key.clone(),
                             new_val.clone(),
                         );
+                        self.replace_references(&old, &base_val);
                         self.assign_base(base, base_val)?;
                         Ok(new_val)
                     }
@@ -1221,6 +1228,14 @@ impl MacroInterpreter {
                 message: "invalid assignment target".to_string(),
                 location,
             }),
+        }
+    }
+
+    fn replace_references(&mut self, old: &MacroValue, new: &MacroValue) {
+        let mut updates = super::value::ReferenceUpdates::new();
+        self.env.replace_references_with(old, new, &mut updates);
+        if let Some(registry) = &self.class_registry {
+            registry.replace_static_references(old, new, &mut updates);
         }
     }
 
@@ -1383,6 +1398,11 @@ impl MacroInterpreter {
 
                 // Method call: base.field(args)
                 let base_val = self.eval_expr(base)?;
+                let mut updated = base_val.clone();
+                if let Some(result) = updated.mutate_map(field, &arg_vals) {
+                    self.replace_references(&base_val, &updated);
+                    return Ok(result);
+                }
 
                 // `pop`/`shift` return the removed element, so the array they
                 // leave behind is written back here rather than below.
@@ -1831,6 +1851,10 @@ impl MacroInterpreter {
                     Ok(result) => {
                         // Collect trace output from VM
                         self.trace_output.append(&mut vm.trace_output);
+                        let updates = vm.take_reference_updates();
+                        for (old, new) in updates {
+                            self.replace_references(&old, &new);
+                        }
                         return Ok(result);
                     }
                     Err(_) => {
@@ -4793,6 +4817,95 @@ mod tests {
             }
         }
         Ok(MacroValue::Null)
+    }
+
+    #[test]
+    fn maps_preserve_aliases_through_nested_helpers_and_closures() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                let file = parser::rd::rd_parse(
+                    include_str!("../../tests/haxe/macro_map_depth/MapDepth.hx"),
+                    "MapDepth.hx",
+                    false,
+                    false,
+                )
+                .unwrap();
+                let mut classes = ClassRegistry::new();
+                classes.register_file(&file);
+                let mut interp = MacroInterpreter::with_class_registry(
+                    MacroRegistry::new(),
+                    Default::default(),
+                    Arc::new(classes),
+                );
+                for _ in 0..3 {
+                    assert_eq!(
+                        interp
+                            .try_static_call("MapDepth", "check", &[], SourceLocation::unknown())
+                            .unwrap(),
+                        Some(MacroValue::Bool(true))
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn promoted_maps_update_callers_and_closures_fall_back() {
+        let file = parser::rd::rd_parse(
+            r#"class Hot {
+            public static macro function mutate(map:Map<String, Int>):Int {
+                map.set("answer", 42);
+                return map.get("answer");
+            }
+            public static macro function closure():Int {
+                var get = function() return 42;
+                return get();
+            }
+        }"#,
+            "Hot.hx",
+            false,
+            false,
+        )
+        .unwrap();
+        let mut registry = MacroRegistry::new();
+        registry.scan_and_register(&file, &file.filename).unwrap();
+        let mut interp = MacroInterpreter::new(registry);
+        interp.vm = Some(MacroVm::new());
+        interp.scheduler = Some(MorselScheduler {
+            call_counts: BTreeMap::new(),
+            threshold: 1,
+            classes_compiled: false,
+        });
+        for _ in 0..3 {
+            let map = MacroValue::Map(Arc::new(Vec::new()));
+            interp.env.define("caller", map.clone());
+            let def = interp.registry.get_macro("Hot.mutate").unwrap().clone();
+            assert_eq!(
+                interp
+                    .call_macro_def(&def, vec![map], SourceLocation::unknown())
+                    .unwrap(),
+                MacroValue::Int(42)
+            );
+            assert_eq!(
+                interp
+                    .env
+                    .get("caller")
+                    .unwrap()
+                    .map_method("get", &[MacroValue::from_string("answer".into())]),
+                Some(MacroValue::Int(42))
+            );
+            assert!(interp.registry.get_compiled("Hot.mutate").is_some());
+            let def = interp.registry.get_macro("Hot.closure").unwrap().clone();
+            assert_eq!(
+                interp
+                    .call_macro_def(&def, vec![], SourceLocation::unknown())
+                    .unwrap(),
+                MacroValue::Int(42)
+            );
+        }
     }
 
     #[test]

@@ -67,11 +67,21 @@ pub(crate) fn record(unit: &mut CompilationUnit) {
             unit.symbol_table.get_symbol_mut(id).unwrap().documentation = Some(doc);
         }
     }
-    // Builtin/extern symbols may have no lowered body or source location.
-    // Their parsed declarations still carry the offsets of their comments.
+    // Imported placeholders may have no original source location. Match their
+    // qualified identity to the parsed declaration, as for builtin symbols.
     let mut extern_docs = BTreeMap::new();
-    for file in &unit.stdlib_files {
-        let Some(comments) = file.input.as_deref().and_then(SourceComments::new) else {
+    for file in unit.stdlib_files.iter().chain(&unit.user_files) {
+        let disk_source;
+        let source = if let Some(source) = file.input.as_deref() {
+            source
+        } else {
+            disk_source = std::fs::read_to_string(&file.filename).ok();
+            let Some(source) = disk_source.as_deref() else {
+                continue;
+            };
+            source
+        };
+        let Some(comments) = SourceComments::new(source) else {
             continue;
         };
         let package = file
@@ -116,11 +126,13 @@ pub(crate) fn record(unit: &mut CompilationUnit) {
         .all_symbols()
         .filter(|s| s.documentation.is_none())
         .filter_map(|s| {
-            let name = unit.symbol_table.build_qualified_name(
-                s.id,
-                &unit.scope_tree,
-                &unit.string_interner,
-            );
+            let name = s.qualified_name.unwrap_or_else(|| {
+                unit.symbol_table.build_qualified_name(
+                    s.id,
+                    &unit.scope_tree,
+                    &unit.string_interner,
+                )
+            });
             let name = unit.string_interner.get(name)?;
             extern_docs.get(name).map(|&doc| (s.id, doc))
         })

@@ -4,7 +4,7 @@
 //! It uses a flat operand stack with indexed local variable access (O(1)
 //! instead of the tree-walker's O(n) scope chain scan).
 
-use super::super::value::{MacroFunction, MacroParam, MacroValue};
+use super::super::value::{MacroFunction, MacroValue};
 use super::chunk::Chunk;
 use super::opcode::{Op, Reader};
 use parser::Span;
@@ -73,6 +73,7 @@ pub struct MacroVm {
     pub trace_output: Vec<String>,
     /// Compiled class data for constructor/method dispatch.
     class_chunks: BTreeMap<String, CompiledClassInfo>,
+    reference_updates: Vec<(MacroValue, MacroValue)>,
 }
 
 impl MacroVm {
@@ -82,6 +83,7 @@ impl MacroVm {
             frames: Vec::with_capacity(16),
             trace_output: Vec::new(),
             class_chunks: BTreeMap::new(),
+            reference_updates: Vec::new(),
         }
     }
 
@@ -100,6 +102,7 @@ impl MacroVm {
         self.stack.clear();
         self.frames.clear();
         self.trace_output.clear();
+        self.reference_updates.clear();
 
         let bp = 0;
 
@@ -554,7 +557,9 @@ impl MacroVm {
                     let val = self.pop()?;
                     let index = self.pop()?;
                     let mut base = self.pop()?;
+                    let old = base.clone();
                     self.set_index(&mut base, index, val.clone())?;
+                    self.replace_references(&old, &base);
                     self.stack.push(val);
                 }
 
@@ -589,51 +594,9 @@ impl MacroVm {
                     self.stack.push(MacroValue::Map(Arc::new(map)));
                 }
                 Op::MakeClosure => {
-                    let chunk_idx = self.read_u16(frame_idx);
-                    let sub_chunk =
-                        self.frames[frame_idx].chunk.closures[chunk_idx as usize].clone();
-                    let params: Vec<MacroParam> = sub_chunk
-                        .params
-                        .iter()
-                        .map(|p| {
-                            let name = sub_chunk
-                                .local_names
-                                .iter()
-                                .find(|(slot, _)| *slot == p.slot)
-                                .map(|(_, n)| n.clone())
-                                .unwrap_or_default();
-                            MacroParam {
-                                name,
-                                optional: p.optional,
-                                rest: false,
-                                default_value: None,
-                            }
-                        })
-                        .collect();
-
-                    // Capture current environment for the closure
-                    let bp = self.frames[frame_idx].bp;
-                    let mut captures = BTreeMap::new();
-                    for (slot, name) in &self.frames[frame_idx].chunk.local_names {
-                        let idx = bp + *slot as usize;
-                        if idx < self.stack.len() {
-                            captures.insert(
-                                name.clone(),
-                                Arc::new(std::sync::Mutex::new(self.stack[idx].clone())),
-                            );
-                        }
-                    }
-
-                    let func = MacroFunction {
-                        name: sub_chunk.name.clone(),
-                        params,
-                        body: Arc::new(parser::Expr {
-                            kind: parser::ExprKind::Null,
-                            span: Span { start: 0, end: 0 },
-                        }),
-                        captures,
-                    };
-                    self.stack.push(MacroValue::Function(Arc::new(func)));
+                    return Err(
+                        self.error(frame_idx, "closures require the macro interpreter".into())
+                    );
                 }
                 Op::NewObject => {
                     let name_idx = self.read_u16(frame_idx);
@@ -646,6 +609,18 @@ impl MacroVm {
 
                     let class_name = self.get_string_constant(frame_idx, name_idx)?;
 
+                    if matches!(
+                        class_name.as_str(),
+                        "Map"
+                            | "haxe.ds.Map"
+                            | "haxe.ds.StringMap"
+                            | "haxe.ds.IntMap"
+                            | "haxe.ds.ObjectMap"
+                            | "haxe.ds.EnumValueMap"
+                    ) {
+                        self.stack.push(MacroValue::Map(Arc::new(Vec::new())));
+                        continue;
+                    }
                     // Check if we have compiled class data
                     if let Some(class_info) = self.class_chunks.get(&class_name) {
                         // Create object with __type__ and instance var defaults
@@ -907,9 +882,21 @@ impl MacroVm {
         _func: &MacroFunction,
         _args: Vec<MacroValue>,
     ) -> Result<MacroValue, VmError> {
-        // TODO: full function call support with new frame
-        // For now, return Null for non-bytecode functions
-        Ok(MacroValue::Null)
+        Err(VmError::new(
+            "function values require the macro interpreter",
+        ))
+    }
+
+    pub(crate) fn take_reference_updates(&mut self) -> Vec<(MacroValue, MacroValue)> {
+        std::mem::take(&mut self.reference_updates)
+    }
+
+    fn replace_references(&mut self, old: &MacroValue, new: &MacroValue) {
+        self.reference_updates.push((old.clone(), new.clone()));
+        let mut updates = super::super::value::ReferenceUpdates::new();
+        for value in &mut self.stack {
+            value.replace_reference(old, new, &mut updates);
+        }
     }
 
     /// Call a method on a value.
@@ -919,6 +906,11 @@ impl MacroVm {
         method: &str,
         args: Vec<MacroValue>,
     ) -> Result<MacroValue, VmError> {
+        let mut updated = base.clone();
+        if let Some(result) = updated.mutate_map(method, &args) {
+            self.replace_references(&base, &updated);
+            return Ok(result);
+        }
         match &base {
             MacroValue::Array(arr) => self.call_array_method(arr, method, args),
             MacroValue::Map(_) => base
@@ -1337,6 +1329,7 @@ fn vm_compare(
 mod tests {
     use super::super::compiler::BytecodeCompiler;
     use super::*;
+    use crate::macro_system::MacroParam;
 
     fn compile_and_run(expr: &parser::Expr) -> Result<MacroValue, VmError> {
         let chunk =
@@ -1640,6 +1633,48 @@ mod tests {
                 assert_eq!(arr[2], MacroValue::Int(3));
             }
             _ => panic!("expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn maps_preserve_aliases_across_compiled_helper_frames() {
+        let file = parser::rd::rd_parse(
+            include_str!("../../../tests/haxe/macro_map_depth/MapDepth.hx"),
+            "MapDepth.hx",
+            false,
+            false,
+        )
+        .unwrap();
+        let mut registry = crate::macro_system::class_registry::ClassRegistry::new();
+        registry.register_file(&file);
+        let class = registry.find_class("MapDepth").unwrap();
+        let mut methods = BTreeMap::new();
+        for name in ["vmCheck", "vmWrite"] {
+            let method = &class.static_methods[name];
+            let params: Vec<_> = method
+                .params
+                .iter()
+                .map(crate::macro_system::MacroParam::from_function_param)
+                .collect();
+            let chunk = BytecodeCompiler::compile(name, &params, &method.body).unwrap();
+            methods.insert(name.to_string(), Arc::new(chunk));
+        }
+        let entry = methods["vmCheck"].clone();
+        let mut vm = MacroVm::new();
+        vm.set_class_chunks(BTreeMap::from([(
+            "MapDepth".into(),
+            CompiledClassInfo {
+                constructor: None,
+                instance_methods: BTreeMap::new(),
+                static_methods: methods,
+                instance_vars: Vec::new(),
+            },
+        )]));
+        for _ in 0..3 {
+            assert_eq!(
+                vm.execute(entry.clone(), vec![]).unwrap(),
+                MacroValue::Bool(true)
+            );
         }
     }
 

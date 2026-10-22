@@ -109,6 +109,7 @@ pub fn process_build_macros_with_class_registry(
                         defer_build_macro(&mut class, meta);
                         continue;
                     }
+                    let original = class.clone();
                     match apply_build_macro(
                         &mut class,
                         meta,
@@ -120,7 +121,8 @@ pub fn process_build_macros_with_class_registry(
                     ) {
                         Ok(emitted) => {
                             diagnostics.extend(emitted);
-                            origins.push(build_origin(
+                            origins.extend(build_origins(
+                                &original,
                                 &class,
                                 meta,
                                 registry,
@@ -159,6 +161,7 @@ pub fn process_build_macros_with_class_registry(
                             defer_build_macro(&mut class, &auto_build.build_meta);
                             continue;
                         }
+                        let original = class.clone();
                         match apply_build_macro(
                             &mut class,
                             &auto_build.build_meta,
@@ -170,9 +173,12 @@ pub fn process_build_macros_with_class_registry(
                         ) {
                             Ok(emitted) => {
                                 diagnostics.extend(emitted);
-                                origins.push(build_origin(
+                                let mut inherited_meta = auto_build.build_meta.clone();
+                                inherited_meta.span = class.span;
+                                origins.extend(build_origins(
+                                    &original,
                                     &class,
-                                    &auto_build.build_meta,
+                                    &inherited_meta,
                                     registry,
                                     class_registry.as_deref(),
                                 ));
@@ -217,50 +223,146 @@ pub fn process_build_macros_with_class_registry(
     }
 }
 
-fn build_origin(
+fn build_origins(
+    original: &ClassDecl,
     class: &ClassDecl,
     meta: &Metadata,
     registry: &MacroRegistry,
     classes: Option<&super::class_registry::ClassRegistry>,
-) -> super::expander::ExpansionOrigin {
+) -> Vec<super::expander::ExpansionOrigin> {
     let name = extract_build_macro_name(meta);
     let def = registry
         .get_macro(&name)
         .or_else(|| registry.find_macro_by_name(&name));
     let ordinary = name.rsplit_once('.').and_then(|(owner, method)| {
         let class = classes?.find_class(owner)?;
-        Some((&class.source_file, &class.static_methods.get(method)?.body))
+        Some((
+            &class.source_file,
+            class.static_methods.get(method)?.location,
+        ))
     });
-    let mut fields = Vec::new();
+    let anchor = if meta.span == class.span {
+        // Implicit build macros belong to the declaration, not its entire body.
+        parser::Span::new(class.span.start, class.span.start + "class".len())
+    } else {
+        meta.span
+    };
+    let template = super::expander::ExpansionOrigin {
+        macro_name: name,
+        call_site: super::errors::span_to_location(anchor),
+        call_span: anchor,
+        definition_site: def
+            .map(|d| d.definition_site)
+            .or_else(|| ordinary.map(|(_, location)| location)),
+        definition_file: def
+            .map(|d| d.source_file.clone())
+            .or_else(|| ordinary.map(|(file, _)| file.clone())),
+        expanded_span: class.span,
+        expanded_text: None,
+    };
+    let mut origins = Vec::new();
+    let mut added = Vec::new();
     for field in &class.fields {
-        let kind = match &field.kind {
-            ClassFieldKind::Function(f) => ExprKind::Function(f.clone()),
-            ClassFieldKind::Var {
-                name,
-                type_hint,
-                expr,
-            } => ExprKind::Var {
-                name: name.clone(),
-                type_hint: type_hint.clone(),
-                expr: expr.clone().map(Box::new),
-                attrs: Default::default(),
-            },
-            ClassFieldKind::Final {
-                name,
-                type_hint,
-                expr,
-            } => ExprKind::Final {
-                name: name.clone(),
-                type_hint: type_hint.clone(),
-                expr: expr.clone().map(Box::new),
-                attrs: Default::default(),
-            },
+        let Some(before) = original
+            .fields
+            .iter()
+            .find(|old| field_name(old) == field_name(field))
+        else {
+            added.push(field_source(field));
+            continue;
+        };
+        if before == field || field_source(before) == field_source(field) {
+            continue;
+        }
+        if before.access == field.access
+            && before.modifiers == field.modifiers
+            && before.meta == field.meta
+            && let (Some(old), Some(new)) = (field_expr(before), field_expr(field))
+        {
+            expression_origins(&old, &new, &template, &mut origins);
+        } else {
+            let mut origin = template.clone();
+            origin.call_span = before.span;
+            origin.expanded_span = field.span;
+            origin.expanded_text = Some(field_source(field));
+            origins.push(origin);
+        }
+    }
+    for field in &original.fields {
+        if !class
+            .fields
+            .iter()
+            .any(|new| field_name(new) == field_name(field))
+        {
+            let mut origin = template.clone();
+            origin.call_span = field.span;
+            origin.expanded_text = Some(format!("// Removed field {}", field_name(field)));
+            origins.push(origin);
+        }
+    }
+    if !added.is_empty() {
+        let mut origin = template;
+        origin.expanded_text = Some(added.join(";\n"));
+        origins.push(origin);
+    }
+    origins
+}
+
+fn field_expr(field: &ClassField) -> Option<Expr> {
+    let kind = match &field.kind {
+        ClassFieldKind::Function(f) => {
+            let mut function = f.clone();
+            // Build-field conversion gives expression bodies an explicit block.
+            if let Some(body) = &mut function.body
+                && !matches!(body.kind, ExprKind::Block(_))
+            {
+                let span = body.span;
+                **body = Expr {
+                    kind: ExprKind::Block(vec![parser::BlockElement::Expr((**body).clone())]),
+                    span,
+                };
+            }
+            ExprKind::Function(function)
+        }
+        ClassFieldKind::Var {
+            name,
+            type_hint,
+            expr,
+        } => ExprKind::Var {
+            name: name.clone(),
+            type_hint: type_hint.clone(),
+            expr: expr.clone().map(Box::new),
+            attrs: Default::default(),
+        },
+        ClassFieldKind::Final {
+            name,
+            type_hint,
+            expr,
+        } => ExprKind::Final {
+            name: name.clone(),
+            type_hint: type_hint.clone(),
+            expr: expr.clone().map(Box::new),
+            attrs: Default::default(),
+        },
+        ClassFieldKind::Property { .. } => return None,
+    };
+    Some(Expr {
+        kind,
+        span: field.span,
+    })
+}
+
+fn field_source(field: &ClassField) -> String {
+    let body = if let Some(expr) = field_expr(field) {
+        super::expander::expanded_expr_source(&expr)
+    } else {
+        match &field.kind {
             ClassFieldKind::Property {
                 name,
                 type_hint,
                 getter,
                 setter,
-                ..
+                expr,
             } => {
                 let ty = type_hint
                     .as_ref()
@@ -269,36 +371,99 @@ fn build_origin(
                             .print_complex_type(&super::expr_adt::complex_type_of(t))
                     })
                     .unwrap_or_default();
-                fields.push(format!(
-                    "var {name}({}, {}):{ty};",
+                let value = expr
+                    .as_ref()
+                    .map(|e| format!(" = {}", super::expander::expanded_expr_source(e)))
+                    .unwrap_or_default();
+                format!(
+                    "var {name}({}, {}):{ty}{value}",
                     property_access_name(getter),
                     property_access_name(setter)
-                ));
-                continue;
+                )
             }
-        };
-        fields.push(super::expander::expanded_expr_source(&Expr {
-            kind,
-            span: field.span,
-        }));
+            _ => unreachable!(),
+        }
+    };
+    let mut prefixes = Vec::new();
+    if let Some(access) = &field.access {
+        prefixes.push(format!("{access:?}").to_lowercase());
     }
-    super::expander::ExpansionOrigin {
-        macro_name: name,
-        call_site: super::errors::span_to_location(meta.span),
-        call_span: meta.span,
-        definition_site: def
-            .map(|d| super::errors::span_to_location(d.body.span))
-            .or_else(|| ordinary.map(|(_, body)| super::errors::span_to_location(body.span))),
-        definition_file: def
-            .map(|d| d.source_file.clone())
-            .or_else(|| ordinary.map(|(file, _)| file.clone())),
-        expanded_span: class.span,
-        expanded_text: Some(format!(
-            "class {} {{\n{}\n}}",
-            class.name,
-            fields.join(";\n")
-        )),
+    prefixes.extend(
+        field
+            .modifiers
+            .iter()
+            .map(|m| format!("{m:?}").to_lowercase()),
+    );
+    prefixes.push(body);
+    prefixes.join(" ")
+}
+
+/// Compare ExprDef structure while pairing child expressions in their AST roles.
+fn matching_shell(
+    before: &MacroValue,
+    after: &MacroValue,
+    children: &mut Vec<(Arc<Expr>, Arc<Expr>)>,
+) -> bool {
+    match (before, after) {
+        (MacroValue::Expr(a), MacroValue::Expr(b)) => {
+            children.push((a.clone(), b.clone()));
+            true
+        }
+        (MacroValue::Array(a), MacroValue::Array(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(a, b)| matching_shell(a, b, children))
+        }
+        (MacroValue::Enum(a, av, aa), MacroValue::Enum(b, bv, ba)) => {
+            a == b
+                && av == bv
+                && aa.len() == ba.len()
+                && aa
+                    .iter()
+                    .zip(ba.iter())
+                    .all(|(a, b)| matching_shell(a, b, children))
+        }
+        (MacroValue::Object(a), MacroValue::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(k, a)| b.get(k).is_some_and(|b| matching_shell(a, b, children)))
+        }
+        (MacroValue::Position(_), MacroValue::Position(_)) => true,
+        _ => before == after,
     }
+}
+
+fn expression_origins(
+    before: &Expr,
+    after: &Expr,
+    template: &super::expander::ExpansionOrigin,
+    origins: &mut Vec<super::expander::ExpansionOrigin>,
+) {
+    if before == after {
+        return;
+    }
+    if let (Some(a), Some(b)) = (
+        super::expr_adt::def_of(&before.kind, before.span),
+        super::expr_adt::def_of(&after.kind, after.span),
+    ) {
+        let mut children = Vec::new();
+        if matching_shell(&a, &b, &mut children) {
+            for (a, b) in children {
+                expression_origins(&a, &b, template, origins);
+            }
+            return;
+        }
+    }
+    let text = super::expander::expanded_expr_source(after);
+    if text == super::expander::expanded_expr_source(before) {
+        return;
+    }
+    let mut origin = template.clone();
+    origin.call_span = before.span;
+    origin.expanded_span = after.span;
+    origin.expanded_text = Some(text);
+    origins.push(origin);
 }
 
 fn defer_build_macro(class: &mut ClassDecl, meta: &Metadata) {

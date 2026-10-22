@@ -94,7 +94,36 @@ pub enum MacroValue {
     Position(SourceLocation),
 }
 
-pub(crate) type ReferenceUpdates = BTreeMap<(u8, usize), (MacroValue, MacroValue)>;
+#[derive(Default)]
+pub(crate) struct ReferenceUpdates {
+    values: BTreeMap<(u8, usize), (MacroValue, MacroValue)>,
+    bindings: std::collections::BTreeSet<usize>,
+}
+
+impl ReferenceUpdates {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn replace_binding(
+        &mut self,
+        binding: &super::environment::VariableBinding,
+        old: &MacroValue,
+        new: &MacroValue,
+    ) {
+        if !self.bindings.insert(Arc::as_ptr(binding) as usize) {
+            return;
+        }
+        // Captures can refer back to their own function's binding.
+        let mut value = binding
+            .lock()
+            .expect("macro variable lock poisoned")
+            .clone();
+        if value.replace_reference(old, new, self) {
+            *binding.lock().expect("macro variable lock poisoned") = value;
+        }
+    }
+}
 
 impl MacroValue {
     pub(crate) fn map_key_eq(&self, other: &Self) -> bool {
@@ -144,8 +173,37 @@ impl MacroValue {
             "iterator" => Self::Array(Arc::new(
                 entries.iter().map(|(_, value)| value.clone()).collect(),
             )),
-            "copy" => self.clone(),
+            "copy" => Self::Map(Arc::new(entries.as_ref().clone())),
             "toString" => Self::from_string(self.to_display_string()),
+            _ => return None,
+        })
+    }
+
+    /// Mutate a map and return the Haxe method's result separately from its storage.
+    pub(crate) fn mutate_map(&mut self, method: &str, args: &[Self]) -> Option<Self> {
+        let Self::Map(entries) = self else {
+            return None;
+        };
+        Some(match method {
+            "set" => {
+                let (key, value) = (args.first()?, args.get(1)?);
+                Self::insert_map_entry(Arc::make_mut(entries), key.clone(), value.clone());
+                Self::Null
+            }
+            "remove" => {
+                let key = args.first()?;
+                let index = entries
+                    .iter()
+                    .position(|(stored, _)| stored.map_key_eq(key));
+                if let Some(index) = index {
+                    Arc::make_mut(entries).remove(index);
+                }
+                Self::Bool(index.is_some())
+            }
+            "clear" => {
+                Arc::make_mut(entries).clear();
+                Self::Null
+            }
             _ => return None,
         })
     }
@@ -161,11 +219,18 @@ impl MacroValue {
             (Self::Object(a), Self::Object(b)) => Arc::ptr_eq(a, b),
             (Self::Expr(a), Self::Expr(b)) => Arc::ptr_eq(a, b),
             (Self::Array(a), Self::Array(b)) => Arc::ptr_eq(a, b),
+            (Self::Map(a), Self::Map(b)) => Arc::ptr_eq(a, b),
             _ => false,
         };
         if same {
             *self = new.clone();
             return true;
+        }
+        if let Self::Function(function) = self {
+            for binding in function.captures.values() {
+                updates.replace_binding(binding, old, new);
+            }
+            return false;
         }
         let key = match self {
             Self::Object(value) => (0, Arc::as_ptr(value) as usize),
@@ -174,7 +239,7 @@ impl MacroValue {
             Self::Map(value) => (3, Arc::as_ptr(value) as usize),
             _ => return false,
         };
-        if let Some((_, value)) = updates.get(&key) {
+        if let Some((_, value)) = updates.values.get(&key) {
             *self = value.clone();
             return true;
         }
@@ -232,7 +297,7 @@ impl MacroValue {
             _ => false,
         };
         if changed {
-            updates.insert(key, (original, self.clone()));
+            updates.values.insert(key, (original, self.clone()));
         }
         changed
     }

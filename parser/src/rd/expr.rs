@@ -927,8 +927,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let cond = self.parse_expression()?;
         self.stream.expect(TokenKind::RParen)?;
         let then_branch = self.parse_expression()?;
-        // Consume optional semicolon before else (common in blocks)
-        self.stream.eat(TokenKind::Semicolon);
+        // Keep a terminating semicolon visible to the enclosing expression.
+        if self.stream.at(TokenKind::Semicolon) && self.stream.peek_at(1).kind == TokenKind::KwElse
+        {
+            self.stream.advance();
+        }
         let else_branch = if self.stream.eat(TokenKind::KwElse).is_some() {
             Some(Box::new(self.parse_expression()?))
         } else {
