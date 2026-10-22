@@ -9,6 +9,7 @@
 
 pub mod analysis;
 mod binary_response;
+mod build_config;
 mod context;
 mod diagnostics;
 mod documentation;

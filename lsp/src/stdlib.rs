@@ -70,9 +70,77 @@ pub(crate) fn discover() -> Result<Vec<PathBuf>, String> {
     }
 }
 
+/// Native manifests use Rayzor's library, including its rayzor.* packages.
+pub(crate) fn discover_for_project(root: &Path, native: bool) -> Result<Vec<PathBuf>, String> {
+    if !native || std::env::var_os("RAYZOR_STD_PATH").is_some_and(|path| !path.is_empty()) {
+        return discover();
+    }
+    for directory in root.ancestors() {
+        for relative in ["compiler/haxe-std", "haxe-std"] {
+            let path = directory.join(relative);
+            if valid(&path) {
+                return Ok(vec![path.canonicalize().unwrap_or(path)]);
+            }
+        }
+    }
+    let paths = compiler::compilation::CompilationConfig::discover_stdlib_paths();
+    let paths: Vec<_> = paths.into_iter().filter(|path| valid(path)).collect();
+    if paths.is_empty() {
+        Err("Rayzor standard library not found for rayzor.toml; set RAYZOR_STD_PATH".into())
+    } else {
+        Ok(paths)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_symbols_cover_native_apis_and_reject_another_library() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../compiler/haxe-std");
+        let config = compiler::compilation::CompilationConfig {
+            typecheck_only: true,
+            stdlib_paths: vec![root.clone()],
+            ..Default::default()
+        };
+        let mut unit = compiler::compilation::CompilationUnit::new(config.clone());
+        assert!(unit.load_stdlib_symbols());
+        for name in [
+            "rayzor.concurrent.Channel",
+            "haxe.io.Bytes",
+            "haxe.io.BytesData",
+            "haxe.io.Path",
+            "haxe.ds.StringMap",
+        ] {
+            assert!(
+                unit.symbol_table.all_symbols().any(|symbol| {
+                    unit.string_interner
+                        .get(symbol.qualified_name.unwrap_or(symbol.name))
+                        == Some(name)
+                }),
+                "missing snapshot type {name}"
+            );
+        }
+        let other =
+            std::env::temp_dir().join(format!("rayzor-other-stdlib-{}", std::process::id()));
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(
+            other.join("StdTypes.hx"),
+            "class DifferentStandardLibrary {}",
+        )
+        .unwrap();
+        let mut unit =
+            compiler::compilation::CompilationUnit::new(compiler::compilation::CompilationConfig {
+                stdlib_paths: vec![other.clone(), root],
+                ..config
+            });
+        assert!(
+            !unit.load_stdlib_symbols(),
+            "restored symbols from an unrelated library"
+        );
+        std::fs::remove_dir_all(other).unwrap();
+    }
 
     #[test]
     fn discovers_a_symlinked_haxe_installation() {

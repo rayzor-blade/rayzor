@@ -111,6 +111,7 @@ pub mod hxml;
 pub mod ir;
 pub mod logging;
 pub mod macro_system;
+pub mod native_libs;
 pub mod pipeline;
 pub mod rpkg; // RPKG package format (native package distribution)
 pub mod semantic_graph;

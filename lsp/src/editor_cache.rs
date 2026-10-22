@@ -248,6 +248,7 @@ impl Expansion {
 
 struct Config {
     key: SessionKey,
+    root: PathBuf,
     directory: PathBuf,
     build_id: String,
 }
@@ -259,9 +260,9 @@ struct Retained {
 }
 #[derive(Default)]
 struct State {
-    config: Option<Config>,
+    configs: Vec<Config>,
     documents: HashMap<String, String>,
-    signature: Option<(u64, Instant)>,
+    signatures: HashMap<PathBuf, (u64, Instant)>,
     retained: VecDeque<Retained>,
 }
 
@@ -269,14 +270,36 @@ struct State {
 pub(crate) struct EditorCache(Arc<Mutex<State>>);
 
 impl EditorCache {
-    pub fn configure(&self, key: SessionKey, root: &std::path::Path) {
+    pub fn reset_projects(&self) {
         let mut state = self.0.lock().unwrap();
-        state.config = Some(Config {
+        state.configs.clear();
+        state.signatures.clear();
+        state.retained.clear();
+    }
+
+    #[cfg(test)]
+    pub fn configure(&self, mut key: SessionKey, root: &std::path::Path) {
+        key.options.cache_enabled = true;
+        self.configure_project(key, root);
+    }
+
+    pub fn configure_project(&self, key: SessionKey, root: &std::path::Path) {
+        let mut state = self.0.lock().unwrap();
+        let root = root.canonicalize().unwrap_or_else(|_| root.into());
+        let directory = key
+            .options
+            .cache_dir
+            .as_ref()
+            .map(|path| path.join("editor"))
+            .unwrap_or_else(|| root.join(".rayzor/blade/editor"));
+        state.configs.retain(|config| config.root != root);
+        state.configs.push(Config {
             key,
-            directory: root.join(".rayzor/blade/editor"),
+            root,
+            directory,
             build_id: format!("{}:{}", compiler::BUILD_ID, env!("RAYZOR_LSP_BUILD_ID")),
         });
-        state.signature = None;
+        state.signatures.clear();
     }
 
     pub fn track(&self, notification: &Notification) {
@@ -287,7 +310,7 @@ impl EditorCache {
             "textDocument/didOpen" => {
                 if let (Some(uri), Some(text)) = (uri, params["textDocument"]["text"].as_str()) {
                     state.documents.insert(uri.into(), text.into());
-                    state.signature = None;
+                    state.signatures.clear();
                 }
             }
             "textDocument/didChange" => {
@@ -299,21 +322,29 @@ impl EditorCache {
                         .and_then(|change| change["text"].as_str()),
                 ) {
                     state.documents.insert(uri.into(), text.into());
-                    state.signature = None;
+                    state.signatures.clear();
                 }
             }
             "textDocument/didClose" => {
                 if let Some(uri) = uri {
                     state.documents.remove(uri);
-                    state.signature = None;
+                    state.signatures.clear();
                 }
             }
             "workspace/didChangeWatchedFiles" => {
-                state.signature = None;
+                state.signatures.clear();
             }
-            "workspace/didChangeConfiguration" => {
-                state.signature = None;
+            "textDocument/didSave" => {
+                state.signatures.clear();
+                if uri.is_some_and(|uri| !crate::context::uri_to_path(uri).ends_with(".hx")) {
+                    state.retained.clear();
+                    state.configs.clear();
+                }
+            }
+            "workspace/didChangeWorkspaceFolders" | "workspace/didChangeConfiguration" => {
+                state.signatures.clear();
                 state.retained.clear();
+                state.configs.clear();
             }
             _ => {}
         }
@@ -321,7 +352,7 @@ impl EditorCache {
 
     pub fn lookup(&self, uri: &str) -> Option<Arc<Snapshot>> {
         let mut state = self.0.lock().unwrap();
-        let (input_hash, path, build_id) = state.identity(uri)?;
+        let (input_hash, path, build_id, persist) = state.identity(uri)?;
         if let Some(index) = state
             .retained
             .iter()
@@ -338,6 +369,9 @@ impl EditorCache {
             }
             state.retained.push_back(entry);
             return Some(result);
+        }
+        if !persist {
+            return None;
         }
         let bytes = compiler::ir::blade::load_editor_index(path, &build_id, input_hash).ok()??;
         let snapshot = Arc::new(decode_snapshot(&bytes)?);
@@ -362,7 +396,7 @@ impl EditorCache {
 
     pub fn fingerprint(&self, uri: &str, documents: &HashMap<String, String>) -> Option<u64> {
         let state = self.0.lock().unwrap();
-        let config = state.config.as_ref()?;
+        let config = state.config_for(uri)?;
         let inputs = Inputs::capture(&config.key, documents);
         inputs.reusable.then(|| {
             hash(&(
@@ -384,13 +418,15 @@ impl EditorCache {
             return;
         }
         let mut state = self.0.lock().unwrap();
-        let Some(config) = state.config.as_ref() else {
+        let Some(config) = state.config_for(uri) else {
             return;
         };
         let path = config.directory.join(format!("{:016x}.bidx", hash(&uri)));
         let build_id = config.build_id.clone();
         let heap_bytes = snapshot.heap_bytes();
-        let _ = compiler::ir::blade::save_editor_index(path, &build_id, input_hash, bytes);
+        if config.key.options.cache_enabled {
+            let _ = compiler::ir::blade::save_editor_index(path, &build_id, input_hash, bytes);
+        }
         state.retain(uri, input_hash, Arc::new(snapshot), heap_bytes);
     }
 
@@ -404,26 +440,49 @@ impl EditorCache {
 }
 
 impl State {
-    fn identity(&mut self, uri: &str) -> Option<(u64, PathBuf, String)> {
-        let config = self.config.as_ref()?;
+    fn config_for(&self, uri: &str) -> Option<&Config> {
+        let path = PathBuf::from(crate::context::uri_to_path(uri));
+        let path = path.canonicalize().unwrap_or(path);
+        self.configs
+            .iter()
+            .filter_map(|config| {
+                crate::build_config::source_depth(
+                    &path,
+                    &config.root,
+                    config
+                        .key
+                        .class_paths
+                        .iter()
+                        .chain(&config.key.stdlib_paths),
+                )
+                .map(|depth| (depth, config))
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, config)| config)
+    }
+
+    fn identity(&mut self, uri: &str) -> Option<(u64, PathBuf, String, bool)> {
+        let root = self.config_for(uri)?.root.clone();
         if self
-            .signature
+            .signatures
+            .get(&root)
             .is_none_or(|(_, checked)| checked.elapsed() >= Duration::from_millis(500))
         {
-            let inputs = Inputs::capture(&config.key, &self.documents);
+            let inputs = Inputs::capture(&self.config_for(uri)?.key, &self.documents);
             if !inputs.reusable {
                 return None;
             }
-            self.signature = Some((
-                hash(&(compiler::BUILD_ID, &config.key, inputs)),
-                Instant::now(),
-            ));
+            let signature = hash(&(compiler::BUILD_ID, &self.config_for(uri)?.key, inputs));
+            self.signatures
+                .insert(root.clone(), (signature, Instant::now()));
         }
-        let signature = hash(&(self.signature?.0, uri, self.documents.get(uri)));
+        let config = self.config_for(uri)?;
+        let signature = hash(&(self.signatures.get(&root)?.0, uri, self.documents.get(uri)));
         Some((
             signature,
             config.directory.join(format!("{:016x}.bidx", hash(&uri))),
             config.build_id.clone(),
+            config.key.options.cache_enabled,
         ))
     }
     fn retain(&mut self, uri: &str, inputs: u64, snapshot: Arc<Snapshot>, bytes: usize) {
@@ -507,6 +566,7 @@ mod tests {
                 defines: vec![],
                 macros: vec![],
                 macro_budget: Duration::from_secs(5),
+                options: Default::default(),
             },
             &root,
         );
@@ -559,6 +619,71 @@ mod tests {
     }
 
     #[test]
+    fn external_dependency_and_stdlib_pages_restore_from_the_owning_project_cache() {
+        let root =
+            std::env::temp_dir().join(format!("rayzor-external-editor-{}", std::process::id()));
+        for directory in ["app", "dependency", "std", "unrelated"] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        for (file, name) in [
+            ("dependency/Helper.hx", "Helper"),
+            ("std/Library.hx", "Library"),
+        ] {
+            std::fs::write(root.join(file), format!("class {name} {{}}")).unwrap();
+        }
+        let key = SessionKey {
+            class_paths: vec![root.join("app"), root.join("dependency")],
+            stdlib_paths: vec![root.join("std")],
+            defines: vec![],
+            macros: vec![],
+            macro_budget: Duration::from_secs(5),
+            options: Default::default(),
+        };
+        let cache = EditorCache::default();
+        cache.configure(key.clone(), &root.join("app"));
+        let mut requests = Vec::new();
+        for (file, name) in [
+            ("dependency/Helper.hx", "Helper"),
+            ("std/Library.hx", "Library"),
+        ] {
+            let source = format!("class {name} {{}}");
+            let uri = crate::context::file_uri(root.join(file).to_str().unwrap());
+            let open = Notification::new(
+                "textDocument/didOpen".into(),
+                json!({"textDocument":{"uri":uri,"text":source}}),
+            );
+            cache.track(&open);
+            let inputs = cache
+                .fingerprint(&uri, &HashMap::from([(uri.clone(), source)]))
+                .unwrap();
+            let snapshot = Snapshot {
+                complete: true,
+                document: Responses::from([("textDocument/hover", json!({"contents":name}))]),
+                ..Default::default()
+            };
+            cache.save(&uri, inputs, snapshot);
+            requests.push((
+                open,
+                Request::new(
+                    1.into(),
+                    "textDocument/hover".into(),
+                    json!({"textDocument":{"uri":uri},"position":{"line":0,"character":7}}),
+                ),
+                name,
+            ));
+        }
+        let restored = EditorCache::default();
+        restored.configure(key, &root.join("app"));
+        for (open, request, expected) in requests {
+            restored.track(&open);
+            assert_eq!(restored.answer(&request).unwrap()["contents"], expected);
+        }
+        let unrelated = crate::context::file_uri(root.join("unrelated/Other.hx").to_str().unwrap());
+        assert!(restored.lookup(&unrelated).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn blade_indexes_survive_restart_and_reject_changed_inputs() {
         let root = std::env::temp_dir().join(format!("rayzor-editor-blade-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -573,6 +698,7 @@ mod tests {
             defines: vec![],
             macros: vec![],
             macro_budget: Duration::from_secs(5),
+            options: Default::default(),
         };
         let open = Notification::new(
             "textDocument/didOpen".into(),

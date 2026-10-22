@@ -10,7 +10,7 @@ impl CompilationUnit {
     /// Returns true if symbols were loaded successfully
     pub fn load_stdlib_symbols(&mut self) -> bool {
         let manifest_path = PathBuf::from(".rayzor/blade/stdlib/stdlib.bsym");
-        let manifest = if manifest_path.exists() {
+        let manifest = if manifest_path.exists() && !self.config.typecheck_only {
             load_symbol_manifest(&manifest_path)
         } else {
             debug!(
@@ -25,6 +25,33 @@ impl CompilationUnit {
 
         match manifest {
             Ok(manifest) => {
+                // Editor snapshots must describe the selected library. A custom
+                // Haxe installation or an edited bundled source falls back to
+                // source analysis instead of inheriting another library's IDs.
+                if self.config.typecheck_only {
+                    use std::hash::{Hash, Hasher};
+                    for module in &manifest.modules {
+                        let Some(path) = self
+                            .config
+                            .stdlib_paths
+                            .iter()
+                            .map(|root| root.join(&module.source_path))
+                            .find(|path| path.is_file())
+                        else {
+                            return false;
+                        };
+                        self.macro_dependencies.register_source(&path);
+                        let Ok(source) = std::fs::read_to_string(&path) else {
+                            return false;
+                        };
+                        let mut hash = std::collections::hash_map::DefaultHasher::new();
+                        source.hash(&mut hash);
+                        if hash.finish() != module.source_hash {
+                            return false;
+                        }
+                    }
+                }
+
                 info!(
                     "[BLADE] Loading {} modules from symbol manifest",
                     manifest.modules.len()

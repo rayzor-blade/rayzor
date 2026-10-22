@@ -76,6 +76,7 @@ pub(crate) fn find_hxml(root: &Path, problems: &mut Vec<String>) -> Option<PathB
 
 #[derive(Default)]
 pub(crate) struct LibraryMetadata {
+    pub input_files: Vec<PathBuf>,
     pub class_paths: Vec<PathBuf>,
     pub libraries: Vec<Dependency>,
     pub provided: Vec<String>,
@@ -106,6 +107,7 @@ pub(crate) fn library_metadata(
     let mut metadata = LibraryMetadata::default();
     let mut seen = HashSet::new();
     for path in manifests {
+        metadata.input_files.push(path.clone());
         if !path.is_file() || !seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())) {
             continue;
         }

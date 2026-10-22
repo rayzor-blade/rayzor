@@ -55,6 +55,7 @@ pub(crate) type IndexProgress = std::sync::Arc<dyn Fn(IndexActivity) + Send + Sy
 pub(crate) struct WorkspaceIndex {
     state: RefCell<State>,
     defines: Vec<String>,
+    profiles: Vec<(PathBuf, Vec<String>)>,
     roots: Vec<(PathBuf, PathBuf)>,
 }
 
@@ -62,12 +63,14 @@ impl WorkspaceIndex {
     pub fn start(
         paths: Vec<PathBuf>,
         defines: Vec<String>,
+        profiles: Vec<(PathBuf, Vec<String>)>,
         progress: Option<IndexProgress>,
     ) -> Self {
         let mut roots: Vec<_> = paths.iter().map(|p| (canonical(p), p.clone())).collect();
         roots.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
         let (sender, receiver) = mpsc::sync_channel(32);
         let worker_defines = defines.clone();
+        let worker_profiles = profiles.clone();
         let progress_roots = roots
             .iter()
             .map(|(path, _)| path.clone())
@@ -145,7 +148,11 @@ impl WorkspaceIndex {
                                 reported = Some(std::time::Instant::now());
                             }
                             let parsed = std::panic::catch_unwind(|| {
-                                declarations(&path, &source, &worker_defines)
+                                declarations(
+                                    &path,
+                                    &source,
+                                    profile_defines(&path, &worker_defines, &worker_profiles),
+                                )
                             })
                             .unwrap_or_default();
                             completed += 1;
@@ -166,6 +173,7 @@ impl WorkspaceIndex {
                 ..Default::default()
             }),
             defines,
+            profiles,
             roots,
         }
     }
@@ -206,7 +214,13 @@ impl WorkspaceIndex {
 
     pub fn update(&self, path: &Path, source: Option<&str>) {
         let path = canonical(path);
-        let parsed = source.map(|s| declarations(&path, s, &self.defines));
+        let parsed = source.map(|s| {
+            declarations(
+                &path,
+                s,
+                profile_defines(&path, &self.defines, &self.profiles),
+            )
+        });
         let mut state = self.state.borrow_mut();
         state.overrides.insert(path.clone());
         if let Some(parsed) = parsed {
@@ -245,10 +259,14 @@ impl WorkspaceIndex {
             return;
         }
         if let Ok(source) = std::fs::read_to_string(&path) {
-            self.state
-                .borrow_mut()
-                .files
-                .insert(path.clone(), declarations(&path, &source, &self.defines));
+            self.state.borrow_mut().files.insert(
+                path.clone(),
+                declarations(
+                    &path,
+                    &source,
+                    profile_defines(&path, &self.defines, &self.profiles),
+                ),
+            );
         }
     }
 
@@ -315,6 +333,18 @@ fn canonical(path: &Path) -> PathBuf {
             _ => path.to_path_buf(),
         }
     })
+}
+
+fn profile_defines<'a>(
+    path: &Path,
+    fallback: &'a [String],
+    profiles: &'a [(PathBuf, Vec<String>)],
+) -> &'a [String] {
+    profiles
+        .iter()
+        .filter(|(root, _)| path.starts_with(root))
+        .max_by_key(|(root, _)| root.components().count())
+        .map_or(fallback, |(_, defines)| defines)
 }
 
 pub(crate) fn declarations(path: &Path, source: &str, defines: &[String]) -> Vec<Declaration> {

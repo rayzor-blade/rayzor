@@ -153,6 +153,13 @@ fn serve_worker(
         ),
         references_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
+        workspace: Some(lsp_types::WorkspaceServerCapabilities {
+            workspace_folders: Some(lsp_types::WorkspaceFoldersServerCapabilities {
+                supported: Some(true),
+                change_notifications: Some(OneOf::Left(true)),
+            }),
+            ..Default::default()
+        }),
         document_highlight_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
@@ -216,6 +223,12 @@ fn serve_worker(
         .as_ref()
         .and_then(|o| o.get("hxml"))
         .and_then(|h| h.as_str());
+    if let Some(folders) = &init_params.workspace_folders {
+        ctx.workspace_roots = folders
+            .iter()
+            .filter_map(|folder| uri_to_file_path(folder.uri.as_str()))
+            .collect();
+    }
     ctx.load_workspace_config(hxml);
     ctx.analysis_cache_capacity = init_params
         .initialization_options
@@ -230,18 +243,7 @@ fn serve_worker(
         .and_then(|o| o.get("macroBudgetMs"))
         .and_then(|ms| ms.as_u64())
         .map_or(MACRO_BUDGET, std::time::Duration::from_millis);
-    if let Ok(stdlib_paths) = crate::stdlib::discover() {
-        ctx.editor_cache.configure(
-            crate::session_cache::SessionKey {
-                class_paths: ctx.class_paths.clone(),
-                stdlib_paths,
-                defines: ctx.defines.clone(),
-                macros: ctx.initialization_macros.clone(),
-                macro_budget: ctx.macro_budget,
-            },
-            &ctx.root,
-        );
-    }
+    ctx.configure_editor_cache();
     for problem in &ctx.config_problems {
         log_message(connection, problem);
     }
@@ -253,10 +255,23 @@ fn serve_worker(
         .and_then(|w| w.dynamic_registration)
         == Some(true)
     {
+        let mut watchers: Vec<_> = [
+            "**/*.hx",
+            "**/*.hxml",
+            "**/rayzor.toml",
+            "**/haxelib.json",
+            "**/*.rpkg",
+        ]
+        .into_iter()
+        .map(|pattern| serde_json::json!({"globPattern":pattern}))
+        .collect();
+        watchers.extend(ctx.configuration_watch_paths().into_iter().map(
+            |path| serde_json::json!({"globPattern":path.to_string_lossy().replace('\\', "/")}),
+        ));
         let request = Request::new(
             "rayzor-file-watch".to_string().into(),
             "client/registerCapability".into(),
-            serde_json::json!({"registrations":[{"id":"rayzor-haxe-files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.hx"}]}}]}),
+            serde_json::json!({"registrations":[{"id":"rayzor-haxe-files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":watchers}}]}),
         );
         let _ = connection.sender.send(Message::Request(request));
     }
@@ -457,12 +472,83 @@ fn handle_notification(
         };
         send_notification::<PublishDiagnostics>(conn, params);
     } else if let Some(params) =
+        cast_notification::<lsp_types::notification::DidChangeWorkspaceFolders>(&not)
+    {
+        for folder in params.event.removed {
+            if let Some(path) = uri_to_file_path(folder.uri.as_str()) {
+                let path = path.canonicalize().unwrap_or(path);
+                ctx.workspace_roots
+                    .retain(|root| root.canonicalize().unwrap_or_else(|_| root.clone()) != path);
+            }
+        }
+        for folder in params.event.added {
+            if let Some(path) = uri_to_file_path(folder.uri.as_str()) {
+                let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                if !ctx
+                    .workspace_roots
+                    .iter()
+                    .any(|root| root.canonicalize().unwrap_or_else(|_| root.clone()) == canonical)
+                {
+                    ctx.workspace_roots.push(path);
+                }
+            }
+        }
+        ctx.reload_workspace_config();
+        for uri in ctx.open_files.keys() {
+            mark(uri);
+        }
+    } else if cast_notification::<lsp_types::notification::DidChangeConfiguration>(&not).is_some() {
+        ctx.reload_workspace_config();
+        for uri in ctx.open_files.keys() {
+            mark(uri);
+        }
+        for problem in &ctx.config_problems {
+            log_message(conn, problem);
+        }
+    } else if let Some(params) =
+        cast_notification::<lsp_types::notification::DidSaveTextDocument>(&not)
+    {
+        let uri = params.text_document.uri.as_str();
+        if !params.text_document.uri.path().as_str().ends_with(".hx") {
+            ctx.reload_workspace_config();
+            for uri in ctx.open_files.keys() {
+                mark(uri);
+            }
+        } else {
+            if let Some(text) = params.text {
+                ctx.open_files.insert(uri.into(), text);
+            }
+            ctx.index_disk_file(uri);
+            if !ctx.has_current_analysis(uri) {
+                mark(uri);
+            }
+        }
+    } else if let Some(params) =
         cast_notification::<lsp_types::notification::DidChangeWatchedFiles>(&not)
     {
-        for change in params.changes {
-            ctx.index_disk_file(change.uri.as_str());
+        if params
+            .changes
+            .iter()
+            .any(|change| !change.uri.path().as_str().ends_with(".hx"))
+        {
+            ctx.reload_workspace_config();
+            for uri in ctx.open_files.keys() {
+                mark(uri);
+            }
+            for problem in &ctx.config_problems {
+                log_message(conn, problem);
+            }
+        } else {
+            for change in params.changes {
+                ctx.index_disk_file(change.uri.as_str());
+            }
+            ctx.invalidate_changed_inputs();
+            for uri in ctx.open_files.keys() {
+                if !ctx.has_current_analysis(uri) && ctx.editor_cache.lookup(uri).is_none() {
+                    mark(uri);
+                }
+            }
         }
-        ctx.invalidate_changed_inputs();
     }
 }
 
@@ -704,8 +790,15 @@ fn declaration_snapshot(
 ) -> (crate::editor_cache::Snapshot, Option<String>) {
     use serde_json::json;
     let filename = crate::context::uri_to_path(uri);
+    let settings = ctx.settings_for_uri(uri);
+    let defines: Vec<_> = settings
+        .defines
+        .iter()
+        .chain(&settings.options.extra_defines)
+        .cloned()
+        .collect();
     let declarations =
-        crate::workspace_index::declarations(std::path::Path::new(&filename), source, &ctx.defines);
+        crate::workspace_index::declarations(std::path::Path::new(&filename), source, &defines);
     let mut snapshot = crate::editor_cache::Snapshot::default();
     let subject = declarations
         .iter()

@@ -6,8 +6,8 @@ type = "library"
 
 [build]
 # The Haxe sources live under ./nue/ (matching the Haxe package path).
-class-paths = ["."]
+class-paths = [".", "../rayzor-tensors/haxe"]
 
 [dependencies]
-# nue uses rayzor.ds.Tensor + rayzor.ds.QTensor from the bundled stdlib —
-# no explicit dependency entry needed; those are part of the compiler.
+# Shared Tensor/QTensor declarations come from the sibling rayzor-tensors
+# source path above; consuming applications load its native plugin.

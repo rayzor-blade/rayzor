@@ -124,12 +124,37 @@ The workspace's `haxelib.json`, and the nearest manifest owning each configured
 class path, supply additional class paths and dependencies. Explicit HXML
 library versions take precedence. Resolved dependencies contribute their
 `extraParams.hxml` initialization macros. Class-path-only libraries do not
-activate their own extra-parameter hooks. Without a selected HXML, the server
-also reads `rayzor.toml` class paths and a workspace library's `extraParams.hxml`.
+activate their own extra-parameter hooks. Without a selected HXML, a
+`rayzor.toml` takes precedence over discovered HXML files. A workspace library's
+`extraParams.hxml` also contributes its settings.
 Missing libraries or invalid manifests are logged without discarding the other
 settings. Later HXML class paths take precedence over earlier ones. Define
 values remain available to macros through `Context.definedValue`.
 Macro evaluation is native to Rayzor.
+
+For `rayzor.toml` projects, editor analysis uses `[build]` class paths, defines,
+resources, target and preset flags, native plugin declarations, and
+`[dependencies]`. Local source projects and `.rpkg` archives contribute source
+paths; packages also contribute their compiler method tables. Loose native
+plugins are checked for ABI compatibility and described without calling their
+runtime initialization entry point. Missing dependencies produce configuration
+diagnostics while the rest of the project remains usable.
+
+`[project] hxml` selects a build relative to that project's directory. Included
+HXML files and dependency metadata are watched along with the manifest.
+Configuration changes invalidate affected editor data and recheck open files.
+`[workspace] members` retain separate defines, compiler identities, and editor
+cache keys; `[workspace.cache] dir` supplies a shared cache location.
+LSP workspace folders can also be initialized, added and removed independently.
+`[cache] dir` overrides the member's location, and `enabled = false` disables
+persisted editor indexes. Reusable in-memory answers remain available.
+
+Native manifests select the Rayzor standard library and its embedded BLADE
+symbol snapshot. The snapshot is checked against the selected library's source
+contents; a changed or custom library is analyzed from source. HXML projects
+continue to use the installed Haxe standard library unless `RAYZOR_STD_PATH`
+selects an override. Build output paths, bundle compression and runtime tier
+thresholds do not affect code hints or launch a build from the editor.
 
 A library identified by a configured source path also satisfies inferred
 dependencies on that library, avoiding an additional installed copy. A direct

@@ -16,6 +16,7 @@ pub(crate) struct SessionKey {
     pub defines: Vec<String>,
     pub macros: Vec<String>,
     pub macro_budget: Duration,
+    pub options: crate::build_config::Options,
 }
 
 #[derive(PartialEq, Eq, Hash)]
@@ -24,6 +25,7 @@ pub(crate) struct Inputs {
     // Contents of loaded sources and macro resources have individual stamps.
     files: BTreeSet<PathBuf>,
     overlays: BTreeMap<PathBuf, String>,
+    configuration: BTreeMap<PathBuf, Option<(u64, std::time::SystemTime)>>,
     pub reusable: bool,
 }
 
@@ -32,6 +34,22 @@ impl Inputs {
         let mut inputs = Self {
             files: BTreeSet::new(),
             overlays: BTreeMap::new(),
+            configuration: key
+                .options
+                .configuration_files
+                .iter()
+                .chain(&key.options.native_libs)
+                .chain(&key.options.packages)
+                .chain(key.options.resources.iter().map(|(path, _)| path))
+                .map(|path| {
+                    (
+                        path.clone(),
+                        std::fs::metadata(path)
+                            .ok()
+                            .and_then(|metadata| Some((metadata.len(), metadata.modified().ok()?))),
+                    )
+                })
+                .collect(),
             reusable: true,
         };
         let mut visited = BTreeSet::new();
@@ -118,6 +136,7 @@ pub(crate) struct SessionCache {
     pub unit: Rc<RefCell<CompilationUnit>>,
     pub initialization_errors: Vec<LspDiagnostic>,
     pub diagnostics: Vec<LspDiagnostic>,
+    pub native_libraries: Vec<compiler::native_libs::Library>,
     pub indexes: HashMap<String, crate::analysis::FileSymbolIndex>,
 }
 
@@ -134,6 +153,7 @@ impl SessionCache {
             unit: Rc::new(RefCell::new(unit)),
             initialization_errors,
             diagnostics: Vec::new(),
+            native_libraries: Vec::new(),
             indexes: HashMap::new(),
         }
     }

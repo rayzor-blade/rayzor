@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 pub struct HxmlConfig {
     /// Class paths (-cp)
     pub class_paths: Vec<PathBuf>,
+    /// Build files read while expanding includes.
+    pub input_files: Vec<PathBuf>,
 
     /// Main class (-main)
     pub main_class: Option<String>,
@@ -70,6 +72,7 @@ impl Default for HxmlConfig {
     fn default() -> Self {
         Self {
             class_paths: Vec::new(),
+            input_files: Vec::new(),
             main_class: None,
             output: None,
             mode: RayzorMode::Jit, // Default to JIT
@@ -172,7 +175,11 @@ impl HxmlConfig {
         let mut seen = vec![path.canonicalize().unwrap_or_else(|_| path.to_path_buf())];
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         collect_args(&content, path, &dir, &mut args, &mut seen);
-        Ok(Self::from_args(&args))
+        let mut builds = Self::from_args(&args);
+        for build in &mut builds {
+            build.input_files = seen.clone();
+        }
+        Ok(builds)
     }
 
     /// As [`Self::builds_from_file`], for content whose includes resolve
@@ -180,8 +187,13 @@ impl HxmlConfig {
     pub fn builds_from_string(content: &str, dir: &Path) -> Result<Vec<Self>, String> {
         let mut args = Vec::new();
         let origin = dir.join("<string>.hxml");
-        collect_args(content, &origin, dir, &mut args, &mut Vec::new());
-        Ok(Self::from_args(&args))
+        let mut seen = Vec::new();
+        collect_args(content, &origin, dir, &mut args, &mut seen);
+        let mut builds = Self::from_args(&args);
+        for build in &mut builds {
+            build.input_files = seen.clone();
+        }
+        Ok(builds)
     }
 
     fn from_args(args: &[Arg]) -> Vec<Self> {

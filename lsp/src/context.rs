@@ -16,6 +16,7 @@ pub struct LspContext {
     pub editor_cache: crate::editor_cache::EditorCache,
     /// Root workspace directory.
     pub root: PathBuf,
+    pub(crate) workspace_roots: Vec<PathBuf>,
     /// Open file contents (URI → source text).
     pub open_files: HashMap<String, String>,
     pub document_versions: HashMap<String, i32>,
@@ -25,8 +26,11 @@ pub struct LspContext {
     /// The project's defines, seen by its own files only.
     pub defines: Vec<String>,
     pub initialization_macros: Vec<String>,
+    pub(crate) build_options: crate::build_config::Options,
+    projects: Vec<crate::build_config::Settings>,
     /// The build file the configuration came from, if any.
     pub hxml: Option<PathBuf>,
+    requested_hxml: Option<String>,
     /// What could not be applied from the configuration.
     pub config_problems: Vec<String>,
     /// How long the macros of one compile may run in all.
@@ -63,13 +67,17 @@ impl LspContext {
     pub fn new(root: PathBuf) -> Self {
         Self {
             editor_cache: Default::default(),
+            workspace_roots: vec![root.clone()],
             root,
             open_files: HashMap::new(),
             document_versions: HashMap::new(),
             class_paths: Vec::new(),
             defines: Vec::new(),
             initialization_macros: Vec::new(),
+            build_options: Default::default(),
+            projects: Vec::new(),
             hxml: None,
+            requested_hxml: None,
             config_problems: Vec::new(),
             macro_budget: std::time::Duration::from_secs(5),
             analyses: HashMap::new(),
@@ -82,133 +90,156 @@ impl LspContext {
         }
     }
 
-    /// Explicit build settings take precedence over discovered library metadata.
     pub fn load_workspace_config(&mut self, hxml: Option<&str>) {
-        self.class_paths.clear();
+        self.requested_hxml = hxml.map(str::to_owned);
+        self.projects = self
+            .workspace_roots
+            .iter()
+            .flat_map(|root| crate::build_config::load(root, hxml))
+            .collect();
         self.defines.clear();
         self.initialization_macros.clear();
-        self.config_problems.clear();
-        self.hxml = hxml
-            .map(|h| self.root.join(h))
-            .or_else(|| crate::project::find_hxml(&self.root, &mut self.config_problems));
-        let mut requested = match self.hxml.clone() {
-            Some(path) => self.apply_hxml(&path),
-            None => {
-                self.class_paths = self.manifest_class_paths();
-                let extra = self.root.join("extraParams.hxml");
-                if self.root.join("haxelib.json").is_file() && extra.is_file() {
-                    self.apply_hxml(&extra)
-                } else {
-                    Vec::new()
-                }
-            }
-        };
-        let mut metadata = crate::project::library_metadata(
-            &self.root,
-            &self.class_paths,
-            &mut self.config_problems,
-        );
-        // A direct -lib or path dependency requests hooks even if a class path
-        // also names its sources. Other inferred dependencies use sources as-is.
-        metadata.provided.retain(|name| {
-            !requested.iter().any(|lib| &lib.name == name)
-                && !metadata
-                    .libraries
-                    .iter()
-                    .any(|lib| &lib.name == name && lib.is_local())
-        });
-        self.class_paths.extend(metadata.class_paths);
-        // A manifest can fill omissions, but must not replace an explicit
-        // version selected in the build file.
-        for dependency in metadata.libraries {
-            if let Some(existing) = requested.iter_mut().find(|lib| lib.name == dependency.name) {
-                if existing.is_unpinned() && dependency.is_local() {
-                    *existing = dependency;
-                }
-            } else {
-                requested.push(dependency);
-            }
+        self.hxml = None;
+        self.build_options = Default::default();
+        self.class_paths = self
+            .projects
+            .iter()
+            .flat_map(|project| project.class_paths.clone())
+            .collect();
+        self.config_problems = self
+            .projects
+            .iter()
+            .flat_map(|project| project.problems.clone())
+            .collect();
+        if let Some(project) = self.projects.first() {
+            self.defines = project.defines.clone();
+            self.initialization_macros = project.macros.clone();
+            self.hxml = project.hxml.clone();
+            self.build_options = project.options.clone();
         }
-        let (libraries, problems) =
-            compiler::haxelib::resolve_dependencies(&requested, &self.root, &metadata.provided);
-        self.config_problems.extend(problems);
-        for lib in libraries {
-            self.class_paths.extend(lib.class_paths);
-            self.initialization_macros.extend(lib.macros);
-            self.defines
-                .extend(lib.defines.into_iter().map(|(name, value)| {
-                    value.map_or_else(|| name.clone(), |value| format!("{name}={value}"))
-                }));
-        }
-        if !self.class_paths.contains(&self.root) {
-            self.class_paths.push(self.root.clone());
-        }
-        let mut seen = std::collections::HashSet::new();
-        self.class_paths
-            .retain(|p| seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())));
         self.workspace_index = crate::workspace_index::WorkspaceIndex::start(
             self.class_paths.clone(),
-            self.defines.clone(),
+            self.defines
+                .iter()
+                .chain(&self.build_options.extra_defines)
+                .cloned()
+                .collect(),
+            self.projects
+                .iter()
+                .map(|project| {
+                    (
+                        project
+                            .root
+                            .canonicalize()
+                            .unwrap_or_else(|_| project.root.clone()),
+                        project
+                            .defines
+                            .iter()
+                            .chain(&project.options.extra_defines)
+                            .cloned()
+                            .collect(),
+                    )
+                })
+                .collect(),
             self.index_progress.clone(),
         );
     }
 
-    /// Use one build; merging `--next` builds would mix incompatible targets.
-    fn apply_hxml(&mut self, path: &std::path::Path) -> Vec<compiler::haxelib::Dependency> {
-        use compiler::hxml::HxmlConfig;
-        let build = match HxmlConfig::builds_from_file(path) {
-            Ok(builds) => builds.into_iter().next().unwrap_or_default(),
-            Err(e) => {
-                self.config_problems.push(e);
-                return Vec::new();
-            }
-        };
-        for (file, line, message) in &build.warnings {
-            self.config_problems
-                .push(format!("{}:{}: {}", file.display(), line, message));
-        }
-        // Haxe gives the last declared class path precedence.
-        self.class_paths
-            .extend(build.class_paths.iter().rev().cloned());
-        self.initialization_macros = build.macros.clone();
-        self.defines = build
-            .defines
+    pub(crate) fn reload_workspace_config(&mut self) {
+        let hxml = self.requested_hxml.clone();
+        self.invalidate_analysis_cache();
+        self.load_workspace_config(hxml.as_deref());
+        self.configure_editor_cache();
+    }
+
+    pub(crate) fn configuration_watch_paths(&self) -> Vec<PathBuf> {
+        self.projects
             .iter()
-            .map(|(name, value)| {
-                value
-                    .as_ref()
-                    .map_or_else(|| name.clone(), |value| format!("{name}={value}"))
+            .flat_map(|project| {
+                project
+                    .options
+                    .configuration_files
+                    .iter()
+                    .chain(&project.options.native_libs)
+                    .chain(&project.options.packages)
+                    .chain(project.options.resources.iter().map(|(path, _)| path))
+                    .cloned()
             })
-            .chain(build.target_defines().into_iter().map(str::to_string))
-            .collect();
-        build
-            .libraries
-            .iter()
-            .map(|spec| {
-                compiler::haxelib::Dependency::parse(spec, path.parent().unwrap_or(&self.root))
-            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
             .collect()
     }
 
-    fn manifest_class_paths(&self) -> Vec<PathBuf> {
-        let Ok(content) = std::fs::read_to_string(self.root.join("rayzor.toml")) else {
-            return Vec::new();
-        };
-        let Ok(manifest) = compiler::workspace::manifest::parse_manifest(&content) else {
-            return Vec::new();
-        };
-        match manifest {
-            compiler::workspace::manifest::RayzorManifest::SingleProject(project) => project
-                .build
-                .map(|build| {
-                    build
-                        .class_paths
-                        .iter()
-                        .map(|cp| self.root.join(cp))
-                        .collect()
+    pub(crate) fn settings_for_uri(&self, uri: &str) -> crate::build_config::Settings {
+        let path = PathBuf::from(uri_to_path(uri));
+        let path = path.canonicalize().unwrap_or(path);
+        let owner = self
+            .projects
+            .iter()
+            .filter_map(|project| {
+                crate::build_config::source_depth(&path, &project.root, &project.class_paths)
+                    .map(|depth| (depth, project))
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, project)| project)
+            .or_else(|| {
+                self.projects.iter().rev().find(|project| {
+                    crate::stdlib::discover_for_project(&project.root, project.options.rayzor)
+                        .is_ok_and(|paths| {
+                            paths.iter().any(|root| {
+                                path.starts_with(
+                                    root.canonicalize().unwrap_or_else(|_| root.clone()),
+                                )
+                            })
+                        })
                 })
-                .unwrap_or_default(),
-            _ => Vec::new(),
+            });
+        if let Some(project) = owner {
+            if self.projects.len() > 1 {
+                return project.clone();
+            }
+        } else if !self.projects.is_empty() {
+            // An open file can outlive its workspace folder. It retains its
+            // own project's settings instead of inheriting another folder's.
+            let parent = path.parent().unwrap_or(&path);
+            let root =
+                compiler::workspace::find_project_root(parent).unwrap_or_else(|| parent.into());
+            if let Some(project) = crate::build_config::load(&root, None).into_iter().next() {
+                return project;
+            }
+        }
+        crate::build_config::Settings {
+            root: self
+                .projects
+                .first()
+                .map_or_else(|| self.root.clone(), |project| project.root.clone()),
+            class_paths: self.class_paths.clone(),
+            defines: self.defines.clone(),
+            macros: self.initialization_macros.clone(),
+            hxml: self.hxml.clone(),
+            options: self.build_options.clone(),
+            problems: self.config_problems.clone(),
+        }
+    }
+
+    pub(crate) fn configure_editor_cache(&self) {
+        self.editor_cache.reset_projects();
+        for project in &self.projects {
+            if let Ok(stdlib_paths) =
+                crate::stdlib::discover_for_project(&project.root, project.options.rayzor)
+            {
+                self.editor_cache.configure_project(
+                    crate::session_cache::SessionKey {
+                        class_paths: project.class_paths.clone(),
+                        stdlib_paths,
+                        defines: project.defines.clone(),
+                        macros: project.macros.clone(),
+                        macro_budget: self.macro_budget,
+                        options: project.options.clone(),
+                    },
+                    &project.root,
+                );
+            }
         }
     }
 
@@ -218,6 +249,7 @@ impl LspContext {
         let started = std::time::Instant::now();
         self.failed_analyses.insert(uri.to_string());
         let filename = uri_to_path(uri);
+        let settings = self.settings_for_uri(uri);
         self.workspace_index
             .update(std::path::Path::new(&filename), Some(source));
 
@@ -226,7 +258,7 @@ impl LspContext {
             profile_typecheck: profiling,
             emit_safety_warnings: false,
             record_references: true,
-            user_defines: self.defines.clone(),
+            user_defines: settings.defines.clone(),
             continue_after_macro_errors: true,
             typecheck_only: true,
             source_overrides: std::sync::Arc::new(
@@ -240,29 +272,52 @@ impl LspContext {
             ),
             ..Default::default()
         };
-        config.stdlib_paths = match crate::stdlib::discover() {
-            Ok(paths) => paths,
-            Err(message) => return vec![LspDiagnostic::error(&filename, 0, 0, message)],
-        };
+        config.stdlib_paths =
+            match crate::stdlib::discover_for_project(&settings.root, settings.options.rayzor) {
+                Ok(paths) => paths,
+                Err(message) => return vec![LspDiagnostic::error(&filename, 0, 0, message)],
+            };
         // Cached Rayzor library symbols do not describe a system Haxe library.
-        config.enable_cache = false;
+        config.enable_cache = settings.options.rayzor && settings.options.cache_enabled;
+        config.cache_dir = settings.options.cache_dir.clone();
+        config.extra_defines = settings.options.extra_defines.clone();
+        config.resources = std::sync::Arc::new(
+            settings
+                .options
+                .resources
+                .iter()
+                .filter_map(|(path, name)| {
+                    std::fs::read(path).ok().map(|bytes| (name.clone(), bytes))
+                })
+                .collect(),
+        );
         config.pipeline_config = config.pipeline_config.skip_analysis();
 
         // A syntax error is reported as such, and the last analysis is kept:
         // compiling text the parser rejects yields a partial program and no
         // error, because a fallback parser recovers by dropping what it cannot
         // read.
-        let syntax = self.syntax_errors(&filename, source);
+        let syntax = self.syntax_errors(
+            &filename,
+            source,
+            &settings
+                .defines
+                .iter()
+                .chain(&settings.options.extra_defines)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
         if !syntax.is_empty() {
             return syntax;
         }
 
         let key = crate::session_cache::SessionKey {
-            class_paths: self.class_paths.clone(),
+            class_paths: settings.class_paths.clone(),
             stdlib_paths: config.stdlib_paths.clone(),
-            defines: self.defines.clone(),
-            macros: self.initialization_macros.clone(),
+            defines: settings.defines.clone(),
+            macros: settings.macros.clone(),
             macro_budget: self.macro_budget,
+            options: settings.options.clone(),
         };
         let mut inputs = crate::session_cache::Inputs::capture(&key, &self.open_files);
         inputs.set_source(&filename, source);
@@ -271,20 +326,20 @@ impl LspContext {
         // documents on their next request using the current source generation.
         self.analyses.retain(|_, analysis| {
             self.sessions.iter().any(|session| {
-                inputs.reusable
-                    && Rc::ptr_eq(&session.unit, &analysis.unit)
-                    && session.key == key
-                    && session.inputs == inputs
-                    && session.unit.borrow().macro_dependencies.is_current()
+                Rc::ptr_eq(&session.unit, &analysis.unit)
+                    && (session.key != key
+                        || (inputs.reusable
+                            && session.inputs == inputs
+                            && session.unit.borrow().macro_dependencies.is_current()))
             })
         });
         // BLADE keeps editor answers for old source generations; their compiler
         // graphs need not remain alive alongside the replacement graph.
         self.sessions.retain(|session| {
-            inputs.reusable
-                && session.key == key
-                && session.inputs == inputs
-                && session.unit.borrow().macro_dependencies.is_current()
+            session.key != key
+                || (inputs.reusable
+                    && session.inputs == inputs
+                    && session.unit.borrow().macro_dependencies.is_current())
         });
         let reusable = self.sessions.iter().rposition(|session| {
             inputs.reusable
@@ -302,8 +357,40 @@ impl LspContext {
                         .retain(|_, analysis| !Rc::ptr_eq(&analysis.unit, &oldest.unit));
                 }
                 let mut unit = CompilationUnit::new(config);
-                for cp in &self.class_paths {
+                for path in settings
+                    .options
+                    .configuration_files
+                    .iter()
+                    .chain(&settings.options.native_libs)
+                    .chain(&settings.options.packages)
+                    .chain(settings.options.resources.iter().map(|(path, _)| path))
+                {
+                    unit.macro_dependencies.register_read(path);
+                }
+                for cp in &settings.class_paths {
                     unit.add_source_path(cp.clone());
+                }
+                let mut native_libraries = Vec::new();
+                for path in &settings.options.native_libs {
+                    if let Ok((library, plugin)) =
+                        compiler::native_libs::load_manifest_native_lib_for_analysis(path)
+                    {
+                        unit.register_compiler_plugin(Box::new(plugin));
+                        native_libraries.push(library);
+                    }
+                }
+                for path in &settings.options.packages {
+                    if let Ok(package) = compiler::rpkg::load_rpkg(path) {
+                        unit.register_compiler_plugin(Box::new(
+                            compiler::compiler_plugin::NativePlugin::from_method_entries(
+                                package
+                                    .plugin_name
+                                    .as_deref()
+                                    .unwrap_or(&package.package_name),
+                                package.methods,
+                            ),
+                        ));
+                    }
                 }
                 if let Err(error) = unit.load_stdlib() {
                     return vec![LspDiagnostic::error(
@@ -313,13 +400,32 @@ impl LspContext {
                         format!("Stdlib: {error}"),
                     )];
                 }
-                let settings = self
-                    .hxml
-                    .clone()
-                    .unwrap_or_else(|| self.root.join("haxelib.json"));
-                let settings_source = std::fs::read_to_string(&settings).unwrap_or_default();
-                let mut initialization_errors = Vec::new();
-                for call in &self.initialization_macros {
+                let settings_file = settings.hxml.clone().unwrap_or_else(|| {
+                    settings.root.join(if settings.options.rayzor {
+                        "rayzor.toml"
+                    } else {
+                        "haxelib.json"
+                    })
+                });
+                let settings_source = std::fs::read_to_string(&settings_file).unwrap_or_default();
+                let configuration_file = if settings.options.rayzor {
+                    settings.root.join("rayzor.toml")
+                } else {
+                    settings_file.clone()
+                };
+                let mut initialization_errors: Vec<_> = settings
+                    .problems
+                    .iter()
+                    .map(|message| {
+                        LspDiagnostic::error(
+                            &configuration_file.to_string_lossy(),
+                            1,
+                            1,
+                            message.clone(),
+                        )
+                    })
+                    .collect();
+                for call in &settings.macros {
                     let (line, column) = settings_source
                         .find(call)
                         .map(|offset| line_column(&settings_source, offset))
@@ -329,7 +435,7 @@ impl LspContext {
                             .into_iter()
                             .map(|message| {
                                 LspDiagnostic::error(
-                                    &settings.to_string_lossy(),
+                                    &settings_file.to_string_lossy(),
                                     line,
                                     column,
                                     message,
@@ -337,7 +443,14 @@ impl LspContext {
                             }),
                     );
                 }
-                crate::session_cache::SessionCache::new(key, inputs, unit, initialization_errors)
+                let mut session = crate::session_cache::SessionCache::new(
+                    key,
+                    inputs,
+                    unit,
+                    initialization_errors,
+                );
+                session.native_libraries = native_libraries;
+                session
             }
         };
         if let Some(index) = session.indexes.get(uri).cloned() {
@@ -473,8 +586,10 @@ impl LspContext {
         let file_id = unit.file_id_of(&filename).unwrap_or(u32::MAX);
         let mut preprocessor = parser::preprocessor::PreprocessorConfig::default();
         preprocessor.defines.extend(
-            self.defines
+            settings
+                .defines
                 .iter()
+                .chain(&settings.options.extra_defines)
                 .map(|define| define.split('=').next().unwrap().to_string()),
         );
         preprocessor.defines.insert("eval".into());
@@ -743,11 +858,16 @@ impl LspContext {
         self.workspace_index.pump()
     }
 
-    fn syntax_errors(&self, filename: &str, source: &str) -> Vec<LspDiagnostic> {
+    fn syntax_errors(
+        &self,
+        filename: &str,
+        source: &str,
+        defines: &[String],
+    ) -> Vec<LspDiagnostic> {
         let mut config = parser::preprocessor::PreprocessorConfig::default();
         config.defines.insert("eval".to_string());
         config.defines.extend(
-            self.defines
+            defines
                 .iter()
                 .map(|define| define.split('=').next().unwrap().to_string()),
         );
@@ -1282,6 +1402,34 @@ mod cache_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn manifest_resources_reach_analysis_and_invalidate_reused_graphs() {
+        let workspace = Workspace::new(&[
+            (
+                "rayzor.toml",
+                "[project]\nname = 'resources'\n[build]\nresources = ['data.txt@settings']\n",
+            ),
+            ("data.txt", "first"),
+            ("Main.hx", "class Main { public var value:Int; }"),
+        ]);
+        let mut context = workspace.context();
+        context.load_workspace_config(None);
+        let uri = workspace.compile(&mut context, "Main.hx", None);
+        let first = context.analyses[&uri].unit.clone();
+        assert_eq!(
+            first.borrow().config.resources[0],
+            ("settings".into(), b"first".to_vec())
+        );
+        std::fs::write(workspace.0.join("data.txt"), "updated resource").unwrap();
+        workspace.compile(&mut context, "Main.hx", None);
+        let second = &context.analyses[&uri].unit;
+        assert!(!Rc::ptr_eq(&first, second));
+        assert_eq!(
+            second.borrow().config.resources[0],
+            ("settings".into(), b"updated resource".to_vec())
+        );
     }
 
     #[test]

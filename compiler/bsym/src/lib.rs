@@ -1010,7 +1010,7 @@ pub fn build_manifest(stdlib_root: &Path) -> Vec<BladeModuleSymbols> {
         }
 
         modules.push(BladeModuleSymbols {
-            source_hash: hash_string(&relative),
+            source_hash: hash_string(&source),
             name: module_name,
             source_path: relative,
             types,
@@ -1019,4 +1019,23 @@ pub fn build_manifest(stdlib_root: &Path) -> Vec<BladeModuleSymbols> {
     }
 
     modules
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    #[test]
+    fn manifest_fingerprint_tracks_source_contents_at_a_stable_path() {
+        let root = std::env::temp_dir().join(format!("rayzor-bsym-source-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("Example.hx");
+        std::fs::write(&file, "class Example { public var value:Int; }").unwrap();
+        let first = super::build_manifest(&root);
+        std::fs::write(&file, "class Example { public var value:String; }").unwrap();
+        let second = super::build_manifest(&root);
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0].source_hash, second[0].source_hash);
+        assert_eq!(first[0].source_path, second[0].source_path);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

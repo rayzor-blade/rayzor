@@ -16,6 +16,8 @@ pub struct Library {
     pub defines: Vec<(String, Option<String>)>,
     /// Initialization macros from the library's extraParams.hxml.
     pub macros: Vec<String>,
+    /// Configuration and selection files that affect this library.
+    pub input_files: Vec<PathBuf>,
 }
 
 /// A dependency with paths already resolved against its declaring file.
@@ -206,7 +208,11 @@ fn library(
         }
     };
 
-    library_at(&root, name, version)
+    let (mut library, dependencies) = library_at(&root, name, version)?;
+    library
+        .input_files
+        .extend([dir.join(".dev"), dir.join(".current")]);
+    Ok((library, dependencies))
 }
 
 fn library_at(
@@ -232,6 +238,7 @@ fn library_at(
         class_paths: vec![root.join(&manifest.class_path)],
         defines: vec![(name.to_string(), version)],
         macros: Vec::new(),
+        input_files: vec![manifest_path, root.join("extraParams.hxml")],
     };
     let mut dependencies = manifest.dependencies(root);
 
@@ -244,6 +251,7 @@ fn library_at(
         lib.class_paths.extend(params.class_paths);
         lib.defines.extend(params.defines);
         lib.macros.extend(params.macros);
+        lib.input_files.extend(params.input_files);
         dependencies.extend(params.libraries.iter().map(|l| Dependency::parse(l, root)));
     }
     Ok((lib, dependencies))

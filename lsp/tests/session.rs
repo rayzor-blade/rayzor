@@ -40,6 +40,15 @@ impl Session {
     }
 
     fn connect(root: PathBuf, options: Value, temporary: bool) -> Self {
+        Self::connect_folders(root, options, temporary, None)
+    }
+
+    fn connect_folders(
+        root: PathBuf,
+        options: Value,
+        temporary: bool,
+        folders: Option<Vec<PathBuf>>,
+    ) -> Self {
         let (server_end, client) = Connection::memory();
         let server = rayzor_lsp::spawn_session(server_end).unwrap();
         let mut session = Session {
@@ -53,10 +62,11 @@ impl Session {
             temporary,
         };
         let root_uri = session.uri("");
-        session.request(
-            "initialize",
-            json!({"processId": null, "rootUri": root_uri, "capabilities": {}, "initializationOptions": options}),
-        );
+        let mut params = json!({"processId": null, "rootUri": root_uri, "capabilities": {}, "initializationOptions": options});
+        if let Some(folders) = folders {
+            params["workspaceFolders"] = json!(folders.iter().map(|path| json!({"uri":format!("file://{}", path.display()),"name":path.file_name().unwrap().to_string_lossy()})).collect::<Vec<_>>());
+        }
+        session.request("initialize", params);
         session.notify("initialized", json!({}));
         session
     }
@@ -2390,4 +2400,417 @@ fn module_enum_constructors_precede_foreign_ambient_type_names() {
         "{hover}"
     );
     assert!(!hover.contains("foreign.Message"), "{hover}");
+}
+
+#[test]
+fn rayzor_manifest_uses_native_stdlib_defines_and_declared_sources() {
+    let source = "import rayzor.concurrent.Channel;\nclass Main {\n#if enabled\npublic static function selected():Int return 7;\n#else\npublic static function selected():String return 'wrong';\n#end\n#if disabled\npublic var fail:MissingDisabledType;\n#end\n#if jit\npublic function channel(value:Channel<Int>):Channel<Int> return value;\n#end\npublic var value:Int = selected();\n}";
+    let mut session = Session::start(&[
+        (
+            "rayzor.toml",
+            "[project]\nname = 'native'\ntype = 'library'\n[build]\nclass-paths = ['src']\n[build.defines]\nenabled = true\ndisabled = false\n",
+        ),
+        ("build.hxml", "-cp wrong\n-D disabled\n"),
+        ("src/Main.hx", source),
+    ]);
+    let diagnostics = session.open("src/Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let hover =
+        hover_text(&session.request("textDocument/hover", session.at("src/Main.hx", 3, 28)));
+    assert!(hover.contains("selected():Int"), "{hover}");
+    let hover =
+        hover_text(&session.request("textDocument/hover", session.at("src/Main.hx", 11, 32)));
+    assert!(hover.contains("Channel"), "{hover}");
+}
+
+#[test]
+fn rayzor_manifest_source_dependencies_supply_types_and_documentation() {
+    let mut session = Session::start(&[
+        (
+            "rayzor.toml",
+            "[project]\nname = 'consumer'\n[build]\nclass-paths = ['src']\n[dependencies]\nhelper = {path = 'deps/helper'}\n",
+        ),
+        (
+            "src/Main.hx",
+            "class Main { public var value:Helper; public function new(value:Helper) this.value = value; }",
+        ),
+        (
+            "deps/helper/rayzor.toml",
+            "[project]\nname = 'helper'\ntype = 'library'\n[build]\nclass-paths = ['src']\n",
+        ),
+        (
+            "deps/helper/src/Helper.hx",
+            "/** A local native-project dependency. */ class Helper { public function new() {} }",
+        ),
+    ]);
+    let diagnostics = session.open("src/Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let source = std::fs::read_to_string(session.root.join("src/Main.hx")).unwrap();
+    let column = source.find("Helper").unwrap() as u32;
+    let hover =
+        hover_text(&session.request("textDocument/hover", session.at("src/Main.hx", 0, column)));
+    assert!(
+        hover.contains("class Helper") && hover.contains("local native-project dependency"),
+        "{hover}"
+    );
+}
+
+#[test]
+fn workspace_members_keep_defines_and_persisted_hovers_separate() {
+    let source = "class Main {\n#if number\npublic var value:Int = 7;\n#else\npublic var value:String = 'text';\n#end\n}";
+    let mut session = Session::start(&[
+        (
+            "rayzor.toml",
+            "[workspace]\nmembers = ['one', 'two']\n[workspace.cache]\ndir = '.indexes'\n",
+        ),
+        (
+            "one/rayzor.toml",
+            "[project]\nname = 'one'\n[build]\nclass-paths = ['src']\n[build.defines]\nnumber = true\n",
+        ),
+        (
+            "two/rayzor.toml",
+            "[project]\nname = 'two'\n[build]\nclass-paths = ['src']\n",
+        ),
+        ("one/src/Main.hx", source),
+        ("two/src/Main.hx", source),
+    ]);
+    for (file, line, expected) in [
+        ("one/src/Main.hx", 2, "value:Int"),
+        ("two/src/Main.hx", 4, "value:String"),
+        ("one/src/Main.hx", 2, "value:Int"),
+    ] {
+        assert!(session.open(file).is_empty(), "{:#?}", session.diagnostics);
+        let hover = hover_text(&session.request("textDocument/hover", session.at(file, line, 12)));
+        assert!(hover.contains(expected), "{file}: {hover}");
+    }
+    let root = session.root.clone();
+    session.temporary = false;
+    drop(session);
+    let mut restarted = Session::connect(root, json!({}), true);
+    for (file, line, expected) in [
+        ("one/src/Main.hx", 2, "value:Int"),
+        ("two/src/Main.hx", 4, "value:String"),
+    ] {
+        assert!(restarted.open(file).is_empty());
+        let hover =
+            hover_text(&restarted.request("textDocument/hover", restarted.at(file, line, 12)));
+        assert!(hover.contains(expected), "{file}: {hover}");
+    }
+    assert!(
+        !restarted
+            .activity
+            .iter()
+            .any(|event| event["state"] == "checking"),
+        "{:#?}",
+        restarted.activity
+    );
+}
+
+#[test]
+fn changing_a_manifest_rechecks_open_documents_with_new_defines() {
+    let manifest = "[project]\nname = 'reload'\n[build]\nclass-paths = ['src']\n[build.defines]\nnumber = true\n";
+    let source = "class Main {\n#if number\npublic var value:Int = 7;\n#else\npublic var value:String = 'text';\n#end\n}";
+    let mut session = Session::start(&[("rayzor.toml", manifest), ("src/Main.hx", source)]);
+    assert!(session.open("src/Main.hx").is_empty());
+    std::fs::write(
+        session.root.join("rayzor.toml"),
+        manifest.replace("number = true", "number = false"),
+    )
+    .unwrap();
+    session.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes":[{"uri":session.uri("rayzor.toml"),"type":2}]}),
+    );
+    assert!(session.wait_ready("src/Main.hx", 1).is_empty());
+    let hover =
+        hover_text(&session.request("textDocument/hover", session.at("src/Main.hx", 4, 12)));
+    assert!(hover.contains("value:String"), "{hover}");
+}
+
+#[test]
+fn rayzor_manifest_delegates_to_hxml_and_reloads_included_defines() {
+    let source = "class Main {\n#if number\npublic var value:Int = 7;\n#else\npublic var value:String = 'text';\n#end\n}";
+    let mut session = Session::start(&[
+        (
+            "rayzor.toml",
+            "[project]\nname = 'delegated'\nhxml = 'config/build.hxml'\n",
+        ),
+        ("config/build.hxml", "-cp ../src\nflags.hxml\n"),
+        ("config/flags.hxml", "-D number\n"),
+        ("src/Main.hx", source),
+    ]);
+    assert!(
+        session.open("src/Main.hx").is_empty(),
+        "{:#?}",
+        session.diagnostics
+    );
+    let hover =
+        hover_text(&session.request("textDocument/hover", session.at("src/Main.hx", 2, 12)));
+    assert!(hover.contains("value:Int"), "{hover}");
+    std::fs::write(session.root.join("config/flags.hxml"), "# removed\n").unwrap();
+    session.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes":[{"uri":session.uri("config/flags.hxml"),"type":2}]}),
+    );
+    assert!(session.wait_ready("src/Main.hx", 1).is_empty());
+    let hover =
+        hover_text(&session.request("textDocument/hover", session.at("src/Main.hx", 4, 12)));
+    assert!(hover.contains("value:String"), "{hover}");
+}
+
+#[test]
+fn disabled_manifest_cache_keeps_hovers_without_writing_an_index() {
+    let mut session = Session::start(&[
+        (
+            "rayzor.toml",
+            "[project]\nname = 'uncached'\n[cache]\nenabled = false\ndir = '.custom-cache'\n",
+        ),
+        ("Main.hx", "class Main { public var value:Int = 7; }"),
+    ]);
+    assert!(session.open("Main.hx").is_empty());
+    let hover = hover_text(&session.request("textDocument/hover", session.at("Main.hx", 0, 25)));
+    assert!(hover.contains("value:Int"), "{hover}");
+    assert!(!session.root.join(".custom-cache/editor").exists());
+}
+
+#[test]
+fn missing_manifest_dependencies_are_reported_without_losing_hints() {
+    let mut session = Session::start(&[
+        (
+            "rayzor.toml",
+            "[project]\nname = 'incomplete'\n[build]\nnative-libs = ['missing-plugin.dylib']\n[dependencies]\nmissing = {path = 'missing.rpkg'}\n",
+        ),
+        ("Main.hx", "class Main { public var value:Int = 7; }"),
+    ]);
+    assert!(session.open("Main.hx").is_empty());
+    let hover = hover_text(&session.request("textDocument/hover", session.at("Main.hx", 0, 25)));
+    assert!(hover.contains("value:Int"), "{hover}");
+    let config = session.uri("rayzor.toml");
+    let errors = session
+        .diagnostics
+        .iter()
+        .filter(|update| update["uri"] == config)
+        .flat_map(|update| update["diagnostics"].as_array().unwrap())
+        .map(|error| error["message"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.iter().any(|error| error.contains("missing-plugin")),
+        "{errors:?}"
+    );
+    assert!(
+        errors.iter().any(|error| error.contains("missing.rpkg")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn packaged_sources_are_indexed_without_loading_native_code() {
+    let mut setup = Session::start(&[
+        (
+            "rayzor.toml",
+            "[project]\nname = 'packaged'\n[build]\nclass-paths = ['src']\n[dependencies]\nfixture = {path = 'fixture.rpkg'}\n",
+        ),
+        ("src/Main.hx", "class Main { public var value:Provided; }"),
+    ]);
+    let mut package = compiler::rpkg::pack::RpkgBuilder::new("fixture");
+    package.add_haxe_source(
+        "Provided.hx",
+        "/** Packaged declaration documentation. */ class Provided { public var value:Int; }",
+    );
+    package.add_method_table("rayzor_fixture_plugins", &[]);
+    // Metadata and source analysis must not attempt dlopen on this payload.
+    package.add_native_lib(
+        b"not executable",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    );
+    package.write(&setup.root.join("fixture.rpkg")).unwrap();
+    let root = setup.root.clone();
+    setup.temporary = false;
+    drop(setup);
+    let mut session = Session::connect(root, json!({}), true);
+    assert!(
+        session.open("src/Main.hx").is_empty(),
+        "{:?}",
+        session.diagnostics
+    );
+    let hover =
+        hover_text(&session.request("textDocument/hover", session.at("src/Main.hx", 0, 32)));
+    assert!(
+        hover.contains("class Provided") && hover.contains("Packaged declaration documentation"),
+        "{hover}"
+    );
+    assert!(
+        !session.logs.iter().any(|log| log.contains("dlopen")),
+        "{:?}",
+        session.logs
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn native_manifest_plugins_do_not_run_runtime_initialization() {
+    let mut setup = Session::start(&[("Main.hx", "class Main { public var value:Int = 7; }")]);
+    let marker = setup.root.join("runtime-initialized");
+    let source = setup.root.join("plugin.c");
+    std::fs::write(
+        &source,
+        format!(
+            r#"
+#include <stddef.h>
+#include <stdio.h>
+unsigned int rayzor_plugin_abi_version(void) {{ return {}; }}
+void *plugin_init(size_t *count) {{
+    FILE *file = fopen({}, "w");
+    if (file) fclose(file);
+    *count = 0;
+    return NULL;
+}}
+"#,
+            compiler::plugin::ABI_VERSION,
+            serde_json::to_string(marker.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    let library = setup.root.join(if cfg!(target_os = "macos") {
+        "libfixture.dylib"
+    } else {
+        "libfixture.so"
+    });
+    let output = std::process::Command::new("cc")
+        .arg(if cfg!(target_os = "macos") {
+            "-dynamiclib"
+        } else {
+            "-shared"
+        })
+        .arg("-fPIC")
+        .arg(&source)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::write(
+        setup.root.join("rayzor.toml"),
+        format!(
+            "[project]\nname = 'native-plugin'\n[build]\nnative-libs = [{}]\n",
+            serde_json::to_string(library.file_name().unwrap().to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    let root = setup.root.clone();
+    setup.temporary = false;
+    drop(setup);
+    let mut session = Session::connect(root, json!({}), true);
+    assert!(session.open("Main.hx").is_empty());
+    let hover = hover_text(&session.request("textDocument/hover", session.at("Main.hx", 0, 25)));
+    assert!(hover.contains("value:Int"), "{hover}");
+    assert!(!marker.exists(), "editor analysis ran plugin_init");
+    assert!(session.logs.is_empty(), "{:?}", session.logs);
+}
+
+#[test]
+fn workspace_folders_load_and_replace_separate_project_settings() {
+    let source = "class Main {\n#if number\npublic var value:Int = 7;\n#else\npublic var value:String = 'text';\n#end\n}";
+    let mut setup = Session::start(&[
+        (
+            "one/rayzor.toml",
+            "[project]\nname = 'one'\n[build.defines]\nnumber = true\n",
+        ),
+        ("two/rayzor.toml", "[project]\nname = 'two'\n"),
+        ("one/Main.hx", source),
+        ("one/RemovedOnly.hx", "class RemovedOnly {}"),
+        ("two/Main.hx", source),
+    ]);
+    let root = setup.root.clone();
+    setup.temporary = false;
+    drop(setup);
+    let folders = vec![root.join("one")];
+    let mut session = Session::connect_folders(root, json!({}), true, Some(folders));
+    assert!(session.open("one/Main.hx").is_empty());
+    let hover =
+        hover_text(&session.request("textDocument/hover", session.at("one/Main.hx", 2, 12)));
+    assert!(hover.contains("value:Int"), "{hover}");
+    session.notify(
+        "workspace/didChangeWorkspaceFolders",
+        json!({"event":{"added":[{"uri":session.uri("two"),"name":"two"}],"removed":[]}}),
+    );
+    assert!(session.wait_ready("one/Main.hx", 1).is_empty());
+    assert!(session.open("two/Main.hx").is_empty());
+    let hover =
+        hover_text(&session.request("textDocument/hover", session.at("two/Main.hx", 4, 12)));
+    assert!(hover.contains("value:String"), "{hover}");
+    session.notify(
+        "workspace/didChangeWorkspaceFolders",
+        json!({"event":{"added":[],"removed":[{"uri":session.uri("one"),"name":"one"}]}}),
+    );
+    assert!(session.wait_ready("one/Main.hx", 1).is_empty());
+    let hover =
+        hover_text(&session.request("textDocument/hover", session.at("one/Main.hx", 2, 12)));
+    assert!(
+        hover.contains("value:Int"),
+        "removed folder inherited another project's flags: {hover}"
+    );
+    // A request is a barrier for the notification; workspace search must stop
+    // advertising declarations from the removed folder.
+    let symbols = session.request("workspace/symbol", json!({"query":"RemovedOnly"}));
+    assert!(symbols.as_array().unwrap().is_empty(), "{symbols}");
+}
+
+#[test]
+fn saving_a_manifest_rechecks_haxe_documents_without_treating_toml_as_haxe() {
+    let manifest = "[project]\nname = 'saved'\n[build.defines]\nnumber = true\n";
+    let source = "class Main {\n#if number\npublic var value:Int = 7;\n#else\npublic var value:String = 'text';\n#end\n}";
+    let mut session = Session::start(&[("rayzor.toml", manifest), ("Main.hx", source)]);
+    assert!(session.open("Main.hx").is_empty());
+    let updated = manifest.replace("true", "false");
+    std::fs::write(session.root.join("rayzor.toml"), &updated).unwrap();
+    session.notify(
+        "textDocument/didSave",
+        json!({"textDocument":{"uri":session.uri("rayzor.toml")},"text":updated}),
+    );
+    assert!(session.wait_ready("Main.hx", 1).is_empty());
+    let hover = hover_text(&session.request("textDocument/hover", session.at("Main.hx", 4, 12)));
+    assert!(hover.contains("value:String"), "{hover}");
+    assert!(
+        !session
+            .activity
+            .iter()
+            .any(|event| event["uri"] == session.uri("rayzor.toml"))
+    );
+}
+
+#[test]
+fn nue_manifest_keeps_shared_tensor_and_map_identities() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../nue")
+        .canonicalize()
+        .unwrap();
+    let mut session = Session::connect(root, json!({}), false);
+    for file in ["nue/Module.hx", "nue/model/NamedTensorMap.hx"] {
+        let diagnostics = session.open(file);
+        assert!(diagnostics.is_empty(), "{file}: {diagnostics:#?}");
+        let source = std::fs::read_to_string(session.root.join(file)).unwrap();
+        let offset = source
+            .rfind(if file.ends_with("Module.hx") {
+                "function forward(x:Tensor)"
+            } else {
+                "var tensorByName:StringMap<Tensor>"
+            })
+            .unwrap();
+        let offset = offset + source[offset..].find("Tensor").unwrap();
+        let before = &source[..offset];
+        let line = before.bytes().filter(|byte| *byte == b'\n').count() as u32;
+        let column = before.rsplit('\n').next().unwrap().len() as u32;
+        let hover =
+            hover_text(&session.request("textDocument/hover", session.at(file, line, column)));
+        assert!(
+            hover.contains("Tensor") && !hover.contains("Unknown") && !hover.contains("SymbolId"),
+            "{file}: {hover}"
+        );
+    }
 }
