@@ -2097,6 +2097,8 @@ fn build_macros_load_helpers_and_their_macro_only_dependencies() {
             r#"class Helpers {
     #if macro
     public static function name():String {
+        var quoted = macro 'test$id';
+        if (!quoted.expr.match(EConst(CString("test$id", SingleQuotes)))) throw "quote identity";
         if (String.fromCharCode(233) != "é" || "é".charCodeAt(0) != 233
             || StringTools.unsafeCodeAt("é", 0) != 233 || StringTools.fastCodeAt("x", 2) != -1) throw "character codes";
         if (Math.fround(-1.5) != -1 || Math.sqrt(9) != 3 || Math.cos(0) != 1 || !Math.isFinite(Math.PI)) throw "math primitives";

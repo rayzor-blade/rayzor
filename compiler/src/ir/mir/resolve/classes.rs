@@ -32,7 +32,19 @@ impl<'a> HirToMirContext<'a> {
                     break;
                 }
                 match type_table.get(current).map(|ti| &ti.kind) {
-                    Some(TypeKind::Class { symbol_id, .. }) => return Some(*symbol_id),
+                    Some(TypeKind::Class { symbol_id, .. }) => {
+                        return self.symbol_table.get_symbol(*symbol_id).and_then(|symbol| {
+                            (symbol.kind != crate::tast::SymbolKind::Interface)
+                                .then_some(*symbol_id)
+                        });
+                    }
+                    Some(TypeKind::Abstract { .. }) => {
+                        let storage = self.resolve_storage_type(current);
+                        if storage == current {
+                            return None;
+                        }
+                        current = storage;
+                    }
                     Some(TypeKind::TypeAlias { target_type, .. }) => {
                         current = *target_type;
                     }
@@ -52,7 +64,11 @@ impl<'a> HirToMirContext<'a> {
                         | TypeKind::Float
                         | TypeKind::Bool
                         | TypeKind::Function { .. }
-                        | TypeKind::Anonymous { .. },
+                        | TypeKind::Anonymous { .. }
+                        | TypeKind::Optional { .. }
+                        | TypeKind::TypeParameter { .. }
+                        | TypeKind::Dynamic
+                        | TypeKind::Void,
                     ) => return None,
                     _ => break,
                 }

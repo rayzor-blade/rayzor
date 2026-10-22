@@ -305,7 +305,7 @@ impl<'a> HirToMirContext<'a> {
         // symbol; `convert_type` makes either a fat pointer.
         let is_interface = |kind: Option<&TypeKind>| match kind {
             Some(TypeKind::Interface { .. }) => true,
-            Some(TypeKind::Class { symbol_id, .. }) => self
+            Some(TypeKind::Class { symbol_id, .. } | TypeKind::Abstract { symbol_id, .. }) => self
                 .symbol_table
                 .get_symbol(*symbol_id)
                 .is_some_and(|s| s.kind == crate::tast::SymbolKind::Interface),
@@ -336,7 +336,7 @@ impl<'a> HirToMirContext<'a> {
         let type_ref = type_table.get(type_id)?;
         match &type_ref.kind {
             TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
-            TypeKind::Class { symbol_id, .. }
+            TypeKind::Class { symbol_id, .. } | TypeKind::Abstract { symbol_id, .. }
                 if self
                     .symbol_table
                     .get_symbol(*symbol_id)

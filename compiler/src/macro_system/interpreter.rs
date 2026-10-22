@@ -312,17 +312,6 @@ impl MacroInterpreter {
                 {
                     return Ok(value);
                 }
-                if let Some((owner, 0)) = self
-                    .class_registry
-                    .as_ref()
-                    .and_then(|registry| registry.enum_constructor(None, name))
-                {
-                    return Ok(MacroValue::Enum(
-                        Arc::from(owner),
-                        Arc::from(name.as_str()),
-                        Arc::new(Vec::new()),
-                    ));
-                }
                 // A static helper used as a callback retains its declaring class.
                 if let Some(class) = self.macro_class_stack.last()
                     && let Some(registry) = &self.class_registry
@@ -384,6 +373,17 @@ impl MacroInterpreter {
                 if let Some(enum_name) = expr_enum_value(name) {
                     return Ok(MacroValue::Enum(
                         Arc::from(enum_name),
+                        Arc::from(name.as_str()),
+                        Arc::new(Vec::new()),
+                    ));
+                }
+                if let Some((owner, 0)) = self
+                    .class_registry
+                    .as_ref()
+                    .and_then(|registry| registry.enum_constructor(None, name))
+                {
+                    return Ok(MacroValue::Enum(
+                        Arc::from(owner),
                         Arc::from(name.as_str()),
                         Arc::new(Vec::new()),
                     ));
