@@ -51,12 +51,15 @@ impl OptimizationPass for LoopUnswitchPass {
         let mut result = OptimizationResult::unchanged();
         let preserving = super::optimization::header_preserving_functions(module);
         for function in module.functions.values_mut() {
-            close_loops(function);
+            // Exit phis are preparation for a split, not a transformation by themselves.
+            let mut candidate = function.clone();
+            close_loops(&mut candidate);
             let mut done = 0;
-            while done < MAX_COPIES_PER_FUNCTION && split_one(function, &preserving) {
+            while done < MAX_COPIES_PER_FUNCTION && split_one(&mut candidate, &preserving) {
                 done += 1;
             }
             if done > 0 {
+                *function = candidate;
                 result.modified = true;
                 *result.stats.entry("loops_split".to_string()).or_insert(0) += done;
             }
@@ -68,7 +71,7 @@ impl OptimizationPass for LoopUnswitchPass {
 /// Gives every value a single-exit loop defines and uses after it a phi in the
 /// exit block, so the loop can be copied: after a split, either copy may be
 /// the one that defined it, and only a phi in the exit can say which.
-fn close_loops(function: &mut IrFunction) {
+pub(super) fn close_loops(function: &mut IrFunction) {
     for _ in 0..32 {
         let Some((exit, values, inside)) = unclosed_loop(function) else {
             return;
@@ -1269,5 +1272,77 @@ fn apply(function: &mut IrFunction, natural: &NaturalLoop, split: Split) {
         for phi in &mut block.phi_nodes {
             phi.incoming.retain(|(from, _)| live.contains(from));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::builder::{FunctionSignatureBuilder, IrBuilder};
+    use crate::tast::SymbolId;
+
+    fn counted_loop(limit: i64) -> (IrModule, IrFunctionId) {
+        let mut builder = IrBuilder::new("count".into(), "count.hx".into());
+        let id = builder.start_function(
+            SymbolId::from_raw(1),
+            "count".into(),
+            FunctionSignatureBuilder::new().returns(IrType::I32).build(),
+        );
+        let zero = builder.build_int(0, IrType::I32).unwrap();
+        let limit = builder.build_int(limit, IrType::I32).unwrap();
+        let header = builder.create_block().unwrap();
+        let body = builder.create_block().unwrap();
+        let exit = builder.create_block().unwrap();
+        builder.build_branch(header);
+        builder.switch_to_block(header);
+        let i = builder.build_phi(header, IrType::I32).unwrap();
+        let condition = builder.build_cmp(CompareOp::Lt, i, limit).unwrap();
+        builder.build_cond_branch(condition, body, exit);
+        builder.switch_to_block(body);
+        let one = builder.build_int(1, IrType::I32).unwrap();
+        let next = builder.build_binop(BinaryOp::Add, i, one).unwrap();
+        builder.build_branch(header);
+        builder.add_phi_incoming(header, i, IrBlockId::entry(), zero);
+        builder.add_phi_incoming(header, i, body, next);
+        builder.switch_to_block(exit);
+        builder.build_return(Some(i));
+        builder.finish_function();
+        (builder.module, id)
+    }
+
+    #[test]
+    fn an_unsplit_loop_keeps_its_exit_values_and_registers() {
+        let (mut module, id) = counted_loop(100);
+        let function = &module.functions[&id];
+        assert!(unclosed_loop(function).is_some());
+        let before = postcard::to_allocvec(function).unwrap();
+        let result = LoopUnswitchPass::new().run_on_module(&mut module);
+        assert!(!result.modified);
+        assert_eq!(
+            before,
+            postcard::to_allocvec(&module.functions[&id]).unwrap()
+        );
+    }
+
+    #[test]
+    fn unrolling_preserves_values_used_after_the_loop() {
+        use crate::codegen::mir_interpreter::{InterpValue, MirInterpreter};
+        let (mut module, id) = counted_loop(4);
+        let result =
+            super::super::loop_unrolling::LoopUnrollingPass::new().run_on_module(&mut module);
+        assert!(result.modified);
+        super::super::validation::validate_module(&module).unwrap();
+        let value = MirInterpreter::new().execute(&module, id, vec![]).unwrap();
+        assert!(matches!(value, InterpValue::I32(4)));
+    }
+
+    #[test]
+    fn unrolling_leaves_ineligible_loops_unchanged() {
+        let (mut module, _) = counted_loop(100);
+        let before = postcard::to_allocvec(&module).unwrap();
+        let result =
+            super::super::loop_unrolling::LoopUnrollingPass::new().run_on_module(&mut module);
+        assert!(!result.modified);
+        assert_eq!(before, postcard::to_allocvec(&module).unwrap());
     }
 }

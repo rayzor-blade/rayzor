@@ -225,6 +225,7 @@ impl PassManager {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
+        let profile = std::env::var_os("RAYZOR_PROFILE_PASSES").is_some();
 
         for _pipeline_iter in 0..max_pipeline_iterations {
             let mut transformative_change = false;
@@ -233,7 +234,17 @@ impl PassManager {
                 if disabled.contains(&pass.name()) {
                     continue;
                 }
+                let start = profile.then(std::time::Instant::now);
                 let result = pass.run_on_module(module);
+                if let Some(start) = start {
+                    eprintln!(
+                        "[mir-pass] iteration={} pass={} ms={:.3} changed={}",
+                        _pipeline_iter,
+                        pass.name(),
+                        start.elapsed().as_secs_f64() * 1000.0,
+                        result.modified
+                    );
+                }
                 if result.modified {
                     // Only re-iterate if a transformative pass (not just cleanup) changed things
                     let is_cleanup = matches!(

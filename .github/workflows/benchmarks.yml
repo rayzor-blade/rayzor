@@ -62,8 +62,8 @@ jobs:
       # Built here so the kernel runners and `collect` only execute it. Their
       # cargo caches are keyed per job, so building it there costs a full
       # compiler rebuild on every kernel.
-      - name: Build benchmark runner
-        run: cargo build --release --package compiler --features all-backends,llvm-dynamic --example benchmark_runner
+      - name: Build benchmark runners
+        run: cargo build --release --package compiler --features all-backends,llvm-dynamic --example benchmark_runner --example benchmark_startup
 
       - name: Generate precompiled bundles and stdlib symbol cache
         run: |
@@ -99,6 +99,7 @@ jobs:
             target/release/rayzor
             target/release/librayzor_runtime.a
             target/release/examples/benchmark_runner
+            target/release/examples/benchmark_startup
           retention-days: 1
 
   benchmark:
@@ -220,7 +221,7 @@ jobs:
           path: target/release
 
       - name: Fix binary permissions
-        run: chmod +x target/release/rayzor target/release/examples/benchmark_runner
+        run: chmod +x target/release/rayzor target/release/examples/benchmark_runner target/release/examples/benchmark_startup
 
       - name: Run ${{ matrix.kernel }} benchmark
         # The bundles were regenerated from source two jobs up; the artifact
@@ -230,6 +231,20 @@ jobs:
           RAYZOR_BENCH_BUNDLES_ARE_FRESH: "1"
           RAYZOR_PROFILE_TIER_EVENTS: "1"
         run: ./target/release/examples/benchmark_runner ${{ matrix.kernel }} --json --disable-trace
+
+      - name: Measure ${{ matrix.kernel }} source startup
+        run: |
+          mkdir -p target/benchmark-startup
+          ./target/release/examples/benchmark_startup ${{ matrix.kernel }} --repetitions 3 > target/benchmark-startup/cranelift.jsonl
+          ./target/release/examples/benchmark_startup ${{ matrix.kernel }} --repetitions 3 --llvm > target/benchmark-startup/llvm.jsonl
+
+      - name: Upload startup measurements (${{ matrix.kernel }})
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: benchmark-startup-${{ matrix.kernel }}
+          path: target/benchmark-startup/
+          retention-days: 90
 
       # Each runner produces only its own kernel; `collect` merges them back
       # into the single results file downstream consumers expect.

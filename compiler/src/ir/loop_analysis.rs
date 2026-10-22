@@ -35,22 +35,36 @@ impl DominatorTree {
     pub fn compute(function: &IrFunction) -> Self {
         let cfg = &function.cfg;
         let entry = cfg.entry_block;
+        if cfg.blocks.len() <= 1 {
+            return Self {
+                idom: BTreeMap::new(),
+                children: BTreeMap::new(),
+                depth: BTreeMap::from([(entry, 0)]),
+                entry,
+            };
+        }
 
         // Get blocks in reverse postorder for efficient iteration
         let rpo = Self::reverse_postorder(cfg, entry);
         let rpo_index: BTreeMap<IrBlockId, usize> =
             rpo.iter().enumerate().map(|(i, &b)| (b, i)).collect();
 
-        // Initialize idom: entry dominates itself, others undefined
-        let mut idom: BTreeMap<IrBlockId, Option<IrBlockId>> = BTreeMap::new();
-        for &block in &rpo {
-            idom.insert(block, None);
-        }
-        idom.insert(entry, Some(entry));
+        // Work in dense reverse-postorder indices, independent of sparse MIR IDs.
+        let predecessors: Vec<Vec<usize>> = rpo
+            .iter()
+            .map(|&block| {
+                cfg.get_block(block)
+                    .into_iter()
+                    .flat_map(|b| &b.predecessors)
+                    .filter_map(|p| rpo_index.get(p).copied())
+                    .collect()
+            })
+            .collect();
+        let mut idom = vec![None; rpo.len()];
+        idom[0] = Some(0);
 
-        // Iterative dataflow until fixed point
         let mut changed = true;
-        let max_iterations = rpo.len() * 2 + 10; // Convergence guaranteed in O(n) for reducible CFGs
+        let max_iterations = rpo.len() * 2 + 10;
         let mut iteration = 0;
         while changed {
             changed = false;
@@ -62,48 +76,29 @@ impl DominatorTree {
                 );
                 break;
             }
-
-            for &block in &rpo {
-                if block == entry {
-                    continue;
-                }
-
-                // Find first processed predecessor
-                let predecessors: Vec<IrBlockId> = cfg
-                    .get_block(block)
-                    .map(|b| b.predecessors.clone())
-                    .unwrap_or_default();
-
-                let mut new_idom: Option<IrBlockId> = None;
-
-                for &pred in &predecessors {
-                    if idom.get(&pred).and_then(|x| *x).is_some() {
-                        if new_idom.is_none() {
-                            new_idom = Some(pred);
-                        } else {
-                            // Intersect: find common dominator
-                            new_idom =
-                                Some(Self::intersect(new_idom.unwrap(), pred, &idom, &rpo_index));
-                        }
+            for block in 1..rpo.len() {
+                let mut new_idom = None;
+                for &pred in &predecessors[block] {
+                    if idom[pred].is_some() {
+                        new_idom = Some(match new_idom {
+                            None => pred,
+                            Some(dom) => Self::intersect(dom, pred, &idom),
+                        });
                     }
                 }
-
-                if new_idom != idom[&block] {
-                    idom.insert(block, new_idom);
+                if new_idom != idom[block] {
+                    idom[block] = new_idom;
                     changed = true;
                 }
             }
         }
 
-        // Convert Option<IrBlockId> to IrBlockId (removing entry's self-domination)
-        let mut final_idom: BTreeMap<IrBlockId, IrBlockId> = BTreeMap::new();
-        for (&block, &dom) in &idom {
-            if let Some(d) = dom {
-                if block != entry {
-                    final_idom.insert(block, d);
-                }
-            }
-        }
+        let final_idom: BTreeMap<IrBlockId, IrBlockId> = idom
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter_map(|(block, dom)| dom.map(|dom| (rpo[block], rpo[dom])))
+            .collect();
 
         // Build children map
         // IMPORTANT: Sort children for deterministic iteration order in GVN and other passes
@@ -169,42 +164,24 @@ impl DominatorTree {
 
     /// Find intersection of two dominators in the dominator tree.
     /// Uses the standard algorithm from Cooper, Harvey, and Kennedy.
-    fn intersect(
-        mut b1: IrBlockId,
-        mut b2: IrBlockId,
-        idom: &BTreeMap<IrBlockId, Option<IrBlockId>>,
-        rpo_index: &BTreeMap<IrBlockId, usize>,
-    ) -> IrBlockId {
-        // Walk up the dominator tree until we find a common dominator
+    fn intersect(mut b1: usize, mut b2: usize, idom: &[Option<usize>]) -> usize {
         let max_steps = idom.len() + 1;
         let mut steps = 0;
         while b1 != b2 {
             steps += 1;
             if steps > max_steps {
-                return b1; // Safety: prevent infinite loop on malformed CFG
+                return b1;
             }
-            let mut idx1 = rpo_index.get(&b1).copied().unwrap_or(usize::MAX);
-            let mut idx2 = rpo_index.get(&b2).copied().unwrap_or(usize::MAX);
-
-            // Walk b1 up until it's at or before b2 in RPO
-            while idx1 > idx2 {
-                if let Some(Some(dom)) = idom.get(&b1) {
-                    b1 = *dom;
-                    idx1 = rpo_index.get(&b1).copied().unwrap_or(usize::MAX);
-                } else {
-                    // No dominator, shouldn't happen for valid CFG
-                    return b1;
+            while b1 > b2 {
+                match idom[b1] {
+                    Some(dom) => b1 = dom,
+                    None => return b1,
                 }
             }
-
-            // Walk b2 up until it's at or before b1 in RPO
-            while idx2 > idx1 {
-                if let Some(Some(dom)) = idom.get(&b2) {
-                    b2 = *dom;
-                    idx2 = rpo_index.get(&b2).copied().unwrap_or(usize::MAX);
-                } else {
-                    // No dominator, shouldn't happen for valid CFG
-                    return b2;
+            while b2 > b1 {
+                match idom[b2] {
+                    Some(dom) => b2 = dom,
+                    None => return b2,
                 }
             }
         }
@@ -588,6 +565,118 @@ mod tests {
     use crate::ir::builder::*;
     use crate::ir::{IrBlockId, IrType};
     use crate::tast::SymbolId;
+
+    fn reachable_without(
+        cfg: &IrControlFlowGraph,
+        removed: Option<IrBlockId>,
+    ) -> BTreeSet<IrBlockId> {
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![cfg.entry_block];
+        while let Some(block) = pending.pop() {
+            if Some(block) != removed && seen.insert(block) {
+                pending.extend(cfg.blocks[&block].successors());
+            }
+        }
+        seen
+    }
+
+    fn check_dominators(ids: &[u32], edges: impl Fn(usize, usize) -> bool) {
+        let mut builder = IrBuilder::new("dom".into(), "dom.hx".into());
+        builder.start_function(
+            SymbolId::from_raw(1),
+            "test".into(),
+            FunctionSignatureBuilder::new()
+                .returns(IrType::Void)
+                .build(),
+        );
+        let function = builder.current_function_mut().unwrap();
+        function.cfg.entry_block = IrBlockId(ids[0]);
+        function.cfg.blocks.clear();
+        for (i, &id) in ids.iter().enumerate() {
+            let mut block = super::super::IrBasicBlock::new(IrBlockId(id));
+            let successors: Vec<_> = ids
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| edges(i, *j))
+                .map(|(_, &id)| IrBlockId(id))
+                .collect();
+            block.terminator = match successors.split_first() {
+                None => super::super::IrTerminator::Return { value: None },
+                Some((&default, rest)) => super::super::IrTerminator::Switch {
+                    value: super::super::IrId::new(0),
+                    cases: rest
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &b)| (i as i64, b))
+                        .collect(),
+                    default,
+                },
+            };
+            function.cfg.blocks.insert(block.id, block);
+        }
+        function.cfg.recompute_predecessors();
+        let reachable = reachable_without(&function.cfg, None);
+        let tree = DominatorTree::compute(function);
+        let dominated: BTreeMap<_, _> = reachable
+            .iter()
+            .map(|&a| {
+                let without = reachable_without(&function.cfg, Some(a));
+                (
+                    a,
+                    reachable
+                        .difference(&without)
+                        .copied()
+                        .collect::<BTreeSet<_>>(),
+                )
+            })
+            .collect();
+        for &b in &reachable {
+            let strict: Vec<_> = reachable
+                .iter()
+                .copied()
+                .filter(|a| *a != b && dominated[a].contains(&b))
+                .collect();
+            let idom = strict
+                .iter()
+                .copied()
+                .find(|a| strict.iter().all(|d| d == a || dominated[d].contains(a)));
+            assert_eq!(tree.idom(b), idom, "block {b:?}, CFG {:?}", function.cfg);
+            assert_eq!(tree.depth(b), strict.len());
+            for &a in &reachable {
+                assert_eq!(tree.dominates(a, b), dominated[&a].contains(&b));
+                assert_eq!(tree.children(a).contains(&b), tree.idom(b) == Some(a));
+            }
+        }
+        for &id in ids {
+            if !reachable.contains(&IrBlockId(id)) {
+                assert_eq!(tree.idom(IrBlockId(id)), None);
+            }
+        }
+    }
+
+    #[test]
+    fn dominators_match_path_removal_on_all_small_graphs() {
+        for mask in 0..512 {
+            check_dominators(&[0, 1, 2], |i, j| mask & (1 << (i * 3 + j)) != 0);
+        }
+    }
+
+    #[test]
+    fn dominators_handle_sparse_ids_and_irreducible_graphs() {
+        let ids = [700, 4, u32::MAX - 1, 18, 20000, 500, 12, 77];
+        for seed in 1..128_u64 {
+            check_dominators(&ids, |i, j| {
+                let mut bits = seed ^ (i * ids.len() + j) as u64;
+                bits = bits
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                bits ^= bits >> 23;
+                bits % 5 == 0
+            });
+        }
+        check_dominators(&[700], |_, _| true);
+        check_dominators(&[700], |_, _| false);
+    }
 
     #[test]
     fn test_dominator_tree_simple() {

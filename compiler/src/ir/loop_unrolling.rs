@@ -42,7 +42,13 @@ impl OptimizationPass for LoopUnrollingPass {
         let func_ids: Vec<IrFunctionId> = module.functions.keys().copied().collect();
         for func_id in func_ids {
             let function = module.functions.get_mut(&func_id).unwrap();
-            let r = unroll_loops_in_function(function);
+            // A copied loop exports its values through exit phis.
+            let mut candidate = function.clone();
+            super::loop_unswitch::close_loops(&mut candidate);
+            let r = unroll_loops_in_function(&mut candidate);
+            if r.modified {
+                *function = candidate;
+            }
             result = result.combine(r);
         }
 
