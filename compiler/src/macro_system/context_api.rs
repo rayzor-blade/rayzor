@@ -1154,12 +1154,16 @@ impl MacroContext {
                 let name = arg_as_string(args, 0, "resolvePath", location)?;
                 let requested = std::path::Path::new(&name);
                 let found = if requested.is_absolute() {
+                    self.dependencies.register_read(requested);
                     requested.exists().then(|| requested.to_path_buf())
                 } else {
                     self.class_paths
                         .iter()
                         .map(|root| root.join(requested))
-                        .find(|path| path.exists())
+                        .find(|path| {
+                            self.dependencies.register_read(path);
+                            path.exists()
+                        })
                 };
                 found
                     .map(|path| MacroValue::String(Arc::from(path.to_string_lossy().as_ref())))

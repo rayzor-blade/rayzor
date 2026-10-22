@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SessionKey {
@@ -20,9 +20,9 @@ pub(crate) struct SessionKey {
 
 #[derive(PartialEq, Eq, Hash)]
 pub(crate) struct Inputs {
-    // Include directory entries too: creating a formerly missing dependency
-    // invalidates negative lookups. Resources can be read by build macros.
-    files: BTreeMap<PathBuf, (u64, Option<SystemTime>)>,
+    // Discovering/removing a module invalidates negative import lookups.
+    // Contents of loaded sources and macro resources have individual stamps.
+    files: BTreeSet<PathBuf>,
     overlays: BTreeMap<PathBuf, String>,
     pub reusable: bool,
 }
@@ -30,7 +30,7 @@ pub(crate) struct Inputs {
 impl Inputs {
     pub fn capture(key: &SessionKey, open_files: &HashMap<String, String>) -> Self {
         let mut inputs = Self {
-            files: BTreeMap::new(),
+            files: BTreeSet::new(),
             overlays: BTreeMap::new(),
             reusable: true,
         };
@@ -42,6 +42,7 @@ impl Inputs {
             .cloned()
             .collect();
         while let Some(path) = pending.pop() {
+            let is_source = path.extension().is_some_and(|extension| extension == "hx");
             let path = canonical(&path);
             if !visited.insert(path.clone()) {
                 continue;
@@ -51,14 +52,9 @@ impl Inputs {
                 // absence; if it appears, the next capture differs.
                 continue;
             };
-            inputs.files.insert(
-                path.clone(),
-                if metadata.is_dir() {
-                    (0, None)
-                } else {
-                    (metadata.len(), metadata.modified().ok())
-                },
-            );
+            if !metadata.is_dir() && is_source {
+                inputs.files.insert(path.clone());
+            }
             if metadata.is_dir() {
                 match std::fs::read_dir(path) {
                     Ok(entries) => {
@@ -87,7 +83,15 @@ impl Inputs {
                             {
                                 continue;
                             }
-                            pending.push(entry.path());
+                            if kind.is_dir()
+                                || kind.is_symlink()
+                                || entry
+                                    .path()
+                                    .extension()
+                                    .is_some_and(|extension| extension == "hx")
+                            {
+                                pending.push(entry.path());
+                            }
                         }
                     }
                     Err(_) => inputs.reusable = false,

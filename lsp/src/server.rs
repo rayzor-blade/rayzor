@@ -264,7 +264,22 @@ fn serve_worker(
     // Apply edits first. Serve requests for unchanged indexed pages before
     // starting unrelated queued analysis; requests for edited pages wait.
     let mut changed: Vec<String> = Vec::new();
-    while let Ok(first) = connection.receiver.recv() {
+    loop {
+        let first = if ctx.poll_workspace_index() {
+            match connection
+                .receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+            {
+                Ok(message) => message,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match connection.receiver.recv() {
+                Ok(message) => message,
+                Err(_) => break,
+            }
+        };
         let mut requests = Vec::new();
         for msg in std::iter::once(first).chain(connection.receiver.try_iter()) {
             match msg {
@@ -444,10 +459,10 @@ fn handle_notification(
     } else if let Some(params) =
         cast_notification::<lsp_types::notification::DidChangeWatchedFiles>(&not)
     {
-        ctx.invalidate_analysis_cache();
         for change in params.changes {
             ctx.index_disk_file(change.uri.as_str());
         }
+        ctx.invalidate_changed_inputs();
     }
 }
 
@@ -554,7 +569,11 @@ fn build_editor_snapshot(
     let mut snapshot = crate::editor_cache::Snapshot {
         diagnostics,
         dependencies: ctx.macro_dependencies(uri),
-        expansions: ctx.indexed_expansions(uri),
+        expansions: ctx
+            .indexed_expansions(uri)
+            .into_iter()
+            .filter_map(crate::editor_cache::Expansion::from_json)
+            .collect(),
         ..Default::default()
     };
     let declarations = ctx
@@ -570,9 +589,7 @@ fn build_editor_snapshot(
         "textDocument/inlayHint",
     ] {
         let params = json!({"textDocument":{"uri":uri},"position":{"line":0,"character":0},"range":{"start":{"line":0,"character":0},"end":{"line":u32::MAX,"character":0}}});
-        snapshot
-            .document
-            .insert(method.into(), render(method, params));
+        snapshot.document.insert(method, render(method, params));
     }
     let names = ctx.indexed_names(uri);
     let total = names.len();
@@ -584,15 +601,15 @@ fn build_editor_snapshot(
         let metadata = if let Some(&record) = records.get(&symbol) {
             record
         } else {
-            let mut metadata = std::collections::BTreeMap::new();
+            let mut metadata = crate::binary_response::Responses::default();
             for method in ["textDocument/definition", "textDocument/documentHighlight"] {
-                metadata.insert(method.into(), render(method, params.clone()));
+                metadata.insert(method, render(method, params.clone()));
             }
             for include in [false, true] {
                 let mut params = params.clone();
                 params["context"] = json!({"includeDeclaration":include});
                 metadata.insert(
-                    format!("textDocument/references:{include}"),
+                    &format!("textDocument/references:{include}"),
                     render("textDocument/references", params),
                 );
             }
@@ -601,8 +618,8 @@ fn build_editor_snapshot(
             records.insert(symbol, record);
             record
         };
-        let responses = std::collections::BTreeMap::from([(
-            "textDocument/hover".into(),
+        let responses = crate::binary_response::Responses::from([(
+            "textDocument/hover",
             render("textDocument/hover", params),
         )]);
         let completion = json!({"textDocument":{"uri":uri},"position":{"line":line,"character":column + len + 1}});
@@ -618,11 +635,11 @@ fn build_editor_snapshot(
                 let record = snapshot.member_results.len();
                 snapshot
                     .member_results
-                    .push(render("textDocument/completion", completion));
+                    .push(render("textDocument/completion", completion).into());
                 member_records.insert(symbol, record);
                 record
             };
-            snapshot.members.insert(format!("{line}:{column}"), record);
+            snapshot.members.insert((line, column), record);
         }
         snapshot.names.push(crate::editor_cache::Name {
             line,
@@ -669,12 +686,13 @@ fn build_editor_snapshot(
                 let params =
                     json!({"textDocument":{"uri":uri},"position":{"line":line,"character":column}});
                 name.responses.insert(
-                    "textDocument/signatureHelp".into(),
+                    "textDocument/signatureHelp",
                     render("textDocument/signatureHelp", params),
                 );
             }
         }
     }
+    snapshot.dependencies = ctx.macro_dependencies(uri);
     snapshot.complete = true;
     snapshot
 }
@@ -701,13 +719,13 @@ fn declaration_snapshot(
             hover.push_str("\n\n");
             hover.push_str(doc);
         }
-        let mut responses = std::collections::BTreeMap::new();
+        let mut responses = crate::binary_response::Responses::default();
         responses.insert(
-            "textDocument/hover".into(),
+            "textDocument/hover",
             json!({"contents":{"kind":"markdown","value":hover},"range":declaration.range}),
         );
         responses.insert(
-            "textDocument/definition".into(),
+            "textDocument/definition",
             json!({"uri":uri,"range":declaration.range}),
         );
         let kind = match declaration.kind {
@@ -735,12 +753,12 @@ fn declaration_snapshot(
         });
     }
     snapshot.document.insert(
-        "textDocument/completion".into(),
+        "textDocument/completion",
         json!({"isIncomplete":true,"items":completions}),
     );
     snapshot
         .document
-        .insert("textDocument/documentSymbol".into(), json!(outline));
+        .insert("textDocument/documentSymbol", json!(outline));
     (snapshot, subject)
 }
 

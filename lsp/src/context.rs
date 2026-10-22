@@ -271,11 +271,20 @@ impl LspContext {
         // documents on their next request using the current source generation.
         self.analyses.retain(|_, analysis| {
             self.sessions.iter().any(|session| {
-                Rc::ptr_eq(&session.unit, &analysis.unit)
+                inputs.reusable
+                    && Rc::ptr_eq(&session.unit, &analysis.unit)
                     && session.key == key
                     && session.inputs == inputs
                     && session.unit.borrow().macro_dependencies.is_current()
             })
+        });
+        // BLADE keeps editor answers for old source generations; their compiler
+        // graphs need not remain alive alongside the replacement graph.
+        self.sessions.retain(|session| {
+            inputs.reusable
+                && session.key == key
+                && session.inputs == inputs
+                && session.unit.borrow().macro_dependencies.is_current()
         });
         let reusable = self.sessions.iter().rposition(|session| {
             inputs.reusable
@@ -287,6 +296,11 @@ impl LspContext {
         let mut session = match reusable {
             Some(index) => self.sessions.remove(index).unwrap(),
             None => {
+                while self.sessions.len() >= self.analysis_cache_capacity.clamp(1, 8) {
+                    let oldest = self.sessions.pop_front().unwrap();
+                    self.analyses
+                        .retain(|_, analysis| !Rc::ptr_eq(&analysis.unit, &oldest.unit));
+                }
                 let mut unit = CompilationUnit::new(config);
                 for cp in &self.class_paths {
                     unit.add_source_path(cp.clone());
@@ -610,6 +624,12 @@ impl LspContext {
         self.analyses.remove(uri);
         self.failed_analyses.remove(uri);
         self.diagnostics.remove(uri);
+        self.sessions.retain(|session| {
+            session
+                .indexes
+                .keys()
+                .any(|uri| self.open_files.contains_key(uri))
+        });
         self.index_disk_file(uri);
     }
 
@@ -687,6 +707,24 @@ impl LspContext {
         self.failed_analyses.clear();
     }
 
+    pub(crate) fn invalidate_changed_inputs(&mut self) {
+        let mut generations = HashMap::new();
+        self.sessions.retain(|session| {
+            let inputs = generations.entry(session.key.clone()).or_insert_with(|| {
+                crate::session_cache::Inputs::capture(&session.key, &self.open_files)
+            });
+            inputs.reusable
+                && *inputs == session.inputs
+                && session.unit.borrow().macro_dependencies.is_current()
+        });
+        self.analyses.retain(|_, analysis| {
+            self.sessions
+                .iter()
+                .any(|session| Rc::ptr_eq(&session.unit, &analysis.unit))
+        });
+        self.failed_analyses.clear();
+    }
+
     pub fn index_disk_file(&self, uri: &str) {
         let path = PathBuf::from(uri_to_path(uri));
         let source = self
@@ -699,6 +737,10 @@ impl LspContext {
 
     pub fn workspace_symbols(&self, query: &str) -> Vec<serde_json::Value> {
         self.workspace_index.search(query)
+    }
+
+    pub fn poll_workspace_index(&self) -> bool {
+        self.workspace_index.pump()
     }
 
     fn syntax_errors(&self, filename: &str, source: &str) -> Vec<LspDiagnostic> {
@@ -1317,10 +1359,10 @@ mod cache_tests {
             "class Shared { public static function value():String return 'updated'; }".into(),
         );
         let second = workspace.compile(&mut context, "Second.hx", None);
-        assert!(!Rc::ptr_eq(
-            &old.upgrade().unwrap(),
-            &context.analyses[&second].unit
-        ));
+        assert!(
+            old.upgrade().is_none(),
+            "obsolete generations must be released"
+        );
         let unit = context.analyses[&second].unit.borrow();
         let source = unit
             .source_of(
@@ -1369,6 +1411,20 @@ mod cache_tests {
                 .unwrap()
                 .contains("return 7")
         );
+    }
+
+    #[test]
+    fn closing_the_last_page_releases_its_compiler_graph() {
+        let workspace = Workspace::new(&[(
+            "Main.hx",
+            "class Main { static function test():Int return 1; }",
+        )]);
+        let mut context = workspace.context();
+        let uri = workspace.compile(&mut context, "Main.hx", None);
+        let graph = Rc::downgrade(&context.analyses[&uri].unit);
+        context.close(&uri);
+        assert!(graph.upgrade().is_none());
+        assert!(context.sessions.is_empty());
     }
     #[test]
     fn opening_an_import_through_its_canonical_path_reuses_its_source_identity() {

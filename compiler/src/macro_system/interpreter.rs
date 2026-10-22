@@ -98,6 +98,17 @@ pub struct MacroInterpreter {
 }
 
 impl MacroInterpreter {
+    fn dependencies(&self) -> Option<&super::dependencies::Dependencies> {
+        self.macro_context
+            .as_ref()
+            .map(|context| &context.dependencies)
+            .or_else(|| {
+                self.class_registry
+                    .as_ref()
+                    .map(|classes| &classes.dependencies)
+            })
+    }
+
     fn is_untyped_expression_macro(&self) -> bool {
         self.macro_context
             .as_ref()
@@ -2434,10 +2445,23 @@ impl MacroInterpreter {
                 }
                 _ => Ok(None),
             },
-            "sys.FileSystem" => super::filesystem::call(method, args, location),
+            "sys.FileSystem" => {
+                if matches!(
+                    method,
+                    "exists" | "isDirectory" | "fullPath" | "readDirectory"
+                ) && let Some(path) = args.first().and_then(MacroValue::as_string)
+                    && let Some(dependencies) = self.dependencies()
+                {
+                    dependencies.register_read(path);
+                }
+                super::filesystem::call(method, args, location)
+            }
             "sys.io.File" => match method {
                 "getContent" => {
                     let path = args.first().map(|v| value_to_string(v)).unwrap_or_default();
+                    if let Some(dependencies) = self.dependencies() {
+                        dependencies.register_read(&path);
+                    }
                     match std::fs::read_to_string(&path) {
                         Ok(content) => Ok(Some(MacroValue::String(Arc::from(content.as_str())))),
                         Err(e) => Err(MacroError::RuntimeError {
@@ -2453,6 +2477,9 @@ impl MacroInterpreter {
                         message: format!("File.saveContent('{}') failed: {}", path, e),
                         location,
                     })?;
+                    if let Some(dependencies) = self.dependencies() {
+                        dependencies.refresh_written(&path);
+                    }
                     Ok(Some(MacroValue::Null))
                 }
                 _ => Ok(None),

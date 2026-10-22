@@ -6,6 +6,9 @@ impl CompilationUnit {
     /// Imports and macro source views use the same editor overlay as roots.
     pub(crate) fn read_source(&self, path: impl AsRef<Path>) -> Result<String, std::io::Error> {
         let path = path.as_ref();
+        if self.config.typecheck_only {
+            self.macro_dependencies.register_source(path);
+        }
         if let Some(source) = self
             .config
             .source_overrides
@@ -22,6 +25,9 @@ impl CompilationUnit {
         filename: &str,
         source: &str,
     ) -> Result<parser::HaxeFile, String> {
+        if self.config.typecheck_only && !filename.starts_with('<') {
+            self.macro_dependencies.register_source(filename);
+        }
         let config = self.preprocessor_config_for(filename);
         let mut file = parser::haxe_parser::parse_haxe_file_with_config(
             filename, source, true, true, &config,

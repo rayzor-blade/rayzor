@@ -571,13 +571,15 @@ fn blade_editor_data_is_reused_after_a_server_restart() {
 
 #[test]
 fn a_new_dependency_tab_reuses_macro_types_and_persists_its_editor_index() {
-    let shared = "@:build(Build.fields())\nclass Shared { public static function value():Int return generated; }";
+    let shared = "@:build(Build.fields())\nclass Shared { public static function value():Dynamic return generated; }";
     let mut first = Session::start(&[
         (
             "Main.hx",
             "class Main { static function main() trace(Shared.value()); }",
         ),
         ("Shared.hx", shared),
+        ("Unrelated.hx", "class Unrelated {}"),
+        ("notes.txt", "original notes"),
         (".rayzor/runs", "0"),
         (
             "Build.hx",
@@ -598,6 +600,16 @@ fn a_new_dependency_tab_reuses_macro_types_and_persists_its_editor_index() {
         std::fs::read_to_string(first.root.join(".rayzor/runs")).unwrap(),
         "1"
     );
+    std::fs::write(
+        first.root.join("Unrelated.hx"),
+        "class Unrelated { var unused:String; }",
+    )
+    .unwrap();
+    std::fs::write(first.root.join("notes.txt"), "updated notes").unwrap();
+    first.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes":[{"uri":first.uri("Unrelated.hx"),"type":2}]}),
+    );
     assert!(
         first.open("Shared.hx").is_empty(),
         "{:?}",
@@ -609,6 +621,21 @@ fn a_new_dependency_tab_reuses_macro_types_and_persists_its_editor_index() {
     assert_eq!(
         std::fs::read_to_string(first.root.join(".rayzor/runs")).unwrap(),
         "1"
+    );
+    first.notify(
+        "textDocument/didClose",
+        json!({"textDocument":{"uri":first.uri("Shared.hx")}}),
+    );
+    first.activity.clear();
+    std::fs::write(first.root.join("notes.txt"), "changed again").unwrap();
+    assert!(first.open("Shared.hx").is_empty());
+    assert!(
+        !first
+            .activity
+            .iter()
+            .any(|activity| activity["state"] == "checking"),
+        "{:?}",
+        first.activity
     );
     let root = first.root.clone();
     first.temporary = false;
@@ -630,6 +657,82 @@ fn a_new_dependency_tab_reuses_macro_types_and_persists_its_editor_index() {
         std::fs::read_to_string(second.root.join(".rayzor/runs")).unwrap(),
         "1"
     );
+    std::fs::write(
+        second.root.join("Build.hx"),
+        r#"class Build {
+        public static macro function fields():Array<haxe.macro.Expr.Field> {
+            var fields = haxe.macro.Context.getBuildFields();
+            fields.push({name:"generated", access:[APublic,AStatic], kind:FVar(macro:String,macro "updated"), pos:haxe.macro.Context.currentPos()});
+            return fields;
+        }
+    }"#,
+    )
+    .unwrap();
+    second.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes":[{"uri":second.uri("Build.hx"),"type":2}]}),
+    );
+    // The root source remains unchanged; the macro helper is the changed input.
+    assert!(second.change("Shared.hx", shared).is_empty());
+    let hover =
+        hover_text(&second.request("textDocument/hover", second.at("Shared.hx", 1, column)));
+    assert!(hover.contains("generated:String"), "{hover}");
+}
+
+#[test]
+fn macro_filesystem_reads_invalidate_persisted_types() {
+    let source =
+        "@:build(Build.fields())\nclass Main { static function test():Dynamic return generated; }";
+    let mut session = Session::start(&[
+        ("Main.hx", source),
+        (".rayzor/anchor", "anchor"),
+        (".rayzor/assets/value.txt", "Int"),
+        (
+            "Build.hx",
+            r#"class Build {
+    public static macro function fields():Array<haxe.macro.Expr.Field> {
+        var anchor = haxe.macro.Context.resolvePath(".rayzor/anchor");
+        var root = anchor.substr(0, anchor.length - "anchor".length);
+        var value = sys.io.File.getContent(root + "assets/value.txt");
+        var type = value == "Int" ? macro:Int : macro:String;
+        if (sys.FileSystem.exists(root + "enabled")) type = macro:Bool;
+        if (sys.FileSystem.readDirectory(root + "assets").length > 1) type = macro:Float;
+        var fields = haxe.macro.Context.getBuildFields();
+        fields.push({name:"generated", access:[APublic,AStatic], kind:FVar(type), pos:haxe.macro.Context.currentPos()});
+        return fields;
+    }
+}"#,
+        ),
+    ]);
+    let root = session.root.clone();
+    let column = source.lines().nth(1).unwrap().find("generated").unwrap() as u32;
+    for (stage, expected) in ["Int", "String", "Bool", "Float"].into_iter().enumerate() {
+        if stage != 0 {
+            session.temporary = false;
+            drop(session);
+            match stage {
+                1 => std::fs::write(root.join(".rayzor/assets/value.txt"), "String").unwrap(),
+                2 => std::fs::write(root.join(".rayzor/enabled"), "enabled").unwrap(),
+                3 => std::fs::write(root.join(".rayzor/assets/extra.txt"), "extra").unwrap(),
+                _ => unreachable!(),
+            }
+            session = Session::connect(root.clone(), json!({}), true);
+        }
+        assert!(
+            session.open("Main.hx").is_empty(),
+            "{:?}",
+            session.diagnostics
+        );
+        let hover =
+            hover_text(&session.request("textDocument/hover", session.at("Main.hx", 1, column)));
+        assert!(hover.contains(&format!("generated:{expected}")), "{hover}");
+        assert!(
+            session
+                .activity
+                .iter()
+                .any(|activity| activity["state"] == "checking")
+        );
+    }
 }
 
 #[test]

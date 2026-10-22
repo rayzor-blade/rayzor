@@ -66,7 +66,7 @@ impl WorkspaceIndex {
     ) -> Self {
         let mut roots: Vec<_> = paths.iter().map(|p| (canonical(p), p.clone())).collect();
         roots.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(32);
         let worker_defines = defines.clone();
         let progress_roots = roots
             .iter()
@@ -168,6 +168,11 @@ impl WorkspaceIndex {
             defines,
             roots,
         }
+    }
+
+    pub fn pump(&self) -> bool {
+        self.poll(false);
+        self.state.borrow().receiver.is_some()
     }
 
     fn poll(&self, wait: bool) {

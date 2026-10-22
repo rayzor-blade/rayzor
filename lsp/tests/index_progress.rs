@@ -10,6 +10,13 @@ fn reports_workspace_modules_and_qualified_document_types() {
     std::fs::write(root.join("build.hxml"), "-cp src\n-main models.Thing\n").unwrap();
     let source = "package models; class Thing { public static function main() {} }";
     std::fs::write(root.join("src/models/Thing.hx"), source).unwrap();
+    for index in 0..64 {
+        std::fs::write(
+            root.join(format!("src/models/Extra{index}.hx")),
+            format!("package models; class Extra{index} {{}}"),
+        )
+        .unwrap();
+    }
     let uri = format!("file://{}", root.display());
     let document = format!("{uri}/src/models/Thing.hx");
     let (server, client) = Connection::memory();
@@ -50,11 +57,21 @@ fn reports_workspace_modules_and_qualified_document_types() {
             && note.params["scope"] == "workspace"
         {
             if note.params["state"] == "ready" {
-                assert_eq!(note.params["completed"], 1);
+                assert_eq!(note.params["completed"], 65);
                 break;
             }
-            assert_eq!(note.params["subject"], "models.Thing");
-            assert_eq!(note.params["uri"], document);
+            assert!(
+                note.params["subject"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("models.")
+            );
+            assert!(
+                note.params["uri"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("{uri}/src/models/"))
+            );
             assert_eq!(note.params["phase"], "scanning");
             scanning = true;
         }

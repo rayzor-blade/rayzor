@@ -3183,6 +3183,7 @@ dependencies = [
  "lsp-server",
  "lsp-types",
  "parser",
+ "postcard",
  "serde",
  "serde_json",
  "source_map",

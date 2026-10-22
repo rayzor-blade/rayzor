@@ -8,6 +8,7 @@
 //! Usage: `rayzor lsp` starts the server on stdio.
 
 pub mod analysis;
+mod binary_response;
 mod context;
 mod diagnostics;
 mod documentation;

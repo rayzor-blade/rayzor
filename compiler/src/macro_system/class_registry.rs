@@ -87,7 +87,7 @@ pub struct ClassRegistry {
     /// Static variables' current values, `Class.field` → value. Shared by
     /// every macro call of the compile, as macro-time statics are.
     statics: MacroStatics,
-    dependencies: super::dependencies::Dependencies,
+    pub(super) dependencies: super::dependencies::Dependencies,
     class_paths: Vec<std::path::PathBuf>,
     defines: BTreeMap<String, String>,
 }
