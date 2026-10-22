@@ -38,6 +38,19 @@ struct State {
     receiver: Option<Receiver<Event>>,
 }
 
+pub(crate) enum IndexActivity {
+    Scanning {
+        path: PathBuf,
+        subject: String,
+        completed: usize,
+    },
+    Finished {
+        completed: usize,
+    },
+}
+
+pub(crate) type IndexProgress = std::sync::Arc<dyn Fn(IndexActivity) + Send + Sync>;
+
 #[derive(Default)]
 pub(crate) struct WorkspaceIndex {
     state: RefCell<State>,
@@ -46,16 +59,26 @@ pub(crate) struct WorkspaceIndex {
 }
 
 impl WorkspaceIndex {
-    pub fn start(paths: Vec<PathBuf>, defines: Vec<String>) -> Self {
+    pub fn start(
+        paths: Vec<PathBuf>,
+        defines: Vec<String>,
+        progress: Option<IndexProgress>,
+    ) -> Self {
         let mut roots: Vec<_> = paths.iter().map(|p| (canonical(p), p.clone())).collect();
         roots.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
         let (sender, receiver) = mpsc::channel();
         let worker_defines = defines.clone();
+        let progress_roots = roots
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
         let worker = std::thread::Builder::new()
             .name("lsp-index".into())
             .stack_size(64 << 20)
             .spawn(move || {
                 let mut visited = BTreeSet::new();
+                let mut completed = 0;
+                let mut reported = None::<std::time::Instant>;
                 for path in paths {
                     let mut pending = vec![path];
                     while let Some(path) = pending.pop() {
@@ -99,15 +122,41 @@ impl WorkspaceIndex {
                             let Ok(source) = std::fs::read_to_string(&path) else {
                                 continue;
                             };
+                            if let Some(progress) = &progress
+                                && reported.is_none_or(|at| {
+                                    at.elapsed() >= std::time::Duration::from_millis(100)
+                                })
+                            {
+                                let relative = progress_roots
+                                    .iter()
+                                    .find_map(|root| path.strip_prefix(root).ok())
+                                    .unwrap_or(&path);
+                                let subject = relative
+                                    .with_extension("")
+                                    .components()
+                                    .map(|part| part.as_os_str().to_string_lossy())
+                                    .collect::<Vec<_>>()
+                                    .join(".");
+                                progress(IndexActivity::Scanning {
+                                    path: path.clone(),
+                                    subject,
+                                    completed,
+                                });
+                                reported = Some(std::time::Instant::now());
+                            }
                             let parsed = std::panic::catch_unwind(|| {
                                 declarations(&path, &source, &worker_defines)
                             })
                             .unwrap_or_default();
+                            completed += 1;
                             if sender.send(Event::File(path, parsed)).is_err() {
                                 return;
                             }
                         }
                     }
+                }
+                if let Some(progress) = &progress {
+                    progress(IndexActivity::Finished { completed });
                 }
                 let _ = sender.send(Event::Finished);
             });

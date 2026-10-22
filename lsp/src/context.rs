@@ -38,6 +38,7 @@ pub struct LspContext {
     pub analysis_cache_capacity: usize,
     diagnostics: HashMap<String, Vec<LspDiagnostic>>,
     workspace_index: crate::workspace_index::WorkspaceIndex,
+    pub(crate) index_progress: Option<crate::workspace_index::IndexProgress>,
 }
 
 /// A compiled document: the unit its symbols live in and its position index.
@@ -77,6 +78,7 @@ impl LspContext {
             analysis_cache_capacity: 2,
             diagnostics: HashMap::new(),
             workspace_index: Default::default(),
+            index_progress: None,
         }
     }
 
@@ -147,6 +149,7 @@ impl LspContext {
         self.workspace_index = crate::workspace_index::WorkspaceIndex::start(
             self.class_paths.clone(),
             self.defines.clone(),
+            self.index_progress.clone(),
         );
     }
 

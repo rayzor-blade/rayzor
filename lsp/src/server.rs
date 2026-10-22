@@ -182,6 +182,35 @@ fn serve_worker(
 
     let mut ctx = LspContext::new(root);
     ctx.editor_cache = editor_cache;
+    if init_params
+        .capabilities
+        .experimental
+        .as_ref()
+        .and_then(|value| value.get("rayzorIndexProgress"))
+        .and_then(|value| value.as_bool())
+        == Some(true)
+    {
+        let sender = connection.sender.clone();
+        ctx.index_progress = Some(std::sync::Arc::new(move |activity| {
+            use crate::workspace_index::IndexActivity;
+            let params = match activity {
+                IndexActivity::Scanning {
+                    path,
+                    subject,
+                    completed,
+                } => {
+                    serde_json::json!({"scope":"workspace","state":"checking","phase":"scanning","uri":crate::context::file_uri(&path.to_string_lossy()),"subject":subject,"completed":completed})
+                }
+                IndexActivity::Finished { completed } => {
+                    serde_json::json!({"scope":"workspace","state":"ready","completed":completed})
+                }
+            };
+            let _ = sender.send(Message::Notification(Notification::new(
+                "rayzor/indexProgress".into(),
+                params,
+            )));
+        }));
+    }
     let hxml = init_params
         .initialization_options
         .as_ref()
@@ -455,9 +484,10 @@ fn analyze_document(conn: &Connection, ctx: &mut LspContext, uri: &str, allow_in
             declaration_snapshot(ctx, uri, &source)
         }))
     {
+        let (snapshot, subject) = snapshot;
         let count = snapshot.names.len();
         ctx.editor_cache.publish_partial(uri, input_hash, snapshot);
-        let _ = conn.sender.send(Message::Notification(Notification::new("rayzor/indexProgress".into(), serde_json::json!({"uri":uri,"version":version,"phase":"declarations","completed":count}))));
+        let _ = conn.sender.send(Message::Notification(Notification::new("rayzor/indexProgress".into(), serde_json::json!({"uri":uri,"version":version,"phase":"declarations","subject":subject,"completed":count}))));
     }
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _budget = compiler::macro_system::budget::limit(Some(ctx.macro_budget));
@@ -532,6 +562,7 @@ fn build_editor_snapshot(
         .get(uri)
         .map(|source| declaration_snapshot(ctx, uri, source))
         .unwrap_or_default();
+    let (declarations, subject) = declarations;
     for method in [
         "textDocument/documentSymbol",
         "textDocument/semanticTokens/full",
@@ -612,7 +643,7 @@ fn build_editor_snapshot(
                 }
             }
             ctx.editor_cache.publish_partial(uri, input_hash, partial);
-            let _ = conn.sender.send(Message::Notification(Notification::new("rayzor/indexProgress".into(), json!({"uri":uri,"version":ctx.document_versions.get(uri),"phase":"types","completed":snapshot.names.len(),"total":total}))));
+            let _ = conn.sender.send(Message::Notification(Notification::new("rayzor/indexProgress".into(), json!({"uri":uri,"version":ctx.document_versions.get(uri),"phase":"types","subject":subject,"completed":snapshot.names.len(),"total":total}))));
         }
     }
     if let Some(source) = ctx.open_files.get(uri)
@@ -652,12 +683,16 @@ fn declaration_snapshot(
     ctx: &LspContext,
     uri: &str,
     source: &str,
-) -> crate::editor_cache::Snapshot {
+) -> (crate::editor_cache::Snapshot, Option<String>) {
     use serde_json::json;
     let filename = crate::context::uri_to_path(uri);
     let declarations =
         crate::workspace_index::declarations(std::path::Path::new(&filename), source, &ctx.defines);
     let mut snapshot = crate::editor_cache::Snapshot::default();
+    let subject = declarations
+        .iter()
+        .find(|entry| entry.type_kind.is_some())
+        .map(|entry| entry.qualified.clone());
     let mut completions = Vec::new();
     let mut outline = Vec::new();
     for declaration in declarations {
@@ -706,7 +741,7 @@ fn declaration_snapshot(
     snapshot
         .document
         .insert("textDocument/documentSymbol".into(), json!(outline));
-    snapshot
+    (snapshot, subject)
 }
 
 fn analysis_status(conn: &Connection, uri: &str, version: Option<i32>, state: &str) {
