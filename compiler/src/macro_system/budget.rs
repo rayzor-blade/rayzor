@@ -44,7 +44,8 @@ pub fn invocation() -> Invocation {
     if IN_MACRO.with(|active| active.replace(true)) {
         return Invocation(None);
     }
-    let deadline = ALLOWANCE.with(|allowance| allowance.get().map(|duration| Instant::now() + duration));
+    let deadline =
+        ALLOWANCE.with(|allowance| allowance.get().map(|duration| Instant::now() + duration));
     Invocation(Some(DEADLINE.with(|current| current.replace(deadline))))
 }
 

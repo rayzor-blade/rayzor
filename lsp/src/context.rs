@@ -346,20 +346,26 @@ impl LspContext {
         let shared_unit = session.unit.clone();
         let mut unit = shared_unit.borrow_mut();
         let initialization_errors = session.initialization_errors.clone();
-        unit.set_editor_entry(&filename);
         // A source reached as an import already has its types and reference
         // identities in this graph. Index it without compiling its body again.
-        let already_root = unit.user_files.iter().any(|file| file.filename == filename);
-        if !already_root && let Err(error) = unit.add_file(source, &filename) {
-            return vec![LspDiagnostic::error(
-                &filename,
-                0,
-                0,
-                format!("Parse: {error}"),
-            )];
-        }
+        let already_typed = unit.has_typed_file(&filename);
+        let lowered = if already_typed {
+            Ok(Vec::new())
+        } else {
+            unit.set_editor_entry(&filename);
+            let already_root = unit.user_files.iter().any(|file| file.filename == filename);
+            if !already_root && let Err(error) = unit.add_file(source, &filename) {
+                return vec![LspDiagnostic::error(
+                    &filename,
+                    0,
+                    0,
+                    format!("Parse: {error}"),
+                )];
+            }
+            unit.lower_to_tast()
+        };
 
-        let mut result = match unit.lower_to_tast() {
+        let mut result = match lowered {
             Ok(_typed_files) => Vec::new(),
             Err(errors) => errors
                 .iter()
@@ -506,17 +512,26 @@ impl LspContext {
         if profiling {
             let timings = unit.typecheck_timings();
             eprintln!(
-                "lsp-analysis: reused={} total_ms={:.2} typed_files={} imports_reused={} imports_compiled={} symbols={} file={}",
+                "lsp-analysis: reused={} already_typed={} total_ms={:.2} typed_files={} imports_reused={} imports_compiled={} symbols={} file={}",
                 reused,
+                already_typed,
                 started.elapsed().as_secs_f64() * 1000.0,
-                timings.files_seen,
-                timings.import_already_compiled,
-                timings.import_fresh_compiles,
+                if already_typed { 0 } else { timings.files_seen },
+                if already_typed {
+                    0
+                } else {
+                    timings.import_already_compiled
+                },
+                if already_typed {
+                    0
+                } else {
+                    timings.import_fresh_compiles
+                },
                 unit.symbol_table.len(),
                 filename
             );
         }
-        if profiling {
+        if profiling && !already_typed {
             eprintln!("lsp-typecheck: {:?}", unit.typecheck_timings());
         }
         session.indexes.insert(uri.to_string(), index.clone());
@@ -625,7 +640,9 @@ impl LspContext {
                     .index
                     .names
                     .iter()
-                    .map(|(&(line, column), &(len, symbol))| (line - 1, column - 1, len, symbol))
+                    .filter_map(|(&(line, column), &(len, symbol))| {
+                        Some((line.checked_sub(1)?, column.checked_sub(1)?, len, symbol))
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -1366,11 +1383,46 @@ mod cache_tests {
         context.class_paths = vec![workspace.0.join(".")];
         let main = workspace.compile(&mut context, "Main.hx", None);
         let graph = context.analyses[&main].unit.clone();
+        let compiled = graph.borrow().typecheck_timings().files_seen;
+        let roots = graph.borrow().user_files.len();
         let shared = workspace.compile(&mut context, "Shared.hx", None);
         assert!(Rc::ptr_eq(&graph, &context.analyses[&shared].unit));
+        assert_eq!(graph.borrow().user_files.len(), roots);
+        assert_eq!(graph.borrow().typecheck_timings().files_seen, compiled);
         assert_ne!(context.analyses[&shared].index.file_id, u32::MAX);
         let hover = context.hover_info(&shared, 1, 8).unwrap();
         assert!(hover.contains("class Shared"), "{hover}");
         assert!(!context.document_symbols(&shared).unwrap().is_empty());
+    }
+
+    #[test]
+    fn typed_dependencies_remain_available_after_the_graph_reaches_its_page_limit() {
+        let workspace = Workspace::new(&[
+            (
+                "Shared.hx",
+                "class Shared { public static var value:Int = 1; }",
+            ),
+            (
+                "Main.hx",
+                "class Main { static function main() trace(Shared.value); }",
+            ),
+        ]);
+        let mut context = workspace.context();
+        let main = workspace.compile(&mut context, "Main.hx", None);
+        let graph = context.analyses[&main].unit.clone();
+        {
+            let mut unit = graph.borrow_mut();
+            let root = unit.user_files[0].clone();
+            unit.user_files.resize(32, root);
+        }
+        let shared = workspace.compile(&mut context, "Shared.hx", None);
+        assert!(Rc::ptr_eq(&graph, &context.analyses[&shared].unit));
+        assert_eq!(context.sessions.len(), 1);
+        assert!(
+            context
+                .hover_info(&shared, 1, 35)
+                .unwrap()
+                .contains("value:Int")
+        );
     }
 }

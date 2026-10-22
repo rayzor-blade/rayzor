@@ -147,12 +147,15 @@ impl FileSymbolIndex {
         file_id: u32,
     ) -> Self {
         let mut names = BTreeMap::new();
-        for r in references.iter().filter(|r| r.at.file_id == file_id) {
+        for r in references
+            .iter()
+            .filter(|r| r.at.file_id == file_id && r.at.line > 0 && r.at.column > 0)
+        {
             names.insert((r.at.line, r.at.column), (r.len, r.symbol));
         }
         for sym in symbol_table.all_symbols() {
             let loc = sym.definition_location;
-            if loc.file_id == file_id && loc.is_valid() {
+            if loc.file_id == file_id && loc.line > 0 && loc.column > 0 {
                 let len = interner.get(sym.name).map_or(1, |n| n.len() as u32);
                 names.insert((loc.line, loc.column), (len, sym.id));
             }
@@ -1408,6 +1411,26 @@ pub fn enclosing_call(text: &str, line: u32, col: u32) -> Option<CallAtCursor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offset_only_locations_are_not_editor_coordinates() {
+        let interner = StringInterner::new();
+        let mut symbols = SymbolTable::new();
+        let name = interner.intern("parameter");
+        let parameter = symbols.create_variable(name);
+        symbols
+            .get_symbol_mut(parameter)
+            .unwrap()
+            .definition_location = compiler::tast::SourceLocation::new(0, 0, 0, 5);
+        let index = FileSymbolIndex::build(&symbols, &interner, &[], 0);
+        assert!(index.names.is_empty());
+        symbols
+            .get_symbol_mut(parameter)
+            .unwrap()
+            .definition_location = compiler::tast::SourceLocation::new(0, 1, 6, 5);
+        let index = FileSymbolIndex::build(&symbols, &interner, &[], 0);
+        assert_eq!(index.find_symbol_at(1, 6), Some(parameter));
+    }
 
     #[test]
     fn unresolved_function_hover_keeps_the_name_and_explains_missing_signature() {

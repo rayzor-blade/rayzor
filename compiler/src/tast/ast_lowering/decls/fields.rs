@@ -742,11 +742,7 @@ impl<'a> AstLowering<'a> {
 
         // Create function type and update symbol
         let param_types: Vec<TypeId> = parameters.iter().map(|p| p.param_type).collect();
-        let function_type = self
-            .context
-            .type_table
-            .borrow_mut()
-            .create_function_type(param_types, return_type);
+        let function_type = self.declaration_function_type(&func.params, param_types, return_type);
 
         // Update the symbol with its type
         self.context
@@ -890,11 +886,7 @@ impl<'a> AstLowering<'a> {
 
         // Create function type and update symbol
         let param_types: Vec<TypeId> = parameters.iter().map(|p| p.param_type).collect();
-        let function_type = self
-            .context
-            .type_table
-            .borrow_mut()
-            .create_function_type(param_types, return_type);
+        let function_type = self.declaration_function_type(&func.params, param_types, return_type);
 
         // Update the symbol with its type
         self.context
@@ -1015,6 +1007,25 @@ impl<'a> AstLowering<'a> {
         parameter: &FunctionParam,
     ) -> LoweringResult<TypedParameter> {
         self.lower_parameter_with_hint(parameter, None)
+    }
+
+    pub(crate) fn declaration_function_type(
+        &self,
+        parameters: &[FunctionParam],
+        types: Vec<TypeId>,
+        result: TypeId,
+    ) -> TypeId {
+        let labels = parameters
+            .iter()
+            .map(|parameter| crate::tast::core::FunctionArgLabel {
+                name: None,
+                optional: parameter.optional || parameter.default_value.is_some(),
+            })
+            .collect();
+        self.context
+            .type_table
+            .borrow_mut()
+            .create_labelled_function_type(types, result, Default::default(), labels)
     }
 
     /// As `lower_parameter`, with a type recovered from the body for a

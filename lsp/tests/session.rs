@@ -570,6 +570,69 @@ fn blade_editor_data_is_reused_after_a_server_restart() {
 }
 
 #[test]
+fn a_new_dependency_tab_reuses_macro_types_and_persists_its_editor_index() {
+    let shared = "@:build(Build.fields())\nclass Shared { public static function value():Int return generated; }";
+    let mut first = Session::start(&[
+        (
+            "Main.hx",
+            "class Main { static function main() trace(Shared.value()); }",
+        ),
+        ("Shared.hx", shared),
+        (".rayzor/runs", "0"),
+        (
+            "Build.hx",
+            r#"class Build {
+            public static macro function fields():Array<haxe.macro.Expr.Field> {
+                var path = haxe.macro.Context.resolvePath(".rayzor/runs");
+                var runs = Std.parseInt(sys.io.File.getContent(path));
+                sys.io.File.saveContent(path, Std.string(runs + 1));
+                var fields = haxe.macro.Context.getBuildFields();
+                fields.push({name:"generated", access:[APublic, AStatic], kind:FVar(macro:Int, macro 7), pos:haxe.macro.Context.currentPos()});
+                return fields;
+            }
+        }"#,
+        ),
+    ]);
+    assert!(first.open("Main.hx").is_empty(), "{:?}", first.diagnostics);
+    assert_eq!(
+        std::fs::read_to_string(first.root.join(".rayzor/runs")).unwrap(),
+        "1"
+    );
+    assert!(
+        first.open("Shared.hx").is_empty(),
+        "{:?}",
+        first.diagnostics
+    );
+    let column = shared.lines().nth(1).unwrap().find("generated").unwrap() as u32;
+    let hover = hover_text(&first.request("textDocument/hover", first.at("Shared.hx", 1, column)));
+    assert!(hover.contains("generated:Int"), "{hover}");
+    assert_eq!(
+        std::fs::read_to_string(first.root.join(".rayzor/runs")).unwrap(),
+        "1"
+    );
+    let root = first.root.clone();
+    first.temporary = false;
+    drop(first);
+    let mut second = Session::connect(root, json!({}), true);
+    assert!(second.open("Shared.hx").is_empty());
+    let hover =
+        hover_text(&second.request("textDocument/hover", second.at("Shared.hx", 1, column)));
+    assert!(hover.contains("generated:Int"), "{hover}");
+    assert!(
+        !second
+            .activity
+            .iter()
+            .any(|activity| activity["state"] == "checking"),
+        "{:?}",
+        second.activity
+    );
+    assert_eq!(
+        std::fs::read_to_string(second.root.join(".rayzor/runs")).unwrap(),
+        "1"
+    );
+}
+
+#[test]
 fn a_request_sent_with_didopen_after_restart_is_answered_from_the_index() {
     let source = "class Main { /** Retained field. */ public static var value:Int = 7; }";
     let mut first = Session::start(&[("Main.hx", source)]);
@@ -1944,6 +2007,7 @@ fn generic_receivers_nullable_strings_and_optional_local_calls_are_valid() {
         child.store(value);
         var callback:Dynamic = function() return 1;
         callback();
+        var bytes = haxe.io.Bytes.ofString("text");
     }
 }
 class Parent<T> {
@@ -2033,13 +2097,33 @@ fn build_macros_load_helpers_and_their_macro_only_dependencies() {
             r#"class Helpers {
     #if macro
     public static function name():String {
+        if (String.fromCharCode(233) != "é" || "é".charCodeAt(0) != 233
+            || StringTools.unsafeCodeAt("é", 0) != 233 || StringTools.fastCodeAt("x", 2) != -1) throw "character codes";
+        if (Math.fround(-1.5) != -1 || Math.sqrt(9) != 3 || Math.cos(0) != 1 || !Math.isFinite(Math.PI)) throw "math primitives";
+        if (StringTools.htmlEscape("<&", true) != "&lt;&amp;") throw "stdlib fallback";
+        var iterator = [7, 9].iterator();
+        if (!iterator.hasNext() || iterator.next() != 7 || iterator.next() != 9 || iterator.hasNext()) throw "array iterator";
+        var counter = new Counter();
+        for (item in counter) { if (item != 0) throw "iterator start"; break; }
+        if (counter.next() != 1) throw "iterator mutation";
+        if (State.After != 4) throw "abstract constants";
         var document = Xml.parse('<asset name="generated"><child/></asset>');
         var root = document.firstElement();
         if (root.nodeName != "asset" || root.elements().next().nodeName != "child") throw "XML traversal";
-        return root.get("name");
+        var result = Payload(root.get("name"));
+        return switch result { case Ready: "wrong branch"; case Payload(name): name; };
     }
     #end
-}"#,
+}
+private enum abstract State(Int) { var Before = 3; var After; }
+private enum Result { Ready; Payload(name:String); }
+private class Counter {
+    var current = 0;
+    public function new() {}
+    public function hasNext():Bool return true;
+    public function next():Int return current++;
+}
+"#,
         ),
     ]);
     let diagnostics = s.open("Main.hx");

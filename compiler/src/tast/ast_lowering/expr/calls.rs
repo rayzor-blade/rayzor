@@ -318,7 +318,7 @@ impl<'a> AstLowering<'a> {
         method_symbol: SymbolId,
     ) {
         let dynamic_type = self.context.type_table.borrow().dynamic_type();
-        let Some((mut params, mut ret, effects)) = self
+        let Some((mut params, mut ret, effects, labels)) = self
             .context
             .symbol_table
             .get_symbol(method_symbol)
@@ -334,10 +334,13 @@ impl<'a> AstLowering<'a> {
                         params,
                         return_type,
                         effects,
-                        ..
-                    }) if *return_type == dynamic_type || params.contains(&dynamic_type) => {
-                        Some((params.clone(), *return_type, effects.clone()))
-                    }
+                        labels,
+                    }) if *return_type == dynamic_type || params.contains(&dynamic_type) => Some((
+                        params.clone(),
+                        *return_type,
+                        effects.clone(),
+                        labels.clone(),
+                    )),
                     _ => None,
                 }
             })
@@ -378,7 +381,7 @@ impl<'a> AstLowering<'a> {
             .context
             .type_table
             .borrow_mut()
-            .create_function_type_with_effects(params, ret, effects);
+            .create_labelled_function_type(params, ret, effects, labels);
         self.context
             .symbol_table
             .update_symbol_type(method_symbol, fn_ty);
@@ -420,11 +423,19 @@ impl<'a> AstLowering<'a> {
         if generic {
             self.context.pop_type_parameters();
         }
+        let labels = sig
+            .optional
+            .iter()
+            .map(|&optional| crate::tast::core::FunctionArgLabel {
+                name: None,
+                optional,
+            })
+            .collect();
         let fn_ty = self
             .context
             .type_table
             .borrow_mut()
-            .create_function_type(param_types, return_type);
+            .create_labelled_function_type(param_types, return_type, Default::default(), labels);
         self.context
             .symbol_table
             .update_symbol_type(method_symbol, fn_ty);
@@ -6640,7 +6651,8 @@ impl<'a> AstLowering<'a> {
             Some(TypeKind::Function {
                 params,
                 return_type,
-                ..
+                effects,
+                labels,
             }) => {
                 let new_params: Vec<TypeId> = params
                     .iter()
@@ -6653,7 +6665,7 @@ impl<'a> AstLowering<'a> {
                     self.context
                         .type_table
                         .borrow_mut()
-                        .create_function_type(new_params, new_ret)
+                        .create_labelled_function_type(new_params, new_ret, effects, labels)
                 }
             }
             _ => ty,

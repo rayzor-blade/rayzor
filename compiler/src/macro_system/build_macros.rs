@@ -1147,8 +1147,15 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
 
     if let Some(arr) = access_arr {
         for a in arr {
-            if let MacroValue::String(s) = a {
-                match &**s {
+            let name = match a {
+                MacroValue::String(name) => Some(name.as_ref()),
+                MacroValue::Enum(_, name, args) if args.is_empty() => {
+                    Some(name.strip_prefix('A').unwrap_or(name))
+                }
+                _ => None,
+            };
+            if let Some(name) = name {
+                match name {
                     "Public" => access_val = Some(parser::Access::Public),
                     "Private" => access_val = Some(parser::Access::Private),
                     "Static" => modifiers.push(Modifier::Static),
@@ -1553,6 +1560,27 @@ mod tests {
         let field = value_to_class_field(&MacroValue::Object(Arc::new(obj)));
         assert!(field.is_some());
         let field = field.unwrap();
+        assert_eq!(field.access, Some(parser::Access::Public));
+        assert!(field.modifiers.contains(&Modifier::Static));
+    }
+
+    #[test]
+    fn access_enum_values_preserve_generated_field_modifiers() {
+        let access = |name| {
+            MacroValue::Enum(
+                Arc::from("haxe.macro.Access"),
+                Arc::from(name),
+                Arc::new(Vec::new()),
+            )
+        };
+        let value = MacroValue::Object(Arc::new(std::collections::BTreeMap::from([
+            ("name".into(), MacroValue::from_str("generated")),
+            (
+                "access".into(),
+                MacroValue::Array(Arc::new(vec![access("APublic"), access("AStatic")])),
+            ),
+        ])));
+        let field = value_to_class_field(&value).unwrap();
         assert_eq!(field.access, Some(parser::Access::Public));
         assert!(field.modifiers.contains(&Modifier::Static));
     }

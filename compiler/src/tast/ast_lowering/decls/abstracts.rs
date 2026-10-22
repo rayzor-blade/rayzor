@@ -437,11 +437,8 @@ impl<'a> AstLowering<'a> {
                     } else {
                         self.context.type_table.borrow().dynamic_type()
                     };
-                    let function_type = self
-                        .context
-                        .type_table
-                        .borrow_mut()
-                        .create_function_type(param_types, return_type);
+                    let function_type =
+                        self.declaration_function_type(&func.params, param_types, return_type);
                     self.context
                         .symbol_table
                         .update_symbol_type(sym, function_type);

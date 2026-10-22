@@ -413,7 +413,12 @@ mod tests {
         stale.track(&open);
         assert!(stale.answer(&request).is_none());
         std::fs::write(&asset, "original asset").unwrap();
-        std::fs::File::options().write(true).open(&asset).unwrap().set_modified(asset_time).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&asset)
+            .unwrap()
+            .set_modified(asset_time)
+            .unwrap();
         assert!(restarted.answer(&request).is_some());
         restarted.track(&Notification::new(
             "textDocument/didChange".into(),

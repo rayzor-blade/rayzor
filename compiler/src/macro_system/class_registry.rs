@@ -56,6 +56,7 @@ struct TypeDefinition {
     fields: Vec<FieldDefinition>,
     is_abstract: bool,
     is_enum_abstract: bool,
+    constructors: BTreeMap<String, usize>,
 }
 
 struct FieldDefinition {
@@ -63,6 +64,7 @@ struct FieldDefinition {
     metadata: Vec<Metadata>,
     is_static: bool,
     is_enum_value: bool,
+    init_expr: Option<Arc<Expr>>,
 }
 
 /// Registry of all known classes for macro interpretation.
@@ -79,6 +81,8 @@ pub struct ClassRegistry {
     /// short_name → qualified_name (for unambiguous lookups)
     short_name_index: BTreeMap<String, String>,
     type_definitions: BTreeMap<String, Arc<TypeDefinition>>,
+    enum_constants: BTreeMap<String, std::collections::BTreeSet<String>>,
+    enum_constructors: BTreeMap<String, BTreeMap<String, usize>>,
     generic_builds: BTreeMap<String, Arc<GenericBuildInfo>>,
     /// Static variables' current values, `Class.field` → value. Shared by
     /// every macro call of the compile, as macro-time statics are.
@@ -94,6 +98,8 @@ impl ClassRegistry {
             classes: BTreeMap::new(),
             short_name_index: BTreeMap::new(),
             type_definitions: BTreeMap::new(),
+            enum_constants: BTreeMap::new(),
+            enum_constructors: BTreeMap::new(),
             generic_builds: BTreeMap::new(),
             statics: MacroStatics::default(),
             dependencies: Default::default(),
@@ -131,15 +137,24 @@ impl ClassRegistry {
     /// The static variable `name` declared by `class_name`, with the class's
     /// qualified name.
     pub fn find_static_var(&self, class_name: &str, name: &str) -> Option<(String, Arc<Expr>)> {
-        let class = self.find_class(class_name)?;
-        let var = class.static_vars.iter().find(|v| v.name == name)?;
-        let init = var.init_expr.clone().unwrap_or_else(|| {
+        let (qualified, init) = if let Some(class) = self.find_class(class_name) {
+            let var = class.static_vars.iter().find(|v| v.name == name)?;
+            (class.qualified_name.clone(), var.init_expr.clone())
+        } else {
+            let definition = self.type_definitions.get(class_name)?;
+            let field = definition
+                .fields
+                .iter()
+                .find(|field| field.is_static && field.name == name)?;
+            (definition.qualified_name.clone(), field.init_expr.clone())
+        };
+        let init = init.unwrap_or_else(|| {
             Arc::new(Expr {
                 kind: parser::ExprKind::Null,
                 span: parser::Span::default(),
             })
         });
-        Some((class.qualified_name.clone(), init))
+        Some((qualified, init))
     }
 
     /// Every macro-time static's current value.
@@ -179,7 +194,7 @@ impl ClassRegistry {
 
     /// Register all classes from a single HaxeFile.
     pub fn register_file(&mut self, file: &HaxeFile) {
-        let file_imports = Arc::new(super::interpreter::build_import_map(&file.imports));
+        let mut file_imports = super::interpreter::build_import_map(&file.imports);
         let package_prefix = match &file.package {
             Some(pkg) if !pkg.path.is_empty() => format!("{}.", pkg.path.join(".")),
             _ => String::new(),
@@ -189,6 +204,18 @@ impl ClassRegistry {
             .file_stem()
             .and_then(|name| name.to_str())
             .unwrap_or("");
+        for declaration in &file.declarations {
+            let name = match declaration {
+                TypeDeclaration::Class(c) => &c.name,
+                TypeDeclaration::Interface(c) => &c.name,
+                TypeDeclaration::Abstract(c) => &c.name,
+                TypeDeclaration::Enum(c) => &c.name,
+                TypeDeclaration::Typedef(c) => &c.name,
+                _ => continue,
+            };
+            file_imports.insert(name.clone(), format!("{package_prefix}{name}"));
+        }
+        let file_imports = Arc::new(file_imports);
         for decl in &file.declarations {
             let (name, access, metadata, fields, is_abstract, is_enum_abstract) = match decl {
                 TypeDeclaration::Class(c) => (
@@ -219,6 +246,14 @@ impl ClassRegistry {
                 TypeDeclaration::Enum(e) => (&e.name, e.access, &e.meta, &[][..], false, false),
                 _ => continue,
             };
+            let underlying = match decl {
+                TypeDeclaration::Abstract(a) => match &a.underlying {
+                    Some(parser::Type::Path { path, .. }) => Some(path.name.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let mut next_value: i64 = 0;
             let definition = Arc::new(TypeDefinition {
                 qualified_name: format!("{package_prefix}{name}"),
                 runtime_class: matches!(
@@ -258,6 +293,14 @@ impl ClassRegistry {
                 metadata: metadata.clone(),
                 is_abstract,
                 is_enum_abstract,
+                constructors: match decl {
+                    TypeDeclaration::Enum(declaration) => declaration
+                        .constructors
+                        .iter()
+                        .map(|constructor| (constructor.name.clone(), constructor.params.len()))
+                        .collect(),
+                    _ => BTreeMap::new(),
+                },
                 fields: fields
                     .iter()
                     .map(|field| {
@@ -270,15 +313,69 @@ impl ClassRegistry {
                             ),
                             ClassFieldKind::Property { name, .. } => (name, false),
                         };
+                        let mut init_expr = match &field.kind {
+                            ClassFieldKind::Var { expr, .. }
+                            | ClassFieldKind::Final { expr, .. }
+                            | ClassFieldKind::Property { expr, .. } => expr.clone(),
+                            _ => None,
+                        };
+                        if is_enum_value {
+                            if let Some(Expr {
+                                kind: parser::ExprKind::Int(value),
+                                ..
+                            }) = &init_expr
+                            {
+                                next_value = value.saturating_add(1);
+                            } else if init_expr.is_none() {
+                                let kind = match underlying {
+                                    Some("Int") => Some(parser::ExprKind::Int(next_value)),
+                                    Some("Float") => {
+                                        Some(parser::ExprKind::Float(next_value as f64))
+                                    }
+                                    Some("String") => Some(parser::ExprKind::String(name.clone())),
+                                    _ => None,
+                                };
+                                init_expr = kind.map(|kind| Expr {
+                                    kind,
+                                    span: field.span,
+                                });
+                                next_value = next_value.saturating_add(1);
+                            }
+                        }
                         FieldDefinition {
                             name: name.clone(),
                             metadata: field.meta.clone(),
                             is_static: field.modifiers.contains(&Modifier::Static) || is_enum_value,
                             is_enum_value,
+                            init_expr: init_expr.map(Arc::new),
                         }
                     })
                     .collect(),
             });
+            if let Some(previous) = self.type_definitions.get(&definition.qualified_name) {
+                for field in previous.fields.iter().filter(|field| field.is_enum_value) {
+                    if let Some(owners) = self.enum_constants.get_mut(&field.name) {
+                        owners.remove(&previous.qualified_name);
+                    }
+                }
+                for name in previous.constructors.keys() {
+                    if let Some(owners) = self.enum_constructors.get_mut(name) {
+                        owners.remove(&previous.qualified_name);
+                    }
+                }
+            }
+            for field in definition.fields.iter().filter(|field| field.is_enum_value) {
+                self.enum_constants
+                    .entry(field.name.clone())
+                    .or_default()
+                    .insert(definition.qualified_name.clone());
+            }
+            for (name, &arity) in &definition.constructors {
+                self.enum_constructors
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(definition.qualified_name.clone(), arity);
+            }
             self.type_definitions
                 .insert(format!("{package_prefix}{name}"), definition.clone());
             let module_path = if access == Some(Access::Private) {
@@ -358,7 +455,8 @@ impl ClassRegistry {
                                 info.instance_methods.insert(func.name.clone(), method);
                             }
                         }
-                        ClassFieldKind::Var { name, expr, .. } => {
+                        ClassFieldKind::Var { name, expr, .. }
+                        | ClassFieldKind::Property { name, expr, .. } => {
                             let init = expr.as_ref().map(|e| Arc::new(e.clone()));
                             let var_info = FieldVarInfo {
                                 name: name.clone(),
@@ -383,9 +481,6 @@ impl ClassRegistry {
                             } else {
                                 info.instance_vars.push(var_info);
                             }
-                        }
-                        ClassFieldKind::Property { .. } => {
-                            // Properties are accessed via getter/setter methods, skip for now
                         }
                     }
                 }
@@ -534,6 +629,35 @@ impl ClassRegistry {
         for file in files {
             self.register_file(file);
         }
+    }
+
+    pub(crate) fn enum_constant_owner(&self, name: &str) -> Option<String> {
+        let owners = self.enum_constants.get(name)?;
+        (owners.len() == 1)
+            .then(|| owners.first().cloned())
+            .flatten()
+    }
+
+    pub(crate) fn enum_constructor(
+        &self,
+        owner: Option<&str>,
+        name: &str,
+    ) -> Option<(String, usize)> {
+        if let Some(owner) = owner {
+            let definition = self.type_definitions.get(owner)?;
+            return Some((
+                definition.qualified_name.clone(),
+                *definition.constructors.get(name)?,
+            ));
+        }
+        let constructors = self.enum_constructors.get(name)?;
+        (constructors.len() == 1)
+            .then(|| {
+                constructors
+                    .first_key_value()
+                    .map(|(name, &arity)| (name.clone(), arity))
+            })
+            .flatten()
     }
 
     /// Find a class by name (tries exact match, then short name index).

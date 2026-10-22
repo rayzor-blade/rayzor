@@ -3,6 +3,12 @@
 use super::*;
 
 impl CompilationUnit {
+    /// Whether this graph already holds the lowered body and its source identities.
+    pub fn has_typed_file(&self, filename: &str) -> bool {
+        self.compiled_files
+            .contains_key(&source_file_identity(filename))
+    }
+
     /// Select the page of a persistent editor graph. Callers must start a
     /// new unit when any source or compiler setting in that graph changes.
     pub fn set_editor_entry(&mut self, filename: &str) {

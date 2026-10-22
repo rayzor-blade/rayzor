@@ -141,7 +141,8 @@ impl SessionCache {
         }
         // One graph can contain a large dependency closure; bound how many
         // unrelated pages may keep extending it before starting a new graph.
-        unit.user_files.iter().any(|file| file.filename == filename)
+        unit.has_typed_file(filename)
+            || unit.user_files.iter().any(|file| file.filename == filename)
             || (unit.user_files.len() < 32 && unit.symbol_table.len() < 100_000)
     }
 }
