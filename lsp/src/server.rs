@@ -110,6 +110,7 @@ pub fn serve(connection: &Connection) -> Result<(), String> {
             work_done_progress_options: Default::default(),
         }),
         inlay_hint_provider: Some(OneOf::Left(true)),
+        experimental: Some(serde_json::json!({"macroExpansionProvider":true})),
         references_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
         ..Default::default()
@@ -208,7 +209,12 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 // ---------------------------------------------------------------------------
 
 fn handle_request(conn: &Connection, ctx: &LspContext, req: Request) {
-    if let Some((id, params)) = cast_request::<HoverRequest>(&req) {
+    if req.method == "rayzor/expandMacro" {
+        let preview = serde_json::from_value::<lsp_types::TextDocumentPositionParams>(req.params)
+            .ok()
+            .and_then(|p| ctx.expand_macro(p.text_document.uri.as_str(), p.position));
+        send_response(conn, req.id, preview);
+    } else if let Some((id, params)) = cast_request::<HoverRequest>(&req) {
         send_response(conn, id, handle_hover(ctx, params));
     } else if let Some((id, params)) = cast_request::<GotoDefinition>(&req) {
         send_response(conn, id, handle_goto_definition(ctx, params));
@@ -269,6 +275,7 @@ fn handle_notification(
         }
     } else if let Some(params) = cast_notification::<DidCloseTextDocument>(&not) {
         let uri = params.text_document.uri.as_str().to_string();
+        publish_diagnostic_updates(conn, ctx.update_diagnostics(&uri, Vec::new()));
         ctx.close(&uri);
         changed.retain(|u| *u != uri);
         let params = PublishDiagnosticsParams {
@@ -293,22 +300,14 @@ fn publish_diagnostics(conn: &Connection, ctx: &mut LspContext, uri: &str) {
     let diags = compiled.unwrap_or_else(|payload| {
         let message = format!("internal compiler error: {}", panic_message(&payload));
         log_message(conn, &message);
-        vec![crate::context::LspDiagnostic::error(uri, 1, 1, message)]
+        vec![crate::context::LspDiagnostic::error(
+            &crate::context::uri_to_path(uri),
+            1,
+            1,
+            message,
+        )]
     });
-    let lsp_diags = to_lsp_diagnostics(&diags);
-
-    let lsp_uri: Uri = uri.parse().unwrap_or_else(|_| {
-        format!("file://{}", uri)
-            .parse()
-            .unwrap_or_else(|_| "file:///unknown".parse().unwrap())
-    });
-
-    let params = PublishDiagnosticsParams {
-        uri: lsp_uri,
-        diagnostics: lsp_diags,
-        version: None,
-    };
-    send_notification::<PublishDiagnostics>(conn, params);
+    publish_diagnostic_updates(conn, ctx.update_diagnostics(uri, diags));
 }
 
 /// Tells the client about a configuration problem it can show in its log.
@@ -328,6 +327,25 @@ where
     let _ = conn.sender.send(Message::Notification(not));
 }
 
+fn publish_diagnostic_updates(
+    conn: &Connection,
+    updates: Vec<(String, Vec<crate::context::LspDiagnostic>)>,
+) {
+    for (file, diagnostics) in updates {
+        let Ok(uri) = crate::context::file_uri(&file).parse() else {
+            continue;
+        };
+        send_notification::<PublishDiagnostics>(
+            conn,
+            PublishDiagnosticsParams {
+                uri,
+                diagnostics: to_lsp_diagnostics(&diagnostics),
+                version: None,
+            },
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Hover
 // ---------------------------------------------------------------------------
@@ -339,7 +357,24 @@ fn handle_hover(ctx: &LspContext, params: HoverParams) -> Option<Hover> {
         .uri
         .as_str();
     let pos = params.text_document_position_params.position;
-    let info = ctx.hover_info(uri, pos.line + 1, pos.character + 1)?;
+    let info = ctx.hover_info(uri, pos.line + 1, pos.character + 1);
+    if info.is_none()
+        && let Some(preview) = ctx.expand_macro(uri, pos)
+        && let Some(expansion) = preview["expansion"].as_str()
+    {
+        return Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!(
+                    "**Macro expansion: `{}`**\n\n```haxe\n{}\n```",
+                    preview["name"].as_str().unwrap_or("macro"),
+                    expansion
+                ),
+            }),
+            range: serde_json::from_value(preview["range"].clone()).ok(),
+        });
+    }
+    let info = info?;
 
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
@@ -619,10 +654,23 @@ fn handle_inlay_hints(ctx: &LspContext, params: InlayHintParams) -> Option<Vec<I
         }
 
         // Show as: `macroName(...)` → `expanded_result`
-        let label = format!(" → {}", hint.expanded_text);
+        let compact = hint
+            .expanded_text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let label = format!(
+            " → {}{}",
+            compact.chars().take(80).collect::<String>(),
+            if compact.chars().count() > 80 {
+                "…"
+            } else {
+                ""
+            }
+        );
 
         hints.push(InlayHint {
-            position: Position::new(line, col + hint.macro_name.len() as u32 + 2),
+            position: Position::new(line, col),
             label: InlayHintLabel::String(label),
             kind: Some(InlayHintKind::PARAMETER),
             text_edits: None,

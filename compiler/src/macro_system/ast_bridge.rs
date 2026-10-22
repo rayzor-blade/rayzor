@@ -206,6 +206,24 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
             }
         }
         MacroValue::Expr(expr) => expr.as_ref().clone(),
+        MacroValue::Class(name) => {
+            let mut parts = name.split('.');
+            let mut expr = Expr {
+                kind: ExprKind::Ident(parts.next().unwrap_or_default().into()),
+                span,
+            };
+            for part in parts {
+                expr = Expr {
+                    kind: ExprKind::Field {
+                        expr: Box::new(expr),
+                        field: part.into(),
+                        is_optional: false,
+                    },
+                    span,
+                };
+            }
+            expr
+        }
         MacroValue::Type(_type_id) => {
             // Type references can't be directly expressed; use a placeholder
             Expr {

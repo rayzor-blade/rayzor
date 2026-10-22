@@ -20,6 +20,7 @@ pub struct LspContext {
     pub class_paths: Vec<PathBuf>,
     /// The project's defines, seen by its own files only.
     pub defines: Vec<String>,
+    pub initialization_macros: Vec<String>,
     /// The build file the configuration came from, if any.
     pub hxml: Option<PathBuf>,
     /// What could not be applied from the configuration.
@@ -28,6 +29,7 @@ pub struct LspContext {
     pub macro_budget: std::time::Duration,
     /// The last analysis of each open document that produced an index.
     analyses: HashMap<String, Analysis>,
+    diagnostics: HashMap<String, Vec<LspDiagnostic>>,
 }
 
 /// A compiled document: the unit its symbols live in and its position index.
@@ -55,74 +57,116 @@ impl LspContext {
             open_files: HashMap::new(),
             class_paths: Vec::new(),
             defines: Vec::new(),
+            initialization_macros: Vec::new(),
             hxml: None,
             config_problems: Vec::new(),
             macro_budget: std::time::Duration::from_secs(5),
             analyses: HashMap::new(),
+            diagnostics: HashMap::new(),
         }
     }
 
-    /// Configure the project from its build file: `hxml` when the client
-    /// names one, else `build.hxml`, else the first `.hxml` in the root, else
-    /// `rayzor.toml`. The workspace root comes last, as haxe always searches
-    /// the working directory.
+    /// Explicit build settings take precedence over discovered library metadata.
     pub fn load_workspace_config(&mut self, hxml: Option<&str>) {
         self.class_paths.clear();
         self.defines.clear();
+        self.initialization_macros.clear();
         self.config_problems.clear();
-        self.hxml = hxml.map(|h| self.root.join(h)).or_else(|| self.find_hxml());
-        match self.hxml.clone() {
+        self.hxml = hxml
+            .map(|h| self.root.join(h))
+            .or_else(|| crate::project::find_hxml(&self.root, &mut self.config_problems));
+        let mut requested = match self.hxml.clone() {
             Some(path) => self.apply_hxml(&path),
-            None => self.class_paths = self.manifest_class_paths(),
+            None => {
+                self.class_paths = self.manifest_class_paths();
+                let extra = self.root.join("extraParams.hxml");
+                if self.root.join("haxelib.json").is_file() && extra.is_file() {
+                    self.apply_hxml(&extra)
+                } else {
+                    Vec::new()
+                }
+            }
+        };
+        let mut metadata = crate::project::library_metadata(
+            &self.root,
+            &self.class_paths,
+            &mut self.config_problems,
+        );
+        // A direct -lib or path dependency requests hooks even if a class path
+        // also names its sources. Other inferred dependencies use sources as-is.
+        metadata.provided.retain(|name| {
+            !requested.iter().any(|lib| &lib.name == name)
+                && !metadata
+                    .libraries
+                    .iter()
+                    .any(|lib| &lib.name == name && lib.is_local())
+        });
+        self.class_paths.extend(metadata.class_paths);
+        // A manifest can fill omissions, but must not replace an explicit
+        // version selected in the build file.
+        for dependency in metadata.libraries {
+            if let Some(existing) = requested.iter_mut().find(|lib| lib.name == dependency.name) {
+                if existing.is_unpinned() && dependency.is_local() {
+                    *existing = dependency;
+                }
+            } else {
+                requested.push(dependency);
+            }
+        }
+        let (libraries, problems) =
+            compiler::haxelib::resolve_dependencies(&requested, &self.root, &metadata.provided);
+        self.config_problems.extend(problems);
+        for lib in libraries {
+            self.class_paths.extend(lib.class_paths);
+            self.initialization_macros.extend(lib.macros);
+            self.defines
+                .extend(lib.defines.into_iter().map(|(name, value)| {
+                    value.map_or_else(|| name.clone(), |value| format!("{name}={value}"))
+                }));
         }
         if !self.class_paths.contains(&self.root) {
             self.class_paths.push(self.root.clone());
         }
+        let mut seen = std::collections::HashSet::new();
+        self.class_paths
+            .retain(|p| seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())));
     }
 
-    fn find_hxml(&self) -> Option<PathBuf> {
-        let build = self.root.join("build.hxml");
-        if build.is_file() {
-            return Some(build);
-        }
-        let mut found: Vec<PathBuf> = std::fs::read_dir(&self.root)
-            .ok()?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "hxml"))
-            .collect();
-        found.sort();
-        found.into_iter().next()
-    }
-
-    /// The first build the file describes; a `--next` build only differs in
-    /// output or target, and one view of the sources is what an editor shows.
-    fn apply_hxml(&mut self, path: &std::path::Path) {
+    /// Use one build; merging `--next` builds would mix incompatible targets.
+    fn apply_hxml(&mut self, path: &std::path::Path) -> Vec<compiler::haxelib::Dependency> {
         use compiler::hxml::HxmlConfig;
         let build = match HxmlConfig::builds_from_file(path) {
             Ok(builds) => builds.into_iter().next().unwrap_or_default(),
             Err(e) => {
                 self.config_problems.push(e);
-                return;
+                return Vec::new();
             }
         };
         for (file, line, message) in &build.warnings {
             self.config_problems
                 .push(format!("{}:{}: {}", file.display(), line, message));
         }
-        self.class_paths = build.class_paths.clone();
+        // Haxe gives the last declared class path precedence.
+        self.class_paths
+            .extend(build.class_paths.iter().rev().cloned());
+        self.initialization_macros = build.macros.clone();
         self.defines = build
             .defines
             .iter()
-            .map(|(name, _)| name.clone())
+            .map(|(name, value)| {
+                value
+                    .as_ref()
+                    .map_or_else(|| name.clone(), |value| format!("{name}={value}"))
+            })
             .chain(build.target_defines().into_iter().map(str::to_string))
             .collect();
-        let (libraries, problems) = compiler::haxelib::resolve(&build.libraries, &self.root);
-        self.config_problems.extend(problems);
-        for lib in libraries {
-            self.class_paths.extend(lib.class_paths);
-            self.defines
-                .extend(lib.defines.into_iter().map(|(name, _)| name));
-        }
+        build
+            .libraries
+            .iter()
+            .map(|spec| {
+                compiler::haxelib::Dependency::parse(spec, path.parent().unwrap_or(&self.root))
+            })
+            .collect()
     }
 
     fn manifest_class_paths(&self) -> Vec<PathBuf> {
@@ -160,6 +204,12 @@ impl LspContext {
             typecheck_only: true,
             ..Default::default()
         };
+        config.stdlib_paths = match crate::stdlib::discover() {
+            Ok(paths) => paths,
+            Err(message) => return vec![LspDiagnostic::error(&filename, 0, 0, message)],
+        };
+        // Cached Rayzor library symbols do not describe a system Haxe library.
+        config.enable_cache = false;
         config.pipeline_config = config.pipeline_config.skip_analysis();
 
         // A syntax error is reported as such, and the last analysis is kept:
@@ -186,6 +236,7 @@ impl LspContext {
             )];
         }
 
+        let initialization_errors = unit.run_initialization_macros(&self.initialization_macros);
         if let Err(e) = unit.add_file(source, &filename) {
             return vec![LspDiagnostic::error(
                 &filename,
@@ -195,12 +246,16 @@ impl LspContext {
             )];
         }
 
-        let result = match unit.lower_to_tast() {
+        let mut result = match unit.lower_to_tast() {
             Ok(_typed_files) => Vec::new(),
             Err(errors) => errors
                 .iter()
+                .filter(|e| e.category != compiler::pipeline::ErrorCategory::MacroExpansionError)
                 .map(|e| LspDiagnostic {
-                    file: filename.clone(),
+                    file: unit
+                        .file_path_of(e.location.file_id)
+                        .unwrap_or(&filename)
+                        .to_string(),
                     line: e.location.line,
                     column: e.location.column,
                     end_line: e.location.line,
@@ -209,16 +264,73 @@ impl LspContext {
                         compiler::pipeline::ErrorCategory::ParseError => DiagSeverity::Error,
                         compiler::pipeline::ErrorCategory::TypeError => DiagSeverity::Error,
                         compiler::pipeline::ErrorCategory::ConcurrencyError => DiagSeverity::Error,
+                        compiler::pipeline::ErrorCategory::MacroExpansionError => {
+                            DiagSeverity::Error
+                        }
                         _ => DiagSeverity::Warning,
                     },
                     message: e.message.clone(),
                     suggestion: e.suggestion.clone(),
                     related: e.related_errors.clone(),
+                    related_information: Vec::new(),
                 })
                 .collect(),
         };
+        result.extend(unit.macro_diagnostics.iter().filter_map(|diagnostic| {
+            use compiler::macro_system::MacroSeverity;
+            let severity = match diagnostic.severity {
+                MacroSeverity::Error => DiagSeverity::Error,
+                MacroSeverity::Warning => DiagSeverity::Warning,
+                MacroSeverity::Info => return None,
+            };
+            let file = unit
+                .file_path_of(diagnostic.location.file_id)
+                .unwrap_or(&filename);
+            let mut item = LspDiagnostic::error(
+                file,
+                diagnostic.location.line,
+                diagnostic.location.column,
+                diagnostic.message.clone(),
+            );
+            item.severity = severity;
+            if let Some(call) = diagnostic.call_site
+                && let Some(file) = unit.file_path_of(call.file_id)
+                && let Ok(uri) = file_uri(file).parse()
+            {
+                let at = lsp_types::Position::new(
+                    call.line.saturating_sub(1),
+                    call.column.saturating_sub(1),
+                );
+                item.related_information
+                    .push(lsp_types::DiagnosticRelatedInformation {
+                        location: lsp_types::Location {
+                            uri,
+                            range: lsp_types::Range::new(at, at),
+                        },
+                        message: "Macro invoked here".into(),
+                    });
+            }
+            Some(item)
+        }));
+        result.extend(
+            initialization_errors
+                .into_iter()
+                .map(|message| LspDiagnostic::error(&filename, 0, 0, message)),
+        );
 
         let file_id = unit.file_id_of(&filename).unwrap_or(u32::MAX);
+        let mut preprocessor = parser::preprocessor::PreprocessorConfig::default();
+        preprocessor.defines.extend(
+            self.defines
+                .iter()
+                .map(|define| define.split('=').next().unwrap().to_string()),
+        );
+        preprocessor.defines.insert("eval".into());
+        let text = parser::preprocessor::preprocess(source, &preprocessor);
+        if let Ok(file) = parser::rd::rd_parse(&text, &filename, false, false) {
+            FileSymbolIndex::record_source_declarations(&file, source, file_id, &mut unit);
+        }
+        crate::documentation::record(&mut unit);
         let index = FileSymbolIndex::build(
             &unit.symbol_table,
             &unit.string_interner,
@@ -235,16 +347,55 @@ impl LspContext {
         result
     }
 
+    /// Publish errors on their own files, merging contributions from open documents.
+    pub fn update_diagnostics(
+        &mut self,
+        uri: &str,
+        diagnostics: Vec<LspDiagnostic>,
+    ) -> Vec<(String, Vec<LspDiagnostic>)> {
+        let mut files = std::collections::BTreeSet::from([uri_to_path(uri)]);
+        files.extend(diagnostics.iter().map(|d| d.file.clone()));
+        if let Some(previous) = self.diagnostics.insert(uri.to_string(), diagnostics) {
+            files.extend(previous.into_iter().map(|d| d.file));
+        }
+        files
+            .into_iter()
+            .map(|file| {
+                let mut found = Vec::new();
+                for diagnostic in self
+                    .diagnostics
+                    .values()
+                    .flatten()
+                    .filter(|d| d.file == file)
+                {
+                    if !found.iter().any(|d: &LspDiagnostic| {
+                        d.line == diagnostic.line
+                            && d.column == diagnostic.column
+                            && d.message == diagnostic.message
+                    }) {
+                        found.push(diagnostic.clone());
+                    }
+                }
+                (file, found)
+            })
+            .collect()
+    }
+
     /// Forget a closed document and its analysis.
     pub fn close(&mut self, uri: &str) {
         self.open_files.remove(uri);
         self.analyses.remove(uri);
+        self.diagnostics.remove(uri);
     }
 
     fn syntax_errors(&self, filename: &str, source: &str) -> Vec<LspDiagnostic> {
         let mut config = parser::preprocessor::PreprocessorConfig::default();
         config.defines.insert("eval".to_string());
-        config.defines.extend(self.defines.iter().cloned());
+        config.defines.extend(
+            self.defines
+                .iter()
+                .map(|define| define.split('=').next().unwrap().to_string()),
+        );
         let text = parser::preprocessor::preprocess(source, &config);
         let import_file = filename.ends_with("import.hx");
         let Err(errors) = parser::rd::rd_parse(&text, filename, import_file, false) else {
@@ -265,6 +416,7 @@ impl LspContext {
                     message: e.message.clone(),
                     suggestion: None,
                     related: Vec::new(),
+                    related_information: Vec::new(),
                 }
             })
             .collect()
@@ -351,7 +503,7 @@ impl LspContext {
                     analysis::resolve_name(&name, a.index.file_id, rline, rcol, st, interner)
                 })
                 .map(|receiver| {
-                    analysis::member_completions(
+                    let members = analysis::member_completions(
                         receiver,
                         &unit.symbol_table,
                         &unit.type_table,
@@ -362,7 +514,12 @@ impl LspContext {
                                 .map(|f| (f.1, f.2))
                                 .collect()
                         },
-                    )
+                    );
+                    if members.is_empty() {
+                        analysis::stdlib_member_completions(receiver, unit)
+                    } else {
+                        members
+                    }
                 })
                 .unwrap_or_default();
             return Completions::Members(members);
@@ -424,6 +581,58 @@ impl LspContext {
         )
     }
 
+    pub fn expand_macro(
+        &self,
+        uri: &str,
+        position: lsp_types::Position,
+    ) -> Option<serde_json::Value> {
+        let analysis = self.analyses.get(uri)?;
+        let source = self.open_files.get(uri)?;
+        let line_start = source
+            .split_inclusive('\n')
+            .take(position.line as usize)
+            .map(str::len)
+            .sum::<usize>();
+        let line = source.get(line_start..)?.split('\n').next()?;
+        let mut utf16 = 0;
+        let column = line
+            .char_indices()
+            .find_map(|(offset, c)| {
+                if utf16 >= position.character {
+                    Some(offset)
+                } else {
+                    utf16 += c.len_utf16() as u32;
+                    None
+                }
+            })
+            .unwrap_or(line.len());
+        let offset = line_start + column;
+        let origin = analysis
+            .unit
+            .macro_expansions
+            .iter()
+            .filter(|o| {
+                o.call_site.file_id == analysis.index.file_id
+                    && o.call_span.start <= offset
+                    && offset <= o.call_span.end
+            })
+            .min_by_key(|o| o.call_span.end.saturating_sub(o.call_span.start))?;
+        let pos = |at| {
+            let (line, character) = line_column(source, at);
+            serde_json::json!({"line":line-1,"character":character-1})
+        };
+        Some(serde_json::json!({
+            "name": origin.macro_name,
+            "expansion": origin.expanded_text,
+            "range": {"start":pos(origin.call_span.start),"end":pos(origin.call_span.end)},
+            "definition": origin.definition_file.as_ref().zip(origin.definition_site).and_then(|(file, at)| {
+                let text = std::fs::read_to_string(file).ok()?;
+                let (line, character) = line_column(&text, at.byte_offset as usize);
+                Some(serde_json::json!({"uri":file_uri(file),"range":{"start":{"line":line-1,"character":character-1},"end":{"line":line-1,"character":character}}}))
+            })
+        }))
+    }
+
     /// The macro expansions in the document, for inlay hints.
     pub fn macro_expansion_hints(&self, uri: &str) -> Vec<MacroExpansionHint> {
         let Some(a) = self.analyses.get(uri) else {
@@ -438,9 +647,11 @@ impl LspContext {
                 if !loc.is_valid() || loc.file_id != a.index.file_id {
                     return None;
                 }
+                let source = self.open_files.get(uri)?;
+                let (line, column) = line_column(source, origin.call_span.end);
                 Some(MacroExpansionHint {
-                    line: loc.line,
-                    column: loc.column,
+                    line,
+                    column,
                     macro_name: origin.macro_name.clone(),
                     expanded_text: text.clone(),
                 })
@@ -467,6 +678,7 @@ pub struct MacroExpansionHint {
 
 /// A diagnostic ready for LSP conversion.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct LspDiagnostic {
     pub file: String,
     pub line: u32,
@@ -477,6 +689,7 @@ pub struct LspDiagnostic {
     pub message: String,
     pub suggestion: Option<String>,
     pub related: Vec<String>,
+    pub related_information: Vec<lsp_types::DiagnosticRelatedInformation>,
 }
 
 impl LspDiagnostic {
@@ -491,11 +704,13 @@ impl LspDiagnostic {
             message,
             suggestion: None,
             related: Vec::new(),
+            related_information: Vec::new(),
         }
     }
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub enum DiagSeverity {
     Error,
     Warning,
@@ -511,13 +726,27 @@ fn line_column(text: &str, offset: usize) -> (u32, u32) {
         .iter()
         .rposition(|&b| b == b'\n')
         .map_or(0, |p| p + 1);
-    (line, (before.len() - start) as u32 + 1)
+    let column = String::from_utf8_lossy(&before[start..])
+        .encode_utf16()
+        .count() as u32
+        + 1;
+    (line, column)
 }
 
-fn uri_to_path(uri: &str) -> String {
+pub(crate) fn uri_to_path(uri: &str) -> String {
     if let Some(path) = uri.strip_prefix("file://") {
         path.replace("%20", " ")
     } else {
         uri.to_string()
     }
+}
+
+pub(crate) fn file_uri(path: &str) -> String {
+    format!(
+        "file://{}",
+        path.replace('%', "%25")
+            .replace(' ', "%20")
+            .replace('#', "%23")
+            .replace('?', "%3F")
+    )
 }

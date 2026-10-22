@@ -77,6 +77,17 @@ impl CompilationUnit {
                 .iter()
                 .any(|file| source_file_identity(&file.filename) == identity);
 
+        let mut annotated;
+        let ast_file = if self.global_metadata.is_empty() {
+            ast_file
+        } else {
+            annotated = ast_file.clone();
+            for metadata in &self.global_metadata {
+                metadata.apply(&mut annotated);
+            }
+            &annotated
+        };
+
         // Type headers and sibling declarations supply signatures to the entry.
         let entry_name = Path::new(filename)
             .file_stem()
@@ -190,8 +201,8 @@ impl CompilationUnit {
                 })
                 .map(|f| view(&f))
                 .collect();
-            let mut class_registry = crate::macro_system::ClassRegistry::new();
-            class_registry.use_statics(self.macro_statics.clone());
+            let mut class_registry = self.macro_class_registry();
+            class_registry.register_files(&self.initialization_macro_files);
             class_registry.register_files(&self.user_files);
             class_registry.register_files(&self.loaded_import_haxe_files);
             class_registry.register_files(&generic_build_modules);
@@ -218,6 +229,7 @@ impl CompilationUnit {
             // Without this, only the current file's macros are in the registry
             // and cross-file calls silently fall through.
             let mut dep_files: Vec<HaxeFile> = build_modules;
+            dep_files.extend(self.initialization_macro_files.iter().cloned());
             dep_files.extend(generic_build_modules.iter().map(view));
             dep_files.extend(self.user_files.iter().map(view));
             dep_files.extend(self.loaded_import_haxe_files.iter().map(view));
@@ -271,6 +283,59 @@ impl CompilationUnit {
             // error — a failed macro call otherwise routes to a regular
             // method (often the stdlib namesake) with no indication the
             // macro didn't run.
+            for diagnostic in &mut expansion.diagnostics {
+                let (path, text) =
+                    crate::macro_system::context_api::named_file(diagnostic.location.file_id)
+                        .map(|(path, contents)| {
+                            let text = contents
+                                .map(|s| s.to_string())
+                                .or_else(|| std::fs::read_to_string(&path).ok())
+                                .unwrap_or_default();
+                            (path, text)
+                        })
+                        .unwrap_or_else(|| (filename.to_string(), source.to_string()));
+                let id = *self
+                    .file_id_by_filename
+                    .entry(path.clone())
+                    .or_insert_with(|| {
+                        let id = self.next_file_id;
+                        self.next_file_id += 1;
+                        id
+                    });
+                self.file_source_by_filename
+                    .entry(path)
+                    .or_insert_with(|| text.clone());
+                let at = (diagnostic.location.byte_offset as usize).min(text.len());
+                let before = &text.as_bytes()[..at];
+                diagnostic.location = SourceLocation::new(
+                    id,
+                    1 + before.iter().filter(|&&b| b == b'\n').count() as u32,
+                    (at - before
+                        .iter()
+                        .rposition(|&b| b == b'\n')
+                        .map_or(0, |p| p + 1)
+                        + 1) as u32,
+                    at as u32,
+                );
+            }
+            for diagnostic in &mut expansion.diagnostics {
+                if let Some(call) = &mut diagnostic.call_site {
+                    let at = (call.byte_offset as usize).min(source.len());
+                    let before = &source.as_bytes()[..at];
+                    *call = SourceLocation::new(
+                        file_id_u32,
+                        1 + before.iter().filter(|&&b| b == b'\n').count() as u32,
+                        (at - before
+                            .iter()
+                            .rposition(|&b| b == b'\n')
+                            .map_or(0, |p| p + 1)
+                            + 1) as u32,
+                        at as u32,
+                    );
+                }
+            }
+            self.macro_diagnostics
+                .extend(expansion.diagnostics.iter().cloned());
             let mut macro_diagnostics: Vec<diagnostics::Diagnostic> = Vec::new();
             // The expander re-walks a dirty declaration once per iteration and
             // records the same failure each time, so the batch repeats itself.
@@ -292,10 +357,7 @@ impl CompilationUnit {
                         diagnostics::DiagnosticSeverity::Info
                     }
                 };
-                // Macro positions carry no file; this file expanded them.
-                let mut loc = diag.location;
-                loc.file_id = file_id_u32;
-                let loc = &loc;
+                let loc = &diag.location;
                 let pos = diagnostics::SourcePosition::new(
                     loc.line.max(1) as usize,
                     loc.column.max(1) as usize,
@@ -309,7 +371,11 @@ impl CompilationUnit {
                 if !seen_macro_diags.insert((diag.message.clone(), loc.line, loc.column)) {
                     continue;
                 }
-                let span = diagnostics::SourceSpan::new(pos, end_pos, file_id);
+                let span = diagnostics::SourceSpan::new(
+                    pos,
+                    end_pos,
+                    diagnostics::FileId::new(loc.file_id as usize),
+                );
                 macro_diagnostics.push(diagnostics::Diagnostic {
                     severity,
                     code: Some("MACRO".to_string()),
@@ -337,10 +403,7 @@ impl CompilationUnit {
                 .filter(|diag| matches!(diag.severity, crate::macro_system::MacroSeverity::Error))
                 .map(|diag| CompilationError {
                     message: format!("[E0700] {}", diag.message),
-                    location: SourceLocation {
-                        file_id: file_id_u32,
-                        ..diag.location
-                    },
+                    location: diag.location,
                     category: ErrorCategory::MacroExpansionError,
                     suggestion: None,
                     related_errors: Vec::new(),
@@ -362,7 +425,22 @@ impl CompilationUnit {
                     expansion.expansions_count, filename
                 );
             }
-            // Store expansion origins for LSP macro hints
+            // Expansion positions are byte offsets until tied to this source file.
+            for origin in &mut expansion.expansion_origins {
+                let offset = origin.call_span.start.min(source.len());
+                let before = &source.as_bytes()[..offset];
+                origin.call_site = SourceLocation::new(
+                    file_id_u32,
+                    1 + before.iter().filter(|&&b| b == b'\n').count() as u32,
+                    (offset
+                        - before
+                            .iter()
+                            .rposition(|&b| b == b'\n')
+                            .map_or(0, |p| p + 1)
+                        + 1) as u32,
+                    offset as u32,
+                );
+            }
             self.macro_expansions.extend(expansion.expansion_origins);
             self.macro_hooks.extend(expansion.hooks);
             // A type named only in a macro's output (`new $tPath(...)`) was
@@ -498,6 +576,24 @@ impl CompilationUnit {
                 self.global_class_fields
                     .entry(*class_sym)
                     .or_insert_with(|| fields.clone());
+            }
+        }
+        if let Some(engine) = &deferred_macro_expander {
+            for mut origin in engine.borrow_mut().take_expansion_origins() {
+                let offset = origin.call_span.start.min(source.len());
+                let before = &source.as_bytes()[..offset];
+                origin.call_site = SourceLocation::new(
+                    file_id_u32,
+                    1 + before.iter().filter(|&&b| b == b'\n').count() as u32,
+                    (offset
+                        - before
+                            .iter()
+                            .rposition(|&b| b == b'\n')
+                            .map_or(0, |p| p + 1)
+                        + 1) as u32,
+                    offset as u32,
+                );
+                self.macro_expansions.push(origin);
             }
         }
         let typed_file = lowered.map_err(|e| vec![e.to_compilation_error()])?;
@@ -1224,7 +1320,8 @@ impl CompilationUnit {
     }
 
     pub(crate) fn macro_expansion_may_apply(&self, ast_file: &parser::HaxeFile) -> bool {
-        haxe_file_source_has_macro_hook(ast_file)
+        !self.global_metadata.is_empty()
+            || haxe_file_source_has_macro_hook(ast_file)
             || self.user_files.iter().any(haxe_file_source_has_macro_hook)
             || self
                 .import_hx_files
@@ -1589,7 +1686,7 @@ impl CompilationUnit {
         let diagnostics = crate::macro_system::expander::run_generation_hooks(
             &hooks,
             &files,
-            self.macro_statics.clone(),
+            self.macro_class_registry(),
         )
         .map_err(|e| vec![to_error(format!("macro hook failed: {}", e), e.location())])?;
         let mut errors = Vec::new();

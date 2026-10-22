@@ -34,6 +34,25 @@ pub fn rd_parse(
     Ok(file)
 }
 
+/// Parse one metadata entry without inventing a declaration around it.
+pub fn rd_parse_metadata(source: &str) -> Result<Metadata, ParseError> {
+    let tokens = Lexer::new(source)
+        .tokenize()
+        .map_err(|e| ParseError::new(&e.message, Span::new(e.offset, e.offset + 1)))?;
+    let mut stream = TokenStream::new(&tokens, source);
+    if !stream.at_any(&[TokenKind::At, TokenKind::AtColon]) {
+        return Err(ParseError::new("expected metadata", stream.peek().span));
+    }
+    let metadata = RdParser::new(&mut stream, source, "").parse_metadata(false)?;
+    if !stream.is_eof() {
+        return Err(ParseError::new(
+            "unexpected text after metadata",
+            stream.peek().span,
+        ));
+    }
+    Ok(metadata)
+}
+
 /// The recursive descent parser state.
 pub struct RdParser<'a, 'b> {
     pub(crate) stream: &'a mut TokenStream<'b>,

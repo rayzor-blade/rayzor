@@ -112,6 +112,73 @@ rayzor lsp                       # Language Server
 rayzor jit main.hx               # interactive REPL
 ```
 
+The language server reads class paths, libraries, defines and initialization
+macros from HXML. Set `initializationOptions.hxml` to select a build explicitly.
+Otherwise it prefers the workspace's `build.hxml`, then other root HXML files,
+then searches up to two directories below the root (excluding hidden directories,
+dependency directories and common output directories). At each depth it prefers
+`build.hxml`, then alphabetical order. Ambiguous choices are logged; builds and
+targets are never merged. `extraParams.hxml` is not a build candidate.
+
+The workspace's `haxelib.json`, and the nearest manifest owning each configured
+class path, supply additional class paths and dependencies. Explicit HXML
+library versions take precedence. Resolved dependencies contribute their
+`extraParams.hxml` initialization macros. Class-path-only libraries do not
+activate their own extra-parameter hooks. Without a selected HXML, the server
+also reads `rayzor.toml` class paths and a workspace library's `extraParams.hxml`.
+Missing libraries or invalid manifests are logged without discarding the other
+settings. Later HXML class paths take precedence over earlier ones. Define
+values remain available to macros through `Context.definedValue`.
+Macro evaluation is native to Rayzor.
+
+A library identified by a configured source path also satisfies inferred
+dependencies on that library, avoiding an additional installed copy. A direct
+HXML `-lib` still explicitly requests its library settings and hooks.
+
+Unpinned libraries also honor checkouts registered with `haxelib dev`; an
+explicit version still selects that installed version. Rayzor additionally
+accepts local dependencies in `haxelib.json` as `{"path":"../library"}` or a
+relative/absolute path string:
+
+```json
+{"dependencies":{"my_macros":{"path":"../my_macros"}}}
+```
+
+Paths are relative to the manifest that declares them. These libraries supply
+their `classPath`, transitive dependencies and `extraParams.hxml` macros without
+requiring installation in a haxelib repository. A local path can supply an
+unpinned HXML `-lib` of the same name; an explicit HXML version remains
+authoritative. Path-valued dependency declarations are a Rayzor extension to
+the usual haxelib version strings.
+
+An explicit `RAYZOR_STD_PATH` selects the analysis library. Otherwise the server
+looks for the installed Haxe standard library, including `HAXE_STD_PATH` and
+the installation behind `haxe` on `PATH`. The bundled Rayzor library is a
+fallback when no Haxe installation is found.
+
+Hover popovers include declaration comments, including imported declarations.
+HaxeDoc (`/** ... **/`) and JSDoc (`/** ... */`) blocks preserve Markdown and
+format `@param`, `@return`/`@returns`, `@throws`, `@see`, `@deprecated` and
+`@example` tags. The same documentation is available in completion and
+signature help. Adjacent line comments are also displayed.
+
+Successful macro expansions are available as inlay hints with full expansion
+tooltips. Hovering a macro invocation shows its expanded Haxe source. Macro
+diagnostics retain their source file and can include a link to the invocation.
+
+Clients can request a preview using `rayzor/expandMacro` with standard
+`TextDocumentPositionParams`:
+
+```json
+{"textDocument":{"uri":"file:///project/Main.hx"},"position":{"line":4,"character":12}}
+```
+
+The response is `null` when no recorded expansion covers that position, or an
+object with `name`, `expansion`, `range`, and an optional `definition` location.
+Positions use zero-based UTF-16 offsets. Support is advertised as
+`capabilities.experimental.macroExpansionProvider`. A client can display
+`expansion` in a read-only Haxe buffer without executing the macro again.
+
 ---
 
 ## `rayzor.toml`

@@ -14,6 +14,7 @@ pub enum MacroSeverity {
 /// A diagnostic message emitted during macro processing
 #[derive(Debug, Clone)]
 pub struct MacroDiagnostic {
+    pub call_site: Option<SourceLocation>,
     pub severity: MacroSeverity,
     pub message: String,
     pub location: SourceLocation,
@@ -332,6 +333,7 @@ impl From<MacroError> for CompilationError {
 impl MacroDiagnostic {
     pub fn error(message: impl Into<String>, location: SourceLocation) -> Self {
         Self {
+            call_site: None,
             severity: MacroSeverity::Error,
             message: message.into(),
             location,
@@ -341,6 +343,7 @@ impl MacroDiagnostic {
 
     pub fn warning(message: impl Into<String>, location: SourceLocation) -> Self {
         Self {
+            call_site: None,
             severity: MacroSeverity::Warning,
             message: message.into(),
             location,
@@ -350,11 +353,17 @@ impl MacroDiagnostic {
 
     pub fn info(message: impl Into<String>, location: SourceLocation) -> Self {
         Self {
+            call_site: None,
             severity: MacroSeverity::Info,
             message: message.into(),
             location,
             suggestion: None,
         }
+    }
+
+    pub fn with_call_site(mut self, location: SourceLocation) -> Self {
+        self.call_site = Some(location);
+        self
     }
 
     pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {

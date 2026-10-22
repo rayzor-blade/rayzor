@@ -84,12 +84,17 @@ pub enum MacroValue {
     /// A reference to a resolved type in the compiler
     Type(TypeId),
 
+    /// A runtime class/type value, distinct from haxe.macro.Type descriptors.
+    Class(Arc<str>),
+
     /// A callable function value (Arc for O(1) clone)
     Function(Arc<MacroFunction>),
 
     /// A source position value
     Position(SourceLocation),
 }
+
+pub(crate) type ReferenceUpdates = BTreeMap<(u8, usize), (MacroValue, MacroValue)>;
 
 impl MacroValue {
     pub(crate) fn map_key_eq(&self, other: &Self) -> bool {
@@ -145,6 +150,93 @@ impl MacroValue {
         })
     }
 
+    /// Preserve shared value identity when a COW mutation replaces its storage.
+    pub(crate) fn replace_reference(
+        &mut self,
+        old: &Self,
+        new: &Self,
+        updates: &mut ReferenceUpdates,
+    ) -> bool {
+        let same = match (&*self, old) {
+            (Self::Object(a), Self::Object(b)) => Arc::ptr_eq(a, b),
+            (Self::Expr(a), Self::Expr(b)) => Arc::ptr_eq(a, b),
+            (Self::Array(a), Self::Array(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        if same {
+            *self = new.clone();
+            return true;
+        }
+        let key = match self {
+            Self::Object(value) => (0, Arc::as_ptr(value) as usize),
+            Self::Array(value) => (1, Arc::as_ptr(value) as usize),
+            Self::Enum(_, _, value) => (2, Arc::as_ptr(value) as usize),
+            Self::Map(value) => (3, Arc::as_ptr(value) as usize),
+            _ => return false,
+        };
+        if let Some((_, value)) = updates.get(&key) {
+            *self = value.clone();
+            return true;
+        }
+        // Retain the original allocation so its address cannot be reused while
+        // the memo is shared across bindings. Parents retain their aliases too.
+        let original = self.clone();
+        let changed = match self {
+            Self::Object(fields) => {
+                let changes: Vec<_> = fields
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        let mut value = value.clone();
+                        value
+                            .replace_reference(old, new, updates)
+                            .then(|| (key.clone(), value))
+                    })
+                    .collect();
+                if changes.is_empty() {
+                    return false;
+                }
+                Arc::make_mut(fields).extend(changes);
+                true
+            }
+            Self::Array(values) | Self::Enum(_, _, values) => {
+                let changes: Vec<_> = values
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, value)| {
+                        let mut value = value.clone();
+                        value
+                            .replace_reference(old, new, updates)
+                            .then_some((i, value))
+                    })
+                    .collect();
+                if changes.is_empty() {
+                    return false;
+                }
+                for (i, value) in changes {
+                    Arc::make_mut(values)[i] = value;
+                }
+                true
+            }
+            Self::Map(entries) => {
+                let mut replacement = entries.as_ref().clone();
+                let mut changed = false;
+                for (key, value) in &mut replacement {
+                    changed |= key.replace_reference(old, new, updates);
+                    changed |= value.replace_reference(old, new, updates);
+                }
+                if changed {
+                    *entries = Arc::new(replacement);
+                }
+                changed
+            }
+            _ => false,
+        };
+        if changed {
+            updates.insert(key, (original, self.clone()));
+        }
+        changed
+    }
+
     /// Mutate the fields presented by objects and reified expressions.
     pub(crate) fn set_field(&mut self, field: &str, value: Self) -> bool {
         match self {
@@ -190,6 +282,7 @@ impl MacroValue {
             MacroValue::Enum(_, _, _) => "Enum",
             MacroValue::Expr(_) => "Expr",
             MacroValue::Type(_) => "Type",
+            MacroValue::Class(_) => "Class",
             MacroValue::Function(_) => "Function",
             MacroValue::Position(_) => "Position",
         }
@@ -218,6 +311,7 @@ impl MacroValue {
                 }
             }
             MacroValue::Type(_) => true,
+            MacroValue::Class(_) => true,
             MacroValue::Function(_) => true,
             MacroValue::Position(_) => true,
         }
@@ -381,6 +475,7 @@ impl MacroValue {
                 }
             }
             MacroValue::Type(_) => "<type>".to_string(),
+            MacroValue::Class(name) => format!("Class<{name}>"),
             MacroValue::Function(f) => format!("<function:{}>", f.name),
             MacroValue::Position(loc) => super::context_api::named_position_string(loc)
                 .unwrap_or_else(|| format!("{}:{}", loc.file_id, loc.line)),
@@ -407,6 +502,7 @@ impl fmt::Display for MacroValue {
 impl PartialEq for MacroValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (MacroValue::Class(a), MacroValue::Class(b)) => a == b,
             (MacroValue::Null, MacroValue::Null) => true,
             (MacroValue::Bool(a), MacroValue::Bool(b)) => a == b,
             (MacroValue::Int(a), MacroValue::Int(b)) => a == b,

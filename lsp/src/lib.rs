@@ -10,7 +10,10 @@
 pub mod analysis;
 mod context;
 mod diagnostics;
+mod documentation;
+mod project;
 mod server;
+mod stdlib;
 mod transport;
 
 pub use server::{run_lsp, serve, spawn_session};

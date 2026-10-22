@@ -24,6 +24,121 @@ pub struct FileSymbolIndex {
 }
 
 impl FileSymbolIndex {
+    /// Declaration signatures remain useful when a body cannot be lowered.
+    pub fn record_source_declarations(
+        file: &parser::HaxeFile,
+        source: &str,
+        file_id: u32,
+        unit: &mut compiler::compilation::CompilationUnit,
+    ) {
+        let Ok(tokens) = parser::lexer::Lexer::new(source).tokenize() else {
+            return;
+        };
+        let package = file
+            .package
+            .as_ref()
+            .map(|p| p.path.join("."))
+            .unwrap_or_default();
+        let qualify = |name: &str| {
+            if package.is_empty() {
+                name.to_string()
+            } else {
+                format!("{package}.{name}")
+            }
+        };
+        let mut declarations = Vec::new();
+        for declaration in &file.declarations {
+            let (name, fields) = match declaration {
+                parser::TypeDeclaration::Class(c) => (&c.name, c.fields.as_slice()),
+                parser::TypeDeclaration::Interface(c) => (&c.name, c.fields.as_slice()),
+                parser::TypeDeclaration::Abstract(c) => (&c.name, c.fields.as_slice()),
+                parser::TypeDeclaration::Typedef(t) => (&t.name, &[][..]),
+                parser::TypeDeclaration::Enum(e) => {
+                    let owner = qualify(&e.name);
+                    for constructor in &e.constructors {
+                        declarations.push((
+                            format!("{owner}.{}", constructor.name),
+                            constructor.name.as_str(),
+                            constructor.span,
+                        ));
+                    }
+                    (&e.name, &[][..])
+                }
+                _ => continue,
+            };
+            let owner = qualify(name);
+            declarations.push((owner.clone(), name.as_str(), declaration.span()));
+            for field in fields {
+                let (name, span) = match &field.kind {
+                    parser::ClassFieldKind::Function(f) => (f.name.as_str(), f.span),
+                    parser::ClassFieldKind::Var { name, .. }
+                    | parser::ClassFieldKind::Final { name, .. }
+                    | parser::ClassFieldKind::Property { name, .. } => (name.as_str(), field.span),
+                };
+                declarations.push((format!("{owner}.{name}"), name, span));
+            }
+        }
+        let mut symbols_by_name: BTreeMap<String, Vec<SymbolId>> = BTreeMap::new();
+        for symbol in unit
+            .symbol_table
+            .all_symbols()
+            .filter(|s| !s.definition_location.is_valid())
+        {
+            let owner = (symbol.kind == SymbolKind::EnumVariant)
+                .then(|| {
+                    unit.symbol_table
+                        .find_parent_enum_for_constructor(symbol.id)
+                })
+                .flatten();
+            let name = unit.symbol_table.build_qualified_name(
+                owner.unwrap_or(symbol.id),
+                &unit.scope_tree,
+                &unit.string_interner,
+            );
+            if let Some(name) = unit.string_interner.get(name) {
+                let name = match owner {
+                    Some(_) => format!(
+                        "{name}.{}",
+                        unit.string_interner.get(symbol.name).unwrap_or("")
+                    ),
+                    None => name.to_string(),
+                };
+                symbols_by_name.entry(name).or_default().push(symbol.id);
+            }
+        }
+        for (qualified, name, span) in declarations {
+            let Some(token) = tokens.iter().find(|t| {
+                t.span.start >= span.start
+                    && t.span.end <= span.end
+                    && t.kind == parser::token::TokenKind::Ident
+                    && &source[t.span.start..t.span.end] == name
+            }) else {
+                continue;
+            };
+            let ids = symbols_by_name.get(&qualified).cloned().unwrap_or_default();
+            let before = &source[..token.span.start];
+            let line = before.bytes().filter(|&b| b == b'\n').count() as u32 + 1;
+            let column = before
+                .rsplit('\n')
+                .next()
+                .unwrap_or("")
+                .encode_utf16()
+                .count() as u32
+                + 1;
+            for id in ids {
+                unit.symbol_table
+                    .get_symbol_mut(id)
+                    .unwrap()
+                    .definition_location = compiler::tast::SourceLocation::new(
+                    file_id,
+                    line,
+                    column,
+                    token.span.start as u32,
+                );
+            }
+        }
+    }
+
     pub fn build(
         symbol_table: &SymbolTable,
         interner: &StringInterner,
@@ -900,6 +1015,116 @@ fn class_of_type(
 
 /// What can follow `receiver.`: a type's statics and constructors, or an
 /// instance's fields and methods, its superclasses' included.
+pub fn stdlib_member_completions(
+    receiver: SymbolId,
+    unit: &compiler::compilation::CompilationUnit,
+) -> Vec<CompletionEntry> {
+    let Some(symbol) = unit.symbol_table.get_symbol(receiver) else {
+        return Vec::new();
+    };
+    let is_type = symbol.kind == SymbolKind::Class;
+    let owner = if is_type {
+        Some(symbol.id)
+    } else {
+        class_of_type(
+            symbol.type_id,
+            &unit.symbol_table,
+            &unit.type_table.borrow(),
+            &unit.string_interner,
+        )
+    };
+    let Some(owner) = owner.and_then(|id| unit.symbol_table.get_symbol(id)) else {
+        return Vec::new();
+    };
+    let name = unit
+        .string_interner
+        .get(owner.qualified_name.unwrap_or(owner.name));
+    for file in &unit.stdlib_files {
+        let comments = file
+            .input
+            .as_deref()
+            .and_then(crate::documentation::SourceComments::new);
+        let package = file
+            .package
+            .as_ref()
+            .map(|p| p.path.join("."))
+            .unwrap_or_default();
+        for declaration in &file.declarations {
+            let parser::TypeDeclaration::Class(class) = declaration else {
+                continue;
+            };
+            let qualified = if package.is_empty() {
+                class.name.clone()
+            } else {
+                format!("{package}.{}", class.name)
+            };
+            if name != Some(qualified.as_str()) {
+                continue;
+            }
+            return class
+                .fields
+                .iter()
+                .filter(|f| {
+                    f.access != Some(parser::Access::Private)
+                        && f.modifiers.contains(&parser::Modifier::Static) == is_type
+                })
+                .filter_map(|field| {
+                    let (name, kind, expr) = match &field.kind {
+                        parser::ClassFieldKind::Function(f) => {
+                            let mut f = f.clone();
+                            f.body = None;
+                            (
+                                f.name.clone(),
+                                CompletionKind::Function,
+                                parser::ExprKind::Function(f),
+                            )
+                        }
+                        parser::ClassFieldKind::Var {
+                            name, type_hint, ..
+                        }
+                        | parser::ClassFieldKind::Final {
+                            name, type_hint, ..
+                        }
+                        | parser::ClassFieldKind::Property {
+                            name, type_hint, ..
+                        } => (
+                            name.clone(),
+                            CompletionKind::Field,
+                            parser::ExprKind::Var {
+                                name: name.clone(),
+                                type_hint: type_hint.clone(),
+                                expr: None,
+                                attrs: Default::default(),
+                            },
+                        ),
+                    };
+                    if name == "new" {
+                        return None;
+                    }
+                    let detail = compiler::macro_system::printer::Printer::new().print_expr(
+                        &compiler::macro_system::MacroValue::Expr(std::sync::Arc::new(
+                            parser::Expr {
+                                kind: expr,
+                                span: field.span,
+                            },
+                        )),
+                    );
+                    Some(CompletionEntry {
+                        label: name,
+                        kind,
+                        detail,
+                        documentation: comments.as_ref().and_then(|c| c.at(field.span.start)),
+                        deprecated: false,
+                        sort_priority: 0,
+                    })
+                })
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+/// Members supplied by typed declarations and inherited classes.
 pub fn member_completions(
     receiver: SymbolId,
     symbol_table: &SymbolTable,

@@ -51,7 +51,7 @@ impl CompilationUnit {
         if !names_macro {
             return None;
         }
-        let mut config = self.preprocessor_config();
+        let mut config = self.preprocessor_config_for(&file.filename);
         config.defines.insert("macro".to_string());
         let mut parsed = parser::haxe_parser::parse_haxe_file_with_config(
             &file.filename,

@@ -45,6 +45,8 @@ pub fn to_lsp_diagnostics(diags: &[LspDiagnostic]) -> Vec<Diagnostic> {
                 code: Some(NumberOrString::String("rayzor".to_string())),
                 source: Some("rayzor".to_string()),
                 message,
+                related_information: (!d.related_information.is_empty())
+                    .then(|| d.related_information.clone()),
                 ..Default::default()
             }
         })

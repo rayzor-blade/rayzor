@@ -38,6 +38,7 @@ pub enum TokenKind {
     FloatLit,
     StringLit, // double-quoted "..." or single-quoted '...'
     RegexLit,  // ~/pattern/flags
+    MarkupLit, // <tag>...</tag>, passed verbatim to macros
 
     // === Identifiers ===
     Ident,

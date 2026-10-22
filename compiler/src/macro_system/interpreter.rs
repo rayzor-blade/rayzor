@@ -66,6 +66,9 @@ pub struct MacroInterpreter {
     pub(crate) defined_types: Vec<super::context_api::DefinedType>,
     /// `onAfterTyping`/`onGenerate` callbacks registered during this run.
     pub(crate) hooks: Vec<(String, MacroValue)>,
+    pub(crate) global_metadata: Vec<super::compiler_api::GlobalMetadata>,
+    pub(crate) compiler_defines: BTreeMap<String, String>,
+    pub(crate) source_file: Option<String>,
     /// Import map: short class name → fully qualified name
     /// e.g., "Context" → "haxe.macro.Context"
     import_map: BTreeMap<String, String>,
@@ -94,6 +97,12 @@ pub struct MacroInterpreter {
 }
 
 impl MacroInterpreter {
+    fn is_untyped_expression_macro(&self) -> bool {
+        self.macro_context
+            .as_ref()
+            .is_none_or(|ctx| ctx.is_expression_macro && !ctx.has_typer())
+    }
+
     /// Create a new scheduler+VM pair if bytecode tiering is enabled.
     fn make_vm_and_scheduler() -> (Option<MacroVm>, Option<MorselScheduler>) {
         if std::env::var("RAYZOR_MACRO_VM").is_ok() {
@@ -124,6 +133,9 @@ impl MacroInterpreter {
             trace_output: Vec::new(),
             defined_types: Vec::new(),
             hooks: Vec::new(),
+            global_metadata: Vec::new(),
+            compiler_defines: BTreeMap::new(),
+            source_file: None,
             import_map: BTreeMap::new(),
             class_registry: None,
             class_data_cache: BTreeMap::new(),
@@ -147,6 +159,9 @@ impl MacroInterpreter {
             trace_output: Vec::new(),
             defined_types: Vec::new(),
             hooks: Vec::new(),
+            global_metadata: Vec::new(),
+            compiler_defines: BTreeMap::new(),
+            source_file: None,
             import_map,
             class_registry: None,
             class_data_cache: BTreeMap::new(),
@@ -176,6 +191,9 @@ impl MacroInterpreter {
             trace_output: Vec::new(),
             defined_types: Vec::new(),
             hooks: Vec::new(),
+            global_metadata: Vec::new(),
+            compiler_defines: BTreeMap::new(),
+            source_file: None,
             import_map,
             class_registry: Some(class_registry),
             class_data_cache: BTreeMap::new(),
@@ -249,7 +267,10 @@ impl MacroInterpreter {
     }
 
     pub fn eval_expr(&mut self, expr: &Expr) -> Result<MacroValue, MacroError> {
-        let location = span_to_location(expr.span);
+        let location = self.source_file.as_deref().map_or_else(
+            || span_to_location(expr.span),
+            |file| super::context_api::source_position(file, expr.span),
+        );
 
         match &expr.kind {
             // --- Literals ---
@@ -327,6 +348,9 @@ impl MacroInterpreter {
                         Arc::from(name.as_str()),
                         Arc::new(Vec::new()),
                     ));
+                }
+                if let Some(name) = self.runtime_class_name(name) {
+                    return Ok(MacroValue::Class(Arc::from(name)));
                 }
                 Err(MacroError::UndefinedVariable {
                     name: name.clone(),
@@ -658,7 +682,7 @@ impl MacroInterpreter {
                         // The first catch whose type admits the error takes it.
                         let err_val = Self::caught_value(&e);
                         let defers = matches!(e, MacroError::NeedsTyper { .. })
-                            && self.macro_context.is_none();
+                            && self.is_untyped_expression_macro();
                         if let Some(catch) = catches
                             .iter()
                             .find(|c| Self::catch_admits(c, &e))
@@ -759,7 +783,21 @@ impl MacroInterpreter {
             ExprKind::Field {
                 expr: base, field, ..
             } => {
+                if let Some((path, _)) = extract_qualified_call(expr, "")
+                    && self
+                        .env
+                        .get(path.split('.').next().unwrap_or_default())
+                        .is_none()
+                    && let Some(name) = self.runtime_class_name(&path)
+                {
+                    return Ok(MacroValue::Class(Arc::from(name)));
+                }
                 let base_val = self.eval_expr(base)?;
+                if let MacroValue::Class(name) = &base_val
+                    && let Some(value) = self.read_class_static(Some(name), field)?
+                {
+                    return Ok(value);
+                }
                 self.field_access(&base_val, field, location)
             }
 
@@ -1113,9 +1151,7 @@ impl MacroInterpreter {
             ExprKind::Field {
                 expr: base, field, ..
             } => {
-                // Fast path: this.field = value or ident.field = value
-                // Mutates the object in-place in the environment, avoiding
-                // eval→clone→COW→reassign overhead (O(N²) for N-field constructors)
+                // Direct bindings propagate field writes through shared aliases.
                 let base_var_name = match &base.kind {
                     ExprKind::This => Some("this"),
                     ExprKind::Ident(name) => Some(name.as_str()),
@@ -1131,7 +1167,9 @@ impl MacroInterpreter {
                 }
                 // Fallback: complex base expressions (e.g. a.b.field = value)
                 let mut base_val = self.eval_expr(base)?;
+                let old = base_val.clone();
                 if base_val.set_field(field, new_val.clone()) {
+                    self.env.replace_references(&old, &base_val);
                     // Re-assign the modified object back
                     self.assign_base(base, base_val)?;
                     Ok(new_val)
@@ -1247,10 +1285,6 @@ impl MacroInterpreter {
                 if let Some((this, _)) = self.this_with_method(name) {
                     return self.object_method(&this, name, arg_vals, location);
                 }
-                // Look up in macro registry
-                if let Some(macro_def) = self.registry.find_macro_by_name(name).cloned() {
-                    return self.call_macro_def(&macro_def, arg_vals, location);
-                }
                 // Look up as a sibling static method of the class whose macro
                 // is currently executing. This lets a macro body call helper
                 // functions defined in the same class (e.g. `tink.Json.parse`
@@ -1261,6 +1295,10 @@ impl MacroInterpreter {
                     {
                         return Ok(result);
                     }
+                }
+                // Unqualified registry lookup must not shadow the current class.
+                if let Some(macro_def) = self.registry.find_macro_by_name(name).cloned() {
+                    return self.call_macro_def(&macro_def, arg_vals, location);
                 }
                 // Enum-constructor style call from haxe.macro.Expr:
                 // `FFun({args:[], ret:..., expr:...})` should produce
@@ -1583,8 +1621,21 @@ impl MacroInterpreter {
             return Ok(MacroValue::String(Arc::from(printed.as_str())));
         }
         let f = args.get(1).cloned().unwrap_or(MacroValue::Null);
-        let expr = super::expr_adt::expr_of(&e, parser::Span::default());
-        let def = ast_bridge::expr_kind_to_value(&expr.kind, expr.span);
+        // Preserve ExprDef records: converting grouped EVars to the parser AST
+        // introduces a block that would visit the same declaration again.
+        let (def, pos) = match &e {
+            MacroValue::Object(fields) if is_expr_value(&e) => (
+                fields["expr"].clone(),
+                fields.get("pos").cloned().unwrap_or(MacroValue::Null),
+            ),
+            _ => {
+                let expr = super::expr_adt::expr_of(&e, parser::Span::default());
+                (
+                    ast_bridge::expr_kind_to_value(&expr.kind, expr.span),
+                    MacroValue::Position(span_to_location(expr.span)),
+                )
+            }
+        };
         let MacroValue::Enum(enum_name, variant, def_args) = &def else {
             return Ok(if method == "map" { e } else { MacroValue::Null });
         };
@@ -1596,9 +1647,16 @@ impl MacroInterpreter {
             return Ok(MacroValue::Null);
         }
         let rebuilt = MacroValue::Enum(enum_name.clone(), variant.clone(), Arc::new(mapped));
-        Ok(MacroValue::Expr(Arc::new(super::expr_adt::expr_of(
-            &rebuilt, expr.span,
-        ))))
+        if let MacroValue::Expr(original) = &e {
+            return Ok(MacroValue::Expr(Arc::new(super::expr_adt::expr_of(
+                &rebuilt,
+                original.span,
+            ))));
+        }
+        Ok(MacroValue::Object(Arc::new(BTreeMap::from([
+            ("expr".into(), rebuilt),
+            ("pos".into(), pos),
+        ]))))
     }
 
     /// Every expression directly inside `v` passed through `f`; types and
@@ -1799,7 +1857,12 @@ impl MacroInterpreter {
         if let Some(cls) = &class_name {
             self.macro_class_stack.push(cls.clone());
         }
+        let caller_source = self.source_file.replace(def.source_file.clone());
+        let caller_imports = self.take_import_map();
+        self.set_import_map((*def.imports).clone());
         let result = self.call_function(&func, args, location);
+        self.source_file = caller_source;
+        self.set_import_map(caller_imports);
         if class_name.is_some() {
             self.macro_class_stack.pop();
         }
@@ -1908,6 +1971,62 @@ impl MacroInterpreter {
         class_name.to_string()
     }
 
+    fn runtime_class_name(&self, name: &str) -> Option<String> {
+        let resolved = self.resolve_class_name(name);
+        if matches!(
+            resolved.as_str(),
+            "String"
+                | "Int"
+                | "Float"
+                | "Bool"
+                | "Array"
+                | "Dynamic"
+                | "Std"
+                | "Reflect"
+                | "Type"
+                | "Math"
+                | "StringTools"
+                | "Lambda"
+        ) {
+            return Some(resolved);
+        }
+        self.class_registry
+            .as_ref()?
+            .runtime_class_name(&resolved)
+            .map(str::to_string)
+    }
+
+    fn is_of_type(&self, value: &MacroValue, expected: &MacroValue) -> bool {
+        let MacroValue::Class(name) = expected else {
+            return false;
+        };
+        if matches!(value, MacroValue::Null) {
+            return false;
+        }
+        match (value, name.as_ref()) {
+            (_, "Dynamic") => true,
+            (MacroValue::Bool(_), "Bool")
+            | (MacroValue::String(_), "String")
+            | (MacroValue::Array(_), "Array") => true,
+            (MacroValue::Int(value), "Int") => i32::try_from(*value).is_ok(),
+            (MacroValue::Float(value), "Int") => {
+                value.fract() == 0.0 && *value >= i32::MIN as f64 && *value <= i32::MAX as f64
+            }
+            (MacroValue::Int(_) | MacroValue::Float(_), "Float") => true,
+            (MacroValue::Object(fields), _) => fields
+                .get("__type__")
+                .and_then(MacroValue::as_string)
+                .is_some_and(|actual| {
+                    actual == name.as_ref()
+                        || self
+                            .class_registry
+                            .as_ref()
+                            .is_some_and(|classes| classes.is_subclass(actual, name))
+                }),
+            _ => false,
+        }
+    }
+
     /// Try to dispatch a static class method call (e.g., Context.parse, Std.string)
     fn try_static_call(
         &mut self,
@@ -1934,6 +2053,36 @@ impl MacroInterpreter {
             return Ok(Some(view));
         }
         match resolved.as_str() {
+            "haxe.macro.Compiler" => match method {
+                "addGlobalMetadata" => {
+                    self.global_metadata
+                        .push(super::compiler_api::GlobalMetadata::from_args(
+                            args, location,
+                        )?);
+                    Ok(Some(MacroValue::Null))
+                }
+                "define" => {
+                    let name = args
+                        .first()
+                        .map(MacroValue::to_display_string)
+                        .unwrap_or_default();
+                    let value = args
+                        .get(1)
+                        .filter(|v| !matches!(v, MacroValue::Null))
+                        .map(MacroValue::to_display_string)
+                        .unwrap_or_else(|| "1".into());
+                    self.compiler_defines.insert(name.clone(), value.clone());
+                    if let Some(ctx) = &mut self.macro_context {
+                        ctx.defines.insert(name, value);
+                    }
+                    Ok(Some(MacroValue::Null))
+                }
+                _ => Err(MacroError::ContextError {
+                    method: format!("Compiler.{method}"),
+                    message: format!("unsupported Compiler method: {method}"),
+                    location,
+                }),
+            },
             "haxe.macro.Context" if method == "getLocalImports" => {
                 Ok(Some(local_imports_value(&self.local_imports)))
             }
@@ -1962,14 +2111,20 @@ impl MacroInterpreter {
             }
             // An expression macro's expected type is known only to the typer,
             // so the call defers until lowering reaches its site.
-            "haxe.macro.Context" if method == "getExpectedType" && self.macro_context.is_none() => {
+            "haxe.macro.Context"
+                if method == "getExpectedType" && self.is_untyped_expression_macro() =>
+            {
                 Err(MacroError::NeedsTyper { location })
             }
             "haxe.macro.Context" => {
                 // Use the stored macro_context if available (set by @:build
                 // pipeline so Context.getBuildFields() returns class fields).
                 // Fall back to a fresh empty context for expression macros.
-                let mut fresh = super::context_api::MacroContext::new();
+                let mut fresh = self
+                    .class_registry
+                    .as_ref()
+                    .map(|classes| classes.macro_context())
+                    .unwrap_or_default();
                 let ctx = self.macro_context.as_mut().unwrap_or(&mut fresh);
                 let result = ctx.dispatch(method, args, location)?;
                 self.defined_types.extend(ctx.take_defined_types());
@@ -1977,6 +2132,10 @@ impl MacroInterpreter {
                 Ok(Some(result))
             }
             "Std" => match method {
+                "isOfType" | "is" => Ok(Some(MacroValue::Bool(self.is_of_type(
+                    args.first().unwrap_or(&MacroValue::Null),
+                    args.get(1).unwrap_or(&MacroValue::Null),
+                )))),
                 "string" => {
                     let val = args.first().unwrap_or(&MacroValue::Null);
                     // A Type value has no printable form of its own — its
@@ -2058,6 +2217,7 @@ impl MacroInterpreter {
                 }
                 _ => Ok(None),
             },
+            "sys.FileSystem" => super::filesystem::call(method, args, location),
             "sys.io.File" => match method {
                 "getContent" => {
                     let path = args.first().map(|v| value_to_string(v)).unwrap_or_default();
@@ -2402,9 +2562,10 @@ impl MacroInterpreter {
                         method.params.clone(),
                         class.imports.clone(),
                         class.qualified_name.clone(),
+                        class.source_file.clone(),
                     ))
                 });
-                if let Some((body, params, imports, owner)) = maybe_method {
+                if let Some((body, params, imports, owner, source_file)) = maybe_method {
                     // Depth tracking — prevents runaway recursion from
                     // crashing the compiler when a macro body has a bug
                     // (stack overflow aborts the process; we'd rather
@@ -2427,7 +2588,9 @@ impl MacroInterpreter {
                     let caller_imports = self.take_import_map();
                     self.set_import_map((*imports).clone());
                     self.macro_class_stack.push(owner);
+                    let caller_source = self.source_file.replace(source_file);
                     let result = self.eval_expr(&body);
+                    self.source_file = caller_source;
                     self.macro_class_stack.pop();
                     self.set_import_map(caller_imports);
                     self.env.pop_scope();
@@ -2677,6 +2840,14 @@ impl MacroInterpreter {
         let base = unwrapped.as_ref().unwrap_or(base);
 
         // Check for static method calls (e.g., Std.string(), Math.abs())
+        if let MacroValue::Class(name) = base {
+            return self
+                .try_static_call(name, method, &args, location)?
+                .ok_or_else(|| MacroError::TypeError {
+                    message: format!("Class {name} has no static method '{method}'"),
+                    location,
+                });
+        }
         if let MacroValue::String(s) = base {
             // Not a String method: a `using StringTools` extension.
             return match self.string_method(s, method, args.clone(), location) {
@@ -3908,6 +4079,9 @@ impl MacroInterpreter {
                     Some(MacroValue::String(s)) if &**s == ctor_name.as_str() => {}
                     _ => return Ok(false),
                 }
+                if ctor_name == "FFun" && params.len() == 1 {
+                    return self.match_pattern(value, &params[0]);
+                }
                 // Pull positional args. If `__args__` is missing the kind
                 // object was constructed without positional info — match
                 // only if no params were expected.
@@ -4237,6 +4411,24 @@ fn enum_ctor_tag(name: &str) -> Option<&'static str> {
 fn build_enum_ctor_value(tag: &'static str, args: &[MacroValue]) -> MacroValue {
     let mut map = std::collections::BTreeMap::new();
     map.insert("kind".to_string(), MacroValue::String(Arc::from(tag)));
+    if matches!(tag, "FVar" | "FProp") {
+        let keys: &[&str] = if tag == "FVar" {
+            &["type", "expr"]
+        } else {
+            &["get", "set", "type", "expr"]
+        };
+        for (index, key) in keys.iter().enumerate() {
+            map.insert(
+                (*key).into(),
+                args.get(index).cloned().unwrap_or(MacroValue::Null),
+            );
+        }
+        map.insert(
+            "__args__".into(),
+            MacroValue::Array(Arc::new(args.to_vec())),
+        );
+        return MacroValue::Object(Arc::new(map));
+    }
     if args.len() == 1 {
         if let MacroValue::Object(payload) = &args[0] {
             for (k, v) in payload.iter() {
@@ -4604,6 +4796,108 @@ mod tests {
     }
 
     #[test]
+    fn sibling_helpers_take_precedence_over_unrelated_macro_names() {
+        let file = parser::rd::rd_parse(
+            r#"
+            class AForeign {
+                public static macro function make():haxe.macro.Expr { throw "foreign make"; }
+                public static macro function finish():haxe.macro.Expr { throw "foreign finish"; }
+            }
+            class Builder {
+                public static function run() { return make(); }
+                static function make() { return finish(); }
+                static function finish():Int { return 42; }
+            }
+        "#,
+            "Builder.hx",
+            false,
+            false,
+        )
+        .unwrap();
+        let mut classes = ClassRegistry::new();
+        classes.register_file(&file);
+        let mut macros = MacroRegistry::new();
+        macros.scan_and_register(&file, &file.filename).unwrap();
+        let mut interp =
+            MacroInterpreter::with_class_registry(macros, Default::default(), Arc::new(classes));
+        assert_eq!(
+            interp
+                .try_static_call("Builder", "run", &[], SourceLocation::unknown())
+                .unwrap(),
+            Some(MacroValue::Int(42))
+        );
+    }
+
+    #[test]
+    fn runtime_class_values_can_be_passed_to_type_checks() {
+        assert_eq!(
+            eval(
+                r#"
+            var stringType = String;
+            var std = Std;
+            if (stringType != String || stringType == "String") return false;
+            if (std.string(stringType) != "Class<String>") return false;
+            if (!Std.isOfType("icons", stringType)) return false;
+            if (Std.isOfType([], stringType) || Std.isOfType("icons", "String")) return false;
+            if (!Std.isOfType([], Array) || !Std.isOfType(true, Bool)) return false;
+            if (!Std.isOfType(1, Float) || !Std.isOfType(1.0, Int)) return false;
+            if (Std.isOfType(1.5, Int) || Std.isOfType(2147483648.0, Int)) return false;
+            if (Std.isOfType(null, String) || Std.isOfType(null, Dynamic)) return false;
+            return Std.isOfType(stringType, Dynamic);
+        "#
+            )
+            .unwrap(),
+            MacroValue::Bool(true)
+        );
+    }
+
+    #[test]
+    fn runtime_class_checks_follow_class_and_interface_parents() {
+        let file = parser::rd::rd_parse(
+            r#"
+            package sample;
+            interface Root {}
+            interface Label extends Root {}
+            class Base { public function new() {} }
+            class Child extends Base implements Label {}
+            class Unrelated {}
+            class Probe {
+                public static var marker = 3;
+                public static function check() {
+                    var kind = sample.Base;
+                    var owner = sample.Probe;
+                    var child = new sample.Child();
+                    return owner.marker == 3 && kind == sample.Types.Base
+                        && Std.isOfType(child, kind)
+                        && Std.isOfType(child, sample.Child)
+                        && Std.isOfType(child, sample.Label)
+                        && Std.isOfType(child, sample.Root)
+                        && !Std.isOfType(new sample.Base(), sample.Child)
+                        && !Std.isOfType(child, sample.Unrelated);
+                }
+            }
+        "#,
+            "sample/Types.hx",
+            false,
+            false,
+        )
+        .unwrap();
+        let mut classes = super::super::class_registry::ClassRegistry::new();
+        classes.register_file(&file);
+        let mut interp = MacroInterpreter::with_class_registry(
+            MacroRegistry::new(),
+            Default::default(),
+            Arc::new(classes),
+        );
+        assert_eq!(
+            interp
+                .try_static_call("sample.Probe", "check", &[], SourceLocation::unknown())
+                .unwrap(),
+            Some(MacroValue::Bool(true))
+        );
+    }
+
+    #[test]
     fn test_literal_eval() {
         assert_eq!(eval("return 42;").unwrap(), MacroValue::Int(42));
         assert_eq!(
@@ -4612,6 +4906,40 @@ mod tests {
         );
         assert_eq!(eval("return true;").unwrap(), MacroValue::Bool(true));
         assert_eq!(eval("return null;").unwrap(), MacroValue::Null);
+    }
+
+    #[test]
+    fn expr_tools_walk_grouped_declarations_once() {
+        for method in ["map", "iter"] {
+            let source = format!(
+                r#"
+                var visits = 0;
+                function walk(e) {{
+                    if (++visits > 20) throw "expression walk did not terminate";
+                    return haxe.macro.ExprTools.{method}(e, walk);
+                }}
+                var original = macro {{ var a = 1, b = 2; return a + b; }};
+                var result = walk(original);
+                if ("{method}" == "map") {{
+                    var before = haxe.macro.Context.getPosInfos(original.pos);
+                    var after = haxe.macro.Context.getPosInfos(result.pos);
+                    if (before.file != after.file || before.min != after.min || before.max != after.max)
+                        throw "position changed";
+                    switch result.expr {{
+                        case EBlock(items):
+                            switch items[0].expr {{
+                                case EVars(vars):
+                                    if (vars.length != 2) throw "declaration split";
+                                case _: throw "declaration wrapped";
+                            }}
+                        case _: throw "block lost";
+                    }}
+                }}
+                return visits;
+                "#
+            );
+            assert_eq!(eval(&source).unwrap(), MacroValue::Int(8), "{method}");
+        }
     }
 
     #[test]

@@ -1,7 +1,6 @@
 //! Type substitution at a generic-build use site.
 
 use super::class_registry::{ClassRegistry, GenericBuildInfo};
-use super::context_api::MacroContext;
 use super::errors::MacroError;
 use super::interpreter::MacroInterpreter;
 use super::registry::MacroRegistry;
@@ -46,7 +45,7 @@ impl GenericBuildEngine {
                 message: "expected a macro call".to_string(),
                 location,
             })?;
-        let mut context = MacroContext::new();
+        let mut context = self.class_registry.macro_context();
         context.set_call_position(location);
         let mut pack = info.pack.clone();
         if matches!(info.class.access, Some(parser::Access::Private)) {

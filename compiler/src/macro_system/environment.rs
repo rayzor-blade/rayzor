@@ -62,18 +62,31 @@ impl Environment {
         false
     }
 
-    /// Mutate a single field on an object or reified expression variable in-place.
-    ///
-    /// Avoids the clone→COW→reassign cycle for `this.field = value` patterns.
+    /// Mutate a field and propagate the new storage through aliases.
     /// Returns whether the variable and field support mutation.
     pub fn mutate_object_field(&mut self, var_name: &str, field: &str, value: MacroValue) -> bool {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(binding) = scope.get(var_name) {
-                let mut value_guard = binding.lock().expect("macro variable lock poisoned");
-                return value_guard.set_field(field, value);
+        let Some(old) = self.get(var_name) else {
+            return false;
+        };
+        let mut new = old.clone();
+        if !new.set_field(field, value) {
+            return false;
+        }
+        self.replace_references(&old, &new);
+        true
+    }
+
+    /// Pattern and loop bindings retain the identity of objects inside field arrays.
+    pub(crate) fn replace_references(&mut self, old: &MacroValue, new: &MacroValue) {
+        let mut updates = super::value::ReferenceUpdates::new();
+        for scope in &mut self.scopes {
+            for binding in scope.values() {
+                binding
+                    .lock()
+                    .expect("macro variable lock poisoned")
+                    .replace_reference(old, new, &mut updates);
             }
         }
-        false
     }
 
     /// Define a new variable in the current (innermost) scope.
@@ -175,6 +188,42 @@ impl Default for Environment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_mutations_preserve_parent_aliases() {
+        let mut env = Environment::new();
+        let child = MacroValue::Object(Arc::new(BTreeMap::from([(
+            "value".into(),
+            MacroValue::Int(1),
+        )])));
+        let parent =
+            MacroValue::Object(Arc::new(BTreeMap::from([("child".into(), child.clone())])));
+        let unrelated = MacroValue::Object(Arc::new(BTreeMap::from([(
+            "value".into(),
+            MacroValue::Int(1),
+        )])));
+        env.define("child", child);
+        env.define("parent", parent.clone());
+        env.define("fields", MacroValue::Array(Arc::new(vec![parent])));
+        env.define("unrelated", unrelated.clone());
+        assert!(env.mutate_object_field("child", "value", MacroValue::Int(2)));
+        assert!(env.mutate_object_field(
+            "parent",
+            "name",
+            MacroValue::from_string("updated".into())
+        ));
+        let MacroValue::Array(fields) = env.get("fields").unwrap() else {
+            panic!()
+        };
+        let parent = env.get("parent").unwrap();
+        assert!(fields[0].map_key_eq(&parent));
+        assert!(env.get("unrelated").unwrap().map_key_eq(&unrelated));
+        let MacroValue::Object(parent) = parent else {
+            panic!()
+        };
+        assert!(parent["child"].map_key_eq(&env.get("child").unwrap()));
+        assert_eq!(parent["name"], MacroValue::from_string("updated".into()));
+    }
 
     #[test]
     fn test_define_and_get() {

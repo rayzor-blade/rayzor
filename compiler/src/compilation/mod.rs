@@ -269,6 +269,7 @@ pub struct CompilationUnit {
     manifest_type_params: BTreeMap<String, TypeId>,
 
     /// Macro expansion origins (for IDE hints showing expanded results)
+    pub macro_diagnostics: Vec<crate::macro_system::MacroDiagnostic>,
     pub macro_expansions: Vec<crate::macro_system::expander::ExpansionOrigin>,
     /// Where each resolved name in a compiled file sits, and what it names.
     pub symbol_references: Vec<crate::tast::references::SymbolReference>,
@@ -282,6 +283,8 @@ pub struct CompilationUnit {
     pub(crate) macro_statics: crate::macro_system::class_registry::MacroStatics,
     /// `onAfterTyping`/`onGenerate` callbacks registered by expanded macros.
     pub(crate) macro_hooks: Vec<(String, crate::macro_system::MacroValue)>,
+    pub(crate) global_metadata: Vec<crate::macro_system::compiler_api::GlobalMetadata>,
+    pub(crate) initialization_macro_files: Vec<parser::HaxeFile>,
     /// Macro statics before and after each file's first expansion. A file
     /// expanded again (the entry file also reached as an import) replays
     /// from the first state and leaves the second, so its macros take effect
@@ -602,6 +605,7 @@ mod driver;
 mod errors;
 mod externs;
 mod imports;
+mod initialization_macros;
 mod manifest;
 mod ownership;
 mod runtime_metadata;
@@ -648,12 +652,15 @@ impl CompilationUnit {
             stdlib_manifest_loaded: false,
             manifest_types_by_short_name: BTreeMap::new(),
             manifest_type_params: BTreeMap::new(),
+            macro_diagnostics: Vec::new(),
             macro_expansions: Vec::new(),
             symbol_references: Vec::new(),
             deferred_errors: Vec::new(),
             blade_functions: None,
             macro_statics: Default::default(),
             macro_hooks: Vec::new(),
+            global_metadata: Vec::new(),
+            initialization_macro_files: Vec::new(),
             macro_state_by_file: std::collections::BTreeMap::new(),
             string_interner,
             symbol_table: SymbolTable::new(),
@@ -739,7 +746,9 @@ impl CompilationUnit {
         // exclude because rayzor is in none of their target lists.
         config.defines.insert("rayzor".to_string());
         for define in &self.config.extra_defines {
-            config.defines.insert(define.clone());
+            config
+                .defines
+                .insert(define.split('=').next().unwrap().to_string());
         }
         config
     }
@@ -755,9 +764,12 @@ impl CompilationUnit {
             || filename.contains("haxe-std/")
             || filename.contains("haxe-std\\");
         if !stdlib {
-            config
-                .defines
-                .extend(self.config.user_defines.iter().cloned());
+            config.defines.extend(
+                self.config
+                    .user_defines
+                    .iter()
+                    .map(|define| define.split('=').next().unwrap().to_string()),
+            );
         }
         config
     }

@@ -27,6 +27,8 @@ pub struct FieldVarInfo {
 
 /// Info about a registered class
 pub struct ClassInfo {
+    /// Path of the defining file; method spans are byte offsets in this file.
+    pub source_file: String,
     pub name: String,
     pub qualified_name: String,
     pub constructor: Option<MethodInfo>,
@@ -45,6 +47,9 @@ pub(crate) struct GenericBuildInfo {
 }
 
 struct TypeDefinition {
+    qualified_name: String,
+    runtime_class: bool,
+    parents: Vec<String>,
     module: String,
     metadata: Vec<Metadata>,
     fields: Vec<FieldDefinition>,
@@ -77,6 +82,8 @@ pub struct ClassRegistry {
     /// Static variables' current values, `Class.field` → value. Shared by
     /// every macro call of the compile, as macro-time statics are.
     statics: MacroStatics,
+    class_paths: Vec<std::path::PathBuf>,
+    defines: BTreeMap<String, String>,
 }
 
 impl ClassRegistry {
@@ -87,6 +94,8 @@ impl ClassRegistry {
             type_definitions: BTreeMap::new(),
             generic_builds: BTreeMap::new(),
             statics: MacroStatics::default(),
+            class_paths: Vec::new(),
+            defines: BTreeMap::new(),
         }
     }
 
@@ -94,6 +103,21 @@ impl ClassRegistry {
     /// store, instead of a store of this registry's own.
     pub fn use_statics(&mut self, statics: MacroStatics) {
         self.statics = statics;
+    }
+
+    pub fn set_class_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.class_paths = paths;
+    }
+
+    pub fn set_defines(&mut self, defines: BTreeMap<String, String>) {
+        self.defines = defines;
+    }
+
+    pub(crate) fn macro_context(&self) -> super::context_api::MacroContext {
+        let mut context = super::context_api::MacroContext::new();
+        context.class_paths = self.class_paths.clone();
+        context.defines = self.defines.clone();
+        context
     }
 
     /// The static variable `name` declared by `class_name`, with the class's
@@ -175,6 +199,40 @@ impl ClassRegistry {
                 _ => continue,
             };
             let definition = Arc::new(TypeDefinition {
+                qualified_name: format!("{package_prefix}{name}"),
+                runtime_class: matches!(
+                    decl,
+                    TypeDeclaration::Class(_) | TypeDeclaration::Interface(_)
+                ),
+                parents: {
+                    let types: Vec<&parser::Type> = match decl {
+                        TypeDeclaration::Class(c) => {
+                            c.extends.iter().chain(&c.implements).collect()
+                        }
+                        TypeDeclaration::Interface(c) => c.extends.iter().collect(),
+                        _ => Vec::new(),
+                    };
+                    types
+                        .into_iter()
+                        .filter_map(|t| {
+                            let parser::Type::Path { path, .. } = t else {
+                                return None;
+                            };
+                            let mut parts = path.package.clone();
+                            parts.push(path.name.clone());
+                            parts.extend(path.sub.clone());
+                            let name = parts.join(".");
+                            Some(if path.package.is_empty() {
+                                file_imports
+                                    .get(&name)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("{package_prefix}{name}"))
+                            } else {
+                                name
+                            })
+                        })
+                        .collect()
+                },
                 module: format!("{package_prefix}{module_name}"),
                 metadata: metadata.clone(),
                 is_abstract,
@@ -233,6 +291,7 @@ impl ClassRegistry {
                     );
                 }
                 let mut info = ClassInfo {
+                    source_file: file.filename.clone(),
                     name: class.name.clone(),
                     qualified_name: qualified_name.clone(),
                     constructor: None,
@@ -467,6 +526,42 @@ impl ClassRegistry {
             .map(|pack| format!("{pack}.{short_name}"))
             .unwrap_or_else(|| short_name.to_string());
         self.classes.get(&qualified)
+    }
+
+    pub fn runtime_class_name(&self, name: &str) -> Option<&str> {
+        if let Some(info) = self.find_class(name) {
+            return Some(&info.qualified_name);
+        }
+        if let Some(info) = self.type_definitions.get(name).filter(|d| d.runtime_class) {
+            return Some(&info.qualified_name);
+        }
+        let mut names = self
+            .type_definitions
+            .values()
+            .filter(|d| d.runtime_class && d.qualified_name.rsplit('.').next() == Some(name))
+            .map(|d| d.qualified_name.as_str());
+        let first = names.next()?;
+        names.all(|other| other == first).then_some(first)
+    }
+
+    pub fn is_subclass(&self, actual: &str, expected: &str) -> bool {
+        let mut pending = vec![actual.to_string()];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(name) = pending.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if name == expected {
+                return true;
+            }
+            if let Some(definition) = self.type_definitions.get(&name) {
+                if definition.qualified_name == expected {
+                    return true;
+                }
+                pending.extend(definition.parents.iter().cloned());
+            }
+        }
+        false
     }
 
     /// `Context.getLocalClass().get()` for a class known only by its source:

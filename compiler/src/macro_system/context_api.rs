@@ -185,6 +185,8 @@ pub struct MacroContext {
     // --- Current expansion context ---
     /// Position where the macro was invoked
     pub call_position: SourceLocation,
+    /// Expression calls can collect diagnostics before their live typer exists.
+    pub(crate) is_expression_macro: bool,
 
     /// Class being built (for @:build macros)
     pub build_class: Option<BuildClassContext>,
@@ -204,6 +206,9 @@ pub struct MacroContext {
     // --- Conditional compilation ---
     /// Conditional compilation defines (-D flags)
     pub defines: BTreeMap<String, String>,
+
+    /// Resource lookup order, shared with the compilation's module resolver.
+    pub class_paths: Vec<std::path::PathBuf>,
 
     // --- Output collectors ---
     /// Diagnostics emitted by the macro
@@ -280,20 +285,21 @@ pub struct BuildField {
 pub enum BuildFieldKind {
     /// Variable field: `var x:Type = value;`
     Var {
-        type_hint: Option<String>,
+        type_hint: Option<parser::Type>,
         expr: Option<Box<parser::Expr>>,
     },
     /// Function field: `function foo() {}`
     Function {
-        params: Vec<String>,
-        return_type: Option<String>,
+        params: Vec<parser::FunctionParam>,
+        return_type: Option<parser::Type>,
         body: Option<Box<parser::Expr>>,
     },
     /// Property field: `var x(get, set):Type;`
     Property {
         get: String,
         set: String,
-        type_hint: Option<String>,
+        type_hint: Option<parser::Type>,
+        expr: Option<Box<parser::Expr>>,
     },
 }
 
@@ -360,6 +366,7 @@ impl MacroContext {
             symbol_table: None,
             type_table: None,
             call_position: SourceLocation::unknown(),
+            is_expression_macro: false,
             build_class: None,
             current_module: None,
             current_method: None,
@@ -367,6 +374,7 @@ impl MacroContext {
             local_type: None,
             call_arguments: None,
             defines: BTreeMap::new(),
+            class_paths: Vec::new(),
             typer: None,
             monomorphs: std::collections::BTreeSet::new(),
             mono_bindings: BTreeMap::new(),
@@ -391,6 +399,7 @@ impl MacroContext {
                 symbol_table: Some(SymbolTableRef::new(symbol_table)),
                 type_table: Some(type_table),
                 call_position: SourceLocation::unknown(),
+                is_expression_macro: false,
                 build_class: None,
                 current_module: None,
                 current_method: None,
@@ -398,6 +407,7 @@ impl MacroContext {
                 local_type: None,
                 call_arguments: None,
                 defines: BTreeMap::new(),
+                class_paths: Vec::new(),
                 typer: None,
                 monomorphs: std::collections::BTreeSet::new(),
                 mono_bindings: BTreeMap::new(),
@@ -1089,6 +1099,8 @@ impl MacroContext {
                 Ok(MacroValue::Null)
             }
             "currentPos" => Ok(self.current_pos()),
+            // Whole-document analysis has no active display cursor.
+            "containsDisplayPosition" => Ok(MacroValue::Bool(false)),
             "getLocalClass" => Ok(self.get_local_class()),
             "getLocalType" => Ok(self
                 .local_type
@@ -1117,6 +1129,37 @@ impl MacroContext {
                 Ok(self.defined_value(&key))
             }
             "getDefines" => Ok(self.get_defines()),
+            "getClassPath" => Ok(MacroValue::Array(Arc::new(
+                self.class_paths
+                    .iter()
+                    .map(|path| {
+                        let mut path = path.to_string_lossy().into_owned();
+                        if !path.is_empty() && !path.ends_with(std::path::MAIN_SEPARATOR) {
+                            path.push(std::path::MAIN_SEPARATOR);
+                        }
+                        MacroValue::String(Arc::from(path))
+                    })
+                    .collect(),
+            ))),
+            "resolvePath" => {
+                let name = arg_as_string(args, 0, "resolvePath", location)?;
+                let requested = std::path::Path::new(&name);
+                let found = if requested.is_absolute() {
+                    requested.exists().then(|| requested.to_path_buf())
+                } else {
+                    self.class_paths
+                        .iter()
+                        .map(|root| root.join(requested))
+                        .find(|path| path.exists())
+                };
+                found
+                    .map(|path| MacroValue::String(Arc::from(path.to_string_lossy().as_ref())))
+                    .ok_or_else(|| MacroError::ContextError {
+                        method: "resolvePath".into(),
+                        message: format!("File not found '{name}'"),
+                        location,
+                    })
+            }
             // `Context.getExpectedType()` — answered by the live typer at a
             // deferred call site; null outside one (a build macro has no
             // call position to expect anything).
@@ -1559,7 +1602,7 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
             let mut kind_obj = BTreeMap::new();
             kind_obj.insert("kind".to_string(), MacroValue::String(Arc::from("FVar")));
             let type_val = match type_hint {
-                Some(t) => MacroValue::String(Arc::from(t.as_str())),
+                Some(t) => super::expr_adt::complex_type_of(t),
                 None => MacroValue::Null,
             };
             let expr_val = match expr {
@@ -1588,17 +1631,11 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
             kind_obj.insert(
                 "args".to_string(),
                 MacroValue::Array(Arc::new(
-                    params
-                        .iter()
-                        .map(|p| MacroValue::String(Arc::from(p.as_str())))
-                        .collect(),
+                    params.iter().map(super::expr_adt::arg_value).collect(),
                 )),
             );
             if let Some(rt) = return_type {
-                kind_obj.insert(
-                    "ret".to_string(),
-                    MacroValue::String(Arc::from(rt.as_str())),
-                );
+                kind_obj.insert("ret".to_string(), super::expr_adt::complex_type_of(rt));
             }
             if let Some(b) = body {
                 kind_obj.insert(
@@ -1612,6 +1649,7 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
             get,
             set,
             type_hint,
+            expr,
         } => {
             let mut kind_obj = BTreeMap::new();
             kind_obj.insert("kind".to_string(), MacroValue::String(Arc::from("FProp")));
@@ -1624,11 +1662,25 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
                 MacroValue::String(Arc::from(set.as_str())),
             );
             if let Some(t) = type_hint {
-                kind_obj.insert(
-                    "type".to_string(),
-                    MacroValue::String(Arc::from(t.as_str())),
-                );
+                kind_obj.insert("type".to_string(), super::expr_adt::complex_type_of(t));
             }
+            let expr = expr
+                .as_ref()
+                .map(|e| MacroValue::Expr(Arc::new((**e).clone())))
+                .unwrap_or(MacroValue::Null);
+            kind_obj.insert("expr".into(), expr.clone());
+            kind_obj.insert(
+                "__args__".into(),
+                MacroValue::Array(Arc::new(vec![
+                    MacroValue::from_string(get.clone()),
+                    MacroValue::from_string(set.clone()),
+                    type_hint
+                        .as_ref()
+                        .map(super::expr_adt::complex_type_of)
+                        .unwrap_or(MacroValue::Null),
+                    expr,
+                ])),
+            );
             MacroValue::Object(Arc::new(kind_obj))
         }
     };
@@ -1770,6 +1822,13 @@ fn named_file_id(name: &str) -> u32 {
         };
         super::errors::NAMED_FILE_ID + index as u32
     })
+}
+
+pub(crate) fn source_position(file: &str, span: parser::Span) -> SourceLocation {
+    if span.start >= super::errors::NAMED_FILE_SPAN {
+        return super::errors::span_to_location(span);
+    }
+    SourceLocation::new(named_file_id(file), 0, span.end as u32, span.start as u32)
 }
 
 /// `Context.registerFileContents`: the text positions in `name` find lines in.
@@ -1963,8 +2022,7 @@ fn value_to_build_field(value: &MacroValue) -> Option<BuildField> {
         kind: BuildFieldKind::Var {
             type_hint: obj
                 .get("type")
-                .and_then(|v| v.as_string())
-                .map(String::from),
+                .and_then(|v| super::expr_adt::type_of_value(v, parser::Span::default())),
             expr: None,
         },
         access: Vec::new(),
@@ -2082,7 +2140,15 @@ mod tests {
             fields: vec![BuildField {
                 name: "x".to_string(),
                 kind: BuildFieldKind::Var {
-                    type_hint: Some("Int".to_string()),
+                    type_hint: Some(parser::Type::Path {
+                        path: parser::TypePath {
+                            package: Vec::new(),
+                            name: "Int".into(),
+                            sub: None,
+                        },
+                        params: Vec::new(),
+                        span: parser::Span::default(),
+                    }),
                     expr: None,
                 },
                 access: vec![FieldAccess::Public],

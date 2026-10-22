@@ -26,6 +26,7 @@ pub mod enhanced_incremental_parser;
 
 // New tokenizer + recursive descent parser infrastructure
 pub mod lexer;
+mod markup;
 pub mod rd;
 pub mod token;
 pub mod token_stream;

@@ -1053,6 +1053,15 @@ fn test_context_defines() {
 
 #[test]
 fn test_context_build_class() {
+    let named_type = |name: &str| parser::Type::Path {
+        path: parser::TypePath {
+            package: vec![],
+            name: name.into(),
+            sub: None,
+        },
+        params: vec![],
+        span: default_span(),
+    };
     let mut ctx = MacroContext::new();
     ctx.build_class = Some(BuildClassContext {
         class_name: "MyClass".to_string(),
@@ -1062,7 +1071,7 @@ fn test_context_build_class() {
             BuildField {
                 name: "x".to_string(),
                 kind: BuildFieldKind::Var {
-                    type_hint: Some("Int".to_string()),
+                    type_hint: Some(named_type("Int")),
                     expr: None,
                 },
                 access: vec![FieldAccess::Public],
@@ -1073,7 +1082,7 @@ fn test_context_build_class() {
             BuildField {
                 name: "y".to_string(),
                 kind: BuildFieldKind::Var {
-                    type_hint: Some("String".to_string()),
+                    type_hint: Some(named_type("String")),
                     expr: None,
                 },
                 access: vec![FieldAccess::Public],
@@ -1466,4 +1475,39 @@ fn test_full_pipeline_empty_file() {
 
     assert_eq!(result.expansions_count, 0);
     assert!(result.diagnostics.is_empty());
+}
+
+#[test]
+fn diagnostic_context_does_not_replace_the_live_typer() {
+    for body in [
+        r#"
+        var expected = haxe.macro.Context.getExpectedType();
+        return macro 1;
+        "#,
+        r#"
+        try {
+            haxe.macro.Context.typeof(macro 1);
+        } catch (error:Dynamic) {
+            return macro $v{error.message};
+        }
+        return macro "";
+        "#,
+    ] {
+        let source = format!(
+            "class Main {{
+                macro static function probe() {{ {body} }}
+                static function main() {{ var value = probe(); }}
+            }}"
+        );
+        let result = expand_macros(parse(&source));
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.expansions_count, 0);
+        assert!(!result.deferred.is_empty(), "{body}");
+        // Removing macro declarations can trigger another expansion walk.
+        // Each deferred entry must still point to the original call site.
+        for call in result.deferred {
+            assert_eq!(call.name, "probe");
+            assert_eq!(&source[call.span.start..call.span.end], "probe()");
+        }
+    }
 }

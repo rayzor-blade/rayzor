@@ -44,6 +44,22 @@ impl CompilationUnit {
             .map(|(path, _)| path.as_str())
     }
 
+    /// The exact source whose byte offsets were used during lowering.
+    pub fn source_of(&self, file_id: u32) -> Option<&str> {
+        let path = self.file_path_of(file_id)?;
+        self.file_source_by_filename
+            .get(path)
+            .map(String::as_str)
+            .or_else(|| {
+                self.user_files
+                    .iter()
+                    .chain(&self.stdlib_files)
+                    .chain(&self.import_hx_files)
+                    .find(|file| file.filename == path)
+                    .and_then(|file| file.input.as_deref())
+            })
+    }
+
     /// The fields a compiled class declares: (name, symbol, is static).
     pub fn class_fields(
         &self,

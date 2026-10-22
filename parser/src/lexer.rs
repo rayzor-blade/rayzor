@@ -52,7 +52,30 @@ impl<'a> Lexer<'a> {
                 tokens.push(Token::new(TokenKind::Eof, self.pos, self.pos));
                 break;
             }
-            let token = self.next_token()?;
+            // A tag starts an operand, never a type argument or a comparison.
+            let operand = tokens.last().is_none_or(|t: &Token| {
+                matches!(
+                    t.kind,
+                    TokenKind::Assign
+                        | TokenKind::KwReturn
+                        | TokenKind::LParen
+                        | TokenKind::LBracket
+                        | TokenKind::LBrace
+                        | TokenKind::Comma
+                        | TokenKind::Colon
+                        | TokenKind::Arrow
+                        | TokenKind::KwElse
+                        | TokenKind::KwThrow
+                        | TokenKind::KwMacro
+                )
+            });
+            let token = if operand && self.peek() == b'<' && self.peek_at(1).is_ascii_alphabetic() {
+                let start = self.pos;
+                self.pos = crate::markup::scan(self.source, start)?;
+                Token::new(TokenKind::MarkupLit, start, self.pos)
+            } else {
+                self.next_token()?
+            };
             tokens.push(token);
         }
 

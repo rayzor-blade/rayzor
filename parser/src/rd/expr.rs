@@ -540,6 +540,24 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let token = self.stream.peek().clone();
 
         match token.kind {
+            TokenKind::MarkupLit => {
+                self.stream.advance();
+                Ok(Expr {
+                    kind: ExprKind::Meta {
+                        meta: Metadata {
+                            name: "markup".into(),
+                            params: Vec::new(),
+                            span: token.span,
+                            compile_time: true,
+                        },
+                        expr: Box::new(Expr {
+                            kind: ExprKind::String(token.text(self.source).into()),
+                            span: token.span,
+                        }),
+                    },
+                    span: token.span,
+                })
+            }
             TokenKind::IntLit => {
                 let text = token.text(self.source);
                 self.stream.advance();

@@ -38,6 +38,8 @@ pub struct ExpansionOrigin {
     pub macro_name: String,
     /// Location where the macro was called
     pub call_site: SourceLocation,
+    pub call_span: parser::Span,
+    pub definition_file: Option<String>,
     /// Location where the macro was defined (if known)
     pub definition_site: Option<SourceLocation>,
     /// Byte span of the expanded output in the resulting AST
@@ -90,6 +92,7 @@ pub struct MacroExpander {
     expansion_origins: Vec<ExpansionOrigin>,
     /// Memoization cache: (macro_name, args_hash) -> expanded Expr
     call_cache: BTreeMap<(String, u64), Expr>,
+    failed_call: Option<SourceLocation>,
     /// Call sites deferred to lowering (typer-dependent macro bodies).
     deferred: Vec<DeferredMacroCall>,
     /// Build calls waiting for class lowering's live typer.
@@ -123,6 +126,7 @@ impl MacroExpander {
             max_iterations: 100,
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
+            failed_call: None,
             deferred: Vec::new(),
             deferred_builds: false,
             defined_types: Vec::new(),
@@ -144,6 +148,7 @@ impl MacroExpander {
             max_iterations: 100,
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
+            failed_call: None,
             deferred: Vec::new(),
             deferred_builds: false,
             defined_types: Vec::new(),
@@ -160,11 +165,12 @@ impl MacroExpander {
     pub fn with_class_registry(class_registry: ClassRegistry) -> Self {
         Self {
             registry: MacroRegistry::new(),
-            context: MacroContext::new(),
+            context: class_registry.macro_context(),
             expansions_count: 0,
             max_iterations: 100,
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
+            failed_call: None,
             deferred: Vec::new(),
             deferred_builds: false,
             defined_types: Vec::new(),
@@ -202,9 +208,14 @@ impl MacroExpander {
         &mut self.registry
     }
 
+    pub(crate) fn take_expansion_origins(&mut self) -> Vec<ExpansionOrigin> {
+        std::mem::take(&mut self.expansion_origins)
+    }
+
     pub(crate) fn fork_for_typing(&self) -> Self {
         let mut context = MacroContext::new();
         context.defines = self.context.defines.clone();
+        context.class_paths = self.context.class_paths.clone();
         context.current_module = self.context.current_module.clone();
         context.current_class = self.context.current_class.clone();
         context.current_method = self.context.current_method.clone();
@@ -287,6 +298,7 @@ impl MacroExpander {
                 &self.registry,
                 Some(self.class_registry.clone()),
             );
+            self.expansion_origins.extend(build_result.origins);
             file = build_result.file;
             self.deferred_builds = file.declarations.iter().any(|declaration| {
                 matches!(declaration, TypeDeclaration::Class(class)
@@ -481,13 +493,20 @@ impl MacroExpander {
                         }
                         Err(e) => {
                             if !e.is_control_flow() {
-                                self.context.diagnostics.push(MacroDiagnostic::error(
-                                    format!(
-                                        "macro expansion failed in function '{}': {}",
-                                        func.name, e
+                                self.context.diagnostics.push(
+                                    MacroDiagnostic::error(
+                                        format!(
+                                            "macro expansion failed in function '{}': {}",
+                                            func.name, e
+                                        ),
+                                        e.location(),
+                                    )
+                                    .with_call_site(
+                                        self.failed_call.take().unwrap_or_else(|| {
+                                            super::errors::span_to_location(backup.span)
+                                        }),
                                     ),
-                                    e.location(),
-                                ));
+                                );
                             }
                             func.body = Some(backup);
                         }
@@ -505,10 +524,17 @@ impl MacroExpander {
                         }
                         Err(e) => {
                             if !e.is_control_flow() {
-                                self.context.diagnostics.push(MacroDiagnostic::error(
-                                    format!("macro expansion failed in var initializer: {}", e),
-                                    e.location(),
-                                ));
+                                self.context.diagnostics.push(
+                                    MacroDiagnostic::error(
+                                        format!("macro expansion failed in var initializer: {}", e),
+                                        e.location(),
+                                    )
+                                    .with_call_site(
+                                        self.failed_call.take().unwrap_or_else(|| {
+                                            super::errors::span_to_location(backup.span)
+                                        }),
+                                    ),
+                                );
                             }
                             *init = Some(backup);
                         }
@@ -525,10 +551,20 @@ impl MacroExpander {
                         }
                         Err(e) => {
                             if !e.is_control_flow() {
-                                self.context.diagnostics.push(MacroDiagnostic::error(
-                                    format!("macro expansion failed in final initializer: {}", e),
-                                    e.location(),
-                                ));
+                                self.context.diagnostics.push(
+                                    MacroDiagnostic::error(
+                                        format!(
+                                            "macro expansion failed in final initializer: {}",
+                                            e
+                                        ),
+                                        e.location(),
+                                    )
+                                    .with_call_site(
+                                        self.failed_call.take().unwrap_or_else(|| {
+                                            super::errors::span_to_location(backup.span)
+                                        }),
+                                    ),
+                                );
                             }
                             *init = Some(backup);
                         }
@@ -1086,9 +1122,11 @@ impl MacroExpander {
         self.expansion_origins.push(ExpansionOrigin {
             macro_name: "<macro expr>".to_string(),
             call_site,
+            call_span: expr.span,
+            definition_file: None,
             definition_site: None,
             expanded_span: expanded.span,
-            expanded_text: Some(compact_expr_string(&expanded)),
+            expanded_text: Some(expanded_expr_source(&expanded)),
         });
 
         Ok(expanded)
@@ -1178,12 +1216,15 @@ impl MacroExpander {
         // During a deferred re-expansion the live typer is installed on THIS
         // context; the interpreter builds its own, so hand the typer across
         // (and the call position with it, for currentPos()).
+        let mut ctx = super::context_api::MacroContext::new();
+        ctx.class_paths = self.context.class_paths.clone();
+        ctx.defines = self.context.defines.clone();
+        ctx.is_expression_macro = true;
         if self.context.has_typer() {
-            let mut ctx = super::context_api::MacroContext::new();
             ctx.adopt_typer_from(&self.context);
-            ctx.set_call_position(location);
-            interp.macro_context = Some(ctx);
         }
+        ctx.set_call_position(location);
+        interp.macro_context = Some(ctx);
 
         // Bind parameters in the interpreter environment
         for (i, param) in macro_def.params.iter().enumerate() {
@@ -1217,7 +1258,18 @@ impl MacroExpander {
         // depend on who invoked it.
         let caller_imports = interp.take_import_map();
         interp.set_import_map((*macro_def.imports).clone());
+        interp.source_file = Some(macro_def.source_file.clone());
         let result = interp.eval_expr(&macro_def.body);
+        if result.as_ref().is_err_and(|e| !e.is_control_flow()) {
+            self.failed_call = Some(location);
+        }
+        if let Some(ctx) = &mut interp.macro_context {
+            self.context.diagnostics.extend(
+                ctx.take_diagnostics()
+                    .into_iter()
+                    .map(|d| d.with_call_site(location)),
+            );
+        }
         interp.set_import_map(caller_imports);
         let defined = std::mem::take(&mut interp.defined_types);
         let hooks = std::mem::take(&mut interp.hooks);
@@ -1260,9 +1312,11 @@ impl MacroExpander {
         self.expansion_origins.push(ExpansionOrigin {
             macro_name: name.to_string(),
             call_site: location,
+            call_span: call_expr.span,
+            definition_file: Some(macro_def.source_file.clone()),
             definition_site: Some(super::errors::span_to_location(macro_def.body.span)),
             expanded_span: expanded.span,
-            expanded_text: Some(compact_expr_string(&expanded)),
+            expanded_text: Some(expanded_expr_source(&expanded)),
         });
 
         // Store in memoization cache for future identical calls
@@ -1288,18 +1342,17 @@ impl Default for MacroExpander {
 pub fn run_generation_hooks(
     hooks: &[(String, MacroValue)],
     files: &[HaxeFile],
-    statics: super::class_registry::MacroStatics,
+    mut class_registry: ClassRegistry,
 ) -> Result<Vec<MacroDiagnostic>, MacroError> {
-    let mut class_registry = ClassRegistry::new();
-    class_registry.use_statics(statics);
     class_registry.register_files(files);
+    let context = class_registry.macro_context();
     let types = MacroValue::Array(Arc::new(files.iter().flat_map(module_types).collect()));
     let mut interp = MacroInterpreter::with_class_registry(
         MacroRegistry::new(),
         BTreeMap::new(),
         Arc::new(class_registry),
     );
-    interp.macro_context = Some(MacroContext::new());
+    interp.macro_context = Some(context);
     for phase in ["onAfterTyping", "onGenerate"] {
         for (_, callback) in hooks.iter().filter(|(h, _)| h == phase) {
             match interp.call_value(
@@ -1437,59 +1490,9 @@ pub(crate) fn defined_declaration(
 
 /// Hash a slice of expressions for memoization cache key.
 ///
-/// Hash expressions for memoization cache key. Uses both source spans AND
-/// Compact string representation of an expanded expression (for IDE hints).
-/// Shows the result value, truncated to 80 chars for readability.
-fn compact_expr_string(expr: &Expr) -> String {
-    let s = match &expr.kind {
-        ExprKind::Int(n) => n.to_string(),
-        ExprKind::Float(f) => f.to_string(),
-        ExprKind::String(s) => format!("\"{}\"", s),
-        ExprKind::Bool(b) => b.to_string(),
-        ExprKind::Ident(id) => id.clone(),
-        ExprKind::Null => "null".to_string(),
-        ExprKind::Array(elems) => {
-            let inner: Vec<String> = elems.iter().map(compact_expr_string).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        ExprKind::Binary { left, op, right } => {
-            format!(
-                "{} {:?} {}",
-                compact_expr_string(left),
-                op,
-                compact_expr_string(right)
-            )
-        }
-        ExprKind::Unary { op, expr: inner } => {
-            format!("{:?}{}", op, compact_expr_string(inner))
-        }
-        ExprKind::Paren(inner) => format!("({})", compact_expr_string(inner)),
-        ExprKind::Call { expr: callee, args } => {
-            let args_str: Vec<String> = args.iter().map(compact_expr_string).collect();
-            format!("{}({})", compact_expr_string(callee), args_str.join(", "))
-        }
-        ExprKind::Field {
-            expr: obj,
-            field,
-            is_optional,
-        } => {
-            let op = if *is_optional { "?." } else { "." };
-            format!("{}{}{}", compact_expr_string(obj), op, field)
-        }
-        ExprKind::Block(stmts) => {
-            if stmts.len() == 1 {
-                format!("{:?}", stmts[0])
-            } else {
-                format!("{{ ... {} statements }}", stmts.len())
-            }
-        }
-        _ => format!("{:?}", expr.kind),
-    };
-    if s.len() > 80 {
-        format!("{}...", &s[..77])
-    } else {
-        s
-    }
+/// Haxe source for the complete expansion; editors truncate only its hint label.
+pub(crate) fn expanded_expr_source(expr: &Expr) -> String {
+    super::printer::Printer::new().print_expr(&MacroValue::Expr(Arc::new(expr.clone())))
 }
 
 /// a Debug representation of the expression kind, so expanded macro results

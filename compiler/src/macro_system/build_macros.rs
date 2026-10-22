@@ -15,9 +15,7 @@
 //! any macro calls in the generated fields are expanded in the normal
 //! expression expansion pass.
 
-use super::context_api::{
-    BuildClassContext, BuildField, BuildFieldKind, FieldAccess, FieldMeta, MacroContext,
-};
+use super::context_api::{BuildClassContext, BuildField, BuildFieldKind, FieldAccess, FieldMeta};
 use super::errors::{MacroDiagnostic, MacroError};
 use super::interpreter::MacroInterpreter;
 use super::registry::MacroRegistry;
@@ -37,6 +35,7 @@ pub struct BuildMacroResult {
     pub diagnostics: Vec<MacroDiagnostic>,
     /// Number of build macros applied
     pub applied_count: usize,
+    pub origins: Vec<super::expander::ExpansionOrigin>,
 }
 
 /// Process all @:build and @:autoBuild macros in a parsed file.
@@ -57,6 +56,7 @@ pub fn process_build_macros_with_class_registry(
 ) -> BuildMacroResult {
     let mut diagnostics = Vec::new();
     let mut applied_count = 0;
+    let mut origins = Vec::new();
 
     let file_pack: Vec<String> = file
         .package
@@ -118,7 +118,14 @@ pub fn process_build_macros_with_class_registry(
                         &file_module,
                         None,
                     ) {
-                        Ok(()) => {
+                        Ok(emitted) => {
+                            diagnostics.extend(emitted);
+                            origins.push(build_origin(
+                                &class,
+                                meta,
+                                registry,
+                                class_registry.as_deref(),
+                            ));
                             applied_count += 1;
                             diagnostics.push(MacroDiagnostic::info(
                                 format!("@:build macro applied to class '{}'", class.name),
@@ -130,10 +137,13 @@ pub fn process_build_macros_with_class_registry(
                             deferred = true;
                         }
                         Err(e) => {
-                            diagnostics.push(MacroDiagnostic::error(
-                                format!("@:build macro failed on '{}': {}", class.name, e),
-                                e.location(),
-                            ));
+                            diagnostics.push(
+                                MacroDiagnostic::error(
+                                    format!("@:build macro failed on '{}': {}", class.name, e),
+                                    e.location(),
+                                )
+                                .with_call_site(super::errors::span_to_location(meta.span)),
+                            );
                         }
                     }
                 }
@@ -158,7 +168,14 @@ pub fn process_build_macros_with_class_registry(
                             &file_module,
                             None,
                         ) {
-                            Ok(()) => {
+                            Ok(emitted) => {
+                                diagnostics.extend(emitted);
+                                origins.push(build_origin(
+                                    &class,
+                                    &auto_build.build_meta,
+                                    registry,
+                                    class_registry.as_deref(),
+                                ));
                                 applied_count += 1;
                                 diagnostics.push(MacroDiagnostic::info(
                                     format!(
@@ -196,6 +213,91 @@ pub fn process_build_macros_with_class_registry(
         file,
         diagnostics,
         applied_count,
+        origins,
+    }
+}
+
+fn build_origin(
+    class: &ClassDecl,
+    meta: &Metadata,
+    registry: &MacroRegistry,
+    classes: Option<&super::class_registry::ClassRegistry>,
+) -> super::expander::ExpansionOrigin {
+    let name = extract_build_macro_name(meta);
+    let def = registry
+        .get_macro(&name)
+        .or_else(|| registry.find_macro_by_name(&name));
+    let ordinary = name.rsplit_once('.').and_then(|(owner, method)| {
+        let class = classes?.find_class(owner)?;
+        Some((&class.source_file, &class.static_methods.get(method)?.body))
+    });
+    let mut fields = Vec::new();
+    for field in &class.fields {
+        let kind = match &field.kind {
+            ClassFieldKind::Function(f) => ExprKind::Function(f.clone()),
+            ClassFieldKind::Var {
+                name,
+                type_hint,
+                expr,
+            } => ExprKind::Var {
+                name: name.clone(),
+                type_hint: type_hint.clone(),
+                expr: expr.clone().map(Box::new),
+                attrs: Default::default(),
+            },
+            ClassFieldKind::Final {
+                name,
+                type_hint,
+                expr,
+            } => ExprKind::Final {
+                name: name.clone(),
+                type_hint: type_hint.clone(),
+                expr: expr.clone().map(Box::new),
+                attrs: Default::default(),
+            },
+            ClassFieldKind::Property {
+                name,
+                type_hint,
+                getter,
+                setter,
+                ..
+            } => {
+                let ty = type_hint
+                    .as_ref()
+                    .map(|t| {
+                        super::printer::Printer::new()
+                            .print_complex_type(&super::expr_adt::complex_type_of(t))
+                    })
+                    .unwrap_or_default();
+                fields.push(format!(
+                    "var {name}({}, {}):{ty};",
+                    property_access_name(getter),
+                    property_access_name(setter)
+                ));
+                continue;
+            }
+        };
+        fields.push(super::expander::expanded_expr_source(&Expr {
+            kind,
+            span: field.span,
+        }));
+    }
+    super::expander::ExpansionOrigin {
+        macro_name: name,
+        call_site: super::errors::span_to_location(meta.span),
+        call_span: meta.span,
+        definition_site: def
+            .map(|d| super::errors::span_to_location(d.body.span))
+            .or_else(|| ordinary.map(|(_, body)| super::errors::span_to_location(body.span))),
+        definition_file: def
+            .map(|d| d.source_file.clone())
+            .or_else(|| ordinary.map(|(file, _)| file.clone())),
+        expanded_span: class.span,
+        expanded_text: Some(format!(
+            "class {} {{\n{}\n}}",
+            class.name,
+            fields.join(";\n")
+        )),
     }
 }
 
@@ -221,7 +323,7 @@ pub(crate) fn apply_build_macro(
     pack: &[String],
     module: &str,
     typer: Option<(&mut dyn super::context_api::MacroTyper, crate::tast::TypeId)>,
-) -> Result<(), MacroError> {
+) -> Result<Vec<MacroDiagnostic>, MacroError> {
     let location = super::errors::span_to_location(meta.span);
 
     // Step 1: Extract macro function name
@@ -237,7 +339,10 @@ pub(crate) fn apply_build_macro(
     let build_fields = class_fields_to_build_fields(&class.fields);
 
     // Step 3: Set up context with build class info
-    let mut context = MacroContext::new();
+    let mut context = class_registry
+        .as_ref()
+        .map(|classes| classes.macro_context())
+        .unwrap_or_default();
     context.set_call_position(location);
     let mut class_pack = pack.to_vec();
     if matches!(class.access, Some(parser::Access::Private)) {
@@ -280,6 +385,7 @@ pub(crate) fn apply_build_macro(
         .get_macro(&macro_name)
         .or_else(|| registry.find_macro_by_name(&macro_name));
 
+    let mut emitted = Vec::new();
     let result = if let Some(def) = macro_def {
         // Macro is in the registry — execute it. Thread the ClassRegistry
         // when available so bare-name references inside the build-macro
@@ -303,8 +409,9 @@ pub(crate) fn apply_build_macro(
         }
         // Pass the build context so Context.getBuildFields() returns class fields
         interp.macro_context = Some(context);
+        interp.source_file = Some(def.source_file.clone());
         let eval_result = interp.eval_expr(&def.body);
-
+        emitted.extend(interp.macro_context.as_mut().unwrap().take_diagnostics());
         match eval_result {
             Ok(val) => val,
             Err(MacroError::Return { value: Some(v) }) => *v,
@@ -318,15 +425,11 @@ pub(crate) fn apply_build_macro(
         let mut interp =
             MacroInterpreter::with_class_registry(registry.clone(), Default::default(), cr);
         interp.macro_context = Some(context);
-        match interp.eval_expr(call) {
+        let result = interp.eval_expr(call);
+        emitted.extend(interp.macro_context.as_mut().unwrap().take_diagnostics());
+        match result {
             Ok(val) => val,
             Err(MacroError::Return { value: Some(v) }) => *v,
-            Err(MacroError::UndefinedVariable { .. }) => {
-                return Err(MacroError::UndefinedMacro {
-                    name: macro_name,
-                    location,
-                });
-            }
             Err(e) => return Err(e),
         }
     } else {
@@ -344,7 +447,10 @@ pub(crate) fn apply_build_macro(
     }
     // If the macro returns null or non-array, fields remain unchanged
 
-    Ok(())
+    Ok(emitted
+        .into_iter()
+        .map(|d| d.with_call_site(location))
+        .collect())
 }
 
 // ==========================================================
@@ -447,6 +553,16 @@ fn class_implements_in(file_decls: &[TypeDeclaration], class: &ClassDecl, ancest
 // Conversion helpers
 // ==========================================================
 
+fn property_access_name(access: &parser::PropertyAccess) -> String {
+    match access {
+        parser::PropertyAccess::Default => "default".into(),
+        parser::PropertyAccess::Null => "null".into(),
+        parser::PropertyAccess::Never => "never".into(),
+        parser::PropertyAccess::Dynamic => "dynamic".into(),
+        parser::PropertyAccess::Custom(name) => name.clone(),
+    }
+}
+
 /// Convert parser ClassField list to BuildField representations
 pub(crate) fn class_fields_to_build_fields(fields: &[ClassField]) -> Vec<BuildField> {
     fields.iter().map(class_field_to_build_field).collect()
@@ -461,7 +577,7 @@ fn class_field_to_build_field(field: &ClassField) -> BuildField {
             expr,
         } => {
             let kind = BuildFieldKind::Var {
-                type_hint: type_hint.as_ref().map(|t| format!("{:?}", t)),
+                type_hint: type_hint.clone(),
                 expr: expr.as_ref().map(|e| Box::new(e.clone())),
             };
             (name.clone(), kind)
@@ -472,7 +588,7 @@ fn class_field_to_build_field(field: &ClassField) -> BuildField {
             expr,
         } => {
             let kind = BuildFieldKind::Var {
-                type_hint: type_hint.as_ref().map(|t| format!("{:?}", t)),
+                type_hint: type_hint.clone(),
                 expr: expr.as_ref().map(|e| Box::new(e.clone())),
             };
             (name.clone(), kind)
@@ -482,19 +598,20 @@ fn class_field_to_build_field(field: &ClassField) -> BuildField {
             type_hint,
             getter,
             setter,
-            ..
+            expr,
         } => {
             let kind = BuildFieldKind::Property {
-                get: format!("{:?}", getter),
-                set: format!("{:?}", setter),
-                type_hint: type_hint.as_ref().map(|t| format!("{:?}", t)),
+                get: property_access_name(getter),
+                set: property_access_name(setter),
+                type_hint: type_hint.clone(),
+                expr: expr.clone().map(Box::new),
             };
             (name.clone(), kind)
         }
         ClassFieldKind::Function(func) => {
             let kind = BuildFieldKind::Function {
-                params: func.params.iter().map(|p| p.name.clone()).collect(),
-                return_type: func.return_type.as_ref().map(|t| format!("{:?}", t)),
+                params: func.params.clone(),
+                return_type: func.return_type.clone(),
                 body: func.body.clone(),
             };
             (func.name.clone(), kind)
@@ -503,6 +620,9 @@ fn class_field_to_build_field(field: &ClassField) -> BuildField {
 
     // Convert access modifiers
     let mut access = Vec::new();
+    if matches!(field.kind, ClassFieldKind::Final { .. }) {
+        access.push(FieldAccess::Final);
+    }
     if let Some(parser::Access::Public) = &field.access {
         access.push(FieldAccess::Public);
     }
@@ -555,12 +675,8 @@ fn class_field_to_build_field(field: &ClassField) -> BuildField {
 /// declaration — e.g. a constructor `new(host, port, maxConn)` would lose
 /// its parameters and the body would fail with `Cannot find name 'maxConn'`.
 ///
-/// To preserve fidelity we resolve each rebuilt field by name against the
-/// original class. If the original has the same field name and matching
-/// kind, swap in the original's full `ClassFieldKind` — this keeps params,
-/// return types, type hints, and bodies intact for unchanged fields.
-/// Newly synthesised fields (no name match) keep the round-trip-rebuilt
-/// form.
+/// Recover declaration details absent from the wire format while retaining
+/// expressions rewritten by the macro.
 fn values_to_class_fields(values: &[MacroValue], class: &ClassDecl) -> Vec<ClassField> {
     let originals: std::collections::BTreeMap<String, &ClassField> = class
         .fields
@@ -573,9 +689,6 @@ fn values_to_class_fields(values: &[MacroValue], class: &ClassDecl) -> Vec<Class
         .filter_map(value_to_class_field)
         .map(|mut rebuilt| {
             if let Some(original) = originals.get(field_name(&rebuilt)) {
-                // Same kind in both → replace with original to recover
-                // params / return types / type hints / bodies that the
-                // BuildField wire format dropped.
                 let same_kind = matches!(
                     (&rebuilt.kind, &original.kind),
                     (ClassFieldKind::Function(_), ClassFieldKind::Function(_))
@@ -587,7 +700,38 @@ fn values_to_class_fields(values: &[MacroValue], class: &ClassDecl) -> Vec<Class
                         )
                 );
                 if same_kind {
-                    rebuilt.kind = original.kind.clone();
+                    match (&mut rebuilt.kind, &original.kind) {
+                        (ClassFieldKind::Function(new), ClassFieldKind::Function(old)) => {
+                            for param in &mut new.params {
+                                if let Some(original) =
+                                    old.params.iter().find(|p| p.name == param.name)
+                                {
+                                    param.span = original.span;
+                                    param.meta = original.meta.clone();
+                                    param.rest = original.rest;
+                                }
+                            }
+                            new.type_params = old.type_params.clone();
+                            new.span = old.span;
+                        }
+                        (
+                            ClassFieldKind::Var { type_hint, .. },
+                            ClassFieldKind::Var { type_hint: old, .. },
+                        )
+                        | (
+                            ClassFieldKind::Final { type_hint, .. },
+                            ClassFieldKind::Final { type_hint: old, .. },
+                        )
+                        | (
+                            ClassFieldKind::Property { type_hint, .. },
+                            ClassFieldKind::Property { type_hint: old, .. },
+                        ) => {
+                            if type_hint.is_none() {
+                                *type_hint = old.clone();
+                            }
+                        }
+                        _ => {}
+                    }
                     rebuilt.span = original.span;
                     // Merge original metadata that the macro may have
                     // dropped, but keep any access/modifiers explicitly
@@ -646,7 +790,7 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
         })
         .unwrap_or_else(|| "FVar".to_string());
 
-    let field_kind = match kind_str.as_str() {
+    let mut field_kind = match kind_str.as_str() {
         "FFun" | "function" => {
             // `{args, ret}` of the FFun payload, as `macro class` and
             // hand-built fields carry them.
@@ -772,6 +916,33 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
                 span: parser::Span::new(0, 0),
             })
         }
+        "FProp" => {
+            let Some(MacroValue::Object(fields)) = kind_obj else {
+                return None;
+            };
+            let access = |key| match fields
+                .get(key)
+                .and_then(MacroValue::as_string)
+                .unwrap_or("default")
+            {
+                "default" => parser::PropertyAccess::Default,
+                "null" => parser::PropertyAccess::Null,
+                "never" => parser::PropertyAccess::Never,
+                "dynamic" => parser::PropertyAccess::Dynamic,
+                name => parser::PropertyAccess::Custom(name.into()),
+            };
+            ClassFieldKind::Property {
+                name: name.clone(),
+                type_hint: fields
+                    .get("type")
+                    .and_then(|t| super::expr_adt::type_of_value(t, parser::Span::default())),
+                getter: access("get"),
+                setter: access("set"),
+                expr: fields
+                    .get("expr")
+                    .and_then(|e| super::expr_adt::try_expr_of(e, parser::Span::default())),
+            }
+        }
         _ => {
             // Default to Var
             let expr = kind_obj
@@ -826,6 +997,19 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
         }
     }
 
+    if modifiers.contains(&Modifier::Final)
+        && let ClassFieldKind::Var {
+            name,
+            type_hint,
+            expr,
+        } = field_kind
+    {
+        field_kind = ClassFieldKind::Final {
+            name,
+            type_hint,
+            expr,
+        };
+    }
     Some(ClassField {
         meta: Vec::new(),
         access: access_val,
@@ -1006,6 +1190,30 @@ mod tests {
         let result = process_build_macros(file, &registry);
         assert_eq!(result.applied_count, 0);
         assert_eq!(result.file.declarations.len(), 1);
+    }
+
+    #[test]
+    fn ordinary_build_macro_preserves_body_error_location() {
+        let source = "class Builder { public static function build() { return missingHelper(); } }\n@:build(Builder.build()) class Target {}";
+        let file = parse(source);
+        let mut classes = super::super::class_registry::ClassRegistry::new();
+        classes.register_file(&file);
+        let result = process_build_macros_with_class_registry(
+            file,
+            &MacroRegistry::new(),
+            Some(Arc::new(classes)),
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        let diagnostic = &result.diagnostics[0];
+        assert!(
+            diagnostic.message.contains("missingHelper"),
+            "{diagnostic:?}"
+        );
+        assert_eq!(
+            diagnostic.location.byte_offset as usize,
+            source.find("missingHelper").unwrap()
+        );
+        assert!(diagnostic.call_site.is_some());
     }
 
     /// Phase 6 regression guard: when a build macro returns the original

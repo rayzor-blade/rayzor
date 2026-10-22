@@ -12,6 +12,7 @@ struct Session {
     root: PathBuf,
     next_id: i32,
     diagnostics: Vec<Value>,
+    temporary: bool,
 }
 
 impl Session {
@@ -33,6 +34,10 @@ impl Session {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, text).unwrap();
         }
+        Self::connect(root, options, true)
+    }
+
+    fn connect(root: PathBuf, options: Value, temporary: bool) -> Self {
         let (server_end, client) = Connection::memory();
         let server = rayzor_lsp::spawn_session(server_end).unwrap();
         let mut session = Session {
@@ -41,6 +46,7 @@ impl Session {
             root,
             next_id: 0,
             diagnostics: Vec::new(),
+            temporary,
         };
         let root_uri = session.uri("");
         session.request(
@@ -68,7 +74,12 @@ impl Session {
         let r = Request::new(id.clone(), method.to_string(), params);
         self.client.sender.send(Message::Request(r)).unwrap();
         loop {
-            match self.client.receiver.recv().unwrap() {
+            match self
+                .client
+                .receiver
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .expect("LSP response timeout")
+            {
                 Message::Response(resp) if resp.id == id => {
                     return resp.result.unwrap_or(Value::Null);
                 }
@@ -91,10 +102,13 @@ impl Session {
             if let Message::Notification(n) = self.client.receiver.recv().unwrap()
                 && n.method == "textDocument/publishDiagnostics"
             {
-                return n.params["diagnostics"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
+                if n.params["uri"] == self.uri(name) {
+                    return n.params["diagnostics"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                }
+                self.diagnostics.push(n.params);
             }
         }
     }
@@ -111,10 +125,13 @@ impl Session {
             if let Message::Notification(n) = self.client.receiver.recv().unwrap()
                 && n.method == "textDocument/publishDiagnostics"
             {
-                return n.params["diagnostics"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
+                if n.params["uri"] == self.uri(name) {
+                    return n.params["diagnostics"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                }
+                self.diagnostics.push(n.params);
             }
         }
     }
@@ -144,6 +161,16 @@ impl Drop for Session {
             "shutdown".into(),
             Value::Null,
         )));
+        // Complete shutdown before sending exit; the server batches queued messages.
+        while let Ok(message) = self
+            .client
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+        {
+            if matches!(message, Message::Response(_)) {
+                break;
+            }
+        }
         let _ = self
             .client
             .sender
@@ -154,7 +181,9 @@ impl Drop for Session {
         if let Some(server) = self.server.take() {
             let _ = server.join();
         }
-        let _ = std::fs::remove_dir_all(&self.root);
+        if self.temporary {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
 }
 
@@ -204,6 +233,118 @@ fn hover_answers_at_declarations_and_uses() {
     assert!(hover_text(&param).contains("a:Int"), "{param}");
     let at = s.at("Main.hx", 3, 1);
     assert!(s.request("textDocument/hover", at).is_null());
+}
+
+#[test]
+fn hover_includes_declaration_comments_and_refreshes_after_edits() {
+    let source = r#"/** Main **entry point**. */
+@:keep
+class Main {
+    /** Stored count. */
+    static var count:Int = 1;
+    /**
+     * Adds a value.
+     *
+     * `value` is added to the stored count.
+     * @param value The amount to add.
+     * @return The resulting count.
+     */
+    @:keep
+    static inline function add(value:Int):Int {
+        return count + value;
+    }
+    static function main() {
+        trace(add(DocTools.amount));
+        trace(DocTools.twice(count));
+    }
+}
+/** Named integer type. */
+typedef Count = Int;
+/** Unit wrapper. */
+abstract Unit(Int) {}
+/** Available choices. */
+enum Choice {
+    /** Select the first choice. */
+    First;
+}
+/** Service contract. */
+interface Service {
+    // Perform the work.
+    public function run():Void;
+}
+"#;
+    let imported = r#"/** Shared utilities. */
+class DocTools {
+    /** Default amount. */
+    public static var amount:Int = 2;
+    /**
+     * Doubles the input.
+     * @param {Int} value - Input amount.
+     * @returns {Int} Twice the amount.
+     **/
+    public static function twice(value:Int):Int return value * 2;
+}
+"#;
+    let mut s = Session::start(&[("Main.hx", source), ("DocTools.hx", imported)]);
+    assert!(s.open("Main.hx").is_empty());
+    let hover_at = |s: &mut Session, text: &str, needle: &str| {
+        let offset = text.find(needle).unwrap();
+        let before = &text[..offset];
+        let line = before.bytes().filter(|&b| b == b'\n').count() as u32;
+        let col = before.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
+        let at = s.at("Main.hx", line, col);
+        hover_text(&s.request("textDocument/hover", at))
+    };
+    for (needle, expected) in [
+        ("Main {", "Main **entry point**."),
+        ("count:Int", "Stored count."),
+        ("count +", "Stored count."),
+        (
+            "add(value",
+            "Adds a value.\n\n`value` is added to the stored count.",
+        ),
+        ("add(DocTools", "Adds a value."),
+        ("add(value", "**Parameter** `value`: The amount to add."),
+        ("amount)", "Default amount."),
+        ("twice(count", "Doubles the input."),
+        ("twice(count", "**Returns**\n\n`Int` Twice the amount."),
+        ("Count =", "Named integer type."),
+        ("Unit(Int)", "Unit wrapper."),
+        ("Choice {", "Available choices."),
+        ("First;", "Select the first choice."),
+        ("Service {", "Service contract."),
+        ("run()", "Perform the work."),
+    ] {
+        let hover = hover_at(&mut s, source, needle);
+        assert!(hover.contains(expected), "{needle}: {hover}");
+        assert!(!hover.contains("/**"), "{hover}");
+    }
+    let changed = source.replace("Stored count.", "Current total.");
+    s.change("Main.hx", &changed);
+    let hover = hover_at(&mut s, &changed, "count +");
+    assert!(hover.contains("Current total."), "{hover}");
+    assert!(!hover.contains("Stored count."), "{hover}");
+}
+
+#[test]
+fn standard_library_completion_includes_documentation() {
+    let source = "class Main {\n    static function main() {\n        var text = \"hello\";\n        text.charAt(0);\n    }\n}";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    s.open("Main.hx");
+    let at = s.at("Main.hx", 3, 13);
+    let items = s.request("textDocument/completion", at);
+    let item = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == "charAt")
+        .unwrap();
+    assert!(
+        item["documentation"]["value"]
+            .as_str()
+            .is_some_and(|d| d.contains("character")),
+        "{item}"
+    );
 }
 
 #[test]
@@ -502,8 +643,15 @@ fn failing_macros_are_reported_and_the_server_survives() {
 
     for (name, _) in &macros {
         let started = std::time::Instant::now();
+        let previous = s.diagnostics.len();
         let diags = s.open(&format!("Use{name}.hx"));
-        assert!(!diags.is_empty(), "{name} gave no diagnostic");
+        assert!(
+            !diags.is_empty()
+                || s.diagnostics[previous..]
+                    .iter()
+                    .any(|d| d["diagnostics"].as_array().is_some_and(|d| !d.is_empty())),
+            "{name} gave no diagnostic"
+        );
         assert!(
             started.elapsed().as_secs() < 10,
             "{name} took {:?}",
@@ -520,5 +668,292 @@ fn failing_macros_are_reported_and_the_server_survives() {
     assert!(
         hover_text(&hover).contains("function add"),
         "server stopped answering: {hover}"
+    );
+}
+
+#[test]
+fn initialization_macros_transform_inline_markup_and_add_completions() {
+    check_initialization_macro_editor_services(MacroProject::Hxml);
+}
+
+#[test]
+fn discovered_haxelib_dependency_macros_transform_inline_markup() {
+    check_initialization_macro_editor_services(MacroProject::InstalledLibrary);
+}
+
+#[test]
+fn local_path_dependency_macros_transform_inline_markup() {
+    check_initialization_macro_editor_services(MacroProject::LocalLibrary);
+}
+
+enum MacroProject {
+    Hxml,
+    InstalledLibrary,
+    LocalLibrary,
+}
+
+fn check_initialization_macro_editor_services(project: MacroProject) {
+    let main = "class Main {\n    static function view():Int { var first = 1, second = 2; return <counter/>; }\n    static function main() { var count = view(); }\n    static var count(default, never):Int = 3;\n    static final LIMIT:Int = 10;\n}\n";
+    let macros = r#"import haxe.macro.Context;
+import haxe.macro.Expr;
+class Setup {
+    public static function enable() {
+        haxe.macro.Compiler.addGlobalMetadata("Main", "@:build(Setup.build())");
+    }
+    public static function build():Array<Field> {
+        var fields = Context.getBuildFields();
+        var fieldType = Array;
+        if (!Std.isOfType(fields, fieldType)) Context.error("expected build fields", Context.currentPos());
+        function lower(e:Expr):Expr {
+            return switch e.expr {
+                case EMeta({name: ":markup"}, _): macro 42;
+                case _: haxe.macro.ExprTools.map(e, lower);
+            };
+        }
+        for (field in fields) switch field.kind {
+            case FFun(fn) if (fn.expr != null): fn.expr = lower(fn.expr);
+            case _:
+        }
+        fields.push({name:"generated", access:[APublic, AStatic], kind:FVar(macro:Int, macro 7), pos:Context.currentPos()});
+        return fields;
+    }
+}"#;
+    let files = match project {
+        MacroProject::InstalledLibrary => vec![
+            ("haxelib.json", r#"{"dependencies":{"markup":"1.0.0"}}"#),
+            (
+                ".haxelib/markup/1,0,0/haxelib.json",
+                r#"{"classPath":"src"}"#,
+            ),
+            (
+                ".haxelib/markup/1,0,0/extraParams.hxml",
+                "--macro Setup.enable()\n",
+            ),
+            (".haxelib/markup/1,0,0/src/Setup.hx", macros),
+            ("Main.hx", main),
+        ],
+        MacroProject::LocalLibrary => vec![
+            (
+                "haxelib.json",
+                r#"{"dependencies":{"markup":{"path":"./packages/markup"}}}"#,
+            ),
+            ("packages/markup/haxelib.json", r#"{"classPath":"src"}"#),
+            (
+                "packages/markup/extraParams.hxml",
+                "--macro Setup.enable()\n",
+            ),
+            ("packages/markup/src/Setup.hx", macros),
+            ("Main.hx", main),
+        ],
+        MacroProject::Hxml => vec![
+            ("build.hxml", "--macro Setup.enable()\n"),
+            ("Setup.hx", macros),
+            ("Main.hx", main),
+        ],
+    };
+    let mut s = Session::start(&files);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let labels = s.labels("Main.hx", 2, 44);
+    assert!(labels.iter().any(|l| l == "generated"), "{labels:?}");
+    let hover = s.request("textDocument/hover", s.at("Main.hx", 2, 41));
+    assert!(!hover.is_null(), "missing hover after markup expansion");
+    let preview = s.request("rayzor/expandMacro", s.at("Main.hx", 1, 30));
+    assert!(
+        preview["expansion"].as_str().unwrap().contains("return 42"),
+        "{preview}"
+    );
+    assert!(
+        preview["expansion"]
+            .as_str()
+            .unwrap()
+            .contains("count(default, never):Int"),
+        "{preview}"
+    );
+    assert!(
+        preview["definition"]["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("Setup.hx"),
+        "{preview}"
+    );
+}
+
+#[test]
+fn macro_resources_use_project_class_paths_in_every_phase() {
+    let main = "class Main {\n    static function main() { var text = Assets.text(); }\n}\n";
+    let macros = r#"import haxe.macro.Context;
+import haxe.macro.Expr;
+import sys.FileSystem;
+import sys.io.File;
+class Assets {
+    #if macro
+    public static function enable() {
+        haxe.macro.Compiler.define("asset_file", "value.txt");
+        if (read() != "asset value") throw "initialization resource";
+        haxe.macro.Compiler.addGlobalMetadata("Main", "@:build(Assets.build())");
+        Context.onGenerate(function(_) {
+            var file = Context.resolvePath(Context.definedValue("asset_root") + "/" + Context.definedValue("asset_file"));
+            if (File.getContent(file) != "asset value") throw "generation resource";
+        });
+    }
+    static function read():String {
+        #if !asset_root
+        throw "missing asset_root condition";
+        #end
+        if (!Context.defined("asset_root")) throw "missing macro defines";
+        if (Context.getClassPath().length == 0) throw "no class paths";
+        var directory = Context.resolvePath(Context.definedValue("asset_root"));
+        if (!FileSystem.isDirectory(directory)) throw "not a directory";
+        var entries = FileSystem.readDirectory(directory);
+        if (entries.length != 1 || entries[0] != "value.txt") throw "directory entries";
+        var file = Context.resolvePath(Context.definedValue("asset_root") + "/" + Context.definedValue("asset_file"));
+        if (FileSystem.isDirectory(file)) throw "not a file";
+        if (!FileSystem.exists(FileSystem.fullPath(file))) throw "full path";
+        if (Context.resolvePath(FileSystem.fullPath(file)) != FileSystem.fullPath(file)) throw "absolute resource";
+        var missing = FileSystem.absolutePath(directory + "/missing.txt");
+        if (FileSystem.absolutePath("") != FileSystem.absolutePath(".")) throw "empty absolute path";
+        if (FileSystem.absolutePath("unused/../macro-missing.txt") != FileSystem.absolutePath("macro-missing.txt")) throw "relative normalization";
+        var unchanged = FileSystem.fullPath(directory) + "/unused/../missing.txt";
+        if (FileSystem.absolutePath(unchanged) != unchanged) throw "absolute path changed";
+        if (FileSystem.exists(missing)) throw "missing exists";
+        if (FileSystem.isDirectory(missing)) throw "missing directory exists";
+        var failed = false;
+        try Context.resolvePath("icons/missing.txt") catch (_:Dynamic) failed = true;
+        if (!failed) throw "missing resource did not throw";
+        failed = false;
+        try FileSystem.readDirectory(missing) catch (_:Dynamic) failed = true;
+        if (!failed) throw "missing directory did not throw";
+        return File.getContent(file);
+    }
+    public static function build():Array<Field> {
+        var fields = Context.getBuildFields();
+        fields.push({name:"asset", access:[APublic, AStatic], kind:FVar(macro:String, Context.makeExpr(read(), Context.currentPos())), pos:Context.currentPos()});
+        return fields;
+    }
+    #end
+    public static macro function text():Expr {
+        return Context.makeExpr(read(), Context.currentPos());
+    }
+}"#;
+    let mut s = Session::start(&[
+        (
+            "build.hxml",
+            "-cp src\n-cp decoy\n-cp resources\n-D asset_root=icons\n--macro Assets.enable()\n",
+        ),
+        ("decoy/icons/value.txt", "wrong asset"),
+        ("resources/icons/value.txt", "asset value"),
+        ("src/Assets.hx", macros),
+        ("src/Main.hx", main),
+    ]);
+    let diagnostics = s.open("src/Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let labels = s.labels("src/Main.hx", 1, 40);
+    assert!(labels.iter().any(|label| label == "asset"), "{labels:?}");
+    let preview = s.request("rayzor/expandMacro", s.at("src/Main.hx", 1, 43));
+    assert!(
+        preview["expansion"]
+            .as_str()
+            .unwrap_or("")
+            .contains("asset value"),
+        "{preview}"
+    );
+}
+
+#[test]
+#[ignore = "requires the sibling RayDE workspace and its libraries"]
+fn rayde_macro_workspace_keeps_editor_services() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../RayDE")
+        .canonicalize()
+        .unwrap();
+    let mut s = Session::connect(root, json!({"macroBudgetMs": 5000}), false);
+    let name = "src/rayde/ui/Welcome.hx";
+    let diagnostics = s.open(name);
+    eprintln!(
+        "RayDE diagnostics ({}): {:#?}",
+        diagnostics.len(),
+        &diagnostics[..diagnostics.len().min(20)]
+    );
+    assert!(!diagnostics.iter().any(|d| {
+        d["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("expected expression, found '<'"))
+    }));
+    let text = std::fs::read_to_string(s.root.join(name)).unwrap();
+    let line = text
+        .lines()
+        .position(|l| l.contains("function darkScheme()"))
+        .unwrap() as u32;
+    let column = text
+        .lines()
+        .nth(line as usize)
+        .unwrap()
+        .find("darkScheme")
+        .unwrap() as u32;
+    let hover = s.request("textDocument/hover", s.at(name, line, column + 1));
+    eprintln!(
+        "RayDE hover: {hover}; completions: {:?}",
+        s.labels(name, line, column)
+    );
+    assert!(
+        hover_text(&hover).contains("function darkScheme"),
+        "missing typed hover in macro-enabled file: {hover}"
+    );
+    let labels = s.labels(name, line, column);
+    assert!(
+        labels.iter().any(|l| l == "darkScheme"),
+        "missing local completions"
+    );
+    let symbols = s.request(
+        "textDocument/documentSymbol",
+        json!({"textDocument":{"uri":s.uri(name)}}),
+    );
+    assert!(!symbols.is_null(), "missing document symbols");
+}
+
+#[test]
+fn macro_previews_hints_and_definition_errors_have_source_positions() {
+    let macros = "import haxe.macro.Expr;\nclass Macros {\n public static macro function value():Expr return macro 21 + 21;\n public static macro function broken():Expr { throw \"macro failed\"; }\n}";
+    let main = "class Main {\n static function main() { var result = Macros.value(); }\n}";
+    let mut s = Session::start(&[("Macros.hx", macros), ("Main.hx", main)]);
+    assert!(s.open("Main.hx").is_empty());
+    let column = main.lines().nth(1).unwrap().find("Macros.value").unwrap() as u32;
+    let preview = s.request("rayzor/expandMacro", s.at("Main.hx", 1, column + 8));
+    assert_eq!(preview["expansion"], "21 + 21", "{preview}");
+    assert!(
+        preview["definition"]["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("Macros.hx")
+    );
+    let hints = s.request("textDocument/inlayHint", json!({"textDocument":{"uri":s.uri("Main.hx")},"range":{"start":{"line":0,"character":0},"end":{"line":3,"character":0}}}));
+    assert_eq!(hints.as_array().unwrap().len(), 1, "{hints}");
+    assert_eq!(hints[0]["position"]["line"], 1);
+    let hover = s.request("textDocument/hover", s.at("Main.hx", 1, column + 8));
+    assert!(hover_text(&hover).contains("21 + 21"), "{hover}");
+    let before = s.diagnostics.len();
+    s.change(
+        "Main.hx",
+        &main.replace("Macros.value()", "Macros.broken()"),
+    );
+    let error = s.diagnostics[before..]
+        .iter()
+        .find(|d| d["uri"] == s.uri("Macros.hx"))
+        .expect("macro declaration diagnostic");
+    assert_eq!(
+        error["diagnostics"][0]["range"]["start"]["line"], 3,
+        "{error}"
+    );
+    assert_eq!(
+        error["diagnostics"][0]["relatedInformation"][0]["location"]["uri"],
+        s.uri("Main.hx")
+    );
+    assert_eq!(error["diagnostics"][0]["severity"], 1);
+    assert!(
+        error["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("macro failed")
     );
 }
