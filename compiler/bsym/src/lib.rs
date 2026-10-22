@@ -85,6 +85,68 @@ const SYMBOL_MAGIC: &[u8; 4] = b"BSYM";
 /// Current symbol format version
 const SYMBOL_VERSION: u32 = 2;
 
+/// A BLADE editor index contains portable query data, without executable MIR
+/// or compiler-local symbol IDs. The editor owns the payload schema.
+#[derive(Serialize, Deserialize)]
+struct EditorIndex {
+    magic: [u8; 4],
+    version: u32,
+    build_id: String,
+    input_hash: u64,
+    payload: Vec<u8>,
+}
+
+pub fn save_editor_index(
+    path: impl AsRef<Path>,
+    build_id: &str,
+    input_hash: u64,
+    payload: Vec<u8>,
+) -> Result<(), BladeError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let entry = EditorIndex {
+        magic: *b"BIDX",
+        version: 1,
+        build_id: build_id.into(),
+        input_hash,
+        payload,
+    };
+    let bytes = postcard::to_allocvec(&entry)?;
+    let temporary = path.with_extension(format!(
+        "{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = fs::write(&temporary, bytes).and_then(|()| fs::rename(&temporary, path));
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result.map_err(BladeError::from)
+}
+
+pub fn load_editor_index(
+    path: impl AsRef<Path>,
+    build_id: &str,
+    input_hash: u64,
+) -> Result<Option<Vec<u8>>, BladeError> {
+    let path = path.as_ref();
+    if fs::metadata(path)?.len() > 64 << 20 {
+        return Ok(None);
+    }
+    let entry: EditorIndex = postcard::from_bytes(&fs::read(path)?)?;
+    if entry.magic != *b"BIDX" {
+        return Err(BladeError::InvalidMagic);
+    }
+    if entry.version != 1 {
+        return Err(BladeError::UnsupportedVersion(entry.version));
+    }
+    Ok((entry.build_id == build_id && entry.input_hash == input_hash).then_some(entry.payload))
+}
+
 /// A type as the manifest records it.
 ///
 /// Types used to be written out as source text and parsed again on load. That

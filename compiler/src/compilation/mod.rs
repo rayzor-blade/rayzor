@@ -91,6 +91,21 @@ fn profile_timer(enabled: bool) -> Option<Instant> {
     enabled.then(Instant::now)
 }
 
+struct EditorFileProfile<'a> {
+    filename: &'a str,
+    started: Instant,
+}
+
+impl Drop for EditorFileProfile<'_> {
+    fn drop(&mut self) {
+        eprintln!(
+            "  typecheck-editor-file: total={:.2}ms file={}",
+            elapsed_ms(self.started),
+            self.filename
+        );
+    }
+}
+
 #[inline]
 fn add_profile_ms(slot: &mut f64, start: Option<Instant>) {
     if let Some(start) = start {
@@ -329,6 +344,9 @@ pub struct CompilationUnit {
     /// Cache of files that have been successfully compiled (to avoid redundant recompilation)
     /// Maps filename to the TypedFile result
     compiled_files: BTreeMap<PathBuf, TypedFile>,
+    /// Entry and settled import attempts in a source-validated editor graph.
+    editor_entry: Option<PathBuf>,
+    settled_editor_imports: BTreeSet<PathBuf>,
 
     /// Internal compilation pipeline (delegates to HaxeCompilationPipeline)
     pipeline: HaxeCompilationPipeline,
@@ -581,6 +599,9 @@ pub struct CompilationConfig {
     /// macro leaves its class as written.
     pub continue_after_macro_errors: bool,
 
+    /// Unsaved editor sources, keyed by canonical source path.
+    pub source_overrides: std::sync::Arc<BTreeMap<PathBuf, String>>,
+
     /// Stop each file after type checking: no HIR or MIR. For tools that
     /// read the typed program only.
     pub typecheck_only: bool,
@@ -674,6 +695,8 @@ impl CompilationUnit {
                 crate::tast::sig_index::StaticSigIndex::default(),
             )),
             compiled_files: BTreeMap::new(),
+            editor_entry: None,
+            settled_editor_imports: BTreeSet::new(),
             pipeline,
             mir_modules: Vec::new(),
             import_mir_modules: Vec::new(),
@@ -1142,6 +1165,58 @@ fn collect_qualified_type_refs_from_ast(ast: &parser::HaxeFile, out: &mut Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn class_registration_does_not_reuse_an_enum_constructor() {
+        use crate::tast::SymbolKind;
+
+        for enum_first in [true, false] {
+            let mut unit = CompilationUnit::new(CompilationConfig::default());
+            let declarations = [
+                ("Clip.hx", "package drawing; enum Clip { Path(d:String); }"),
+                (
+                    "Path.hx",
+                    "package haxe.io; class Path { public static function extension(path:String):String return path; }",
+                ),
+            ];
+            let order = if enum_first { [0, 1] } else { [1, 0] };
+            for index in order {
+                let (file, source) = declarations[index];
+                unit.pre_register_file_types(file, source).unwrap();
+            }
+            // Retrying registration must preserve both declarations' identities.
+            unit.pre_register_file_types(declarations[1].0, declarations[1].1)
+                .unwrap();
+            let named: Vec<_> = unit
+                .symbol_table
+                .all_symbols()
+                .filter(|s| unit.string_interner.get(s.name) == Some("Path"))
+                .collect();
+            let class = named
+                .iter()
+                .find(|s| s.kind == SymbolKind::Class)
+                .expect("Path class");
+            let constructor = named
+                .iter()
+                .find(|s| s.kind == SymbolKind::EnumVariant)
+                .expect("Path constructor");
+            assert_ne!(class.id, constructor.id);
+            assert_eq!(
+                unit.string_interner.get(class.qualified_name.unwrap()),
+                Some("haxe.io.Path")
+            );
+            assert_ne!(
+                constructor
+                    .qualified_name
+                    .and_then(|n| unit.string_interner.get(n)),
+                Some("haxe.io.Path")
+            );
+            assert_eq!(
+                named.iter().filter(|s| s.kind == SymbolKind::Class).count(),
+                1
+            );
+        }
+    }
 
     #[test]
     fn manifest_method_parameters_shadow_class_parameters() {

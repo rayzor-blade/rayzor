@@ -288,7 +288,7 @@ impl<'a> AstLowering<'a> {
             .map(|s| s.type_id.is_valid())
             .unwrap_or(false);
         if has_type {
-            self.refine_dynamic_static_return(class_symbol, method_name, method_symbol);
+            self.refine_dynamic_static_signature(class_symbol, method_name, method_symbol);
             return;
         }
 
@@ -310,16 +310,15 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    /// A static typed before its declared return type could resolve (an import
-    /// cycle) keeps a Dynamic return; take the declared one once it resolves.
-    fn refine_dynamic_static_return(
+    /// Recover annotated positions that were still Dynamic during registration.
+    fn refine_dynamic_static_signature(
         &mut self,
         class_symbol: SymbolId,
         method_name: InternedString,
         method_symbol: SymbolId,
     ) {
         let dynamic_type = self.context.type_table.borrow().dynamic_type();
-        let Some((params, effects)) = self
+        let Some((mut params, mut ret, effects)) = self
             .context
             .symbol_table
             .get_symbol(method_symbol)
@@ -336,7 +335,9 @@ impl<'a> AstLowering<'a> {
                         return_type,
                         effects,
                         ..
-                    }) if *return_type == dynamic_type => Some((params.clone(), effects.clone())),
+                    }) if *return_type == dynamic_type || params.contains(&dynamic_type) => {
+                        Some((params.clone(), *return_type, effects.clone()))
+                    }
                     _ => None,
                 }
             })
@@ -346,13 +347,31 @@ impl<'a> AstLowering<'a> {
         let Some(sig) = self.resolve_declared_method_sig(class_symbol, method_name, true) else {
             return;
         };
-        let (Some(declared), true) = (&sig.return_type, sig.type_params.is_empty()) else {
+        if !sig.type_params.is_empty() {
             return;
-        };
-        let Ok(ret) = self.lower_type(declared) else {
-            return;
-        };
-        if ret == dynamic_type {
+        }
+        let mut changed = false;
+        if params.len() == sig.params.len() {
+            for (param, hint) in params.iter_mut().zip(&sig.params) {
+                if *param == dynamic_type
+                    && let Some(hint) = hint
+                    && let Ok(declared) = self.lower_type(hint)
+                    && declared != dynamic_type
+                {
+                    *param = declared;
+                    changed = true;
+                }
+            }
+        }
+        if ret == dynamic_type
+            && let Some(hint) = &sig.return_type
+            && let Ok(declared) = self.lower_type(hint)
+            && declared != dynamic_type
+        {
+            ret = declared;
+            changed = true;
+        }
+        if !changed {
             return;
         }
         let fn_ty = self

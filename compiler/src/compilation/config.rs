@@ -36,6 +36,7 @@ impl Default for CompilationConfig {
             user_defines: Vec::new(),
             continue_after_macro_errors: false,
             typecheck_only: false,
+            source_overrides: Default::default(),
             extra_defines: Vec::new(),
             profile_typecheck: false,
             resources: Default::default(),

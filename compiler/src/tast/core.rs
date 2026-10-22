@@ -1347,7 +1347,21 @@ impl TypeTable {
         self.dynamic_type() // Placeholder
     }
 
-    /// Resolve a type alias to its target type with caching
+    /// Follow transparent aliases and references without changing nullability.
+    pub fn resolve_alias_type(&self, mut type_id: TypeId) -> TypeId {
+        for _ in 0..64 {
+            match self.get(type_id).map(|ty| &ty.kind) {
+                Some(
+                    TypeKind::TypeAlias { target_type, .. }
+                    | TypeKind::Reference { target_type, .. },
+                ) if *target_type != type_id => type_id = *target_type,
+                _ => break,
+            }
+        }
+        type_id
+    }
+
+    /// Resolve a type alias to its target type with caching.
     pub fn resolve_type_alias(&self, symbol_id: SymbolId) -> TypeId {
         let cache_key = TypeCacheKey::TypeAlias(symbol_id);
 

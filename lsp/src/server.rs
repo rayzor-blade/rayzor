@@ -67,6 +67,44 @@ pub fn spawn_session(
 
 /// Serve one session on `connection`, from `initialize` to `shutdown`.
 pub fn serve(connection: &Connection) -> Result<(), String> {
+    let cache = crate::editor_cache::EditorCache::default();
+    let (front, worker_connection) = Connection::memory();
+    let worker_cache = cache.clone();
+    let worker = std::thread::Builder::new()
+        .name("lsp-typing".into())
+        .stack_size(SESSION_STACK)
+        .spawn(move || serve_worker(&worker_connection, worker_cache))
+        .map_err(|error| error.to_string())?;
+    loop {
+        crossbeam_channel::select! {
+            recv(connection.receiver) -> message => {
+                let Ok(message) = message else { break };
+                if let Message::Notification(notification) = &message { cache.track(notification); }
+                if let Message::Request(request) = &message
+                    && let Some(result) = cache.answer(request)
+                {
+                    let _ = connection.sender.send(Message::Response(Response::new_ok(request.id.clone(), result)));
+                    continue;
+                }
+                let exit = matches!(&message, Message::Notification(notification) if notification.method == "exit");
+                if front.sender.send(message).is_err() || exit { break; }
+            }
+            recv(front.receiver) -> message => {
+                let Ok(message) = message else { break };
+                if connection.sender.send(message).is_err() { break; }
+            }
+        }
+    }
+    drop(front);
+    worker
+        .join()
+        .unwrap_or_else(|_| Err("the typing session panicked".into()))
+}
+
+fn serve_worker(
+    connection: &Connection,
+    editor_cache: crate::editor_cache::EditorCache,
+) -> Result<(), String> {
     let (id, params) = connection
         .initialize_start()
         .map_err(|e| format!("Initialize failed: {}", e))?;
@@ -110,7 +148,9 @@ pub fn serve(connection: &Connection) -> Result<(), String> {
             work_done_progress_options: Default::default(),
         }),
         inlay_hint_provider: Some(OneOf::Left(true)),
-        experimental: Some(serde_json::json!({"macroExpansionProvider":true})),
+        experimental: Some(
+            serde_json::json!({"macroExpansionProvider":true,"analysisStatusProvider":true,"diagnosticProgress":true,"partialIndexProvider":true}),
+        ),
         references_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
@@ -141,18 +181,38 @@ pub fn serve(connection: &Connection) -> Result<(), String> {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     let mut ctx = LspContext::new(root);
+    ctx.editor_cache = editor_cache;
     let hxml = init_params
         .initialization_options
         .as_ref()
         .and_then(|o| o.get("hxml"))
         .and_then(|h| h.as_str());
     ctx.load_workspace_config(hxml);
+    ctx.analysis_cache_capacity = init_params
+        .initialization_options
+        .as_ref()
+        .and_then(|o| o.get("analysisCacheSize"))
+        .and_then(|size| size.as_u64())
+        .unwrap_or(2)
+        .clamp(1, 8) as usize;
     ctx.macro_budget = init_params
         .initialization_options
         .as_ref()
         .and_then(|o| o.get("macroBudgetMs"))
         .and_then(|ms| ms.as_u64())
         .map_or(MACRO_BUDGET, std::time::Duration::from_millis);
+    if let Ok(stdlib_paths) = crate::stdlib::discover() {
+        ctx.editor_cache.configure(
+            crate::session_cache::SessionKey {
+                class_paths: ctx.class_paths.clone(),
+                stdlib_paths,
+                defines: ctx.defines.clone(),
+                macros: ctx.initialization_macros.clone(),
+                macro_budget: ctx.macro_budget,
+            },
+            &ctx.root,
+        );
+    }
     for problem in &ctx.config_problems {
         log_message(connection, problem);
     }
@@ -172,9 +232,8 @@ pub fn serve(connection: &Connection) -> Result<(), String> {
         let _ = connection.sender.send(Message::Request(request));
     }
 
-    // Everything queued is taken at once: the edits first, each changed
-    // document compiled once at its latest text, then the requests, which so
-    // see that text.
+    // Apply edits first. Serve requests for unchanged indexed pages before
+    // starting unrelated queued analysis; requests for edited pages wait.
     let mut changed: Vec<String> = Vec::new();
     while let Ok(first) = connection.receiver.recv() {
         let mut requests = Vec::new();
@@ -187,29 +246,63 @@ pub fn serve(connection: &Connection) -> Result<(), String> {
                 Message::Response(_) => {}
             }
         }
+        let mut deferred = Vec::new();
+        for req in requests {
+            let ready = req
+                .params
+                .get("textDocument")
+                .and_then(|doc| doc.get("uri"))
+                .and_then(|uri| uri.as_str())
+                .is_some_and(|uri| {
+                    !changed.iter().any(|changed| changed == uri) && ctx.has_current_analysis(uri)
+                });
+            if ready {
+                if answer_request(connection, &ctx, req)? {
+                    return Ok(());
+                }
+            } else {
+                deferred.push(req);
+            }
+        }
         for uri in changed.drain(..) {
             publish_diagnostics(connection, &mut ctx, &uri);
         }
-        for req in requests {
-            if connection
-                .handle_shutdown(&req)
-                .map_err(|e| e.to_string())?
+        for req in deferred {
+            if let Some(uri) = req
+                .params
+                .get("textDocument")
+                .and_then(|doc| doc.get("uri"))
+                .and_then(|uri| uri.as_str())
+                && ctx.needs_analysis(uri)
             {
-                return Ok(());
+                analyze_document(connection, &mut ctx, uri, false);
             }
-            let id = req.id.clone();
-            let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                handle_request(connection, &ctx, req)
-            }));
-            if let Err(payload) = answered {
-                let message = format!("internal error: {}", panic_message(&payload));
-                log_message(connection, &message);
-                let failed = Response::new_err(id, ErrorCode::InternalError as i32, message);
-                let _ = connection.sender.send(Message::Response(failed));
+            if answer_request(connection, &ctx, req)? {
+                return Ok(());
             }
         }
     }
     Ok(())
+}
+
+fn answer_request(connection: &Connection, ctx: &LspContext, req: Request) -> Result<bool, String> {
+    if connection
+        .handle_shutdown(&req)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(true);
+    }
+    let id = req.id.clone();
+    let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_request(connection, ctx, req)
+    }));
+    if let Err(payload) = answered {
+        let message = format!("internal error: {}", panic_message(&payload));
+        log_message(connection, &message);
+        let failed = Response::new_err(id, ErrorCode::InternalError as i32, message);
+        let _ = connection.sender.send(Message::Response(failed));
+    }
+    Ok(false)
 }
 
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
@@ -287,18 +380,22 @@ fn handle_notification(
     };
     if let Some(params) = cast_notification::<DidOpenTextDocument>(&not) {
         let uri = params.text_document.uri.as_str().to_string();
+        ctx.document_versions
+            .insert(uri.clone(), params.text_document.version);
         ctx.open_files
             .insert(uri.clone(), params.text_document.text);
         mark(&uri);
     } else if let Some(params) = cast_notification::<DidChangeTextDocument>(&not) {
         let uri = params.text_document.uri.as_str().to_string();
         if let Some(change) = params.content_changes.into_iter().last() {
+            ctx.document_versions
+                .insert(uri.clone(), params.text_document.version);
             ctx.open_files.insert(uri.clone(), change.text);
             mark(&uri);
         }
     } else if let Some(params) = cast_notification::<DidCloseTextDocument>(&not) {
         let uri = params.text_document.uri.as_str().to_string();
-        publish_diagnostic_updates(conn, ctx.update_diagnostics(&uri, Vec::new()));
+        publish_diagnostic_updates(conn, ctx.update_diagnostics(&uri, Vec::new()), None);
         ctx.close(&uri);
         changed.retain(|u| *u != uri);
         let params = PublishDiagnosticsParams {
@@ -310,6 +407,7 @@ fn handle_notification(
     } else if let Some(params) =
         cast_notification::<lsp_types::notification::DidChangeWatchedFiles>(&not)
     {
+        ctx.invalidate_analysis_cache();
         for change in params.changes {
             ctx.index_disk_file(change.uri.as_str());
         }
@@ -319,14 +417,46 @@ fn handle_notification(
 /// Compiles `uri` at its current text and publishes what it finds. A panic
 /// inside the compiler becomes a diagnostic; the last analysis stays.
 fn publish_diagnostics(conn: &Connection, ctx: &mut LspContext, uri: &str) {
+    analyze_document(conn, ctx, uri, true);
+}
+
+fn analyze_document(conn: &Connection, ctx: &mut LspContext, uri: &str, allow_index: bool) {
     let Some(source) = ctx.open_files.get(uri).cloned() else {
         return;
     };
+    let version = ctx.document_versions.get(uri).copied();
+    if allow_index
+        && !ctx.has_current_analysis(uri)
+        && let Some(snapshot) = ctx
+            .editor_cache
+            .lookup(uri)
+            .filter(|snapshot| snapshot.complete)
+    {
+        let notification = Notification::new(
+            "textDocument/publishDiagnostics".into(),
+            serde_json::json!({"uri":uri,"version":version,"diagnostics":snapshot.diagnostics}),
+        );
+        let _ = conn.sender.send(Message::Notification(notification));
+        analysis_status(conn, uri, version, "ready");
+        return;
+    }
+    let input_hash = ctx.editor_cache.fingerprint(uri, &ctx.open_files);
+    analysis_status(conn, uri, version, "checking");
+    if let Some(input_hash) = input_hash
+        && let Ok(snapshot) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            declaration_snapshot(ctx, uri, &source)
+        }))
+    {
+        let count = snapshot.names.len();
+        ctx.editor_cache.publish_partial(uri, input_hash, snapshot);
+        let _ = conn.sender.send(Message::Notification(Notification::new("rayzor/indexProgress".into(), serde_json::json!({"uri":uri,"version":version,"phase":"declarations","completed":count}))));
+    }
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _budget = compiler::macro_system::budget::limit(Some(ctx.macro_budget));
         ctx.compile_file(uri, &source)
     }));
     let diags = compiled.unwrap_or_else(|payload| {
+        ctx.invalidate_analysis_cache();
         let message = format!("internal compiler error: {}", panic_message(&payload));
         log_message(conn, &message);
         vec![crate::context::LspDiagnostic::error(
@@ -336,7 +466,254 @@ fn publish_diagnostics(conn: &Connection, ctx: &mut LspContext, uri: &str) {
             message,
         )]
     });
-    publish_diagnostic_updates(conn, ctx.update_diagnostics(uri, diags));
+    let root_diagnostics: Vec<_> = diags
+        .iter()
+        .filter(|diagnostic| diagnostic.file == crate::context::uri_to_path(uri))
+        .cloned()
+        .collect();
+    let cached_diagnostics = serde_json::to_value(to_lsp_diagnostics(&root_diagnostics))
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    publish_diagnostic_updates(
+        conn,
+        ctx.update_diagnostics(uri, diags),
+        version.map(|version| (uri, version)),
+    );
+    if ctx.has_current_analysis(uri)
+        && let Some(input_hash) = input_hash
+        && ctx.editor_cache.fingerprint(uri, &ctx.open_files) == Some(input_hash)
+    {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            build_editor_snapshot(conn, ctx, uri, input_hash, cached_diagnostics)
+        })) {
+            Ok(snapshot)
+                if ctx.editor_cache.fingerprint(uri, &ctx.open_files) == Some(input_hash) =>
+            {
+                ctx.editor_cache.save(uri, input_hash, snapshot)
+            }
+            Ok(_) => {}
+            Err(payload) => log_message(
+                conn,
+                &format!(
+                    "Editor index failed: {}; serving from live analysis",
+                    panic_message(&payload)
+                ),
+            ),
+        }
+    }
+    analysis_status(conn, uri, version, "ready");
+}
+
+fn build_editor_snapshot(
+    conn: &Connection,
+    ctx: &LspContext,
+    uri: &str,
+    input_hash: u64,
+    diagnostics: Vec<serde_json::Value>,
+) -> crate::editor_cache::Snapshot {
+    use serde_json::{Value, json};
+    let (server, client) = Connection::memory();
+    let render = |method: &str, params: Value| {
+        handle_request(&server, ctx, Request::new(0.into(), method.into(), params));
+        match client.receiver.recv() {
+            Ok(Message::Response(response)) => response.result.unwrap_or(Value::Null),
+            _ => Value::Null,
+        }
+    };
+    let mut snapshot = crate::editor_cache::Snapshot {
+        diagnostics,
+        expansions: ctx.indexed_expansions(uri),
+        ..Default::default()
+    };
+    let declarations = ctx
+        .open_files
+        .get(uri)
+        .map(|source| declaration_snapshot(ctx, uri, source))
+        .unwrap_or_default();
+    for method in [
+        "textDocument/documentSymbol",
+        "textDocument/semanticTokens/full",
+        "textDocument/completion",
+        "textDocument/inlayHint",
+    ] {
+        let params = json!({"textDocument":{"uri":uri},"position":{"line":0,"character":0},"range":{"start":{"line":0,"character":0},"end":{"line":u32::MAX,"character":0}}});
+        snapshot
+            .document
+            .insert(method.into(), render(method, params));
+    }
+    let names = ctx.indexed_names(uri);
+    let total = names.len();
+    let mut records = std::collections::HashMap::new();
+    let mut member_records = std::collections::HashMap::new();
+    for (line, column, len, symbol) in names {
+        let params =
+            json!({"textDocument":{"uri":uri},"position":{"line":line,"character":column}});
+        let metadata = if let Some(&record) = records.get(&symbol) {
+            record
+        } else {
+            let mut metadata = std::collections::BTreeMap::new();
+            for method in ["textDocument/definition", "textDocument/documentHighlight"] {
+                metadata.insert(method.into(), render(method, params.clone()));
+            }
+            for include in [false, true] {
+                let mut params = params.clone();
+                params["context"] = json!({"includeDeclaration":include});
+                metadata.insert(
+                    format!("textDocument/references:{include}"),
+                    render("textDocument/references", params),
+                );
+            }
+            let record = snapshot.records.len();
+            snapshot.records.push(metadata);
+            records.insert(symbol, record);
+            record
+        };
+        let responses = std::collections::BTreeMap::from([(
+            "textDocument/hover".into(),
+            render("textDocument/hover", params),
+        )]);
+        let completion = json!({"textDocument":{"uri":uri},"position":{"line":line,"character":column + len + 1}});
+        if ctx
+            .open_files
+            .get(uri)
+            .and_then(|source| analysis::receiver_before(source, line + 1, column + len + 2))
+            .is_some_and(|(row, col, _)| row == line + 1 && col == column + 1)
+        {
+            let record = if let Some(&record) = member_records.get(&symbol) {
+                record
+            } else {
+                let record = snapshot.member_results.len();
+                snapshot
+                    .member_results
+                    .push(render("textDocument/completion", completion));
+                member_records.insert(symbol, record);
+                record
+            };
+            snapshot.members.insert(format!("{line}:{column}"), record);
+        }
+        snapshot.names.push(crate::editor_cache::Name {
+            line,
+            column,
+            len,
+            metadata: Some(metadata),
+            responses,
+        });
+        if snapshot.names.len().is_multiple_of(128) {
+            let mut partial = snapshot.clone();
+            for declaration in &declarations.names {
+                if !partial
+                    .names
+                    .iter()
+                    .any(|name| name.line == declaration.line && name.column == declaration.column)
+                {
+                    partial.names.push(declaration.clone());
+                }
+            }
+            ctx.editor_cache.publish_partial(uri, input_hash, partial);
+            let _ = conn.sender.send(Message::Notification(Notification::new("rayzor/indexProgress".into(), json!({"uri":uri,"version":ctx.document_versions.get(uri),"phase":"types","completed":snapshot.names.len(),"total":total}))));
+        }
+    }
+    if let Some(source) = ctx.open_files.get(uri)
+        && let Ok(tokens) = parser::lexer::Lexer::new(source).tokenize()
+    {
+        for token in tokens
+            .iter()
+            .filter(|token| token.kind == parser::token::TokenKind::LParen)
+        {
+            let before = &source[..token.span.end];
+            let line = before.bytes().filter(|&byte| byte == b'\n').count() as u32;
+            let column = before
+                .rsplit('\n')
+                .next()
+                .unwrap_or("")
+                .encode_utf16()
+                .count() as u32;
+            if let Some(call) = analysis::enclosing_call(source, line + 1, column + 1)
+                && let Some(name) = snapshot.names.iter_mut().find(|name| {
+                    name.line + 1 == call.callee_line && name.column + 1 == call.callee_col
+                })
+            {
+                let params =
+                    json!({"textDocument":{"uri":uri},"position":{"line":line,"character":column}});
+                name.responses.insert(
+                    "textDocument/signatureHelp".into(),
+                    render("textDocument/signatureHelp", params),
+                );
+            }
+        }
+    }
+    snapshot.complete = true;
+    snapshot
+}
+
+fn declaration_snapshot(
+    ctx: &LspContext,
+    uri: &str,
+    source: &str,
+) -> crate::editor_cache::Snapshot {
+    use serde_json::json;
+    let filename = crate::context::uri_to_path(uri);
+    let declarations =
+        crate::workspace_index::declarations(std::path::Path::new(&filename), source, &ctx.defines);
+    let mut snapshot = crate::editor_cache::Snapshot::default();
+    let mut completions = Vec::new();
+    let mut outline = Vec::new();
+    for declaration in declarations {
+        let mut hover = format!("```haxe\n{}\n```", declaration.signature);
+        if let Some(doc) = &declaration.documentation {
+            hover.push_str("\n\n");
+            hover.push_str(doc);
+        }
+        let mut responses = std::collections::BTreeMap::new();
+        responses.insert(
+            "textDocument/hover".into(),
+            json!({"contents":{"kind":"markdown","value":hover},"range":declaration.range}),
+        );
+        responses.insert(
+            "textDocument/definition".into(),
+            json!({"uri":uri,"range":declaration.range}),
+        );
+        let kind = match declaration.kind {
+            lsp_types::SymbolKind::CLASS => CompletionItemKind::CLASS,
+            lsp_types::SymbolKind::INTERFACE => CompletionItemKind::INTERFACE,
+            lsp_types::SymbolKind::STRUCT => CompletionItemKind::STRUCT,
+            lsp_types::SymbolKind::ENUM => CompletionItemKind::ENUM,
+            lsp_types::SymbolKind::METHOD | lsp_types::SymbolKind::FUNCTION => {
+                CompletionItemKind::FUNCTION
+            }
+            _ => CompletionItemKind::FIELD,
+        };
+        completions.push(json!({"label":declaration.name,"kind":kind,"detail":declaration.signature,"documentation":declaration.documentation.map(|doc| json!({"kind":"markdown","value":doc}))}));
+        outline.push(json!({"name":declaration.name,"detail":declaration.signature,"kind":declaration.kind,"range":declaration.range,"selectionRange":declaration.range}));
+        snapshot.names.push(crate::editor_cache::Name {
+            line: declaration.range.start.line,
+            column: declaration.range.start.character,
+            len: declaration
+                .range
+                .end
+                .character
+                .saturating_sub(declaration.range.start.character),
+            metadata: None,
+            responses,
+        });
+    }
+    snapshot.document.insert(
+        "textDocument/completion".into(),
+        json!({"isIncomplete":true,"items":completions}),
+    );
+    snapshot
+        .document
+        .insert("textDocument/documentSymbol".into(), json!(outline));
+    snapshot
+}
+
+fn analysis_status(conn: &Connection, uri: &str, version: Option<i32>, state: &str) {
+    let notification = Notification::new(
+        "rayzor/analysisStatus".into(),
+        serde_json::json!({"uri":uri,"version":version,"state":state}),
+    );
+    let _ = conn.sender.send(Message::Notification(notification));
 }
 
 /// Tells the client about a configuration problem it can show in its log.
@@ -359,17 +736,20 @@ where
 fn publish_diagnostic_updates(
     conn: &Connection,
     updates: Vec<(String, Vec<crate::context::LspDiagnostic>)>,
+    analyzed: Option<(&str, i32)>,
 ) {
     for (file, diagnostics) in updates {
-        let Ok(uri) = crate::context::file_uri(&file).parse() else {
+        let Ok(uri) = crate::context::file_uri(&file).parse::<lsp_types::Uri>() else {
             continue;
         };
         send_notification::<PublishDiagnostics>(
             conn,
             PublishDiagnosticsParams {
+                version: analyzed
+                    .filter(|(owner, _)| *owner == uri.as_str())
+                    .map(|(_, version)| version),
                 uri,
                 diagnostics: to_lsp_diagnostics(&diagnostics),
-                version: None,
             },
         );
     }

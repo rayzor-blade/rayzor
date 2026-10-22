@@ -3,6 +3,19 @@
 use super::*;
 
 impl CompilationUnit {
+    /// Imports and macro source views use the same editor overlay as roots.
+    pub(crate) fn read_source(&self, path: impl AsRef<Path>) -> Result<String, std::io::Error> {
+        let path = path.as_ref();
+        if let Some(source) = self
+            .config
+            .source_overrides
+            .get(&source_file_identity(&path.to_string_lossy()))
+        {
+            return Ok(source.clone());
+        }
+        std::fs::read_to_string(path)
+    }
+
     /// Parse a file with the compilation unit's preprocessor defines.
     pub(crate) fn parse_file(
         &self,
@@ -37,7 +50,7 @@ impl CompilationUnit {
         let source = match source {
             Some(s) => s,
             None => {
-                read = std::fs::read_to_string(&file.filename).ok()?;
+                read = self.read_source(Path::new(&file.filename)).ok()?;
                 &read
             }
         };
@@ -315,9 +328,8 @@ impl CompilationUnit {
     /// This resolves the file's path and loads it, making it easier to work with
     /// real projects on disk
     pub fn add_file_from_path(&mut self, path: &PathBuf) -> Result<(), String> {
-        use std::fs;
-
-        let source = fs::read_to_string(path)
+        let source = self
+            .read_source(path)
             .map_err(|e| format!("Failed to read file {:?}: {}", path, e))?;
 
         let file_path_str = path

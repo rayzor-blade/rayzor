@@ -116,7 +116,7 @@ impl<'a> TypeCheckingPhase<'a> {
 
     /// Check if a method signature matches the provided argument types
     pub(crate) fn check_signature_compatibility(
-        &self,
+        &mut self,
         param_types: &[TypeId],
         arg_types: &[TypeId],
     ) -> bool {
@@ -125,32 +125,12 @@ impl<'a> TypeCheckingPhase<'a> {
         }
 
         for (expected_type, actual_type) in param_types.iter().zip(arg_types) {
-            // Check compatibility by accessing type table directly to avoid borrowing issues
-            let type_table = self.type_checker.type_table.borrow();
-            let expected_type_info = type_table.get(*expected_type);
-            let actual_type_info = type_table.get(*actual_type);
-
-            // Basic compatibility check - for now, require exact match or allow implicit upcasts
-            if *expected_type != *actual_type {
-                // For now, only allow some basic implicit conversions
-                let compatible = match (expected_type_info, actual_type_info) {
-                    (Some(expected), Some(actual)) => {
-                        match (&expected.kind, &actual.kind) {
-                            // Dynamic can accept anything
-                            (super::TypeKind::Dynamic, _) => true,
-                            // Same types are compatible
-                            _ if expected_type == actual_type => true,
-                            // Allow Int -> Float implicit conversion
-                            (super::TypeKind::Float, super::TypeKind::Int) => true,
-                            _ => false,
-                        }
-                    }
-                    _ => false,
-                };
-
-                if !compatible {
-                    return false;
-                }
+            if matches!(
+                self.type_checker
+                    .check_compatibility(*actual_type, *expected_type),
+                TypeCompatibility::Incompatible
+            ) {
+                return false;
             }
         }
 
@@ -159,7 +139,7 @@ impl<'a> TypeCheckingPhase<'a> {
 
     /// Check method overloads to find a matching signature
     pub(crate) fn check_method_overloads(
-        &self,
+        &mut self,
         method_symbol: SymbolId,
         arg_types: &[TypeId],
         source_location: SourceLocation,

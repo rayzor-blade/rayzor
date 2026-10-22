@@ -260,7 +260,20 @@ impl<'a> AstLowering<'a> {
                 self.context
                     .symbol_table
                     .get_symbol(symbol)
-                    .is_some_and(|symbol| symbol.kind == crate::tast::SymbolKind::EnumVariant)
+                    .is_some_and(|symbol| {
+                        symbol.kind == crate::tast::SymbolKind::EnumVariant
+                            || (matches!(
+                                symbol.kind,
+                                crate::tast::SymbolKind::Class
+                                    | crate::tast::SymbolKind::Interface
+                                    | crate::tast::SymbolKind::Enum
+                                    | crate::tast::SymbolKind::Abstract
+                                    | crate::tast::SymbolKind::TypeAlias
+                            ) && symbol.package_id.is_some_and(|package| {
+                                package != crate::tast::namespace::PackageId::root()
+                                    && Some(package) != self.context.current_package
+                            }))
+                    })
             }) && let Some(&variant) = self.module_enum_variants.get(&name)
             {
                 return Some(variant);

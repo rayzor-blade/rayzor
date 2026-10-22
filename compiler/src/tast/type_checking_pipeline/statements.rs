@@ -10,7 +10,7 @@ impl<'a> TypeCheckingPhase<'a> {
                 expression,
                 source_location: _,
             } => {
-                if let Err(e) = self.check_expression(expression) {
+                if let Err(e) = self.check_discarded_expression(expression) {
                     // Continue checking even if expression has errors
                     eprintln!("Expression error: {}", e);
                 }

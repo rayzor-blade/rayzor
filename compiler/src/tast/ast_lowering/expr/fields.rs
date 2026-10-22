@@ -1089,6 +1089,12 @@ impl<'a> AstLowering<'a> {
             None => self.infer_expression_type(&kind)?,
         };
         let expr_type = self.registered_alias_as_array(expr_type);
+        // Dynamic placeholders keep the runtime field lookup representation.
+        if is_placeholder && expr_type != self.context.type_table.borrow().dynamic_type() {
+            self.context
+                .symbol_table
+                .update_symbol_type(field_symbol, expr_type);
+        }
         let usage = self.determine_variable_usage(&kind);
         let lifetime_id = self.assign_lifetime(&kind, &expr_type);
         let metadata = self.analyze_expression_metadata(&kind);

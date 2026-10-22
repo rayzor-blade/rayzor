@@ -33,7 +33,12 @@ impl CompilationUnit {
 
     /// The id the lowering pipeline gave the file compiled from `path`.
     pub fn file_id_of(&self, path: &str) -> Option<u32> {
-        self.file_id_by_filename.get(path).copied()
+        self.file_id_by_filename.get(path).copied().or_else(|| {
+            let identity = source_file_identity(path);
+            self.file_id_by_filename
+                .iter()
+                .find_map(|(name, id)| (source_file_identity(name) == identity).then_some(*id))
+        })
     }
 
     /// The path of the file compiled under `file_id`.

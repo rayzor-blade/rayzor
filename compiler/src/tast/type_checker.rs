@@ -1115,6 +1115,13 @@ impl<'a> TypeChecker<'a> {
 
     /// Check if two types are compatible
     pub fn check_compatibility(&mut self, source: TypeId, target: TypeId) -> TypeCompatibility {
+        let (source, target) = {
+            let table = self.type_table.borrow();
+            (
+                table.resolve_alias_type(source),
+                table.resolve_alias_type(target),
+            )
+        };
         // Increment stats counter
         self.stats.types_checked += 1;
 
@@ -1484,7 +1491,17 @@ impl<'a> TypeChecker<'a> {
         }
 
         // Check return type compatibility (covariant)
-        let return_compat = self.check_compatibility(source_return, target_return);
+        let return_compat = if source_return != target_return
+            && self
+                .type_table
+                .borrow()
+                .get(target_return)
+                .is_some_and(|ty| matches!(ty.kind, TypeKind::Void))
+        {
+            TypeCompatibility::Assignable
+        } else {
+            self.check_compatibility(source_return, target_return)
+        };
         match return_compat {
             TypeCompatibility::Incompatible => TypeCompatibility::Incompatible,
             TypeCompatibility::Identical if param_compat == TypeCompatibility::Identical => {
@@ -2462,6 +2479,40 @@ mod tests {
         let string_type = checker.type_table.borrow().string_type();
         assert_eq!(
             checker.check_compatibility(int_type, string_type),
+            TypeCompatibility::Incompatible
+        );
+    }
+
+    #[test]
+    fn aliases_use_their_targets_for_compatibility() {
+        let (type_table, symbols, scopes, interner) = create_test_setup();
+        let (text, number, alias, nested) = {
+            let mut table = type_table.borrow_mut();
+            let text = table.string_type();
+            let number = table.int_type();
+            let alias = table.create_type(TypeKind::TypeAlias {
+                symbol_id: SymbolId::from_raw(100),
+                target_type: text,
+                type_args: Vec::new(),
+            });
+            let nested = table.create_type(TypeKind::TypeAlias {
+                symbol_id: SymbolId::from_raw(101),
+                target_type: alias,
+                type_args: Vec::new(),
+            });
+            (text, number, alias, nested)
+        };
+        let mut checker = TypeChecker::new(&type_table, &symbols, &scopes, &interner);
+        assert_eq!(
+            checker.check_compatibility(alias, text),
+            TypeCompatibility::Identical
+        );
+        assert_eq!(
+            checker.check_compatibility(text, nested),
+            TypeCompatibility::Identical
+        );
+        assert_eq!(
+            checker.check_compatibility(number, nested),
             TypeCompatibility::Incompatible
         );
     }

@@ -629,6 +629,15 @@ impl<'a> AstLowering<'a> {
                 }
             }
             Type::Function { params, ret, .. } => {
+                // In Haxe's arrow notation Void denotes an empty argument list.
+                let params = if matches!(params.as_slice(), [Type::Path { path, params, .. }]
+                    if path.name == "Void" && (path.package.is_empty() || path.package == ["StdTypes"])
+                        && params.is_empty())
+                {
+                    &[][..]
+                } else {
+                    params.as_slice()
+                };
                 let param_types = params
                     .iter()
                     .map(|param| self.lower_type(param))

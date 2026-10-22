@@ -180,7 +180,7 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    /// Keep declarations in distinct packages from sharing a root name's symbol.
+    /// Type declarations cannot reuse a foreign type or an enum constructor.
     pub(crate) fn root_slot_is_foreign_type(&self, name: InternedString) -> bool {
         let named_package = |package: Option<crate::tast::namespace::PackageId>| {
             package.filter(|&id| {
@@ -195,6 +195,7 @@ impl<'a> AstLowering<'a> {
             .symbol_table
             .lookup_symbol(ScopeId::first(), name)
             .is_some_and(|s| match s.kind {
+                crate::tast::SymbolKind::EnumVariant => true,
                 crate::tast::SymbolKind::Enum | crate::tast::SymbolKind::Abstract => {
                     named_package(s.package_id) != pkg
                 }

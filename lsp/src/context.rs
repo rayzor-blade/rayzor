@@ -6,15 +6,19 @@
 use crate::analysis::{self, CompletionEntry, FileSymbolIndex};
 use compiler::compilation::{CompilationConfig, CompilationUnit};
 use compiler::tast::SymbolId;
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 /// Persistent compilation context shared across LSP requests.
 pub struct LspContext {
+    pub editor_cache: crate::editor_cache::EditorCache,
     /// Root workspace directory.
     pub root: PathBuf,
     /// Open file contents (URI → source text).
     pub open_files: HashMap<String, String>,
+    pub document_versions: HashMap<String, i32>,
     /// Where imports are searched: the project's class paths, its
     /// libraries', then the workspace root.
     pub class_paths: Vec<PathBuf>,
@@ -29,13 +33,16 @@ pub struct LspContext {
     pub macro_budget: std::time::Duration,
     /// The last analysis of each open document that produced an index.
     analyses: HashMap<String, Analysis>,
+    sessions: VecDeque<crate::session_cache::SessionCache>,
+    failed_analyses: HashSet<String>,
+    pub analysis_cache_capacity: usize,
     diagnostics: HashMap<String, Vec<LspDiagnostic>>,
     workspace_index: crate::workspace_index::WorkspaceIndex,
 }
 
 /// A compiled document: the unit its symbols live in and its position index.
 pub struct Analysis {
-    pub unit: CompilationUnit,
+    pub unit: Rc<RefCell<CompilationUnit>>,
     pub index: FileSymbolIndex,
 }
 
@@ -43,10 +50,10 @@ impl Analysis {
     /// Whether `symbol` is called `name`: an index of earlier text can hold
     /// another name at a position that has since been edited.
     fn names(&self, symbol: SymbolId, name: &str) -> bool {
-        self.unit
-            .symbol_table
+        let unit = self.unit.borrow();
+        unit.symbol_table
             .get_symbol(symbol)
-            .and_then(|s| self.unit.string_interner.get(s.name))
+            .and_then(|s| unit.string_interner.get(s.name))
             == Some(name)
     }
 }
@@ -54,8 +61,10 @@ impl Analysis {
 impl LspContext {
     pub fn new(root: PathBuf) -> Self {
         Self {
+            editor_cache: Default::default(),
             root,
             open_files: HashMap::new(),
+            document_versions: HashMap::new(),
             class_paths: Vec::new(),
             defines: Vec::new(),
             initialization_macros: Vec::new(),
@@ -63,6 +72,9 @@ impl LspContext {
             config_problems: Vec::new(),
             macro_budget: std::time::Duration::from_secs(5),
             analyses: HashMap::new(),
+            sessions: VecDeque::new(),
+            failed_analyses: HashSet::new(),
+            analysis_cache_capacity: 2,
             diagnostics: HashMap::new(),
             workspace_index: Default::default(),
         }
@@ -199,17 +211,30 @@ impl LspContext {
 
     /// Compile a file and return diagnostics. Also builds the symbol index.
     pub fn compile_file(&mut self, uri: &str, source: &str) -> Vec<LspDiagnostic> {
+        let profiling = std::env::var_os("RAYZOR_LSP_PROFILE").is_some();
+        let started = std::time::Instant::now();
+        self.failed_analyses.insert(uri.to_string());
         let filename = uri_to_path(uri);
         self.workspace_index
             .update(std::path::Path::new(&filename), Some(source));
 
         let mut config = CompilationConfig {
             load_stdlib: true,
+            profile_typecheck: profiling,
             emit_safety_warnings: false,
             record_references: true,
             user_defines: self.defines.clone(),
             continue_after_macro_errors: true,
             typecheck_only: true,
+            source_overrides: std::sync::Arc::new(
+                self.open_files
+                    .iter()
+                    .map(|(uri, source)| {
+                        let path = PathBuf::from(uri_to_path(uri));
+                        (path.canonicalize().unwrap_or(path), source.clone())
+                    })
+                    .collect(),
+            ),
             ..Default::default()
         };
         config.stdlib_paths = match crate::stdlib::discover() {
@@ -229,28 +254,85 @@ impl LspContext {
             return syntax;
         }
 
-        let mut unit = CompilationUnit::new(config);
-
-        for cp in &self.class_paths {
-            unit.add_source_path(cp.clone());
+        let key = crate::session_cache::SessionKey {
+            class_paths: self.class_paths.clone(),
+            stdlib_paths: config.stdlib_paths.clone(),
+            defines: self.defines.clone(),
+            macros: self.initialization_macros.clone(),
+            macro_budget: self.macro_budget,
+        };
+        let mut inputs = crate::session_cache::Inputs::capture(&key, &self.open_files);
+        inputs.set_source(&filename, source);
+        // Old document indices cannot answer against an outdated dependency
+        // graph. Keep bounded snapshots for undo/reopen, but reindex those
+        // documents on their next request using the current source generation.
+        self.analyses.retain(|_, analysis| {
+            self.sessions.iter().any(|session| {
+                Rc::ptr_eq(&session.unit, &analysis.unit)
+                    && session.key == key
+                    && session.inputs == inputs
+            })
+        });
+        let reusable = self.sessions.iter().rposition(|session| {
+            inputs.reusable
+                && session.key == key
+                && session.inputs == inputs
+                && session.can_extend(&filename)
+        });
+        let reused = reusable.is_some();
+        let mut session = match reusable {
+            Some(index) => self.sessions.remove(index).unwrap(),
+            None => {
+                let mut unit = CompilationUnit::new(config);
+                for cp in &self.class_paths {
+                    unit.add_source_path(cp.clone());
+                }
+                if let Err(error) = unit.load_stdlib() {
+                    return vec![LspDiagnostic::error(
+                        &filename,
+                        0,
+                        0,
+                        format!("Stdlib: {error}"),
+                    )];
+                }
+                let initialization_errors =
+                    unit.run_initialization_macros(&self.initialization_macros);
+                crate::session_cache::SessionCache::new(key, inputs, unit, initialization_errors)
+            }
+        };
+        if let Some(index) = session.indexes.get(uri).cloned() {
+            let result = session.diagnostics.clone();
+            self.analyses.insert(
+                uri.to_string(),
+                Analysis {
+                    unit: session.unit.clone(),
+                    index,
+                },
+            );
+            self.failed_analyses.remove(uri);
+            self.sessions.push_back(session);
+            if profiling {
+                eprintln!(
+                    "lsp-analysis: reused=true indexed=true total_ms={:.2} file={}",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    filename
+                );
+            }
+            return result;
         }
-
-        if let Err(e) = unit.load_stdlib() {
+        let shared_unit = session.unit.clone();
+        let mut unit = shared_unit.borrow_mut();
+        let initialization_errors = session.initialization_errors.clone();
+        unit.set_editor_entry(&filename);
+        // A source reached as an import already has its types and reference
+        // identities in this graph. Index it without compiling its body again.
+        let already_root = unit.user_files.iter().any(|file| file.filename == filename);
+        if !already_root && let Err(error) = unit.add_file(source, &filename) {
             return vec![LspDiagnostic::error(
                 &filename,
                 0,
                 0,
-                format!("Stdlib: {}", e),
-            )];
-        }
-
-        let initialization_errors = unit.run_initialization_macros(&self.initialization_macros);
-        if let Err(e) = unit.add_file(source, &filename) {
-            return vec![LspDiagnostic::error(
-                &filename,
-                0,
-                0,
-                format!("Parse: {}", e),
+                format!("Parse: {error}"),
             )];
         }
 
@@ -284,6 +366,26 @@ impl LspContext {
                 })
                 .collect(),
         };
+        result.extend(session.diagnostics.iter().cloned());
+        result.extend(
+            unit.check_typed_file(&filename)
+                .diagnostics
+                .into_iter()
+                .filter_map(|diagnostic| {
+                    if diagnostic.severity != diagnostics::DiagnosticSeverity::Error {
+                        return None;
+                    }
+                    let file = unit
+                        .file_path_of(diagnostic.span.file_id.as_usize() as u32)
+                        .unwrap_or(&filename);
+                    Some(LspDiagnostic::error(
+                        file,
+                        diagnostic.span.start.line as u32,
+                        diagnostic.span.start.column as u32,
+                        diagnostic.message,
+                    ))
+                }),
+        );
         result.extend(unit.macro_diagnostics.iter().filter_map(|diagnostic| {
             use compiler::macro_system::MacroSeverity;
             let severity = match diagnostic.severity {
@@ -337,11 +439,44 @@ impl LspContext {
         let text = parser::preprocessor::preprocess(source, &preprocessor);
         if let Ok(file) = parser::rd::rd_parse(&text, &filename, false, false) {
             FileSymbolIndex::record_source_declarations(&file, &text, file_id, &mut unit);
-            crate::type_references::record(&file, &text, file_id, &mut unit);
+            crate::structural_fields::record(&file, &text, file_id, &mut unit);
+            crate::type_references::record(&file, &text, file_id, &mut unit, &self.workspace_index);
         }
         crate::documentation::record(&mut unit);
         for file in unit.stdlib_files.iter().chain(&unit.user_files) {
             self.workspace_index.ensure_parsed_file(file);
+        }
+        // Imported placeholders may still carry a provisional class kind.
+        // Source declarations determine their editor presentation.
+        let source_types = self.workspace_index.type_identities();
+        let declaration_kinds: Vec<_> = unit
+            .symbol_table
+            .all_symbols()
+            .filter(|symbol| {
+                matches!(
+                    symbol.kind,
+                    compiler::tast::symbols::SymbolKind::Class
+                        | compiler::tast::symbols::SymbolKind::Interface
+                        | compiler::tast::symbols::SymbolKind::Abstract
+                        | compiler::tast::symbols::SymbolKind::Enum
+                        | compiler::tast::symbols::SymbolKind::TypeAlias
+                )
+            })
+            .filter_map(|symbol| {
+                let qualified = symbol.qualified_name.unwrap_or_else(|| {
+                    unit.symbol_table.build_qualified_name(
+                        symbol.id,
+                        &unit.scope_tree,
+                        &unit.string_interner,
+                    )
+                });
+                let name = unit.string_interner.get(qualified)?;
+                let kind = source_types.get(name)?.kind;
+                Some((symbol.id, kind))
+            })
+            .collect();
+        for (id, kind) in declaration_kinds {
+            unit.symbol_table.get_symbol_mut(id).unwrap().kind = kind;
         }
         let index = FileSymbolIndex::build(
             &unit.symbol_table,
@@ -349,11 +484,49 @@ impl LspContext {
             &unit.symbol_references,
             file_id,
         );
-        // A document mid-edit often fails to type; until it does again, the
-        // last analysis still holds for the text before the edit.
-        if !index.names.is_empty() || !self.analyses.contains_key(uri) {
+        if profiling {
+            let timings = unit.typecheck_timings();
+            eprintln!(
+                "lsp-analysis: reused={} total_ms={:.2} typed_files={} imports_reused={} imports_compiled={} symbols={} file={}",
+                reused,
+                started.elapsed().as_secs_f64() * 1000.0,
+                timings.files_seen,
+                timings.import_already_compiled,
+                timings.import_fresh_compiles,
+                unit.symbol_table.len(),
+                filename
+            );
+        }
+        if profiling {
+            eprintln!("lsp-typecheck: {:?}", unit.typecheck_timings());
+        }
+        session.indexes.insert(uri.to_string(), index.clone());
+        drop(unit);
+        self.analyses.insert(
+            uri.to_string(),
+            Analysis {
+                unit: shared_unit,
+                index,
+            },
+        );
+        self.failed_analyses.remove(uri);
+        // Keep one copy of diagnostics for modules served from the shared
+        // typed graph on later pages. Bound this along with the graph itself.
+        for diagnostic in &result {
+            if !session.diagnostics.iter().any(|old| {
+                old.file == diagnostic.file
+                    && old.line == diagnostic.line
+                    && old.column == diagnostic.column
+                    && old.message == diagnostic.message
+            }) {
+                session.diagnostics.push(diagnostic.clone());
+            }
+        }
+        self.sessions.push_back(session);
+        while self.sessions.len() > self.analysis_cache_capacity.clamp(1, 8) {
+            let oldest = self.sessions.pop_front().unwrap();
             self.analyses
-                .insert(uri.to_string(), Analysis { unit, index });
+                .retain(|_, analysis| !Rc::ptr_eq(&analysis.unit, &oldest.unit));
         }
 
         result
@@ -396,9 +569,68 @@ impl LspContext {
     /// Forget a closed document and its analysis.
     pub fn close(&mut self, uri: &str) {
         self.open_files.remove(uri);
+        self.document_versions.remove(uri);
         self.analyses.remove(uri);
+        self.failed_analyses.remove(uri);
         self.diagnostics.remove(uri);
         self.index_disk_file(uri);
+    }
+
+    pub fn needs_analysis(&mut self, uri: &str) -> bool {
+        self.open_files.contains_key(uri)
+            && !self.analyses.contains_key(uri)
+            && !self.failed_analyses.contains(uri)
+    }
+
+    pub fn has_current_analysis(&self, uri: &str) -> bool {
+        self.analyses.get(uri).is_some_and(|analysis| {
+            self.open_files.get(uri).is_some_and(|source| {
+                analysis
+                    .unit
+                    .borrow()
+                    .source_matches(analysis.index.file_id, source)
+            })
+        })
+    }
+
+    pub(crate) fn indexed_names(&self, uri: &str) -> Vec<(u32, u32, u32, SymbolId)> {
+        self.analyses
+            .get(uri)
+            .map(|analysis| {
+                analysis
+                    .index
+                    .names
+                    .iter()
+                    .map(|(&(line, column), &(len, symbol))| (line - 1, column - 1, len, symbol))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn indexed_expansions(&self, uri: &str) -> Vec<serde_json::Value> {
+        let Some(analysis) = self.analyses.get(uri) else {
+            return Vec::new();
+        };
+        let unit = analysis.unit.borrow();
+        let Some(source) = unit.source_of(analysis.index.file_id) else {
+            return Vec::new();
+        };
+        unit.macro_expansions
+            .iter()
+            .filter(|origin| origin.call_site.file_id == analysis.index.file_id)
+            .filter_map(|origin| {
+                let (line, column) = line_column(source, origin.call_span.start);
+                self.expand_macro(uri, lsp_types::Position::new(line - 1, column - 1))
+            })
+            .collect()
+    }
+
+    /// A changed dependency, newly created module, or compiler panic makes
+    /// the workspace graph unsafe to reuse, including its negative lookups.
+    pub fn invalidate_analysis_cache(&mut self) {
+        self.sessions.clear();
+        self.analyses.clear();
+        self.failed_analyses.clear();
     }
 
     pub fn index_disk_file(&self, uri: &str) {
@@ -452,7 +684,8 @@ impl LspContext {
     fn symbol_at(&self, uri: &str, line: u32, col: u32) -> Option<(&Analysis, SymbolId)> {
         let a = self.analyses.get(uri)?;
         let current = self.open_files.get(uri)?;
-        let original = a.unit.source_of(a.index.file_id)?;
+        let unit = a.unit.borrow();
+        let original = unit.source_of(a.index.file_id)?;
         if current != original {
             let (&(row, start), &(len, _)) = a.index.names.range(..=(line, col)).next_back()?;
             let old = original.lines().nth(row.checked_sub(1)? as usize)?;
@@ -490,7 +723,7 @@ impl LspContext {
     /// Look up type/doc info for a symbol at a given position.
     pub fn hover_info(&self, uri: &str, line: u32, col: u32) -> Option<String> {
         let (a, sym_id) = self.symbol_at(uri, line, col)?;
-        let unit = &a.unit;
+        let unit = a.unit.borrow();
         let mut hover = analysis::format_hover(
             sym_id,
             &unit.symbol_table,
@@ -511,12 +744,15 @@ impl LspContext {
                 let (rline, rcol, _) = analysis::receiver_before(text, line, col)?;
                 let receiver = a.index.find_symbol_at(rline, rcol)?;
                 let receiver_type = unit.symbol_table.get_symbol(receiver)?.type_id;
-                let owner = analysis::class_of_type(
-                    receiver_type,
-                    &unit.symbol_table,
-                    &unit.type_table.borrow(),
-                    &unit.string_interner,
-                )?;
+                let owner =
+                    crate::structural_fields::alias_owner(receiver_type, &unit).or_else(|| {
+                        analysis::class_of_type(
+                            receiver_type,
+                            &unit.symbol_table,
+                            &unit.type_table.borrow(),
+                            &unit.string_interner,
+                        )
+                    })?;
                 let path = unit
                     .symbol_table
                     .display_type_path(owner, &unit.string_interner)?;
@@ -543,9 +779,10 @@ impl LspContext {
                 hover.push_str("\n\n");
                 hover.push_str(&doc);
             }
-            if symbol.kind == compiler::tast::symbols::SymbolKind::Function
-                && hover.contains("*Signature not yet resolved.*")
-                && declaration.signature.contains("function ")
+            if (declaration.type_kind.is_some()
+                || (symbol.kind == compiler::tast::symbols::SymbolKind::Function
+                    && hover.contains("*Signature not yet resolved.*")
+                    && declaration.signature.contains("function ")))
                 && let Some(end) = hover.find("\n```")
             {
                 hover.replace_range("```haxe\n".len()..end, &declaration.signature);
@@ -558,11 +795,12 @@ impl LspContext {
     /// Find definition location for a symbol at a given position.
     pub fn goto_definition(&self, uri: &str, line: u32, col: u32) -> Option<(String, u32, u32)> {
         let (a, sym_id) = self.symbol_at(uri, line, col)?;
-        let loc = a.unit.symbol_table.get_symbol(sym_id)?.definition_location;
+        let unit = a.unit.borrow();
+        let loc = unit.symbol_table.get_symbol(sym_id)?.definition_location;
         if !loc.is_valid() {
             return None;
         }
-        let file = a.unit.file_path_of(loc.file_id)?.to_string();
+        let file = unit.file_path_of(loc.file_id)?.to_string();
         Some((file, loc.line, loc.column))
     }
 
@@ -578,7 +816,7 @@ impl LspContext {
         let Some((a, sym_id)) = self.symbol_at(uri, line, col) else {
             return Vec::new();
         };
-        let unit = &a.unit;
+        let unit = a.unit.borrow();
         let mut out = Vec::new();
         let place = |at: compiler::tast::SourceLocation, len: u32| {
             unit.file_path_of(at.file_id)
@@ -606,7 +844,7 @@ impl LspContext {
         let Some(a) = self.analyses.get(uri) else {
             return Completions::Names(Vec::new());
         };
-        let unit = &a.unit;
+        let unit = a.unit.borrow();
         if let Some(text) = self.open_files.get(uri)
             && let Some((rline, rcol, name)) = analysis::receiver_before(text, line, col)
         {
@@ -619,7 +857,7 @@ impl LspContext {
                     analysis::resolve_name(&name, a.index.file_id, rline, rcol, st, interner)
                 })
                 .map(|receiver| {
-                    let members = analysis::member_completions(
+                    let mut members = analysis::member_completions(
                         receiver,
                         &unit.symbol_table,
                         &unit.type_table,
@@ -631,8 +869,27 @@ impl LspContext {
                                 .collect()
                         },
                     );
+                    if let Some(owner) = unit.symbol_table.get_symbol(receiver).and_then(|symbol| {
+                        crate::structural_fields::alias_owner(symbol.type_id, &unit)
+                    }) && let Some(path) = unit
+                        .symbol_table
+                        .display_type_path(owner, &unit.string_interner)
+                    {
+                        if let Some(source) = unit
+                            .namespace_resolver
+                            .resolve_qualified_path_to_file_force(&path)
+                        {
+                            self.workspace_index.ensure_disk_file(&source);
+                        }
+                        for member in &mut members {
+                            member.documentation = self
+                                .workspace_index
+                                .declaration(&format!("{path}.{}", member.label))
+                                .and_then(|declaration| declaration.documentation);
+                        }
+                    }
                     if members.is_empty() {
-                        analysis::stdlib_member_completions(receiver, unit)
+                        analysis::stdlib_member_completions(receiver, &unit)
                     } else {
                         members
                     }
@@ -645,14 +902,16 @@ impl LspContext {
             &unit.type_table,
             &unit.string_interner,
             a.index.file_id,
+            &unit.symbol_references,
         ))
     }
 
     /// Build semantic tokens for syntax highlighting.
     pub fn semantic_tokens(&self, uri: &str) -> Option<Vec<analysis::SemanticToken>> {
         let a = self.analyses.get(uri)?;
+        let unit = a.unit.borrow();
         Some(analysis::build_semantic_tokens(
-            &a.unit.symbol_table,
+            &unit.symbol_table,
             &a.index,
         ))
     }
@@ -660,10 +919,11 @@ impl LspContext {
     /// Build document symbols for the outline panel.
     pub fn document_symbols(&self, uri: &str) -> Option<Vec<analysis::DocumentSymbolEntry>> {
         let a = self.analyses.get(uri)?;
+        let unit = a.unit.borrow();
         Some(analysis::build_document_symbols(
-            &a.unit.symbol_table,
-            &a.unit.type_table,
-            &a.unit.string_interner,
+            &unit.symbol_table,
+            &unit.type_table,
+            &unit.string_interner,
             a.index.file_id,
         ))
     }
@@ -679,7 +939,8 @@ impl LspContext {
         let text = self.open_files.get(uri)?;
         let call = analysis::enclosing_call(text, line, col)?;
         let a = self.analyses.get(uri)?;
-        let (st, interner) = (&a.unit.symbol_table, &a.unit.string_interner);
+        let unit = a.unit.borrow();
+        let (st, interner) = (&unit.symbol_table, &unit.string_interner);
         let callee = a
             .index
             .find_symbol_at(call.callee_line, call.callee_col)
@@ -690,9 +951,9 @@ impl LspContext {
             })?;
         analysis::build_signature_help(
             callee,
-            &a.unit.symbol_table,
-            &a.unit.type_table,
-            &a.unit.string_interner,
+            &unit.symbol_table,
+            &unit.type_table,
+            &unit.string_interner,
             call.argument,
         )
     }
@@ -704,10 +965,11 @@ impl LspContext {
     ) -> Option<serde_json::Value> {
         let analysis = self.analyses.get(uri)?;
         let source = self.open_files.get(uri)?;
-        if !analysis.unit.source_matches(analysis.index.file_id, source) {
+        let unit = analysis.unit.borrow();
+        if !unit.source_matches(analysis.index.file_id, source) {
             return None;
         }
-        let source = analysis.unit.source_of(analysis.index.file_id)?;
+        let source = unit.source_of(analysis.index.file_id)?;
         let line_start = source
             .split_inclusive('\n')
             .take(position.line as usize)
@@ -727,8 +989,7 @@ impl LspContext {
             })
             .unwrap_or(line.len());
         let offset = line_start + column;
-        let origin = analysis
-            .unit
+        let origin = unit
             .macro_expansions
             .iter()
             .filter(|o| {
@@ -760,15 +1021,15 @@ impl LspContext {
         let Some(a) = self.analyses.get(uri) else {
             return Vec::new();
         };
+        let unit = a.unit.borrow();
         if !self
             .open_files
             .get(uri)
-            .is_some_and(|source| a.unit.source_matches(a.index.file_id, source))
+            .is_some_and(|source| unit.source_matches(a.index.file_id, source))
         {
             return Vec::new();
         }
-        a.unit
-            .macro_expansions
+        unit.macro_expansions
             .iter()
             .filter_map(|origin| {
                 let text = origin.expanded_text.as_ref()?;
@@ -776,7 +1037,7 @@ impl LspContext {
                 if !loc.is_valid() || loc.file_id != a.index.file_id {
                     return None;
                 }
-                let source = a.unit.source_of(a.index.file_id)?;
+                let source = unit.source_of(a.index.file_id)?;
                 let (line, column) = line_column(source, origin.call_span.end);
                 Some(MacroExpansionHint {
                     line,
@@ -878,4 +1139,204 @@ pub(crate) fn file_uri(path: &str) -> String {
             .replace('#', "%23")
             .replace('?', "%3F")
     )
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Workspace(PathBuf);
+    impl Workspace {
+        fn new(files: &[(&str, &str)]) -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "rayzor-session-cache-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            for (name, source) in files {
+                std::fs::write(root.join(name), source).unwrap();
+            }
+            Self(root)
+        }
+        fn context(&self) -> LspContext {
+            let mut context = LspContext::new(self.0.clone());
+            context.class_paths.push(self.0.clone());
+            context
+        }
+        fn compile(&self, context: &mut LspContext, name: &str, source: Option<&str>) -> String {
+            let path = self.0.join(name);
+            let uri = file_uri(path.to_str().unwrap());
+            let source = source
+                .map(str::to_string)
+                .unwrap_or_else(|| std::fs::read_to_string(path).unwrap());
+            context.open_files.insert(uri.clone(), source.clone());
+            let errors = context.compile_file(&uri, &source);
+            assert!(
+                errors.is_empty(),
+                "{name}: {:?}",
+                errors.iter().map(|d| &d.message).collect::<Vec<_>>()
+            );
+            uri
+        }
+    }
+    impl Drop for Workspace {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn pages_share_import_types_and_reopening_reuses_the_graph() {
+        let workspace = Workspace::new(&[
+            (
+                "Shared.hx",
+                "class Shared { public static function value():Int return 1; }",
+            ),
+            (
+                "First.hx",
+                "class First { static function test():Int return Shared.value(); }",
+            ),
+            (
+                "Second.hx",
+                "class Second { static function test():Int return Shared.value(); }",
+            ),
+        ]);
+        let mut context = workspace.context();
+        let first = workspace.compile(&mut context, "First.hx", None);
+        let graph = context.analyses[&first].unit.clone();
+        let shared = graph
+            .borrow()
+            .file_id_of(workspace.0.join("Shared.hx").to_str().unwrap())
+            .unwrap();
+        let second = workspace.compile(&mut context, "Second.hx", None);
+        assert!(Rc::ptr_eq(&graph, &context.analyses[&second].unit));
+        assert_eq!(context.sessions.len(), 1);
+        assert_eq!(
+            graph
+                .borrow()
+                .file_id_of(workspace.0.join("Shared.hx").to_str().unwrap()),
+            Some(shared)
+        );
+        let before = (
+            graph.borrow().symbol_table.len(),
+            graph.borrow().symbol_references.len(),
+        );
+        context.close(&first);
+        let first = workspace.compile(&mut context, "First.hx", None);
+        assert!(Rc::ptr_eq(&graph, &context.analyses[&first].unit));
+        assert!(context.hover_info(&first, 1, 49).is_some());
+        assert_eq!(
+            before,
+            (
+                graph.borrow().symbol_table.len(),
+                graph.borrow().symbol_references.len()
+            )
+        );
+    }
+
+    #[test]
+    fn changed_dependencies_and_defines_invalidate_the_graph() {
+        let workspace = Workspace::new(&[
+            (
+                "Shared.hx",
+                "class Shared { public static function value():Int return 1; }",
+            ),
+            (
+                "First.hx",
+                "class First { static function test():Dynamic return Shared.value(); }",
+            ),
+            (
+                "Second.hx",
+                "class Second { static function test():Dynamic return Shared.value(); }",
+            ),
+        ]);
+        let mut context = workspace.context();
+        let first = workspace.compile(&mut context, "First.hx", None);
+        let old = Rc::downgrade(&context.analyses[&first].unit);
+        // Use an unsaved dependency: imports must see its current buffer.
+        let shared_uri = file_uri(workspace.0.join("Shared.hx").to_str().unwrap());
+        context.open_files.insert(
+            shared_uri,
+            "class Shared { public static function value():String return 'updated'; }".into(),
+        );
+        let second = workspace.compile(&mut context, "Second.hx", None);
+        assert!(!Rc::ptr_eq(
+            &old.upgrade().unwrap(),
+            &context.analyses[&second].unit
+        ));
+        let unit = context.analyses[&second].unit.borrow();
+        let source = unit
+            .source_of(
+                unit.file_id_of(workspace.0.join("Shared.hx").to_str().unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(source.contains("updated"), "{source}");
+        drop(unit);
+        let before_define = context.analyses[&second].unit.clone();
+        context.defines.push("new_feature".into());
+        workspace.compile(&mut context, "Second.hx", None);
+        assert!(!Rc::ptr_eq(&before_define, &context.analyses[&second].unit));
+        drop(before_define);
+        assert!(
+            old.upgrade().is_none(),
+            "old graph must be released at capacity"
+        );
+    }
+
+    #[test]
+    fn cached_graphs_are_bounded_and_evicted_pages_are_reanalyzed() {
+        let workspace = Workspace::new(&[(
+            "Main.hx",
+            "class Main { static function test():Int return 1; }",
+        )]);
+        let mut context = workspace.context();
+        context.analysis_cache_capacity = 1;
+        let uri = workspace.compile(&mut context, "Main.hx", None);
+        let first = Rc::downgrade(&context.analyses[&uri].unit);
+        for version in 2..8 {
+            let text = format!("class Main {{ static function test():Int return {version}; }}");
+            workspace.compile(&mut context, "Main.hx", Some(&text));
+            assert_eq!(context.sessions.len(), 1);
+            assert_eq!(context.analyses.len(), 1);
+        }
+        assert!(first.upgrade().is_none());
+        context.invalidate_analysis_cache();
+        assert!(context.needs_analysis(&uri));
+        let source = context.open_files[&uri].clone();
+        assert!(context.compile_file(&uri, &source).is_empty());
+        assert!(!context.needs_analysis(&uri));
+        let unit = context.analyses[&uri].unit.borrow();
+        assert!(
+            unit.source_of(context.analyses[&uri].index.file_id)
+                .unwrap()
+                .contains("return 7")
+        );
+    }
+    #[test]
+    fn opening_an_import_through_its_canonical_path_reuses_its_source_identity() {
+        let workspace = Workspace::new(&[
+            (
+                "Shared.hx",
+                "class Shared { public static function value():Int return 1; }",
+            ),
+            (
+                "Main.hx",
+                "class Main { static function main() trace(Shared.value()); }",
+            ),
+        ]);
+        let mut context = workspace.context();
+        context.class_paths = vec![workspace.0.join(".")];
+        let main = workspace.compile(&mut context, "Main.hx", None);
+        let graph = context.analyses[&main].unit.clone();
+        let shared = workspace.compile(&mut context, "Shared.hx", None);
+        assert!(Rc::ptr_eq(&graph, &context.analyses[&shared].unit));
+        assert_ne!(context.analyses[&shared].index.file_id, u32::MAX);
+        let hover = context.hover_info(&shared, 1, 8).unwrap();
+        assert!(hover.contains("class Shared"), "{hover}");
+        assert!(!context.document_symbols(&shared).unwrap().is_empty());
+    }
 }

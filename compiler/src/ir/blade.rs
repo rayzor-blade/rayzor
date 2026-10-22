@@ -449,7 +449,8 @@ pub fn compute_body_hash(func: &crate::ir::IrFunction) -> u64 {
 pub use bsym::{
     BladeAbstractInfo, BladeClassInfo, BladeEnumInfo, BladeEnumVariantInfo, BladeFieldInfo,
     BladeMethodInfo, BladeModuleSymbols, BladeParamInfo, BladeSymbolManifest, BladeTypeAliasInfo,
-    BladeTypeInfo, load_symbol_manifest, load_symbol_manifest_from_bytes, save_symbol_manifest,
+    BladeTypeInfo, load_editor_index, load_symbol_manifest, load_symbol_manifest_from_bytes,
+    save_editor_index, save_symbol_manifest,
 };
 
 // ============================================================================

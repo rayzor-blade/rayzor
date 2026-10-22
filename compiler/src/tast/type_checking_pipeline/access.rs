@@ -8,7 +8,7 @@ impl<'a> TypeCheckingPhase<'a> {
     /// Check if a field access is valid
     pub(crate) fn check_field_access(
         &mut self,
-        object_type: TypeId,
+        mut object_type: TypeId,
         field_symbol: SymbolId,
         location: SourceLocation,
         is_static_access: bool,
@@ -16,6 +16,17 @@ impl<'a> TypeCheckingPhase<'a> {
         // Get the object type information
         let type_kind = {
             let type_table = self.type_checker.type_table.borrow();
+            for _ in 0..64 {
+                object_type = type_table.resolve_alias_type(object_type);
+                match type_table.get(object_type).map(|ty| &ty.kind) {
+                    Some(super::TypeKind::Optional { inner_type })
+                        if *inner_type != object_type =>
+                    {
+                        object_type = *inner_type
+                    }
+                    _ => break,
+                }
+            }
             if let Some(type_info) = type_table.get(object_type) {
                 type_info.kind.clone()
             } else {

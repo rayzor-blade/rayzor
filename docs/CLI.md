@@ -162,6 +162,43 @@ format `@param`, `@return`/`@returns`, `@throws`, `@see`, `@deprecated` and
 `@example` tags. The same documentation is available in completion and
 signature help. Adjacent line comments are also displayed.
 
+Pages with the same class paths, defines, initialization macros and source
+versions share a live typed dependency graph. Opening another page reuses
+already typed imports instead of loading and expanding them again. Changes to
+workspace inputs (including unsaved buffers and macro resources) start a new
+graph; watched-file events also invalidate cached lookups. The server keeps two
+graphs by default, configurable with `initializationOptions.analysisCacheSize`
+(1–8). Each graph accepts up to 32 root documents or 100,000 symbols before new
+pages start another graph. Evicting a graph releases its compiler state;
+queries absent from the portable editor index rebuild that state from current
+buffers. This session
+cache uses the configured Haxe sources and does not substitute the bundled
+Rayzor BLADE manifest for a different installed standard library.
+
+Portable editor indexes are saved in `.rayzor/blade/editor/*.bidx`. They store
+positions, named type signatures, documentation and query results, independently
+of compiler graph lifetimes. Entries are validated against project inputs,
+build settings, the selected standard library and compiler/LSP build IDs.
+Cached requests are served separately from typechecking, including while
+another document runs a macro. Closing a tab or restarting the server can reuse
+its editor index. Uncached queries still use the compiler.
+
+Cold documents publish declaration information first, followed by inferred
+information in batches. `rayzor/indexProgress` notifications carry `uri`,
+`version`, `phase` (`declarations` or `types`), `completed` and, when known,
+`total`. Partial completion lists set `isIncomplete`. Only complete indexes
+are written to BLADE; `rayzor/analysisStatus` becomes `ready` when analysis
+finishes. Partial indexing is advertised as
+`capabilities.experimental.partialIndexProvider`.
+
+During document analysis, `rayzor/analysisStatus` notifications carry the
+document `uri`, `version` and a `state` of `checking` or `ready`. `ready` means
+analysis finished, including when it found errors. Clients should match the
+version to their current buffer before clearing a pending indicator. Support
+is advertised as `capabilities.experimental.analysisStatusProvider`.
+Diagnostics for the analyzed document also carry its version and are published
+even when the result is empty (`capabilities.experimental.diagnosticProgress`).
+
 Successful macro expansions are available as inlay hints with full expansion
 tooltips. Hovering a macro invocation shows its expanded Haxe source. Macro
 diagnostics retain their source file and can include a link to the invocation.

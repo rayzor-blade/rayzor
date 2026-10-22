@@ -1171,6 +1171,34 @@ impl<'a> TypeDiagnosticEmitter<'a> {
                     TypeKind::Float => "Float".to_string(),
                     TypeKind::String => "String".to_string(),
                     TypeKind::Dynamic => "Dynamic".to_string(),
+                    TypeKind::TypeAlias {
+                        symbol_id,
+                        type_args,
+                        ..
+                    }
+                    | TypeKind::Abstract {
+                        symbol_id,
+                        type_args,
+                        ..
+                    } => {
+                        let name = self
+                            .symbol_table
+                            .display_type_path(*symbol_id, self.string_interner)
+                            .unwrap_or_else(|| "Unknown".into());
+                        if type_args.is_empty() {
+                            name
+                        } else {
+                            format!(
+                                "{}<{}>",
+                                name,
+                                type_args
+                                    .iter()
+                                    .map(|&id| self.format_type_name(id))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        }
+                    }
                     TypeKind::Class { symbol_id, .. } => {
                         // Look up the class name from symbol table
                         if let Some(symbol) = self.symbol_table.get_symbol(*symbol_id) {

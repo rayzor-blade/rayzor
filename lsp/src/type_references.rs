@@ -12,11 +12,21 @@ pub(crate) fn record(
     source: &str,
     file_id: u32,
     unit: &mut CompilationUnit,
+    workspace: &crate::workspace_index::WorkspaceIndex,
 ) {
     let Ok(tokens) = parser::lexer::Lexer::new(source).tokenize() else {
         return;
     };
     let mut types = BTreeMap::<String, SymbolId>::new();
+    for import in &file.imports {
+        if let Some(path) = unit
+            .namespace_resolver
+            .resolve_qualified_path_to_file_force(&import.path.join("."))
+        {
+            workspace.ensure_disk_file(&path);
+        }
+    }
+    let source_types = workspace.type_identities();
     for symbol in unit.symbol_table.all_symbols().filter(|s| {
         matches!(
             s.kind,
@@ -38,6 +48,11 @@ pub(crate) fn record(
             let slot = types.entry(path.to_string()).or_insert(symbol.id);
             if symbol.definition_location.is_valid() {
                 *slot = symbol.id;
+            }
+            if let Some(declaration) = source_types.get(path) {
+                types
+                    .entry(declaration.qualified.clone())
+                    .or_insert(symbol.id);
             }
         }
     }

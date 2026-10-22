@@ -765,8 +765,24 @@ impl CompilationUnit {
             discovered_paths.insert(identity, qualified_path.clone());
             file_aliases.insert(qualified_path.clone(), qualified_path.clone());
 
+            // In a persistent tooling session this source and its dependency
+            // closure are already typed. Do not rediscover or reparse them.
+            if self.config.typecheck_only
+                && (self
+                    .compiled_files
+                    .contains_key(&source_file_identity(&file_path_str))
+                    || self
+                        .settled_editor_imports
+                        .contains(&source_file_identity(&file_path_str)))
+            {
+                if self.config.profile_typecheck {
+                    self.typecheck_timings.import_already_compiled += 1;
+                }
+                continue;
+            }
+
             // Read and parse to extract imports
-            let source = match std::fs::read_to_string(&file_path) {
+            let source = match self.read_source(&file_path) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
@@ -1613,7 +1629,8 @@ impl CompilationUnit {
         self.namespace_resolver.mark_file_loaded(file_path.clone());
 
         // Read the file
-        let source = std::fs::read_to_string(&file_path)
+        let source = self
+            .read_source(&file_path)
             .map_err(|e| format!("Failed to read {:?}: {}", file_path, e))?;
 
         let filename = file_path.to_string_lossy().to_string();
@@ -2047,7 +2064,7 @@ impl CompilationUnit {
     pub(crate) fn import_hx_type_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         for path in self.discover_import_hx_files() {
-            let Ok(source) = std::fs::read_to_string(&path) else {
+            let Ok(source) = self.read_source(&path) else {
                 continue;
             };
             let Ok(file) = self.parse_file(path.to_str().unwrap_or("import.hx"), &source) else {
@@ -2069,10 +2086,9 @@ impl CompilationUnit {
     /// These are processed AFTER stdlib but BEFORE user files
     /// They provide global imports available to all user code
     pub fn load_global_imports(&mut self) -> Result<(), String> {
-        use std::fs;
-
         for import_path in &self.config.global_import_hx_files.clone() {
-            let source = fs::read_to_string(import_path)
+            let source = self
+                .read_source(import_path)
                 .map_err(|e| format!("Failed to read import.hx at {:?}: {}", import_path, e))?;
 
             let haxe_file = self

@@ -17,6 +17,7 @@ use std::rc::Rc;
 
 /// The names written in one file, by position: where its symbols are
 /// declared and where resolved names refer to them.
+#[derive(Clone)]
 pub struct FileSymbolIndex {
     pub file_id: u32,
     /// (line, start column) → (length, symbol), both 1-based.
@@ -237,6 +238,9 @@ fn format_symbol_flags(sym: &Symbol) -> String {
     }
     if f.contains(SymbolFlags::DEPRECATED) {
         tags.push("@:deprecated");
+    }
+    if f.contains(SymbolFlags::OPTIONAL) {
+        tags.push("@:optional");
     }
     if f.contains(SymbolFlags::CSTRUCT) {
         tags.push("@:cstruct");
@@ -524,7 +528,8 @@ fn format_type_at(
             fields
                 .iter()
                 .map(|f| format!(
-                    "{}:{}",
+                    "{}{}:{}",
+                    if f.optional { "?" } else { "" },
                     interner.get(f.name).unwrap_or("_"),
                     nested(f.type_id)
                 ))
@@ -555,9 +560,15 @@ pub fn collect_completions(
     type_table: &Rc<RefCell<TypeTable>>,
     interner: &StringInterner,
     file_id: u32,
+    references: &[SymbolReference],
 ) -> Vec<CompletionEntry> {
     let mut entries = Vec::new();
     let tt = type_table.borrow();
+    let referenced: std::collections::BTreeSet<_> = references
+        .iter()
+        .filter(|r| r.at.file_id == file_id)
+        .map(|r| r.symbol)
+        .collect();
 
     for sym in symbol_table.all_symbols() {
         let name = match interner.get(sym.name) {
@@ -570,8 +581,16 @@ pub fn collect_completions(
             continue;
         }
 
-        // Include: same file, exported, or stdlib
-        if sym.definition_location.file_id != file_id && !sym.is_exported {
+        let visible_type = referenced.contains(&sym.id)
+            && matches!(
+                sym.kind,
+                SymbolKind::Class
+                    | SymbolKind::Interface
+                    | SymbolKind::Abstract
+                    | SymbolKind::Enum
+                    | SymbolKind::TypeAlias
+            );
+        if sym.definition_location.file_id != file_id && !sym.is_exported && !visible_type {
             continue;
         }
 
@@ -621,8 +640,7 @@ fn symbol_kind_to_completion(kind: SymbolKind) -> CompletionKind {
         SymbolKind::Interface => CompletionKind::Interface,
         SymbolKind::Enum => CompletionKind::Enum,
         SymbolKind::EnumVariant => CompletionKind::EnumMember,
-        SymbolKind::TypeAlias => CompletionKind::TypeParameter,
-        SymbolKind::Abstract => CompletionKind::Class,
+        SymbolKind::TypeAlias | SymbolKind::Abstract => CompletionKind::Struct,
         SymbolKind::Module => CompletionKind::Module,
         SymbolKind::TypeParameter => CompletionKind::TypeParameter,
         _ => CompletionKind::Variable,
@@ -645,6 +663,7 @@ pub enum CompletionKind {
     Field,
     Property,
     Class,
+    Struct,
     Interface,
     Enum,
     EnumMember,
@@ -660,6 +679,7 @@ impl CompletionKind {
             Self::Field => lsp_types::CompletionItemKind::FIELD,
             Self::Property => lsp_types::CompletionItemKind::PROPERTY,
             Self::Class => lsp_types::CompletionItemKind::CLASS,
+            Self::Struct => lsp_types::CompletionItemKind::STRUCT,
             Self::Interface => lsp_types::CompletionItemKind::INTERFACE,
             Self::Enum => lsp_types::CompletionItemKind::ENUM,
             Self::EnumMember => lsp_types::CompletionItemKind::ENUM_MEMBER,
@@ -840,6 +860,7 @@ pub fn build_document_symbols(
             | SymbolKind::Interface
             | SymbolKind::Enum
             | SymbolKind::Abstract
+            | SymbolKind::TypeAlias
             | SymbolKind::Module => {
                 top_level.push((sym.id, entry));
             }
@@ -869,7 +890,7 @@ fn symbol_kind_to_lsp_symbol(kind: SymbolKind) -> lsp_types::SymbolKind {
         SymbolKind::Variable | SymbolKind::Parameter => lsp_types::SymbolKind::VARIABLE,
         SymbolKind::Field => lsp_types::SymbolKind::FIELD,
         SymbolKind::Property => lsp_types::SymbolKind::PROPERTY,
-        SymbolKind::TypeAlias | SymbolKind::Abstract => lsp_types::SymbolKind::TYPE_PARAMETER,
+        SymbolKind::TypeAlias | SymbolKind::Abstract => lsp_types::SymbolKind::STRUCT,
         SymbolKind::TypeParameter => lsp_types::SymbolKind::TYPE_PARAMETER,
         SymbolKind::Module => lsp_types::SymbolKind::NAMESPACE,
         SymbolKind::Macro => lsp_types::SymbolKind::FUNCTION,
@@ -1202,9 +1223,41 @@ pub fn member_completions(
     };
     let is_type = matches!(
         sym.kind,
-        SymbolKind::Class | SymbolKind::Interface | SymbolKind::Abstract | SymbolKind::Enum
+        SymbolKind::Class
+            | SymbolKind::Interface
+            | SymbolKind::Abstract
+            | SymbolKind::Enum
+            | SymbolKind::TypeAlias
     );
-    let mut class = if is_type {
+    if !is_type {
+        let mut structural = sym.type_id;
+        for _ in 0..64 {
+            structural = tt.resolve_alias_type(structural);
+            match tt.get(structural).map(|ty| &ty.kind) {
+                Some(TypeKind::Optional { inner_type }) if *inner_type != structural => {
+                    structural = *inner_type
+                }
+                _ => break,
+            }
+        }
+        if let Some(TypeKind::Anonymous { fields }) = tt.get(structural).map(|ty| &ty.kind) {
+            return fields
+                .iter()
+                .filter(|field| field.is_public)
+                .filter_map(|field| {
+                    Some(CompletionEntry {
+                        label: interner.get(field.name)?.to_string(),
+                        kind: CompletionKind::Field,
+                        detail: format_type_name(field.type_id, &tt, interner, symbol_table),
+                        documentation: None,
+                        deprecated: false,
+                        sort_priority: 0,
+                    })
+                })
+                .collect();
+        }
+    }
+    let mut class = if is_type && sym.kind != SymbolKind::TypeAlias {
         Some(sym.id)
     } else {
         class_of_type(sym.type_id, symbol_table, &tt, interner)

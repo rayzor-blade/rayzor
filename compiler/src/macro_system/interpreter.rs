@@ -300,6 +300,22 @@ impl MacroInterpreter {
                 if let Some(v) = self.read_class_static(None, name)? {
                     return Ok(v);
                 }
+                // A static helper used as a callback retains its declaring class.
+                if let Some(class) = self.macro_class_stack.last()
+                    && let Some(registry) = &self.class_registry
+                    && let Some(method) = registry.find_static_method(class, name)
+                {
+                    return Ok(MacroValue::Function(Arc::new(MacroFunction {
+                        name: format!("{class}.{name}"),
+                        params: method
+                            .params
+                            .iter()
+                            .map(MacroParam::from_function_param)
+                            .collect(),
+                        body: method.body.clone(),
+                        captures: Default::default(),
+                    })));
+                }
                 // A bare method of the running instance, as a value bound to it.
                 if let Some((_, arity)) = self.this_with_method(name) {
                     let span = expr.span;
@@ -1775,6 +1791,17 @@ impl MacroInterpreter {
             });
         }
 
+        let static_context = func.name.rsplit_once('.').and_then(|(class, method)| {
+            let registry = self.class_registry.as_ref()?;
+            registry.find_static_method(class, method)?;
+            let info = registry.find_class(class)?;
+            Some((class.to_string(), (*info.imports).clone()))
+        });
+        let previous_imports = static_context.map(|(class, imports)| {
+            self.macro_class_stack.push(class);
+            std::mem::replace(&mut self.import_map, imports)
+        });
+
         // Set up function scope with captures and parameters
         self.env.push_scope();
 
@@ -1824,6 +1851,10 @@ impl MacroInterpreter {
         };
 
         self.env.pop_scope();
+        if let Some(imports) = previous_imports {
+            self.import_map = imports;
+            self.macro_class_stack.pop();
+        }
         self.call_depth -= 1;
         result
     }

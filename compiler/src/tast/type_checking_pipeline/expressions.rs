@@ -5,6 +5,23 @@ use super::*;
 impl<'a> TypeCheckingPhase<'a> {
     /// Check an expression and return its type
     pub fn check_expression(&mut self, expr: &TypedExpression) -> Result<TypeId, String> {
+        self.check_expression_in_context(expr, true)
+    }
+
+    pub(super) fn check_discarded_expression(
+        &mut self,
+        expr: &TypedExpression,
+    ) -> Result<TypeId, String> {
+        // Statement branches may end in unrelated values (for example a
+        // fluent call versus a Void call). Their contents still need checking.
+        self.check_expression_in_context(expr, false)
+    }
+
+    fn check_expression_in_context(
+        &mut self,
+        expr: &TypedExpression,
+        value_used: bool,
+    ) -> Result<TypeId, String> {
         match &expr.kind {
             TypedExpressionKind::BinaryOp {
                 left,
@@ -158,7 +175,14 @@ impl<'a> TypeCheckingPhase<'a> {
                 scope_id: _,
             } => {
                 // Check all statements in the block
-                for stmt in statements {
+                for (index, stmt) in statements.iter().enumerate() {
+                    if value_used
+                        && index + 1 == statements.len()
+                        && let TypedStatement::Expression { expression, .. } = stmt
+                    {
+                        self.check_expression(expression)?;
+                        continue;
+                    }
                     self.check_statement(stmt)?;
                 }
             }
@@ -408,14 +432,14 @@ impl<'a> TypeCheckingPhase<'a> {
                 }
 
                 // Check then and else branches
-                let then_type = self.check_expression(then_expr)?;
+                let then_type = self.check_expression_in_context(then_expr, value_used)?;
 
                 if let Some(else_expr) = else_expr {
-                    let else_type = self.check_expression(else_expr)?;
+                    let else_type = self.check_expression_in_context(else_expr, value_used)?;
 
                     // Branches should have compatible types
                     let branch_compat = self.type_checker.check_compatibility(then_type, else_type);
-                    if matches!(branch_compat, TypeCompatibility::Incompatible) {
+                    if value_used && matches!(branch_compat, TypeCompatibility::Incompatible) {
                         self.emit_error(TypeCheckError {
                             kind: TypeErrorKind::TypeMismatch {
                                 expected: then_type,
@@ -449,7 +473,7 @@ impl<'a> TypeCheckingPhase<'a> {
                 finally_block,
             } => {
                 // Check try block
-                let try_type = self.check_expression(try_expr)?;
+                let try_type = self.check_expression_in_context(try_expr, value_used)?;
 
                 // Check catch clauses and verify type consistency
                 for catch in catch_clauses {
@@ -500,7 +524,7 @@ impl<'a> TypeCheckingPhase<'a> {
 
                 // Check finally block if present
                 if let Some(finally) = finally_block {
-                    self.check_expression(finally)?;
+                    self.check_discarded_expression(finally)?;
                 }
             }
             TypedExpressionKind::While {
@@ -525,7 +549,7 @@ impl<'a> TypeCheckingPhase<'a> {
                 }
 
                 // Check loop body
-                self.check_expression(then_expr)?;
+                self.check_discarded_expression(then_expr)?;
             }
             TypedExpressionKind::For {
                 variable,
@@ -566,7 +590,7 @@ impl<'a> TypeCheckingPhase<'a> {
                 }
 
                 // Check loop body
-                self.check_expression(body)?;
+                self.check_discarded_expression(body)?;
             }
             TypedExpressionKind::ForIn {
                 value_var,
@@ -608,7 +632,7 @@ impl<'a> TypeCheckingPhase<'a> {
                 }
 
                 // Check loop body
-                self.check_expression(body)?;
+                self.check_discarded_expression(body)?;
             }
             TypedExpressionKind::Throw { expression } => {
                 // Check exception expression
@@ -848,7 +872,7 @@ impl<'a> TypeCheckingPhase<'a> {
             }
             TypedExpressionKind::Meta { expression, .. } => {
                 // Check the wrapped expression
-                self.check_expression(expression)?;
+                self.check_expression_in_context(expression, value_used)?;
             }
             TypedExpressionKind::DollarIdent { .. }
             | TypedExpressionKind::CompilerSpecific { .. }
@@ -1080,6 +1104,11 @@ impl<'a> TypeCheckingPhase<'a> {
         source_location: SourceLocation,
     ) -> Result<(), String> {
         let callee_type = self.check_expression(function)?;
+        let callee_type = self
+            .type_checker
+            .type_table
+            .borrow()
+            .resolve_alias_type(callee_type);
 
         // Check argument types first
         let mut arg_types = Vec::new();
@@ -1269,7 +1298,27 @@ impl<'a> TypeCheckingPhase<'a> {
                     let overload_match_found =
                         self.check_method_overloads(method_symbol, &arg_types, source_location);
 
-                    if !overload_match_found {
+                    if !overload_match_found && param_types.len() == arg_types.len() {
+                        for (i, (&actual, &expected)) in
+                            arg_types.iter().zip(&param_types).enumerate()
+                        {
+                            if matches!(
+                                self.type_checker.check_compatibility(actual, expected),
+                                TypeCompatibility::Incompatible
+                            ) {
+                                self.emit_enhanced_type_error(
+                                    actual,
+                                    expected,
+                                    arguments[i].source_location,
+                                    &format!("Argument {} type mismatch", i + 1),
+                                    &TypeErrorContext::FunctionCall {
+                                        param_index: i,
+                                        expected_type: expected,
+                                    },
+                                );
+                            }
+                        }
+                    } else if !overload_match_found {
                         // No overload matched, emit error
                         self.emit_error(TypeCheckError {
                             kind: TypeErrorKind::TypeMismatch {

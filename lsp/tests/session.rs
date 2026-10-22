@@ -13,6 +13,7 @@ struct Session {
     next_id: i32,
     diagnostics: Vec<Value>,
     logs: Vec<String>,
+    activity: Vec<Value>,
     temporary: bool,
 }
 
@@ -48,6 +49,7 @@ impl Session {
             next_id: 0,
             diagnostics: Vec::new(),
             logs: Vec::new(),
+            activity: Vec::new(),
             temporary,
         };
         let root_uri = session.uri("");
@@ -92,6 +94,9 @@ impl Session {
                 Message::Notification(n) if n.method == "textDocument/publishDiagnostics" => {
                     self.diagnostics.push(n.params);
                 }
+                Message::Notification(n) if n.method == "rayzor/analysisStatus" => {
+                    self.activity.push(n.params);
+                }
                 _ => {}
             }
         }
@@ -104,25 +109,7 @@ impl Session {
             "textDocument/didOpen",
             json!({"textDocument": {"uri": self.uri(name), "languageId": "haxe", "version": 1, "text": text}}),
         );
-        loop {
-            if let Message::Notification(n) = self.client.receiver.recv().unwrap() {
-                if n.method == "window/logMessage" {
-                    self.logs
-                        .push(n.params["message"].as_str().unwrap_or("").into());
-                    continue;
-                }
-                if n.method != "textDocument/publishDiagnostics" {
-                    continue;
-                }
-                if n.params["uri"] == self.uri(name) {
-                    return n.params["diagnostics"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
-                }
-                self.diagnostics.push(n.params);
-            }
-        }
+        self.wait_ready(name, 1)
     }
 
     /// Replaces `name`'s text in the editor (not on disk) and returns its
@@ -133,17 +120,44 @@ impl Session {
             "textDocument/didChange",
             json!({"textDocument": {"uri": self.uri(name), "version": self.next_id}, "contentChanges": [{"text": text}]}),
         );
+        self.wait_ready(name, self.next_id)
+    }
+
+    // Ordinary assertions use completed analysis; partial-index tests send
+    // notifications directly and query while the worker is still running.
+    fn wait_ready(&mut self, name: &str, version: i32) -> Vec<Value> {
+        let mut diagnostics = Vec::new();
         loop {
-            if let Message::Notification(n) = self.client.receiver.recv().unwrap()
-                && n.method == "textDocument/publishDiagnostics"
+            if let Message::Notification(notification) = self
+                .client
+                .receiver
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .expect("analysis timeout")
             {
-                if n.params["uri"] == self.uri(name) {
-                    return n.params["diagnostics"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
+                match notification.method.as_str() {
+                    "window/logMessage" => self
+                        .logs
+                        .push(notification.params["message"].as_str().unwrap_or("").into()),
+                    "textDocument/publishDiagnostics" => {
+                        if notification.params["uri"] == self.uri(name) {
+                            diagnostics = notification.params["diagnostics"]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default();
+                        }
+                        self.diagnostics.push(notification.params);
+                    }
+                    "rayzor/analysisStatus" => {
+                        let ready = notification.params["uri"] == self.uri(name)
+                            && notification.params["version"] == version
+                            && notification.params["state"] == "ready";
+                        self.activity.push(notification.params);
+                        if ready {
+                            return diagnostics;
+                        }
+                    }
+                    _ => {}
                 }
-                self.diagnostics.push(n.params);
             }
         }
     }
@@ -441,6 +455,555 @@ fn imported_type_docs_and_named_signatures_survive_across_modules() {
     assert!(
         hover.contains("Updated box documentation.") && !hover.contains("A reusable box."),
         "{hover}"
+    );
+}
+
+#[test]
+fn cached_and_partial_hovers_work_while_a_build_macro_is_waiting() {
+    let mut s = Session::start(&[
+        (
+            "First.hx",
+            "class First { public static var value:Int = 1; }",
+        ),
+        (
+            "Slow.hx",
+            "/** Available before its build completes. */\n@:build(Gate.build())\nclass Slow {}",
+        ),
+        ("gate.txt", "closed"),
+        (".rayzor/entered", ""),
+        (
+            "Gate.hx",
+            r#"import haxe.macro.Context; import haxe.macro.Expr;
+class Gate { public static macro function build():Array<Field> {
+ var path = Context.resolvePath("gate.txt");
+ sys.io.File.saveContent(Context.resolvePath(".rayzor/entered"), "waiting");
+ while (sys.io.File.getContent(path) != "open") {}
+ return Context.getBuildFields();
+} }"#,
+        ),
+    ]);
+    struct Release(std::path::PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, "open");
+        }
+    }
+    let release = Release(s.root.join("gate.txt"));
+    assert!(s.open("First.hx").is_empty());
+    // A worker round trip drains the ready notification after its index is saved.
+    s.request("workspace/symbol", json!({"query":"First"}));
+    s.notify("textDocument/didOpen", json!({"textDocument":{"uri":s.uri("Slow.hx"),"version":1,"languageId":"haxe","text":std::fs::read_to_string(s.root.join("Slow.hx")).unwrap()}}));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::fs::read_to_string(s.root.join(".rayzor/entered")).unwrap_or_default() != "waiting" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "build macro never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let hover = hover_text(&s.request("textDocument/hover", s.at("First.hx", 0, 34)));
+    assert!(hover.contains("value:Int"), "{hover}");
+    let partial = hover_text(&s.request("textDocument/hover", s.at("Slow.hx", 2, 7)));
+    assert!(
+        partial.contains("class Slow") && partial.contains("Available before"),
+        "{partial}"
+    );
+    assert!(
+        !s.activity
+            .iter()
+            .any(|activity| activity["uri"] == s.uri("Slow.hx") && activity["state"] == "ready"),
+        "macro completed before cached queries were answered"
+    );
+    drop(release);
+    s.request("workspace/symbol", json!({"query":"Slow"}));
+}
+
+#[test]
+fn blade_editor_data_is_reused_after_a_server_restart() {
+    let source = "class Main { /** Retained field. */ public static var value:Int = 7; }";
+    let mut first = Session::start(&[("Main.hx", source)]);
+    assert!(first.open("Main.hx").is_empty());
+    first.request("workspace/symbol", json!({"query":"Main"}));
+    let root = first.root.clone();
+    first.temporary = false;
+    drop(first);
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(root.clone());
+    assert!(
+        std::fs::read_dir(root.join(".rayzor/blade/editor"))
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "bidx"))
+    );
+    let mut second = Session::connect(root, json!({}), false);
+    assert!(second.open("Main.hx").is_empty());
+    let column = source.find("value").unwrap() as u32;
+    let hover = hover_text(&second.request("textDocument/hover", second.at("Main.hx", 0, column)));
+    assert!(
+        hover.contains("value:Int") && hover.contains("Retained field."),
+        "{hover}"
+    );
+    second.request("workspace/symbol", json!({"query":"Main"}));
+    assert!(
+        !second
+            .activity
+            .iter()
+            .any(|activity| activity["state"] == "checking"),
+        "{:#?}",
+        second.activity
+    );
+    let changed = source.replace("value:Int = 7", "value:String = \"new\"");
+    assert!(second.change("Main.hx", &changed).is_empty());
+    let hover = hover_text(&second.request("textDocument/hover", second.at("Main.hx", 0, column)));
+    assert!(
+        hover.contains("value:String") && !hover.contains("value:Int"),
+        "{hover}"
+    );
+}
+
+#[test]
+fn typedef_fields_have_types_and_docs_at_declarations_and_imported_reads() {
+    let types = "package models;\ntypedef State = {\n /** Horizontal offset. */\n panX:Float,\n /** Display label. */\n ?label:String,\n /** Nested position. */\n position:{x:Int, y:Int}\n};\ntypedef Alias = State;";
+    let main = "import models.Types.State;\nimport models.Types.Alias;\nclass Main {\n static function main() {\n  var state:State = {panX:1.0, position:{x:1, y:2}};\n  var alias:Alias = state;\n  state.panX;\n  alias.panX;\n  state.position.x;\n }\n}";
+    let mut s = Session::start(&[("Main.hx", main), ("models/Types.hx", types)]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    for line in [6, 7] {
+        let text = main.lines().nth(line).unwrap();
+        let col = text.find("panX").unwrap();
+        let hover = hover_text(&s.request(
+            "textDocument/hover",
+            s.at("Main.hx", line as u32, col as u32 + 1),
+        ));
+        assert!(
+            hover.contains("panX:Float") && hover.contains("Horizontal offset."),
+            "{hover}"
+        );
+        let items = s.request(
+            "textDocument/completion",
+            s.at("Main.hx", line as u32, col as u32),
+        );
+        let field = items
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"] == "panX")
+            .unwrap();
+        assert_eq!(field["detail"], "Float");
+        assert!(
+            field["documentation"]["value"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Horizontal offset."),
+            "{field}"
+        );
+    }
+    s.open("models/Types.hx");
+    for (line, name, ty, doc) in [
+        (3, "panX", "Float", "Horizontal offset."),
+        (5, "label", "String", "Display label."),
+        (7, "x", "Int", ""),
+    ] {
+        let col = types.lines().nth(line).unwrap().find(name).unwrap();
+        let hover = hover_text(&s.request(
+            "textDocument/hover",
+            s.at("models/Types.hx", line as u32, col as u32),
+        ));
+        assert!(
+            hover.contains(&format!("{name}:{ty}")) && hover.contains(doc),
+            "{hover}"
+        );
+    }
+}
+
+#[test]
+fn hover_preserves_type_declaration_kinds_and_structural_types() {
+    let types = "package models;\n/** View state. */\ntypedef State = {panX:Float, ?label:String};\n/** A count. */\ntypedef Count = Int;\n/** A collection. */\ntypedef Items<T> = Array<T>;\n/** A readable value. */\ninterface Readable { public function read():String; }\n/** An identifier. */\nabstract Token(Int) from Int to Int {}\n/** A mode. */\nenum abstract Mode(Int) { var Enabled = 1; }\n/** A color. */\nenum Color { Red; }\n/** A box. */\nclass Box<T> { public var value:T; }";
+    let main = "import models.Types.State;\nimport models.Types.Count;\nimport models.Types.Items;\nimport models.Types.Readable;\nimport models.Types.Token;\nimport models.Types.Mode;\nimport models.Types.Color;\nimport models.Types.Box;\nclass Main {\n static function main() {\n  var state:State = {panX:1.0};\n  var shape:{panX:Float, ?label:String} = {panX:2.0};\n  var inferred = {panX:3.0, label:\"view\"};\n  shape.panX;\n  inferred.panX;\n  state.panX;\n }\n}";
+    let mut s = Session::start(&[("Main.hx", main), ("models/Types.hx", types)]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    s.open("models/Types.hx");
+    for (name, expected, doc) in [
+        (
+            "State",
+            "typedef State = {panX:Float, ?label:String}",
+            "View state.",
+        ),
+        ("Count", "typedef Count = Int", "A count."),
+        ("Items", "typedef Items<T> = Array<T>", "A collection."),
+        ("Readable", "interface Readable", "A readable value."),
+        (
+            "Token",
+            "abstract Token(Int) from Int to Int",
+            "An identifier.",
+        ),
+        ("Mode", "enum abstract Mode(Int)", "A mode."),
+        ("Color", "enum Color", "A color."),
+        ("Box", "class Box<T>", "A box."),
+    ] {
+        for (file, text) in [("Main.hx", main), ("models/Types.hx", types)] {
+            let (line, contents) = text
+                .lines()
+                .enumerate()
+                .find(|(_, l)| l.contains(name))
+                .unwrap();
+            let col = contents.find(name).unwrap();
+            let hover = hover_text(&s.request(
+                "textDocument/hover",
+                s.at(file, line as u32, col as u32 + 1),
+            ));
+            assert!(
+                hover.contains(expected) && hover.contains(doc),
+                "{file} {name}: {hover}"
+            );
+            assert!(
+                !hover.contains("SymbolId") && !hover.contains("TypeId"),
+                "{hover}"
+            );
+        }
+    }
+    for (line, name, expected) in [
+        (11, "shape", "?label:String"),
+        (12, "inferred", "panX:Float"),
+    ] {
+        let col = main.lines().nth(line).unwrap().find(name).unwrap();
+        let hover = hover_text(&s.request(
+            "textDocument/hover",
+            s.at("Main.hx", line as u32, col as u32 + 1),
+        ));
+        assert!(hover.contains(expected) && hover.contains('{'), "{hover}");
+    }
+    let symbols = s.request(
+        "textDocument/documentSymbol",
+        json!({"textDocument":{"uri":s.uri("models/Types.hx")}}),
+    );
+    for (line, name) in [(13, "shape"), (14, "inferred"), (15, "state")] {
+        let items = s.request(
+            "textDocument/completion",
+            s.at("Main.hx", line, name.len() as u32 + 3),
+        );
+        assert!(
+            items
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["label"] == "panX" && item["detail"] == "Float"),
+            "{name}: {items}"
+        );
+    }
+    let completions = s.request("textDocument/completion", s.at("Main.hx", 10, 2));
+    for (name, symbol_kind, completion_kind) in [
+        (
+            "State",
+            lsp_types::SymbolKind::STRUCT,
+            lsp_types::CompletionItemKind::STRUCT,
+        ),
+        (
+            "Count",
+            lsp_types::SymbolKind::STRUCT,
+            lsp_types::CompletionItemKind::STRUCT,
+        ),
+        (
+            "Items",
+            lsp_types::SymbolKind::STRUCT,
+            lsp_types::CompletionItemKind::STRUCT,
+        ),
+        (
+            "Readable",
+            lsp_types::SymbolKind::INTERFACE,
+            lsp_types::CompletionItemKind::INTERFACE,
+        ),
+        (
+            "Token",
+            lsp_types::SymbolKind::STRUCT,
+            lsp_types::CompletionItemKind::STRUCT,
+        ),
+        (
+            "Mode",
+            lsp_types::SymbolKind::STRUCT,
+            lsp_types::CompletionItemKind::STRUCT,
+        ),
+        (
+            "Color",
+            lsp_types::SymbolKind::ENUM,
+            lsp_types::CompletionItemKind::ENUM,
+        ),
+        (
+            "Box",
+            lsp_types::SymbolKind::CLASS,
+            lsp_types::CompletionItemKind::CLASS,
+        ),
+    ] {
+        let symbol = symbols
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("missing {name} in {symbols}"));
+        assert_eq!(symbol["kind"], json!(symbol_kind), "{symbol}");
+        let completion = completions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["label"] == name)
+            .unwrap_or_else(|| panic!("missing {name} in {completions}"));
+        assert_eq!(completion["kind"], json!(completion_kind), "{completion}");
+    }
+}
+
+#[test]
+fn fully_qualified_standard_library_calls_are_typed() {
+    let source = "class Main {\n static function main() {\n  var extension = haxe.io.Path.extension(\"view.png\");\n  var lower = extension.toLowerCase();\n }\n}";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 2, 34)));
+    assert!(
+        hover.contains("function extension") && hover.contains(":String"),
+        "{hover}"
+    );
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 3, 7)));
+    assert!(hover.contains("var lower:String"), "{hover}");
+    let diagnostics = s.change(
+        "Main.hx",
+        &source
+            .replace("extension(", "withoutExtension(")
+            .replace("\"view.png\"", "123"),
+    );
+    assert!(
+        diagnostics.iter().any(|d| d["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("String") && m.contains("Int"))),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn a_namesake_enum_constructor_does_not_replace_a_standard_library_class() {
+    let source = "enum Shape { Path(d:String); }\nclass Main {\n static function main() {\n  var extension = haxe.io.Path.extension(\"view.png\");\n  var shape = Shape.Path(\"M0 0\");\n }\n}";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 3, 34)));
+    assert!(
+        hover.contains("function extension") && hover.contains(":String"),
+        "{hover}"
+    );
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 4, 7)));
+    assert!(hover.contains("var shape:Shape"), "{hover}");
+}
+
+#[test]
+fn analysis_status_and_diagnostics_track_document_versions() {
+    let source = "class Main { static function main() {} }";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    for (version, text) in [
+        (10, source),
+        (
+            11,
+            "class Main { static function main() { var bad:Int = \"bad\"; } }",
+        ),
+    ] {
+        if version == 10 {
+            s.notify("textDocument/didOpen", json!({"textDocument":{"uri":s.uri("Main.hx"),"version":version,"languageId":"haxe","text":text}}));
+        } else {
+            s.notify("textDocument/didChange", json!({"textDocument":{"uri":s.uri("Main.hx"),"version":version},"contentChanges":[{"text":text}]}));
+        }
+        s.request("textDocument/hover", s.at("Main.hx", 0, 7));
+        s.request("workspace/symbol", json!({"query":"Main"}));
+        let activity: Vec<_> = s
+            .activity
+            .iter()
+            .filter(|event| event["version"] == version)
+            .map(|event| event["state"].as_str().unwrap())
+            .collect();
+        assert_eq!(activity, ["checking", "ready"]);
+        assert!(
+            s.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic["uri"] == s.uri("Main.hx")
+                    && diagnostic["version"] == version),
+            "{:?}",
+            s.diagnostics
+        );
+    }
+}
+
+#[test]
+fn imported_subclasses_are_assignable_to_their_base_classes() {
+    let mut s = Session::start(&[
+        ("Base.hx", "class Base { public function new() {} }"),
+        ("Middle.hx", "class Middle extends Base {}"),
+        ("Child.hx", "class Child extends Middle {}"),
+        (
+            "Main.hx",
+            "class Main { static function fill(value:Base):Void {} static function main() { var child = new Child(); fill(child); var items:Array<Base> = [child]; } }",
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn method_callbacks_use_structural_function_compatibility() {
+    let source = r#"typedef Callback = Int->Void;
+class Main {
+ public function new() {}
+ function listen(callback:Callback):Main { callback(1); return this; }
+ static function main() {
+  var owner = new Main();
+  owner.listen((value:Int) -> {}).listen((value:Int) -> value + 1);
+ }
+}"#;
+    let mut s = Session::start(&[("Main.hx", source)]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn method_callbacks_reject_incompatible_parameter_types() {
+    let source = r#"class Main {
+ public function new() {}
+ function listen(callback:Int->Void):Void callback(1);
+ static function main() new Main().listen((value:String) -> {});
+}"#;
+    let mut s = Session::start(&[("Main.hx", source)]);
+    let diagnostics = s.open("Main.hx");
+    assert!(
+        !diagnostics.is_empty(),
+        "incompatible callback was accepted"
+    );
+}
+
+#[test]
+fn discarded_conditionals_allow_different_branch_results() {
+    let source = r#"class Main {
+ static function interaction():Main return new Main();
+ static function fill():Void {}
+ public function new() {}
+ static function main() {
+  var scrolling = true;
+  if (scrolling) { interaction(); } else fill();
+  if (scrolling) { if (scrolling) interaction(); else fill(); } else fill();
+  while (scrolling) { if (scrolling) interaction(); else fill(); break; }
+  fill();
+ }
+}"#;
+    let mut s = Session::start(&[("Main.hx", source)]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn discarded_conditionals_still_check_conditions_and_branch_contents() {
+    let source = r#"class Main {
+ static function takesInt(value:Int):Void {}
+ static function main() {
+  if (123) takesInt("wrong"); else takesInt(0);
+ }
+}"#;
+    let mut s = Session::start(&[("Main.hx", source)]);
+    let diagnostics = s.open("Main.hx");
+    let messages = format!("{diagnostics:#?}");
+    assert!(messages.contains("Bool"), "{messages}");
+    assert!(
+        messages.contains("String") && messages.contains("Int"),
+        "{messages}"
+    );
+}
+
+#[test]
+fn conditional_values_still_require_compatible_branches() {
+    let source = r#"class Main {
+ static function main() {
+  var condition = true;
+  var value:Int = if (condition) 1 else "wrong";
+ }
+}"#;
+    let mut s = Session::start(&[("Main.hx", source)]);
+    let diagnostics = s.open("Main.hx");
+    let messages = format!("{diagnostics:#?}");
+    assert!(
+        messages.contains("String") && messages.contains("Int"),
+        "{messages}"
+    );
+}
+
+#[test]
+fn inherited_generic_props_and_ordinary_closures_are_valid() {
+    let props = "package models; typedef Props = {file:Void->String, ?label:String};";
+    let component = "package models; class Component<P> { public var props:P; public function new(props:P) this.props = props; }";
+    let source = "import models.Component;\nimport models.Props;\nclass Main extends Component<Props> {\n function render():String {\n  var serial = 0;\n  var cancel:Void->Void = () -> {};\n  Owner.onCleanup(() -> { serial++; cancel(); });\n  cancel = () -> {};\n  var label = props.label;\n  return props.file();\n }\n static function main() {}\n}";
+    let owner =
+        "class Owner { public static function onCleanup(callback:Void->Void):Void callback(); }";
+    let mut s = Session::start(&[
+        ("Main.hx", source),
+        ("Owner.hx", owner),
+        ("models/Component.hx", component),
+        ("models/Props.hx", props),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 9, 17)));
+    assert!(
+        hover.contains("file") && !hover.contains("TypeAlias") && !hover.contains("SymbolId"),
+        "{hover}"
+    );
+}
+
+#[test]
+fn build_traversal_does_not_label_ordinary_closures_as_expansions() {
+    let macros = r#"import haxe.macro.Context;
+import haxe.macro.Expr;
+import haxe.macro.ExprTools;
+class Builder {
+ static function walk(e:Expr):Expr {
+  return switch e.expr {
+   case EConst(CInt("7")): macro 8;
+   case _: ExprTools.map(e, walk);
+  }
+ }
+ public static function build():Array<Field> {
+  var fields = Context.getBuildFields();
+  for (field in fields) switch field.kind {
+   case FFun(fn): fn.expr = walk(fn.expr);
+   case _:
+  }
+  return fields;
+ }
+}"#;
+    let source = "@:build(Builder.build())\nclass Main {\n static function main() {\n  Owner.onCleanup(() -> { cleanup(); });\n  var marker = 7;\n }\n static function cleanup() {}\n}";
+    let mut s = Session::start(&[
+        ("Main.hx", source),
+        ("Builder.hx", macros),
+        (
+            "Owner.hx",
+            "class Owner { public static function onCleanup(callback:Void->Void):Void callback(); }",
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    for column in [9, 18, 25] {
+        let preview = s.request("rayzor/expandMacro", s.at("Main.hx", 3, column));
+        assert!(preview.is_null(), "{preview}");
+        let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 3, column)));
+        assert!(!hover.contains("Macro expansion"), "{hover}");
+    }
+    let preview = s.request("rayzor/expandMacro", s.at("Main.hx", 4, 15));
+    assert!(
+        preview["expansion"]
+            .as_str()
+            .is_some_and(|text| text.contains('8')),
+        "{preview}"
     );
 }
 
@@ -1102,6 +1665,39 @@ class Assets {
 
 #[test]
 #[ignore = "requires the sibling RayDE workspace and its libraries"]
+fn rayde_image_preview_preserves_types_and_stdlib_calls() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../RayDE")
+        .canonicalize()
+        .unwrap();
+    let mut s = Session::connect(root, json!({"macroBudgetMs":5000}), false);
+    let name = "src/rayde/ui/ImagePreview.hx";
+    let diagnostics = s.open(name);
+    assert!(
+        !diagnostics.iter().any(|d| d["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("Cannot find type 'haxe.io'"))),
+        "{diagnostics:#?}"
+    );
+    let source = std::fs::read_to_string(s.root.join(name)).unwrap();
+    for (needle, expected) in [
+        ("ImageViewState", "typedef ImageViewState = {panX:Float"),
+        ("Path.extension", "function extension"),
+    ] {
+        let (line, text) = source
+            .lines()
+            .enumerate()
+            .find(|(_, text)| text.contains(needle))
+            .unwrap();
+        let column = text.find(needle).unwrap() + if needle == "Path.extension" { 6 } else { 1 };
+        let hover =
+            hover_text(&s.request("textDocument/hover", s.at(name, line as u32, column as u32)));
+        assert!(hover.contains(expected), "{needle}: {hover}");
+    }
+}
+
+#[test]
+#[ignore = "requires the sibling RayDE workspace and its libraries"]
 fn rayde_macro_workspace_keeps_editor_services() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../RayDE")
@@ -1300,4 +1896,24 @@ enum Choice { Item; }"#;
             .iter()
             .any(|label| label == "alive")
     );
+}
+
+#[test]
+fn module_enum_constructors_precede_foreign_ambient_type_names() {
+    let source = "package app;\nimport foreign.Tools;\nprivate enum Event { Message(text:String); }\nclass Main { static function main() {\n var constructor = Message;\n var event = constructor(\"ok\");\n} }";
+    let mut session = Session::start(&[
+        ("app/Main.hx", source),
+        (
+            "foreign/Tools.hx",
+            "package foreign; enum Message { Info; } class Tools {}",
+        ),
+    ]);
+    let diagnostics = session.open("app/Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let hover = hover_text(&session.request("textDocument/hover", session.at("app/Main.hx", 4, 6)));
+    assert!(
+        hover.contains("String") && hover.contains("Event"),
+        "{hover}"
+    );
+    assert!(!hover.contains("foreign.Message"), "{hover}");
 }

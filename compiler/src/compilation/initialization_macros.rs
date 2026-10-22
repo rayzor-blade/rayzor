@@ -133,7 +133,7 @@ impl CompilationUnit {
             {
                 continue;
             }
-            let source = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let source = self.read_source(&path).map_err(|e| e.to_string())?;
             let mut config = self.preprocessor_config_for(&filename);
             config.defines.insert("macro".into());
             let parsed = parser::haxe_parser::parse_haxe_file_with_config(

@@ -1355,7 +1355,45 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                         }
                         _ => String::new(),
                     };
-                    ExprKind::Function(function_of(a(1)?, name, span))
+                    let function = function_of(a(1)?, name, span);
+                    if matches!(a(0), Some(MacroValue::Enum(_, kind, _)) if &**kind == "FArrow")
+                        && function.return_type.is_none()
+                        && function
+                            .params
+                            .iter()
+                            .all(|p| !p.optional && !p.rest && p.default_value.is_none())
+                        && let Some(body) = function.body.as_ref()
+                    {
+                        let body = (**body).clone();
+                        let body = match body.kind {
+                            ExprKind::Meta { meta, expr } if meta.name == "implicitReturn" => {
+                                match expr.kind {
+                                    ExprKind::Return(Some(value)) => value,
+                                    kind => Box::new(Expr {
+                                        kind,
+                                        span: expr.span,
+                                    }),
+                                }
+                            }
+                            kind => Box::new(Expr {
+                                kind,
+                                span: body.span,
+                            }),
+                        };
+                        ExprKind::Arrow {
+                            params: function
+                                .params
+                                .into_iter()
+                                .map(|p| parser::ArrowParam {
+                                    name: p.name,
+                                    type_hint: p.type_hint,
+                                })
+                                .collect(),
+                            expr: body,
+                        }
+                    } else {
+                        ExprKind::Function(function)
+                    }
                 }
                 // A statement declaring several locals declares each in
                 // this block, not in a block of its own.
@@ -1547,4 +1585,33 @@ pub fn constant_of(e: &Expr) -> Option<MacroValue> {
         )),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arrow_kind_and_body_survive_macro_round_trips() {
+        let source = "class Main { var callback = (value:Int) -> { cleanup(value); }; var expression = value -> value + 1; }";
+        let file = parser::rd::rd_parse(source, "Main.hx", false, false).unwrap();
+        let parser::TypeDeclaration::Class(class) = &file.declarations[0] else {
+            panic!("class")
+        };
+        for field in &class.fields {
+            let parser::ClassFieldKind::Var {
+                expr: Some(before), ..
+            } = &field.kind
+            else {
+                panic!("arrow field")
+            };
+            let value = def_of(&before.kind, before.span).unwrap();
+            let after = try_expr_of(&value, before.span).unwrap();
+            assert!(matches!(after.kind, ExprKind::Arrow { .. }));
+            assert_eq!(
+                super::super::expander::expanded_expr_source(before),
+                super::super::expander::expanded_expr_source(&after)
+            );
+        }
+    }
 }

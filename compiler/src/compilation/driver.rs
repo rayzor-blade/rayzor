@@ -3,6 +3,31 @@
 use super::*;
 
 impl CompilationUnit {
+    /// Select the page of a persistent editor graph. Callers must start a
+    /// new unit when any source or compiler setting in that graph changes.
+    pub fn set_editor_entry(&mut self, filename: &str) {
+        assert!(
+            self.config.typecheck_only,
+            "editor reuse requires typecheck-only mode"
+        );
+        let identity = source_file_identity(filename);
+        self.settled_editor_imports.extend(
+            self.failed_attempts
+                .iter()
+                .map(|name| source_file_identity(name)),
+        );
+        self.settled_editor_imports
+            .extend(self.user_files.iter().filter_map(|file| {
+                let path = source_file_identity(&file.filename);
+                (path != identity
+                    && self.file_id_by_filename.contains_key(&file.filename)
+                    && !self.compiled_files.contains_key(&path))
+                .then_some(path)
+            }));
+        self.settled_editor_imports.remove(&identity);
+        self.editor_entry = Some(identity);
+    }
+
     /// Compile a single file using shared state (string interner, symbol table, namespace resolver, etc.)
     /// This ensures symbols from different files can see each other
     ///
@@ -65,6 +90,11 @@ impl CompilationUnit {
         let profile_file_detail = self.config.profile_typecheck
             && std::env::var_os("RAYZOR_PROFILE_TYPECHECK_FILES").is_some();
         let file_total = profile_timer(profile_file_detail);
+        let _editor_file_profile =
+            (profile_file_detail && self.config.typecheck_only).then(|| EditorFileProfile {
+                filename,
+                started: Instant::now(),
+            });
         let mut file_ast_ms = 0.0;
         let mut file_hir_ms = 0.0;
         let mut file_mir_prep_ms = 0.0;
@@ -179,7 +209,7 @@ impl CompilationUnit {
                     let file = self
                         .namespace_resolver
                         .resolve_qualified_path_to_file_force(&import.path.join("."))?;
-                    let source = std::fs::read_to_string(&file).ok()?;
+                    let source = self.read_source(&file).ok()?;
                     if !source.contains("@:genericBuild") {
                         return None;
                     }
@@ -196,7 +226,7 @@ impl CompilationUnit {
                         .namespace_resolver
                         .resolve_qualified_path_to_file_force(&path)?;
                     let name = file.to_string_lossy().to_string();
-                    let source = std::fs::read_to_string(&file).ok()?;
+                    let source = self.read_source(&file).ok()?;
                     self.parse_file(&name, &source).ok()
                 })
                 .map(|f| view(&f))
@@ -289,7 +319,7 @@ impl CompilationUnit {
                         .map(|(path, contents)| {
                             let text = contents
                                 .map(|s| s.to_string())
-                                .or_else(|| std::fs::read_to_string(&path).ok())
+                                .or_else(|| self.read_source(&path).ok())
                                 .unwrap_or_default();
                             (path, text)
                         })
@@ -1448,6 +1478,43 @@ impl CompilationUnit {
         self.typecheck_timings
     }
 
+    /// Validate a lowered file using the shared compilation's resolved types.
+    pub fn check_typed_file(&mut self, filename: &str) -> diagnostics::Diagnostics {
+        let mut diagnostics = diagnostics::Diagnostics::new();
+        let Some(mut file) = self
+            .compiled_files
+            .get(&source_file_identity(filename))
+            .cloned()
+        else {
+            return diagnostics;
+        };
+        let mut hierarchy = crate::tast::class_builder::ClassHierarchyBuilder::new();
+        for file in self.compiled_files.values() {
+            for class in &file.classes {
+                hierarchy.register_class(
+                    class.symbol_id,
+                    class.super_class,
+                    class.interfaces.clone(),
+                );
+            }
+        }
+        hierarchy.compute_transitive_closure(&self.type_table);
+        hierarchy.finalize(&mut self.symbol_table);
+        let sources = self.build_full_source_map();
+        let mut checker = crate::tast::type_checking_pipeline::TypeCheckingPhase::new(
+            &self.type_table,
+            &self.symbol_table,
+            &self.scope_tree,
+            &self.string_interner,
+            &sources,
+            &mut diagnostics,
+        );
+        checker.set_namespace_resolver(&self.namespace_resolver);
+        checker.set_flow_analysis(false);
+        let _ = checker.check_file(&mut file);
+        diagnostics
+    }
+
     /// Lower all files (stdlib + user) to TAST with full pipeline analysis
     ///
     /// This method delegates to HaxeCompilationPipeline for each file to leverage
@@ -1480,7 +1547,19 @@ impl CompilationUnit {
         // Step 1: Analyze dependencies for user files
         // Fast path: single-file compilations don't need dependency analysis
         let t_dependency = profile_timer(self.config.profile_typecheck);
-        let analysis = if self.user_files.len() <= 1 {
+        let analysis = if let Some(entry) = &self.editor_entry {
+            DependencyAnalysis {
+                compilation_order: self
+                    .user_files
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, file)| {
+                        (source_file_identity(&file.filename) == *entry).then_some(index)
+                    })
+                    .collect(),
+                circular_dependencies: Vec::new(),
+            }
+        } else if self.user_files.len() <= 1 {
             DependencyAnalysis {
                 compilation_order: (0..self.user_files.len()).collect(),
                 circular_dependencies: Vec::new(),
@@ -1504,8 +1583,15 @@ impl CompilationUnit {
         // Also handles root-level imports like "import StringTools;" and "using StringTools;"
         // Extract imports from already-parsed user file ASTs (no re-parsing needed).
         let t_import_scan = profile_timer(self.config.profile_typecheck);
-        let (imports_to_load, usings_to_load): (Vec<String>, Vec<String>) =
-            self.user_files.iter().fold(
+        let (imports_to_load, usings_to_load): (Vec<String>, Vec<String>) = self
+            .user_files
+            .iter()
+            .filter(|file| {
+                self.editor_entry
+                    .as_ref()
+                    .is_none_or(|entry| source_file_identity(&file.filename) == *entry)
+            })
+            .fold(
                 (Vec::new(), Vec::new()),
                 |(mut imports, mut usings), ast| {
                     for import in &ast.imports {

@@ -2,6 +2,7 @@
 //! names and source ranges; compiler-local symbol IDs never leave an analysis.
 
 use crate::documentation::SourceComments;
+use compiler::tast::symbols::SymbolKind;
 use parser::{ClassFieldKind, HaxeFile, Span, TypeDeclaration};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,8 +16,14 @@ pub(crate) struct Declaration {
     aliases: Vec<String>,
     pub documentation: Option<String>,
     pub signature: String,
-    kind: lsp_types::SymbolKind,
-    range: lsp_types::Range,
+    pub type_kind: Option<SymbolKind>,
+    pub(crate) kind: lsp_types::SymbolKind,
+    pub(crate) range: lsp_types::Range,
+}
+
+pub(crate) struct TypeIdentity {
+    pub qualified: String,
+    pub kind: SymbolKind,
 }
 
 enum Event {
@@ -201,6 +208,41 @@ impl WorkspaceIndex {
         matches.next().is_none().then(|| first.clone())
     }
 
+    pub fn type_identities(&self) -> BTreeMap<String, TypeIdentity> {
+        self.poll(false);
+        let state = self.state.borrow();
+        let mut names = BTreeMap::new();
+        for declaration in state
+            .files
+            .values()
+            .flatten()
+            .filter(|d| d.type_kind.is_some())
+        {
+            for name in std::iter::once(&declaration.qualified)
+                .chain(&declaration.aliases)
+                .collect::<BTreeSet<_>>()
+            {
+                names
+                    .entry(name.clone())
+                    .and_modify(|entry| *entry = None)
+                    .or_insert(Some(declaration));
+            }
+        }
+        names
+            .into_iter()
+            .filter_map(|(name, declaration)| {
+                let declaration = declaration?;
+                Some((
+                    name,
+                    TypeIdentity {
+                        qualified: declaration.qualified.clone(),
+                        kind: declaration.type_kind?,
+                    },
+                ))
+            })
+            .collect()
+    }
+
     pub fn search(&self, query: &str) -> Vec<serde_json::Value> {
         self.poll(true);
         let query = query.to_lowercase();
@@ -221,7 +263,7 @@ fn canonical(path: &Path) -> PathBuf {
     })
 }
 
-fn declarations(path: &Path, source: &str, defines: &[String]) -> Vec<Declaration> {
+pub(crate) fn declarations(path: &Path, source: &str, defines: &[String]) -> Vec<Declaration> {
     let mut config = parser::preprocessor::PreprocessorConfig::default();
     config.defines.insert("eval".into());
     config.defines.extend(
@@ -279,20 +321,37 @@ fn collect(file: &HaxeFile, source: &str) -> Vec<Declaration> {
     };
     let mut entries = Vec::new();
     for declaration in &file.declarations {
-        let (name, fields, kind) = match declaration {
-            TypeDeclaration::Class(c) => {
-                (&c.name, c.fields.as_slice(), lsp_types::SymbolKind::CLASS)
-            }
+        let (name, fields, kind, type_kind) = match declaration {
+            TypeDeclaration::Class(c) => (
+                &c.name,
+                c.fields.as_slice(),
+                lsp_types::SymbolKind::CLASS,
+                SymbolKind::Class,
+            ),
             TypeDeclaration::Interface(c) => (
                 &c.name,
                 c.fields.as_slice(),
                 lsp_types::SymbolKind::INTERFACE,
+                SymbolKind::Interface,
             ),
-            TypeDeclaration::Abstract(c) => {
-                (&c.name, c.fields.as_slice(), lsp_types::SymbolKind::CLASS)
-            }
-            TypeDeclaration::Enum(c) => (&c.name, &[][..], lsp_types::SymbolKind::ENUM),
-            TypeDeclaration::Typedef(c) => (&c.name, &[][..], lsp_types::SymbolKind::STRUCT),
+            TypeDeclaration::Abstract(c) => (
+                &c.name,
+                c.fields.as_slice(),
+                lsp_types::SymbolKind::STRUCT,
+                SymbolKind::Abstract,
+            ),
+            TypeDeclaration::Enum(c) => (
+                &c.name,
+                &[][..],
+                lsp_types::SymbolKind::ENUM,
+                SymbolKind::Enum,
+            ),
+            TypeDeclaration::Typedef(c) => (
+                &c.name,
+                &[][..],
+                lsp_types::SymbolKind::STRUCT,
+                SymbolKind::TypeAlias,
+            ),
             _ => continue,
         };
         let owner = if name == module {
@@ -305,6 +364,7 @@ fn collect(file: &HaxeFile, source: &str) -> Vec<Declaration> {
                        alias: String,
                        span: Span,
                        kind,
+                       type_kind,
                        signature_end: Option<usize>| {
             let Some(token) = tokens.iter().find(|t| {
                 t.span.start >= span.start
@@ -319,6 +379,7 @@ fn collect(file: &HaxeFile, source: &str) -> Vec<Declaration> {
                 qualified,
                 aliases: vec![alias],
                 kind,
+                type_kind,
                 range: lsp_types::Range::new(position(token.span.start), position(token.span.end)),
                 documentation: comments.at(span.start),
                 signature: source
@@ -336,8 +397,22 @@ fn collect(file: &HaxeFile, source: &str) -> Vec<Declaration> {
             qualify(name),
             declaration.span(),
             kind,
-            None,
+            Some(type_kind),
+            Some(type_signature_end(declaration, &tokens)),
         );
+        if let TypeDeclaration::Typedef(alias) = declaration {
+            for field in crate::structural_fields::source_fields(&alias.type_def) {
+                add(
+                    &field.name,
+                    format!("{owner}.{}", field.name),
+                    format!("{}.{}", qualify(name), field.name),
+                    field.span,
+                    lsp_types::SymbolKind::FIELD,
+                    None,
+                    Some(field.span.end),
+                );
+            }
+        }
         for field in fields {
             let (name, kind, end) = match &field.kind {
                 ClassFieldKind::Function(f) => (
@@ -345,9 +420,20 @@ fn collect(file: &HaxeFile, source: &str) -> Vec<Declaration> {
                     lsp_types::SymbolKind::METHOD,
                     Some(f.body.as_ref().map_or(f.span.end, |body| body.span.start)),
                 ),
-                ClassFieldKind::Var { name, .. } | ClassFieldKind::Final { name, .. } => {
-                    (name.as_str(), lsp_types::SymbolKind::FIELD, None)
-                }
+                ClassFieldKind::Var { name, .. } | ClassFieldKind::Final { name, .. } => (
+                    name.as_str(),
+                    lsp_types::SymbolKind::FIELD,
+                    Some(
+                        tokens
+                            .iter()
+                            .find(|token| {
+                                token.span.start >= field.span.start
+                                    && token.span.end <= field.span.end
+                                    && token.kind == parser::token::TokenKind::Assign
+                            })
+                            .map_or(field.span.end, |token| token.span.start),
+                    ),
+                ),
                 ClassFieldKind::Property { name, .. } => {
                     (name.as_str(), lsp_types::SymbolKind::PROPERTY, None)
                 }
@@ -358,11 +444,40 @@ fn collect(file: &HaxeFile, source: &str) -> Vec<Declaration> {
                 format!("{}.{name}", qualify(declaration_name(declaration))),
                 field.span,
                 kind,
+                None,
                 end,
             );
         }
     }
     entries
+}
+
+fn type_signature_end(declaration: &TypeDeclaration, tokens: &[parser::token::Token]) -> usize {
+    use parser::token::TokenKind;
+    let span = declaration.span();
+    if matches!(declaration, TypeDeclaration::Typedef(_)) {
+        return span.end;
+    }
+    // The final balanced brace pair is the body; constraints and underlying
+    // anonymous types can contain earlier pairs in the declaration header.
+    let mut depth = 0;
+    for token in tokens
+        .iter()
+        .rev()
+        .filter(|t| t.span.start >= span.start && t.span.end <= span.end)
+    {
+        match token.kind {
+            TokenKind::RBrace => depth += 1,
+            TokenKind::LBrace if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return token.span.start;
+                }
+            }
+            _ => {}
+        }
+    }
+    span.end
 }
 
 fn declaration_name(declaration: &TypeDeclaration) -> &str {
@@ -373,5 +488,59 @@ fn declaration_name(declaration: &TypeDeclaration) -> &str {
         TypeDeclaration::Enum(c) => &c.name,
         TypeDeclaration::Typedef(c) => &c.name,
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_headers_preserve_structure_and_exclude_bodies() {
+        let source = "package models;\n\
+            typedef View<T> = {value:T, ?label:String};\n\
+            typedef Callback = (value:Int) -> String;\n\
+            interface Reader<T> extends Base<T> { function read():T; }\n\
+            abstract Token({id:Int}) from {id:Int} to {id:Int} { public function id() return this.id; }\n\
+            enum abstract Mode(Int) { var On = 1; }\n\
+            enum Color { Red; }\n\
+            class Box<T:{id:Int}> implements Reader<T> { public var value:T; }";
+        let entries = declarations(Path::new("models/Types.hx"), source, &[]);
+        for (name, kind, signature) in [
+            (
+                "View",
+                SymbolKind::TypeAlias,
+                "typedef View<T> = {value:T, ?label:String}",
+            ),
+            (
+                "Callback",
+                SymbolKind::TypeAlias,
+                "typedef Callback = (value:Int) -> String",
+            ),
+            (
+                "Reader",
+                SymbolKind::Interface,
+                "interface Reader<T> extends Base<T>",
+            ),
+            (
+                "Token",
+                SymbolKind::Abstract,
+                "abstract Token({id:Int}) from {id:Int} to {id:Int}",
+            ),
+            ("Mode", SymbolKind::Abstract, "enum abstract Mode(Int)"),
+            ("Color", SymbolKind::Enum, "enum Color"),
+            (
+                "Box",
+                SymbolKind::Class,
+                "class Box<T:{id:Int}> implements Reader<T>",
+            ),
+        ] {
+            let entry = entries
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(entry.type_kind, Some(kind), "{name}");
+            assert_eq!(entry.signature, signature, "{name}");
+        }
     }
 }
