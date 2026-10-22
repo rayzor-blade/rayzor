@@ -570,6 +570,40 @@ fn blade_editor_data_is_reused_after_a_server_restart() {
 }
 
 #[test]
+fn a_request_sent_with_didopen_after_restart_is_answered_from_the_index() {
+    let source = "class Main { /** Retained field. */ public static var value:Int = 7; }";
+    let mut first = Session::start(&[("Main.hx", source)]);
+    assert!(first.open("Main.hx").is_empty());
+    let root = first.root.clone();
+    first.temporary = false;
+    drop(first);
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(root.clone());
+    let mut second = Session::connect(root, json!({}), false);
+    let uri = second.uri("Main.hx");
+    second.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {"uri": uri, "languageId": "haxe", "version": 1, "text": source}}),
+    );
+    let column = source.find("value").unwrap() as u32;
+    let hover = hover_text(&second.request("textDocument/hover", second.at("Main.hx", 0, column)));
+    assert!(hover.contains("Retained field."), "{hover}");
+    assert!(
+        !second
+            .activity
+            .iter()
+            .any(|activity| activity["state"] == "checking"),
+        "{:#?}",
+        second.activity
+    );
+}
+
+#[test]
 fn typedef_fields_have_types_and_docs_at_declarations_and_imported_reads() {
     let types = "package models;\ntypedef State = {\n /** Horizontal offset. */\n panX:Float,\n /** Display label. */\n ?label:String,\n /** Nested position. */\n position:{x:Int, y:Int}\n};\ntypedef Alias = State;";
     let main = "import models.Types.State;\nimport models.Types.Alias;\nclass Main {\n static function main() {\n  var state:State = {panX:1.0, position:{x:1, y:2}};\n  var alias:Alias = state;\n  state.panX;\n  alias.panX;\n  state.position.x;\n }\n}";

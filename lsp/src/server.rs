@@ -268,6 +268,14 @@ fn serve_worker(
             publish_diagnostics(connection, &mut ctx, &uri);
         }
         for req in deferred {
+            // A request that raced the cache's configuration is answered from
+            // the persisted index rather than waiting for a fresh analysis.
+            if ctx.needs_analysis_uri(&req)
+                && let Some(result) = ctx.editor_cache.answer(&req)
+            {
+                send_response(connection, req.id, Some(result));
+                continue;
+            }
             if let Some(uri) = req
                 .params
                 .get("textDocument")

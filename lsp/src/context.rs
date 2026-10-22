@@ -601,6 +601,12 @@ impl LspContext {
             && !self.failed_analyses.contains(uri)
     }
 
+    pub fn needs_analysis_uri(&mut self, req: &lsp_server::Request) -> bool {
+        req.params["textDocument"]["uri"]
+            .as_str()
+            .is_some_and(|uri| self.needs_analysis(uri))
+    }
+
     pub fn has_current_analysis(&self, uri: &str) -> bool {
         self.analyses.get(uri).is_some_and(|analysis| {
             self.open_files.get(uri).is_some_and(|source| {
