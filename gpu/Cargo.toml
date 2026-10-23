@@ -10,7 +10,7 @@ crate-type = ["rlib"]
 
 [features]
 default = ["native"]
-native = ["dep:rayzor-plugin", "dep:rayzor-runtime", "dep:libc"]
+native = ["dep:rayzor-plugin", "dep:rayzor-runtime", "dep:libc", "dep:libloading"]
 metal-backend = ["dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
 webgpu-backend = [
     "dep:rayzor-plugin",
@@ -26,6 +26,7 @@ cuda-backend = []
 rayzor-plugin = { path = "../plugin", optional = true }
 rayzor-runtime = { path = "../runtime", optional = true }
 libc = { version = "0.2", optional = true }
+libloading = { version = "0.8", optional = true }
 
 # Metal backend (macOS only)
 objc2 = { version = "0.6", optional = true }

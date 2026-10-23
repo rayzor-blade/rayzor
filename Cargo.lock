@@ -3147,6 +3147,7 @@ version = "0.1.0"
 dependencies = [
  "js-sys",
  "libc",
+ "libloading",
  "objc2",
  "objc2-foundation",
  "objc2-metal",

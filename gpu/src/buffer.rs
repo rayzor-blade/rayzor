@@ -429,18 +429,30 @@ pub unsafe extern "C" fn rayzor_gpu_compute_to_tensor(ctx: i64, buffer_ptr: i64)
 type TensorUninitFn = unsafe extern "C" fn(i64, i64, i64) -> i64;
 fn tensor_uninit_fn() -> Option<TensorUninitFn> {
     use std::sync::OnceLock;
-    static F: OnceLock<Option<usize>> = OnceLock::new();
-    let addr = *F.get_or_init(|| unsafe {
+    static F: OnceLock<Option<TensorUninitFn>> = OnceLock::new();
+    *F.get_or_init(|| unsafe {
         let name = b"rayzor_tensor_uninit\0";
-        let p = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr() as *const libc::c_char);
-        if p.is_null() {
+        #[cfg(unix)]
+        let function = libloading::os::unix::Library::this()
+            .get::<TensorUninitFn>(name)
+            .ok()
+            .map(|symbol| *symbol);
+        #[cfg(windows)]
+        let function = libloading::os::windows::Library::this()
+            .ok()
+            .and_then(|library| {
+                library
+                    .get::<TensorUninitFn>(name)
+                    .ok()
+                    .map(|symbol| *symbol)
+            });
+        #[cfg(not(any(unix, windows)))]
+        let function = None;
+        if function.is_none() {
             eprintln!("[rzg] rayzor_tensor_uninit not found; GPU->Tensor conversion disabled");
-            None
-        } else {
-            Some(p as usize)
         }
-    });
-    addr.map(|a| unsafe { std::mem::transmute::<usize, TensorUninitFn>(a) })
+        function
+    })
 }
 
 /// Free a GPU buffer.

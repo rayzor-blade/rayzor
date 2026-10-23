@@ -91,14 +91,16 @@ mod native_surface {
 
         #[cfg(target_os = "windows")]
         {
+            use std::num::NonZeroIsize;
+
             if window_handle.is_null() {
                 return None;
             }
             let hwnd = NonZeroIsize::new(window_handle as isize)?;
-            let window = RawWindowHandle::Win32(Win32WindowHandle::new(hwnd));
-            let hinstance = NonZeroIsize::new(display_handle as isize);
-            let mut dh = WindowsDisplayHandle::new();
-            let display = RawDisplayHandle::Windows(dh);
+            let mut handle = Win32WindowHandle::new(hwnd);
+            handle.hinstance = NonZeroIsize::new(display_handle as isize);
+            let window = RawWindowHandle::Win32(handle);
+            let display = RawDisplayHandle::Windows(WindowsDisplayHandle::new());
             Some(RawSurfaceTarget { window, display })
         }
 
