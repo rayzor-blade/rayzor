@@ -11,6 +11,11 @@ on:
   schedule:
     - cron: '0 6 * * *'
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and test artifacts without publishing the nightly release'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -291,6 +296,7 @@ jobs:
       # One rolling tag. `install.sh` fetches from a stable URL rather than
       # having to discover the newest release first.
       - name: Publish rolling nightly
+        if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
         uses: softprops/action-gh-release@v3
         with:
           tag_name: nightly

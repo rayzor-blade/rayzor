@@ -10,6 +10,10 @@ on:
         description: 'Package version (e.g., 0.1.0)'
         required: true
         default: '0.1.0'
+      dry_run:
+        description: 'Build and inspect packages without creating a release'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -237,10 +241,11 @@ jobs:
 
       # Create GitHub release with rpkg files
       - name: Create Release
+        if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.ref_name || format('rpkg-v{0}', github.event.inputs.version) }}
-          name: "Rayzor Packages ${{ github.ref_name || github.event.inputs.version }}"
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('rpkg-v{0}', inputs.version) || github.ref_name }}
+          name: "Rayzor Packages ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}"
           body: |
             ## Official Rayzor Packages
 
