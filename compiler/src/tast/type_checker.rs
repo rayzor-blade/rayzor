@@ -1709,7 +1709,10 @@ impl<'a> TypeChecker<'a> {
     }
 
     pub(crate) fn get_parent_class(&self, class: SymbolId) -> Option<TypeId> {
-        self.symbol_table.get_class_hierarchy(class)?.superclass
+        self.symbol_table
+            .get_class_hierarchy(class)
+            .and_then(|hierarchy| hierarchy.superclass)
+            .or_else(|| self.symbol_table.get_class_super_type(class))
     }
 
     /// Find common supertype of two class types
@@ -1772,15 +1775,19 @@ impl<'a> TypeChecker<'a> {
             return true;
         }
 
-        if let Some(source_sym) = self
-            .type_table
-            .borrow()
-            .get_type_symbol(source)
-            .filter(|ty| ty.is_valid())
-        {
+        if let Some(source_sym) = self.get_class_symbol_from_type(source) {
             if let Some(hierarchy) = self.symbol_table.get_class_hierarchy(source_sym) {
-                return hierarchy.all_supertypes.contains(&target);
+                if hierarchy.all_supertypes.contains(&target) {
+                    return true;
+                }
             }
+            return self
+                .get_class_symbol_from_type(target)
+                .is_some_and(|target_sym| {
+                    !self
+                        .get_inheritance_chain(source_sym, target_sym)
+                        .is_empty()
+                });
         }
 
         false
@@ -1803,16 +1810,20 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Get class symbol from a type ID
-    fn get_class_symbol_from_type(&self, type_id: TypeId) -> Option<SymbolId> {
-        if let Some(ty) = self.type_table.borrow().get(type_id) {
-            match &ty.kind {
-                TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
-                _ => None,
+    fn get_class_symbol_from_type(&self, mut type_id: TypeId) -> Option<SymbolId> {
+        let table = self.type_table.borrow();
+        for _ in 0..32 {
+            match &table.get(type_id)?.kind {
+                TypeKind::Class { symbol_id, .. } | TypeKind::Interface { symbol_id, .. } => {
+                    return Some(*symbol_id);
+                }
+                TypeKind::TypeAlias { target_type, .. }
+                | TypeKind::Reference { target_type, .. } => type_id = *target_type,
+                TypeKind::GenericInstance { base_type, .. } => type_id = *base_type,
+                _ => return None,
             }
-        } else {
-            None
         }
+        None
     }
 
     /// Check if source type is compatible with target type through inheritance
@@ -1828,19 +1839,17 @@ impl<'a> TypeChecker<'a> {
         }
 
         // Get type information
-        let binding = self.type_table.borrow();
-        let source_type = match binding.get(source) {
-            Some(t) => t,
+        let source_kind = match self.type_table.borrow().get(source) {
+            Some(t) => t.kind.clone(),
             None => return TypeCompatibility::Incompatible,
         };
 
-        let binding = self.type_table.borrow();
-        let target_type = match binding.get(target) {
-            Some(t) => t,
+        let target_kind = match self.type_table.borrow().get(target) {
+            Some(t) => t.kind.clone(),
             None => return TypeCompatibility::Incompatible,
         };
 
-        match (&source_type.kind, &target_type.kind) {
+        match (&source_kind, &target_kind) {
             // Class to Class
             (
                 TypeKind::Class {
@@ -2107,16 +2116,14 @@ impl<'a> TypeChecker<'a> {
             chain.push(current);
 
             // Get superclass
-            if let Some(hierarchy) = self.symbol_table.get_class_hierarchy(current) {
-                if let Some(superclass_type) = hierarchy.superclass {
-                    if let Some(superclass_sym) = self.get_class_symbol_from_type(superclass_type) {
-                        current = superclass_sym;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
+            if let Some(parent) = self
+                .get_parent_class(current)
+                .and_then(|ty| self.get_class_symbol_from_type(ty))
+            {
+                if chain.contains(&parent) {
+                    return Vec::new();
                 }
+                current = parent;
             } else {
                 break;
             }
@@ -2168,6 +2175,21 @@ impl<'a> TypeChecker<'a> {
         child_args: &[TypeId],
         parent_class: SymbolId,
     ) -> Vec<TypeId> {
+        if let Some(parent) = self.get_parent_class(child_class)
+            && self.get_class_symbol_from_type(parent) == Some(parent_class)
+        {
+            let child = self
+                .type_table
+                .borrow_mut()
+                .create_class_type(child_class, child_args.to_vec());
+            let parent = super::type_substitution::TypeSubstitutions {
+                type_table: &self.type_table,
+                symbol_table: self.symbol_table,
+                class_type_params: None,
+            }
+            .substitute_receiver_type(parent, child);
+            return self.extract_type_arguments_from_type(parent);
+        }
         // Get the hierarchy info for the child class
         if let Some(hierarchy) = self.symbol_table.get_class_hierarchy(child_class) {
             if let Some(superclass_type) = hierarchy.superclass {
@@ -3107,6 +3129,50 @@ mod tests {
 
         assert!(matches!(result, ConstraintValidation::Satisfied));
         assert_eq!(validator.stats().validations_performed, 1);
+    }
+
+    #[test]
+    fn declaration_hierarchy_keeps_generic_ancestry_without_bodies() {
+        let (types, mut symbols, scopes, strings) = create_test_setup();
+        let base = symbols.create_class(strings.intern("Base"));
+        let child = symbols.create_class(strings.intern("Child"));
+        let middle = symbols.create_class(strings.intern("Middle"));
+        let parameter = symbols.create_type_parameter(strings.intern("T"), Vec::new());
+        let (generic, boolean, string, base_bool, base_string, child_bool, middle_generic) = {
+            let mut table = types.borrow_mut();
+            let generic = table.create_type_parameter(
+                parameter,
+                Vec::new(),
+                crate::tast::core::Variance::Invariant,
+            );
+            let boolean = table.bool_type();
+            let string = table.string_type();
+            (
+                generic,
+                boolean,
+                string,
+                table.create_class_type(base, vec![boolean]),
+                table.create_class_type(base, vec![string]),
+                table.create_class_type(child, vec![boolean]),
+                table.create_class_type(middle, vec![generic]),
+            )
+        };
+        symbols.set_class_type_params(child, vec![generic]);
+        symbols.set_class_type_params(middle, vec![generic]);
+        symbols.set_class_super_type(child, Some(middle_generic));
+        let base_generic = types.borrow_mut().create_class_type(base, vec![generic]);
+        symbols.set_class_super_type(middle, Some(base_generic));
+        let mut checker = TypeChecker::new(&types, &symbols, &scopes, &strings);
+        assert!(checker.is_class_subtype_of(child_bool, base_bool));
+        assert!(matches!(
+            checker.check_compatibility(child_bool, base_bool),
+            TypeCompatibility::Identical | TypeCompatibility::Assignable
+        ));
+        assert_eq!(
+            checker.check_compatibility(child_bool, base_string),
+            TypeCompatibility::Incompatible
+        );
+        assert_ne!(boolean, string);
     }
 
     #[test]

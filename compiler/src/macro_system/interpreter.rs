@@ -3453,13 +3453,14 @@ impl MacroInterpreter {
                         .as_str(),
                 )))
             }
-            "indexOf" => {
+            "indexOf" | "lastIndexOf" => {
                 let needle = args.first().and_then(|a| a.as_string()).unwrap_or("");
-                Ok(MacroValue::Int(
-                    s.find(needle)
-                        .map(|i| s[..i].chars().count() as i64)
-                        .unwrap_or(-1),
-                ))
+                Ok(MacroValue::Int(super::strings::search(
+                    s,
+                    needle,
+                    args.get(1).and_then(MacroValue::as_int),
+                    method == "lastIndexOf",
+                )))
             }
             "split" => {
                 let delim = args.first().and_then(|a| a.as_string()).unwrap_or("");

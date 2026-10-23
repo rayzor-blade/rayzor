@@ -90,6 +90,20 @@ impl CompilationUnit {
             .map_or(&[], |fields| fields.as_slice())
     }
 
+    /// Instantiate a member against its receiver, including inherited bindings.
+    pub fn receiver_member_type(
+        &self,
+        member: crate::tast::TypeId,
+        receiver: crate::tast::TypeId,
+    ) -> crate::tast::TypeId {
+        let substitutions = crate::tast::type_substitution::TypeSubstitutions {
+            type_table: &self.type_table,
+            symbol_table: &self.symbol_table,
+            class_type_params: None,
+        };
+        substitutions.substitute_receiver_type(member, receiver)
+    }
+
     /// Extract the type name from an unresolved type error message
     pub(crate) fn extract_type_name_from_error(&self, message: &str) -> Option<String> {
         // Try to extract type name from error message formats:

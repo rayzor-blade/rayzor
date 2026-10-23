@@ -22,6 +22,7 @@ pub struct FileSymbolIndex {
     pub file_id: u32,
     /// (line, start column) → (length, symbol), both 1-based.
     pub names: BTreeMap<(u32, u32), (u32, SymbolId)>,
+    types: BTreeMap<(u32, u32), TypeId>,
 }
 
 impl FileSymbolIndex {
@@ -145,28 +146,69 @@ impl FileSymbolIndex {
         interner: &StringInterner,
         references: &[SymbolReference],
         file_id: u32,
+        source: &str,
     ) -> Self {
         let mut names = BTreeMap::new();
+        let mut types = BTreeMap::new();
+        let line_starts: Vec<_> = std::iter::once(0)
+            .chain(source.match_indices('\n').map(|(at, _)| at + 1))
+            .collect();
+        let column = |line: u32, offset: u32, fallback: u32| {
+            line_starts
+                .get(line.saturating_sub(1) as usize)
+                .and_then(|&start| source.get(start..offset as usize))
+                .map_or(fallback, |before| before.encode_utf16().count() as u32 + 1)
+        };
         for r in references
             .iter()
             .filter(|r| r.at.file_id == file_id && r.at.line > 0 && r.at.column > 0)
         {
-            names.insert((r.at.line, r.at.column), (r.len, r.symbol));
+            let position = (r.at.line, column(r.at.line, r.at.byte_offset, r.at.column));
+            let len = symbol_table
+                .get_symbol(r.symbol)
+                .and_then(|symbol| interner.get(symbol.name))
+                .map_or(r.len, |name| name.encode_utf16().count() as u32);
+            names.insert(position, (len, r.symbol));
+            if r.type_id != TypeId::invalid() {
+                types.insert(position, r.type_id);
+            }
         }
         for sym in symbol_table.all_symbols() {
             let loc = sym.definition_location;
             if loc.file_id == file_id && loc.line > 0 && loc.column > 0 {
-                let len = interner.get(sym.name).map_or(1, |n| n.len() as u32);
-                names.insert((loc.line, loc.column), (len, sym.id));
+                let Some(name) = interner.get(sym.name) else {
+                    continue;
+                };
+                let offset = loc.byte_offset as usize;
+                // Lowered temporaries share their initializer's location.
+                if source.get(offset..offset + name.len()) != Some(name) {
+                    continue;
+                }
+                let len = name.encode_utf16().count() as u32;
+                names.insert(
+                    (loc.line, column(loc.line, loc.byte_offset, loc.column)),
+                    (len, sym.id),
+                );
             }
         }
-        Self { file_id, names }
+        Self {
+            file_id,
+            names,
+            types,
+        }
     }
 
     /// The symbol whose name covers (line, col), both 1-based.
     pub fn find_symbol_at(&self, line: u32, col: u32) -> Option<SymbolId> {
         let (&(l, start), &(len, sym)) = self.names.range(..=(line, col)).next_back()?;
         (l == line && col < start + len).then_some(sym)
+    }
+
+    pub(crate) fn type_at(&self, line: u32, col: u32) -> Option<TypeId> {
+        let (&key, &(len, _)) = self.names.range(..=(line, col)).next_back()?;
+        (key.0 == line && col < key.1 + len)
+            .then(|| self.types.get(&key).copied())
+            .flatten()
     }
 }
 
@@ -182,6 +224,15 @@ pub fn format_hover(
     interner: &StringInterner,
 ) -> Option<String> {
     let sym = symbol_table.get_symbol(sym_id)?;
+    format_hover_symbol(sym, symbol_table, type_table, interner)
+}
+
+pub(crate) fn format_hover_symbol(
+    sym: &Symbol,
+    symbol_table: &SymbolTable,
+    type_table: &Rc<RefCell<TypeTable>>,
+    interner: &StringInterner,
+) -> Option<String> {
     let name = interner.get(sym.name)?;
     let tt = type_table.borrow();
     let mut parts = Vec::new();
@@ -362,10 +413,16 @@ fn format_symbol_signature(
         }
         SymbolKind::EnumVariant => {
             let type_str = format_type_name(sym.type_id, type_table, interner, symbol_table);
-            if type_str == "Void" {
-                name.to_string()
+            if matches!(
+                type_table.get(sym.type_id).map(|ty| &ty.kind),
+                Some(TypeKind::Function { .. })
+            ) {
+                format!(
+                    "{name}{}",
+                    format_function_type(sym.type_id, type_table, interner, symbol_table)
+                )
             } else {
-                format!("{}({})", name, type_str)
+                format!("{name}:{type_str}")
             }
         }
         SymbolKind::TypeParameter => format!("type parameter {}", name),
@@ -383,7 +440,7 @@ fn format_symbol_signature(
 // ---------------------------------------------------------------------------
 
 /// Format function type as `(param:Type, ...):ReturnType`.
-fn format_function_type(
+pub(crate) fn format_function_type(
     type_id: TypeId,
     type_table: &TypeTable,
     interner: &StringInterner,
@@ -393,17 +450,41 @@ fn format_function_type(
         && let TypeKind::Function {
             params,
             return_type,
+            labels,
             ..
         } = &ti.kind
     {
         let param_strs: Vec<String> = params
             .iter()
-            .map(|p| format_type_name(*p, type_table, interner, symbol_table))
+            .enumerate()
+            .map(|(index, p)| {
+                format_parameter(
+                    format_type_name(*p, type_table, interner, symbol_table),
+                    labels.get(index),
+                    interner,
+                )
+            })
             .collect();
         let ret = format_type_name(*return_type, type_table, interner, symbol_table);
         return format!("({}):{}", param_strs.join(", "), ret);
     }
     "(…)".to_string()
+}
+
+fn format_parameter(
+    ty: String,
+    label: Option<&compiler::tast::core::FunctionArgLabel>,
+    interner: &StringInterner,
+) -> String {
+    let Some(label) = label else { return ty };
+    let name = label.name.and_then(|name| interner.get(name));
+    format!(
+        "{}{}{}{}",
+        if label.optional { "?" } else { "" },
+        name.unwrap_or(""),
+        if name.is_some() { ":" } else { "" },
+        ty
+    )
 }
 
 /// Format a type using declaration names from the analysis that owns its IDs.
@@ -927,6 +1008,16 @@ pub fn build_signature_help(
     active_param: u32,
 ) -> Option<SignatureInfo> {
     let sym = symbol_table.get_symbol(sym_id)?;
+    signature_for_symbol(sym, symbol_table, type_table, interner, active_param)
+}
+
+pub(crate) fn signature_for_symbol(
+    sym: &Symbol,
+    symbol_table: &SymbolTable,
+    type_table: &Rc<RefCell<TypeTable>>,
+    interner: &StringInterner,
+    active_param: u32,
+) -> Option<SignatureInfo> {
     let tt = type_table.borrow();
 
     if sym.kind != SymbolKind::Function {
@@ -934,13 +1025,14 @@ pub fn build_signature_help(
     }
 
     let ti = tt.get(sym.type_id)?;
-    let (params, ret) = if let TypeKind::Function {
+    let (params, ret, labels) = if let TypeKind::Function {
         params,
         return_type,
+        labels,
         ..
     } = &ti.kind
     {
-        (params.clone(), *return_type)
+        (params.clone(), *return_type, labels)
     } else {
         return None;
     };
@@ -948,7 +1040,14 @@ pub fn build_signature_help(
     let name = interner.get(sym.name)?;
     let param_strs: Vec<String> = params
         .iter()
-        .map(|p| format_type_name(*p, &tt, interner, symbol_table))
+        .enumerate()
+        .map(|(index, p)| {
+            format_parameter(
+                format_type_name(*p, &tt, interner, symbol_table),
+                labels.get(index),
+                interner,
+            )
+        })
         .collect();
     let ret_str = format_type_name(ret, &tt, interner, symbol_table);
 
@@ -988,8 +1087,16 @@ fn offset_of(text: &str, line: u32, col: u32) -> Option<usize> {
         .take(line.checked_sub(1)? as usize)
         .map(str::len)
         .sum();
-    let at = start + col.checked_sub(1)? as usize;
-    (at <= text.len()).then_some(at)
+    let contents = text.split('\n').nth(line.checked_sub(1)? as usize)?;
+    let column = col.checked_sub(1)? as usize;
+    let mut units = 0;
+    for (offset, character) in contents.char_indices() {
+        if units == column {
+            return Some(start + offset);
+        }
+        units += character.len_utf16();
+    }
+    (units == column).then_some(start + contents.len())
 }
 
 /// The (line, col), both 1-based, of byte offset `at` in `text`.
@@ -1000,7 +1107,7 @@ fn position_of(text: &str, at: usize) -> (u32, u32) {
         .iter()
         .rposition(|&b| b == b'\n')
         .map_or(0, |p| p + 1);
-    (line, (at - line_start) as u32 + 1)
+    (line, text[line_start..at].encode_utf16().count() as u32 + 1)
 }
 
 /// When the cursor at (line, col) follows `receiver.` and part of a member
@@ -1030,6 +1137,176 @@ pub fn receiver_before(text: &str, line: u32, col: u32) -> Option<(u32, u32, Str
         let (line, col) = position_of(text, i);
         (line, col, name.to_string())
     })
+}
+
+pub(crate) fn is_constructor_name(text: &str, line: u32, col: u32) -> bool {
+    let Some(mut start) = offset_of(text, line, col) else {
+        return false;
+    };
+    let bytes = text.as_bytes();
+    while start > 0 && is_ident_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    loop {
+        let prefix = text[..start].trim_end();
+        if !prefix.ends_with('.') {
+            break;
+        }
+        start = prefix.len() - 1;
+        while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && is_ident_byte(bytes[start - 1]) {
+            start -= 1;
+        }
+    }
+    let prefix = text[..start].trim_end();
+    prefix
+        .strip_suffix("new")
+        .is_some_and(|before| before.as_bytes().last().is_none_or(|b| !is_ident_byte(*b)))
+}
+
+pub(crate) fn constructor_symbol(
+    unit: &compiler::compilation::CompilationUnit,
+    ty: TypeId,
+) -> Option<SymbolId> {
+    let mut class = class_of_type(
+        ty,
+        &unit.symbol_table,
+        &unit.type_table.borrow(),
+        &unit.string_interner,
+    )?;
+    let mut visited = std::collections::BTreeSet::new();
+    while visited.insert(class) {
+        if let Some(id) = unit.symbol_table.get_class_constructor(class) {
+            return Some(id);
+        }
+        if let Some(id) = unit.class_fields(class).iter().find_map(|&(name, id, _)| {
+            (unit.string_interner.get(name) == Some("new")).then_some(id)
+        }) {
+            return Some(id);
+        }
+        let parent = unit.symbol_table.get_class_super_type(class)?;
+        class = class_of_type(
+            parent,
+            &unit.symbol_table,
+            &unit.type_table.borrow(),
+            &unit.string_interner,
+        )?;
+    }
+    None
+}
+
+pub(crate) fn forwarded_member(
+    unit: &compiler::compilation::CompilationUnit,
+    mut receiver: TypeId,
+    name: &str,
+) -> Option<(SymbolId, TypeId)> {
+    for _ in 0..32 {
+        let underlying = {
+            let table = unit.type_table.borrow();
+            let kind = &table.get(receiver)?.kind;
+            let kind = match kind {
+                TypeKind::Optional { inner_type } => {
+                    receiver = *inner_type;
+                    continue;
+                }
+                TypeKind::Reference { target_type, .. }
+                | TypeKind::TypeAlias { target_type, .. } => {
+                    receiver = *target_type;
+                    continue;
+                }
+                TypeKind::GenericInstance { base_type, .. } => &table.get(*base_type)?.kind,
+                kind => kind,
+            };
+            let (symbol, underlying) = match kind {
+                TypeKind::Abstract {
+                    symbol_id,
+                    underlying,
+                    ..
+                } => (
+                    *symbol_id,
+                    underlying.or_else(|| table.resolve_abstract_underlying(*symbol_id))?,
+                ),
+                TypeKind::Class { symbol_id, .. } => {
+                    (*symbol_id, table.resolve_abstract_underlying(*symbol_id)?)
+                }
+                _ => return None,
+            };
+            if !unit
+                .symbol_table
+                .get_symbol(symbol)?
+                .flags
+                .contains(SymbolFlags::FORWARD)
+            {
+                return None;
+            }
+            underlying
+        };
+        let underlying = unit.receiver_member_type(underlying, receiver);
+        let class = class_of_type(
+            underlying,
+            &unit.symbol_table,
+            &unit.type_table.borrow(),
+            &unit.string_interner,
+        )?;
+        let owner = unit.symbol_table.get_symbol(class)?;
+        let prefix = format!(
+            "{}.",
+            unit.string_interner
+                .get(owner.qualified_name.unwrap_or(owner.name))?
+        );
+        if let Some(member) = unit.symbol_table.all_symbols().find(|symbol| {
+            unit.string_interner.get(symbol.name) == Some(name)
+                && symbol
+                    .qualified_name
+                    .and_then(|name| unit.string_interner.get(name))
+                    .is_some_and(|qualified| qualified.strip_prefix(&prefix) == Some(name))
+        }) {
+            let ty = unit.receiver_member_type(member.type_id, underlying);
+            if !matches!(
+                unit.type_table.borrow().get(ty).map(|ty| &ty.kind),
+                None | Some(TypeKind::Unknown)
+            ) {
+                return Some((member.id, ty));
+            }
+        }
+        receiver = underlying;
+    }
+    None
+}
+
+pub(crate) fn symbol_at_use(
+    unit: &compiler::compilation::CompilationUnit,
+    index: &FileSymbolIndex,
+    source: &str,
+    line: u32,
+    column: u32,
+    symbol: SymbolId,
+) -> Option<Symbol> {
+    let mut symbol = unit.symbol_table.get_symbol(symbol)?.clone();
+    symbol.type_id = index.type_at(line, column).unwrap_or(symbol.type_id);
+    if let Some((row, col, _)) = receiver_before(source, line, column)
+        && let Some(receiver) = index
+            .find_symbol_at(row, col)
+            .and_then(|id| unit.symbol_table.get_symbol(id))
+    {
+        let receiver = index.type_at(row, col).unwrap_or(receiver.type_id);
+        symbol.type_id = unit.receiver_member_type(symbol.type_id, receiver);
+        if matches!(
+            unit.type_table
+                .borrow()
+                .get(symbol.type_id)
+                .map(|ty| &ty.kind),
+            None | Some(TypeKind::Unknown)
+        ) && let Some((member, ty)) =
+            forwarded_member(unit, receiver, unit.string_interner.get(symbol.name)?)
+        {
+            symbol = unit.symbol_table.get_symbol(member)?.clone();
+            symbol.type_id = ty;
+        }
+    }
+    Some(symbol)
 }
 
 /// The symbol `name` most likely means at (line, col): the closest earlier
@@ -1081,24 +1358,34 @@ pub(crate) fn class_of_type(
             .first()
             .map(|s| s.id)
     };
-    match &type_table.get(type_id)?.kind {
-        TypeKind::Class { symbol_id, .. }
-        | TypeKind::Interface { symbol_id, .. }
-        | TypeKind::Enum { symbol_id, .. }
-        | TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
-        TypeKind::GenericInstance { base_type, .. } => {
-            class_of_type(*base_type, symbol_table, type_table, interner)
+    let mut type_id = type_id;
+    for _ in 0..64 {
+        match &type_table.get(type_id)?.kind {
+            TypeKind::Class { symbol_id, .. } => {
+                if let Some(TypeKind::TypeAlias { target_type, .. }) = symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|symbol| type_table.get(symbol.type_id))
+                    .map(|ty| &ty.kind)
+                {
+                    type_id = *target_type;
+                } else {
+                    return Some(*symbol_id);
+                }
+            }
+            TypeKind::Interface { symbol_id, .. }
+            | TypeKind::Enum { symbol_id, .. }
+            | TypeKind::Abstract { symbol_id, .. } => return Some(*symbol_id),
+            TypeKind::GenericInstance { base_type, .. } => type_id = *base_type,
+            TypeKind::Optional { inner_type } => type_id = *inner_type,
+            TypeKind::TypeAlias { target_type, .. } | TypeKind::Reference { target_type, .. } => {
+                type_id = *target_type
+            }
+            TypeKind::String => return named("String"),
+            TypeKind::Array { .. } => return named("Array"),
+            _ => return None,
         }
-        TypeKind::Optional { inner_type, .. } => {
-            class_of_type(*inner_type, symbol_table, type_table, interner)
-        }
-        TypeKind::TypeAlias { target_type, .. } | TypeKind::Reference { target_type, .. } => {
-            class_of_type(*target_type, symbol_table, type_table, interner)
-        }
-        TypeKind::String => named("String"),
-        TypeKind::Array { .. } => named("Array"),
-        _ => None,
     }
+    None
 }
 
 /// What can follow `receiver.`: a type's statics and constructors, or an
@@ -1215,11 +1502,11 @@ pub fn stdlib_member_completions(
 /// Members supplied by typed declarations and inherited classes.
 pub fn member_completions(
     receiver: SymbolId,
-    symbol_table: &SymbolTable,
-    type_table: &Rc<RefCell<TypeTable>>,
-    interner: &StringInterner,
-    class_fields: impl Fn(SymbolId) -> Vec<(SymbolId, bool)>,
+    receiver_type: TypeId,
+    unit: &compiler::compilation::CompilationUnit,
 ) -> Vec<CompletionEntry> {
+    let (symbol_table, type_table, interner) =
+        (&unit.symbol_table, &unit.type_table, &unit.string_interner);
     let tt = type_table.borrow();
     let Some(sym) = symbol_table.get_symbol(receiver) else {
         return Vec::new();
@@ -1233,7 +1520,7 @@ pub fn member_completions(
             | SymbolKind::TypeAlias
     );
     if !is_type {
-        let mut structural = sym.type_id;
+        let mut structural = receiver_type;
         for _ in 0..64 {
             structural = tt.resolve_alias_type(structural);
             match tt.get(structural).map(|ty| &ty.kind) {
@@ -1263,10 +1550,11 @@ pub fn member_completions(
     let mut class = if is_type && sym.kind != SymbolKind::TypeAlias {
         Some(sym.id)
     } else {
-        class_of_type(sym.type_id, symbol_table, &tt, interner)
+        class_of_type(receiver_type, symbol_table, &tt, interner)
     };
     let mut entries: Vec<CompletionEntry> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    drop(tt);
     while let Some(class_id) = class {
         let Some(prefix) = symbol_table
             .get_symbol(class_id)
@@ -1276,7 +1564,7 @@ pub fn member_completions(
         else {
             break;
         };
-        let fields = class_fields(class_id);
+        let fields = unit.class_fields(class_id);
         let declared = symbol_table.all_symbols().filter(|m| {
             m.qualified_name
                 .and_then(|q| interner.get(q))
@@ -1287,7 +1575,7 @@ pub fn member_completions(
         // flags do.
         let members = fields
             .iter()
-            .filter_map(|&(f, is_static)| Some((symbol_table.get_symbol(f)?, Some(is_static))))
+            .filter_map(|&(_, f, is_static)| Some((symbol_table.get_symbol(f)?, Some(is_static))))
             .chain(declared.map(|m| (m, None)));
         for (member, is_static) in members {
             let wanted = match (member.kind, is_static) {
@@ -1305,10 +1593,24 @@ pub fn member_completions(
             {
                 continue;
             }
+            let mut member_type = if is_type {
+                member.type_id
+            } else {
+                unit.receiver_member_type(member.type_id, receiver_type)
+            };
+            if !is_type
+                && matches!(
+                    type_table.borrow().get(member_type).map(|ty| &ty.kind),
+                    None | Some(TypeKind::Unknown)
+                )
+                && let Some((_, ty)) = forwarded_member(unit, receiver_type, name)
+            {
+                member_type = ty;
+            }
             entries.push(CompletionEntry {
                 label: name.to_string(),
                 kind: symbol_kind_to_completion(member.kind),
-                detail: format_type_name(member.type_id, &tt, interner, symbol_table),
+                detail: format_type_name(member_type, &type_table.borrow(), interner, symbol_table),
                 documentation: member
                     .documentation
                     .and_then(|d| interner.get(d))
@@ -1322,7 +1624,7 @@ pub fn member_completions(
         class = (!is_type)
             .then(|| symbol_table.get_class_super_type(class_id))
             .flatten()
-            .and_then(|t| class_of_type(t, symbol_table, &tt, interner));
+            .and_then(|t| class_of_type(t, symbol_table, &type_table.borrow(), interner));
     }
     entries
 }
@@ -1422,13 +1724,13 @@ mod tests {
             .get_symbol_mut(parameter)
             .unwrap()
             .definition_location = compiler::tast::SourceLocation::new(0, 0, 0, 5);
-        let index = FileSymbolIndex::build(&symbols, &interner, &[], 0);
+        let index = FileSymbolIndex::build(&symbols, &interner, &[], 0, "     parameter");
         assert!(index.names.is_empty());
         symbols
             .get_symbol_mut(parameter)
             .unwrap()
             .definition_location = compiler::tast::SourceLocation::new(0, 1, 6, 5);
-        let index = FileSymbolIndex::build(&symbols, &interner, &[], 0);
+        let index = FileSymbolIndex::build(&symbols, &interner, &[], 0, "     parameter");
         assert_eq!(index.find_symbol_at(1, 6), Some(parameter));
     }
 

@@ -469,6 +469,256 @@ fn imported_type_docs_and_named_signatures_survive_across_modules() {
 }
 
 #[test]
+fn dialog_switch_subject_keeps_source_field_identity() {
+    let source = "typedef Props = { /** Is the panel open? */ ?open:Bool, ?id:String };\nclass Base<T> { public var props:T; public function new(props:T) { this.props = props; } }\nclass Main extends Base<Props> {\n function render():Bool {\n  return switch props.open { case null: false; case value: value; }\n }\n}";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    let line = source.lines().nth(4).unwrap();
+    let hover = hover_text(&s.request(
+        "textDocument/hover",
+        s.at("Main.hx", 4, line.find("open").unwrap() as u32),
+    ));
+    assert!(hover.contains("open:") && hover.contains("Bool"), "{hover}");
+    assert!(hover.contains("Is the panel open?"), "{hover}");
+    assert!(!hover.contains("__switch"), "{hover}");
+    let labels = s.labels("Main.hx", 4, line.find("props.").unwrap() as u32 + 6);
+    assert!(
+        labels.contains(&"open".into()) && labels.contains(&"id".into()),
+        "{labels:?}"
+    );
+}
+
+#[test]
+fn dialog_forwarded_signal_members_keep_the_payload_type() {
+    let source = "interface ISignal<T> { public function get():T; public function set(value:T):T; }\n@:forward(get, set) abstract Signal<T>(ISignal<T>) from ISignal<T> {}\nclass Main { static function read(signal:Signal<Bool>):Bool {\n signal.set(true);\n return signal.get();\n} }";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    let members = s.request("textDocument/completion", s.at("Main.hx", 4, 15));
+    let get = members
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["label"] == "get")
+        .unwrap();
+    assert_eq!(get["detail"], "() -> Bool", "{get}");
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 4, 15)));
+    assert!(hover.contains("get():Bool"), "{hover}");
+    let definition = s.request("textDocument/definition", s.at("Main.hx", 4, 15));
+    assert_eq!(start(&definition), (0, 39), "{definition}");
+    let signature = s.request("textDocument/signatureHelp", s.at("Main.hx", 3, 12));
+    assert!(
+        signature.to_string().contains("Bool") && !signature.to_string().contains("Unknown"),
+        "{signature}"
+    );
+}
+
+#[test]
+fn dialog_enum_pattern_bindings_have_hover_and_definition() {
+    let source = "enum State<T> { Const(value:T); Bound(value:T); }\nclass Main { static function read(state:State<Bool>):Bool {\n return switch state {\n  case Const(value): value;\n  case Bound(other): other;\n };\n} }";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 3, 13)));
+    assert!(hover.contains("value:Bool"), "{hover}");
+    let definition = s.request("textDocument/definition", s.at("Main.hx", 3, 22));
+    assert_eq!(start(&definition), (3, 13), "{definition}");
+}
+
+#[test]
+fn dialog_abstract_enum_patterns_bind_the_underlying_payload() {
+    let source = "enum State<T> { Const(value:T); Bound(value:T); }\n@:forward abstract Reactive<T>(State<T>) from State<T> to State<T> {}\nclass Main { static function read(state:Reactive<Bool>):Bool {\n return switch state {\n  case Const(value): value;\n  case Bound(other): other;\n };\n} }";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 4, 13)));
+    assert!(hover.contains("value:Bool"), "{hover}");
+    let diagnostics = s.change(
+        "Main.hx",
+        &source.replace("case Const(value): value", "case Const(value): 42"),
+    );
+    assert!(
+        !diagnostics.is_empty(),
+        "the Bool return must still reject Int"
+    );
+}
+
+#[test]
+fn dialog_optional_map_literals_coerce_their_entries() {
+    let source = "abstract Reactive<T>(T) { @:from public static function of<T>(value:T):Reactive<T> return cast value; }\nclass Main {\n static function part(?data:Map<String,Reactive<Bool>>):Void {}\n static function main() { part([\"open\" => true]); }\n}";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    let diagnostics = s.change("Main.hx", &source.replace("=> true", "=> 42"));
+    assert!(
+        !diagnostics.is_empty(),
+        "a map entry must retain its declared payload type"
+    );
+}
+
+#[test]
+fn dialog_aliases_do_not_replace_a_same_named_imported_class() {
+    let source = "import api.Registry;\nclass Main { static function main() {\n var own = new Alias<Bool>(); own.add(true);\n var imported = new Registry<Int>(); imported.add(42);\n} }\ntypedef Alias<T> = local.Registry<T>;";
+    let mut s = Session::start(&[
+        ("Main.hx", source),
+        (
+            "api/Registry.hx",
+            "package api; class Registry<T> { public function new() {} public function add(value:T):Void {} }",
+        ),
+        (
+            "local/Registry.hx",
+            "package local; typedef Registry<T> = api.Registry<T>;",
+        ),
+    ]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 2, 34)));
+    assert!(hover.contains("Bool"), "{hover}");
+    let diagnostics = s.change(
+        "Main.hx",
+        &source.replace("imported.add(42)", "imported.add(true)"),
+    );
+    assert!(
+        !diagnostics.is_empty(),
+        "the imported Int registry must reject Bool"
+    );
+}
+
+#[test]
+fn dialog_macro_helpers_keep_the_callers_filename_and_search_bounds() {
+    let source = "class Main { static function main() { var path:String = Helpers.caller(); } }";
+    let mut s = Session::start(&[
+        ("Main.hx", source),
+        (
+            "Helpers.hx",
+            "import haxe.macro.Context; class Helpers { macro public static function caller() { var file = Context.getPosInfos(Context.currentPos()).file; var path = sys.FileSystem.fullPath(file); var slash = path.lastIndexOf(\"/\"); if (path.indexOf(\"Main.hx\", slash) < 0) Context.error(\"wrong caller\", Context.currentPos()); return macro $v{path}; } }",
+        ),
+    ]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    let preview = s.request(
+        "rayzor/expandMacro",
+        s.at("Main.hx", 0, source.find("Helpers.caller").unwrap() as u32),
+    );
+    assert!(preview.to_string().contains("Main.hx"), "{preview}");
+}
+
+#[test]
+fn dialog_constructor_hints_use_utf16_positions() {
+    let source = "class Main { static function main() { /* 🙂é */ var value = new Box(\"x\"); value.get(); } }\nclass Box { public function new(label:String) {} public function get():Bool return true; }";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    let at = |needle: &str| {
+        source[..source.find(needle).unwrap()]
+            .encode_utf16()
+            .count() as u32
+    };
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 0, at("Box("))));
+    assert!(hover.contains("new Box(String)"), "{hover}");
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 0, at("get();"))));
+    assert!(hover.contains("get():Bool"), "{hover}");
+    assert!(s.labels("Main.hx", 0, at("get();")).contains(&"get".into()));
+}
+
+#[test]
+fn dialog_generic_members_and_inherited_constructor_are_instantiated() {
+    let main = "import api.Dialog;\nclass Main { static function main() {\n var registry = new Alias<Dialog>();\n registry.add(new Dialog({open:true}));\n var dialog = new Dialog({open:true});\n} }\ntypedef Alias<T> = Registry<T>;\nclass Registry<T> { public function new() {} public function add(value:T):Void {} }";
+    let mut s = Session::start(&[
+        ("Main.hx", main),
+        (
+            "api/Dialog.hx",
+            "package api;\ntypedef Props = { ?open:Bool };\nclass Base<T> { public var props:T; public function new(props:T, ?children:Array<String>) { this.props = props; } }\nclass Dialog extends Base<Props> {}",
+        ),
+    ]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 3, 10)));
+    assert!(
+        hover.contains("api.Dialog") && !hover.contains("add(T)"),
+        "{hover}"
+    );
+    let items = s.request("textDocument/completion", s.at("Main.hx", 3, 10));
+    let add = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == "add")
+        .unwrap();
+    assert!(
+        add["detail"].as_str().unwrap().contains("api.Dialog"),
+        "{add}"
+    );
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 4, 18)));
+    assert!(
+        hover.contains("new Dialog(") && hover.contains("api.Props"),
+        "{hover}"
+    );
+    let help = s.request("textDocument/signatureHelp", s.at("Main.hx", 4, 25));
+    assert!(help.to_string().contains("api.Props"), "{help}");
+    s.notify(
+        "textDocument/didClose",
+        json!({"textDocument":{"uri":s.uri("Main.hx")}}),
+    );
+    s.activity.clear();
+    assert!(s.open("Main.hx").is_empty());
+    assert!(
+        !s.activity
+            .iter()
+            .any(|activity| activity["state"] == "checking"),
+        "{:#?}",
+        s.activity
+    );
+    let restored = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 4, 18)));
+    assert_eq!(restored, hover);
+    let diagnostics = s.change(
+        "Main.hx",
+        &main.replace(
+            "registry.add(new Dialog({open:true}))",
+            "registry.add(\"wrong\")",
+        ),
+    );
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert!(
+        diagnostics[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Dialog"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn dialog_module_qualified_types_and_enum_definitions_have_source_locations() {
+    let source = "class Main {\n var callback:api.Dialog.CancelEvent->Void;\n function placement():api.TopLayer.Placement return Centered;\n}";
+    let mut s = Session::start(&[
+        ("Main.hx", source),
+        (
+            "api/Dialog.hx",
+            "package api;\nclass Dialog {}\n/** Cancellation details. */\ntypedef CancelEvent = { prevented:Bool };",
+        ),
+        (
+            "api/TopLayer.hx",
+            "package api;\nclass TopLayer {}\nenum Placement { Centered; Edge; }",
+        ),
+    ]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 1, 26)));
+    assert!(
+        hover.contains("CancelEvent") && hover.contains("Cancellation details."),
+        "{hover}"
+    );
+    let definition = s.request("textDocument/definition", s.at("Main.hx", 1, 26));
+    assert!(
+        definition["uri"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("api/Dialog.hx"),
+        "{definition}"
+    );
+    let definition = s.request("textDocument/definition", s.at("Main.hx", 2, 52));
+    assert!(
+        definition["uri"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("api/TopLayer.hx"),
+        "{definition}"
+    );
+}
+
+#[test]
 fn cached_and_partial_hovers_work_while_a_build_macro_is_waiting() {
     let mut s = Session::start(&[
         (
@@ -1406,6 +1656,34 @@ fn an_hxml_project_gets_its_class_paths_libraries_and_target() {
     let def = s.request("textDocument/definition", at);
     let uri = def["uri"].as_str().unwrap_or("");
     assert!(uri.ends_with("/.haxelib/mylib/1,0,0/src/Lib.hx"), "{def}");
+}
+
+#[test]
+fn an_hxml_hashlink_short_flag_applies_to_the_standard_library() {
+    let source = "class Main {\n static function accept(value:Single):Void {}\n static function main() { accept(0.5); }\n}";
+    let mut session = Session::start(&[("build.hxml", "-cp .\n-hl out.hl\n"), ("Main.hx", source)]);
+    assert!(
+        session.open("Main.hx").is_empty(),
+        "{:?}",
+        session.diagnostics
+    );
+    assert!(
+        session
+            .diagnostics
+            .iter()
+            .all(|update| update["diagnostics"].as_array().unwrap().is_empty()),
+        "{:?}",
+        session.diagnostics
+    );
+    let errors = session.change(
+        "Main.hx",
+        &source.replace("accept(0.5)", "accept(\"wrong\")"),
+    );
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0]["message"].as_str().unwrap().contains("Single"),
+        "{errors:?}"
+    );
 }
 
 const POINT: &str = "class Point {

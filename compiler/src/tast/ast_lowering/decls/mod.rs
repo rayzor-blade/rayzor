@@ -183,6 +183,22 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        let mut lowered_aliases = std::collections::BTreeSet::new();
+        for (index, declaration) in file.declarations.iter().enumerate() {
+            if let TypeDeclaration::Typedef(alias) = declaration
+                && let Ok(TypedDeclaration::TypeAlias(typed)) =
+                    self.lower_typedef_declaration(alias)
+            {
+                self.record_private_type(
+                    file,
+                    declaration,
+                    &TypedDeclaration::TypeAlias(typed.clone()),
+                );
+                typed_file.type_aliases.push(typed);
+                lowered_aliases.insert(index);
+            }
+        }
+
         // Register fields before any body, including abstract statics and bare enum constants.
         for declaration in &file.declarations {
             match declaration {
@@ -202,7 +218,10 @@ impl<'a> AstLowering<'a> {
         }
 
         // Second pass: Process declarations with full type resolution
-        for declaration in &file.declarations {
+        for (index, declaration) in file.declarations.iter().enumerate() {
+            if lowered_aliases.contains(&index) {
+                continue;
+            }
             if matches!(declaration, TypeDeclaration::Class(class)
                 if super::const_generics::is_template(class))
             {
@@ -629,10 +648,13 @@ impl<'a> AstLowering<'a> {
         let typedef_name = self.context.intern_string(&typedef_decl.name);
 
         // Look up existing symbol or create a new one
-        let typedef_symbol = if let Some(existing_symbol) = self
+        let typedef_symbol = if let Some(symbol) = self.packaged_symbol(typedef_name) {
+            symbol
+        } else if let Some(existing_symbol) = self
             .context
             .symbol_table
             .lookup_symbol(ScopeId::first(), typedef_name)
+            .filter(|_| !self.root_slot_is_foreign_type(typedef_name))
         {
             existing_symbol.id
         } else {
@@ -676,13 +698,17 @@ impl<'a> AstLowering<'a> {
         self.context.push_type_parameters(type_param_map);
 
         // Now process target type (can reference type parameters)
-        let mut target_type = self.lower_type(&typedef_decl.type_def)?;
-        if let Some(extended) = self.extended_types(&typedef_decl.type_def) {
+        let target_type = self.lower_type(&typedef_decl.type_def);
+        let extended = if target_type.is_ok() {
+            self.extended_types(&typedef_decl.type_def)
+        } else {
+            None
+        };
+        self.context.pop_type_parameters();
+        let mut target_type = target_type?;
+        if let Some(extended) = extended {
             self.alias_extensions.insert(typedef_symbol, extended);
         }
-
-        // Pop type parameters from stack
-        self.context.pop_type_parameters();
 
         // If the target resolved to a Placeholder, check if the existing symbol (from
         // a prior compilation, e.g. rayzor.Bytes extern class) already has a valid Class type.
@@ -864,4 +890,47 @@ pub(super) fn module_type_names(
         }
     }
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_typedef_extensions_keep_the_declarations_parameter_identity() {
+        let file = parser::rd::rd_parse(
+            "typedef Base<T> = {value:T}; typedef Props<T> = {>Base<T>, tag:String};",
+            "Main.hx",
+            false,
+            false,
+        )
+        .unwrap();
+        let mut unit = crate::compilation::CompilationUnit::new(Default::default());
+        let mut lowering = AstLowering::new(
+            &mut unit.string_interner,
+            Rc::new(RefCell::new(StringInterner::new())),
+            &mut unit.symbol_table,
+            &unit.type_table,
+            &mut unit.scope_tree,
+            &mut unit.namespace_resolver,
+            &mut unit.import_resolver,
+        );
+        lowering.set_skip_stdlib_loading(true);
+        let typed = lowering.lower_file(&file).unwrap();
+        let alias = typed
+            .type_aliases
+            .iter()
+            .find(|alias| lowering.context.string_interner.get(alias.name) == Some("Props"))
+            .unwrap();
+        let extended = lowering.alias_extensions[&alias.symbol_id][0];
+        let table = lowering.context.type_table.borrow();
+        let args = match &table.get(extended).unwrap().kind {
+            TypeKind::Class { type_args, .. }
+            | TypeKind::TypeAlias { type_args, .. }
+            | TypeKind::GenericInstance { type_args, .. } => type_args,
+            kind => panic!("unexpected extension {kind:?}"),
+        };
+        assert!(matches!(&table.get(args[0]).unwrap().kind,
+            TypeKind::TypeParameter {symbol_id, ..} if *symbol_id == alias.type_parameters[0].symbol_id));
+    }
 }

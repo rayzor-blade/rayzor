@@ -140,6 +140,18 @@ impl<'a> AstLowering<'a> {
 
     /// The declared entry types of a Map literal, including concrete map classes.
     pub(crate) fn map_literal_entry_types(&self, mut ty: TypeId) -> Option<(TypeId, TypeId)> {
+        let substitutions = crate::tast::type_substitution::TypeSubstitutions {
+            type_table: self.context.type_table,
+            symbol_table: self.context.symbol_table,
+            class_type_params: Some(&self.class_type_params),
+        };
+        for _ in 0..32 {
+            ty = substitutions.resolve_alias_type(ty);
+            match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                _ => break,
+            }
+        }
         let tt = self.context.type_table.borrow();
         let mut remaining = tt.len();
         let (symbol, args) = loop {

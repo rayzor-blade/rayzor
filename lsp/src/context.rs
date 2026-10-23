@@ -648,6 +648,7 @@ impl LspContext {
             &unit.string_interner,
             &unit.symbol_references,
             file_id,
+            &text,
         );
         if profiling {
             let timings = unit.typecheck_timings();
@@ -710,8 +711,11 @@ impl LspContext {
     pub fn update_diagnostics(
         &mut self,
         uri: &str,
-        diagnostics: Vec<LspDiagnostic>,
+        mut diagnostics: Vec<LspDiagnostic>,
     ) -> Vec<(String, Vec<LspDiagnostic>)> {
+        for diagnostic in &mut diagnostics {
+            diagnostic.file = self.editor_path(&diagnostic.file);
+        }
         let mut files = std::collections::BTreeSet::from([uri_to_path(uri)]);
         files.extend(diagnostics.iter().map(|d| d.file.clone()));
         if let Some(previous) = self.diagnostics.insert(uri.to_string(), diagnostics) {
@@ -738,6 +742,26 @@ impl LspContext {
                 (file, found)
             })
             .collect()
+    }
+
+    fn editor_path(&self, file: &str) -> String {
+        if self.open_files.contains_key(&file_uri(file)) {
+            return file.to_owned();
+        }
+        let path = PathBuf::from(file);
+        let identity = path.canonicalize().unwrap_or(path);
+        let canonical = identity.to_string_lossy();
+        if self.open_files.contains_key(&file_uri(&canonical)) {
+            return canonical.into_owned();
+        }
+        self.open_files
+            .keys()
+            .find_map(|uri| {
+                let open = uri_to_path(uri);
+                let path = PathBuf::from(&open);
+                (path.canonicalize().unwrap_or(path) == identity).then_some(open)
+            })
+            .unwrap_or_else(|| file.to_owned())
     }
 
     /// Forget a closed document and its analysis.
@@ -944,17 +968,52 @@ impl LspContext {
     pub fn hover_info(&self, uri: &str, line: u32, col: u32) -> Option<String> {
         let (a, sym_id) = self.symbol_at(uri, line, col)?;
         let unit = a.unit.borrow();
-        let mut hover = analysis::format_hover(
+        let symbol = analysis::symbol_at_use(
+            &unit,
+            &a.index,
+            self.open_files.get(uri)?,
+            line,
+            col,
             sym_id,
+        )?;
+        let mut constructor_signature = None;
+        if let Some(source) = self.open_files.get(uri)
+            && analysis::is_constructor_name(source, line, col)
+            && let Some(constructor) = analysis::constructor_symbol(&unit, symbol.type_id)
+                .and_then(|id| unit.symbol_table.get_symbol(id))
+        {
+            let ty = unit.receiver_member_type(constructor.type_id, symbol.type_id);
+            let signature = analysis::format_function_type(
+                ty,
+                &unit.type_table.borrow(),
+                &unit.string_interner,
+                &unit.symbol_table,
+            );
+            constructor_signature = Some(format!(
+                "new {}{}",
+                unit.string_interner.get(symbol.name)?,
+                signature
+            ));
+        }
+        let mut hover = analysis::format_hover_symbol(
+            &symbol,
             &unit.symbol_table,
             &unit.type_table,
             &unit.string_interner,
         )?;
-        let symbol = unit.symbol_table.get_symbol(sym_id)?;
         let qualified = symbol.qualified_name.unwrap_or_else(|| {
             unit.symbol_table
                 .build_qualified_name(sym_id, &unit.scope_tree, &unit.string_interner)
         });
+        if let Some(path) = unit.file_path_of(symbol.definition_location.file_id) {
+            self.workspace_index
+                .ensure_disk_file(std::path::Path::new(path));
+        } else if let Some(path) = unit.string_interner.get(qualified).and_then(|name| {
+            unit.namespace_resolver
+                .resolve_qualified_path_to_file_force(name)
+        }) {
+            self.workspace_index.ensure_disk_file(&path);
+        }
         if let Some(declaration) = unit
             .string_interner
             .get(qualified)
@@ -963,7 +1022,10 @@ impl LspContext {
                 let text = self.open_files.get(uri)?;
                 let (rline, rcol, _) = analysis::receiver_before(text, line, col)?;
                 let receiver = a.index.find_symbol_at(rline, rcol)?;
-                let receiver_type = unit.symbol_table.get_symbol(receiver)?.type_id;
+                let receiver_type = a
+                    .index
+                    .type_at(rline, rcol)
+                    .unwrap_or(unit.symbol_table.get_symbol(receiver)?.type_id);
                 let owner =
                     crate::structural_fields::alias_owner(receiver_type, &unit).or_else(|| {
                         analysis::class_of_type(
@@ -1009,6 +1071,11 @@ impl LspContext {
                 hover = hover.replace("\n\n*Signature not yet resolved.*", "");
             }
         }
+        if let Some(signature) = constructor_signature
+            && let Some(end) = hover.find("\n```")
+        {
+            hover.replace_range("```haxe\n".len()..end, &signature);
+        }
         Some(hover)
     }
 
@@ -1016,11 +1083,20 @@ impl LspContext {
     pub fn goto_definition(&self, uri: &str, line: u32, col: u32) -> Option<(String, u32, u32)> {
         let (a, sym_id) = self.symbol_at(uri, line, col)?;
         let unit = a.unit.borrow();
-        let loc = unit.symbol_table.get_symbol(sym_id)?.definition_location;
+        let loc = analysis::symbol_at_use(
+            &unit,
+            &a.index,
+            self.open_files.get(uri)?,
+            line,
+            col,
+            sym_id,
+        )?
+        .definition_location;
         if !loc.is_valid() {
             return None;
         }
-        let file = unit.file_path_of(loc.file_id)?.to_string();
+        let path = PathBuf::from(unit.file_path_of(loc.file_id)?);
+        let file = self.editor_path(&path.canonicalize().unwrap_or(path).to_string_lossy());
         Some((file, loc.line, loc.column))
     }
 
@@ -1077,23 +1153,15 @@ impl LspContext {
                     analysis::resolve_name(&name, a.index.file_id, rline, rcol, st, interner)
                 })
                 .map(|receiver| {
-                    let mut members = analysis::member_completions(
-                        receiver,
-                        &unit.symbol_table,
-                        &unit.type_table,
-                        &unit.string_interner,
-                        |class| {
-                            unit.class_fields(class)
-                                .iter()
-                                .map(|f| (f.1, f.2))
-                                .collect()
-                        },
-                    );
-                    if let Some(owner) = unit.symbol_table.get_symbol(receiver).and_then(|symbol| {
-                        crate::structural_fields::alias_owner(symbol.type_id, &unit)
-                    }) && let Some(path) = unit
-                        .symbol_table
-                        .display_type_path(owner, &unit.string_interner)
+                    let receiver_type = a
+                        .index
+                        .type_at(rline, rcol)
+                        .unwrap_or_else(|| unit.symbol_table.get_symbol(receiver).unwrap().type_id);
+                    let mut members = analysis::member_completions(receiver, receiver_type, &unit);
+                    if let Some(owner) = crate::structural_fields::alias_owner(receiver_type, &unit)
+                        && let Some(path) = unit
+                            .symbol_table
+                            .display_type_path(owner, &unit.string_interner)
                     {
                         if let Some(source) = unit
                             .namespace_resolver
@@ -1169,8 +1237,22 @@ impl LspContext {
                 let (l, c) = (call.callee_line, call.callee_col);
                 analysis::resolve_name(&call.callee, a.index.file_id, l, c, st, interner)
             })?;
-        analysis::build_signature_help(
+        let mut symbol = analysis::symbol_at_use(
+            &unit,
+            &a.index,
+            text,
+            call.callee_line,
+            call.callee_col,
             callee,
+        )?;
+        if analysis::is_constructor_name(text, call.callee_line, call.callee_col) {
+            let constructor = analysis::constructor_symbol(&unit, symbol.type_id)?;
+            let receiver = symbol.type_id;
+            symbol = st.get_symbol(constructor)?.clone();
+            symbol.type_id = unit.receiver_member_type(symbol.type_id, receiver);
+        }
+        analysis::signature_for_symbol(
+            &symbol,
             &unit.symbol_table,
             &unit.type_table,
             &unit.string_interner,
@@ -1366,6 +1448,49 @@ mod cache_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn diagnostics_use_the_open_documents_path_identity() {
+        let workspace = Workspace::new(&[("Main.hx", "class Main {}")]);
+        std::fs::create_dir(workspace.0.join("nested")).unwrap();
+        let mut context = workspace.context();
+        let path = workspace.0.join("Main.hx").to_string_lossy().into_owned();
+        let uri = file_uri(&path);
+        context
+            .open_files
+            .insert(uri.clone(), "class Main {}".into());
+        let alias = workspace
+            .0
+            .join("nested/../Main.hx")
+            .to_string_lossy()
+            .into_owned();
+        let published = context.update_diagnostics(
+            &uri,
+            vec![LspDiagnostic::error(&alias, 1, 7, "example".into())],
+        );
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].0, path);
+        assert_eq!(published[0].1.len(), 1);
+        let cleared = context.update_diagnostics(&uri, Vec::new());
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0].0, path);
+        assert!(cleared[0].1.is_empty());
+        let config = workspace
+            .0
+            .join("build.hxml")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(&config, "-cp .").unwrap();
+        let published = context.update_diagnostics(
+            &uri,
+            vec![LspDiagnostic::error(&config, 1, 1, "configuration".into())],
+        );
+        assert!(
+            published
+                .iter()
+                .any(|(path, diagnostics)| path == &config && diagnostics.len() == 1)
+        );
+    }
+
     struct Workspace(PathBuf);
     impl Workspace {
         fn new(files: &[(&str, &str)]) -> Self {
@@ -1476,6 +1601,102 @@ mod cache_tests {
                         );
                     }
                 }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires sibling ashui and RayDE projects"]
+    fn ashui_dialog_editor_services() {
+        std::thread::Builder::new()
+            .stack_size(256 << 20)
+            .spawn(|| {
+                let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../RayDE")
+                    .canonicalize()
+                    .unwrap();
+                let path = root
+                    .join("../ashui/components/haxe/ashui/components/Dialog.hx")
+                    .canonicalize()
+                    .unwrap();
+                let source = std::fs::read_to_string(&path).unwrap();
+                let uri = file_uri(path.to_str().unwrap());
+                let mut context = LspContext::new(root);
+                context.load_workspace_config(None);
+                context.defines.push("hl".into());
+                context.build_options.extra_defines.push("hl".into());
+                context.build_options.cache_enabled = false;
+                for project in &mut context.projects {
+                    project.defines.push("hl".into());
+                    project.options.extra_defines.push("hl".into());
+                    project.options.cache_enabled = false;
+                }
+                context.macro_budget = std::time::Duration::from_secs(5);
+                context.open_files.insert(uri.clone(), source.clone());
+                let diagnostics = context.compile_file(&uri, &source);
+                let own: Vec<_> = diagnostics
+                    .iter()
+                    .filter(|diagnostic| {
+                        PathBuf::from(&diagnostic.file).canonicalize().ok().as_ref() == Some(&path)
+                    })
+                    .collect();
+                assert!(
+                    own.is_empty(),
+                    "{:?}",
+                    own.iter()
+                        .map(|diagnostic| &diagnostic.message)
+                        .collect::<Vec<_>>()
+                );
+                let at = |needle: &str, name: &str| {
+                    let offset = source.find(needle).unwrap() + needle.find(name).unwrap();
+                    line_column(&source, offset)
+                };
+                for (needle, name, expected) in [
+                    (
+                        "switch props.open",
+                        "open",
+                        "open:ashui.layout.IntoReactive<Bool>",
+                    ),
+                    ("registry.add(root", "add", "ashui.components.Dialog"),
+                    ("case Const(v)", "v", "v:Bool"),
+                    ("new Button({", "Button", "new Button("),
+                    (
+                        "ashui.ui.Dialog.DialogCancelEvent",
+                        "DialogCancelEvent",
+                        "DialogCancelEvent",
+                    ),
+                    ("new ashui.ui.Dialog({", "Dialog", "new Dialog("),
+                ] {
+                    let (line, col) = at(needle, name);
+                    let hover = context.hover_info(&uri, line, col).unwrap_or_default();
+                    assert!(hover.contains(expected), "{needle}: {hover}");
+                    assert!(!hover.contains("__switch_subject"), "{hover}");
+                    if needle.starts_with("new ") {
+                        assert!(hover.contains("Props"), "{needle}: {hover}");
+                    }
+                }
+                let (line, col) = at("switch props.open", "open");
+                let Completions::Members(members) = context.completions(&uri, line, col) else {
+                    panic!("props members missing")
+                };
+                let labels: Vec<_> = members.iter().map(|member| member.label.as_str()).collect();
+                assert!(
+                    labels.contains(&"open")
+                        && labels.contains(&"onOpenChange")
+                        && !labels.contains(&"length"),
+                    "{labels:?}"
+                );
+                let (line, col) = at("d.opened.set(true)", "set");
+                let Completions::Members(members) = context.completions(&uri, line, col) else {
+                    panic!("signal members missing")
+                };
+                let get = members.iter().find(|member| member.label == "get").unwrap();
+                assert_eq!(get.detail, "() -> Bool");
+                let (line, col) = at("return Centered", "Centered");
+                let definition = context.goto_definition(&uri, line, col).unwrap();
+                assert!(definition.0.ends_with("TopLayer.hx"), "{definition:?}");
             })
             .unwrap()
             .join()

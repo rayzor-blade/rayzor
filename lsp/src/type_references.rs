@@ -26,6 +26,37 @@ pub(crate) fn record(
             workspace.ensure_disk_file(&path);
         }
     }
+    for imported in unit.stdlib_files.iter().chain(&unit.user_files) {
+        workspace.ensure_parsed_file(imported);
+    }
+    let mut qualified_types = BTreeSet::new();
+    for (index, _) in tokens.iter().enumerate().filter(|(_, token)| {
+        token.kind == TokenKind::Ident && source.as_bytes()[token.span.start].is_ascii_uppercase()
+    }) {
+        let mut first = index;
+        while first >= 2
+            && tokens[first - 1].kind == TokenKind::Dot
+            && tokens[first - 2].kind == TokenKind::Ident
+        {
+            first -= 2;
+        }
+        if first != index && source.as_bytes()[tokens[first].span.start].is_ascii_lowercase() {
+            qualified_types.insert(
+                tokens[first..=index]
+                    .iter()
+                    .map(|token| &source[token.span.start..token.span.end])
+                    .collect::<String>(),
+            );
+        }
+    }
+    for path in qualified_types {
+        if let Some(path) = unit
+            .namespace_resolver
+            .resolve_qualified_path_to_file_force(&path)
+        {
+            workspace.ensure_disk_file(&path);
+        }
+    }
     let source_types = workspace.type_identities();
     for symbol in unit.symbol_table.all_symbols().filter(|s| {
         matches!(
@@ -164,6 +195,7 @@ pub(crate) fn record(
             symbol,
             at: SourceLocation::new(file_id, line, column, token.span.start as u32),
             len: name.encode_utf16().count() as u32,
+            type_id: compiler::tast::TypeId::invalid(),
         });
     }
 }

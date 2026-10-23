@@ -16,7 +16,11 @@ use tracing::warn;
 
 impl<'a> AstLowering<'a> {
     /// Bind a pattern's payloads through the constructor's declared result.
-    pub(crate) fn enum_constructor_for_result(&self, declared: TypeId, result: TypeId) -> TypeId {
+    pub(crate) fn enum_constructor_for_result(
+        &self,
+        declared: TypeId,
+        mut result: TypeId,
+    ) -> TypeId {
         let return_type = {
             let table = self.context.type_table.borrow();
             match table.get(declared).map(|ty| &ty.kind) {
@@ -24,6 +28,42 @@ impl<'a> AstLowering<'a> {
                 _ => return declared,
             }
         };
+        let substitutions = crate::tast::type_substitution::TypeSubstitutions {
+            type_table: self.context.type_table,
+            symbol_table: self.context.symbol_table,
+            class_type_params: Some(&self.class_type_params),
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        while seen.insert(result) && seen.len() <= 32 {
+            result = substitutions.resolve_alias_type(result);
+            let underlying = {
+                let table = self.context.type_table.borrow();
+                let kind = table.get(result).map(|ty| &ty.kind);
+                let kind = match kind {
+                    Some(TypeKind::Optional { inner_type }) => {
+                        result = *inner_type;
+                        continue;
+                    }
+                    Some(TypeKind::GenericInstance { base_type, .. }) => {
+                        table.get(*base_type).map(|ty| &ty.kind)
+                    }
+                    kind => kind,
+                };
+                match kind {
+                    Some(TypeKind::Abstract {
+                        symbol_id,
+                        underlying,
+                        ..
+                    }) => underlying.or_else(|| table.resolve_abstract_underlying(*symbol_id)),
+                    Some(TypeKind::Class { symbol_id, .. }) => {
+                        table.resolve_abstract_underlying(*symbol_id)
+                    }
+                    _ => None,
+                }
+            };
+            let Some(underlying) = underlying else { break };
+            result = self.substitute_receiver_type(underlying, result);
+        }
         let mut bindings = Vec::new();
         self.unify_type_args_inner(return_type, result, 0, &mut bindings, true);
         self.substitute_type_bindings(declared, &bindings, false)
@@ -678,11 +718,16 @@ impl<'a> AstLowering<'a> {
             .symbol_table
             .update_symbol_type(variant_symbol, constructor_type);
 
+        let location = self.context.create_location_from_span(variant.span);
+        if let Some(symbol) = self.context.symbol_table.get_symbol_mut(variant_symbol) {
+            symbol.definition_location = location;
+        }
+
         Ok(TypedEnumVariant {
             name: variant_name,
             native_name,
             parameters,
-            source_location: self.context.create_location(),
+            source_location: location,
         })
     }
 }

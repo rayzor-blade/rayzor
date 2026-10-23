@@ -3,7 +3,7 @@
 use super::definition_locations::name_location;
 use super::node::TypedFile;
 use super::walk::{SymbolSink, walk_file};
-use super::{SourceLocation, StringInterner, SymbolId, SymbolTable};
+use super::{SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId};
 
 /// A name in the source and the symbol it resolves to. `at` is the name's
 /// first byte; it spans `len` bytes.
@@ -12,6 +12,8 @@ pub struct SymbolReference {
     pub symbol: SymbolId,
     pub at: SourceLocation,
     pub len: u32,
+    /// The instantiated type at this use; invalid for a type-only reference.
+    pub type_id: TypeId,
 }
 
 /// How far into an expression a member's `.name` may sit: past its receiver.
@@ -48,6 +50,16 @@ impl SymbolSink for Collect<'_> {
     fn declares(&mut self, _symbol: SymbolId, _at: SourceLocation) {}
 
     fn refers(&mut self, symbol: SymbolId, at: SourceLocation, member: bool) {
+        self.refers_typed(symbol, at, member, TypeId::invalid());
+    }
+
+    fn refers_typed(
+        &mut self,
+        symbol: SymbolId,
+        at: SourceLocation,
+        member: bool,
+        type_id: TypeId,
+    ) {
         if !at.is_valid() {
             return;
         }
@@ -67,6 +79,7 @@ impl SymbolSink for Collect<'_> {
                 symbol,
                 at,
                 len: name.len() as u32,
+                type_id,
             });
         }
     }

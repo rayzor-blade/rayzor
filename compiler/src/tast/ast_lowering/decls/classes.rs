@@ -240,6 +240,57 @@ impl<'a> AstLowering<'a> {
         let built = self.apply_deferred_class_builds(class_decl, class_symbol)?;
         let class_decl = built.as_ref().unwrap_or(class_decl);
 
+        // A constructor's signature does not depend on lowering its superclass's body.
+        for field in &class_decl.fields {
+            let ClassFieldKind::Function(function) = &field.kind else {
+                continue;
+            };
+            if function.name != "new" {
+                continue;
+            }
+            let name = self.context.intern_string("new");
+            let constructor = self
+                .context
+                .symbol_table
+                .lookup_symbol(class_scope, name)
+                .map(|symbol| symbol.id)
+                .unwrap_or_else(|| {
+                    let symbol = self
+                        .context
+                        .symbol_table
+                        .create_function_in_scope(name, class_scope);
+                    self.context
+                        .scope_tree
+                        .get_scope_mut(class_scope)
+                        .unwrap()
+                        .add_symbol(symbol, name);
+                    self.context.update_symbol_qualified_name(symbol);
+                    symbol
+                });
+            let params = function
+                .params
+                .iter()
+                .map(|parameter| {
+                    let ty = parameter
+                        .type_hint
+                        .as_ref()
+                        .and_then(|hint| self.lower_type(hint).ok())
+                        .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+                    self.optional_param_type(parameter, ty)
+                })
+                .collect();
+            let void = self.context.type_table.borrow().void_type();
+            let signature = self.declaration_function_type(&function.params, params, void);
+            self.context
+                .symbol_table
+                .update_symbol_type(constructor, signature);
+            self.context
+                .symbol_table
+                .set_class_constructor(class_symbol, constructor);
+            self.class_constructor_symbols
+                .insert(class_symbol, constructor);
+        }
+
         // Process extends clause
         let extends = if let Some(extends_type) = &class_decl.extends {
             let parent = self.lower_type(extends_type)?;
@@ -1957,7 +2008,30 @@ impl<'a> AstLowering<'a> {
     /// Resolve a TypeId to the underlying class-like symbol for member lookup.
     pub(crate) fn resolve_type_to_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
         let type_table = self.context.type_table.borrow();
-        self.resolve_type_to_class_symbol_inner(&type_table, type_id)
+        let mut current = type_id;
+        for _ in 0..64 {
+            match &type_table.get(current)?.kind {
+                TypeKind::Class { symbol_id, .. } => {
+                    if let Some(TypeKind::TypeAlias { target_type, .. }) = self
+                        .context
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .and_then(|symbol| type_table.get(symbol.type_id))
+                        .map(|ty| &ty.kind)
+                    {
+                        current = *target_type;
+                    } else {
+                        return Some(*symbol_id);
+                    }
+                }
+                TypeKind::TypeAlias { target_type, .. }
+                | TypeKind::Reference { target_type, .. } => current = *target_type,
+                TypeKind::GenericInstance { base_type, .. } => current = *base_type,
+                TypeKind::Optional { inner_type } => current = *inner_type,
+                _ => return self.resolve_type_to_class_symbol_inner(&type_table, current),
+            }
+        }
+        None
     }
 
     /// Inner helper that takes a borrowed type table to allow recursive calls

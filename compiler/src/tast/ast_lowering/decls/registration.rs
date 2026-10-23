@@ -200,7 +200,9 @@ impl<'a> AstLowering<'a> {
                     named_package(s.package_id) != pkg
                 }
                 // Declarations have package identities; unresolved placeholders do not.
-                crate::tast::SymbolKind::Class => {
+                crate::tast::SymbolKind::Class
+                | crate::tast::SymbolKind::Interface
+                | crate::tast::SymbolKind::TypeAlias => {
                     let owner = named_package(s.package_id);
                     s.package_id.is_some() && owner != pkg
                 }
@@ -652,6 +654,29 @@ impl<'a> AstLowering<'a> {
             TypeDeclaration::Typedef(typedef_decl) => {
                 let typedef_name = self.context.intern_string(&typedef_decl.name);
                 self.record_type_usings(typedef_name, &typedef_decl.meta);
+
+                if self.root_slot_is_foreign_type(typedef_name) {
+                    if self.packaged_symbol(typedef_name).is_none() {
+                        let root = self
+                            .context
+                            .symbol_table
+                            .lookup_symbol(ScopeId::first(), typedef_name)
+                            .map(|s| s.id);
+                        let symbol = self
+                            .context
+                            .symbol_table
+                            .create_type_alias_in_scope(typedef_name, ScopeId::first());
+                        self.register_symbol_with_package(symbol, &typedef_decl.name);
+                        if let Some(root) = root {
+                            self.context.symbol_table.remap_symbol_in_scope(
+                                ScopeId::first(),
+                                typedef_name,
+                                root,
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
 
                 // Check if this typedef already exists in the root scope
                 if self

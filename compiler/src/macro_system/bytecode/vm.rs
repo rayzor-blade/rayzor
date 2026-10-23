@@ -1155,12 +1155,14 @@ impl MacroVm {
                     .map(|c| MacroValue::from_str(&c.to_string()))
                     .unwrap_or(MacroValue::from_str("")))
             }
-            "indexOf" => {
+            "indexOf" | "lastIndexOf" => {
                 if let Some(MacroValue::String(needle)) = args.first() {
-                    match s.find(needle.as_ref()) {
-                        Some(pos) => Ok(MacroValue::Int(s[..pos].chars().count() as i64)),
-                        None => Ok(MacroValue::Int(-1)),
-                    }
+                    Ok(MacroValue::Int(crate::macro_system::strings::search(
+                        s,
+                        needle,
+                        args.get(1).and_then(MacroValue::as_int),
+                        method == "lastIndexOf",
+                    )))
                 } else {
                     Ok(MacroValue::Int(-1))
                 }

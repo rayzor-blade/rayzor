@@ -94,15 +94,14 @@ impl TypeSubstitutions<'_> {
         let mut current = receiver;
         let mut visited = std::collections::BTreeSet::new();
         for _ in 0..32 {
+            current = self.resolve_alias_type(current);
             if !visited.insert(current) {
                 break;
             }
             let (current_bindings, superclass) = {
                 let tt = self.type_table.borrow();
-                if let Some(TypeKind::TypeAlias { target_type, .. }) =
-                    tt.get(current).map(|t| &t.kind)
-                {
-                    current = *target_type;
+                if let Some(TypeKind::Optional { inner_type }) = tt.get(current).map(|t| &t.kind) {
+                    current = *inner_type;
                     continue;
                 }
                 let (class_symbol, params, args) = match tt.get(current).map(|t| &t.kind) {
@@ -353,6 +352,19 @@ impl TypeSubstitutions<'_> {
                     .borrow_mut()
                     .create_class_type(symbol_id, args);
             }
+            Some(TypeKind::Interface {
+                symbol_id,
+                type_args,
+            }) => {
+                let args = sub(&type_args);
+                if args == type_args {
+                    return ty;
+                }
+                return self
+                    .type_table
+                    .borrow_mut()
+                    .create_interface_type(symbol_id, args);
+            }
             Some(TypeKind::Enum {
                 symbol_id,
                 type_args,
@@ -406,6 +418,7 @@ impl TypeSubstitutions<'_> {
                 .collect(),
             Some(TypeKind::Anonymous { fields }) => fields.iter().map(|f| f.type_id).collect(),
             Some(TypeKind::Class { type_args, .. })
+            | Some(TypeKind::Interface { type_args, .. })
             | Some(TypeKind::Enum { type_args, .. })
             | Some(TypeKind::Abstract { type_args, .. })
             | Some(TypeKind::TypeAlias { type_args, .. })

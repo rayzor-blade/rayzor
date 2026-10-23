@@ -957,7 +957,7 @@ fn handle_goto_definition(
     let pos = params.text_document_position_params.position;
     let (file, line, col) = ctx.goto_definition(uri, pos.line + 1, pos.character + 1)?;
 
-    let target_uri: Uri = format!("file://{}", file).parse().ok()?;
+    let target_uri: Uri = crate::context::file_uri(&file).parse().ok()?;
     let target_pos = Position::new(line.saturating_sub(1), col.saturating_sub(1));
 
     Some(GotoDefinitionResponse::Scalar(Location {

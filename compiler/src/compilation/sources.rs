@@ -235,6 +235,7 @@ impl CompilationUnit {
             Ok(f) => f,
             Err(_) => return,
         };
+        let file_id = self.register_source_location(filename, source);
         let dummy_interner_rc = Rc::new(RefCell::new(StringInterner::new()));
 
         let mut lowering = AstLowering::new(
@@ -246,6 +247,7 @@ impl CompilationUnit {
             &mut self.namespace_resolver,
             &mut self.import_resolver,
         );
+        lowering.initialize_span_converter_with_filename(file_id, source.into(), filename.into());
 
         // Set package context from the parsed file
         if let Some(ref pkg) = ast_file.package {
@@ -260,10 +262,12 @@ impl CompilationUnit {
                 parser::TypeDeclaration::Enum(enum_decl) => {
                     let _ = lowering.lower_enum_declaration_public(enum_decl);
                 }
-                parser::TypeDeclaration::Abstract(_) => {
+                parser::TypeDeclaration::Abstract(abstract_decl) => {
                     // Pre-register abstract declarations so import resolution
                     // creates Abstract symbols instead of Class placeholders
                     let _ = lowering.pre_register_declaration(decl);
+                    let _ = lowering.pre_register_abstract_fields(abstract_decl);
+                    lowering.pre_register_abstract_casts(abstract_decl);
                 }
                 _ => {}
             }
@@ -283,6 +287,7 @@ impl CompilationUnit {
         let ast_file = self
             .parse_file(filename, source)
             .map_err(|e| format!("Parse error in {}: {}", filename, e))?;
+        let file_id = self.register_source_location(filename, source);
         let dummy_interner_rc = Rc::new(RefCell::new(StringInterner::new()));
 
         let mut lowering = AstLowering::new(
@@ -294,6 +299,7 @@ impl CompilationUnit {
             &mut self.namespace_resolver,
             &mut self.import_resolver,
         );
+        lowering.initialize_span_converter_with_filename(file_id, source.into(), filename.into());
 
         // Pre-register types (classes, interfaces, enums, abstracts)
         lowering
@@ -309,8 +315,10 @@ impl CompilationUnit {
                 parser::TypeDeclaration::Enum(enum_decl) => {
                     let _ = lowering.lower_enum_declaration_public(enum_decl);
                 }
-                parser::TypeDeclaration::Abstract(_) => {
+                parser::TypeDeclaration::Abstract(abstract_decl) => {
                     let _ = lowering.pre_register_declaration(decl);
+                    let _ = lowering.pre_register_abstract_fields(abstract_decl);
+                    lowering.pre_register_abstract_casts(abstract_decl);
                 }
                 parser::TypeDeclaration::Typedef(typedef_decl) => {
                     let _ = lowering.lower_typedef_declaration(typedef_decl);
@@ -320,6 +328,20 @@ impl CompilationUnit {
         }
 
         Ok(())
+    }
+
+    fn register_source_location(&mut self, filename: &str, source: &str) -> u32 {
+        let id = *self
+            .file_id_by_filename
+            .entry(filename.into())
+            .or_insert_with(|| {
+                let id = self.next_file_id;
+                self.next_file_id += 1;
+                id
+            });
+        self.file_source_by_filename
+            .insert(filename.into(), source.into());
+        id
     }
 
     /// Add a user source file to the compilation unit

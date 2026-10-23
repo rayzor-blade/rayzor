@@ -18,6 +18,23 @@ pub fn record_definition_locations(
         symbols,
         interner,
     };
+    for declaration in &file.enums {
+        for symbol in stamp
+            .symbols
+            .get_enum_variants(declaration.symbol_id)
+            .cloned()
+            .unwrap_or_default()
+        {
+            if let Some(variant) = stamp.symbols.get_symbol(symbol).and_then(|symbol| {
+                declaration
+                    .variants
+                    .iter()
+                    .find(|variant| variant.name == symbol.name)
+            }) {
+                stamp.declares(symbol, variant.source_location);
+            }
+        }
+    }
     walk_file(file, &mut stamp);
 }
 

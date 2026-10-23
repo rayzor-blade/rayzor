@@ -270,9 +270,12 @@ impl HxmlConfig {
                 }
             }
             flag => {
-                if let Some((_, target, _)) = TARGETS.iter().find(|(f, ..)| *f == flag) {
+                if let Some((canonical, target, _)) = TARGETS
+                    .iter()
+                    .find(|(f, ..)| *f == flag || f.strip_prefix('-') == Some(flag))
+                {
                     self.target = Some(target.to_string());
-                    if flag == "--run" {
+                    if *canonical == "--run" {
                         let class = value.split_whitespace().next().unwrap_or("");
                         self.main_class = Some(class.to_string());
                     }
@@ -469,6 +472,24 @@ mod tests {
         assert_eq!(config.mode, RayzorMode::Jit);
         assert_eq!(config.target.as_deref(), Some("js"));
         assert_eq!(config.target_defines(), vec!["js"]);
+    }
+
+    #[test]
+    fn legacy_target_flags_keep_the_target_defines() {
+        for (flag, target, defines) in [
+            ("-hl", "hl", vec!["hl", "sys"]),
+            ("-cpp", "cpp", vec!["cpp", "sys"]),
+            ("-neko", "neko", vec!["neko", "sys"]),
+            ("-js", "js", vec!["js"]),
+        ] {
+            let config = HxmlConfig::from_string(&format!("-main Main\n{flag} output")).unwrap();
+            assert_eq!(config.target.as_deref(), Some(target));
+            assert_eq!(config.target_defines(), defines);
+            assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        }
+        let run = HxmlConfig::from_string("-run Main arg").unwrap();
+        assert_eq!(run.main_class.as_deref(), Some("Main"));
+        assert_eq!(run.target_defines(), vec!["eval", "interp", "sys"]);
     }
 
     #[test]

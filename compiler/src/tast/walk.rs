@@ -6,7 +6,7 @@ use super::node::{
     TypedExpressionKind, TypedField, TypedFile, TypedFunction, TypedParameter, TypedStatement,
     TypedSwitchCase,
 };
-use super::{SourceLocation, SymbolId};
+use super::{SourceLocation, SymbolId, TypeId};
 
 /// What a walk reports. `at` is the location of the declaring or referring
 /// node, which may start before the name itself.
@@ -14,6 +14,9 @@ pub trait SymbolSink {
     fn declares(&mut self, symbol: SymbolId, at: SourceLocation);
     /// `member`: the name follows a `.` when written qualified.
     fn refers(&mut self, _symbol: SymbolId, _at: SourceLocation, _member: bool) {}
+    fn refers_typed(&mut self, symbol: SymbolId, at: SourceLocation, member: bool, _ty: TypeId) {
+        self.refers(symbol, at, member);
+    }
 }
 
 pub fn walk_file(file: &TypedFile, sink: &mut impl SymbolSink) {
@@ -245,21 +248,21 @@ pub fn walk_expression(e: &TypedExpression, sink: &mut impl SymbolSink) {
     let at = e.source_location;
     use TypedExpressionKind as K;
     match &e.kind {
-        K::Variable { symbol_id } => sink.refers(*symbol_id, at, false),
+        K::Variable { symbol_id } => sink.refers_typed(*symbol_id, at, false, e.expr_type),
         K::FieldAccess {
             object,
             field_symbol,
             ..
         } => {
             walk_expression(object, sink);
-            sink.refers(*field_symbol, at, true);
+            sink.refers_typed(*field_symbol, at, true, e.expr_type);
         }
         K::StaticFieldAccess {
             class_symbol,
             field_symbol,
         } => {
             sink.refers(*class_symbol, at, false);
-            sink.refers(*field_symbol, at, true);
+            sink.refers_typed(*field_symbol, at, true, e.expr_type);
         }
         K::ArrayAccess { array, index } => {
             walk_expression(array, sink);
@@ -292,7 +295,7 @@ pub fn walk_expression(e: &TypedExpression, sink: &mut impl SymbolSink) {
             method_symbol,
         } => {
             walk_expression(receiver, sink);
-            sink.refers(*method_symbol, at, true);
+            sink.refers_typed(*method_symbol, at, true, e.expr_type);
         }
         K::StaticMethodCall {
             class_symbol,

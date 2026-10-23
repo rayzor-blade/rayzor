@@ -111,6 +111,7 @@ pub struct MacroExpander {
     import_map: BTreeMap<String, String>,
     /// The current file's imports as written.
     file_imports: Vec<parser::Import>,
+    source_file: Option<String>,
     /// Class registry for macro interpreter fallback dispatch
     class_registry: Arc<ClassRegistry>,
 }
@@ -134,6 +135,7 @@ impl MacroExpander {
             bound_names: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
             file_imports: Vec::new(),
+            source_file: None,
             class_registry: Arc::new(ClassRegistry::new()),
         }
     }
@@ -156,6 +158,7 @@ impl MacroExpander {
             bound_names: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
             file_imports: Vec::new(),
+            source_file: None,
             class_registry: Arc::new(ClassRegistry::new()),
         }
     }
@@ -178,6 +181,7 @@ impl MacroExpander {
             bound_names: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
             file_imports: Vec::new(),
+            source_file: None,
             class_registry: Arc::new(class_registry),
         }
     }
@@ -222,6 +226,7 @@ impl MacroExpander {
         fork.class_registry = self.class_registry.clone();
         fork.import_map = self.import_map.clone();
         fork.file_imports = self.file_imports.clone();
+        fork.source_file = self.source_file.clone();
         fork.deferred_builds = self.deferred_builds;
         fork
     }
@@ -251,6 +256,7 @@ impl MacroExpander {
     /// 3. Returns the modified file with diagnostics
     pub fn expand_file(&mut self, mut file: HaxeFile) -> ExpansionResult {
         self.expansions_count = 0;
+        self.source_file = Some(file.filename.clone());
 
         // Build import map from file imports for macro interpreter resolution
         self.import_map = super::interpreter::build_import_map(&file.imports);
@@ -1350,11 +1356,16 @@ impl MacroExpander {
         let mut ctx = super::context_api::MacroContext::new();
         ctx.class_paths = self.context.class_paths.clone();
         ctx.defines = self.context.defines.clone();
+        ctx.current_module = self.context.current_module.clone();
+        ctx.current_class = self.context.current_class.clone();
+        ctx.current_method = self.context.current_method.clone();
         ctx.is_expression_macro = true;
         if self.context.has_typer() {
             ctx.adopt_typer_from(&self.context);
         }
-        ctx.set_call_position(location);
+        ctx.set_call_position(self.source_file.as_deref().map_or(location, |file| {
+            super::context_api::source_position(file, call_expr.span)
+        }));
         interp.macro_context = Some(ctx);
 
         // Bind parameters in the interpreter environment

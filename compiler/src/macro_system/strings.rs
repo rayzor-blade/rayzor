@@ -5,6 +5,38 @@ use std::{cell::RefCell, collections::VecDeque, mem::size_of, sync::Arc};
 const MAX_BYTES: usize = 8 << 20;
 const MAX_STRINGS: usize = 16;
 
+pub(super) fn search(text: &str, needle: &str, start: Option<i64>, reverse: bool) -> i64 {
+    let length = text.chars().count();
+    let start = start
+        .map(|index| index.max(0) as usize)
+        .unwrap_or(if reverse { length } else { 0 });
+    if !reverse && start > length {
+        return -1;
+    }
+    let start = start.min(length);
+    if needle.is_empty() {
+        return start as i64;
+    }
+    if reverse {
+        text.char_indices()
+            .enumerate()
+            .take(start + 1)
+            .filter_map(|(index, (offset, _))| {
+                text[offset..].starts_with(needle).then_some(index as i64)
+            })
+            .last()
+            .unwrap_or(-1)
+    } else {
+        let offset = text
+            .char_indices()
+            .nth(start)
+            .map_or(text.len(), |(offset, _)| offset);
+        text[offset..].find(needle).map_or(-1, |found| {
+            (start + text[offset..offset + found].chars().count()) as i64
+        })
+    }
+}
+
 struct Entry {
     source: Arc<str>,
     characters: Vec<char>,
@@ -62,6 +94,28 @@ impl Characters {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_preserves_character_offsets_bounds_and_overlapping_matches() {
+        for (text, needle, start, reverse, expected) in [
+            ("aé🙂é", "é", None, false, 1),
+            ("aé🙂é", "é", Some(2), false, 3),
+            ("aé🙂é", "é", None, true, 3),
+            ("aé🙂é", "é", Some(2), true, 1),
+            ("ababa", "aba", None, true, 2),
+            ("ababa", "aba", Some(1), true, 0),
+            ("abc", "", Some(3), false, 3),
+            ("abc", "", Some(4), false, -1),
+            ("abc", "", None, true, 3),
+            ("abc", "z", None, true, -1),
+        ] {
+            assert_eq!(
+                search(text, needle, start, reverse),
+                expected,
+                "{text} {needle} {start:?} {reverse}"
+            );
+        }
+    }
 
     #[test]
     fn character_reads_preserve_unicode_and_do_not_retain_every_input() {

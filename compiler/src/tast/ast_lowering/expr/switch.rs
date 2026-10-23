@@ -1200,8 +1200,15 @@ impl<'a> AstLowering<'a> {
                 let var_bindings = self.bind_case_pattern_variables(bind_pattern)?;
 
                 // For constructor patterns, create the constructor expression
-                let case_expr =
+                let mut case_expr =
                     self.create_constructor_expression_with_bindings(first_pattern, var_bindings)?;
+                if let TypedExpressionKind::PatternPlaceholder {
+                    source_location, ..
+                } = &mut case_expr.kind
+                {
+                    *source_location = self.context.span_to_location(&case.span);
+                    case_expr.source_location = *source_location;
+                }
 
                 // Lower guard in the new scope (before restoring) so pattern vars are visible
                 let guard = case
@@ -1308,8 +1315,15 @@ impl<'a> AstLowering<'a> {
                 let var_bindings = self.bind_case_pattern_variables(bind_pattern)?;
 
                 // For constructor patterns, create the constructor expression
-                let case_expr =
+                let mut case_expr =
                     self.create_constructor_expression_with_bindings(first_pattern, var_bindings)?;
+                if let TypedExpressionKind::PatternPlaceholder {
+                    source_location, ..
+                } = &mut case_expr.kind
+                {
+                    *source_location = self.context.span_to_location(&case.span);
+                    case_expr.source_location = *source_location;
+                }
 
                 // Lower guard in the new scope (before restoring) so pattern vars are visible
                 let guard = case
