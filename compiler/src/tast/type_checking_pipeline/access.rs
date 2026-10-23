@@ -4,6 +4,67 @@
 use super::*;
 
 impl<'a> TypeCheckingPhase<'a> {
+    pub(super) fn index_key_type(&self, ty: TypeId) -> Option<TypeId> {
+        let substitution = super::super::type_substitution::TypeSubstitutions {
+            type_table: self.type_table,
+            symbol_table: self.symbol_table,
+            class_type_params: None,
+        };
+        let mut current = ty;
+        let mut receiver = ty;
+        let mut visited = std::collections::BTreeSet::new();
+        while visited.insert(current) {
+            let kind = {
+                let table = self.type_table.borrow();
+                current = table.resolve_alias_type(current);
+                table.get(current)?.kind.clone()
+            };
+            match kind {
+                TypeKind::Array { .. } | TypeKind::String => {
+                    return Some(self.type_table.borrow().int_type());
+                }
+                TypeKind::Dynamic => return Some(self.type_table.borrow().dynamic_type()),
+                TypeKind::Map { key_type, .. } => return Some(key_type),
+                TypeKind::Optional { inner_type } => {
+                    current = inner_type;
+                    receiver = inner_type;
+                }
+                TypeKind::GenericInstance { base_type, .. } => current = base_type,
+                TypeKind::Class { symbol_id, .. } | TypeKind::Abstract { symbol_id, .. } => {
+                    let owner = self.symbol_table.get_symbol(symbol_id)?;
+                    let key = self
+                        .symbol_table
+                        .find_symbols(|method| {
+                            method.scope_id == owner.scope_id
+                                && !method.is_static()
+                                && method
+                                    .flags
+                                    .contains(super::super::symbols::SymbolFlags::ARRAY_ACCESS)
+                        })
+                        .into_iter()
+                        .find_map(|method| {
+                            let table = self.type_table.borrow();
+                            match table.get(method.type_id).map(|t| &t.kind) {
+                                Some(TypeKind::Function { params, .. }) => params.first().copied(),
+                                _ => None,
+                            }
+                        });
+                    if let Some(key) = key {
+                        return Some(substitution.substitute_receiver_type(key, receiver));
+                    }
+                    let underlying = self
+                        .type_table
+                        .borrow()
+                        .resolve_abstract_underlying(symbol_id)?;
+                    current = substitution.substitute_receiver_type(underlying, receiver);
+                    receiver = current;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
     /// Emit a type error as a diagnostic
     /// Check if a field access is valid
     pub(crate) fn check_field_access(

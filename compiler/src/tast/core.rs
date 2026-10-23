@@ -441,6 +441,9 @@ pub struct TypeTable {
     /// Named types by symbol ID
     symbol_index: IdMap<SymbolId, Vec<TypeId>>,
 
+    /// Declared abstract conversions shared by every file in this type graph.
+    pub(crate) abstract_casts: BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>)>,
+
     /// Generic instances cache for performance
     generic_cache: BTreeMap<(TypeId, Vec<TypeId>), TypeId>,
 
@@ -570,6 +573,7 @@ impl TypeTable {
             kind_index,
             symbol_index,
             generic_cache,
+            abstract_casts: BTreeMap::new(),
             usage_stats,
             string_interner: StringInterner::new(),
             type_cache: Rc::new(TypeCache::new()),
@@ -616,6 +620,7 @@ impl TypeTable {
             kind_index,
             symbol_index,
             generic_cache,
+            abstract_casts: BTreeMap::new(),
             usage_stats,
             string_interner: StringInterner::new(),
             type_cache: Rc::new(TypeCache::new()),

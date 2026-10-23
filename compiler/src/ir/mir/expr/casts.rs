@@ -169,7 +169,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Abstract targets may define @:from conversion rules.
-        if let Some(converted) = self.try_abstract_from_cast(expr, *target) {
+        if *is_safe && let Some(converted) = self.try_abstract_from_cast(expr, *target) {
             return Some(converted);
         }
 

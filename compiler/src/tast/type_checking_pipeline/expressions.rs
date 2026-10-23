@@ -230,51 +230,32 @@ impl<'a> TypeCheckingPhase<'a> {
                 let array_type = self.check_expression(array)?;
                 let index_type = self.check_expression(index)?;
 
-                // Check that index is a valid index type (Int)
-                let type_table = self.type_checker.type_table.borrow();
-                let int_type = type_table.int_type();
-                drop(type_table);
-
-                let index_compatibility =
-                    self.type_checker.check_compatibility(index_type, int_type);
-                if matches!(index_compatibility, TypeCompatibility::Incompatible) {
-                    self.emit_enhanced_type_error(
-                        index_type,
-                        int_type,
-                        expr.source_location,
-                        "Array index must be Int",
-                        &TypeErrorContext::ArrayAccess,
-                    );
-                }
-
-                // Check that the array is actually an array type
-                let is_valid_indexable = {
-                    let type_table = self.type_checker.type_table.borrow();
-                    if let Some(array_type_info) = type_table.get(array_type) {
-                        matches!(
-                            &array_type_info.kind,
-                            super::TypeKind::Array { .. }
-                                | super::TypeKind::String
-                                | super::TypeKind::Dynamic
-                        )
-                    } else {
-                        false
+                if let Some(expected) = self.index_key_type(array_type) {
+                    if self.type_checker.check_compatibility(index_type, expected)
+                        == TypeCompatibility::Incompatible
+                    {
+                        self.emit_enhanced_type_error(
+                            index_type,
+                            expected,
+                            expr.source_location,
+                            "Invalid index type",
+                            &TypeErrorContext::ArrayAccess,
+                        );
                     }
-                };
-
-                if !is_valid_indexable {
-                    // Invalid array access
-                    let dynamic_type = self.type_checker.type_table.borrow().dynamic_type();
+                } else {
+                    let expected = {
+                        let mut types = self.type_table.borrow_mut();
+                        let dynamic = types.dynamic_type();
+                        types.create_array_type(dynamic)
+                    };
                     self.emit_error(TypeCheckError {
                         kind: TypeErrorKind::TypeMismatch {
-                            expected: dynamic_type, // Use dynamic as placeholder
+                            expected,
                             actual: array_type,
                         },
                         location: expr.source_location,
-                        context: "Cannot index non-array type".to_string(),
-                        suggestion: Some(
-                            "Only arrays, strings, and dynamic types can be indexed".to_string(),
-                        ),
+                        context: "Cannot index non-array type".into(),
+                        suggestion: Some("Declare an @:arrayAccess or @:op([]) accessor".into()),
                     });
                 }
             }

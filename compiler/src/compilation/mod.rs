@@ -770,11 +770,7 @@ impl CompilationUnit {
         // specifically", e.g. `Single`, which the shared `#if` guards otherwise
         // exclude because rayzor is in none of their target lists.
         config.defines.insert("rayzor".to_string());
-        for define in &self.config.extra_defines {
-            config
-                .defines
-                .insert(define.split('=').next().unwrap().to_string());
-        }
+        config.add_defines(&self.config.extra_defines);
         config
     }
 
@@ -789,12 +785,7 @@ impl CompilationUnit {
             || filename.contains("haxe-std/")
             || filename.contains("haxe-std\\");
         if !stdlib {
-            config.defines.extend(
-                self.config
-                    .user_defines
-                    .iter()
-                    .map(|define| define.split('=').next().unwrap().to_string()),
-            );
+            config.add_defines(&self.config.user_defines);
         }
         config
     }

@@ -36,6 +36,7 @@ impl<'a> AstLowering<'a> {
             import_resolver,
         );
 
+        let abstract_casts = context.type_table.borrow().abstract_casts.clone();
         Self {
             context,
             resolution_state: TypeResolutionState::default(),
@@ -115,7 +116,7 @@ impl<'a> AstLowering<'a> {
             class_value_bindings: BTreeMap::new(),
             deferred_macro_calls: BTreeMap::new(),
             var_init_expected: None,
-            abstract_casts: BTreeMap::new(),
+            abstract_casts,
             abstract_from_methods: BTreeMap::new(),
             imported_to_types: BTreeMap::new(),
             enum_abstracts: std::collections::BTreeSet::new(),

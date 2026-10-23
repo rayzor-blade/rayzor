@@ -1123,6 +1123,11 @@ impl<'a> AstLowering<'a> {
                 }
             }
         }
+        self.context
+            .type_table
+            .borrow_mut()
+            .abstract_casts
+            .insert(abstract_symbol, (from_types.clone(), to_types.clone()));
         self.abstract_casts
             .insert(abstract_symbol, (from_types, to_types));
     }

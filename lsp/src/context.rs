@@ -585,12 +585,11 @@ impl LspContext {
 
         let file_id = unit.file_id_of(&filename).unwrap_or(u32::MAX);
         let mut preprocessor = parser::preprocessor::PreprocessorConfig::default();
-        preprocessor.defines.extend(
+        preprocessor.add_defines(
             settings
                 .defines
                 .iter()
-                .chain(&settings.options.extra_defines)
-                .map(|define| define.split('=').next().unwrap().to_string()),
+                .chain(&settings.options.extra_defines),
         );
         preprocessor.defines.insert("eval".into());
         let text = parser::preprocessor::preprocess(source, &preprocessor);
@@ -866,11 +865,7 @@ impl LspContext {
     ) -> Vec<LspDiagnostic> {
         let mut config = parser::preprocessor::PreprocessorConfig::default();
         config.defines.insert("eval".to_string());
-        config.defines.extend(
-            defines
-                .iter()
-                .map(|define| define.split('=').next().unwrap().to_string()),
-        );
+        config.add_defines(defines.iter());
         let text = parser::preprocessor::preprocess(source, &config);
         let import_file = filename.ends_with("import.hx");
         let Err(errors) = parser::rd::rd_parse(&text, filename, import_file, false) else {
@@ -1402,6 +1397,38 @@ mod cache_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    #[ignore = "requires the sibling RayDE workspace and its libraries"]
+    fn rayde_bcencoder_retains_its_imported_bytes_identity() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../RayDE")
+                    .canonicalize()
+                    .unwrap();
+                let mut context = LspContext::new(root.clone());
+                context.load_workspace_config(None);
+                context.initialization_macros.clear();
+                let path = root
+                    .join("../ashui/haxe/ashui/draw3d/BcEncoder.hx")
+                    .canonicalize()
+                    .unwrap();
+                let source = std::fs::read_to_string(&path).unwrap();
+                let uri = crate::context::file_uri(path.to_str().unwrap());
+                context.open_files.insert(uri.clone(), source.clone());
+                let diagnostics = context.compile_file(&uri, &source);
+                assert!(
+                    diagnostics.is_empty(),
+                    "{:?}",
+                    diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

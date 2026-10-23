@@ -16,21 +16,21 @@ impl CompilationUnit {
                 .cloned()
                 .collect(),
         );
-        let mut defines = self
-            .preprocessor_config()
+        let mut config = self.preprocessor_config();
+        config.add_defines(&self.config.user_defines);
+        config.defines.insert("macro".into());
+        let defines = config
             .defines
             .into_iter()
-            .map(|name| (name, "1".to_string()))
-            .collect::<BTreeMap<_, _>>();
-        for define in self
-            .config
-            .extra_defines
-            .iter()
-            .chain(&self.config.user_defines)
-        {
-            let (name, value) = define.split_once('=').unwrap_or((define, "1"));
-            defines.insert(name.into(), value.into());
-        }
+            .map(|name| {
+                let value = config
+                    .values
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| "1".into());
+                (name, value)
+            })
+            .collect();
         classes.set_defines(defines);
         classes
     }

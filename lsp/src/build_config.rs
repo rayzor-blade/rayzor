@@ -286,6 +286,10 @@ fn apply_hxml(settings: &mut Settings, path: &Path) -> Vec<compiler::haxelib::De
         .extend(build.defines.into_iter().map(|(name, value)| {
             value.map_or_else(|| name.clone(), |value| format!("{name}={value}"))
         }));
+    settings
+        .options
+        .extra_defines
+        .extend(target_defines.iter().cloned());
     settings.defines.extend(target_defines);
     settings
         .options

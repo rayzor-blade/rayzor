@@ -13,13 +13,15 @@
 //! 2. Strip out platform-specific code for other targets
 //! 3. Keep only code that applies to Rayzor
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 /// Configuration for conditional compilation
 #[derive(Debug, Clone)]
 pub struct PreprocessorConfig {
     /// Active compiler defines (e.g., "rayzor", "sys", "debug")
     pub defines: HashSet<String>,
+    /// Values for explicit -D settings; presence-only defines default to "1".
+    pub values: BTreeMap<String, String>,
 }
 
 impl Default for PreprocessorConfig {
@@ -47,7 +49,27 @@ impl Default for PreprocessorConfig {
         #[cfg(debug_assertions)]
         defines.insert("debug".to_string());
 
-        Self { defines }
+        Self {
+            defines,
+            values: BTreeMap::new(),
+        }
+    }
+}
+
+impl PreprocessorConfig {
+    /// Haxe exposes both spellings of a hyphenated command-line define.
+    pub fn define(&mut self, setting: &str) {
+        let (name, value) = setting.split_once('=').unwrap_or((setting, "1"));
+        for name in [name.to_string(), name.replace('-', "_")] {
+            self.defines.insert(name.clone());
+            self.values.insert(name, value.to_string());
+        }
+    }
+
+    pub fn add_defines<'a>(&mut self, defines: impl IntoIterator<Item = &'a String>) {
+        for define in defines {
+            self.define(define);
+        }
     }
 }
 
@@ -457,8 +479,8 @@ fn count_inline_directives(s: &str, needle: &str) -> i32 {
 /// - Boolean AND: `sys && debug`
 /// - Parentheses: `(java || cs) && sys`
 /// - Negation: `!jvm`
+/// - Define values and comparisons: `level >= 3`, `theme == "dark"`
 fn evaluate_condition(condition: &str, config: &PreprocessorConfig) -> bool {
-    // For MVP, we'll implement a simple recursive descent evaluator
     let tokens = tokenize_condition(condition);
     evaluate_tokens(&tokens, config)
 }
@@ -471,6 +493,10 @@ enum CondToken {
     Not,
     LParen,
     RParen,
+    Text(String),
+    Number(f64),
+    Compare(char, bool),
+    Invalid,
 }
 
 fn tokenize_condition(condition: &str) -> Vec<CondToken> {
@@ -482,7 +508,61 @@ fn tokenize_condition(condition: &str) -> Vec<CondToken> {
             ' ' | '\t' => continue,
             '(' => tokens.push(CondToken::LParen),
             ')' => tokens.push(CondToken::RParen),
-            '!' => tokens.push(CondToken::Not),
+            '!' if chars.peek() != Some(&'=') => tokens.push(CondToken::Not),
+            '=' | '!' | '<' | '>' => {
+                let equal = chars.peek() == Some(&'=');
+                if equal {
+                    chars.next();
+                }
+                if matches!(ch, '=' | '!') && !equal {
+                    tokens.push(CondToken::Invalid);
+                } else {
+                    tokens.push(CondToken::Compare(ch, equal));
+                }
+            }
+            '\'' | '"' => {
+                let mut text = String::new();
+                let mut closed = false;
+                while let Some(next) = chars.next() {
+                    if next == ch {
+                        closed = true;
+                        break;
+                    }
+                    if next == '\\' {
+                        let Some(escaped) = chars.next() else {
+                            break;
+                        };
+                        text.push(match escaped {
+                            'n' => '\n',
+                            'r' => '\r',
+                            't' => '\t',
+                            other => other,
+                        });
+                    } else {
+                        text.push(next);
+                    }
+                }
+                tokens.push(if closed {
+                    CondToken::Text(text)
+                } else {
+                    CondToken::Invalid
+                });
+            }
+            _ if ch.is_ascii_digit() || ch == '-' => {
+                let mut number = ch.to_string();
+                while chars
+                    .peek()
+                    .is_some_and(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
+                {
+                    number.push(chars.next().unwrap());
+                }
+                tokens.push(
+                    number
+                        .parse()
+                        .map(CondToken::Number)
+                        .unwrap_or(CondToken::Invalid),
+                );
+            }
             '|' if chars.peek() == Some(&'|') => {
                 chars.next();
                 tokens.push(CondToken::Or);
@@ -509,7 +589,7 @@ fn tokenize_condition(condition: &str) -> Vec<CondToken> {
                 }
                 tokens.push(CondToken::Ident(ident));
             }
-            _ => {}
+            _ => tokens.push(CondToken::Invalid),
         }
     }
 
@@ -563,22 +643,94 @@ fn parse_unary(tokens: &[CondToken], pos: &mut usize, config: &PreprocessorConfi
     parse_primary(tokens, pos, config)
 }
 
-fn parse_primary(tokens: &[CondToken], pos: &mut usize, config: &PreprocessorConfig) -> bool {
-    match tokens.get(*pos) {
-        Some(CondToken::Ident(name)) => {
-            *pos += 1;
-            config.defines.contains(name)
+#[derive(PartialEq)]
+enum ConditionValue {
+    Missing,
+    Flag(String),
+    Text(String),
+    Number(f64),
+    Bool(bool),
+}
+
+impl ConditionValue {
+    fn truthy(&self) -> bool {
+        match self {
+            Self::Missing => false,
+            Self::Flag(_) => true,
+            Self::Text(s) => !s.is_empty(),
+            Self::Number(n) => *n != 0.0,
+            Self::Bool(b) => *b,
         }
-        Some(CondToken::LParen) => {
-            *pos += 1;
-            let inner = parse_or(tokens, pos, config);
-            if matches!(tokens.get(*pos), Some(CondToken::RParen)) {
-                *pos += 1;
-            }
-            inner
-        }
-        _ => false,
     }
+    fn compare(&self, rhs: &Self) -> Option<std::cmp::Ordering> {
+        match (self, rhs) {
+            (Self::Missing, Self::Missing) => Some(std::cmp::Ordering::Equal),
+            (Self::Flag(a) | Self::Text(a), Self::Flag(b) | Self::Text(b)) => Some(a.cmp(b)),
+            (Self::Number(a), Self::Number(b)) => a.partial_cmp(b),
+            (Self::Flag(a) | Self::Text(a), Self::Number(b)) => {
+                a.parse::<f64>().ok()?.partial_cmp(b)
+            }
+            (Self::Number(a), Self::Flag(b) | Self::Text(b)) => {
+                a.partial_cmp(&b.parse::<f64>().ok()?)
+            }
+            (Self::Bool(a), Self::Bool(b)) => Some(a.cmp(b)),
+            _ => None,
+        }
+    }
+}
+
+fn condition_value(
+    tokens: &[CondToken],
+    pos: &mut usize,
+    config: &PreprocessorConfig,
+) -> Option<ConditionValue> {
+    let value = match tokens.get(*pos)? {
+        CondToken::Ident(name) if name == "true" => ConditionValue::Bool(true),
+        CondToken::Ident(name) if name == "false" => ConditionValue::Bool(false),
+        CondToken::Ident(name) if config.defines.contains(name) => ConditionValue::Flag(
+            config
+                .values
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| "1".into()),
+        ),
+        CondToken::Ident(_) => ConditionValue::Missing,
+        CondToken::Text(text) => ConditionValue::Text(text.clone()),
+        CondToken::Number(number) => ConditionValue::Number(*number),
+        _ => return None,
+    };
+    *pos += 1;
+    Some(value)
+}
+
+fn parse_primary(tokens: &[CondToken], pos: &mut usize, config: &PreprocessorConfig) -> bool {
+    if matches!(tokens.get(*pos), Some(CondToken::LParen)) {
+        *pos += 1;
+        let inner = parse_or(tokens, pos, config);
+        if matches!(tokens.get(*pos), Some(CondToken::RParen)) {
+            *pos += 1;
+            return inner;
+        }
+        return false;
+    }
+    let Some(left) = condition_value(tokens, pos, config) else {
+        return false;
+    };
+    if let Some(CondToken::Compare(operator, equal)) = tokens.get(*pos) {
+        *pos += 1;
+        let Some(right) = condition_value(tokens, pos, config) else {
+            return false;
+        };
+        let order = left.compare(&right);
+        return match operator {
+            '=' => order == Some(std::cmp::Ordering::Equal),
+            '!' => order != Some(std::cmp::Ordering::Equal),
+            '<' => order.is_some_and(|o| o.is_lt() || (*equal && o.is_eq())),
+            '>' => order.is_some_and(|o| o.is_gt() || (*equal && o.is_eq())),
+            _ => false,
+        };
+    }
+    left.truthy()
 }
 
 #[cfg(test)]
@@ -591,6 +743,38 @@ mod tests {
             c.defines.insert((*d).to_string());
         }
         c
+    }
+
+    #[test]
+    fn valued_and_hyphenated_defines_select_the_requested_branch() {
+        let mut config = PreprocessorConfig::default();
+        for setting in ["window-lib=0.3.1", "level=4", "theme=dark", "zero=0"] {
+            config.define(setting);
+        }
+        for condition in [
+            "window_lib",
+            "(window_lib == \"0.3.1\")",
+            "(theme == 'dark' && level >= 4)",
+            "(level < 5 && level != 3)",
+            "zero",
+            "(zero == 0)",
+            "(!missing && theme != 'light')",
+        ] {
+            assert!(evaluate_condition(condition, &config), "{condition}");
+        }
+        for condition in [
+            "(theme == 'light')",
+            "(level > 4)",
+            "(window_lib < \"0.3.0\")",
+            "(level >=)",
+        ] {
+            assert!(!evaluate_condition(condition, &config), "{condition}");
+        }
+        let source = "#if (theme == \"dark\")\nclass Dark {}\n#else\nclass Light {}\n#end\n";
+        let result = preprocess(source, &config);
+        assert!(result.contains("class Dark"));
+        assert!(!result.contains("class Light"));
+        assert_eq!(source.lines().count(), result.lines().count());
     }
 
     /// Parenthesized conditions used to be split on `||`/`&&` BEFORE the parens

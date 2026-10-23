@@ -162,6 +162,69 @@ mod tests {
     }
 
     #[test]
+    fn hxml_defines_apply_to_open_dependency_files() {
+        let source = "package lib;\n#if hlwindow\nclass WindowedApp { public static function run():Int return 1; }\n#else\nclass WindowedApp { public var wrong:Missing; }\n#end\n";
+        let workspace = Workspace::new(&[
+            ("app/build.hxml", "-cp ../lib\n-D hlwindow=0.3.1\n"),
+            ("lib/lib/WindowedApp.hx", source),
+        ]);
+        let mut context = LspContext::new(workspace.0.join("app"));
+        context.load_workspace_config(None);
+        let path = workspace.0.join("lib/lib/WindowedApp.hx");
+        let uri = crate::context::file_uri(path.to_str().unwrap());
+        assert!(
+            context
+                .settings_for_uri(&uri)
+                .defines
+                .iter()
+                .any(|d| d == "hlwindow=0.3.1")
+        );
+        context.open_files.insert(uri.clone(), source.into());
+        let diagnostics = context.compile_file(&uri, source);
+        assert!(
+            diagnostics.is_empty(),
+            "{:?}",
+            diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        let col = source.lines().nth(2).unwrap().find("run").unwrap() as u32;
+        assert!(
+            context.hover_info(&uri, 3, col + 1).is_some(),
+            "no hint in the guarded branch"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the sibling RayDE workspace and its libraries"]
+    fn rayde_defines_select_external_window_module() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../RayDE")
+            .canonicalize()
+            .unwrap();
+        let mut context = LspContext::new(root.clone());
+        context.load_workspace_config(None);
+        eprintln!(
+            "defines: {:?}; problems: {:?}",
+            context.defines, context.config_problems
+        );
+        assert!(
+            context
+                .defines
+                .iter()
+                .any(|d| d.split('=').next() == Some("hlwindow"))
+        );
+        let path = root
+            .join("../ashui/haxe/ashui/app/WindowedApp.hx")
+            .canonicalize()
+            .unwrap();
+        let source = std::fs::read_to_string(&path).unwrap();
+        let declarations = crate::workspace_index::declarations(&path, &source, &context.defines);
+        assert!(
+            declarations.iter().any(|d| d.name == "WindowedApp"),
+            "no WindowedApp declarations"
+        );
+    }
+
+    #[test]
     fn finds_nested_build_but_explicit_selection_wins() {
         let workspace = Workspace::new(&[
             ("extraParams.hxml", "--macro Wrong.enable()"),

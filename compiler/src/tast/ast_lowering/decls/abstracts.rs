@@ -351,6 +351,10 @@ impl<'a> AstLowering<'a> {
                 }
             }
         }
+        self.context.type_table.borrow_mut().abstract_casts.insert(
+            abstract_symbol,
+            (recorded_from.clone(), recorded_to.clone()),
+        );
         self.abstract_casts
             .insert(abstract_symbol, (recorded_from, recorded_to));
         self.record_unary_operators(abstract_symbol, abstract_decl);

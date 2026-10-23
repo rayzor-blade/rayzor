@@ -350,11 +350,7 @@ fn profile_defines<'a>(
 pub(crate) fn declarations(path: &Path, source: &str, defines: &[String]) -> Vec<Declaration> {
     let mut config = parser::preprocessor::PreprocessorConfig::default();
     config.defines.insert("eval".into());
-    config.defines.extend(
-        defines
-            .iter()
-            .map(|d| d.split('=').next().unwrap().to_string()),
-    );
+    config.add_defines(defines.iter());
     let text = parser::preprocessor::preprocess(source, &config);
     let filename = path.to_string_lossy();
     let Ok(file) = parser::rd::rd_parse(

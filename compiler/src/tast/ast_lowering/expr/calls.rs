@@ -1804,6 +1804,15 @@ impl<'a> AstLowering<'a> {
         let Some(formal_ty) = formal else {
             return arg;
         };
+        if matches!(
+            arg.kind,
+            TypedExpressionKind::Cast {
+                cast_kind: CastKind::Unsafe,
+                ..
+            }
+        ) {
+            return self.retype_literal_to(arg, formal_ty);
+        }
         let arg = self.upcast_to_abstract_interface(arg, formal_ty);
         // The formal's abstract symbol, through generic instantiation.
         let abstract_symbol = {
@@ -1816,6 +1825,7 @@ impl<'a> AstLowering<'a> {
                     break None;
                 }
                 match tt.get(resolved).map(|ti| &ti.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => resolved = *target_type,
                     Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
                     Some(TypeKind::Abstract { symbol_id, .. }) => break Some(*symbol_id),
                     _ => break None,
@@ -1836,6 +1846,7 @@ impl<'a> AstLowering<'a> {
                     break false;
                 }
                 match tt.get(resolved).map(|ti| &ti.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => resolved = *target_type,
                     Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
                     Some(TypeKind::Abstract { symbol_id, .. }) => {
                         break *symbol_id == abstract_symbol;
@@ -1877,7 +1888,17 @@ impl<'a> AstLowering<'a> {
         let pick = {
             candidates
                 .iter()
-                .find(|(_, param_ty)| {
+                .find(|(method, param_ty)| {
+                    // A conversion body cannot implicitly call itself.
+                    if self.context.class_context_stack.last() == Some(&abstract_symbol)
+                        && self
+                            .context
+                            .symbol_table
+                            .get_symbol(*method)
+                            .is_some_and(|symbol| Some(symbol.name) == self.current_method_name)
+                    {
+                        return false;
+                    }
                     if *param_ty == arg.expr_type {
                         return true;
                     }
@@ -2174,6 +2195,7 @@ impl<'a> AstLowering<'a> {
         let mut resolved = ty;
         for _ in 0..8 {
             match tt.get(resolved).map(|ti| &ti.kind) {
+                Some(TypeKind::TypeAlias { target_type, .. }) => resolved = *target_type,
                 Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
                 Some(TypeKind::Abstract { symbol_id, .. }) => return Some(*symbol_id),
                 _ => return None,
@@ -2227,6 +2249,15 @@ impl<'a> AstLowering<'a> {
         let Some(formal_ty) = formal else {
             return arg;
         };
+        if matches!(
+            arg.kind,
+            TypedExpressionKind::Cast {
+                cast_kind: CastKind::Unsafe,
+                ..
+            }
+        ) {
+            return self.retype_literal_to(arg, formal_ty);
+        }
         let Some(abstract_symbol) = self.abstract_symbol_of(arg.expr_type) else {
             return arg;
         };
@@ -2236,18 +2267,24 @@ impl<'a> AstLowering<'a> {
             let to_types = self.imported_to_conversion_types(abstract_symbol);
             self.imported_to_types.insert(abstract_symbol, to_types);
         }
+        let destinations = self
+            .abstract_casts
+            .get(&abstract_symbol)
+            .map(|(_, to_types)| to_types)
+            .or_else(|| self.imported_to_types.get(&abstract_symbol))
+            .cloned()
+            .unwrap_or_default();
+        let destinations: Vec<_> = destinations
+            .into_iter()
+            .map(|ty| self.substitute_receiver_type(ty, arg.expr_type))
+            .collect();
         let converts = {
-            let tt = self.context.type_table.borrow();
-            let formal_kind = tt.get(formal_ty).map(|ti| &ti.kind);
-            self.abstract_casts
-                .get(&abstract_symbol)
-                .map(|(_, to_types)| to_types)
-                .or_else(|| self.imported_to_types.get(&abstract_symbol))
-                .is_some_and(|to_types| {
-                    to_types
-                        .iter()
-                        .any(|&t| t == formal_ty || tt.get(t).map(|ti| &ti.kind) == formal_kind)
-                })
+            let table = self.context.type_table.borrow();
+            let formal = table.resolve_alias_type(formal_ty);
+            destinations.iter().any(|&ty| {
+                let ty = table.resolve_alias_type(ty);
+                ty == formal || table.get(ty).map(|t| &t.kind) == table.get(formal).map(|t| &t.kind)
+            })
         };
         if !converts {
             return arg;

@@ -1038,6 +1038,8 @@ pub struct TypeChecker<'a> {
     /// Subtype relationship cache for performance
     subtype_cache: BTreeMap<(TypeId, TypeId), bool>,
 
+    checking_conversions: std::collections::BTreeSet<(TypeId, TypeId)>,
+
     /// Generic instantiation context
     generic_context: GenericContext,
 
@@ -1097,6 +1099,7 @@ impl<'a> TypeChecker<'a> {
             },
             errors: Vec::new(),
             subtype_cache: BTreeMap::new(),
+            checking_conversions: Default::default(),
             generic_context: GenericContext::default(),
             stats: TypeCheckerStats {
                 types_checked: 0,
@@ -1141,8 +1144,60 @@ impl<'a> TypeChecker<'a> {
             None => return TypeCompatibility::Incompatible,
         };
 
-        // Check various compatibility rules
-        self.check_compatibility_impl(&source_type, &target_type, source, target)
+        let result = self.check_compatibility_impl(&source_type, &target_type, source, target);
+        if result != TypeCompatibility::Incompatible
+            || !self.checking_conversions.insert((source, target))
+        {
+            return result;
+        }
+        let outgoing = match source_type {
+            TypeKind::Abstract { symbol_id, .. } => self
+                .type_table
+                .borrow()
+                .abstract_casts
+                .get(&symbol_id)
+                .map(|(_, to)| to.clone())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let incoming = match target_type {
+            TypeKind::Abstract { symbol_id, .. } => self
+                .type_table
+                .borrow()
+                .abstract_casts
+                .get(&symbol_id)
+                .map(|(from, _)| from.clone())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let substitute = |ty, receiver| {
+            super::type_substitution::TypeSubstitutions {
+                type_table: self.type_table,
+                symbol_table: self.symbol_table,
+                class_type_params: None,
+            }
+            .substitute_receiver_type(ty, receiver)
+        };
+        let outgoing: Vec<_> = outgoing
+            .into_iter()
+            .map(|ty| substitute(ty, source))
+            .collect();
+        let incoming: Vec<_> = incoming
+            .into_iter()
+            .map(|ty| substitute(ty, target))
+            .collect();
+        let convertible = outgoing
+            .into_iter()
+            .any(|ty| self.check_compatibility(ty, target) != TypeCompatibility::Incompatible)
+            || incoming
+                .into_iter()
+                .any(|ty| self.check_compatibility(source, ty) != TypeCompatibility::Incompatible);
+        self.checking_conversions.remove(&(source, target));
+        if convertible {
+            TypeCompatibility::Convertible
+        } else {
+            result
+        }
     }
 
     /// Internal compatibility checking implementation
@@ -1182,11 +1237,14 @@ impl<'a> TypeChecker<'a> {
             }
 
             (TypeKind::Optional { inner_type }, target) => {
-                // Haxe reference types are already nullable. Null<T> only
-                // changes the representation of non-nullable value types.
+                // Haxe implicitly unwraps Null<T>; strict null-safety is
+                // checked separately by flow analysis.
                 if matches!(
                     target,
                     TypeKind::String
+                        | TypeKind::Int
+                        | TypeKind::Float
+                        | TypeKind::Bool
                         | TypeKind::Array { .. }
                         | TypeKind::Map { .. }
                         | TypeKind::Class { .. }
@@ -1331,6 +1389,65 @@ impl<'a> TypeChecker<'a> {
                     let source_args = source_args.clone();
                     let target_args = target_args.clone();
                     self.check_generic_compatibility(&source_args, &target_args)
+                } else {
+                    TypeCompatibility::Incompatible
+                }
+            }
+
+            // Forward signatures can retain a generic instance while a
+            // constructor already has the concrete named instantiation.
+            (
+                TypeKind::GenericInstance {
+                    base_type,
+                    type_args,
+                    ..
+                },
+                named @ (TypeKind::Class { .. }
+                | TypeKind::Interface { .. }
+                | TypeKind::Enum { .. }
+                | TypeKind::Abstract { .. }),
+            )
+            | (
+                named @ (TypeKind::Class { .. }
+                | TypeKind::Interface { .. }
+                | TypeKind::Enum { .. }
+                | TypeKind::Abstract { .. }),
+                TypeKind::GenericInstance {
+                    base_type,
+                    type_args,
+                    ..
+                },
+            ) => {
+                let (base, concrete) = {
+                    let table = self.type_table.borrow();
+                    let base = table.resolve_alias_type(*base_type);
+                    let symbol = |kind: &TypeKind| match kind {
+                        TypeKind::Class {
+                            symbol_id,
+                            type_args,
+                        }
+                        | TypeKind::Interface {
+                            symbol_id,
+                            type_args,
+                        }
+                        | TypeKind::Enum {
+                            symbol_id,
+                            type_args,
+                        }
+                        | TypeKind::Abstract {
+                            symbol_id,
+                            type_args,
+                            ..
+                        } => Some((*symbol_id, type_args.clone())),
+                        _ => None,
+                    };
+                    (table.get(base).and_then(|t| symbol(&t.kind)), symbol(named))
+                };
+                if let (Some((base, _)), Some((concrete, arguments))) = (base, concrete)
+                    && base == concrete
+                    && type_args.len() == arguments.len()
+                {
+                    self.check_generic_compatibility(type_args, &arguments)
                 } else {
                     TypeCompatibility::Incompatible
                 }
@@ -2575,9 +2692,18 @@ mod tests {
             TypeCompatibility::Assignable
         );
 
-        // Int? should NOT be assignable to Int (requires unwrapping)
+        // Haxe implicitly unwraps nullable values; strict null checks are separate.
         assert_eq!(
             checker.check_compatibility(optional_int, int_type),
+            TypeCompatibility::Assignable
+        );
+        let string_type = checker.type_table.borrow().string_type();
+        let optional_string = checker
+            .type_table
+            .borrow_mut()
+            .create_optional_type(string_type);
+        assert_eq!(
+            checker.check_compatibility(optional_string, int_type),
             TypeCompatibility::Incompatible
         );
     }

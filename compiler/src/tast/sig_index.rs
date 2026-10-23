@@ -91,6 +91,8 @@ pub struct StaticSigIndex {
     /// Preprocessor defines matching `CompilationUnit::parse_file`, so
     /// on-demand parses see the same `#if` branches.
     pub preprocessor: PreprocessorConfig,
+    pub(crate) stdlib_preprocessor: PreprocessorConfig,
+    pub(crate) stdlib_paths: Vec<std::path::PathBuf>,
     /// Qualified class name → its static signatures.
     classes: BTreeMap<String, ClassSigs>,
     /// Bare class name → all qualified names that declare it.
@@ -1208,7 +1210,16 @@ impl StaticSigIndex {
                     &src,
                     true,
                     false,
-                    &self.preprocessor,
+                    if self.stdlib_paths.iter().any(|root| {
+                        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+                        path.canonicalize()
+                            .unwrap_or_else(|_| path.clone())
+                            .starts_with(root)
+                    }) {
+                        &self.stdlib_preprocessor
+                    } else {
+                        &self.preprocessor
+                    },
                 )
                 .ok()
             });
@@ -1301,4 +1312,35 @@ pub(crate) fn returned_field_hint<'f>(
         } if n == name => type_hint.as_ref(),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod preprocessor_tests {
+    use super::*;
+
+    #[test]
+    fn on_demand_signatures_keep_project_values_out_of_stdlib_parses() {
+        let root =
+            std::env::temp_dir().join(format!("rayzor-signature-defines-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("std")).unwrap();
+        let user = root.join("Guarded.hx");
+        let stdlib = root.join("std/Standard.hx");
+        std::fs::write(&user, "#if (window_lib == \"0.3.1\")\nclass Guarded { public static function value():Int return 1; }\n#end\n").unwrap();
+        std::fs::write(&stdlib, "#if window_lib\nclass Standard { public static function value():String return 'wrong'; }\n#else\nclass Standard { public static function value():Int return 1; }\n#end\n").unwrap();
+        let mut index = StaticSigIndex {
+            stdlib_paths: vec![root.join("std")],
+            ..Default::default()
+        };
+        index.preprocessor.define("window-lib=0.3.1");
+        for (name, path) in [("Standard", stdlib), ("Guarded", user)] {
+            let sig = index
+                .resolve(name, "value", true, &|_| Some(path.clone()))
+                .unwrap();
+            assert!(
+                matches!(sig.return_type, Some(parser::Type::Path { ref path, .. }) if path.name == "Int"),
+                "{name}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

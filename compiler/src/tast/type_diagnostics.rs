@@ -747,7 +747,6 @@ impl<'a> TypeDiagnosticEmitter<'a> {
     ) -> Diagnostic {
         let expected_name = self.format_type_name(expected);
         let actual_name = self.format_type_name(actual);
-
         let source_span = self.location_to_span(location);
 
         let mut builder = DiagnosticBuilder::error(
@@ -1198,6 +1197,23 @@ impl<'a> TypeDiagnosticEmitter<'a> {
                                     .join(", ")
                             )
                         }
+                    }
+                    TypeKind::GenericInstance {
+                        base_type,
+                        type_args,
+                        ..
+                    } => {
+                        let base = self.format_type_name(*base_type);
+                        let base = base.split('<').next().unwrap_or(&base);
+                        format!(
+                            "{}<{}>",
+                            base,
+                            type_args
+                                .iter()
+                                .map(|ty| self.format_type_name(*ty))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
                     }
                     TypeKind::Class { symbol_id, .. } => {
                         // Look up the class name from symbol table

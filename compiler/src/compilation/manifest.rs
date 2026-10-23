@@ -892,6 +892,9 @@ impl CompilationUnit {
             }
         }
 
+        self.symbol_table
+            .set_class_type_params(symbol_id, ordered_abstract.clone());
+
         // Create abstract type
         let abstract_type = self
             .type_table
@@ -901,6 +904,34 @@ impl CompilationUnit {
                 underlying: Some(underlying_type),
                 type_args: ordered_abstract,
             });
+
+        let parameters = self
+            .symbol_table
+            .get_class_type_params(symbol_id)
+            .cloned()
+            .unwrap_or_default();
+        let previous = std::mem::take(&mut self.manifest_type_params);
+        self.manifest_type_params = abstract_info
+            .type_params
+            .iter()
+            .cloned()
+            .zip(parameters)
+            .collect();
+        let from = abstract_info
+            .from_types
+            .iter()
+            .map(|t| self.parse_type_string(t))
+            .collect();
+        let to = abstract_info
+            .to_types
+            .iter()
+            .map(|t| self.parse_type_string(t))
+            .collect();
+        self.manifest_type_params = previous;
+        self.type_table
+            .borrow_mut()
+            .abstract_casts
+            .insert(symbol_id, (from, to));
 
         // Update symbol with type
         self.symbol_table

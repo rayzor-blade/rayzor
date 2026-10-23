@@ -38,7 +38,9 @@ impl CompilationUnit {
         // sites can type not-yet-lowered statics from their declarations.
         {
             let mut index = self.static_sig_index.borrow_mut();
-            index.preprocessor = config;
+            index.preprocessor = self.preprocessor_config_for("<signature>");
+            index.stdlib_preprocessor = self.preprocessor_config();
+            index.stdlib_paths = self.config.stdlib_paths.clone();
             index.index_file(&file);
         }
         Ok(file)

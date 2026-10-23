@@ -2858,3 +2858,207 @@ fn nue_manifest_keeps_shared_tensor_and_map_identities() {
         );
     }
 }
+
+#[test]
+fn project_types_keep_imported_identities_when_short_names_collide() {
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp .\n-main Main\n"),
+        (
+            "Main.hx",
+            r#"import payload.Bytes;
+import native.Driver;
+class Main {
+    static var driver:Driver;
+    public static function create():Bytes {
+        var out = Bytes.alloc(8);
+        return out;
+    }
+}"#,
+        ),
+        (
+            "payload/Bytes.hx",
+            "package payload; class Bytes { public function new() {} public static function alloc(size:Int):Bytes return new Bytes(); }",
+        ),
+        (
+            "native/Bytes.hx",
+            "package native; abstract Bytes(Int) from Int to Int {}",
+        ),
+        (
+            "native/Driver.hx",
+            "package native; class Driver { public var data:Bytes; public function new() {} }",
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 4, 29)));
+    assert!(hover.contains("create():payload.Bytes"), "{hover}");
+}
+
+#[test]
+fn project_types_allow_declared_abstract_conversions_through_aliases() {
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp .\n-main Main\n"),
+        (
+            "types/Types.hx",
+            r#"package types;
+typedef Number = Count;
+abstract Count(Int) from Int to Int {}
+abstract Label(String) {
+    @:from public static function ofString(value:String):Label return cast value;
+    @:to public function asString():String return this;
+}
+class Types {}"#,
+        ),
+        (
+            "Main.hx",
+            r#"import types.Types.Number;
+import types.Types.Label;
+class Main {
+    static function number():Number return 7;
+    static function raw(value:Number):Int return value;
+    static function label():Label return "text";
+    static function text(value:Label):String return value;
+    static function main() { var value:Number = 3; var text:Label = "value"; }
+}"#,
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn project_defines_keep_values_in_syntax_indexing_imports_and_macros() {
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp .\nflags.hxml\n--macro Setup.enable()\n"),
+        (
+            "flags.hxml",
+            "-D window-lib=0.3.1\n-D theme=dark\n-D level=4\n",
+        ),
+        (
+            "Setup.hx",
+            r#"class Setup {
+#if macro
+    public static function enable() {
+        if (!haxe.macro.Context.defined("window_lib")) throw "missing normalized define";
+        if (haxe.macro.Context.definedValue("window_lib") != "0.3.1") throw "missing version value";
+#if (theme != "dark" || level < 4)
+        throw "wrong macro branch";
+#end
+    }
+#end
+}"#,
+        ),
+        (
+            "Helper.hx",
+            r#"#if (window_lib == "0.3.1" && theme == "dark" && level >= 4)
+class Helper { public static function value():Int return 7; }
+#else
+class Helper { public static function value():String return "wrong"; }
+#end"#,
+        ),
+        (
+            "Main.hx",
+            r#"class Main {
+#if (theme == "dark" && level >= 4)
+    public var value:Int = Helper.value();
+#else
+    this is deliberately not valid syntax
+#end
+}"#,
+        ),
+    ]);
+    assert!(s.open("Main.hx").is_empty(), "{:?}", s.diagnostics);
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 2, 15)));
+    assert!(hover.contains("value:Int"), "{hover}");
+    std::fs::write(
+        s.root.join("flags.hxml"),
+        "-D window-lib=0.3.1\n-D theme=light\n-D level=2\n",
+    )
+    .unwrap();
+    // A configuration change must invalidate the old branch's cached index.
+    s.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes":[{"uri":s.uri("flags.hxml"),"type":2}]}),
+    );
+    assert!(
+        !s.wait_ready("Main.hx", 1).is_empty(),
+        "stale diagnostics after changing -D values"
+    );
+}
+
+#[test]
+fn project_types_reject_undeclared_and_wrong_generic_abstract_conversions() {
+    let mut s = Session::start(&[
+        (
+            "Types.hx",
+            "abstract Cell<T>(T) from T to T {} abstract Locked(Int) {} class Types {}",
+        ),
+        (
+            "Main.hx",
+            r#"import Types.Cell;
+import Types.Locked;
+class Main {
+    static function good():Cell<String> return "text";
+    static function wrong():Cell<String> return 1;
+    static function locked():Locked return 1;
+    static function reinterpreted():Locked return cast 1;
+}"#,
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert_eq!(diagnostics.len(), 2, "{diagnostics:#?}");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d["message"].as_str().unwrap().contains("Type mismatch")),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn project_types_accept_generic_abstract_instances_and_nullable_values() {
+    let mut s = Session::start(&[
+        (
+            "Container.hx",
+            "abstract Container<T>(Array<T>) { public function new(length:Int) this = []; }",
+        ),
+        (
+            "Main.hx",
+            r#"class Main {
+    static function take(value:Container<Int>):Int return 1;
+    static function count(value:Null<Int>):Int return value != null ? value * 4 : 0;
+    static function main() { var value = new Container<Int>(3); take(value); }
+}"#,
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn project_types_index_abstracts_through_their_declared_key_types() {
+    let mut s = Session::start(&[
+        (
+            "Lookup.hx",
+            r#"abstract Lookup<K>(Array<Int>) {
+    public function new() this = [];
+    @:arrayAccess public function read(key:K):Int return 7;
+}"#,
+        ),
+        (
+            "Main.hx",
+            r#"class Main {
+    static function main() { var lookup = new Lookup<String>(); var result = lookup["key"]; }
+}"#,
+        ),
+    ]);
+    assert!(s.open("Main.hx").is_empty(), "{:?}", s.diagnostics);
+    let diagnostics = s.change("Main.hx", "class Main { static function main() { var lookup = new Lookup<String>(); var result = lookup[true]; } }");
+    assert!(!diagnostics.is_empty(), "invalid abstract key was accepted");
+    assert!(
+        diagnostics.iter().any(|d| d["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("String") && m.contains("Bool"))),
+        "{diagnostics:#?}"
+    );
+}

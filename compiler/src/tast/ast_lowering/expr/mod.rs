@@ -2031,9 +2031,13 @@ impl<'a> AstLowering<'a> {
                     self.context.expected_new_type_hint = self.context.expected_return_type;
                     let lowered = self.lower_value_expression(expr);
                     self.context.expected_new_type_hint = prev_hint;
+                    let lowered = self
+                        .coerce_arg_via_abstract_to(lowered?, self.context.expected_return_type);
+                    let lowered = self
+                        .coerce_arg_via_abstract_from(lowered, self.context.expected_return_type);
                     let mut lowered = match self.context.expected_return_type {
-                        Some(ret) => self.retype_literal_to(lowered?, ret),
-                        None => lowered?,
+                        Some(ret) => self.retype_literal_to(lowered, ret),
+                        None => lowered,
                     };
                     // GADT branches refine T independently; their join retains T.
                     if matches!(lowered.kind, TypedExpressionKind::Switch { .. })
@@ -2989,6 +2993,7 @@ impl<'a> AstLowering<'a> {
                         Some(converted) => converted,
                         None => result,
                     };
+                    let result = self.coerce_arg_via_abstract_to(result, declared_type);
                     let convertible = {
                         let table = self.context.type_table.borrow();
                         let ty = Self::resolve_alias_chain(&table, result.expr_type);
@@ -4179,6 +4184,16 @@ impl<'a> AstLowering<'a> {
         mut expr: TypedExpression,
         target: TypeId,
     ) -> TypedExpression {
+        if let TypedExpressionKind::Cast {
+            target_type,
+            cast_kind: CastKind::Unsafe,
+            ..
+        } = &mut expr.kind
+        {
+            *target_type = target;
+            expr.expr_type = target;
+            return expr;
+        }
         // An abstract over a structure holds the structure itself.
         let underlying = match self
             .context

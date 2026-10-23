@@ -2245,6 +2245,7 @@ impl MacroInterpreter {
                         .unwrap_or_else(|| "1".into());
                     self.compiler_defines.insert(name.clone(), value.clone());
                     if let Some(ctx) = &mut self.macro_context {
+                        ctx.defines.insert(name.replace('-', "_"), value.clone());
                         ctx.defines.insert(name, value);
                     }
                     Ok(Some(MacroValue::Null))
