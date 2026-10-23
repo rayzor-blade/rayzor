@@ -588,6 +588,14 @@ pub(crate) struct Abi {
 pub(crate) struct Function {
     pub id: IrFunctionId,
     pub name: Arc<str>,
+    /// Address of the module it was decoded from.
+    pub module: usize,
+    /// The MIR block behind each decoded block.
+    pub block_ids: Vec<IrBlockId>,
+    /// Each register's machine type.
+    pub reg_mts: Vec<Mt>,
+    /// Compiled resume points by loop header, found once compiled code exists.
+    pub osr: std::sync::OnceLock<HashMap<u32, Arc<super::exec::OsrTarget>>>,
     pub abi: Abi,
     pub return_type: IrType,
     /// MIR parameters in order, after the hidden ones.
@@ -940,9 +948,14 @@ pub(crate) fn decode(
         blocks.push(Block { ops, term });
     }
 
+    let reg_mts = (0..d.next_reg).map(|r| d.mt_of(r)).collect();
     Ok(Function {
         id: func_id,
         name: Arc::from(function.name.as_str()),
+        module: d.module_addr,
+        block_ids: order,
+        reg_mts,
+        osr: std::sync::OnceLock::new(),
         abi,
         return_type: function.signature.return_type.clone(),
         params,

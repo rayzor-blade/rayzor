@@ -340,6 +340,10 @@ pub struct TieredBackend {
     /// Native compilation done on the calling thread, for startup reports.
     activity: CompileActivity,
 
+    /// Functions whose loops the next baseline compile gives resume points:
+    /// those a suspended interpreted stack is waiting in.
+    pending_osr: BTreeSet<IrFunctionId>,
+
     /// Number of loaded MIR modules that have already run startup hooks.
     initialized_module_count: Arc<Mutex<usize>>,
 
@@ -1200,6 +1204,7 @@ impl TieredBackend {
             llvm_compiled: Arc::new(Mutex::new(false)),
             promotion_barrier: Arc::new(PromotionBarrier::new()),
             activity: CompileActivity::default(),
+            pending_osr: BTreeSet::new(),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1269,6 +1274,7 @@ impl TieredBackend {
             llvm_compiled: Arc::new(Mutex::new(false)),
             promotion_barrier: Arc::new(PromotionBarrier::new()),
             activity: CompileActivity::default(),
+            pending_osr: BTreeSet::new(),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1870,11 +1876,10 @@ impl TieredBackend {
 
     /// Re-run startup hooks after compiling to native code.
     ///
-    /// The interpreter maintains its own global state, while native tiers use
-    /// runtime-backed global slots. The first native tier must initialize those
-    /// slots. LLVM shares the same slots with Cranelift, so promotion only needs
-    /// to refresh vtable function pointers; replaying `__init__` would repeat
-    /// user-visible static side effects.
+    /// Every tier, the interpreter included, uses the runtime's global slots,
+    /// so whichever ran `__init__` first initialized them; replaying it would
+    /// repeat user-visible static side effects. A new tier only needs to
+    /// refresh the function pointers `__vtable_init__` registers.
     fn rerun_loaded_modules_startup_jit(
         &self,
         include_static_initializers: bool,
@@ -2059,31 +2064,46 @@ impl TieredBackend {
                 Ok(value) => Ok(value),
                 Err(InterpError::JitBailout(bailout_func_id)) => {
                     self.activity.bailouts += 1;
-                    // Hot loop detected! Promote to JIT and re-execute
                     tracing::trace!(
                         "[TieredBackend] JIT bailout for {:?} - promoting to Baseline tier",
                         bailout_func_id
                     );
 
-                    // Compile all modules with JIT if not already compiled
                     let needs_compile = self.function_pointers.read().unwrap().is_empty();
                     if needs_compile {
-                        self.compile_all_modules_jit()?;
+                        self.pending_osr = self
+                            .interpreter
+                            .lock()
+                            .unwrap()
+                            .suspended_functions()
+                            .into_iter()
+                            .collect();
+                        let compiled = self.compile_all_modules_jit();
+                        self.pending_osr.clear();
+                        compiled?;
+                    } else {
+                        let mut interp = self.interpreter.lock().unwrap();
+                        for (id, ptr) in self.function_pointers.read().unwrap().iter() {
+                            interp.install_native(*id, *ptr as *const u8);
+                        }
                     }
-
-                    // Promote ALL compiled functions to Baseline tier
-                    // This is crucial: without this, the recursive execute_function call
-                    // would still think the functions are at Interpreted tier
                     self.promote_compiled_functions_to_baseline();
 
-                    // Reset interpreter iteration counter
-                    {
+                    // The suspended frames carry on: the hot loop in compiled
+                    // code, its callers here. Nothing that ran runs again.
+                    let resumed = {
+                        let _modules = self.modules.read().unwrap();
                         let mut interp = self.interpreter.lock().unwrap();
                         interp.reset_iteration_count();
+                        interp.resume()
+                    };
+                    match resumed {
+                        Ok(value) => Ok(value),
+                        // Stopped where only compiled code continues: the call
+                        // starts over there.
+                        Err(InterpError::NotResumable(_)) => self.execute_function(func_id, args),
+                        Err(e) => Err(format!("Interpreter error: {}", e)),
                     }
-
-                    // Re-execute using JIT (recursive call will use JIT path now)
-                    self.execute_function(func_id, args)
                 }
                 Err(e) => Err(format!("Interpreter error: {}", e)),
             }
@@ -2500,6 +2520,15 @@ impl TieredBackend {
             Self::strip_stack_trace_updates(&mut self.modules.write().unwrap());
         }
 
+        // Resume points for the loops a suspended interpreted stack waits in,
+        // compiled with everything else and taken out again afterwards.
+        let resume_points = if self.pending_osr.is_empty() {
+            Vec::new()
+        } else {
+            Self::add_resume_points(&mut self.modules.write().unwrap(), &self.pending_osr)
+        };
+        let osr_ids: BTreeSet<IrFunctionId> = resume_points.iter().map(|r| r.3).collect();
+
         // Convert runtime symbols to the format Cranelift expects
         let symbols: Vec<(&str, *const u8)> = self
             .runtime_symbols
@@ -2564,7 +2593,7 @@ impl TieredBackend {
         for module in modules.iter() {
             for (func_id, function) in &module.functions {
                 // Skip extern functions (no body to compile)
-                if function.cfg.blocks.is_empty() {
+                if function.cfg.blocks.is_empty() || osr_ids.contains(func_id) {
                     continue;
                 }
                 if let Ok(ptr) = backend.get_function_ptr(*func_id) {
@@ -2601,6 +2630,21 @@ impl TieredBackend {
         }
         drop(modules);
 
+        if !resume_points.is_empty() {
+            let modules = self.modules.read().unwrap();
+            let mut interp = self.interpreter.lock().unwrap();
+            for &(module, parent, header, variant) in &resume_points {
+                if let Ok(ptr) = backend.get_function_ptr(variant) {
+                    interp.install_resume_point(&modules[module], parent, header, ptr);
+                }
+            }
+        }
+        if !osr_ids.is_empty() {
+            for module in self.modules.write().unwrap().iter_mut() {
+                module.functions.retain(|id, _| !osr_ids.contains(id));
+            }
+        }
+
         // Function values the interpreter handed out now reach compiled code.
         {
             let mut interp = self.interpreter.lock().unwrap();
@@ -2612,8 +2656,11 @@ impl TieredBackend {
         // Keep the backend alive by storing it (replace the old baseline_backend)
         *self.baseline_backend.lock().unwrap() = backend;
 
-        // Refresh backend-dependent startup state now that compiled function pointers exist.
-        self.rerun_loaded_modules_startup_jit(true)?;
+        // Refresh backend-dependent startup state now that compiled function
+        // pointers exist. After interpreted startup the globals are already
+        // set, so only the registrations run again, with compiled addresses:
+        // runtime tables are keyed by the code addresses compiled code uses.
+        self.rerun_loaded_modules_startup_jit(!self.start_interpreted)?;
 
         if self.config.verbosity >= 1 {
             debug!("[TieredBackend] JIT compilation complete");
@@ -3357,6 +3404,51 @@ impl TieredBackend {
             return Err(last_error.unwrap_or_else(|| "nothing queued compiled".to_string()));
         }
         Ok(installed)
+    }
+
+    /// Add a resume point for every loop of `functions`, for interpreted frames
+    /// waiting in them. Returns `(module index, function, header, variant)`;
+    /// a function is named by module and id because ids repeat across modules
+    /// and names repeat within one (every constructor is `new`).
+    fn add_resume_points(
+        modules: &mut [crate::ir::IrModule],
+        functions: &BTreeSet<IrFunctionId>,
+    ) -> Vec<(usize, IrFunctionId, crate::ir::IrBlockId, IrFunctionId)> {
+        use crate::ir::osr;
+
+        if !osr::osr_enabled() {
+            return Vec::new();
+        }
+        let mut next_id = modules
+            .iter()
+            .flat_map(|m| m.functions.keys().map(|id| id.0 + 1))
+            .chain(modules.iter().map(|m| m.next_function_id))
+            .max()
+            .unwrap_or(0);
+        let mut points = Vec::new();
+        for (index, module) in modules.iter_mut().enumerate() {
+            let mut built = Vec::new();
+            for &parent_id in functions {
+                let Some(parent) = module.functions.get(&parent_id) else {
+                    continue;
+                };
+                if parent.cfg.blocks.is_empty() {
+                    continue;
+                }
+                for header in osr::find_loop_headers(parent) {
+                    let variant_id = IrFunctionId(next_id);
+                    if let Ok(variant) = osr::build_resume_variant(parent, header, variant_id) {
+                        next_id += 1;
+                        points.push((index, parent_id, header, variant_id));
+                        built.push(variant.function);
+                    }
+                }
+            }
+            for function in built {
+                module.add_function(function);
+            }
+        }
+        points
     }
 
     /// Add a resumable second entry point for every loop that has one, and
@@ -4144,6 +4236,108 @@ mod tests {
         builder.ret(Some(sum));
 
         (builder.finish(), first_id, second_id)
+    }
+
+    static EFFECTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    extern "C" fn record_effect() {
+        EFFECTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// `effect(); var acc = 0; for (i in 0...n) acc += i; return acc;`
+    fn build_effect_then_loop_module() -> (IrModule, IrFunctionId) {
+        use crate::ir::{CallingConvention, CompareOp, IrPhiNode};
+        let mut b = MirBuilder::new("tiered_resume_test");
+        let effect = b
+            .begin_function("record_effect")
+            .returns(IrType::Void)
+            .calling_convention(CallingConvention::C)
+            .extern_func()
+            .build();
+        let f = b
+            .begin_function("effect_then_loop")
+            .param("n", IrType::I64)
+            .returns(IrType::I64)
+            .build();
+        b.set_current_function(f);
+        let entry = b.create_block("entry");
+        let header = b.create_block("header");
+        let body = b.create_block("body");
+        let exit = b.create_block("exit");
+        let n = b.get_param(0);
+        b.set_insert_point(entry);
+        b.call(effect, vec![]);
+        let zero = b.const_i64(0);
+        b.br(header);
+        let (i, acc) = (b.alloc_reg(), b.alloc_reg());
+        b.set_insert_point(header);
+        let more = b.cmp(CompareOp::Lt, i, n);
+        b.cond_br(more, body, exit);
+        b.set_insert_point(body);
+        let one = b.const_i64(1);
+        let acc2 = b.bin_op(BinaryOp::Add, acc, i);
+        let i2 = b.bin_op(BinaryOp::Add, i, one);
+        b.br(header);
+        b.set_insert_point(exit);
+        b.ret(Some(acc));
+        let mut module = b.finish();
+        let block = module
+            .functions
+            .get_mut(&f)
+            .unwrap()
+            .cfg
+            .blocks
+            .get_mut(&header)
+            .unwrap();
+        for (dest, init, next) in [(i, zero, i2), (acc, zero, acc2)] {
+            block.phi_nodes.push(IrPhiNode {
+                dest,
+                incoming: vec![(entry, init), (body, next)],
+                ty: IrType::I64,
+            });
+        }
+        for (from, to) in [
+            (entry, header),
+            (body, header),
+            (header, body),
+            (header, exit),
+        ] {
+            let blocks = &mut module.functions.get_mut(&f).unwrap().cfg.blocks;
+            blocks.get_mut(&to).unwrap().predecessors.push(from);
+        }
+        (module, f)
+    }
+
+    /// A hot interpreted loop carries on in compiled code: what ran before it
+    /// does not run again, and the result is the whole computation.
+    #[test]
+    fn hot_interpreted_loop_continues_in_compiled_code() {
+        let mut cfg = TieredConfig::default();
+        cfg.start_interpreted = true;
+        cfg.enable_tier_promotion = true;
+        cfg.enable_stack_traces = false;
+        cfg.profile_config.interpreter_threshold = u64::MAX;
+        cfg.profile_config.warm_threshold = u64::MAX;
+        cfg.profile_config.hot_threshold = u64::MAX;
+        cfg.profile_config.blazing_threshold = u64::MAX;
+
+        let symbols = [("record_effect", record_effect as *const u8)];
+        let mut backend = TieredBackend::with_symbols(cfg, &symbols).expect("tiered backend");
+        let (module, func_id) = build_effect_then_loop_module();
+        backend.compile_module(module).expect("module loaded");
+        backend.interpreter.lock().unwrap().set_max_iterations(200);
+
+        EFFECTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let result = backend
+            .execute_function(func_id, vec![InterpValue::I64(100_000)])
+            .expect("execute");
+        assert!(
+            matches!(result, InterpValue::I64(4_999_950_000)),
+            "{:?}",
+            result
+        );
+        assert_eq!(EFFECTS.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(backend.interpreter.lock().unwrap().transfers(), 1);
     }
 
     #[test]

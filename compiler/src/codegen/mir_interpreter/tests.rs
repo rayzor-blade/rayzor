@@ -627,3 +627,81 @@ fn hot_loops_ask_for_compiled_code() {
         r
     );
 }
+
+static RESUME_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+extern "C" fn count_resume_call() {
+    RESUME_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// A suspended stack picks up where it stopped: the side effect before the
+/// loop happens once, and the sum is the whole sum.
+#[test]
+fn suspended_stacks_resume_without_replaying() {
+    let mut b = MirBuilder::new("t");
+    let bump = extern_fn(&mut b, "count_resume_call", &[], IrType::Void);
+    let f = b
+        .begin_function("sum_after_effect")
+        .param("n", IrType::I64)
+        .returns(IrType::I64)
+        .build();
+    let outer = b.begin_function("outer").returns(IrType::I64).build();
+    b.set_current_function(f);
+    let entry = b.create_block("entry");
+    let header = b.create_block("header");
+    let body = b.create_block("body");
+    let exit = b.create_block("exit");
+    let n = b.get_param(0);
+    b.set_insert_point(entry);
+    b.call(bump, vec![]);
+    let zero = b.const_i64(0);
+    b.br(header);
+    let (i, acc) = (b.alloc_reg(), b.alloc_reg());
+    b.set_insert_point(header);
+    let more = b.cmp(CompareOp::Lt, i, n);
+    b.cond_br(more, body, exit);
+    b.set_insert_point(body);
+    let one = b.const_i64(1);
+    let acc2 = b.bin_op(BinaryOp::Add, acc, i);
+    let i2 = b.bin_op(BinaryOp::Add, i, one);
+    b.br(header);
+    b.set_insert_point(exit);
+    b.ret(Some(acc));
+    b.set_current_function(outer);
+    let e = b.create_block("entry");
+    b.set_insert_point(e);
+    let count = b.const_i64(1000);
+    let r = b.call(f, vec![count]).unwrap();
+    let ten = b.const_i64(10);
+    let r10 = b.bin_op(BinaryOp::Add, r, ten);
+    b.ret(Some(r10));
+    let mut m = b.finish();
+    for (dest, init, next) in [(i, zero, i2), (acc, zero, acc2)] {
+        phi(
+            &mut m,
+            f,
+            header,
+            IrPhiNode {
+                dest,
+                incoming: vec![(entry, init), (body, next)],
+                ty: IrType::I64,
+            },
+        );
+    }
+
+    RESUME_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    let mut interp = MirInterpreter::new();
+    interp.register_symbol("count_resume_call", count_resume_call as *const u8);
+    interp.set_max_iterations(50);
+    let r = interp.execute(&m, outer, vec![]);
+    assert!(
+        matches!(r, Err(InterpError::JitBailout(id)) if id == f),
+        "{:?}",
+        r
+    );
+    assert_eq!(interp.suspended_functions(), vec![outer, f]);
+    interp.set_max_iterations(u64::MAX);
+    let r = interp.resume().unwrap();
+    assert!(matches!(r, InterpValue::I64(499_510)), "{:?}", r);
+    assert_eq!(RESUME_CALLS.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

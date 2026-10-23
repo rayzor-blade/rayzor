@@ -53,7 +53,7 @@ pub enum OsrReject {
     /// A live value's type has no known size, so it has nowhere to sit.
     LiveInHasNoLayout,
     /// A live value has no recorded type.
-    LiveInTypeUnknown,
+    LiveInTypeUnknown(IrId),
     /// A value is read that no instruction is known to define. `dest()` does
     /// not cover every instruction, so treating this as "already computed"
     /// would silently read whatever the register happened to hold.
@@ -430,8 +430,122 @@ fn definition_blocks(func: &IrFunction) -> BTreeMap<IrId, IrBlockId> {
     defs
 }
 
+/// The blocks of `region` from which `header` can be reached again.
+fn blocks_reaching(
+    func: &IrFunction,
+    header: IrBlockId,
+    region: &BTreeSet<IrBlockId>,
+) -> BTreeSet<IrBlockId> {
+    let mut preds: BTreeMap<IrBlockId, Vec<IrBlockId>> = BTreeMap::new();
+    for (&b, block) in &func.cfg.blocks {
+        for succ in block.successors() {
+            preds.entry(succ).or_default().push(b);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    let mut queue = VecDeque::from([header]);
+    while let Some(b) = queue.pop_front() {
+        for &p in preds.get(&b).into_iter().flatten() {
+            if region.contains(&p) && seen.insert(p) {
+                queue.push_back(p);
+            }
+        }
+    }
+    seen.insert(header);
+    seen
+}
+
+/// The instruction, or phi type, behind each register.
+enum Definition<'a> {
+    Phi(&'a IrType),
+    Inst(&'a IrInstruction),
+}
+
+fn definitions(func: &IrFunction) -> BTreeMap<IrId, Definition<'_>> {
+    let mut defs = BTreeMap::new();
+    for block in func.cfg.blocks.values() {
+        for phi in &block.phi_nodes {
+            defs.insert(phi.dest, Definition::Phi(&phi.ty));
+        }
+        for inst in &block.instructions {
+            if let Some(d) = inst.dest() {
+                defs.insert(d, Definition::Inst(inst));
+            }
+        }
+    }
+    defs
+}
+
+/// A register's type: the recorded one, or what its definition produces.
+fn value_type(func: &IrFunction, defs: &BTreeMap<IrId, Definition<'_>>, v: IrId) -> Option<IrType> {
+    let mut v = v;
+    for _ in 0..16 {
+        if let Some(ty) = func
+            .register_types
+            .get(&v)
+            .or_else(|| func.locals.get(&v).map(|l| &l.ty))
+        {
+            return Some(ty.clone());
+        }
+        let inst = match defs.get(&v)? {
+            Definition::Phi(ty) => return Some((*ty).clone()),
+            Definition::Inst(inst) => inst,
+        };
+        return Some(match inst {
+            IrInstruction::Copy { src, .. }
+            | IrInstruction::Move { src, .. }
+            | IrInstruction::BorrowImmutable { src, .. }
+            | IrInstruction::BorrowMutable { src, .. } => {
+                v = *src;
+                continue;
+            }
+            IrInstruction::SsaBarrier { ty, .. }
+            | IrInstruction::Undef { ty, .. }
+            | IrInstruction::Load { ty, .. }
+            | IrInstruction::BitCast { ty, .. } => ty.clone(),
+            IrInstruction::Cast { to_ty, .. } => to_ty.clone(),
+            IrInstruction::Alloc { ty, .. } => IrType::Ptr(Box::new(ty.clone())),
+            IrInstruction::Cmp { .. } => IrType::Bool,
+            IrInstruction::Const { value, .. } => match value {
+                IrValue::Bool(_) => IrType::Bool,
+                IrValue::I8(_) => IrType::I8,
+                IrValue::I16(_) => IrType::I16,
+                IrValue::I32(_) => IrType::I32,
+                IrValue::I64(_) => IrType::I64,
+                IrValue::U8(_) => IrType::U8,
+                IrValue::U16(_) => IrType::U16,
+                IrValue::U32(_) => IrType::U32,
+                IrValue::U64(_) => IrType::U64,
+                IrValue::F32(_) => IrType::F32,
+                IrValue::F64(_) => IrType::F64,
+                IrValue::String(_) => IrType::String,
+                IrValue::Null | IrValue::Function(_) => IrType::Ptr(Box::new(IrType::Void)),
+                _ => return None,
+            },
+            IrInstruction::FunctionRef { .. }
+            | IrInstruction::MakeClosure { .. }
+            | IrInstruction::Clone { .. } => IrType::Ptr(Box::new(IrType::Void)),
+            _ => return None,
+        });
+    }
+    None
+}
+
 /// Work out what resuming at `header` needs, or why it cannot be done.
 pub fn osr_layout(func: &IrFunction, header: IrBlockId) -> Result<OsrLayout, OsrReject> {
+    layout(func, header, false)
+}
+
+/// As [`osr_layout`], for an interpreted frame that resumes in compiled code
+/// once: blocks past the loop may also be entered from outside it, and a
+/// value with no recorded type takes the type its definition produces.
+/// Back-edge probes keep the strict form, which builds a variant for fewer
+/// loops.
+pub fn resume_layout(func: &IrFunction, header: IrBlockId) -> Result<OsrLayout, OsrReject> {
+    layout(func, header, true)
+}
+
+fn layout(func: &IrFunction, header: IrBlockId, relaxed: bool) -> Result<OsrLayout, OsrReject> {
     let header_block = func
         .cfg
         .blocks
@@ -450,7 +564,16 @@ pub fn osr_layout(func: &IrFunction, header: IrBlockId) -> Result<OsrLayout, Osr
     // may also be reached without the header -- an enclosing loop's header is
     // the usual case -- so anything it defines has to arrive in the frame.
     let dominated = blocks_dominated_by(func, header);
+    // Except a block that cannot lead back to the header: everything after the
+    // loop. Any path from the header to a use of what it defines runs through
+    // it, in the variant as in the function, so the variant computes it.
+    let cycle = if relaxed {
+        blocks_reaching(func, header, &region)
+    } else {
+        region.clone()
+    };
     let defs = definition_blocks(func);
+    let def_insts = definitions(func);
 
     // The header's phis are the loop-carried values. They lead the frame, and
     // the walk below skips the header's own incomings: those are precisely what
@@ -479,15 +602,20 @@ pub fn osr_layout(func: &IrFunction, header: IrBlockId) -> Result<OsrLayout, Osr
             // assuming it is already computed would read a stale register.
             return Err(OsrReject::UnclassifiableValue);
         };
-        if dominated.contains(&db) {
+        if dominated.contains(&db) || (region.contains(&db) && !cycle.contains(&db)) {
             return Ok(());
         }
-        let ty = func
+        let recorded = func
             .register_types
             .get(&v)
-            .cloned()
-            .or_else(|| func.locals.get(&v).map(|l| l.ty.clone()))
-            .ok_or(OsrReject::LiveInTypeUnknown)?;
+            .or_else(|| func.locals.get(&v).map(|l| &l.ty))
+            .cloned();
+        let ty = if relaxed {
+            value_type(func, &def_insts, v)
+        } else {
+            recorded
+        }
+        .ok_or(OsrReject::LiveInTypeUnknown(v))?;
         if frame_size_of(&ty) == 0 {
             return Err(OsrReject::LiveInHasNoLayout);
         }
@@ -522,9 +650,10 @@ pub fn osr_layout(func: &IrFunction, header: IrBlockId) -> Result<OsrLayout, Osr
     }
 
     // A block other than the header that is also entered from outside the
-    // region would, on that edge, redefine values the frame supplies, and its
-    // phi would take an incoming the variant has no block for.
-    for &b in &region {
+    // region and leads back to the header would, on that edge, redefine values
+    // the frame supplies. One past the loop only loses incomings the variant
+    // can never take.
+    for &b in &cycle {
         if b == header {
             continue;
         }
@@ -555,7 +684,24 @@ pub fn build_osr_variant(
     header: IrBlockId,
     new_id: IrFunctionId,
 ) -> Result<OsrVariant, OsrReject> {
-    let layout = osr_layout(func, header)?;
+    build_variant(func, header, new_id, osr_layout(func, header)?)
+}
+
+/// Build the variant an interpreted frame resumes in; see [`resume_layout`].
+pub fn build_resume_variant(
+    func: &IrFunction,
+    header: IrBlockId,
+    new_id: IrFunctionId,
+) -> Result<OsrVariant, OsrReject> {
+    build_variant(func, header, new_id, resume_layout(func, header)?)
+}
+
+fn build_variant(
+    func: &IrFunction,
+    header: IrBlockId,
+    new_id: IrFunctionId,
+    layout: OsrLayout,
+) -> Result<OsrVariant, OsrReject> {
     let region = blocks_reachable_from(func, header);
 
     let mut variant = func.clone();
@@ -901,6 +1047,71 @@ mod tests {
             build_osr_variant(&func, inner_h, IrFunctionId(9997)).err(),
             Some(OsrReject::RegionHasExternalEntry)
         );
+    }
+
+    /// `if (0 < n) loop; return merged` with the merge also reached when the
+    /// loop is skipped, and a loop bound copied into a register with no
+    /// recorded type.
+    fn guarded_loop() -> (IrFunction, IrBlockId) {
+        let mut builder = IrBuilder::new("test".to_string(), "test.hx".to_string());
+        let sig = FunctionSignatureBuilder::new().returns(IrType::I32).build();
+        builder.start_function(SymbolId::from_raw(3), "guarded".to_string(), sig);
+
+        let limit = builder.build_int(10, IrType::I32).unwrap();
+        let bound = builder.build_copy(limit).unwrap();
+        let zero = builder.build_int(0, IrType::I32).unwrap();
+        let header = builder.create_block().unwrap();
+        let body = builder.create_block().unwrap();
+        let exit = builder.create_block().unwrap();
+        let guard = builder.build_cmp(CompareOp::Lt, zero, bound).unwrap();
+        builder.build_cond_branch(guard, header, exit);
+
+        builder.switch_to_block(header);
+        let i = builder.build_phi(header, IrType::I32).unwrap();
+        let more = builder.build_cmp(CompareOp::Lt, i, bound).unwrap();
+        builder.build_cond_branch(more, body, exit);
+
+        builder.switch_to_block(body);
+        let one = builder.build_int(1, IrType::I32).unwrap();
+        let next = builder.build_add(i, one, false).unwrap();
+        builder.build_branch(header);
+
+        builder.add_phi_incoming(header, i, IrBlockId::entry(), zero);
+        builder.add_phi_incoming(header, i, body, next);
+
+        builder.switch_to_block(exit);
+        let merged = builder.build_phi(exit, IrType::I32).unwrap();
+        builder.add_phi_incoming(exit, merged, IrBlockId::entry(), zero);
+        builder.add_phi_incoming(exit, merged, header, i);
+        builder.build_return(Some(merged));
+
+        builder.finish_function();
+        let mut func = builder.module.functions.values().next().unwrap().clone();
+        func.register_types.remove(&bound);
+        func.cfg.recompute_predecessors();
+        (func, header)
+    }
+
+    /// The merge past the loop is entered from outside it, which a probe
+    /// refuses; an interpreted frame resumes, and the merge stays the
+    /// variant's own phi rather than a value it is handed.
+    #[test]
+    fn a_guarded_loop_resumes_but_is_not_probed() {
+        let (func, header) = guarded_loop();
+        assert!(osr_layout(&func, header).is_err());
+        let layout = resume_layout(&func, header).expect("resumable");
+        assert_eq!(layout.phi_count, 1);
+        assert_eq!(layout.params.len(), 2, "{:?}", layout.params);
+        assert_eq!(layout.live_in_types[1], IrType::I32);
+        let v = build_resume_variant(&func, header, IrFunctionId(9996)).unwrap();
+        let exit_phis: usize = v
+            .function
+            .cfg
+            .blocks
+            .values()
+            .map(|b| b.phi_nodes.len())
+            .sum();
+        assert_eq!(exit_phis, 2, "the header phi and the merge survive");
     }
 
     /// A probe calls a helper as `(frame) -> ret`, so the helper must not also

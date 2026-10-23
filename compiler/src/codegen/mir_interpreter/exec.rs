@@ -1,36 +1,157 @@
 //! Running decoded functions.
+//!
+//! Interpreted calls push frames on an explicit stack rather than nesting Rust
+//! calls, so a run can stop with every interpreted frame intact: when a loop
+//! gets hot, the stack is set aside while the program is compiled, and the
+//! loop then resumes in compiled code while its callers carry on here. Only a
+//! native callback or a `setjmp` region starts a nested run.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-use crate::ir::AtomicRmwOp;
+use crate::ir::{AtomicRmwOp, IrFunctionId, IrModule};
 
 use super::decode::{
     Block, Call, Edge, FloatCc, FloatOp, FnRef, Function, GlobalSlot, IndirectCall, IntCc, IntOp,
-    Intrinsic, Mt, Op, Src, Target, Term, canon, float, float_bits, sext,
+    Intrinsic, Mt, Op, Reg, Src, Target, Term, canon, float, float_bits, sext,
 };
 use super::native::{self, Ret};
 use super::{InterpError, Machine, trampoline};
 
-/// Interpreted calls deeper than this stop with a stack overflow.
-const MAX_DEPTH: u32 = 10_000;
+/// Interpreted frames deeper than this stop with a stack overflow.
+const MAX_DEPTH: usize = 200_000;
 
 pub(super) struct Frame {
+    f: Arc<Function>,
     regs: Vec<u64>,
     slots: Vec<u64>,
     live: Vec<u8>,
     env: u64,
     sret: u64,
+    block: u32,
+    pc: usize,
+    /// Landing pads of trys that caught in this frame and have yet to pop.
+    caught: u32,
+    /// Where the result of the call this frame waits on goes.
+    pending: Pending,
 }
 
-/// How a run of a frame ended.
+#[derive(Clone, Copy, Default)]
+struct Pending {
+    dest: Option<Reg>,
+    ret: Option<Mt>,
+    sret: Option<u32>,
+}
+
+impl Frame {
+    /// A frame for `f`, given its arguments in ABI order, hidden ones first.
+    fn new(f: Arc<Function>, args: &[u64]) -> Self {
+        let mut fr = Frame {
+            regs: vec![0; f.registers],
+            slots: vec![0; f.slot_words],
+            live: vec![1; f.live_slots],
+            env: 0,
+            sret: 0,
+            block: f.entry,
+            pc: 0,
+            caught: 0,
+            pending: Pending::default(),
+            f,
+        };
+        let mut at = 0;
+        let mut next = || {
+            let v = args.get(at).copied().unwrap_or(0);
+            at += 1;
+            v
+        };
+        if fr.f.abi.sret {
+            fr.sret = next();
+        }
+        if fr.f.abi.hidden_env {
+            fr.env = next();
+        }
+        for i in 0..fr.f.params.len() {
+            let (reg, mt) = fr.f.params[i];
+            fr.regs[reg as usize] = canon(next(), mt);
+        }
+        if fr.f.explicit_env {
+            if let Some(&(reg, _)) = fr.f.params.first() {
+                fr.env = fr.regs[reg as usize];
+            }
+        }
+        fr
+    }
+
+    pub(super) fn function(&self) -> &Arc<Function> {
+        &self.f
+    }
+
+    /// Whether the frame stopped at an instruction only compiled code runs.
+    pub(super) fn at_bail(&self) -> bool {
+        matches!(
+            self.f.blocks[self.block as usize].ops.get(self.pc),
+            Some(Op::Bail)
+        )
+    }
+
+    fn deliver(&mut self, v: u64) {
+        let p = std::mem::take(&mut self.pending);
+        if let Some(d) = p.dest {
+            self.regs[d as usize] = match (p.sret, p.ret) {
+                (Some(offset), _) => self.slots.as_ptr() as u64 + offset as u64,
+                (None, Some(mt)) => canon(v, mt),
+                (None, None) => 0,
+            };
+        }
+    }
+}
+
+/// Why a run stopped without a result.
+pub(super) enum Stop {
+    /// A loop got hot: compile, then resume the set-aside stack.
+    Suspend(IrFunctionId),
+    Fail(InterpError),
+}
+
+impl From<InterpError> for Stop {
+    fn from(e: InterpError) -> Self {
+        Stop::Fail(e)
+    }
+}
+
+/// How a run of frames ended.
 enum Flow {
     Return(u64),
-    /// The handler guarding the run's `setjmp` was popped; the frame carries on
-    /// in the caller of the region from here.
-    Popped {
-        block: u32,
-        pc: usize,
+    /// The handler guarding the run's `setjmp` was popped.
+    Popped,
+}
+
+/// What `step` stopped for.
+enum Action {
+    Call {
+        callee: Arc<Function>,
+        args: smallvec::SmallVec<[u64; 8]>,
+        pending: Pending,
     },
+    Return(u64),
+    SetJmp {
+        dest: Reg,
+        buf: Reg,
+    },
+    Popped,
+    Suspend,
+    /// Carry on in the compiled resume point for the frame's loop.
+    Transfer(Arc<OsrTarget>),
+}
+
+/// A compiled resume point and how to fill its frame from registers.
+#[derive(Debug)]
+pub(crate) struct OsrTarget {
+    helper: usize,
+    size: usize,
+    slots: Vec<(Reg, u32, Mt)>,
+    ret: Option<Mt>,
 }
 
 fn fault(message: impl Into<String>) -> InterpError {
@@ -42,46 +163,246 @@ fn trap(message: &str) -> InterpError {
 }
 
 /// Call `f` with `args` in its ABI order, hidden parameters first.
-pub(super) fn call(m: &Machine, f: &Function, args: &[u64]) -> Result<u64, InterpError> {
-    let depth = m.depth.get();
-    if depth >= MAX_DEPTH {
-        return Err(InterpError::StackOverflow);
+pub(super) fn call(m: &Machine, f: Arc<Function>, args: &[u64]) -> Result<u64, InterpError> {
+    let mut stack = vec![Frame::new(f, args)];
+    finish(m, stack_run(m, &mut stack), stack)
+}
+
+/// Continue a stack set aside by a suspension.
+pub(super) fn resume(m: &Machine, mut stack: Vec<Frame>) -> Result<u64, InterpError> {
+    let r = stack_run(m, &mut stack);
+    finish(m, r, stack)
+}
+
+fn stack_run(m: &Machine, stack: &mut Vec<Frame>) -> Result<Flow, Stop> {
+    drive(m, stack, 0, None)
+}
+
+fn finish(m: &Machine, r: Result<Flow, Stop>, stack: Vec<Frame>) -> Result<u64, InterpError> {
+    match r {
+        Ok(Flow::Return(v)) => Ok(v),
+        Ok(Flow::Popped) => Err(fault("exception handler popped outside its try")),
+        Err(Stop::Suspend(id)) => {
+            m.suspend(stack);
+            Err(InterpError::JitBailout(id))
+        }
+        Err(Stop::Fail(e)) => Err(e),
     }
-    let mut fr = Frame {
-        regs: vec![0; f.registers],
-        slots: vec![0; f.slot_words],
-        live: vec![1; f.live_slots],
-        env: 0,
-        sret: 0,
+}
+
+/// Run the stack until the frame at `floor` returns or, in a `setjmp`
+/// region, until the handler of the frame at `region` is popped.
+fn drive(
+    m: &Machine,
+    stack: &mut Vec<Frame>,
+    floor: usize,
+    region: Option<usize>,
+) -> Result<Flow, Stop> {
+    loop {
+        let top = stack.len() - 1;
+        let action = step(m, &mut stack[top], region == Some(top))?;
+        let returned = match action {
+            Action::Call {
+                callee,
+                args,
+                pending,
+            } => {
+                if stack.len() >= MAX_DEPTH {
+                    return Err(InterpError::StackOverflow.into());
+                }
+                stack[top].pending = pending;
+                stack.push(Frame::new(callee, &args));
+                continue;
+            }
+            Action::Return(v) => v,
+            Action::Transfer(t) => transfer(m, &stack[top], &t)?,
+            Action::SetJmp { dest, buf } => match set_jmp(m, stack, top, dest, buf)? {
+                Some(v) => {
+                    // The frame returned inside the region, which popped it.
+                    if stack.len() == floor {
+                        return Ok(Flow::Return(v));
+                    }
+                    stack.last_mut().unwrap().deliver(v);
+                    continue;
+                }
+                None => continue,
+            },
+            Action::Popped => return Ok(Flow::Popped),
+            Action::Suspend => return Err(Stop::Suspend(stack[top].f.id)),
+        };
+        stack.pop();
+        if stack.len() == floor {
+            return Ok(Flow::Return(returned));
+        }
+        stack.last_mut().unwrap().deliver(returned);
+    }
+}
+
+/// Run `setjmp` for the frame at `at` with the rest of that frame inside it.
+/// `Some(v)` when the frame returned `v` before its handler was popped.
+#[inline(never)]
+fn set_jmp(
+    m: &Machine,
+    stack: &mut Vec<Frame>,
+    at: usize,
+    dest: Reg,
+    buf: Reg,
+) -> Result<Option<u64>, Stop> {
+    let fr = &mut stack[at];
+    let buf_ptr = fr.regs[buf as usize] as *mut u8;
+    fr.regs[dest as usize] = 0;
+    fr.pc += 1;
+    let (block, pc, caught) = (fr.block, fr.pc, fr.caught);
+    let native_depth = m.native_depth.get();
+    let current = super::current();
+    let frames: *mut Vec<Frame> = stack;
+    let mut outcome = None;
+    // A suspension cannot leave through the setjmp frame.
+    m.native_depth.set(native_depth + 1);
+    let delivered = unsafe {
+        native::setjmp_region(buf_ptr, &mut || {
+            outcome = Some(drive(m, &mut *frames, at, Some(at)));
+        })
     };
-    let mut at = 0;
-    let mut next = || {
-        let v = args.get(at).copied().unwrap_or(0);
-        at += 1;
-        v
+    // A longjmp skipped whatever restored these.
+    m.native_depth.set(native_depth);
+    super::set_current(current);
+    if delivered != 0 {
+        // The throw's frames are gone; the try's frame lands after its setjmp.
+        stack.truncate(at + 1);
+        let fr = &mut stack[at];
+        fr.block = block;
+        fr.pc = pc;
+        fr.caught = caught + 1;
+        fr.pending = Pending::default();
+        fr.regs[dest as usize] = canon(delivered as u64, Mt::I32);
+        return Ok(None);
+    }
+    match outcome {
+        Some(Ok(Flow::Popped)) => Ok(None),
+        Some(Ok(Flow::Return(v))) => Ok(Some(v)),
+        Some(Err(e)) => Err(e),
+        None => Err(fault("setjmp region ended without running").into()),
+    }
+}
+
+/// Run the compiled resume point with the frame's live values.
+fn transfer(m: &Machine, fr: &Frame, t: &OsrTarget) -> Result<u64, InterpError> {
+    let mut frame = vec![0u64; t.size.div_ceil(8).max(1)];
+    let base = frame.as_mut_ptr() as *mut u8;
+    for &(reg, offset, mt) in &t.slots {
+        let bytes = fr.regs[reg as usize].to_le_bytes();
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(offset as usize), mt.bytes())
+        };
+    }
+    let ret = t.ret.map(Ret::Value).unwrap_or(Ret::Void);
+    let args = [(base as u64, Mt::I64)];
+    m.program.transfers.fetch_add(1, Ordering::Relaxed);
+    m.native(|| unsafe { native::call(t.helper, &args, ret) })
+}
+
+/// The compiled resume point for `block`, if it is a loop header that has one.
+fn osr_target(m: &Machine, f: &Function, block: u32) -> Option<Arc<OsrTarget>> {
+    f.osr
+        .get_or_init(|| resume_points(m, f))
+        .get(&block)
+        .cloned()
+}
+
+fn resume_points(m: &Machine, f: &Function) -> HashMap<u32, Arc<OsrTarget>> {
+    use crate::ir::osr;
+    let mut out = HashMap::new();
+    // SAFETY: a decoded function's module outlives it.
+    let module = unsafe { &*(f.module as *const IrModule) };
+    let Some(ir) = module.functions.get(&f.id) else {
+        return out;
     };
-    if f.abi.sret {
-        fr.sret = next();
-    }
-    if f.abi.hidden_env {
-        fr.env = next();
-    }
-    for &(reg, mt) in &f.params {
-        fr.regs[reg as usize] = canon(next(), mt);
-    }
-    if f.explicit_env {
-        if let Some(&(reg, _)) = f.params.first() {
-            fr.env = fr.regs[reg as usize];
+    for header in osr::find_loop_headers(ir) {
+        let Some(dense) = f.block_ids.iter().position(|b| *b == header) else {
+            continue;
+        };
+        let trace = osr::osr_trace_enabled();
+        let layout = match osr::resume_layout(ir, header) {
+            Ok(layout) => layout,
+            Err(reason) => {
+                if trace {
+                    eprintln!("[osr] interpreted {} {header:?}: {reason:?}", ir.name);
+                    if let osr::OsrReject::LiveInTypeUnknown(v) = reason {
+                        for b in ir.cfg.blocks.values() {
+                            for inst in &b.instructions {
+                                if inst.dest() == Some(v) {
+                                    eprintln!("[osr]   defined by {inst:?}");
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+        };
+        let Some(helper) = m.program.resume_point(f.module, f.id, header) else {
+            if trace {
+                eprintln!(
+                    "[osr] interpreted {} {header:?}: no compiled resume point",
+                    ir.name
+                );
+            }
+            continue;
+        };
+        let mut slots = Vec::with_capacity(layout.params.len());
+        let mut usable = true;
+        for (i, p) in layout.params.iter().enumerate() {
+            let reg = match p {
+                osr::OsrParam::HeaderPhi { phi_dest } => *phi_dest,
+                osr::OsrParam::Live(v) => *v,
+            }
+            .as_u32();
+            // The resume point loads each value at its MIR type; one held at
+            // another width here cannot be handed over as it stands.
+            let want = Mt::of(&layout.live_in_types[i]);
+            let have = f.reg_mts.get(reg as usize).copied();
+            if want.is_none() || have != want {
+                if trace {
+                    eprintln!(
+                        "[osr] interpreted {} {header:?}: ${reg} is {have:?}, resume point loads {want:?}",
+                        ir.name
+                    );
+                }
+                usable = false;
+                break;
+            }
+            slots.push((reg, layout.frame.offsets[i], want.unwrap()));
+        }
+        if usable {
+            out.insert(
+                dense as u32,
+                Arc::new(OsrTarget {
+                    helper,
+                    size: layout.frame.size as usize,
+                    slots,
+                    ret: Mt::of(&ir.signature.return_type),
+                }),
+            );
         }
     }
-    m.depth.set(depth + 1);
-    m.tick(f)?;
-    let result = run(m, f, &mut fr, f.entry, 0, false);
-    m.depth.set(depth);
-    match result? {
-        Flow::Return(v) => Ok(v),
-        Flow::Popped { .. } => Err(fault("exception handler popped outside its try")),
+    out
+}
+
+/// Count a block entered. Past the threshold, suspend so the program can be
+/// compiled; once it has been, a loop header with a resume point transfers.
+#[inline(always)]
+fn entered(m: &Machine, f: &Function, block: u32) -> Option<Action> {
+    if m.program.has_natives() {
+        return osr_target(m, f, block).map(Action::Transfer);
     }
+    let n = m.iterations.get() + 1;
+    m.iterations.set(n);
+    if n >= m.max_iterations.get() && m.can_bail() {
+        m.iterations.set(0);
+        return Some(Action::Suspend);
+    }
+    None
 }
 
 #[inline(always)]
@@ -349,22 +670,21 @@ fn convert(
     Ok(v)
 }
 
-/// Run `f` from `pc` in `block` until it returns or, in a `setjmp` region,
-/// until the region's handler is popped.
+/// Run the frame from where it stands until it calls, returns, or has to stop.
+/// `region_here` says the drive running it ends when this frame pops a handler.
 ///
-/// Every interpreted call nests a `run`, so the common operations are handled
-/// here and the rest in `cold`, which keeps this frame small.
-fn run(
-    m: &Machine,
-    f: &Function,
-    fr: &mut Frame,
-    mut block: u32,
-    mut pc: usize,
-    in_region: bool,
-) -> Result<Flow, InterpError> {
-    // Landing pads of nested trys that caught here and have yet to pop.
-    let mut caught = 0u32;
-    'frame: loop {
+/// The common operations are handled here and the rest in `cold`.
+fn step(m: &Machine, fr: &mut Frame, region_here: bool) -> Result<Action, Stop> {
+    // SAFETY: the frame holds the Arc, and this run does not outlive it.
+    let f: &Function = unsafe { &*Arc::as_ptr(&fr.f) };
+    let mut block = fr.block;
+    let mut pc = fr.pc;
+    if pc == 0 && m.program.has_natives() {
+        if let Some(t) = osr_target(m, f, block) {
+            return Ok(Action::Transfer(t));
+        }
+    }
+    loop {
         let b: &Block = &f.blocks[block as usize];
         while pc < b.ops.len() {
             let r = &mut fr.regs;
@@ -422,32 +742,46 @@ fn run(
                     r[*dest as usize] =
                         r[*base as usize].wrapping_add(i.wrapping_mul(*scale) as u64);
                 }
-                Op::Call(c) => call_op(m, fr, c)?,
-                Op::CallIndirect(c) => call_indirect(m, fr, c)?,
-                Op::SetJmp { dest, buf } => match set_jmp(m, f, fr, block, pc, *dest, *buf)? {
-                    Jmp::Finished(flow) => return Ok(flow),
-                    Jmp::Resume { block: b, pc: p } => {
-                        block = b;
-                        pc = p;
-                        continue 'frame;
+                Op::Call(c) => {
+                    if let Some(action) = call_op(m, fr, c)? {
+                        fr.block = block;
+                        fr.pc = pc + 1;
+                        return Ok(action);
                     }
-                    Jmp::Caught => caught += 1,
-                },
+                }
+                Op::CallIndirect(c) => {
+                    if let Some(action) = call_indirect(m, fr, c)? {
+                        fr.block = block;
+                        fr.pc = pc + 1;
+                        return Ok(action);
+                    }
+                }
+                Op::SetJmp { dest, buf } => {
+                    fr.block = block;
+                    fr.pc = pc;
+                    return Ok(Action::SetJmp {
+                        dest: *dest,
+                        buf: *buf,
+                    });
+                }
                 Op::HandlerPopped => {
-                    if caught > 0 {
-                        caught -= 1;
-                    } else if in_region {
-                        return Ok(Flow::Popped { block, pc: pc + 1 });
+                    if fr.caught > 0 {
+                        fr.caught -= 1;
+                    } else if region_here {
+                        fr.block = block;
+                        fr.pc = pc + 1;
+                        return Ok(Action::Popped);
                     }
                 }
                 Op::Bail => {
-                    return Err(if m.can_bail() {
-                        InterpError::JitBailout(f.id)
-                    } else {
-                        fault("vector code reached the interpreter inside a native call")
-                    });
+                    if m.can_bail() && !m.program.has_natives() {
+                        fr.block = block;
+                        fr.pc = pc;
+                        return Ok(Action::Suspend);
+                    }
+                    return Err(fault("vector code reached the interpreter").into());
                 }
-                Op::Trap { message } => return Err(fault(message.to_string())),
+                Op::Trap { message } => return Err(fault(message.to_string()).into()),
                 op => cold(m, fr, op)?,
             }
             pc += 1;
@@ -481,7 +815,7 @@ fn run(
                 take(fr, e)?
             }
             Term::Return(v) => {
-                return Ok(Flow::Return(v.map(|r| fr.regs[r as usize]).unwrap_or(0)));
+                return Ok(Action::Return(v.map(|r| fr.regs[r as usize]).unwrap_or(0)));
             }
             Term::ReturnSret { value, fields } => {
                 let src = fr.regs[*value as usize];
@@ -490,64 +824,101 @@ fn run(
                     let v = read(src.wrapping_add(o), mt)?;
                     write(fr.sret.wrapping_add(o), mt, v)?;
                 }
-                return Ok(Flow::Return(fr.sret));
+                return Ok(Action::Return(fr.sret));
             }
-            Term::Trap(message) => return Err(fault(message.to_string())),
+            Term::Trap(message) => return Err(fault(message.to_string()).into()),
         };
         pc = 0;
-        m.tick(f)?;
+        if let Some(action) = entered(m, f, block) {
+            fr.block = block;
+            fr.pc = 0;
+            return Ok(action);
+        }
     }
 }
 
-/// How a `setjmp` left the frame.
-enum Jmp {
-    /// The rest of the frame ran inside the region and finished.
-    Finished(Flow),
-    /// The try body ended; carry on from here.
-    Resume { block: u32, pc: usize },
-    /// A throw landed: carry on after the `setjmp`, which returned nonzero.
-    Caught,
+fn src_value(fr: &Frame, s: Src) -> u64 {
+    match s {
+        Src::Reg(r) => fr.regs[r as usize],
+        Src::Imm(v) => v,
+        Src::Slot(offset) => fr.slots.as_ptr() as u64 + offset as u64,
+    }
 }
 
-#[inline(never)]
-fn set_jmp(
-    m: &Machine,
-    f: &Function,
-    fr: &mut Frame,
-    block: u32,
-    pc: usize,
-    dest: u32,
-    buf: u32,
-) -> Result<Jmp, InterpError> {
-    let buf_ptr = fr.regs[buf as usize] as *mut u8;
-    let dest = dest as usize;
-    let (depth, native_depth) = (m.depth.get(), m.native_depth.get());
-    let current = super::current();
-    let frame: *mut Frame = fr;
-    let mut outcome = None;
-    // A bailout cannot leave through the setjmp frame.
-    m.native_depth.set(native_depth + 1);
-    let delivered = unsafe {
-        native::setjmp_region(buf_ptr, &mut || {
-            let fr = &mut *frame;
-            fr.regs[dest] = 0;
-            outcome = Some(run(m, f, fr, block, pc + 1, true));
-        })
+/// A direct call. Native callees run now; an interpreted one comes back as an
+/// action for the stack to push.
+fn call_op(m: &Machine, fr: &mut Frame, c: &Call) -> Result<Option<Action>, InterpError> {
+    let mut args = smallvec::SmallVec::<[(u64, Mt); 8]>::with_capacity(c.args.len());
+    for &(s, mt) in &c.args {
+        args.push((canon(src_value(fr, s), mt), mt));
+    }
+    let pending = Pending {
+        dest: c.dest,
+        ret: c.ret,
+        sret: c.sret.map(|(offset, _)| offset),
     };
-    // A longjmp skipped whatever restored these.
-    m.native_depth.set(native_depth);
-    m.depth.set(depth);
-    super::set_current(current);
-    if delivered != 0 {
-        fr.regs[dest] = canon(delivered as u64, Mt::I32);
-        return Ok(Jmp::Caught);
+    let code = match &c.target {
+        Target::Native(addr) => *addr,
+        Target::Interp { module, func } => match m.program.native(*func) {
+            Some(code) => code,
+            None => {
+                return Ok(Some(Action::Call {
+                    callee: m.function_at(*module, *func)?,
+                    args: args.iter().map(|a| a.0).collect(),
+                    pending,
+                }));
+            }
+        },
+    };
+    let ret = match (c.sret, c.ret) {
+        (Some((offset, size)), _) => Ret::Sret {
+            dest: fr.slots.as_ptr() as usize + offset as usize,
+            size: size as usize,
+        },
+        (None, Some(mt)) => Ret::Value(mt),
+        (None, None) => Ret::Void,
+    };
+    let value = m.native(|| unsafe { native::call(code, &args, ret) })?;
+    fr.pending = pending;
+    fr.deliver(value);
+    Ok(None)
+}
+
+fn call_indirect(
+    m: &Machine,
+    fr: &mut Frame,
+    c: &IndirectCall,
+) -> Result<Option<Action>, InterpError> {
+    let closure = fr.regs[c.closure as usize];
+    if closure == 0 {
+        return Err(fault("call through a null function value"));
     }
-    match outcome {
-        Some(Ok(Flow::Popped { block, pc })) => Ok(Jmp::Resume { block, pc }),
-        Some(Ok(flow)) => Ok(Jmp::Finished(flow)),
-        Some(Err(e)) => Err(e),
-        None => Err(fault("setjmp region ended without running")),
+    let code = read(closure, Mt::I64)?;
+    let env = read(closure + 8, Mt::I64)?;
+    let mut args = smallvec::SmallVec::<[(u64, Mt); 8]>::with_capacity(c.args.len() + 1);
+    args.push((env, Mt::I64));
+    for &(r, mt) in &c.args {
+        args.push((fr.regs[r as usize], mt));
     }
+    let pending = Pending {
+        dest: c.dest,
+        ret: c.ret,
+        sret: None,
+    };
+    let interpreted =
+        trampoline::target_of(code as usize).filter(|t| t.forward.load(Ordering::Acquire) == 0);
+    if let Some(t) = interpreted {
+        return Ok(Some(Action::Call {
+            callee: m.function_at(t.module, t.func)?,
+            args: args.iter().map(|a| a.0).collect(),
+            pending,
+        }));
+    }
+    let ret = c.ret.map(Ret::Value).unwrap_or(Ret::Void);
+    let value = m.native(|| unsafe { native::call(code as usize, &args, ret) })?;
+    fr.pending = pending;
+    fr.deliver(value);
+    Ok(None)
 }
 
 /// The operations that are rare in hot code.
@@ -762,78 +1133,6 @@ fn cold(m: &Machine, fr: &mut Frame, op: &Op) -> Result<(), InterpError> {
         }
         // The hot operations and control transfers are `run`'s.
         _ => unreachable!("{:?} reached the cold path", op),
-    }
-    Ok(())
-}
-
-fn src_value(fr: &Frame, s: Src) -> u64 {
-    match s {
-        Src::Reg(r) => fr.regs[r as usize],
-        Src::Imm(v) => v,
-        Src::Slot(offset) => fr.slots.as_ptr() as u64 + offset as u64,
-    }
-}
-
-fn call_op(m: &Machine, fr: &mut Frame, c: &Call) -> Result<(), InterpError> {
-    let mut args = smallvec::SmallVec::<[(u64, Mt); 8]>::with_capacity(c.args.len());
-    for &(s, mt) in &c.args {
-        args.push((canon(src_value(fr, s), mt), mt));
-    }
-    let value = match &c.target {
-        Target::Interp { module, func } => {
-            let callee = m.function_at(*module, *func)?;
-            let bits: smallvec::SmallVec<[u64; 8]> = args.iter().map(|a| a.0).collect();
-            call(m, &callee, &bits)?
-        }
-        Target::Native(addr) => {
-            let ret = match (c.sret, c.ret) {
-                (Some((offset, size)), _) => Ret::Sret {
-                    dest: fr.slots.as_ptr() as usize + offset as usize,
-                    size: size as usize,
-                },
-                (None, Some(mt)) => Ret::Value(mt),
-                (None, None) => Ret::Void,
-            };
-            m.native(|| unsafe { native::call(*addr, &args, ret) })?
-        }
-    };
-    if let Some(d) = c.dest {
-        fr.regs[d as usize] = match (c.sret, c.ret) {
-            (Some((offset, _)), _) => fr.slots.as_ptr() as u64 + offset as u64,
-            (None, Some(mt)) => canon(value, mt),
-            (None, None) => 0,
-        };
-    }
-    Ok(())
-}
-
-fn call_indirect(m: &Machine, fr: &mut Frame, c: &IndirectCall) -> Result<(), InterpError> {
-    let closure = fr.regs[c.closure as usize];
-    if closure == 0 {
-        return Err(fault("call through a null function value"));
-    }
-    let code = read(closure, Mt::I64)?;
-    let env = read(closure + 8, Mt::I64)?;
-    let mut args = smallvec::SmallVec::<[(u64, Mt); 8]>::with_capacity(c.args.len() + 1);
-    args.push((env, Mt::I64));
-    for &(r, mt) in &c.args {
-        args.push((fr.regs[r as usize], mt));
-    }
-    let interpreted = trampoline::target_of(code as usize)
-        .filter(|t| t.forward.load(std::sync::atomic::Ordering::Acquire) == 0);
-    let value = match interpreted {
-        Some(t) => {
-            let callee = m.function_at(t.module, t.func)?;
-            let bits: smallvec::SmallVec<[u64; 8]> = args.iter().map(|a| a.0).collect();
-            call(m, &callee, &bits)?
-        }
-        None => {
-            let ret = c.ret.map(Ret::Value).unwrap_or(Ret::Void);
-            m.native(|| unsafe { native::call(code as usize, &args, ret) })?
-        }
-    };
-    if let Some(d) = c.dest {
-        fr.regs[d as usize] = c.ret.map(|mt| canon(value, mt)).unwrap_or(0);
     }
     Ok(())
 }

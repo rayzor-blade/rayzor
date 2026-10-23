@@ -120,8 +120,12 @@ pub enum InterpError {
     RuntimeError(String),
     Panic(String),
     Exception(String),
-    /// Hand the function to compiled code.
+    /// A loop got hot. The interpreted stack is set aside; compile the
+    /// program and `resume` it.
     JitBailout(IrFunctionId),
+    /// The set-aside stack stopped where only compiled code can carry on, so
+    /// the call has to start over in compiled code.
+    NotResumable(IrFunctionId),
 }
 
 impl std::fmt::Display for InterpError {
@@ -134,6 +138,7 @@ impl std::fmt::Display for InterpError {
             InterpError::Panic(msg) => write!(f, "Panic: {}", msg),
             InterpError::Exception(msg) => write!(f, "Exception: {}", msg),
             InterpError::JitBailout(id) => write!(f, "JIT bailout requested for {:?}", id),
+            InterpError::NotResumable(id) => write!(f, "{:?} cannot resume interpreted", id),
         }
     }
 }
@@ -146,6 +151,12 @@ pub(crate) struct Program {
     decoded: RwLock<HashMap<(usize, IrFunctionId), Arc<Function>>>,
     indirect: RwLock<HashMap<usize, Arc<BTreeSet<IrFunctionId>>>>,
     natives: RwLock<HashMap<IrFunctionId, usize>>,
+    /// Set once compiled code is installed: hot loops then transfer to it.
+    compiled: AtomicBool,
+    /// Compiled resume points by module address, function and loop header.
+    resume_points: RwLock<HashMap<(usize, IrFunctionId, crate::ir::IrBlockId), usize>>,
+    /// Loops that carried on in compiled code.
+    transfers: std::sync::atomic::AtomicU64,
     literals: Mutex<HashMap<String, &'static [u8]>>,
     cache: AtomicBool,
 }
@@ -157,6 +168,9 @@ impl Program {
             decoded: RwLock::new(HashMap::new()),
             indirect: RwLock::new(HashMap::new()),
             natives: RwLock::new(HashMap::new()),
+            compiled: AtomicBool::new(false),
+            resume_points: RwLock::new(HashMap::new()),
+            transfers: std::sync::atomic::AtomicU64::new(0),
             literals: Mutex::new(HashMap::new()),
             cache: AtomicBool::new(true),
         }
@@ -182,7 +196,28 @@ impl Program {
     }
 
     pub(crate) fn native(&self, func: IrFunctionId) -> Option<usize> {
+        if !self.has_natives() {
+            return None;
+        }
         self.natives.read().unwrap().get(&func).copied()
+    }
+
+    pub(crate) fn resume_point(
+        &self,
+        module: usize,
+        func: IrFunctionId,
+        header: crate::ir::IrBlockId,
+    ) -> Option<usize> {
+        self.resume_points
+            .read()
+            .unwrap()
+            .get(&(module, func, header))
+            .copied()
+    }
+
+    #[inline(always)]
+    pub(crate) fn has_natives(&self) -> bool {
+        self.compiled.load(Ordering::Acquire)
     }
 
     fn indirect_targets(&self, module: &IrModule) -> Arc<BTreeSet<IrFunctionId>> {
@@ -203,10 +238,11 @@ pub(crate) struct Machine {
     program: Arc<Program>,
     iterations: Cell<u64>,
     max_iterations: Cell<u64>,
-    depth: Cell<u32>,
     /// Native frames between here and the outermost interpreted call. A
-    /// bailout unwinds by returning, which it cannot do through them.
+    /// suspension returns through every frame, which it cannot do through them.
     native_depth: Cell<u32>,
+    /// The interpreted stack a suspension set aside.
+    suspended: std::cell::RefCell<Option<Vec<exec::Frame>>>,
 }
 
 impl Machine {
@@ -215,8 +251,8 @@ impl Machine {
             program,
             iterations: Cell::new(0),
             max_iterations: Cell::new(10_000),
-            depth: Cell::new(0),
             native_depth: Cell::new(0),
+            suspended: std::cell::RefCell::new(None),
         }
     }
 
@@ -224,16 +260,8 @@ impl Machine {
         self.native_depth.get() == 0
     }
 
-    /// Count a block entered; past the threshold, ask for compiled code.
-    #[inline(always)]
-    fn tick(&self, f: &Function) -> Result<(), InterpError> {
-        let n = self.iterations.get() + 1;
-        self.iterations.set(n);
-        if n >= self.max_iterations.get() && self.can_bail() {
-            self.iterations.set(0);
-            return Err(InterpError::JitBailout(f.id));
-        }
-        Ok(())
+    fn suspend(&self, stack: Vec<exec::Frame>) {
+        *self.suspended.borrow_mut() = Some(stack);
     }
 
     fn native<T>(&self, call: impl FnOnce() -> Result<T, String>) -> Result<T, InterpError> {
@@ -342,7 +370,7 @@ fn enter_from_native(
     }
     let d = m.native_depth.get();
     m.native_depth.set(d + 1);
-    let result = exec::call(m, &f, &args);
+    let result = exec::call(m, f.clone(), &args);
     m.native_depth.set(d);
     let bits = result?;
     if f.abi.sret {
@@ -433,7 +461,59 @@ impl MirInterpreter {
             .write()
             .unwrap()
             .insert(func, code as usize);
+        self.machine.program.compiled.store(true, Ordering::Release);
         trampoline::forward(func, code as usize);
+    }
+
+    /// Compiled code that resumes `func` of `module` at loop `header`, taking
+    /// the frame `crate::ir::osr::osr_layout` describes.
+    pub fn install_resume_point(
+        &mut self,
+        module: &IrModule,
+        func: IrFunctionId,
+        header: crate::ir::IrBlockId,
+        code: *const u8,
+    ) {
+        let key = (module as *const IrModule as usize, func, header);
+        self.machine
+            .program
+            .resume_points
+            .write()
+            .unwrap()
+            .insert(key, code as usize);
+    }
+
+    /// How many interpreted loops have carried on in compiled code.
+    pub fn transfers(&self) -> u64 {
+        self.machine.program.transfers.load(Ordering::Relaxed)
+    }
+
+    /// The functions of the frames a suspension set aside, innermost last.
+    pub fn suspended_functions(&self) -> Vec<IrFunctionId> {
+        self.machine
+            .suspended
+            .borrow()
+            .iter()
+            .flatten()
+            .map(|fr| fr.function().id)
+            .collect()
+    }
+
+    /// Continue the stack a `JitBailout` set aside. Its hot loop carries on in
+    /// compiled code, if a resume point for it has been compiled, and the rest
+    /// of the stack here; nothing that already ran runs again.
+    pub fn resume(&mut self) -> Result<InterpValue, InterpError> {
+        let m = &self.machine;
+        let Some(stack) = m.suspended.borrow_mut().take() else {
+            return Err(InterpError::RuntimeError("nothing to resume".to_string()));
+        };
+        let (base, top) = (stack[0].function().clone(), stack.last().unwrap());
+        if top.at_bail() {
+            return Err(InterpError::NotResumable(base.id));
+        }
+        let _entered = Entered::new(m);
+        let bits = exec::resume(m, stack)?;
+        Ok(InterpValue::from_bits(bits, &base.return_type))
     }
 
     pub fn execute(
@@ -457,7 +537,7 @@ impl MirInterpreter {
         for (i, &(_, mt)) in f.params.iter().enumerate() {
             abi_args.push(args.get(i).map(|a| a.to_bits(mt)).unwrap_or(0));
         }
-        let bits = exec::call(m, &f, &abi_args)?;
+        let bits = exec::call(m, f.clone(), &abi_args)?;
         Ok(InterpValue::from_bits(bits, &f.return_type))
     }
 }
