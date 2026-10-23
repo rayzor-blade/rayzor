@@ -357,6 +357,14 @@ impl MacroVm {
 
                     let method_name = self.get_string_constant(frame_idx, name_idx)?;
 
+                    if let MacroValue::Object(obj) = &base
+                        && obj.get("__type__").and_then(MacroValue::as_string) == Some("StringBuf")
+                    {
+                        return Err(
+                            self.error(frame_idx, "StringBuf requires the macro host".into())
+                        );
+                    }
+
                     // Check for compiled class instance methods
                     let class_method = if let MacroValue::Object(ref obj) = base {
                         if let Some(MacroValue::String(type_name)) = obj.get("__type__") {
@@ -608,6 +616,11 @@ impl MacroVm {
                     args.reverse();
 
                     let class_name = self.get_string_constant(frame_idx, name_idx)?;
+                    if class_name == "StringBuf" {
+                        return Err(
+                            self.error(frame_idx, "StringBuf requires the macro host".into())
+                        );
+                    }
 
                     if matches!(
                         class_name.as_str(),
@@ -785,6 +798,11 @@ impl MacroVm {
     /// Get a field from a value.
     fn get_field(&self, base: MacroValue, name: &str) -> Result<MacroValue, VmError> {
         match &base {
+            MacroValue::Object(obj)
+                if obj.get("__type__").and_then(MacroValue::as_string) == Some("StringBuf") =>
+            {
+                Err(VmError::new("StringBuf requires the macro host"))
+            }
             MacroValue::Object(obj) => Ok(obj.get(name).cloned().unwrap_or(MacroValue::Null)),
             MacroValue::Array(arr) => match name {
                 "length" => Ok(MacroValue::Int(arr.len() as i64)),

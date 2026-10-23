@@ -1015,6 +1015,12 @@ impl MacroInterpreter {
                     | "haxe.ds.ObjectMap"
                     | "haxe.ds.EnumValueMap" => Ok(MacroValue::Map(Arc::new(Vec::new()))),
                     "Array" => Ok(MacroValue::Array(Arc::new(Vec::new()))),
+                    // StringBuf is supplied by the macro host, independently of
+                    // the selected target's extern declaration or native body.
+                    "StringBuf" => Ok(MacroValue::Object(Arc::new(BTreeMap::from([
+                        ("__type__".into(), MacroValue::from_str("StringBuf")),
+                        ("__data__".into(), MacroValue::from_str("")),
+                    ])))),
                     "sys.io.Process" => self.construct_process(arg_vals, location),
                     "sys.io.File" => self.construct_file(arg_vals, location),
                     _ => {
@@ -2314,9 +2320,14 @@ impl MacroInterpreter {
                 )))),
                 "string" => {
                     let val = args.first().unwrap_or(&MacroValue::Null);
-                    // A Type value has no printable form of its own — its
-                    // rendering lives in the type table, reachable only
-                    // through the live typer during a deferred re-expansion.
+                    if let MacroValue::Object(obj) = val
+                        && obj.get("__type__").and_then(MacroValue::as_string) == Some("StringBuf")
+                    {
+                        return Ok(Some(
+                            obj.get("__data__").cloned().unwrap_or(MacroValue::Null),
+                        ));
+                    }
+                    // A Type's rendering needs the live typer during re-expansion.
                     if let MacroValue::Type(id) = val {
                         if let Some(rendered) = self
                             .macro_context
@@ -3607,6 +3618,7 @@ impl MacroInterpreter {
             .and_then(|v| v.as_string().map(|s| s.to_string()));
 
         match type_name.as_deref() {
+            Some("StringBuf") => self.string_buffer_method(obj, method, _args, location),
             Some("sys.io.ProcessOutput" | "sys.io.ProcessStdout") => match method {
                 "readAll" | "readLine" => {
                     // Return the stored data as a string (Bytes → String via toString)
@@ -3685,6 +3697,56 @@ impl MacroInterpreter {
                 })
             }
         }
+    }
+
+    fn string_buffer_method(
+        &mut self,
+        obj: &Arc<BTreeMap<String, MacroValue>>,
+        method: &str,
+        args: Vec<MacroValue>,
+        location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        let data = obj.get("__data__").cloned().unwrap_or(MacroValue::Null);
+        let addition = match method {
+            "toString" => return Ok(data),
+            "get_length" => return self.field_access(&data, "length", location),
+            "add" => self
+                .try_static_call("Std", "string", &args, location)?
+                .unwrap_or(MacroValue::Null)
+                .to_display_string(),
+            "addChar" => args
+                .first()
+                .and_then(MacroValue::as_int)
+                .and_then(|code| u32::try_from(code).ok())
+                .and_then(char::from_u32)
+                .map_or_else(String::new, |character| character.to_string()),
+            "addSub" => {
+                let text = args.first().cloned().unwrap_or(MacroValue::Null);
+                self.method_call(
+                    &text,
+                    "substr",
+                    args.get(1..).unwrap_or_default().to_vec(),
+                    location,
+                )?
+                .to_display_string()
+            }
+            _ => {
+                return Err(MacroError::UnsupportedOperation {
+                    operation: format!("StringBuf.{method}()"),
+                    location,
+                });
+            }
+        };
+        let mut updated = (**obj).clone();
+        updated.insert(
+            "__data__".into(),
+            MacroValue::from_str(&format!("{}{addition}", data.to_display_string())),
+        );
+        self.replace_references(
+            &MacroValue::Object(obj.clone()),
+            &MacroValue::Object(Arc::new(updated)),
+        );
+        Ok(MacroValue::Null)
     }
 
     /// Construct a sys.io.Process — runs a real subprocess at compile time
@@ -3892,6 +3954,16 @@ impl MacroInterpreter {
         };
         let base = unwrapped.as_ref().unwrap_or(base);
         match base {
+            MacroValue::Object(map)
+                if field == "length"
+                    && map.get("__type__").and_then(MacroValue::as_string) == Some("StringBuf") =>
+            {
+                self.field_access(
+                    map.get("__data__").unwrap_or(&MacroValue::Null),
+                    "length",
+                    location,
+                )
+            }
             MacroValue::Object(map) => Ok(map.get(field).cloned().unwrap_or(MacroValue::Null)),
             MacroValue::Array(arr) => match field {
                 "length" => Ok(MacroValue::Int(arr.len() as i64)),
@@ -5454,6 +5526,91 @@ mod tests {
                 .unwrap(),
             Some(MacroValue::Bool(true))
         );
+    }
+
+    #[test]
+    fn string_buffers_use_the_macro_host_with_native_portable_or_extern_declarations() {
+        for declaration in [
+            include_str!("../../haxe-std/StringBuf.hx"),
+            r#"class StringBuf {
+                var b:String;
+                public var length(get, never):Int;
+                public function new() { throw "target constructor executed"; }
+                function get_length():Int { throw "target getter executed"; }
+                public function add<T>(x:T):Void { throw "target method executed"; }
+            }"#,
+            r#"@:coreApi extern class StringBuf {
+                var length(get, never):Int;
+                function new():Void;
+                private function get_length():Int;
+                function add<T>(x:T):Void;
+                function addChar(c:Int):Void;
+                function addSub(s:String, pos:Int, ?len:Int):Void;
+                function toString():String;
+            }"#,
+        ] {
+            let file = parser::rd::rd_parse(declaration, "StringBuf.hx", false, false).unwrap();
+            let mut classes = ClassRegistry::new();
+            classes.register_file(&file);
+            let probe = parser::rd::rd_parse(
+                r#"class Probe { public static macro function check() {
+                var buffer = new StringBuf();
+                if (buffer.length != 0 || buffer.toString() != "") throw "empty buffer";
+                var holder = {buffer: buffer};
+                var append = function(b) { b.addChar(0x1F642); };
+                append(holder.buffer);
+                buffer.add("é");
+                holder.buffer.addSub("a中cd", 1, 2);
+                buffer.add(null);
+                holder.buffer.addSub("xyz", 1, null);
+                holder.buffer.addSub("ab", 1);
+                if (buffer.toString() != "🙂é中cnullyzb" || buffer.length != 11)
+                    throw "buffer alias or unicode";
+                var other = new StringBuf();
+                other.add(buffer.toString());
+                if (Std.string(buffer) != buffer.toString() || Std.string(other) != buffer.toString()
+                    || other.get_length() != 11)
+                    throw "buffer rendering";
+                other.add(42);
+                if (buffer.length != 11 || other.length != 13) throw "independent buffer";
+                return true;
+            }}"#,
+                "Probe.hx",
+                false,
+                false,
+            )
+            .unwrap();
+            classes.register_file(&probe);
+            let mut registry = MacroRegistry::new();
+            registry.scan_and_register(&probe, &probe.filename).unwrap();
+            let def = registry.get_macro("Probe.check").unwrap().clone();
+            let mut interp = MacroInterpreter::with_class_registry(
+                registry,
+                Default::default(),
+                Arc::new(classes),
+            );
+            interp.vm = Some(MacroVm::new());
+            interp.scheduler = Some(MorselScheduler {
+                call_counts: BTreeMap::new(),
+                threshold: 1,
+                classes_compiled: false,
+            });
+            for _ in 0..3 {
+                assert_eq!(
+                    interp
+                        .call_macro_def(&def, vec![], SourceLocation::unknown())
+                        .unwrap(),
+                    MacroValue::Bool(true),
+                );
+            }
+            assert!(interp.registry.get_compiled("Probe.check").is_some());
+            assert!(
+                !interp
+                    .registry
+                    .get_compiled_classes()
+                    .contains_key("StringBuf")
+            );
+        }
     }
 
     #[test]

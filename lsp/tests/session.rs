@@ -2247,6 +2247,50 @@ private class Counter {
 }
 
 #[test]
+fn string_buffers_work_in_build_macros_with_either_standard_library() {
+    for project in ["rayzor.toml", "build.hxml"] {
+        let mut s = Session::start(&[
+            (
+                project,
+                if project == "rayzor.toml" {
+                    "[project]\nname = 'macro-string-buffer'\n"
+                } else {
+                    "-cp .\n-main Main\n"
+                },
+            ),
+            (
+                "Main.hx",
+                "@:build(Build.fields())\nclass Main { static function main() { var value = generated; } }",
+            ),
+            (
+                "Build.hx",
+                r#"import haxe.macro.Expr;
+class Build {
+    #if macro
+    public static function fields():Array<Field> {
+        var buffer = new StringBuf();
+        buffer.add("é");
+        buffer.addChar(88);
+        buffer.addSub("abcd", 1, 2);
+        buffer.add(null);
+        if (buffer.toString() != "éXbcnull" || buffer.length != 8) throw "string buffer content";
+        buffer.addSub("abcd", 2);
+        if (buffer.toString() != "éXbcnullcd" || buffer.length != 10) throw "string buffer substring";
+        var fields = haxe.macro.Context.getBuildFields();
+        fields.push({name:"generated", access:[APublic, AStatic], kind:FVar(macro:String, macro "ok"), pos:haxe.macro.Context.currentPos()});
+        return fields;
+    }
+    #end
+}"#,
+            ),
+        ]);
+        let diagnostics = s.open("Main.hx");
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        assert!(s.labels("Main.hx", 1, 30).contains(&"generated".into()));
+    }
+}
+
+#[test]
 fn instantiated_receivers_still_reject_wrong_values_and_required_arguments() {
     let main = r#"class Main {
     static function main() {
