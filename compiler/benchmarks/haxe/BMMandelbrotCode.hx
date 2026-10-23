@@ -1,5 +1,7 @@
-// Mandelbrot benchmark — exact copy from https://github.com/HaxeBenchmarks/benchmark-runner/blob/master/cases/mandelbrot/BMMandelbrotCode.hx
-// Used to run official Haxe targets (--interp, HashLink, C++) for comparison
+// Mandelbrot workload from https://github.com/HaxeBenchmarks/benchmark-runner/blob/master/cases/mandelbrot/BMMandelbrotCode.hx
+// Used to run official Haxe targets (--interp, HashLink, C++) for comparison.
+// The helper is named MandelbrotComplex because HL/C emits Complex as the
+// reserved C keyword `_Complex`; the computation is unchanged.
 
 class RGB {
     public var r:Int;
@@ -13,7 +15,7 @@ class RGB {
     }
 }
 
-class Complex {
+class MandelbrotComplex {
     public var i:Float;
     public var j:Float;
 
@@ -59,20 +61,20 @@ class BMMandelbrotCode {
         trace("Checksum: " + checksum);
     }
 
-    public function complexLength2(val:Complex):Float {
+    public function complexLength2(val:MandelbrotComplex):Float {
         return val.i * val.i + val.j * val.j;
     }
 
-    public inline function complexAdd(val0:Complex, val1:Complex) {
+    public inline function complexAdd(val0:MandelbrotComplex, val1:MandelbrotComplex) {
         return createComplex(val0.i + val1.i, val0.j + val1.j);
     }
 
-    public inline function complexSquare(val:Complex) {
+    public inline function complexSquare(val:MandelbrotComplex) {
         return createComplex(val.i * val.i - val.j * val.j, 2.0 * val.i * val.j);
     }
 
     public function createComplex(inI:Float, inJ:Float) {
-        return new Complex(inI, inJ);
+        return new MandelbrotComplex(inI, inJ);
     }
 
     public function createPalette(inFraction:Float) {

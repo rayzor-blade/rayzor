@@ -224,7 +224,9 @@ jobs:
         env:
           RAYZOR_BENCH_BUNDLES_ARE_FRESH: "1"
           RAYZOR_PROFILE_TIER_EVENTS: "1"
-        run: ./target/release/examples/benchmark_runner ${{ matrix.kernel }} --json --disable-trace
+        run: >-
+          ./target/release/examples/benchmark_runner ${{ matrix.kernel }} --json --disable-trace --strict
+          --targets rayzor-cranelift,rayzor-precompiled,rayzor-tiered,rayzor-precompiled-tiered,rayzor-llvm,haxe-hashlink,haxe-hashlink-c,ash,haxe-cpp,haxe-jvm
 
       - name: Measure ${{ matrix.kernel }} source startup
         run: |

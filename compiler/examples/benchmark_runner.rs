@@ -86,6 +86,10 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
+    /// Fail the run if any selected target, result write, or chart generation fails
+    #[arg(long)]
+    strict: bool,
+
     /// Disable trace output for Rayzor targets
     #[arg(long)]
     disable_trace: bool,
@@ -1366,22 +1370,27 @@ fn run_benchmark_isolated(
         .map_err(|e| format!("spawning {}: {e}", target.name()))?;
 
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let last = err
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .to_string();
+        // GCC's last line can be just a caret pointing at the real error.
+        // Preserve both streams so failed targets retain their diagnostics.
+        let detail = format!(
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        #[cfg(unix)]
         use std::os::unix::process::ExitStatusExt;
-        return Err(match (out.status.code(), out.status.signal()) {
-            (Some(c), _) => format!("child exited {c}: {last}"),
+        #[cfg(unix)]
+        let signal = out.status.signal();
+        #[cfg(not(unix))]
+        let signal = None;
+        return Err(match (out.status.code(), signal) {
+            (Some(c), _) => format!("child exited {c}:\n{detail}"),
             // SIGKILL here is almost always the OS reclaiming memory: a target
             // runs the benchmark WARMUP_RUNS + BENCH_RUNS times in one process,
             // so anything it leaks is multiplied by that count.
-            (None, Some(9)) => format!("child killed (SIGKILL, likely out of memory): {last}"),
-            (None, Some(sig)) => format!("child killed by signal {sig}: {last}"),
-            (None, None) => format!("child terminated abnormally: {last}"),
+            (None, Some(9)) => format!("child killed (SIGKILL, likely out of memory):\n{detail}"),
+            (None, Some(sig)) => format!("child killed by signal {sig}:\n{detail}"),
+            (None, None) => format!("child terminated abnormally:\n{detail}"),
         });
     }
 
@@ -2123,7 +2132,7 @@ fn main() {
                 name,
                 available.join(", ")
             );
-            return;
+            std::process::exit(2);
         }
     } else {
         available
@@ -2155,7 +2164,7 @@ fn main() {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            return;
+            std::process::exit(2);
         }
         filtered
     } else {
@@ -2184,6 +2193,7 @@ fn main() {
         system_info: Some(sys_info),
         benchmarks: Vec::new(),
     };
+    let mut failures = 0;
 
     for bench_name in &benchmarks_to_run {
         println!("{}", "-".repeat(70));
@@ -2194,6 +2204,7 @@ fn main() {
             Some(b) => b,
             None => {
                 eprintln!("  Failed to load benchmark: {}", bench_name);
+                failures += 1;
                 continue;
             }
         };
@@ -2264,6 +2275,7 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("  [FAIL] {}: {}\n", target.name(), e);
+                    failures += 1;
                 }
             }
 
@@ -2291,12 +2303,14 @@ fn main() {
         Ok(merged) => merged,
         Err(e) => {
             eprintln!("Failed to save results: {}", e);
+            failures += 1;
             suite.clone()
         }
     };
 
     if let Err(e) = generate_chart_html(&merged_suite) {
         eprintln!("Failed to generate charts: {}", e);
+        failures += 1;
     }
 
     if cli.json {
@@ -2305,5 +2319,9 @@ fn main() {
             "{}",
             serde_json::to_string_pretty(&merged_suite).unwrap_or_default()
         );
+    }
+    if cli.strict && failures > 0 {
+        eprintln!("Benchmark run failed: {failures} error(s)");
+        std::process::exit(1);
     }
 }
