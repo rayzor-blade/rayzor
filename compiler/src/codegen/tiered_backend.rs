@@ -1704,34 +1704,11 @@ impl TieredBackend {
         CraneliftBackend::register_enum_rtti_from_modules(&module_refs);
         CraneliftBackend::register_class_rtti_from_modules(&module_refs);
 
-        // `__vtable_init__` calls `haxe_iface_vtable_set_slot` with a
-        // FUNCTION POINTER argument (the interface method's dispatch thunk)
-        // that later gets called INDIRECTLY by compiled code rebuilding a
-        // wider interface fat pointer (`haxe_iface_fat_ptr_build`, used by
-        // an interface-to-interface cast whose target has methods the
-        // source fat pointer's vtable doesn't cover). The interpreter's
-        // `fn_ref` value is a tagged IrFunctionId (see `NanBoxedValue::
-        // from_func_id` in mir_interpreter.rs), not a real machine-code
-        // address — running `__vtable_init__` through the interpreter would
-        // register that placeholder as if it were a callable pointer, and
-        // compiled code would later `blr` through it and crash on a tiny
-        // garbage address. The interpreter also has no dispatch arm for
-        // `haxe_iface_vtable_set_slot` at all (falls through to the
-        // "unknown extern → forgiving default" path and silently no-ops),
-        // so today the registry entry is simply MISSING for any class whose
-        // vtable-init only ever ran interpreted — same crash, different
-        // proximate cause (null instead of garbage).
-        //
-        // In JIT mode (`!start_interpreted`, the default for `rayzor run`)
-        // real Cranelift-compiled function pointers are available almost
-        // immediately anyway (`execute_function` compiles all modules on
-        // its very next step if this is the first call). Compile eagerly
-        // here and run the NATIVE startup hooks instead, so `fn_ref`
-        // resolves to the actual compiled thunk address before any
-        // `__vtable_init__` body executes. Interpreter-first configs keep
-        // the interpreted path — cross-interface casts needing a vtable
-        // rebuild in a pure-interpreter run remain a known gap, not a new
-        // regression from this fix.
+        // In JIT mode (`!start_interpreted`) everything is compiled before
+        // the startup hooks run, so `__vtable_init__` registers compiled
+        // code. Interpreter-first configs run the hooks interpreted: the
+        // addresses they register are trampolines, which forward to
+        // compiled code once it exists.
         if !self.start_interpreted {
             let compiled_now = self.function_pointers.read().unwrap().is_empty();
             if compiled_now {
@@ -1744,7 +1721,10 @@ impl TieredBackend {
                 self.run_startup_hooks_native(&modules_to_init, true)?;
             }
         } else {
-            self.run_startup_hooks_interpreter(&modules_to_init)?;
+            // The stored modules, not the copies: function values made while
+            // the hooks run keep naming the module they came from.
+            let modules = self.modules.read().unwrap();
+            self.run_startup_hooks_interpreter(&modules[start_idx..])?;
         }
 
         *self.initialized_module_count.lock().unwrap() = start_idx + modules_to_init.len();
@@ -1987,6 +1967,8 @@ impl TieredBackend {
 
         // Store module for later recompilation/interpretation
         self.modules.write().unwrap().push(module);
+        // The push may have moved the modules the interpreter decoded from.
+        self.interpreter.lock().unwrap().clear_decoded_cache();
 
         Ok(())
     }
@@ -2618,6 +2600,14 @@ impl TieredBackend {
             }
         }
         drop(modules);
+
+        // Function values the interpreter handed out now reach compiled code.
+        {
+            let mut interp = self.interpreter.lock().unwrap();
+            for (func_id, ptr) in self.function_pointers.read().unwrap().iter() {
+                interp.install_native(*func_id, *ptr as *const u8);
+            }
+        }
 
         // Keep the backend alive by storing it (replace the old baseline_backend)
         *self.baseline_backend.lock().unwrap() = backend;

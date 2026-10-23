@@ -30,10 +30,7 @@ pub mod wasm_wit;
 pub mod apple_jit_memory;
 
 pub use cranelift_backend::CraneliftBackend;
-pub use mir_interpreter::{
-    DecodedBlock, DecodedInstruction, HeapObject, InterpError, InterpValue, MirInterpreter,
-    NanBoxedValue, ObjectHeap, Opcode,
-};
+pub use mir_interpreter::{InterpError, InterpValue, MirInterpreter};
 pub use profiling::{HotnessLevel, ProfileConfig, ProfileData, ProfileStatistics};
 pub use tiered_backend::{
     BailoutStrategy, BeadieStats, OptimizationTier, TierPreset, TieredBackend, TieredConfig,
