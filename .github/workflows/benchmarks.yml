@@ -20,17 +20,13 @@ concurrency:
 jobs:
   build:
     name: Build & Bundle
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
       # --- Install LLVM 21 for Rayzor ---
       - name: Install LLVM 21
-        run: |
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-          sudo add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-21 main"
-          sudo apt-get update
-          sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
+        run: bash .github/scripts/install-llvm.sh
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -105,7 +101,7 @@ jobs:
   benchmark:
     name: bench (${{ matrix.kernel }})
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # One kernel per runner. Run in sequence on a single machine and the heavy
     # kernels leave it warm, so whichever runs last is measured on a throttled
     # CPU. A fresh runner per kernel also keeps one kernel's failure from
@@ -197,11 +193,7 @@ jobs:
 
       # --- Install LLVM 21 for Rayzor ---
       - name: Install LLVM 21
-        run: |
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-          sudo add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-21 main"
-          sudo apt-get update
-          sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
+        run: bash .github/scripts/install-llvm.sh
 
       - name: Download precompiled bundles and stdlib cache
         uses: actions/download-artifact@v7
@@ -268,7 +260,7 @@ jobs:
     name: Collect results
     needs: benchmark
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
@@ -276,11 +268,7 @@ jobs:
       # only redraws charts, so the collector needs the same shared library as
       # the build and benchmark jobs.
       - name: Install LLVM 21
-        run: |
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-          sudo add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-21 main"
-          sudo apt-get update
-          sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
+        run: bash .github/scripts/install-llvm.sh
 
       - name: Download rayzor binaries
         uses: actions/download-artifact@v7

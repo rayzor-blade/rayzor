@@ -30,12 +30,12 @@ jobs:
             rpkg_os: macos
             rpkg_arch: aarch64
             lib: librayzor_window.dylib
-          - os: macos-13        # x86_64
+          - os: macos-15-intel        # x86_64
             target: x86_64-apple-darwin
             rpkg_os: macos
             rpkg_arch: x86_64
             lib: librayzor_window.dylib
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             rpkg_os: linux
             rpkg_arch: x86_64
@@ -68,12 +68,12 @@ jobs:
             rpkg_os: macos
             rpkg_arch: aarch64
             lib: librayzor_gpu.dylib
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             rpkg_os: macos
             rpkg_arch: x86_64
             lib: librayzor_gpu.dylib
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             rpkg_os: linux
             rpkg_arch: x86_64
@@ -116,6 +116,10 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v5
+      - name: Install LLVM 21
+        run: |
+          brew install llvm@21
+          echo "LLVM_SYS_211_PREFIX=$(brew --prefix llvm@21)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       # The lowered standard library the shipped binary carries. Without it a
       # user's first compile in a new project lowers the library from source,
