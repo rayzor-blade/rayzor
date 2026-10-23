@@ -245,6 +245,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         if self.stream.eat(TokenKind::Arrow).is_some() {
             let name = match left.kind {
                 ExprKind::Ident(name) => name,
+                ExprKind::DollarIdent { name, arg: None } => format!("${name}"),
                 _ => {
                     return Err(ParseError::new(
                         "expected identifier before arrow",
@@ -1402,7 +1403,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let param_start = self.stream.current_offset();
             let optional = self.stream.eat(TokenKind::Question).is_some();
             let name = self.stream.current_text().to_string();
-            if !self.stream.at(TokenKind::Ident) {
+            if !self
+                .stream
+                .at_any(&[TokenKind::Ident, TokenKind::DollarIdent])
+            {
                 return Err(ParseError::new(
                     "expected parameter name",
                     self.stream.peek().span,

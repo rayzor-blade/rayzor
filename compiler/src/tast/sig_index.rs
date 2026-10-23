@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// declaration omitted an annotation).
 #[derive(Debug, Clone)]
 pub struct StaticMethodSig {
+    pub package: Vec<String>,
     pub params: Vec<Option<parser::Type>>,
     pub param_names: Vec<String>,
     pub return_type: Option<parser::Type>,
@@ -38,6 +39,29 @@ pub struct StaticMethodSig {
     /// takes as a `NullInt` and defaults itself (MIR's
     /// `param_defaults_in_callee`).
     pub defaulted_ints: Vec<bool>,
+}
+
+impl StaticMethodSig {
+    /// Expression wrappers describe the macro transport, not the generated value.
+    pub(crate) fn runtime_hint<'a>(&self, hint: &'a parser::Type) -> Option<&'a parser::Type> {
+        if self.is_macro
+            && let parser::Type::Path { path, params, .. } = hint
+        {
+            let macro_type = path.package.is_empty()
+                || path.package == ["haxe", "macro"]
+                || path.package == ["haxe", "macro", "Expr"];
+            let name = path.sub.as_deref().unwrap_or(&path.name);
+            if macro_type {
+                if name == "ExprOf" && params.len() == 1 {
+                    return params.first();
+                }
+                if name == "Expr" && params.is_empty() {
+                    return None;
+                }
+            }
+        }
+        Some(hint)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -958,6 +982,11 @@ impl StaticSigIndex {
             table
                 .entry(func.name.clone())
                 .or_insert_with(|| StaticMethodSig {
+                    package: package
+                        .split('.')
+                        .filter(|part| !part.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
                     param_names: func.params.iter().map(|param| param.name.clone()).collect(),
                     params: func.params.iter().map(|p| p.type_hint.clone()).collect(),
                     return_type: func

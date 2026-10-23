@@ -429,7 +429,13 @@ impl<'a> TypeCheckingPhase<'a> {
 
                     // Branches should have compatible types
                     let branch_compat = self.type_checker.check_compatibility(then_type, else_type);
-                    if value_used && matches!(branch_compat, TypeCompatibility::Incompatible) {
+                    if value_used
+                        && matches!(branch_compat, TypeCompatibility::Incompatible)
+                        && matches!(
+                            self.type_checker.check_compatibility(else_type, then_type),
+                            TypeCompatibility::Incompatible
+                        )
+                    {
                         self.emit_error(TypeCheckError {
                             kind: TypeErrorKind::TypeMismatch {
                                 expected: then_type,

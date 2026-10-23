@@ -26,6 +26,70 @@ pub(crate) struct Settings {
     pub problems: Vec<String>,
 }
 
+/// An opened nested library keeps the build's flags and gains its own source root.
+pub(crate) fn include_source_library(settings: &mut Settings, source: &Path) {
+    let Some(manifest) = source
+        .parent()
+        .into_iter()
+        .flat_map(Path::ancestors)
+        .map(|root| root.join("haxelib.json"))
+        .find(|path| path.is_file())
+    else {
+        return;
+    };
+    let identity = manifest.canonicalize().unwrap_or_else(|_| manifest.clone());
+    if settings
+        .options
+        .configuration_files
+        .iter()
+        .any(|path| path.canonicalize().unwrap_or_else(|_| path.clone()) == identity)
+    {
+        return;
+    }
+    let root = manifest.parent().unwrap();
+    let metadata = crate::project::library_metadata(root, &[], &mut settings.problems);
+    let mut provided = metadata.provided;
+    provided.extend(
+        crate::project::library_metadata(
+            &settings.root,
+            &settings.class_paths,
+            &mut settings.problems,
+        )
+        .provided,
+    );
+    let (libraries, problems) =
+        compiler::haxelib::resolve_dependencies(&metadata.libraries, root, &provided);
+    settings.problems.extend(problems);
+    settings.class_paths.extend(metadata.class_paths);
+    settings
+        .options
+        .configuration_files
+        .extend(metadata.input_files);
+    for library in libraries {
+        settings.class_paths.extend(library.class_paths);
+        settings.macros.extend(library.macros);
+        settings
+            .options
+            .configuration_files
+            .extend(library.input_files);
+        for (name, value) in library.defines {
+            if !settings
+                .defines
+                .iter()
+                .any(|define| define.split('=').next() == Some(&name))
+            {
+                settings
+                    .defines
+                    .push(value.map_or_else(|| name.clone(), |value| format!("{name}={value}")));
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    settings
+        .class_paths
+        .retain(|path| seen.insert(path.clone()));
+}
+
 /// Prefer the narrowest owning source path, including dependencies outside a root.
 pub(crate) fn source_depth<'a>(
     path: &Path,

@@ -563,6 +563,7 @@ impl CompilationUnit {
         // the uncached path to pull in a different symbol/method set than the
         // cached path, which changes bundle contents and breaks DeltaBlue parity.
         lowering.set_skip_stdlib_loading(true);
+        lowering.recover_macro_errors = self.config.typecheck_only;
 
         // Declared-static-signature index: lets call sites type statics whose
         // declaring file lowers later (no untyped-placeholder decay).
@@ -604,6 +605,8 @@ impl CompilationUnit {
 
         let t_ast_lower = profile_timer(self.config.profile_typecheck);
         let lowered = lowering.lower_file(ast_file);
+        self.macro_diagnostics
+            .append(&mut lowering.editor_macro_diagnostics);
         file_ast_ms = finish_profile_ms(&mut self.typecheck_timings.ast_lower_ms, t_ast_lower);
 
         // Export class_fields for subsequent compilations. A failed attempt

@@ -400,6 +400,11 @@ impl<'a> AstLowering<'a> {
         method_symbol: SymbolId,
         sig: &crate::tast::sig_index::StaticMethodSig,
     ) -> TypeId {
+        let previous_package = self.context.current_package;
+        if sig.is_macro {
+            self.context.current_package = None;
+            self.set_package_from_parts(&sig.package);
+        }
         let dynamic_type = self.context.type_table.borrow().dynamic_type();
         let generic = match self.function_type_parameter_map(&sig.type_params) {
             Ok(map) if !map.is_empty() => {
@@ -411,23 +416,31 @@ impl<'a> AstLowering<'a> {
         let param_types: Vec<TypeId> = sig
             .params
             .iter()
-            .map(|hint| match hint {
-                Some(t) => self.lower_type(t).unwrap_or(dynamic_type),
-                None => dynamic_type,
-            })
+            .map(
+                |hint| match hint.as_ref().and_then(|hint| sig.runtime_hint(hint)) {
+                    Some(t) => self.lower_type(t).unwrap_or(dynamic_type),
+                    None => dynamic_type,
+                },
+            )
             .collect();
-        let return_type = match &sig.return_type {
+        let return_type = match sig
+            .return_type
+            .as_ref()
+            .and_then(|hint| sig.runtime_hint(hint))
+        {
             Some(t) => self.lower_type(t).unwrap_or(dynamic_type),
             None => dynamic_type,
         };
         if generic {
             self.context.pop_type_parameters();
         }
+        self.context.current_package = previous_package;
         let labels = sig
             .optional
             .iter()
-            .map(|&optional| crate::tast::core::FunctionArgLabel {
-                name: None,
+            .zip(&sig.param_names)
+            .map(|(&optional, name)| crate::tast::core::FunctionArgLabel {
+                name: Some(self.context.intern_string(name)),
                 optional,
             })
             .collect();
@@ -2486,8 +2499,10 @@ impl<'a> AstLowering<'a> {
         // question) is re-expanded HERE, where locals upstream of this site
         // are typed and this lowering can answer as the MacroTyper. The
         // result replaces the call and lowers in its place.
-        if !self.deferred_macro_calls.is_empty() {
-            let key = (expression.span.start, expression.span.end);
+        let macro_key = (expression.span.start, expression.span.end);
+        if !self.failed_editor_macros.contains(&macro_key) && !self.deferred_macro_calls.is_empty()
+        {
+            let key = macro_key;
             if let Some(name) = self.deferred_macro_calls.get(&key).cloned() {
                 let expected = self
                     .var_init_expected
@@ -2505,16 +2520,27 @@ impl<'a> AstLowering<'a> {
                 match expanded {
                     Ok(result) => return self.lower_expression(&result),
                     Err(e) => {
-                        return Err(LoweringError::SemanticError {
+                        let error = LoweringError::SemanticError {
                             message: format!("macro '{}' failed during typing: {}", name, e),
                             location: self.context.create_location_from_span(expression.span),
-                        });
+                        };
+                        if !self.recover_macro_errors {
+                            return Err(error);
+                        }
+                        if let LoweringError::SemanticError { message, location } = error {
+                            self.editor_macro_diagnostics.push(
+                                crate::macro_system::MacroDiagnostic::error(message, location),
+                            );
+                        }
+                        self.failed_editor_macros.insert(macro_key);
                     }
                 }
             }
         }
 
-        if let Some(name) = self.static_macro_name(expr) {
+        if !self.failed_editor_macros.contains(&macro_key)
+            && let Some(name) = self.static_macro_name(expr)
+        {
             let expanded = {
                 let mut typer = super::super::macro_defer::DeferredMacroTyper {
                     lowering: self,
@@ -2523,12 +2549,25 @@ impl<'a> AstLowering<'a> {
                     inferred: None,
                 };
                 typer.expand_deferred_call(&name, expression)
+            };
+            match expanded {
+                Ok(expanded) => return self.lower_expression(&expanded),
+                Err(error) => {
+                    let error = LoweringError::SemanticError {
+                        message: format!("macro '{name}' failed during typing: {error}"),
+                        location: self.context.create_location_from_span(expression.span),
+                    };
+                    if !self.recover_macro_errors {
+                        return Err(error);
+                    }
+                    if let LoweringError::SemanticError { message, location } = error {
+                        self.editor_macro_diagnostics.push(
+                            crate::macro_system::MacroDiagnostic::error(message, location),
+                        );
+                    }
+                    self.failed_editor_macros.insert(macro_key);
+                }
             }
-            .map_err(|error| LoweringError::SemanticError {
-                message: format!("macro '{name}' failed during typing: {error}"),
-                location: self.context.create_location_from_span(expression.span),
-            })?;
-            return self.lower_expression(&expanded);
         }
 
         if let Some(expanded) = self.lower_receiver_macro_call(expression, expr, args)? {

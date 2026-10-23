@@ -105,9 +105,8 @@ pub struct MacroExpander {
     /// Classes with a deferred call: their later calls defer too, so calls
     /// sharing the class's macro-time statics still run in source order.
     deferred_classes: std::collections::BTreeSet<String>,
-    /// The ordinary methods of the class being walked: a bare call to one of
-    /// them is that method, even where some macro shares its name.
-    own_methods: std::collections::BTreeSet<String>,
+    /// Runtime names in the current lexical scope take precedence over macros.
+    bound_names: std::collections::BTreeSet<String>,
     /// Import map for the current file: short name → qualified name
     import_map: BTreeMap<String, String>,
     /// The current file's imports as written.
@@ -132,7 +131,7 @@ impl MacroExpander {
             defined_types: Vec::new(),
             hooks: Vec::new(),
             deferred_classes: std::collections::BTreeSet::new(),
-            own_methods: std::collections::BTreeSet::new(),
+            bound_names: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
             file_imports: Vec::new(),
             class_registry: Arc::new(ClassRegistry::new()),
@@ -154,7 +153,7 @@ impl MacroExpander {
             defined_types: Vec::new(),
             hooks: Vec::new(),
             deferred_classes: std::collections::BTreeSet::new(),
-            own_methods: std::collections::BTreeSet::new(),
+            bound_names: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
             file_imports: Vec::new(),
             class_registry: Arc::new(ClassRegistry::new()),
@@ -176,7 +175,7 @@ impl MacroExpander {
             defined_types: Vec::new(),
             hooks: Vec::new(),
             deferred_classes: std::collections::BTreeSet::new(),
-            own_methods: std::collections::BTreeSet::new(),
+            bound_names: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
             file_imports: Vec::new(),
             class_registry: Arc::new(class_registry),
@@ -418,7 +417,7 @@ impl MacroExpander {
         match decl {
             TypeDeclaration::Class(mut class) => {
                 let mut changed = false;
-                self.own_methods = ordinary_methods(&class.fields);
+                self.bound_names = ordinary_fields(&class.fields);
                 let mut new_fields = Vec::with_capacity(class.fields.len());
                 for field in class.fields.drain(..) {
                     // Strip macro function definitions — they're compile-time only
@@ -437,6 +436,7 @@ impl MacroExpander {
                 (TypeDeclaration::Class(class), changed)
             }
             TypeDeclaration::Interface(mut iface) => {
+                self.bound_names = ordinary_fields(&iface.fields);
                 let mut changed = false;
                 let mut new_fields = Vec::with_capacity(iface.fields.len());
                 for field in iface.fields.drain(..) {
@@ -453,7 +453,7 @@ impl MacroExpander {
             // functions are compile-time only as a class's are.
             TypeDeclaration::Abstract(mut abs) => {
                 let mut changed = false;
-                self.own_methods = ordinary_methods(&abs.fields);
+                self.bound_names = ordinary_fields(&abs.fields);
                 let mut new_fields = Vec::with_capacity(abs.fields.len());
                 for field in abs.fields.drain(..) {
                     if field.modifiers.contains(&parser::Modifier::Macro) {
@@ -486,7 +486,8 @@ impl MacroExpander {
             ClassFieldKind::Function(func) => {
                 if let Some(body) = func.body.take() {
                     let backup = body.clone();
-                    match self.walk_expr(*body) {
+                    let names = func.params.iter().map(|param| param.name.clone());
+                    match self.with_bindings(names, |this| this.walk_expr(*body)) {
                         Ok((expanded, did_change)) => {
                             changed = did_change;
                             func.body = Some(Box::new(expanded));
@@ -580,9 +581,46 @@ impl MacroExpander {
     // Expression-level expansion (recursive walk)
     // =====================================================
 
-    /// Walk an expression tree, expanding macro nodes.
-    /// Returns (expanded_expr, did_change).
+    /// Restore lexical bindings even when expansion fails.
+    fn with_bindings<T>(
+        &mut self,
+        names: impl IntoIterator<Item = String>,
+        walk: impl FnOnce(&mut Self) -> Result<T, MacroError>,
+    ) -> Result<T, MacroError> {
+        let previous = self.bound_names.clone();
+        self.bound_names.extend(names);
+        let result = walk(self);
+        self.bound_names = previous;
+        result
+    }
+
+    /// Walk an expression tree, returning the expanded expression and whether it changed.
     fn walk_expr(&mut self, expr: Expr) -> Result<(Expr, bool), MacroError> {
+        let mut origins = self
+            .expansion_origins
+            .iter()
+            .enumerate()
+            .filter(|(_, origin)| origin.expanded_span == expr.span)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if !origins.is_empty() {
+            let source = expanded_expr_source(&expr);
+            origins.retain(|&index| {
+                self.expansion_origins[index].expanded_text.as_deref() == Some(&source)
+            });
+        }
+        let (expanded, changed) = self.walk_expr_inner(expr)?;
+        if changed && !origins.is_empty() {
+            let source = expanded_expr_source(&expanded);
+            for index in origins {
+                self.expansion_origins[index].expanded_span = expanded.span;
+                self.expansion_origins[index].expanded_text = Some(source.clone());
+            }
+        }
+        Ok((expanded, changed))
+    }
+
+    fn walk_expr_inner(&mut self, expr: Expr) -> Result<(Expr, bool), MacroError> {
         match &expr.kind {
             // --- Reification fragments ---
             //
@@ -603,9 +641,11 @@ impl MacroExpander {
 
             // --- Function calls that might be macro calls ---
             ExprKind::Call { expr: callee, args } => {
-                if let Some(macro_name) = extract_macro_call_name(callee)
-                    .filter(|name| name.contains('.') || !self.own_methods.contains(name))
-                {
+                if let Some(macro_name) = extract_macro_call_name(callee).filter(|name| {
+                    !self
+                        .bound_names
+                        .contains(name.split('.').next().unwrap_or(name))
+                }) {
                     let (head, tail) = macro_name
                         .split_once('.')
                         .map_or((macro_name.as_str(), None), |(head, tail)| {
@@ -671,6 +711,14 @@ impl MacroExpander {
             | ExprKind::Unary { .. }
             | ExprKind::Ternary { .. }
             | ExprKind::Paren(_)
+            | ExprKind::Meta { .. }
+            | ExprKind::Cast { .. }
+            | ExprKind::TypeCheck { .. }
+            | ExprKind::Untyped(_)
+            | ExprKind::Inline(_)
+            | ExprKind::Spread(_)
+            | ExprKind::Function(_)
+            | ExprKind::Arrow { .. }
             | ExprKind::Tuple(_)
             | ExprKind::Return(_)
             | ExprKind::Throw(_)
@@ -696,20 +744,22 @@ impl MacroExpander {
         let mut changed = false;
 
         let new_kind = match expr.kind {
-            ExprKind::Block(elements) => {
+            ExprKind::Block(elements) => self.with_bindings([], |this| {
                 let mut new_elements = Vec::with_capacity(elements.len());
                 for elem in elements {
                     match elem {
                         BlockElement::Expr(e) => {
-                            let (expanded, c) = self.walk_expr(e)?;
+                            let name = expression_binding(&e);
+                            let (expanded, c) = this.walk_expr(e)?;
+                            this.bound_names.extend(name);
                             changed |= c;
                             new_elements.push(BlockElement::Expr(expanded));
                         }
                         other => new_elements.push(other),
                     }
                 }
-                ExprKind::Block(new_elements)
-            }
+                Ok(ExprKind::Block(new_elements))
+            })?,
 
             ExprKind::If {
                 cond,
@@ -760,7 +810,8 @@ impl MacroExpander {
                 body,
             } => {
                 let (iter_exp, c1) = self.walk_expr(*iter)?;
-                let (bod, c2) = self.walk_expr(*body)?;
+                let names = std::iter::once(var_name.clone()).chain(key_var.clone());
+                let (bod, c2) = self.with_bindings(names, |this| this.walk_expr(*body))?;
                 changed |= c1 | c2;
                 ExprKind::For {
                     var: var_name,
@@ -790,6 +841,75 @@ impl MacroExpander {
                 let (expanded, c) = self.walk_expr(*inner)?;
                 changed |= c;
                 ExprKind::Paren(Box::new(expanded))
+            }
+
+            ExprKind::Meta { meta, expr } => {
+                let (expanded, c) = self.walk_expr(*expr)?;
+                changed |= c;
+                ExprKind::Meta {
+                    meta,
+                    expr: Box::new(expanded),
+                }
+            }
+
+            ExprKind::Cast { expr, type_hint } => {
+                let (expanded, c) = self.walk_expr(*expr)?;
+                changed |= c;
+                ExprKind::Cast {
+                    expr: Box::new(expanded),
+                    type_hint,
+                }
+            }
+
+            ExprKind::TypeCheck { expr, type_hint } => {
+                let (expanded, c) = self.walk_expr(*expr)?;
+                changed |= c;
+                ExprKind::TypeCheck {
+                    expr: Box::new(expanded),
+                    type_hint,
+                }
+            }
+
+            ExprKind::Untyped(inner) => {
+                let (expanded, c) = self.walk_expr(*inner)?;
+                changed |= c;
+                ExprKind::Untyped(Box::new(expanded))
+            }
+
+            ExprKind::Inline(inner) => {
+                let (expanded, c) = self.walk_expr(*inner)?;
+                changed |= c;
+                ExprKind::Inline(Box::new(expanded))
+            }
+
+            ExprKind::Spread(inner) => {
+                let (expanded, c) = self.walk_expr(*inner)?;
+                changed |= c;
+                ExprKind::Spread(Box::new(expanded))
+            }
+
+            ExprKind::Function(mut function) => {
+                if let Some(body) = function.body.take() {
+                    let names = function
+                        .params
+                        .iter()
+                        .map(|param| param.name.clone())
+                        .chain((!function.name.is_empty()).then(|| function.name.clone()));
+                    let (expanded, c) = self.with_bindings(names, |this| this.walk_expr(*body))?;
+                    changed |= c;
+                    function.body = Some(Box::new(expanded));
+                }
+                ExprKind::Function(function)
+            }
+
+            ExprKind::Arrow { params, expr } => {
+                let names = params.iter().map(|param| param.name.clone());
+                let (expanded, c) = self.with_bindings(names, |this| this.walk_expr(*expr))?;
+                changed |= c;
+                ExprKind::Arrow {
+                    params,
+                    expr: Box::new(expanded),
+                }
             }
 
             ExprKind::Tuple(elements) => {
@@ -983,15 +1103,22 @@ impl MacroExpander {
                 changed |= c1;
                 let mut new_cases = Vec::with_capacity(cases.len());
                 for case in cases {
-                    let guard = if let Some(g) = case.guard {
-                        let (expanded, c) = self.walk_expr(g)?;
+                    let mut names = Vec::new();
+                    for pattern in &case.patterns {
+                        pattern_bindings(pattern, &mut names);
+                    }
+                    let (guard, body) = self.with_bindings(names, |this| {
+                        let guard = if let Some(g) = case.guard {
+                            let (expanded, c) = this.walk_expr(g)?;
+                            changed |= c;
+                            Some(expanded)
+                        } else {
+                            None
+                        };
+                        let (body, c) = this.walk_expr(case.body)?;
                         changed |= c;
-                        Some(expanded)
-                    } else {
-                        None
-                    };
-                    let (body, c) = self.walk_expr(case.body)?;
-                    changed |= c;
+                        Ok((guard, body))
+                    })?;
                     new_cases.push(parser::Case {
                         patterns: case.patterns,
                         guard,
@@ -1022,15 +1149,18 @@ impl MacroExpander {
                 changed |= c1;
                 let mut new_catches = Vec::with_capacity(catches.len());
                 for catch in catches {
-                    let filter = if let Some(f) = catch.filter {
-                        let (expanded, c) = self.walk_expr(f)?;
+                    let (filter, body) = self.with_bindings([catch.var.clone()], |this| {
+                        let filter = if let Some(f) = catch.filter {
+                            let (expanded, c) = this.walk_expr(f)?;
+                            changed |= c;
+                            Some(expanded)
+                        } else {
+                            None
+                        };
+                        let (body, c) = this.walk_expr(catch.body)?;
                         changed |= c;
-                        Some(expanded)
-                    } else {
-                        None
-                    };
-                    let (body, c) = self.walk_expr(catch.body)?;
-                    changed |= c;
+                        Ok((filter, body))
+                    })?;
                     new_catches.push(parser::Catch {
                         var: catch.var,
                         type_hint: catch.type_hint,
@@ -1506,16 +1636,59 @@ fn hash_exprs(exprs: &[Expr]) -> u64 {
     hasher.finish()
 }
 
-/// The names of a type's methods that are not macros.
-fn ordinary_methods(fields: &[parser::ClassField]) -> std::collections::BTreeSet<String> {
+/// A type's runtime members shadow macro aliases with the same name.
+fn ordinary_fields(fields: &[parser::ClassField]) -> std::collections::BTreeSet<String> {
     fields
         .iter()
         .filter(|f| !f.modifiers.contains(&parser::Modifier::Macro))
-        .filter_map(|f| match &f.kind {
-            ClassFieldKind::Function(func) => Some(func.name.clone()),
-            _ => None,
+        .map(|f| match &f.kind {
+            ClassFieldKind::Function(func) => func.name.clone(),
+            ClassFieldKind::Var { name, .. }
+            | ClassFieldKind::Final { name, .. }
+            | ClassFieldKind::Property { name, .. } => name.clone(),
         })
         .collect()
+}
+
+fn expression_binding(expr: &Expr) -> Option<String> {
+    match &expr.kind {
+        ExprKind::Var { name, .. } | ExprKind::Final { name, .. } => Some(name.clone()),
+        ExprKind::Function(function) if !function.name.is_empty() => Some(function.name.clone()),
+        ExprKind::Meta { expr, .. } => expression_binding(expr),
+        _ => None,
+    }
+}
+
+fn pattern_bindings(pattern: &parser::Pattern, names: &mut Vec<String>) {
+    use parser::Pattern;
+    match pattern {
+        Pattern::Var(name) if name.starts_with(char::is_lowercase) || name.starts_with('_') => {
+            names.push(name.clone())
+        }
+        Pattern::Type { var, .. } => names.push(var.clone()),
+        Pattern::Bind { name, pattern } => {
+            names.push(name.clone());
+            pattern_bindings(pattern, names);
+        }
+        Pattern::Constructor { params, .. } | Pattern::Array(params) | Pattern::Or(params) => {
+            for pattern in params {
+                pattern_bindings(pattern, names);
+            }
+        }
+        Pattern::ArrayRest { elements, rest } => {
+            for pattern in elements {
+                pattern_bindings(pattern, names);
+            }
+            names.extend(rest.clone());
+        }
+        Pattern::Object { fields } => {
+            for (_, pattern) in fields {
+                pattern_bindings(pattern, names);
+            }
+        }
+        Pattern::Extractor { value, .. } => pattern_bindings(value, names),
+        _ => {}
+    }
 }
 
 /// Extract the name of a potential macro call from a callee expression.
@@ -1810,6 +1983,62 @@ mod tests {
         assert_eq!(macros.len(), 1);
         assert_eq!(macros[0].class_name, "User");
         assert_eq!(macros[0].macro_name, "tink.Json.build");
+    }
+
+    #[test]
+    fn nested_macros_expand_through_runtime_wrappers() {
+        let file = parse(
+            r#"
+            class Macros {
+                static macro function outer() return macro @:generated Macros.inner();
+                static macro function inner() return macro 42;
+            }
+            class Test {
+                static function main() {
+                    var a = Macros.outer();
+                    var b = () -> Macros.outer();
+                    var c = function() return (Macros.outer() : Int);
+                    var d = cast Macros.outer();
+                    var e = untyped Macros.outer();
+                    var f = inline Macros.outer();
+                }
+            }
+        "#,
+        );
+        let result = expand_macros(file);
+        let errors = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == super::super::errors::MacroSeverity::Error)
+            .collect::<Vec<_>>();
+        assert!(errors.is_empty(), "{errors:?}");
+        let test = result
+            .file
+            .declarations
+            .iter()
+            .find_map(|decl| match decl {
+                TypeDeclaration::Class(class) if class.name == "Test" => Some(class),
+                _ => None,
+            })
+            .unwrap();
+        let parser::ClassFieldKind::Function(function) = &test.fields[0].kind else {
+            panic!("expected function")
+        };
+        let source = expanded_expr_source(function.body.as_ref().unwrap());
+        assert!(!source.contains("Macros."), "{source}");
+        assert_eq!(source.matches("42").count(), 6, "{source}");
+        let outer = result
+            .expansion_origins
+            .iter()
+            .filter(|origin| origin.macro_name == "Macros.outer")
+            .collect::<Vec<_>>();
+        assert_eq!(outer.len(), 6);
+        assert!(outer.iter().all(|origin| {
+            origin
+                .expanded_text
+                .as_deref()
+                .is_some_and(|source| source.contains("42") && !source.contains("Macros.inner"))
+        }));
     }
 
     #[test]

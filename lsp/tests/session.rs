@@ -3062,3 +3062,241 @@ fn project_types_index_abstracts_through_their_declared_key_types() {
         "{diagnostics:#?}"
     );
 }
+
+#[test]
+fn package_siblings_resolve_in_static_calls_and_field_chains() {
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp src\n"),
+        (
+            "src/widgets/Size.hx",
+            "package widgets; enum abstract Size(String) to String { var Md = 'md'; }",
+        ),
+        (
+            "src/widgets/State.hx",
+            "package widgets; enum State { Open; Closed; }",
+        ),
+        (
+            "src/widgets/Library.hx",
+            "package widgets; class Library { public static function part():Int return 7; }",
+        ),
+        (
+            "src/widgets/Menu.hx",
+            "package widgets; class Menu { public static var registry:{near:()->Int} = {near:() -> 3}; }",
+        ),
+        (
+            "src/widgets/Panel.hx",
+            "package widgets; class Panel { public function new() {} public function run():Int { var optional:Null<Size> = null; var size:String = (optional == null ? Size.Md : optional : String); var state:State = State.Open; return Library.part() + Menu.registry.near() + widgets.Library.part(); } }",
+        ),
+    ]);
+    let diagnostics = s.open("src/widgets/Panel.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn unrelated_conditional_branches_still_report_a_type_mismatch() {
+    let mut s = Session::start(&[(
+        "Main.hx",
+        "class Main { public static function main() { var value = true ? 'text' : false; } }",
+    )]);
+    let diagnostics = s.open("Main.hx");
+    assert!(
+        diagnostics.iter().any(|d| d["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Type mismatch")
+                && message.contains("String")
+                && message.contains("Bool"))),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn expression_macro_hovers_expose_the_generated_value_type() {
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp src\n"),
+        (
+            "src/widgets/Sheet.hx",
+            "package widgets; class Sheet { public function new() {} public var count:Int = 7; }",
+        ),
+        (
+            "src/widgets/Builder.hx",
+            "package widgets;\n#if macro\nimport haxe.macro.Expr;\n#end\nclass Builder { public static macro function make():ExprOf<Sheet> return macro new widgets.Sheet(); }",
+        ),
+        (
+            "src/Main.hx",
+            "import widgets.Builder;\nclass Main { public static function main() { var sheet = Builder.make(); var count:Int = sheet.count; } }",
+        ),
+    ]);
+    let diagnostics = s.open("src/Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let text = std::fs::read_to_string(s.root.join("src/Main.hx")).unwrap();
+    let column = text.lines().nth(1).unwrap().find("make(").unwrap() + 1;
+    let hover = hover_text(&s.request("textDocument/hover", s.at("src/Main.hx", 1, column as u32)));
+    assert!(
+        hover.contains("Sheet") && !hover.contains("ExprOf"),
+        "{hover}"
+    );
+}
+
+#[test]
+fn runtime_callback_names_shadow_macro_aliases_inside_closures() {
+    let mut s = Session::start(&[
+        (
+            "Generator.hx",
+            "class Generator { public static macro function choose() return macro 'global'; }",
+        ),
+        (
+            "Main.hx",
+            "class Main { static function capture(choose:Void->Int):Void->Int return () -> choose(); public static function main() { var evaluate = (choose:Void->Int) -> choose(); var number:Int = evaluate(() -> 42); { var choose = () -> 43; var callback = () -> choose(); var other:Int = callback(); } var global:String = Generator.choose(); } }",
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn nested_expression_macros_preserve_the_generated_type_and_preview() {
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp src\n"),
+        (
+            "src/widgets/Sheet.hx",
+            "package widgets; class Sheet { public function new() {} public var count:Int = 7; }",
+        ),
+        (
+            "src/widgets/Builder.hx",
+            "package widgets;\n#if macro\nimport haxe.macro.Expr;\n#end\nclass Builder { public static macro function outer(template:Expr):Expr return macro @:generated widgets.Builder.inner($template); public static macro function inner(template:Expr):Expr return macro new widgets.Sheet(); }",
+        ),
+        (
+            "src/Main.hx",
+            "class Main { public static function main() { var sheet = widgets.Builder.outer('body'); var count:Int = sheet.count; } }",
+        ),
+    ]);
+    let diagnostics = s.open("src/Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let text = std::fs::read_to_string(s.root.join("src/Main.hx")).unwrap();
+    let column = text.find("sheet =").unwrap() as u32 + 1;
+    let hover = hover_text(&s.request("textDocument/hover", s.at("src/Main.hx", 0, column)));
+    assert!(
+        hover.contains("Sheet") && !hover.contains("Dynamic"),
+        "{hover}"
+    );
+    let column = text.find("outer(").unwrap() as u32 + 1;
+    let preview = s.request("rayzor/expandMacro", s.at("src/Main.hx", 0, column));
+    let expansion = preview["expansion"].as_str().unwrap_or_default();
+    assert!(
+        expansion.contains("new widgets.Sheet") && !expansion.contains("Builder.inner"),
+        "{preview}"
+    );
+}
+
+#[test]
+fn unavailable_expression_macros_keep_their_declared_runtime_type() {
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp src\n"),
+        (
+            "src/widgets/Sheet.hx",
+            "package widgets; class Sheet { public function new() {} public var count:Int = 7; }",
+        ),
+        (
+            "src/widgets/Builder.hx",
+            "package widgets;\n#if macro\nimport haxe.macro.Expr;\n#end\nclass Builder { public static macro function make(template:Expr):ExprOf<Sheet> { throw 'unavailable dependency'; } }",
+        ),
+        (
+            "src/Main.hx",
+            "import widgets.Builder; import widgets.Sheet;\nclass Main { public static function main() { var sheet:Sheet = Builder.make('body'); var count:Int = sheet.count; } }",
+        ),
+    ]);
+    let diagnostics = s.open("src/Main.hx");
+    assert!(
+        diagnostics.iter().any(|d| d["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("unavailable dependency"))),
+        "{diagnostics:#?}"
+    );
+    assert!(
+        !diagnostics.iter().any(|d| d["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("Type mismatch") || m.contains("Cannot find"))),
+        "{diagnostics:#?}"
+    );
+    let text = std::fs::read_to_string(s.root.join("src/Main.hx")).unwrap();
+    let column = text.lines().nth(1).unwrap().find("make(").unwrap() + 1;
+    let hover = hover_text(&s.request("textDocument/hover", s.at("src/Main.hx", 1, column as u32)));
+    assert!(
+        hover.contains("function make") && hover.contains("Sheet") && !hover.contains("ExprOf"),
+        "{hover}"
+    );
+}
+
+#[test]
+fn recovered_typed_macros_still_check_the_payload_type() {
+    let mut s = Session::start(&[
+        (
+            "Builder.hx",
+            "#if macro\nimport haxe.macro.Expr;\n#end\nclass Builder { public static macro function make(value:ExprOf<Int>):ExprOf<Int> { throw 'unavailable dependency'; } }",
+        ),
+        (
+            "Main.hx",
+            "class Main { public static function main() { var count:Int = Builder.make('wrong'); } }",
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(
+        diagnostics.iter().any(|d| d["message"]
+            .as_str()
+            .is_some_and(|message| message == "Type mismatch: expected `Int`, found `String`")),
+        "{diagnostics:#?}"
+    );
+    assert!(
+        !diagnostics.iter().any(|d| d["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Type mismatch") && message.contains("Expr"))),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn nested_library_sources_keep_the_build_flags_and_resolve_siblings() {
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp src\n-D feature=enabled\n"),
+        (
+            "lib/haxelib.json",
+            r#"{"name":"widgets","classPath":"haxe"}"#,
+        ),
+        (
+            "lib/haxe/widgets/Library.hx",
+            "package widgets; class Library { public static function part():Int return 7; }",
+        ),
+        (
+            "lib/haxe/widgets/Size.hx",
+            "package widgets; enum abstract Size(String) to String { var Md = 'md'; }",
+        ),
+        (
+            "lib/haxe/widgets/Panel.hx",
+            "package widgets;\n#if (feature == 'enabled')\nclass Panel { public function run():Int { var size:String = Size.Md; return Library.part(); } }\n#else\ninvalid syntax\n#end",
+        ),
+    ]);
+    let diagnostics = s.open("lib/haxe/widgets/Panel.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let source = std::fs::read_to_string(s.root.join("lib/haxe/widgets/Panel.hx")).unwrap();
+    let column = source.lines().nth(2).unwrap().find("Library.part").unwrap() as u32 + 1;
+    let hover = hover_text(&s.request(
+        "textDocument/hover",
+        s.at("lib/haxe/widgets/Panel.hx", 2, column),
+    ));
+    assert!(hover.contains("Library"), "{hover}");
+}
+
+#[test]
+fn quoted_arrow_parameters_reify_names_and_types() {
+    let mut s = Session::start(&[
+        (
+            "Builder.hx",
+            "#if macro\nimport haxe.macro.Expr;\n#end\nclass Builder { public static macro function make():Expr { var name = 'number'; var hint = macro : Int; return macro ($name:$hint) -> $i{name} + 1; } }",
+        ),
+        (
+            "Main.hx",
+            "class Main { public static function main() { var increment = Builder.make(); var result:Int = increment(3); } }",
+        ),
+    ]);
+    assert!(s.open("Main.hx").is_empty(), "{:?}", s.diagnostics);
+}

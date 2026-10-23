@@ -80,6 +80,11 @@ impl<'a> TypeCheckingPhase<'a> {
             for _ in 0..64 {
                 object_type = type_table.resolve_alias_type(object_type);
                 match type_table.get(object_type).map(|ty| &ty.kind) {
+                    Some(super::TypeKind::GenericInstance { base_type, .. })
+                        if *base_type != object_type =>
+                    {
+                        object_type = *base_type;
+                    }
                     Some(super::TypeKind::Optional { inner_type })
                         if *inner_type != object_type =>
                     {
@@ -97,6 +102,14 @@ impl<'a> TypeCheckingPhase<'a> {
 
         match &type_kind {
             super::TypeKind::Class {
+                symbol_id: class_symbol,
+                ..
+            }
+            | super::TypeKind::Abstract {
+                symbol_id: class_symbol,
+                ..
+            }
+            | super::TypeKind::Enum {
                 symbol_id: class_symbol,
                 ..
             } => {

@@ -171,6 +171,15 @@ impl LspContext {
     }
 
     pub(crate) fn settings_for_uri(&self, uri: &str) -> crate::build_config::Settings {
+        let mut settings = self.project_settings_for_uri(uri);
+        crate::build_config::include_source_library(
+            &mut settings,
+            &PathBuf::from(uri_to_path(uri)),
+        );
+        settings
+    }
+
+    fn project_settings_for_uri(&self, uri: &str) -> crate::build_config::Settings {
         let path = PathBuf::from(uri_to_path(uri));
         let path = path.canonicalize().unwrap_or(path);
         let owner = self
@@ -1424,6 +1433,85 @@ mod cache_tests {
                     diagnostics.is_empty(),
                     "{:?}",
                     diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the sibling RayDE workspace and ashui components"]
+    fn rayde_components_resolve_package_types() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                for workspace_root in ["../../RayDE", "../../ashui"] {
+                    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join(workspace_root)
+                        .canonicalize()
+                        .unwrap();
+                    let mut context = LspContext::new(root.clone());
+                    context.load_workspace_config(None);
+                    context.initialization_macros.clear();
+                    context.macro_budget = std::time::Duration::from_millis(500);
+                    for name in ["Accordion", "ContextMenu", "Library", "Input"] {
+                        let path = root
+                            .join(format!(
+                                "../ashui/components/haxe/ashui/components/{name}.hx"
+                            ))
+                            .canonicalize()
+                            .unwrap();
+                        let source = std::fs::read_to_string(&path).unwrap();
+                        let uri = file_uri(path.to_str().unwrap());
+                        context.open_files.insert(uri.clone(), source.clone());
+                        let diagnostics = context.compile_file(&uri, &source);
+                        assert!(
+                            !diagnostics
+                                .iter()
+                                .any(|d| d.message == "Cannot find name 'Library'"
+                                    || d.message == "Cannot find type 'DropdownMenu'"
+                                    || d.message == "Cannot find name 'Size'"),
+                            "{name}: missing package type"
+                        );
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires sibling RayDE; macro interpreter lacks ParserSource conversion"]
+    fn rayde_markup_reaches_the_generated_div_type() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../RayDE")
+                    .canonicalize()
+                    .unwrap();
+                let mut context = LspContext::new(root.clone());
+                context.load_workspace_config(None);
+                context.initialization_macros.clear();
+                let path = root.join("src/MacroDslProbe.hx");
+                let source = "@:build(ashui.ui.Markup.build()) class MacroDslProbe { public static function main() { var box = <div/>; var node = box.node; } }";
+                let uri = file_uri(path.to_str().unwrap());
+                context.open_files.insert(uri.clone(), source.into());
+                context.compile_file(&uri, source);
+                let column = source.find("box =").unwrap() as u32 + 2;
+                let hover = context.hover_info(&uri, 1, column).unwrap_or_default();
+                assert!(hover.contains("Div"), "box hover: {hover}");
+                let at = source.find("<div/>").unwrap() as u32;
+                let expansion = context
+                    .expand_macro(&uri, lsp_types::Position::new(0, at))
+                    .unwrap();
+                assert!(
+                    expansion["expansion"].as_str().is_some_and(|text| {
+                        text.contains("new") && text.contains("Div") && !text.contains("Hxx.hxx(")
+                    }),
+                    "{expansion}"
                 );
             })
             .unwrap()

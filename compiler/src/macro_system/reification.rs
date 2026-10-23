@@ -320,13 +320,24 @@ impl ReificationEngine {
                 })
             }
 
-            ExprKind::Arrow { params, expr: body } => Ok(Expr {
-                kind: ExprKind::Arrow {
-                    params: params.clone(),
-                    expr: Box::new(Self::process_expr(body, env)?),
-                },
-                span: expr.span,
-            }),
+            ExprKind::Arrow { params, expr: body } => {
+                let mut params = params.clone();
+                for param in &mut params {
+                    param.name = Self::process_name(&param.name, env, expr.span)?;
+                    param.type_hint = param
+                        .type_hint
+                        .as_ref()
+                        .map(|ty| Self::process_type(ty, env))
+                        .transpose()?;
+                }
+                Ok(Expr {
+                    kind: ExprKind::Arrow {
+                        params,
+                        expr: Box::new(Self::process_expr(body, env)?),
+                    },
+                    span: expr.span,
+                })
+            }
 
             ExprKind::Final {
                 name,

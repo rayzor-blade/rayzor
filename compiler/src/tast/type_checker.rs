@@ -1229,9 +1229,9 @@ impl<'a> TypeChecker<'a> {
                 // Now we can make the mutable call without holding references
                 let inner_compat = self.check_compatibility(source_id, inner_type_id);
                 match inner_compat {
-                    TypeCompatibility::Identical | TypeCompatibility::Assignable => {
-                        TypeCompatibility::Assignable
-                    }
+                    TypeCompatibility::Identical
+                    | TypeCompatibility::Assignable
+                    | TypeCompatibility::Convertible => TypeCompatibility::Assignable,
                     _ => TypeCompatibility::Incompatible,
                 }
             }
@@ -1250,6 +1250,8 @@ impl<'a> TypeChecker<'a> {
                         | TypeKind::Class { .. }
                         | TypeKind::Interface { .. }
                         | TypeKind::Enum { .. }
+                        | TypeKind::Abstract { .. }
+                        | TypeKind::GenericInstance { .. }
                         | TypeKind::Anonymous { .. }
                         | TypeKind::Function { .. }
                 ) {
