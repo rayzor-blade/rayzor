@@ -85,6 +85,8 @@ jobs:
           path: |
             compiler/benchmarks/precompiled/*.rzb
             .rayzor/blade/stdlib/stdlib.bsym
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 1
 
       - name: Upload rayzor binaries
@@ -204,7 +206,7 @@ jobs:
       - name: Verify downloads
         run: |
           ls -la compiler/benchmarks/precompiled/*.rzb
-          ls -la .rayzor/blade/stdlib/stdlib.bsym || echo "No bsym found"
+          test -s .rayzor/blade/stdlib/stdlib.bsym
 
       - name: Download rayzor binaries
         uses: actions/download-artifact@v7

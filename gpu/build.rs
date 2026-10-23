@@ -77,7 +77,8 @@ fn main() {
     .expect("xgpu Rayzor model generates");
     std::fs::write(out.join("xgpu_rayzor.rs"), model).expect("xgpu model writes");
 
-    //if let Some(root) = std::env::var_os("XGPU_HAXE_OUT") {
-    write_haxe(&PathBuf::from("haxe")).expect("xgpu Rayzor externs generate");
-    // }
+    let haxe_out = std::env::var_os("XGPU_HAXE_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("haxe"));
+    write_haxe(&haxe_out).expect("xgpu Rayzor externs generate");
 }
