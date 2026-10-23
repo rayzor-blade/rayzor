@@ -337,6 +337,9 @@ pub struct TieredBackend {
     /// Ensures no JIT code is executing when function pointers are replaced
     promotion_barrier: Arc<PromotionBarrier>,
 
+    /// Native compilation done on the calling thread, for startup reports.
+    activity: CompileActivity,
+
     /// Number of loaded MIR modules that have already run startup hooks.
     initialized_module_count: Arc<Mutex<usize>>,
 
@@ -547,6 +550,15 @@ impl Default for BailoutStrategy {
 
 /// Predefined tier presets for common use cases
 ///
+/// Native compilation a backend has done on its own thread: whole-program
+/// Cranelift passes and the interpreter bailouts that triggered them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompileActivity {
+    pub native_passes: u32,
+    pub native_time: std::time::Duration,
+    pub bailouts: u32,
+}
+
 /// Use these presets to quickly configure the tiered backend for your application type.
 /// Each preset is optimized for different performance characteristics:
 ///
@@ -1187,6 +1199,7 @@ impl TieredBackend {
             #[cfg(feature = "llvm-backend")]
             llvm_compiled: Arc::new(Mutex::new(false)),
             promotion_barrier: Arc::new(PromotionBarrier::new()),
+            activity: CompileActivity::default(),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1255,6 +1268,7 @@ impl TieredBackend {
             #[cfg(feature = "llvm-backend")]
             llvm_compiled: Arc::new(Mutex::new(false)),
             promotion_barrier: Arc::new(PromotionBarrier::new()),
+            activity: CompileActivity::default(),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
@@ -2062,6 +2076,7 @@ impl TieredBackend {
             match result {
                 Ok(value) => Ok(value),
                 Err(InterpError::JitBailout(bailout_func_id)) => {
+                    self.activity.bailouts += 1;
                     // Hot loop detected! Promote to JIT and re-execute
                     tracing::trace!(
                         "[TieredBackend] JIT bailout for {:?} - promoting to Baseline tier",
@@ -2478,6 +2493,19 @@ impl TieredBackend {
     /// before executing any function. All modules are compiled to a single Cranelift backend
     /// to allow cross-module function calls.
     fn compile_all_modules_jit(&mut self) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        let result = self.compile_all_modules_jit_now();
+        self.activity.native_passes += 1;
+        self.activity.native_time += started.elapsed();
+        result
+    }
+
+    /// What this backend has compiled to native code on the calling thread.
+    pub fn compile_activity(&self) -> CompileActivity {
+        self.activity
+    }
+
+    fn compile_all_modules_jit_now(&mut self) -> Result<(), String> {
         if self.config.verbosity >= 1 {
             debug!("[TieredBackend] JIT mode: compiling all modules to Cranelift");
         }

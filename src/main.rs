@@ -28,6 +28,7 @@ mod compile_helpers;
 mod debug;
 mod native_libs;
 mod rpkg_cmd;
+mod startup_times;
 mod tui;
 mod wasm_cmd;
 
@@ -794,6 +795,7 @@ where
 use tikv_jemalloc_sys as _;
 
 fn main() {
+    startup_times::process_started();
     rayzor_runtime::crash_diagnostics::install();
     #[cfg(feature = "profile")]
     unsafe {
@@ -1794,6 +1796,7 @@ fn run_file(
         }
 
         // Full compile pipeline
+        startup_times::finished("configure");
         if let Some(ref h) = progress_handle {
             h.begin_phase("compile");
         }
@@ -1872,6 +1875,7 @@ fn run_file(
                 h.end_phase("compile", t_compile.elapsed().as_secs_f64() * 1000.0);
             }
         }
+        startup_times::finished("frontend (parse, typecheck, MIR)");
         // Surface non-fatal compile WARNINGS (errors already abort the compile).
         // e.g. the untyped-empty-array "uncertain element type" warning. Rendered
         // through the standard diagnostic formatter, like errors.
@@ -1923,6 +1927,7 @@ fn run_file(
                 }
                 h.set_shake_stats(before, after);
             }
+            startup_times::finished("tree shake");
         }
 
         // Run O2 pass manager to expand Haxe `inline` functions, apply SRA, and
@@ -1968,6 +1973,7 @@ fn run_file(
             }
         }
 
+        startup_times::finished("MIR optimize");
         if let Some(ref h) = progress_handle {
             h.set_functions(mir_module.functions.len());
         }
@@ -2073,6 +2079,7 @@ fn run_file(
     // main is entered once and any LLVM upgrade happens before it runs, so no
     // running baseline loop ever has optimised code to move into.
     backend.set_osr_probes(false);
+    startup_times::finished("backend construction");
 
     // Compile module with tiered JIT
     if let Some(ref h) = progress_handle {
@@ -2080,6 +2087,7 @@ fn run_file(
     }
     let t_jit = progress_handle.is_some().then(std::time::Instant::now);
     backend.compile_module(mir_module)?;
+    startup_times::finished("module registration");
     if let Some(ref h) = progress_handle {
         if let Some(t_jit) = t_jit {
             h.end_phase("jit", t_jit.elapsed().as_secs_f64() * 1000.0);
@@ -2102,6 +2110,7 @@ fn run_file(
     backend
         .initialize_loaded_modules()
         .map_err(|e| format!("module initialization failed: {}", e))?;
+    startup_times::finished("module init (native compile + static init)");
 
     // Once module init has populated globals/vtables, force every reachable
     // function up to LLVM (Maximum tier) before main runs.
@@ -2146,6 +2155,10 @@ fn run_file(
         }
     }
 
+    if auto_upgrade_to_llvm {
+        startup_times::finished("LLVM upgrade");
+    }
+
     // Initialize Sys.args() before running Haxe code
     rayzor_runtime::haxe_sys::init_program_args(&program_args);
 
@@ -2161,9 +2174,19 @@ fn run_file(
     }
 
     // Execute main function
+    let native_before_main = backend.compile_activity().native_time;
+    startup_times::finished("ready to enter main");
     backend
         .execute_function(main_func_id, vec![])
         .map_err(|e| format!("Execution failed: {}", e))?;
+    startup_times::finished("main returned");
+    let activity = backend.compile_activity();
+    startup_times::report(
+        native_before_main,
+        activity.native_time,
+        activity.native_passes,
+        activity.bailouts,
+    );
 
     // A published resume point proves only that one was compiled. Report the
     // transfers that actually happened, so a run where none did is not mistaken
