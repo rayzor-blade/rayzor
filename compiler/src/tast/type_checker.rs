@@ -1039,6 +1039,7 @@ pub struct TypeChecker<'a> {
     subtype_cache: BTreeMap<(TypeId, TypeId), bool>,
 
     checking_conversions: std::collections::BTreeSet<(TypeId, TypeId)>,
+    checking_structures: std::collections::BTreeSet<(TypeId, TypeId)>,
 
     /// Generic instantiation context
     generic_context: GenericContext,
@@ -1100,6 +1101,7 @@ impl<'a> TypeChecker<'a> {
             errors: Vec::new(),
             subtype_cache: BTreeMap::new(),
             checking_conversions: Default::default(),
+            checking_structures: Default::default(),
             generic_context: GenericContext::default(),
             stats: TypeCheckerStats {
                 types_checked: 0,
@@ -1118,13 +1120,13 @@ impl<'a> TypeChecker<'a> {
 
     /// Check if two types are compatible
     pub fn check_compatibility(&mut self, source: TypeId, target: TypeId) -> TypeCompatibility {
-        let (source, target) = {
-            let table = self.type_table.borrow();
-            (
-                table.resolve_alias_type(source),
-                table.resolve_alias_type(target),
-            )
+        let substitutions = super::type_substitution::TypeSubstitutions {
+            type_table: self.type_table,
+            symbol_table: self.symbol_table,
+            class_type_params: None,
         };
+        let source = substitutions.resolve_alias_type(source);
+        let target = substitutions.resolve_alias_type(target);
         // Increment stats counter
         self.stats.types_checked += 1;
 
@@ -1469,19 +1471,54 @@ impl<'a> TypeChecker<'a> {
                     fields: tgt_fields, ..
                 },
             ) => {
-                // All target fields must exist in source (by name)
-                let all_found = tgt_fields
-                    .iter()
-                    .all(|tf| src_fields.iter().any(|sf| sf.name == tf.name));
-                if all_found {
-                    if src_fields.len() == tgt_fields.len() {
-                        TypeCompatibility::Identical
-                    } else {
-                        TypeCompatibility::Assignable
+                // Recursive structures satisfy a field already being compared.
+                if !self.checking_structures.insert((source_id, _target_id)) {
+                    return TypeCompatibility::Assignable;
+                }
+                let compatible = tgt_fields.iter().all(|target| {
+                    match src_fields.iter().find(|source| source.name == target.name) {
+                        Some(source) => {
+                            (!source.optional || target.optional)
+                                && (!target.is_public || source.is_public)
+                                && self.check_compatibility(source.type_id, target.type_id)
+                                    != TypeCompatibility::Incompatible
+                        }
+                        None => target.optional,
                     }
+                });
+                self.checking_structures.remove(&(source_id, _target_id));
+                if compatible {
+                    TypeCompatibility::Assignable
                 } else {
                     TypeCompatibility::Incompatible
                 }
+            }
+
+            (TypeKind::Array { element_type }, TypeKind::Anonymous { .. }) => {
+                // Array's iterator returns its element type even when no
+                // Array declaration has been lowered in this unit.
+                let structure = {
+                    use super::core::AnonymousField;
+                    let mut table = self.type_table.borrow_mut();
+                    let boolean = table.bool_type();
+                    let has_next = table.create_function_type(Vec::new(), boolean);
+                    let next = table.create_function_type(Vec::new(), *element_type);
+                    let field = |name: &str, type_id| AnonymousField {
+                        name: self.string_interner.intern(name),
+                        type_id,
+                        is_public: true,
+                        optional: false,
+                    };
+                    let iterator = table.create_type(TypeKind::Anonymous {
+                        fields: vec![field("hasNext", has_next), field("next", next)],
+                    });
+                    let iterator = table.create_function_type(Vec::new(), iterator);
+                    let integer = table.int_type();
+                    table.create_type(TypeKind::Anonymous {
+                        fields: vec![field("iterator", iterator), field("length", integer)],
+                    })
+                };
+                self.check_compatibility(structure, _target_id)
             }
 
             // === Structural Subtyping: Anonymous ← Class ===

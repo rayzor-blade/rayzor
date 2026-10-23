@@ -3300,3 +3300,49 @@ fn quoted_arrow_parameters_reify_names_and_types() {
     ]);
     assert!(s.open("Main.hx").is_empty(), "{:?}", s.diagnostics);
 }
+
+#[test]
+fn lambda_find_accepts_arrays_as_iterables() {
+    let source = "class Element { public function new() {} }\nclass Summary extends Element { public function new() { super(); } }\ntypedef Stream<T> = { function iterator():Iterator<T>; }\nclass Main {\n    static function main() {\n        var children:Array<Dynamic> = [new Summary()];\n        var summary:Null<Element> = Lambda.find(children, c -> Std.isOfType(c, Summary));\n        var numbers:Array<Int> = [1, 2, 3];\n        var found:Null<Int> = Lambda.find(numbers, n -> n > 1);\n        var stream:Stream<Int> = numbers;\n        var iterable:Iterable<Int> = numbers;\n    }\n}";
+    for configuration in [
+        ("build.hxml", "-cp .\n"),
+        (
+            "rayzor.toml",
+            "[project]\nname = 'iterable-test'\n[cache]\nenabled = false\n",
+        ),
+    ] {
+        let mut s = Session::start(&[configuration, ("Main.hx", source)]);
+        let diagnostics = s.open("Main.hx");
+        assert!(
+            diagnostics.is_empty(),
+            "{}: {diagnostics:#?}",
+            configuration.0
+        );
+    }
+}
+
+#[test]
+fn iterable_arguments_still_check_structure_and_element_types() {
+    let mut s = Session::start(&[
+        (
+            "custom/Iterable.hx",
+            "package custom; class Iterable<T> { public function new() {} }",
+        ),
+        (
+            "Main.hx",
+            "typedef Stream<T> = { function iterator():Iterator<T>; }\nclass Main {\n    static function ints(values:Iterable<Int>) {}\n    static function main() {\n        ints(['wrong']);\n        var invalid:Stream<Int> = ['wrong'];\n        var notAnIterator:Iterator<Int> = [1, 2];\n        var wrongMethod:Iterable<Int> = {iterator:() -> 'wrong'};\n        var nominal:custom.Iterable<Int> = [1, 2];\n    }\n}",
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    for line in 4..=8 {
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic["range"]["start"]["line"] == line
+                    && diagnostic["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("Type mismatch"))
+            }),
+            "line {line}: {diagnostics:#?}"
+        );
+    }
+}

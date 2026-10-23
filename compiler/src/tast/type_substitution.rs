@@ -10,6 +10,85 @@ pub(crate) struct TypeSubstitutions<'a> {
 }
 
 impl TypeSubstitutions<'_> {
+    /// Expand transparent typedefs, including forward Class nodes, with each
+    /// use's arguments bound to the declaration's parameters.
+    pub(crate) fn resolve_alias_type(&self, mut ty: TypeId) -> TypeId {
+        for _ in 0..64 {
+            let expansion = {
+                let table = self.type_table.borrow();
+                let Some(kind) = table.get(ty).map(|t| &t.kind) else {
+                    break;
+                };
+                if let TypeKind::Reference { target_type, .. } = kind {
+                    ty = *target_type;
+                    continue;
+                }
+                let (base, args) = match kind {
+                    TypeKind::GenericInstance {
+                        base_type,
+                        type_args,
+                        ..
+                    } => (table.get(*base_type).map(|t| &t.kind), type_args),
+                    TypeKind::Class { type_args, .. } | TypeKind::TypeAlias { type_args, .. } => {
+                        (Some(kind), type_args)
+                    }
+                    _ => break,
+                };
+                let (symbol, target) = match base {
+                    Some(TypeKind::TypeAlias {
+                        symbol_id,
+                        target_type,
+                        ..
+                    }) => (*symbol_id, Some(*target_type)),
+                    Some(TypeKind::Class { symbol_id, .. }) => (*symbol_id, None),
+                    _ => break,
+                };
+                let declaration = self
+                    .symbol_table
+                    .get_symbol(symbol)
+                    .and_then(|s| table.get(s.type_id))
+                    .filter(|t| matches!(t.kind, TypeKind::TypeAlias { .. }))
+                    .or_else(|| {
+                        table.types_for_symbol(symbol)?.iter().find_map(|id| {
+                            table.get(*id).filter(|t| {
+                                matches!(&t.kind, TypeKind::TypeAlias { type_args, .. }
+                                    if type_args.iter().all(|p| matches!(table.get(*p).map(|t| &t.kind), Some(TypeKind::TypeParameter { .. }))))
+                            })
+                        })
+                    });
+                let Some(TypeKind::TypeAlias {
+                    target_type,
+                    type_args: parameters,
+                    ..
+                }) = declaration.map(|t| &t.kind)
+                else {
+                    if let Some(target) = target {
+                        ty = target;
+                        continue;
+                    }
+                    break;
+                };
+                let bindings: Vec<_> = parameters
+                    .iter()
+                    .zip(args)
+                    .filter_map(|(parameter, argument)| {
+                        match table.get(*parameter).map(|t| &t.kind) {
+                            Some(TypeKind::TypeParameter { symbol_id, .. })
+                                if parameter != argument =>
+                            {
+                                Some((*symbol_id, *argument))
+                            }
+                            _ => None,
+                        }
+                    })
+                    .collect();
+                (target.unwrap_or(*target_type), bindings)
+            };
+            ty = self.substitute_type_bindings(expansion.0, &expansion.1, false);
+        }
+        ty
+    }
+
     pub(crate) fn substitute_receiver_type(&self, member_type: TypeId, receiver: TypeId) -> TypeId {
         let mut bindings = Vec::new();
         let mut current = receiver;
