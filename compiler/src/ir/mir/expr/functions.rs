@@ -456,6 +456,15 @@ impl<'a> HirToMirContext<'a> {
             if !self.is_terminated() && !self.derive_drop_classes.is_empty() {
                 self.cleanup_drop_classes_only();
             }
+            // The typer requires every path of a non-void function to return,
+            // so falling off its end (after `while (true)`) cannot happen.
+            let returns_value = self
+                .builder
+                .current_function()
+                .is_some_and(|f| !matches!(f.signature.return_type, crate::ir::IrType::Void));
+            if returns_value && !self.is_terminated() {
+                self.builder.build_unreachable();
+            }
             self.ensure_terminator();
         } else {
             debug!("[lower_function_body]: {} has NO body", func_name);
