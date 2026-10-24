@@ -726,3 +726,117 @@ fn suspended_stacks_resume_without_replaying() {
     assert!(matches!(r, InterpValue::I64(499_510)), "{:?}", r);
     assert_eq!(RESUME_CALLS.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+/// A loop resumed at its inner header finishes the enclosing loop as well: the
+/// outer loop's values arrive in the frame and are redefined on the way round.
+#[test]
+fn an_inner_loop_resumes_through_its_enclosing_loop() {
+    // acc = 0; for (i in 0...n) { row = i * 10; for (j in 0...n) acc += row + j; }
+    let mut b = MirBuilder::new("t");
+    let f = b
+        .begin_function("nested")
+        .param("n", IrType::I64)
+        .returns(IrType::I64)
+        .build();
+    b.set_current_function(f);
+    let entry = b.create_block("entry");
+    let outer_h = b.create_block("outer_h");
+    let outer_body = b.create_block("outer_body");
+    let inner_h = b.create_block("inner_h");
+    let inner_body = b.create_block("inner_body");
+    let outer_latch = b.create_block("outer_latch");
+    let exit = b.create_block("exit");
+    let n = b.get_param(0);
+    b.set_insert_point(entry);
+    let zero = b.const_i64(0);
+    b.br(outer_h);
+    let (i, acc_outer, j, acc_inner) = (b.alloc_reg(), b.alloc_reg(), b.alloc_reg(), b.alloc_reg());
+    b.set_insert_point(outer_h);
+    let more_i = b.cmp(CompareOp::Lt, i, n);
+    b.cond_br(more_i, outer_body, exit);
+    b.set_insert_point(outer_body);
+    let ten = b.const_i64(10);
+    let row = b.bin_op(BinaryOp::Mul, i, ten);
+    b.br(inner_h);
+    b.set_insert_point(inner_h);
+    let more_j = b.cmp(CompareOp::Lt, j, n);
+    b.cond_br(more_j, inner_body, outer_latch);
+    b.set_insert_point(inner_body);
+    let cell = b.bin_op(BinaryOp::Add, row, j);
+    let acc_next = b.bin_op(BinaryOp::Add, acc_inner, cell);
+    let one = b.const_i64(1);
+    let j_next = b.bin_op(BinaryOp::Add, j, one);
+    b.br(inner_h);
+    b.set_insert_point(outer_latch);
+    let one_outer = b.const_i64(1);
+    let i_next = b.bin_op(BinaryOp::Add, i, one_outer);
+    b.br(outer_h);
+    b.set_insert_point(exit);
+    b.ret(Some(acc_outer));
+    let mut m = b.finish();
+    for (block, dest, incoming) in [
+        (outer_h, i, vec![(entry, zero), (outer_latch, i_next)]),
+        (
+            outer_h,
+            acc_outer,
+            vec![(entry, zero), (outer_latch, acc_inner)],
+        ),
+        (inner_h, j, vec![(outer_body, zero), (inner_body, j_next)]),
+        (
+            inner_h,
+            acc_inner,
+            vec![(outer_body, acc_outer), (inner_body, acc_next)],
+        ),
+    ] {
+        phi(
+            &mut m,
+            f,
+            block,
+            IrPhiNode {
+                dest,
+                incoming,
+                ty: IrType::I64,
+            },
+        );
+    }
+
+    let mut interp = MirInterpreter::new();
+    interp.set_max_iterations(u64::MAX);
+    let whole = interp.execute(&m, f, vec![InterpValue::I64(3)]).unwrap();
+    assert!(matches!(whole, InterpValue::I64(99)), "{:?}", whole);
+
+    let variant = crate::ir::osr::build_resume_variant(&m.functions[&f], inner_h, IrFunctionId(99))
+        .expect("an inner header resumes");
+    // Entering the inner header with i = 1, j = 2: the cells so far sum to 24,
+    // the outer loop's running total to 3.
+    let state = |r: IrId| match r {
+        r if r == i => 1,
+        r if r == row => 10,
+        r if r == j => 2,
+        r if r == acc_inner => 24,
+        r if r == acc_outer => 3,
+        r if r == n => 3,
+        r if r == zero => 0,
+        other => panic!("unexpected live value {other:?}"),
+    };
+    let layout = &variant.layout;
+    let mut frame = vec![0u64; (layout.frame.size as usize).div_ceil(8).max(1)];
+    for (k, param) in layout.params.iter().enumerate() {
+        let reg = match param {
+            crate::ir::osr::OsrParam::HeaderPhi { phi_dest } => *phi_dest,
+            crate::ir::osr::OsrParam::Live(v) => *v,
+        };
+        frame[layout.frame.offsets[k] as usize / 8] = state(reg);
+    }
+    m.add_function(variant.function);
+    let mut interp = MirInterpreter::new();
+    interp.set_max_iterations(u64::MAX);
+    let resumed = interp
+        .execute(
+            &m,
+            IrFunctionId(99),
+            vec![InterpValue::Ptr(frame.as_mut_ptr() as usize)],
+        )
+        .unwrap();
+    assert!(matches!(resumed, InterpValue::I64(99)), "{:?}", resumed);
+}

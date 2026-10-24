@@ -705,7 +705,10 @@ fn terminator_uses(term: &IrTerminator) -> Vec<IrId> {
 }
 
 /// Replace register uses in a terminator
-fn replace_terminator_uses(term: &mut IrTerminator, replacements: &BTreeMap<IrId, IrId>) {
+pub(super) fn replace_terminator_uses(
+    term: &mut IrTerminator,
+    replacements: &BTreeMap<IrId, IrId>,
+) {
     match term {
         IrTerminator::CondBranch { condition, .. } => {
             if let Some(&new_reg) = replacements.get(condition) {

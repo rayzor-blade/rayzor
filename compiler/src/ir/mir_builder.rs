@@ -160,6 +160,13 @@ impl MirBuilder {
     pub fn alloc_reg(&mut self) -> IrId {
         let id = IrId::new(self.next_reg_id);
         self.next_reg_id += 1;
+        // Passes that add registers number them from the function's count.
+        if let Some(func) = self
+            .current_function
+            .and_then(|f| self.module.functions.get_mut(&f))
+        {
+            func.next_reg_id = func.next_reg_id.max(self.next_reg_id);
+        }
         id
     }
 

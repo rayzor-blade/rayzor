@@ -25,7 +25,7 @@
 //! the value in registers. It is also the only shape that scales, since a
 //! header deep in a nest legitimately carries scores of live values.
 
-use super::blocks::{IrBasicBlock, IrTerminator};
+use super::blocks::{IrBasicBlock, IrPhiNode, IrTerminator};
 use super::functions::{IrFunction, IrFunctionId, IrParameter};
 use super::instructions::IrInstruction;
 use super::loop_analysis::DominatorTree;
@@ -575,9 +575,9 @@ fn layout(func: &IrFunction, header: IrBlockId, relaxed: bool) -> Result<OsrLayo
     let defs = definition_blocks(func);
     let def_insts = definitions(func);
 
-    // The header's phis are the loop-carried values. They lead the frame, and
-    // the walk below skips the header's own incomings: those are precisely what
-    // resuming replaces.
+    // The header's phis are the loop-carried values. They lead the frame, which
+    // replaces the incoming on the edge a transfer takes; the incomings on the
+    // variant's own edges are read like any other use.
     let mut params: Vec<OsrParam> = Vec::new();
     let mut types: Vec<IrType> = Vec::new();
     let mut seen: BTreeSet<IrId> = BTreeSet::new();
@@ -588,12 +588,34 @@ fn layout(func: &IrFunction, header: IrBlockId, relaxed: bool) -> Result<OsrLayo
     }
     let phi_count = params.len();
 
+    // Blocks the header reaches without passing `block`: where a value `block`
+    // defines is still the one the frame held.
+    let mut around: BTreeMap<IrBlockId, BTreeSet<IrBlockId>> = BTreeMap::new();
+    let mut reached_around = |block: IrBlockId| {
+        around
+            .entry(block)
+            .or_insert_with(|| {
+                let mut seen = BTreeSet::new();
+                let mut queue = VecDeque::from([header]);
+                while let Some(b) = queue.pop_front() {
+                    if b == block || !seen.insert(b) {
+                        continue;
+                    }
+                    queue.extend(func.cfg.blocks[&b].successors());
+                }
+                seen
+            })
+            .clone()
+    };
+
+    // `at` is the block the use is in, or the predecessor a phi reads it from.
     let mut consider = |v: IrId,
+                        at: IrBlockId,
                         params: &mut Vec<OsrParam>,
                         types: &mut Vec<IrType>,
                         seen: &mut BTreeSet<IrId>|
      -> Result<(), OsrReject> {
-        if !seen.insert(v) {
+        if seen.contains(&v) {
             return Ok(());
         }
         let Some(&db) = defs.get(&v) else {
@@ -605,6 +627,11 @@ fn layout(func: &IrFunction, header: IrBlockId, relaxed: bool) -> Result<OsrLayo
         if dominated.contains(&db) || (region.contains(&db) && !cycle.contains(&db)) {
             return Ok(());
         }
+        // A use only the variant's own definition reaches needs nothing here.
+        if relaxed && region.contains(&db) && !reached_around(db).contains(&at) {
+            return Ok(());
+        }
+        seen.insert(v);
         let recorded = func
             .register_types
             .get(&v)
@@ -626,22 +653,20 @@ fn layout(func: &IrFunction, header: IrBlockId, relaxed: bool) -> Result<OsrLayo
 
     for &b in &region {
         let block = &func.cfg.blocks[&b];
-        if b != header {
-            for phi in &block.phi_nodes {
-                for (pred, val) in &phi.incoming {
-                    if region.contains(pred) {
-                        consider(*val, &mut params, &mut types, &mut seen)?;
-                    }
+        for phi in &block.phi_nodes {
+            for (pred, val) in &phi.incoming {
+                if region.contains(pred) {
+                    consider(*val, *pred, &mut params, &mut types, &mut seen)?;
                 }
             }
         }
         for inst in &block.instructions {
             for u in inst.uses() {
-                consider(u, &mut params, &mut types, &mut seen)?;
+                consider(u, b, &mut params, &mut types, &mut seen)?;
             }
         }
         for u in terminator_uses(&block.terminator) {
-            consider(u, &mut params, &mut types, &mut seen)?;
+            consider(u, b, &mut params, &mut types, &mut seen)?;
         }
     }
 
@@ -652,18 +677,21 @@ fn layout(func: &IrFunction, header: IrBlockId, relaxed: bool) -> Result<OsrLayo
     // A block other than the header that is also entered from outside the
     // region and leads back to the header would, on that edge, redefine values
     // the frame supplies. One past the loop only loses incomings the variant
-    // can never take.
-    for &b in &cycle {
-        if b == header {
-            continue;
-        }
-        let block = &func.cfg.blocks[&b];
-        if block
-            .predecessors
-            .iter()
-            .any(|p| !region.contains(p) && *p != header)
-        {
-            return Err(OsrReject::RegionHasExternalEntry);
+    // can never take. A resume variant instead merges the frame's value with
+    // the redefinition at the header; see `carry_redefined`.
+    if !relaxed {
+        for &b in &cycle {
+            if b == header {
+                continue;
+            }
+            let block = &func.cfg.blocks[&b];
+            if block
+                .predecessors
+                .iter()
+                .any(|p| !region.contains(p) && *p != header)
+            {
+                return Err(OsrReject::RegionHasExternalEntry);
+            }
         }
     }
 
@@ -737,6 +765,10 @@ fn build_variant(
     variant.cfg.next_block_id += 1;
     let mut prologue: Vec<IrInstruction> = Vec::new();
     let mut phi_values: Vec<IrId> = Vec::new();
+    // A live value the variant also defines -- in an enclosing loop's blocks,
+    // which it runs again -- arrives under a register of its own.
+    let defs = definition_blocks(func);
+    let mut redefined: Vec<(IrId, IrId, IrBlockId, IrType, IrId)> = Vec::new();
     for (i, param) in layout.params.iter().enumerate() {
         let ty = layout.live_in_types[i].clone();
         let offset = fresh();
@@ -747,7 +779,15 @@ fn build_variant(
                 phi_values.push(d);
                 d
             }
-            OsrParam::Live(v) => *v,
+            OsrParam::Live(v) => match defs.get(v).filter(|b| region.contains(b)) {
+                Some(&block) => {
+                    let (d, phi) = (fresh(), fresh());
+                    variant.register_types.insert(phi, ty.clone());
+                    redefined.push((*v, d, block, ty.clone(), phi));
+                    d
+                }
+                None => *v,
+            },
         };
         variant.register_types.insert(offset, IrType::I64);
         variant.register_types.insert(addr, frame_ty.clone());
@@ -805,11 +845,108 @@ fn build_variant(
     // analysis reads.
     variant.cfg.recompute_predecessors();
 
+    if !redefined.is_empty() {
+        carry_redefined(&mut variant, header, entry, &redefined)?;
+    }
+
     Ok(OsrVariant {
         function: variant,
         site: header,
         layout,
     })
+}
+
+/// Give each `(v, arrived, def block, type, phi)` a phi at `header` merging
+/// the frame's value `arrived` with the variant's own definition of `v`, and
+/// point every use of `v` at whichever of the two reaches it. A use that both
+/// can reach by different paths would need a phi of its own; the variant is
+/// refused instead.
+fn carry_redefined(
+    variant: &mut IrFunction,
+    header: IrBlockId,
+    entry: IrBlockId,
+    merged: &[(IrId, IrId, IrBlockId, IrType, IrId)],
+) -> Result<(), OsrReject> {
+    use super::optimization::{InstructionExt, replace_terminator_uses};
+
+    let domtree = DominatorTree::compute(variant);
+    for (v, arrived, def_block, ty, phi) in merged {
+        // Blocks the definition reaches without passing the header, where the
+        // phi has not seen it yet.
+        let mut unmerged = BTreeSet::new();
+        let mut queue: VecDeque<IrBlockId> = variant.cfg.blocks[def_block]
+            .successors()
+            .into_iter()
+            .collect();
+        while let Some(b) = queue.pop_front() {
+            if b == header || !unmerged.insert(b) {
+                continue;
+            }
+            queue.extend(variant.cfg.blocks[&b].successors());
+        }
+        let reaching = |at: IrBlockId| {
+            if domtree.dominates(*def_block, at) {
+                Some(*v)
+            } else if !unmerged.contains(&at) {
+                Some(*phi)
+            } else {
+                None
+            }
+        };
+
+        let preds = variant.cfg.blocks[&header].predecessors.clone();
+        let mut incoming = vec![(entry, *arrived)];
+        for p in preds.into_iter().filter(|p| *p != entry) {
+            incoming.push((p, reaching(p).ok_or(OsrReject::RegionHasExternalEntry)?));
+        }
+
+        let ids: Vec<IrBlockId> = variant.cfg.blocks.keys().copied().collect();
+        for b in ids {
+            if b == entry {
+                continue;
+            }
+            let at = reaching(b);
+            let block = variant.cfg.blocks.get_mut(&b).unwrap();
+            for node in block.phi_nodes.iter_mut() {
+                for (pred, val) in node.incoming.iter_mut() {
+                    if val == v {
+                        *val = reaching(*pred).ok_or(OsrReject::RegionHasExternalEntry)?;
+                    }
+                }
+            }
+            if b == *def_block {
+                continue;
+            }
+            let uses_v = block.instructions.iter().any(|i| i.uses().contains(v))
+                || terminator_uses(&block.terminator).contains(v);
+            if !uses_v {
+                continue;
+            }
+            let to = at.ok_or(OsrReject::RegionHasExternalEntry)?;
+            if to == *v {
+                continue;
+            }
+            let replacement = BTreeMap::from([(*v, to)]);
+            for inst in block.instructions.iter_mut() {
+                InstructionExt::replace_uses(inst, &replacement);
+            }
+            replace_terminator_uses(&mut block.terminator, &replacement);
+            // An operand the rewrite does not reach would read the old register.
+            if block.instructions.iter().any(|i| i.uses().contains(v))
+                || terminator_uses(&block.terminator).contains(v)
+            {
+                return Err(OsrReject::RegionHasExternalEntry);
+            }
+        }
+
+        let header_block = variant.cfg.blocks.get_mut(&header).unwrap();
+        header_block.phi_nodes.push(IrPhiNode {
+            dest: *phi,
+            incoming,
+            ty: ty.clone(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1049,6 +1186,22 @@ mod tests {
         );
     }
 
+    /// A resume variant takes the inner header anyway: the outer loop's
+    /// values arrive in the frame and merge with their redefinitions there.
+    #[test]
+    fn an_inner_header_resumes_with_its_outer_values_merged() {
+        let (func, outer_h, inner_h, _n) = nested_loop();
+        let v = build_resume_variant(&func, inner_h, IrFunctionId(9996)).expect("inner variant");
+        let header = &v.function.cfg.blocks[&inner_h];
+        let outer_phi = func.cfg.blocks[&outer_h].phi_nodes[0].dest;
+        assert!(v.layout.params.contains(&OsrParam::Live(outer_phi)));
+        // The header's own phi, plus one each for the outer `i` and `row`.
+        assert_eq!(header.phi_nodes.len(), 3, "{:?}", header.phi_nodes);
+        for phi in &header.phi_nodes {
+            assert_eq!(phi.incoming.len(), header.predecessors.len());
+        }
+    }
+
     /// `if (0 < n) loop; return merged` with the merge also reached when the
     /// loop is skipped, and a loop bound copied into a register with no
     /// recorded type.
@@ -1199,9 +1352,14 @@ mod tests {
     /// produced. A miss here is state the back edge failed to hand over.
     #[test]
     fn variant_reads_nothing_it_was_not_given() {
+        let builds: [fn(&IrFunction, IrBlockId, IrFunctionId) -> Result<OsrVariant, OsrReject>; 2] =
+            [build_osr_variant, build_resume_variant];
         for func in [counted_loop(), nested_loop().0, rotation_loop().0] {
-            for header in find_loop_headers(&func) {
-                let Ok(v) = build_osr_variant(&func, header, IrFunctionId(9995)) else {
+            for (header, build) in find_loop_headers(&func)
+                .into_iter()
+                .flat_map(|h| builds.iter().map(move |b| (h, b)))
+            {
+                let Ok(v) = build(&func, header, IrFunctionId(9995)) else {
                     continue;
                 };
 
