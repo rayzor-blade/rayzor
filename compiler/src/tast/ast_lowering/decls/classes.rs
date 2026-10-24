@@ -2009,19 +2009,27 @@ impl<'a> AstLowering<'a> {
     pub(crate) fn resolve_type_to_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
         let type_table = self.context.type_table.borrow();
         let mut current = type_id;
+        let mut seen = std::collections::BTreeSet::new();
         for _ in 0..64 {
+            seen.insert(current);
             match &type_table.get(current)?.kind {
+                // A class whose symbol is typed as an alias names the alias's
+                // target, unless that target was already passed: an alias
+                // sharing its target's symbol names the class itself.
                 TypeKind::Class { symbol_id, .. } => {
-                    if let Some(TypeKind::TypeAlias { target_type, .. }) = self
+                    match self
                         .context
                         .symbol_table
                         .get_symbol(*symbol_id)
                         .and_then(|symbol| type_table.get(symbol.type_id))
                         .map(|ty| &ty.kind)
                     {
-                        current = *target_type;
-                    } else {
-                        return Some(*symbol_id);
+                        Some(TypeKind::TypeAlias { target_type, .. })
+                            if !seen.contains(target_type) =>
+                        {
+                            current = *target_type
+                        }
+                        _ => return Some(*symbol_id),
                     }
                 }
                 TypeKind::TypeAlias { target_type, .. }

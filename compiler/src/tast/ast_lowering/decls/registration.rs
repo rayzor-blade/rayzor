@@ -20,6 +20,8 @@ impl<'a> AstLowering<'a> {
     /// without lowering their bodies. Used for multi-file compilation where all
     /// type names need to be available before any file is fully compiled.
     pub fn pre_register_file(&mut self, file: &HaxeFile) -> LoweringResult<()> {
+        self.record_module_types(file);
+
         // Process package declaration to set up the namespace context
         self.context.current_package = None;
         if let Some(package) = &file.package {
@@ -52,6 +54,31 @@ impl<'a> AstLowering<'a> {
         }
 
         Ok(())
+    }
+
+    /// Record the types `file` declares under its package and module name, for
+    /// imports of that module.
+    pub(crate) fn record_module_types(&mut self, file: &HaxeFile) {
+        let Some(module) = std::path::Path::new(&file.filename)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+        else {
+            return;
+        };
+        let module = self.context.string_interner.intern(module);
+        let package = file
+            .package
+            .iter()
+            .flat_map(|package| package.path.iter())
+            .map(|segment| self.context.string_interner.intern(segment))
+            .collect();
+        let names: Vec<_> = super::module_type_names(&file.declarations)
+            .iter()
+            .map(|name| self.context.string_interner.intern(name))
+            .collect();
+        self.context
+            .namespace_resolver
+            .record_module_types(package, module, names);
     }
 
     /// Register top-level stdlib symbols (Math, Std, etc.) for implicit availability.
@@ -181,6 +208,17 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Type declarations cannot reuse a foreign type or an enum constructor.
+    /// Whether the declarations being lowered sit in a package other than the
+    /// root. A typedef there has its own symbol; a root-package typedef claims
+    /// the root slot, which std's `Map` and `List` share with the type they
+    /// alias -- member dispatch on those types depends on that.
+    pub(crate) fn in_named_package(&self) -> bool {
+        self.context
+            .current_package
+            .and_then(|id| self.context.namespace_resolver.get_package(id))
+            .is_some_and(|p| !p.full_path.is_empty())
+    }
+
     pub(crate) fn root_slot_is_foreign_type(&self, name: InternedString) -> bool {
         let named_package = |package: Option<crate::tast::namespace::PackageId>| {
             package.filter(|&id| {
@@ -655,7 +693,7 @@ impl<'a> AstLowering<'a> {
                 let typedef_name = self.context.intern_string(&typedef_decl.name);
                 self.record_type_usings(typedef_name, &typedef_decl.meta);
 
-                if self.root_slot_is_foreign_type(typedef_name) {
+                if self.in_named_package() && self.root_slot_is_foreign_type(typedef_name) {
                     if self.packaged_symbol(typedef_name).is_none() {
                         let root = self
                             .context

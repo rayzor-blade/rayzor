@@ -2216,7 +2216,7 @@ impl MacroInterpreter {
             && self
                 .macro_context
                 .as_ref()
-                .is_none_or(|ctx| ctx.current_class.is_none())
+                .is_none_or(|ctx| ctx.build_class.is_none())
             && let Some(view) = self
                 .local_class
                 .as_deref()

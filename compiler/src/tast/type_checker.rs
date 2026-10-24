@@ -1256,6 +1256,7 @@ impl<'a> TypeChecker<'a> {
                         | TypeKind::GenericInstance { .. }
                         | TypeKind::Anonymous { .. }
                         | TypeKind::Function { .. }
+                        | TypeKind::TypeParameter { .. }
                 ) {
                     match self.check_compatibility(*inner_type, _target_id) {
                         TypeCompatibility::Incompatible => TypeCompatibility::Incompatible,

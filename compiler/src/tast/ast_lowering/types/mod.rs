@@ -41,6 +41,23 @@ fn constant_argument_spelling(value: &Expr) -> Option<String> {
 }
 
 impl<'a> AstLowering<'a> {
+    /// Imported paths `name` may refer to, from the current scope outwards to
+    /// the root, where a file without a package keeps its imports.
+    fn import_candidates(
+        &mut self,
+        name: InternedString,
+    ) -> Vec<crate::tast::namespace::QualifiedPath> {
+        let current = self.context.current_scope;
+        let mut scopes = vec![current];
+        scopes.extend(self.context.scope_tree.get_ancestors(current));
+        if !scopes.contains(&ScopeId::first()) {
+            scopes.push(ScopeId::first());
+        }
+        self.context
+            .import_resolver
+            .resolve_type(name, &scopes, self.context.namespace_resolver)
+    }
+
     /// A function-type argument's name and `?`, read through the parentheses
     /// of a lone argument: `(?a:String) -> Void` is `?a`, `?Int -> Void` `?`.
     fn function_arg_label(&mut self, mut arg: &Type) -> FunctionArgLabel {
@@ -161,11 +178,7 @@ impl<'a> AstLowering<'a> {
                 // IMPORTANT: First try to resolve through the import system.
                 // This ensures we get the symbol with the correct qualified_name (e.g., "rayzor.Bytes")
                 // rather than a duplicate symbol that may have been created without package context.
-                let import_candidates = self.context.import_resolver.resolve_type(
-                    interned_name,
-                    self.context.current_scope,
-                    self.context.namespace_resolver,
-                );
+                let import_candidates = self.import_candidates(interned_name);
 
                 let import_resolved_symbol = import_candidates
                     .first()
@@ -809,24 +822,7 @@ impl<'a> AstLowering<'a> {
         }
         // Then the import resolver — user imports take priority
         // over top-level stdlib builtins (Array, Map, etc.)
-        // Imports are recorded on the file's scope; read outwards to it.
-        let mut candidates = Vec::new();
-        let mut scope = Some(self.context.current_scope);
-        while let Some(current) = scope {
-            candidates = self.context.import_resolver.resolve_type(
-                name_interned,
-                current,
-                self.context.namespace_resolver,
-            );
-            if !candidates.is_empty() {
-                break;
-            }
-            scope = self
-                .context
-                .scope_tree
-                .get_scope(current)
-                .and_then(|s| s.parent_id);
-        }
+        let candidates = self.import_candidates(name_interned);
 
         if !candidates.is_empty() {
             // Use the first candidate (in a full implementation, we'd handle ambiguity)

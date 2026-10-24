@@ -157,6 +157,9 @@ pub struct NamespaceResolver {
 
     /// Standard library paths (checked after source paths)
     stdlib_paths: Vec<PathBuf>,
+
+    /// Type names each module declares, by package path then module name
+    module_types: BTreeMap<Vec<InternedString>, BTreeMap<InternedString, BTreeSet<InternedString>>>,
 }
 
 impl NamespaceResolver {
@@ -170,6 +173,7 @@ impl NamespaceResolver {
             loaded_files: BTreeSet::new(),
             source_paths: Vec::new(),
             stdlib_paths: Vec::new(),
+            module_types: BTreeMap::new(),
         };
 
         // Create root package
@@ -199,6 +203,34 @@ impl NamespaceResolver {
     /// Set standard library paths (checked after source paths)
     pub fn set_stdlib_paths(&mut self, paths: Vec<PathBuf>) {
         self.stdlib_paths = paths;
+    }
+
+    /// Record the types declared by module `module` of `package`.
+    pub fn record_module_types(
+        &mut self,
+        package: Vec<InternedString>,
+        module: InternedString,
+        names: impl IntoIterator<Item = InternedString>,
+    ) {
+        self.module_types
+            .entry(package)
+            .or_default()
+            .entry(module)
+            .or_default()
+            .extend(names);
+    }
+
+    /// Whether module `module` of `package` declares a type called `name`.
+    pub fn module_declares(
+        &self,
+        package: &[InternedString],
+        module: InternedString,
+        name: InternedString,
+    ) -> bool {
+        self.module_types
+            .get(package)
+            .and_then(|modules| modules.get(&module))
+            .is_some_and(|names| names.contains(&name))
     }
 
     /// Mark a file as loaded
@@ -610,23 +642,40 @@ impl ImportResolver {
             .push(import);
     }
 
-    /// Resolve a type name in the context of imports
+    /// `import pkg.Mod;` brings in every type module `Mod` declares, which
+    /// registers as `pkg.Name`.
+    fn module_subtype(
+        import: &ImportEntry,
+        name: InternedString,
+        ns: &NamespaceResolver,
+    ) -> Option<QualifiedPath> {
+        let module = &import.package_path;
+        (!import.is_wildcard
+            && import.alias.is_none()
+            && ns.module_declares(&module.package, module.name, name))
+        .then(|| QualifiedPath::new(module.package.clone(), name))
+    }
+
+    /// Resolve a type name in the context of imports. `scopes` is the lookup
+    /// scope followed by its enclosing scopes: a file's imports sit in its
+    /// package scope, outside the class and method scopes that name types.
     pub fn resolve_type(
         &self,
         name: InternedString,
-        scope: ScopeId,
+        scopes: &[ScopeId],
         ns: &NamespaceResolver,
     ) -> Vec<QualifiedPath> {
-        let mut candidates = Vec::new();
+        let mut candidates: Vec<QualifiedPath> = Vec::new();
+        let push = |path: QualifiedPath, candidates: &mut Vec<QualifiedPath>| {
+            if !candidates.contains(&path) {
+                candidates.push(path);
+            }
+        };
 
-        // Check aliases first (check current scope and root scope)
-        if let Some(path) = self.aliases.get(&(scope, name)) {
-            candidates.push(path.clone());
-        }
-        // Also check root scope for aliases
-        if scope != ScopeId::first() {
-            if let Some(path) = self.aliases.get(&(ScopeId::first(), name)) {
-                candidates.push(path.clone());
+        // Aliases first
+        for scope in scopes {
+            if let Some(path) = self.aliases.get(&(*scope, name)) {
+                push(path.clone(), &mut candidates);
             }
         }
 
@@ -635,42 +684,21 @@ impl ImportResolver {
             if let Some(package) = ns.get_package(pkg_id) {
                 let path = QualifiedPath::new(package.full_path.clone(), name);
                 if ns.lookup_symbol(&path).is_some() {
-                    candidates.push(path);
+                    push(path, &mut candidates);
                 }
             }
         }
 
-        // Check explicit imports in current scope
-        if let Some(imports) = self.imports_by_scope.get(&scope) {
+        // Explicit imports, innermost scope first
+        for imports in scopes.iter().filter_map(|s| self.imports_by_scope.get(s)) {
             for import in imports {
                 if !import.is_wildcard && import.package_path.name == name {
-                    // Direct import match
-                    candidates.push(import.package_path.clone());
+                    push(import.package_path.clone(), &mut candidates);
+                } else if let Some(path) = Self::module_subtype(import, name, ns) {
+                    push(path, &mut candidates);
                 } else if import.is_wildcard && !import.exclusions.contains(&name) {
-                    // Wildcard import - construct full path
                     let wildcard_path = import.package_path.package.clone();
-                    candidates.push(QualifiedPath::new(wildcard_path, name));
-                }
-            }
-        }
-
-        // Also check root scope imports (imports are typically at module level)
-        if scope != ScopeId::first() {
-            if let Some(imports) = self.imports_by_scope.get(&ScopeId::first()) {
-                for import in imports {
-                    if !import.is_wildcard && import.package_path.name == name {
-                        // Direct import match
-                        if !candidates.iter().any(|c| c == &import.package_path) {
-                            candidates.push(import.package_path.clone());
-                        }
-                    } else if import.is_wildcard && !import.exclusions.contains(&name) {
-                        // Wildcard import - construct full path
-                        let wildcard_path = import.package_path.package.clone();
-                        let path = QualifiedPath::new(wildcard_path, name);
-                        if !candidates.iter().any(|c| c == &path) {
-                            candidates.push(path);
-                        }
-                    }
+                    push(QualifiedPath::new(wildcard_path, name), &mut candidates);
                 }
             }
         }
