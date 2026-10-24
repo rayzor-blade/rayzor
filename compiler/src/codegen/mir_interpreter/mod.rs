@@ -439,6 +439,7 @@ impl MirInterpreter {
     }
 
     pub fn register_symbol(&mut self, name: &str, ptr: *const u8) {
+        exec::note_symbol(name, ptr as usize);
         self.machine
             .program
             .symbols
@@ -513,6 +514,21 @@ impl MirInterpreter {
             .iter()
             .flatten()
             .map(|fr| fr.function().id)
+            .collect()
+    }
+
+    /// Where each frame a suspension set aside stopped, innermost last: the
+    /// block, and whether the frame stopped on entering it.
+    pub fn suspended_positions(&self) -> Vec<(IrFunctionId, crate::ir::IrBlockId, bool)> {
+        self.machine
+            .suspended
+            .borrow()
+            .iter()
+            .flatten()
+            .map(|fr| {
+                let (block, at_entry) = fr.position();
+                (fr.function().id, block, at_entry)
+            })
             .collect()
     }
 

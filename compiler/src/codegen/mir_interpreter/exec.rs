@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-use crate::ir::{AtomicRmwOp, IrFunctionId};
+use crate::ir::{AtomicRmwOp, IrBlockId, IrFunctionId};
 
 use super::decode::{
     Block, Call, Edge, FloatCc, FloatOp, FnRef, Function, GlobalSlot, IndirectCall, IntCc, IntOp,
@@ -87,6 +87,11 @@ impl Frame {
         &self.f
     }
 
+    /// The block the frame is in, and whether it stopped on entering it.
+    pub(super) fn position(&self) -> (IrBlockId, bool) {
+        (self.f.block_ids[self.block as usize], self.pc == 0)
+    }
+
     /// Whether the frame stopped at an instruction only compiled code runs.
     pub(super) fn at_bail(&self) -> bool {
         matches!(
@@ -158,6 +163,37 @@ fn fault(message: impl Into<String>) -> InterpError {
     InterpError::RuntimeError(message.into())
 }
 
+/// The runtime's `rayzor_has_handler` and `rayzor_null_access`, once known.
+static HAS_HANDLER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static NULL_ACCESS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Remember the runtime entry points a null access needs.
+pub(super) fn note_symbol(name: &str, addr: usize) {
+    match name {
+        "rayzor_has_handler" => HAS_HANDLER.store(addr, Ordering::Relaxed),
+        "rayzor_null_access" => NULL_ACCESS.store(addr, Ordering::Relaxed),
+        _ => {}
+    }
+}
+
+/// A null access. Inside a `try` it throws `Null Object Reference`, as the
+/// fault does in compiled code; outside one it stops with `message`.
+#[cold]
+fn null_fault(message: impl Into<String>) -> InterpError {
+    let (has, throw) = (
+        HAS_HANDLER.load(Ordering::Relaxed),
+        NULL_ACCESS.load(Ordering::Relaxed),
+    );
+    if has != 0 && throw != 0 {
+        let has: extern "C" fn() -> bool = unsafe { std::mem::transmute(has) };
+        if has() {
+            let throw: extern "C" fn() = unsafe { std::mem::transmute(throw) };
+            throw();
+        }
+    }
+    fault(message)
+}
+
 fn trap(message: &str) -> InterpError {
     InterpError::RuntimeError(message.to_string())
 }
@@ -168,8 +204,20 @@ pub(super) fn call(m: &Machine, f: Arc<Function>, args: &[u64]) -> Result<u64, I
     finish(m, stack_run(m, &mut stack), stack)
 }
 
-/// Continue a stack set aside by a suspension.
+/// Continue a stack set aside by a suspension. A frame that stopped on
+/// entering a loop header with a resume point carries on there at once.
 pub(super) fn resume(m: &Machine, mut stack: Vec<Frame>) -> Result<u64, InterpError> {
+    if let Some(top) = stack.last()
+        && top.pc == 0
+        && let Some(t) = osr_target(m, &top.f, top.block)
+    {
+        let v = transfer(m, top, &t)?;
+        stack.pop();
+        match stack.last_mut() {
+            Some(caller) => caller.deliver(v),
+            None => return Ok(v),
+        }
+    }
     let r = stack_run(m, &mut stack);
     finish(m, r, stack)
 }
@@ -375,7 +423,10 @@ fn entered(m: &Machine, f: &Function, block: u32) -> Option<Action> {
 #[inline(always)]
 fn read(addr: u64, mt: Mt) -> Result<u64, InterpError> {
     if addr < 4096 {
-        return Err(fault(format!("read through a null pointer ({:#x})", addr)));
+        return Err(null_fault(format!(
+            "read through a null pointer ({:#x})",
+            addr
+        )));
     }
     let p = addr as *const u8;
     Ok(unsafe {
@@ -392,7 +443,10 @@ fn read(addr: u64, mt: Mt) -> Result<u64, InterpError> {
 #[inline(always)]
 fn write(addr: u64, mt: Mt, bits: u64) -> Result<(), InterpError> {
     if addr < 4096 {
-        return Err(fault(format!("write through a null pointer ({:#x})", addr)));
+        return Err(null_fault(format!(
+            "write through a null pointer ({:#x})",
+            addr
+        )));
     }
     let p = addr as *mut u8;
     unsafe {
@@ -551,7 +605,7 @@ fn math(kind: Intrinsic, mt: Mt, bits: u64) -> u64 {
 
 fn atomic_rmw(mt: Mt, op: AtomicRmwOp, ptr: u64, val: u64) -> Result<u64, InterpError> {
     if ptr < 4096 {
-        return Err(fault("atomic access through a null pointer"));
+        return Err(null_fault("atomic access through a null pointer"));
     }
     macro_rules! rmw {
         ($a:ty, $t:ty) => {{
@@ -578,7 +632,7 @@ fn atomic_rmw(mt: Mt, op: AtomicRmwOp, ptr: u64, val: u64) -> Result<u64, Interp
 
 fn atomic_cas(mt: Mt, ptr: u64, expected: u64, new: u64) -> Result<u64, InterpError> {
     if ptr < 4096 {
-        return Err(fault("atomic access through a null pointer"));
+        return Err(null_fault("atomic access through a null pointer"));
     }
     macro_rules! cas {
         ($a:ty, $t:ty) => {{
@@ -858,7 +912,7 @@ fn call_indirect(
 ) -> Result<Option<Action>, InterpError> {
     let closure = fr.regs[c.closure as usize];
     if closure == 0 {
-        return Err(fault("call through a null function value"));
+        return Err(null_fault("call through a null function value"));
     }
     let code = read(closure, Mt::I64)?;
     let env = read(closure + 8, Mt::I64)?;

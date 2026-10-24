@@ -201,6 +201,13 @@ pub(crate) fn has_handler() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a `try` is active on this thread, for an interpreter deciding
+/// whether a fault throws.
+#[unsafe(no_mangle)]
+pub extern "C" fn rayzor_has_handler() -> bool {
+    has_handler()
+}
+
 /// Throw an exception with a string message (used by panic guard).
 /// Creates a HaxeString, boxes it as DynamicValue, and throws as TYPE_STRING.
 /// A null array reached by compiled code that reads its header without

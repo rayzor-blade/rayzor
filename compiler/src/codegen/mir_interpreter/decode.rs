@@ -1122,7 +1122,11 @@ impl Decoder<'_> {
                     self.set_mt(dest.as_u32(), Mt::I64);
                 }
             }
-            ops.push(trap(message));
+            let name = self.function.qualified_name.as_deref();
+            ops.push(trap(format!(
+                "{message} (in `{}`)",
+                name.unwrap_or(&self.function.name)
+            )));
         }
     }
 
@@ -2419,8 +2423,9 @@ impl Decoder<'_> {
             .get(&func_id)
             .ok_or_else(|| format!("Called function {:?} not found in module", func_id))?;
         let name = called.name.as_str();
-        let libc = matches!(name, "malloc" | "realloc" | "free");
         let is_extern = called.cfg.blocks.is_empty();
+        // Only a declaration is the libc function; a method may share the name.
+        let libc = is_extern && matches!(name, "malloc" | "realloc" | "free");
         let sig = &called.signature;
         let uses_sret = sig.uses_sret && !is_extern;
         let is_lambda = name.starts_with("<lambda");
