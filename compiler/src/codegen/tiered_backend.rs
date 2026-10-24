@@ -340,12 +340,20 @@ pub struct TieredBackend {
     /// Native compilation done on the calling thread, for startup reports.
     activity: CompileActivity,
 
-    /// Functions whose loops the next baseline compile gives resume points:
-    /// those a suspended interpreted stack is waiting in.
-    pending_osr: BTreeSet<IrFunctionId>,
+    /// Functions the next native compile gives resume points, with the blocks
+    /// a suspended interpreted stack is waiting in them at, and whether it
+    /// stopped on entering the block.
+    pending_osr: BTreeMap<IrFunctionId, BTreeSet<(crate::ir::IrBlockId, bool)>>,
 
     /// The MIR pipeline startup skipped, run before the first native compile.
     deferred_mir_opt: Option<crate::ir::optimization::OptimizationLevel>,
+
+    /// Interpreted code that turns hot compiles straight to LLVM.
+    tier_up_to_llvm: bool,
+
+    /// The modules interpreted code started on, left unchanged for the frames
+    /// still reading them once a native compile has replaced them.
+    retired_modules: Vec<Vec<IrModule>>,
 
     /// Number of loaded MIR modules that have already run startup hooks.
     initialized_module_count: Arc<Mutex<usize>>,
@@ -1207,8 +1215,10 @@ impl TieredBackend {
             llvm_compiled: Arc::new(Mutex::new(false)),
             promotion_barrier: Arc::new(PromotionBarrier::new()),
             activity: CompileActivity::default(),
-            pending_osr: BTreeSet::new(),
+            pending_osr: BTreeMap::new(),
             deferred_mir_opt: None,
+            tier_up_to_llvm: false,
+            retired_modules: Vec::new(),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1278,8 +1288,10 @@ impl TieredBackend {
             llvm_compiled: Arc::new(Mutex::new(false)),
             promotion_barrier: Arc::new(PromotionBarrier::new()),
             activity: CompileActivity::default(),
-            pending_osr: BTreeSet::new(),
+            pending_osr: BTreeMap::new(),
             deferred_mir_opt: None,
+            tier_up_to_llvm: false,
+            retired_modules: Vec::new(),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
@@ -2076,13 +2088,14 @@ impl TieredBackend {
 
                     let needs_compile = self.function_pointers.read().unwrap().is_empty();
                     if needs_compile {
-                        self.pending_osr = self
-                            .interpreter
-                            .lock()
-                            .unwrap()
-                            .suspended_functions()
-                            .into_iter()
-                            .collect();
+                        for (func, block, at_entry) in
+                            self.interpreter.lock().unwrap().suspended_positions()
+                        {
+                            self.pending_osr
+                                .entry(func)
+                                .or_default()
+                                .insert((block, at_entry));
+                        }
                         let compiled = self.compile_all_modules_jit();
                         self.pending_osr.clear();
                         compiled?;
@@ -2171,9 +2184,15 @@ impl TieredBackend {
     }
 
     /// Run `level`'s MIR pipeline, which startup skipped, before the first
-    /// native compile. The required passes must already have run.
+    /// native compile. The required passes, at least, must already have run.
     pub fn defer_mir_optimization(&mut self, level: crate::ir::optimization::OptimizationLevel) {
         self.deferred_mir_opt = Some(level);
+    }
+
+    /// Compile interpreted code straight to LLVM once it turns hot, in place
+    /// of the baseline tier. Only meaningful when starting interpreted.
+    pub fn set_tier_up_to_llvm(&mut self, on: bool) {
+        self.tier_up_to_llvm = on;
     }
 
     /// Get a function pointer (for execution)
@@ -2523,6 +2542,47 @@ impl TieredBackend {
             debug!("[TieredBackend] JIT mode: compiling all modules to Cranelift");
         }
 
+        // Interpreted code, on any thread, decodes from the modules it started
+        // on. What follows rewrites a copy that takes their place, and the
+        // originals stay as they are.
+        if self.start_interpreted {
+            let working = self.modules.read().unwrap().clone();
+            let interpreted = std::mem::replace(&mut *self.modules.write().unwrap(), working);
+            self.retired_modules.push(interpreted);
+        }
+
+        // Resume points are built from the functions suspended interpreted
+        // frames wait in, as those frames run them -- before the stack-trace
+        // pass below rewrites them -- so that they match the frames' registers.
+        // A resumed frame pushed no shadow-stack frame, so they keep no line
+        // updates either. They are compiled with everything else and taken out
+        // again afterwards.
+        let without_line_updates = |m: &IrModule, f: &IrFunction| {
+            let updates = Self::frame_update_ids(m);
+            let mut f = f.clone();
+            for block in f.cfg.blocks.values_mut() {
+                block.instructions.retain(|inst| {
+                    !matches!(inst, IrInstruction::CallDirect { func_id, .. }
+                        if updates.contains(func_id))
+                });
+            }
+            f
+        };
+        let waiting: Vec<(usize, IrFunction, Vec<(crate::ir::IrBlockId, bool)>)> = {
+            let modules = self.modules.read().unwrap();
+            modules
+                .iter()
+                .enumerate()
+                .flat_map(|(i, m)| {
+                    self.pending_osr.iter().filter_map(move |(id, at)| {
+                        m.functions
+                            .get(id)
+                            .filter(|f| !f.cfg.blocks.is_empty())
+                            .map(|f| (i, without_line_updates(m, f), at.iter().copied().collect()))
+                    })
+                })
+                .collect()
+        };
         // Instrument MIR functions with shadow call stack push/pop (debug mode only)
         if self.config.enable_stack_traces {
             Self::instrument_modules_for_stack_traces(&mut self.modules.write().unwrap());
@@ -2531,26 +2591,8 @@ impl TieredBackend {
             Self::strip_stack_trace_updates(&mut self.modules.write().unwrap());
         }
 
-        // Resume points for the loops a suspended interpreted stack waits in,
-        // compiled with everything else and taken out again afterwards.
-        // The functions suspended interpreted frames wait in, as those frames
-        // run them: their resume points must match their registers.
-        let waiting: Vec<(usize, IrFunction)> = {
-            let modules = self.modules.read().unwrap();
-            modules
-                .iter()
-                .enumerate()
-                .flat_map(|(i, m)| {
-                    self.pending_osr
-                        .iter()
-                        .filter_map(move |id| m.functions.get(id))
-                        .filter(|f| !f.cfg.blocks.is_empty())
-                        .map(move |f| (i, f.clone()))
-                })
-                .collect()
-        };
         let resume_points = Self::add_resume_points(&mut self.modules.write().unwrap(), waiting);
-        // Startup ran only the required MIR passes; compiled code gets the
+        // Startup skipped most of the MIR pipeline; compiled code gets the
         // rest, resume points included. Interpreted frames pass an environment
         // to whatever took one when they were decoded, so those keep it.
         let mut kept_indirect = BTreeSet::new();
@@ -2562,6 +2604,11 @@ impl TieredBackend {
             }
         }
         let osr_ids: BTreeSet<IrFunctionId> = resume_points.iter().map(|r| r.2).collect();
+
+        #[cfg(feature = "llvm-backend")]
+        if self.tier_up_to_llvm {
+            return self.tier_up_with_llvm(resume_points, osr_ids, kept_indirect);
+        }
 
         // Convert runtime symbols to the format Cranelift expects
         let symbols: Vec<(&str, *const u8)> = self
@@ -2665,12 +2712,11 @@ impl TieredBackend {
         }
         drop(modules);
 
-        if !resume_points.is_empty() {
-            let modules = self.modules.read().unwrap();
+        if let Some(interpreted) = self.retired_modules.last() {
             let mut interp = self.interpreter.lock().unwrap();
             for (module, parent, variant, layout) in resume_points.iter().cloned() {
                 if let Ok(ptr) = backend.get_function_ptr(variant) {
-                    interp.install_resume_point(&modules[module], parent, ptr, layout);
+                    interp.install_resume_point(&interpreted[module], parent, ptr, layout);
                 }
             }
         }
@@ -2702,6 +2748,78 @@ impl TieredBackend {
         }
 
         Ok(())
+    }
+
+    /// The LLVM counterpart of the baseline compile above, for interpreted code
+    /// turning hot: everything compiles at the top tier, the suspended frames'
+    /// resume points with it.
+    #[cfg(feature = "llvm-backend")]
+    fn tier_up_with_llvm(
+        &mut self,
+        resume_points: Vec<(usize, IrFunctionId, IrFunctionId, crate::ir::osr::OsrLayout)>,
+        osr_ids: BTreeSet<IrFunctionId>,
+        kept_indirect: BTreeSet<IrFunctionId>,
+    ) -> Result<(), String> {
+        {
+            let modules = self.modules.read().unwrap();
+            for module in modules.iter() {
+                Self::register_enum_rtti_from_module(module);
+                Self::register_class_rtti_from_module(module);
+            }
+        }
+        if self.config.enable_stack_traces
+            && let Some((_, ptr)) = self
+                .runtime_symbols
+                .iter()
+                .find(|(name, _)| name == "rayzor_set_stack_traces_enabled")
+        {
+            let enable_fn: extern "C" fn(i32) = unsafe { std::mem::transmute(*ptr) };
+            enable_fn(1);
+        }
+
+        let mut compiled = self
+            .llvm_mcjit_compile(Some(&kept_indirect))
+            .map_err(|e| format!("LLVM tier-up failed: {e}"))?;
+        let variants: BTreeMap<IrFunctionId, usize> = osr_ids
+            .iter()
+            .filter_map(|id| compiled.remove(id).map(|ptr| (*id, ptr)))
+            .collect();
+        self.register_source_info_for_pointers(&compiled);
+        {
+            let mut pointers = self.function_pointers.write().unwrap();
+            let mut tiers = self.function_tiers.write().unwrap();
+            for (func_id, ptr) in &compiled {
+                pointers.insert(*func_id, *ptr);
+                tiers.insert(*func_id, OptimizationTier::Maximum);
+            }
+        }
+
+        {
+            let mut interp = self.interpreter.lock().unwrap();
+            if let Some(interpreted) = self.retired_modules.last() {
+                for (module, parent, variant, layout) in resume_points {
+                    if let Some(&ptr) = variants.get(&variant) {
+                        interp.install_resume_point(
+                            &interpreted[module],
+                            parent,
+                            ptr as *const u8,
+                            layout,
+                        );
+                    }
+                }
+            }
+            for (func_id, ptr) in &compiled {
+                interp.install_native(*func_id, *ptr as *const u8);
+            }
+        }
+        if !osr_ids.is_empty() {
+            for module in self.modules.write().unwrap().iter_mut() {
+                module.functions.retain(|id, _| !osr_ids.contains(id));
+            }
+        }
+
+        // As after a baseline compile: registrations again, at the new addresses.
+        self.rerun_loaded_modules_startup_jit(!self.start_interpreted)
     }
 
     /// Instrument all MIR functions with shadow call stack push/pop instructions.
@@ -3441,14 +3559,17 @@ impl TieredBackend {
         Ok(installed)
     }
 
-    /// Add a resume point for every loop of the `waiting` functions, given as
-    /// the interpreted frames run them, for those frames to continue in.
+    /// Add resume points to the `waiting` functions, given as the interpreted
+    /// frames run them together with where those frames stopped: one for each
+    /// loop header a frame can reach next. A frame stopped on entering a
+    /// header resumes there, so it needs that one alone. A header that cannot
+    /// resume is passed through to the headers beyond it.
     /// Returns `(module index, function, variant, layout)`; a function is
     /// named by module and id because ids repeat across modules and names
     /// repeat within one (every constructor is `new`).
     fn add_resume_points(
         modules: &mut [crate::ir::IrModule],
-        waiting: Vec<(usize, IrFunction)>,
+        waiting: Vec<(usize, IrFunction, Vec<(crate::ir::IrBlockId, bool)>)>,
     ) -> Vec<(usize, IrFunctionId, IrFunctionId, crate::ir::osr::OsrLayout)> {
         use crate::ir::osr;
 
@@ -3462,19 +3583,63 @@ impl TieredBackend {
             .max()
             .unwrap_or(0);
         let mut points = Vec::new();
-        for (index, parent) in waiting {
-            for header in osr::find_loop_headers(&parent) {
+        for (index, parent, at) in waiting {
+            let headers: BTreeSet<_> = osr::find_loop_headers(&parent).into_iter().collect();
+            let mut seen = BTreeSet::new();
+            let mut next: VecDeque<_> = at
+                .iter()
+                .flat_map(|&(b, at_entry)| {
+                    if at_entry {
+                        vec![b]
+                    } else {
+                        parent
+                            .cfg
+                            .blocks
+                            .get(&b)
+                            .map(|block| block.successors())
+                            .unwrap_or_default()
+                    }
+                })
+                .collect();
+            while let Some(header) = next.pop_front() {
+                if !seen.insert(header) {
+                    continue;
+                }
+                let past = || {
+                    parent
+                        .cfg
+                        .blocks
+                        .get(&header)
+                        .map(|b| b.successors())
+                        .unwrap_or_default()
+                };
+                if !headers.contains(&header) {
+                    next.extend(past());
+                    continue;
+                }
                 let variant_id = IrFunctionId(next_id);
                 match osr::build_resume_variant(&parent, header, variant_id) {
                     Ok(variant) => {
+                        if osr::osr_trace_enabled() {
+                            eprintln!("[osr] interpreted {} {header:?}: resume point", parent.name);
+                        }
                         next_id += 1;
                         points.push((index, parent.id, variant_id, variant.layout));
-                        modules[index].add_function(variant.function);
+                        // Nothing calls a resume point; a tree shake keeps it
+                        // only when told to.
+                        let mut function = variant.function;
+                        function
+                            .attributes
+                            .custom
+                            .insert("keep".to_string(), "true".to_string());
+                        modules[index].add_function(function);
                     }
-                    Err(reason) if osr::osr_trace_enabled() => {
-                        eprintln!("[osr] interpreted {} {header:?}: {reason:?}", parent.name);
+                    Err(reason) => {
+                        if osr::osr_trace_enabled() {
+                            eprintln!("[osr] interpreted {} {header:?}: {reason:?}", parent.name);
+                        }
+                        next.extend(past());
                     }
-                    Err(_) => {}
                 }
             }
         }
@@ -3569,6 +3734,18 @@ impl TieredBackend {
 
     #[cfg(feature = "llvm-backend")]
     fn compile_all_with_llvm_mcjit(&self) -> Result<BTreeMap<IrFunctionId, usize>, String> {
+        self.llvm_mcjit_compile(None)
+    }
+
+    /// Compile every function with LLVM. `tier_up` is set when no baseline
+    /// exists: it holds the functions that keep an environment parameter for
+    /// interpreted callers, and every compiled body is resolved, the resume
+    /// points included.
+    #[cfg(feature = "llvm-backend")]
+    fn llvm_mcjit_compile(
+        &self,
+        tier_up: Option<&BTreeSet<IrFunctionId>>,
+    ) -> Result<BTreeMap<IrFunctionId, usize>, String> {
         // Check if THIS instance has already compiled with LLVM
         {
             let llvm_compiled = self.llvm_compiled.lock().unwrap();
@@ -3615,10 +3792,18 @@ impl TieredBackend {
         // the function it came from. A frame already running baseline code can
         // then finish here rather than waiting to return, which is the only way
         // optimised code reaches a loop that is entered once.
-        let osr_variants = Self::add_osr_variants(&mut modules, None);
+        // Baseline code is what transfers into these, so a tier-up has none.
+        let osr_variants = if tier_up.is_some() {
+            Vec::new()
+        } else {
+            Self::add_osr_variants(&mut modules, None)
+        };
         // The whole program decides this, not the shaken part -- see the
         // note at the first seeding site.
         backend.seed_indirect_targets(&self.modules.read().unwrap());
+        if let Some(kept) = tier_up {
+            backend.seed_indirect_target_ids(kept.clone());
+        }
         for module in &modules {
             backend.declare_module(module)?;
         }
@@ -3639,7 +3824,14 @@ impl TieredBackend {
         //
         // We only resolve pointers for functions that already exist in our function_pointers
         // map (i.e., functions that Cranelift compiled and the tiered backend calls externally).
-        let mut needed_func_ids: Vec<IrFunctionId> = {
+        let mut needed_func_ids: Vec<IrFunctionId> = if tier_up.is_some() {
+            modules
+                .iter()
+                .flat_map(|m| m.functions.iter())
+                .filter(|(_, f)| !f.cfg.blocks.is_empty())
+                .map(|(id, _)| *id)
+                .collect()
+        } else {
             let fp_lock = self.function_pointers.read().unwrap();
             fp_lock.keys().cloned().collect()
         };
