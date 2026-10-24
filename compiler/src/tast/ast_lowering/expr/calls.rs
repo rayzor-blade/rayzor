@@ -1397,6 +1397,65 @@ impl<'a> AstLowering<'a> {
     /// (`this()` on an abstract over a function type jumps through the
     /// integer 2). The clause form (`from Y`) is representation-compatible
     /// and correctly stays uncoerced.
+    /// Whether `ty` is the standard `Any`, which unifies with every type.
+    pub(crate) fn is_any_type(&self, ty: TypeId) -> bool {
+        use crate::tast::core::TypeKind;
+        let symbol = match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Abstract { symbol_id, .. }) => *symbol_id,
+            _ => return false,
+        };
+        self.context
+            .symbol_table
+            .get_symbol(symbol)
+            .and_then(|s| self.context.string_interner.get(s.name))
+            == Some("Any")
+    }
+
+    /// A type parameter, or `Null<>` of one: a type nothing has bound.
+    fn is_open_type_param(&self, ty: TypeId) -> bool {
+        use crate::tast::core::TypeKind;
+        let table = self.context.type_table.borrow();
+        let ty = match table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => *inner_type,
+            _ => ty,
+        };
+        matches!(
+            table.get(ty).map(|t| &t.kind),
+            Some(TypeKind::TypeParameter { .. })
+        )
+    }
+
+    /// `a` or `b`, whichever is `Null<>` of the other.
+    fn nullable_of_either(&self, a: TypeId, b: TypeId) -> Option<TypeId> {
+        use crate::tast::core::TypeKind;
+        let table = self.context.type_table.borrow();
+        let inner = |ty: TypeId| match table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => Some(*inner_type),
+            _ => None,
+        };
+        if inner(a) == Some(b) {
+            Some(a)
+        } else if inner(b) == Some(a) {
+            Some(b)
+        } else {
+            None
+        }
+    }
+
+    /// Dynamic, `Any`, or either made nullable.
+    fn is_dynamic_like(&self, ty: TypeId) -> bool {
+        use crate::tast::core::TypeKind;
+        let ty = match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => *inner_type,
+            _ => ty,
+        };
+        let dynamic = matches!(
+            self.context.type_table.borrow().get(ty).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        );
+        dynamic || self.is_any_type(ty)
+    }
+
     /// A String handed to an `Any` parameter travels as Dynamic, boxed.
     pub(crate) fn string_as_any(
         &self,
@@ -1404,15 +1463,8 @@ impl<'a> AstLowering<'a> {
         formal: Option<TypeId>,
     ) -> TypedExpression {
         use crate::tast::core::TypeKind;
+        let formal_is_any = formal.is_some_and(|f| self.is_any_type(f));
         let tt = self.context.type_table.borrow();
-        let formal_is_any = formal
-            .and_then(|f| match tt.get(f).map(|t| &t.kind) {
-                Some(TypeKind::Abstract { symbol_id, .. }) => Some(*symbol_id),
-                _ => None,
-            })
-            .and_then(|s| self.context.symbol_table.get_symbol(s))
-            .and_then(|s| self.context.string_interner.get(s.name))
-            == Some("Any");
         if !formal_is_any
             || !matches!(
                 tt.get(arg.expr_type).map(|t| &t.kind),
@@ -5244,7 +5296,9 @@ impl<'a> AstLowering<'a> {
             }
             // An explicitly Dynamic container keeps boxed elements even when
             // another argument supplies a concrete value for the same parameter.
-            if prev == dynamic || ty == dynamic {
+            // `Any` unifies with every type as Dynamic does, `Null<>` of
+            // either too.
+            if self.is_dynamic_like(prev) || self.is_dynamic_like(ty) {
                 resolved.insert(var, dynamic);
                 continue;
             }
@@ -5252,6 +5306,20 @@ impl<'a> AstLowering<'a> {
                 && ((prev == int_t && ty == float_t) || (prev == float_t && ty == int_t))
             {
                 resolved.insert(var, float_t);
+                continue;
+            }
+            // `T` and `Null<T>` unify to `Null<T>`.
+            if let Some(nullable) = self.nullable_of_either(prev, ty) {
+                resolved.insert(var, nullable);
+                continue;
+            }
+            // Another signature's parameter left open, which Haxe would have
+            // resolved from later use, takes the concrete type beside it.
+            if self.is_open_type_param(ty) {
+                continue;
+            }
+            if self.is_open_type_param(prev) {
+                resolved.insert(var, ty);
                 continue;
             }
             // An abstract bound first keeps the variable; a later primitive
