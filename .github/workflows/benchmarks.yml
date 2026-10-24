@@ -8,6 +8,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+  # The Ash revision the `ash` row measures. Built from source and cached per
+  # revision; bump it to measure a newer Ash.
+  ASH_REV: e842e3004d3a94debacd57b13127a9ea6d441854
 
 permissions:
   contents: read
@@ -100,9 +103,63 @@ jobs:
             target/release/examples/benchmark_startup
           retention-days: 1
 
+  ash:
+    name: Build Ash
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Restore Ash
+        id: ash-cache
+        uses: actions/cache@v4
+        with:
+          path: ash-bin
+          key: ash-linux-x86_64-${{ env.ASH_REV }}
+
+      - uses: actions/checkout@v5
+        if: steps.ash-cache.outputs.cache-hit != 'true'
+        with:
+          repository: rayzor-blade/ash
+          ref: ${{ env.ASH_REV }}
+          path: ash-src
+
+      # As Ash's own release build: nightly Rust, LLVM 21 linked statically.
+      - uses: dtolnay/rust-toolchain@nightly
+        if: steps.ash-cache.outputs.cache-hit != 'true'
+        with:
+          components: rustfmt
+          targets: wasm32-unknown-unknown
+
+      - name: Install LLVM 21
+        if: steps.ash-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
+          wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 21 all
+          echo "LIBCLANG_PATH=/usr/lib/llvm-21/lib" >> "$GITHUB_ENV"
+
+      # ash_std first: the runtime crates embed it at build time.
+      - name: Build Ash
+        if: steps.ash-cache.outputs.cache-hit != 'true'
+        working-directory: ash-src
+        env:
+          ASH_VERSION: ${{ env.ASH_REV }}
+        run: |
+          cargo build --release -p ash_std
+          cargo build --release -p ash
+          mkdir -p ../ash-bin
+          cp target/release/ash ../ash-bin/
+
+      - name: Upload Ash
+        uses: actions/upload-artifact@v6
+        with:
+          name: ash-binary
+          path: ash-bin/ash
+          retention-days: 1
+
   benchmark:
     name: bench (${{ matrix.kernel }})
-    needs: build
+    needs: [build, ash]
     runs-on: ubuntu-24.04
     # One kernel per runner. Run in sequence on a single machine and the heavy
     # kernels leave it warm, so whichever runs last is measured on a throttled
@@ -158,15 +215,16 @@ jobs:
           sudo ldconfig
           hl --version
 
-      # Ash runs the same .hl bytecode as the HashLink row. Its rolling
-      # `nightly` release is rebuilt from main every day; the tagged releases
-      # lag main by weeks, so measuring one compares against old code.
+      # Ash runs the same .hl bytecode as the HashLink row, at ASH_REV.
+      - name: Download Ash
+        uses: actions/download-artifact@v7
+        with:
+          name: ash-binary
+          path: ~/.ash/bin
+
       - name: Install Ash
         run: |
           sudo apt-get install -y libzstd1 zlib1g libxml2 libtinfo6 libedit2 libffi8
-          mkdir -p ~/.ash/bin
-          curl -fsSL https://github.com/rayzor-blade/ash/releases/download/nightly/ash-linux-x86_64.tar.gz \
-            | tar -xz -C ~/.ash/bin
           chmod +x ~/.ash/bin/ash
           echo "$HOME/.ash/bin" >> "$GITHUB_PATH"
           ~/.ash/bin/ash --version
