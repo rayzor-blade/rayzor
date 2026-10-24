@@ -173,6 +173,20 @@ impl<'a> HirToMirContext<'a> {
         if let Some(word) = self.int64_word_read(obj, field, receiver_ty) {
             return Some(word);
         }
+        // A static property named through an instance -- a bare name inside a
+        // method -- calls its getter with no receiver.
+        if let Some(getter) = self.static_property_accessor(field, true) {
+            let return_ty = self
+                .builder
+                .module
+                .functions
+                .get(&getter)
+                .map(|f| f.signature.return_type.clone())
+                .unwrap_or_else(|| self.convert_type(field_ty));
+            return self
+                .builder
+                .build_call_direct(getter, Vec::new(), return_ty);
+        }
         // Type erasure: if field_ty is a TypeParameter, resolve to concrete type
         // using the receiver's type arguments (e.g., Container<Float>.value → Float)
         let resolved_field_ty = self.resolve_type_param_from_receiver(field_ty, receiver_ty);
@@ -673,6 +687,21 @@ impl<'a> HirToMirContext<'a> {
                                 let ty = def_sym_type.unwrap_or(field_ty);
                                 self.convert_type(ty)
                             });
+                        // An instance getter takes `this`; one that takes
+                        // nothing is a static's, named through an instance.
+                        let is_static = self
+                            .builder
+                            .module
+                            .functions
+                            .get(&func_id)
+                            .is_some_and(|f| f.signature.parameters.is_empty());
+                        if is_static {
+                            return self.builder.build_call_direct(
+                                func_id,
+                                Vec::new(),
+                                result_type,
+                            );
+                        }
                         return self.call_instance_accessor(
                             receiver_ty,
                             *getter_method_name,

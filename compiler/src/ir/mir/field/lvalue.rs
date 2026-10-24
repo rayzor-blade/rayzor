@@ -207,6 +207,20 @@ impl<'a> HirToMirContext<'a> {
         field: &SymbolId,
         value: IrId,
     ) -> Option<IrId> {
+        // A static property named through an instance calls its setter with
+        // no receiver.
+        if let Some(setter) = self.static_property_accessor(*field, false) {
+            let return_ty = self
+                .builder
+                .module
+                .functions
+                .get(&setter)
+                .map(|f| f.signature.return_type.clone())
+                .unwrap_or(IrType::Void);
+            return self
+                .builder
+                .build_call_direct(setter, vec![value], return_ty);
+        }
         // `___Int64`'s constructor writes its words; the value is a native
         // i64 built by `Int64_make`, so there is no slot to write.
         if self.is_int64_type(object.ty) {
@@ -353,6 +367,20 @@ impl<'a> HirToMirContext<'a> {
                             .map(|func| func.signature.return_type.clone())
                             .or_else(|| self.builder.get_register_type(value))
                             .unwrap_or(IrType::I32);
+                        // A static's setter takes the value alone.
+                        let is_static = self
+                            .builder
+                            .module
+                            .functions
+                            .get(&func_id)
+                            .is_some_and(|f| f.signature.parameters.len() == 1);
+                        if is_static {
+                            return self.builder.build_call_direct(
+                                func_id,
+                                vec![value],
+                                return_type,
+                            );
+                        }
 
                         return self.call_instance_accessor(
                             object.ty,
