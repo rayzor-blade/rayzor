@@ -988,6 +988,12 @@ impl CraneliftBackend {
         }
     }
 
+    /// Functions that keep their environment parameter whatever the modules
+    /// now say: callers built before the modules last changed pass one.
+    pub fn seed_indirect_target_ids(&mut self, ids: impl IntoIterator<Item = IrFunctionId>) {
+        self.indirect_target_functions.extend(ids);
+    }
+
     pub fn compile_module_without_finalize(&mut self, mir_module: &IrModule) -> Result<(), String> {
         // Skip modules that only have extern functions (no implementations)
         let has_implementations = mir_module

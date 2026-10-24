@@ -2347,7 +2347,21 @@ impl PassManager {
         // The HIR-level drop analysis only handles direct `new` expressions; this
         // pass catches factory functions like createComplex() that return heap pointers.
         manager.add_pass(super::insert_free::InsertFreePass::new());
+        manager.add_level_passes(level);
+        manager
+    }
 
+    /// The rest of `level`'s pipeline, for a module `required_only` has
+    /// already run on: tree fusion is left out, as it has to precede the
+    /// first free insertion.
+    pub fn after_required(level: OptimizationLevel) -> Self {
+        let mut manager = Self::new();
+        manager.add_level_passes(level);
+        manager
+    }
+
+    fn add_level_passes(&mut self, level: OptimizationLevel) {
+        let manager = self;
         match level {
             OptimizationLevel::O0 => {
                 // At O0, inline Haxe `inline`-marked functions (InlineHint::Always) plus
@@ -2464,8 +2478,6 @@ impl PassManager {
                 manager.add_pass(super::insert_free::InsertFreePass::new());
             }
         }
-
-        manager
     }
 }
 

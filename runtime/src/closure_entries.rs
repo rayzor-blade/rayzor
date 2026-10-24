@@ -18,6 +18,7 @@ use crate::type_system::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Copy, Default)]
 struct Entries {
@@ -28,12 +29,72 @@ struct Entries {
 
 static ENTRIES: RwLock<Option<HashMap<usize, Entries>>> = RwLock::new(None);
 
+/// Code addresses that stand for another function's code: an interpreted
+/// function's trampoline, once the function is compiled. Every registry and
+/// comparison here sees the compiled address, so a function keeps one
+/// identity whichever tier made the record.
+static ALIASES: RwLock<Option<HashMap<usize, usize>>> = RwLock::new(None);
+static HAS_ALIASES: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn canonical(code: usize) -> usize {
+    if !HAS_ALIASES.load(Ordering::Acquire) {
+        return code;
+    }
+    ALIASES
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&code).copied())
+        .unwrap_or(code)
+}
+
+/// Make `alias` stand for `code`, moving what was registered under it.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_closure_alias_code(alias: usize, code: usize) {
+    if alias == 0 || code == 0 || alias == code {
+        return;
+    }
+    ALIASES
+        .write()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(alias, code);
+    HAS_ALIASES.store(true, Ordering::Release);
+    if let Some(map) = ENTRIES.write().unwrap().as_mut()
+        && let Some(entry) = map.remove(&alias)
+    {
+        let target = map.entry(code).or_default();
+        if target.slot == 0 {
+            target.slot = entry.slot;
+        }
+        if target.dynamic == 0 {
+            target.dynamic = entry.dynamic;
+        }
+        if target.packed == 0 {
+            target.packed = entry.packed;
+        }
+    }
+    if let Some(methods) = METHODS.write().unwrap().as_mut() {
+        for c in methods.values_mut() {
+            if *c == alias {
+                *c = code;
+            }
+        }
+    }
+    if let Some(set) = BOUND_THUNKS.write().unwrap().as_mut()
+        && set.remove(&alias)
+    {
+        set.insert(code);
+    }
+}
+
 /// The code pointer at offset 0 of a closure record, or 0 for a null record.
 unsafe fn record_code(record: *const u8) -> usize {
     if record.is_null() {
         0
     } else {
-        unsafe { *(record as *const usize) }
+        canonical(unsafe { *(record as *const usize) })
     }
 }
 
@@ -124,6 +185,7 @@ pub(crate) fn bound_method_record(code: usize, receiver: *mut u8) -> *mut u8 {
 }
 
 fn lookup(code: usize) -> Entries {
+    let code = canonical(code);
     let guard = ENTRIES.read().unwrap();
     guard
         .as_ref()
@@ -267,14 +329,15 @@ pub extern "C" fn haxe_closure_equals(left: *mut u8, right: *mut u8) -> bool {
     // function's is `{code, null}`, a bound method's `{thunk, [receiver]}`.
     unsafe {
         let (l, r) = (left as *const usize, right as *const usize);
-        if *l != *r {
+        let code = canonical(*l);
+        if code != canonical(*r) {
             return false;
         }
         let (le, re) = (*l.add(1), *r.add(1));
         le == re
             || (le != 0
                 && re != 0
-                && is_bound_thunk(*l)
+                && is_bound_thunk(code)
                 && *(le as *const usize) == *(re as *const usize))
     }
 }
@@ -390,5 +453,38 @@ pub extern "C" fn haxe_dynamic_to_f64(ptr: *mut u8) -> f64 {
         Some(d) if d.type_id == TYPE_FLOAT => haxe_unbox_float(d),
         Some(d) if d.type_id == TYPE_INT || d.type_id == TYPE_BOOL => haxe_unbox_int(d) as f64,
         _ => 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(code: usize, env: usize) -> Vec<usize> {
+        vec![code, env]
+    }
+
+    /// A trampoline aliased to compiled code is the same function, and what
+    /// was registered under it is found under the compiled address.
+    #[test]
+    fn an_alias_keeps_one_identity() {
+        let (stub, compiled, slot) = (0x7100_0010, 0x7200_0020, 0x7300_0030);
+        let target = record(stub, 0);
+        let slot_record = record(slot, 0);
+        haxe_closure_register_entries(
+            target.as_ptr() as *const u8,
+            slot_record.as_ptr() as *const u8,
+            std::ptr::null(),
+        );
+        haxe_closure_alias_code(stub, compiled);
+
+        let mut before = record(stub, 0);
+        let mut after = record(compiled, 0);
+        assert!(haxe_closure_equals(
+            before.as_mut_ptr() as *mut u8,
+            after.as_mut_ptr() as *mut u8
+        ));
+        assert_eq!(closure_slot_code(compiled), slot);
+        assert_eq!(closure_slot_code(stub), slot);
     }
 }

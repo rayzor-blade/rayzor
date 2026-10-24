@@ -357,6 +357,27 @@ fn string_constants_are_runtime_strings() {
     assert_eq!(text, b"hello");
 }
 
+/// An empty literal's data pointer is a real address, as in compiled code:
+/// the runtime reads it to tell a string from a boxed value.
+#[test]
+fn empty_string_constants_point_at_memory() {
+    let mut b = MirBuilder::new("t");
+    let f = b.begin_function("s").returns(IrType::String).build();
+    b.set_current_function(f);
+    let e = b.create_block("entry");
+    b.set_insert_point(e);
+    let s = b.const_string("");
+    b.ret(Some(s));
+    let m = b.finish();
+    let r = runtime().execute(&m, f, vec![]).unwrap();
+    let InterpValue::Ptr(p) = r else {
+        panic!("{:?}", r)
+    };
+    let (data, len) = unsafe { (*(p as *const usize), *((p + 8) as *const usize)) };
+    assert_eq!(len, 0);
+    assert!(data >= 4096, "data pointer {:#x}", data);
+}
+
 #[test]
 fn globals_live_in_the_runtime_store() {
     let mut b = MirBuilder::new("t");

@@ -145,6 +145,8 @@ impl std::fmt::Display for InterpError {
 
 impl std::error::Error for InterpError {}
 
+type ResumeKey = (usize, IrFunctionId, crate::ir::IrBlockId);
+
 /// What every thread running one program's interpreted code shares.
 pub(crate) struct Program {
     symbols: RwLock<HashMap<String, usize>>,
@@ -153,8 +155,9 @@ pub(crate) struct Program {
     natives: RwLock<HashMap<IrFunctionId, usize>>,
     /// Set once compiled code is installed: hot loops then transfer to it.
     compiled: AtomicBool,
-    /// Compiled resume points by module address, function and loop header.
-    resume_points: RwLock<HashMap<(usize, IrFunctionId, crate::ir::IrBlockId), usize>>,
+    /// Compiled resume points by module address, function and loop header,
+    /// with the frame each takes.
+    resume_points: RwLock<HashMap<ResumeKey, (usize, Arc<crate::ir::osr::OsrLayout>)>>,
     /// Loops that carried on in compiled code.
     transfers: std::sync::atomic::AtomicU64,
     literals: Mutex<HashMap<String, &'static [u8]>>,
@@ -184,13 +187,18 @@ impl Program {
     }
 
     /// The bytes of a string constant, alive for the rest of the process:
-    /// the runtime's string literal borrows them.
+    /// the runtime's string literal borrows them. They sit in a real
+    /// allocation even when empty, as compiled code's data section does; the
+    /// runtime reads a string's data pointer to tell it from an object.
     pub(crate) fn literal(&self, s: &str) -> &'static [u8] {
         let mut literals = self.literals.lock().unwrap();
         if let Some(b) = literals.get(s) {
             return b;
         }
-        let bytes: &'static [u8] = Box::leak(s.as_bytes().to_vec().into_boxed_slice());
+        let mut owned = s.as_bytes().to_vec();
+        owned.push(0);
+        let stored: &'static [u8] = Box::leak(owned.into_boxed_slice());
+        let bytes = &stored[..s.len()];
         literals.insert(s.to_string(), bytes);
         bytes
     }
@@ -207,12 +215,12 @@ impl Program {
         module: usize,
         func: IrFunctionId,
         header: crate::ir::IrBlockId,
-    ) -> Option<usize> {
+    ) -> Option<(usize, Arc<crate::ir::osr::OsrLayout>)> {
         self.resume_points
             .read()
             .unwrap()
             .get(&(module, func, header))
-            .copied()
+            .cloned()
     }
 
     #[inline(always)]
@@ -462,25 +470,34 @@ impl MirInterpreter {
             .unwrap()
             .insert(func, code as usize);
         self.machine.program.compiled.store(true, Ordering::Release);
-        trampoline::forward(func, code as usize);
+        let stubs = trampoline::forward(func, code as usize);
+        // The runtime keys closures by code address; a stub handed out before
+        // now is the same function as the compiled code.
+        if let Some(alias) = self.machine.program.symbol("haxe_closure_alias_code") {
+            let alias: extern "C" fn(usize, usize) = unsafe { std::mem::transmute(alias) };
+            for stub in stubs {
+                alias(stub, code as usize);
+            }
+        }
     }
 
-    /// Compiled code that resumes `func` of `module` at loop `header`, taking
-    /// the frame `crate::ir::osr::osr_layout` describes.
+    /// Compiled code that resumes `func` of `module` at `layout.header`,
+    /// taking the frame `layout` describes. The layout is of the function as
+    /// interpreted frames run it, which the module may since have optimized.
     pub fn install_resume_point(
         &mut self,
         module: &IrModule,
         func: IrFunctionId,
-        header: crate::ir::IrBlockId,
         code: *const u8,
+        layout: crate::ir::osr::OsrLayout,
     ) {
-        let key = (module as *const IrModule as usize, func, header);
+        let key = (module as *const IrModule as usize, func, layout.header);
         self.machine
             .program
             .resume_points
             .write()
             .unwrap()
-            .insert(key, code as usize);
+            .insert(key, (code as usize, Arc::new(layout)));
     }
 
     /// How many interpreted loops have carried on in compiled code.

@@ -2079,6 +2079,10 @@ fn run_file(
     // main is entered once and any LLVM upgrade happens before it runs, so no
     // running baseline loop ever has optimised code to move into.
     backend.set_osr_probes(false);
+    if fast_interpreter_start {
+        // Startup ran only the required MIR passes; compiled code gets the rest.
+        backend.defer_mir_optimization(compiler::ir::optimization::OptimizationLevel::O2);
+    }
     startup_times::finished("backend construction");
 
     // Compile module with tiered JIT

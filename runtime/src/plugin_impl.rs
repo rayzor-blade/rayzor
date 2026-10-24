@@ -2628,6 +2628,10 @@ register_symbol!(
     crate::closure_entries::haxe_closure_register_packed_entry
 );
 register_symbol!(
+    "haxe_closure_alias_code",
+    crate::closure_entries::haxe_closure_alias_code
+);
+register_symbol!(
     "haxe_register_method",
     crate::closure_entries::haxe_register_method
 );

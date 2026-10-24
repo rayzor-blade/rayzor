@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-use crate::ir::{AtomicRmwOp, IrFunctionId, IrModule};
+use crate::ir::{AtomicRmwOp, IrFunctionId};
 
 use super::decode::{
     Block, Call, Edge, FloatCc, FloatOp, FnRef, Function, GlobalSlot, IndirectCall, IntCc, IntOp,
@@ -313,41 +313,8 @@ fn osr_target(m: &Machine, f: &Function, block: u32) -> Option<Arc<OsrTarget>> {
 fn resume_points(m: &Machine, f: &Function) -> HashMap<u32, Arc<OsrTarget>> {
     use crate::ir::osr;
     let mut out = HashMap::new();
-    // SAFETY: a decoded function's module outlives it.
-    let module = unsafe { &*(f.module as *const IrModule) };
-    let Some(ir) = module.functions.get(&f.id) else {
-        return out;
-    };
-    for header in osr::find_loop_headers(ir) {
-        let Some(dense) = f.block_ids.iter().position(|b| *b == header) else {
-            continue;
-        };
-        let trace = osr::osr_trace_enabled();
-        let layout = match osr::resume_layout(ir, header) {
-            Ok(layout) => layout,
-            Err(reason) => {
-                if trace {
-                    eprintln!("[osr] interpreted {} {header:?}: {reason:?}", ir.name);
-                    if let osr::OsrReject::LiveInTypeUnknown(v) = reason {
-                        for b in ir.cfg.blocks.values() {
-                            for inst in &b.instructions {
-                                if inst.dest() == Some(v) {
-                                    eprintln!("[osr]   defined by {inst:?}");
-                                }
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
-        };
-        let Some(helper) = m.program.resume_point(f.module, f.id, header) else {
-            if trace {
-                eprintln!(
-                    "[osr] interpreted {} {header:?}: no compiled resume point",
-                    ir.name
-                );
-            }
+    for (dense, &header) in f.block_ids.iter().enumerate() {
+        let Some((helper, layout)) = m.program.resume_point(f.module, f.id, header) else {
             continue;
         };
         let mut slots = Vec::with_capacity(layout.params.len());
@@ -363,10 +330,10 @@ fn resume_points(m: &Machine, f: &Function) -> HashMap<u32, Arc<OsrTarget>> {
             let want = Mt::of(&layout.live_in_types[i]);
             let have = f.reg_mts.get(reg as usize).copied();
             if want.is_none() || have != want {
-                if trace {
+                if osr::osr_trace_enabled() {
                     eprintln!(
                         "[osr] interpreted {} {header:?}: ${reg} is {have:?}, resume point loads {want:?}",
-                        ir.name
+                        f.name
                     );
                 }
                 usable = false;
@@ -381,7 +348,7 @@ fn resume_points(m: &Machine, f: &Function) -> HashMap<u32, Arc<OsrTarget>> {
                     helper,
                     size: layout.frame.size as usize,
                     slots,
-                    ret: Mt::of(&ir.signature.return_type),
+                    ret: Mt::of(&f.return_type),
                 }),
             );
         }

@@ -344,6 +344,9 @@ pub struct TieredBackend {
     /// those a suspended interpreted stack is waiting in.
     pending_osr: BTreeSet<IrFunctionId>,
 
+    /// The MIR pipeline startup skipped, run before the first native compile.
+    deferred_mir_opt: Option<crate::ir::optimization::OptimizationLevel>,
+
     /// Number of loaded MIR modules that have already run startup hooks.
     initialized_module_count: Arc<Mutex<usize>>,
 
@@ -1205,6 +1208,7 @@ impl TieredBackend {
             promotion_barrier: Arc::new(PromotionBarrier::new()),
             activity: CompileActivity::default(),
             pending_osr: BTreeSet::new(),
+            deferred_mir_opt: None,
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1275,6 +1279,7 @@ impl TieredBackend {
             promotion_barrier: Arc::new(PromotionBarrier::new()),
             activity: CompileActivity::default(),
             pending_osr: BTreeSet::new(),
+            deferred_mir_opt: None,
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
@@ -2165,6 +2170,12 @@ impl TieredBackend {
         }
     }
 
+    /// Run `level`'s MIR pipeline, which startup skipped, before the first
+    /// native compile. The required passes must already have run.
+    pub fn defer_mir_optimization(&mut self, level: crate::ir::optimization::OptimizationLevel) {
+        self.deferred_mir_opt = Some(level);
+    }
+
     /// Get a function pointer (for execution)
     pub fn get_function_pointer(&self, func_id: IrFunctionId) -> Option<*const u8> {
         self.function_pointers
@@ -2522,12 +2533,35 @@ impl TieredBackend {
 
         // Resume points for the loops a suspended interpreted stack waits in,
         // compiled with everything else and taken out again afterwards.
-        let resume_points = if self.pending_osr.is_empty() {
-            Vec::new()
-        } else {
-            Self::add_resume_points(&mut self.modules.write().unwrap(), &self.pending_osr)
+        // The functions suspended interpreted frames wait in, as those frames
+        // run them: their resume points must match their registers.
+        let waiting: Vec<(usize, IrFunction)> = {
+            let modules = self.modules.read().unwrap();
+            modules
+                .iter()
+                .enumerate()
+                .flat_map(|(i, m)| {
+                    self.pending_osr
+                        .iter()
+                        .filter_map(move |id| m.functions.get(id))
+                        .filter(|f| !f.cfg.blocks.is_empty())
+                        .map(move |f| (i, f.clone()))
+                })
+                .collect()
         };
-        let osr_ids: BTreeSet<IrFunctionId> = resume_points.iter().map(|r| r.3).collect();
+        let resume_points = Self::add_resume_points(&mut self.modules.write().unwrap(), waiting);
+        // Startup ran only the required MIR passes; compiled code gets the
+        // rest, resume points included. Interpreted frames pass an environment
+        // to whatever took one when they were decoded, so those keep it.
+        let mut kept_indirect = BTreeSet::new();
+        if let Some(level) = self.deferred_mir_opt.take() {
+            let mut modules = self.modules.write().unwrap();
+            kept_indirect = crate::ir::abi::indirect_targets(&modules);
+            for module in modules.iter_mut() {
+                let _ = crate::ir::optimization::PassManager::after_required(level).run(module);
+            }
+        }
+        let osr_ids: BTreeSet<IrFunctionId> = resume_points.iter().map(|r| r.2).collect();
 
         // Convert runtime symbols to the format Cranelift expects
         let symbols: Vec<(&str, *const u8)> = self
@@ -2539,6 +2573,7 @@ impl TieredBackend {
         // Create a fresh Cranelift backend with runtime symbols
         let mut backend = CraneliftBackend::with_symbols(&symbols)?;
         backend.set_osr_probes(self.baseline_backend.lock().unwrap().osr_probes());
+        backend.seed_indirect_target_ids(kept_indirect);
 
         // Compile all modules to the same backend WITHOUT finalizing between modules
         let modules = self.modules.read().unwrap();
@@ -2633,9 +2668,9 @@ impl TieredBackend {
         if !resume_points.is_empty() {
             let modules = self.modules.read().unwrap();
             let mut interp = self.interpreter.lock().unwrap();
-            for &(module, parent, header, variant) in &resume_points {
+            for (module, parent, variant, layout) in resume_points.iter().cloned() {
                 if let Ok(ptr) = backend.get_function_ptr(variant) {
-                    interp.install_resume_point(&modules[module], parent, header, ptr);
+                    interp.install_resume_point(&modules[module], parent, ptr, layout);
                 }
             }
         }
@@ -3406,17 +3441,18 @@ impl TieredBackend {
         Ok(installed)
     }
 
-    /// Add a resume point for every loop of `functions`, for interpreted frames
-    /// waiting in them. Returns `(module index, function, header, variant)`;
-    /// a function is named by module and id because ids repeat across modules
-    /// and names repeat within one (every constructor is `new`).
+    /// Add a resume point for every loop of the `waiting` functions, given as
+    /// the interpreted frames run them, for those frames to continue in.
+    /// Returns `(module index, function, variant, layout)`; a function is
+    /// named by module and id because ids repeat across modules and names
+    /// repeat within one (every constructor is `new`).
     fn add_resume_points(
         modules: &mut [crate::ir::IrModule],
-        functions: &BTreeSet<IrFunctionId>,
-    ) -> Vec<(usize, IrFunctionId, crate::ir::IrBlockId, IrFunctionId)> {
+        waiting: Vec<(usize, IrFunction)>,
+    ) -> Vec<(usize, IrFunctionId, IrFunctionId, crate::ir::osr::OsrLayout)> {
         use crate::ir::osr;
 
-        if !osr::osr_enabled() {
+        if waiting.is_empty() || !osr::osr_enabled() {
             return Vec::new();
         }
         let mut next_id = modules
@@ -3426,26 +3462,20 @@ impl TieredBackend {
             .max()
             .unwrap_or(0);
         let mut points = Vec::new();
-        for (index, module) in modules.iter_mut().enumerate() {
-            let mut built = Vec::new();
-            for &parent_id in functions {
-                let Some(parent) = module.functions.get(&parent_id) else {
-                    continue;
-                };
-                if parent.cfg.blocks.is_empty() {
-                    continue;
-                }
-                for header in osr::find_loop_headers(parent) {
-                    let variant_id = IrFunctionId(next_id);
-                    if let Ok(variant) = osr::build_resume_variant(parent, header, variant_id) {
+        for (index, parent) in waiting {
+            for header in osr::find_loop_headers(&parent) {
+                let variant_id = IrFunctionId(next_id);
+                match osr::build_resume_variant(&parent, header, variant_id) {
+                    Ok(variant) => {
                         next_id += 1;
-                        points.push((index, parent_id, header, variant_id));
-                        built.push(variant.function);
+                        points.push((index, parent.id, variant_id, variant.layout));
+                        modules[index].add_function(variant.function);
                     }
+                    Err(reason) if osr::osr_trace_enabled() => {
+                        eprintln!("[osr] interpreted {} {header:?}: {reason:?}", parent.name);
+                    }
+                    Err(_) => {}
                 }
-            }
-            for function in built {
-                module.add_function(function);
             }
         }
         points

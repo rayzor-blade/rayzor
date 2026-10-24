@@ -91,13 +91,16 @@ pub(super) fn address(
     Ok(addr)
 }
 
-/// Send every stub for `func` straight to its compiled code.
-pub(super) fn forward(func: IrFunctionId, code: usize) {
-    for t in targets().read().unwrap().values() {
+/// Send every stub for `func` straight to its compiled code, and return them.
+pub(super) fn forward(func: IrFunctionId, code: usize) -> Vec<usize> {
+    let mut stubs = Vec::new();
+    for (&stub, t) in targets().read().unwrap().iter() {
         if t.func == func {
             t.forward.store(code, Ordering::Release);
+            stubs.push(stub);
         }
     }
+    stubs
 }
 
 fn new_chunk() -> Result<Chunk, String> {
