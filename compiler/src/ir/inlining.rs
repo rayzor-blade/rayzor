@@ -171,6 +171,9 @@ pub struct InliningCostModel {
     pub small_function_bonus: usize,
     /// Maximum total growth allowed (as percentage of original size)
     pub max_growth_percent: usize,
+    /// Whether a directly self-recursive call is expanded once; see
+    /// `should_inline`.
+    pub expand_self_recursion: bool,
 }
 
 impl Default for InliningCostModel {
@@ -181,6 +184,7 @@ impl Default for InliningCostModel {
             block_count_penalty: 0.9, // Reduce threshold by 10% per extra block
             small_function_bonus: 20, // Extra budget for tiny functions
             max_growth_percent: 200,  // Allow up to 2x code growth
+            expand_self_recursion: true,
         }
     }
 }
@@ -215,7 +219,7 @@ impl InliningCostModel {
         // compounds exponentially. Mutual recursion, found through
         // `can_reach`, is never expanded — the budget cannot bound it.
         if call_graph.is_recursive(call_site.callee) {
-            if call_site.caller != call_site.callee {
+            if !self.expand_self_recursion || call_site.caller != call_site.callee {
                 return false;
             }
             let body: usize = callee

@@ -6,7 +6,7 @@
 
 use super::{
     BinaryOp, CompareOp, IrBasicBlock, IrBlockId, IrFunction, IrFunctionId, IrGlobalId, IrId,
-    IrInstruction, IrModule, IrTerminator, IrType, IrValue,
+    IrInstruction, IrModule, IrPhiNode, IrTerminator, IrType, IrValue,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1282,10 +1282,11 @@ impl LICMPass {
 
     /// Create a preheader block for a loop if one doesn't exist.
     fn ensure_preheader(
-        cfg: &mut super::IrControlFlowGraph,
+        function: &mut IrFunction,
         header: IrBlockId,
         loop_blocks: &BTreeSet<IrBlockId>,
     ) -> IrBlockId {
+        let cfg = &mut function.cfg;
         let header_block = cfg.get_block(header).unwrap();
 
         // Find predecessors outside the loop
@@ -1356,9 +1357,40 @@ impl LICMPass {
             header_block.predecessors.push(preheader);
         }
 
+        // The header's phis now take what came from outside through the
+        // preheader: the value itself from one predecessor, a phi merging
+        // them from several.
+        let mut merges = Vec::new();
+        if let Some(header_block) = cfg.get_block_mut(header) {
+            for phi in header_block.phi_nodes.iter_mut() {
+                let (outside, inside): (Vec<_>, Vec<_>) = phi
+                    .incoming
+                    .drain(..)
+                    .partition(|(pred, _)| outside_preds.contains(pred));
+                phi.incoming = inside;
+                let Some(&(_, first)) = outside.first() else {
+                    continue;
+                };
+                if outside.iter().all(|(_, value)| *value == first) {
+                    phi.incoming.push((preheader, first));
+                } else {
+                    let merged = IrId::new(function.next_reg_id);
+                    function.next_reg_id += 1;
+                    function.register_types.insert(merged, phi.ty.clone());
+                    phi.incoming.push((preheader, merged));
+                    merges.push(IrPhiNode {
+                        dest: merged,
+                        incoming: outside,
+                        ty: phi.ty.clone(),
+                    });
+                }
+            }
+        }
+
         // Set preheader's predecessors
         if let Some(preheader_block) = cfg.get_block_mut(preheader) {
             preheader_block.predecessors = outside_preds;
+            preheader_block.phi_nodes = merges;
         }
 
         preheader
@@ -1558,7 +1590,7 @@ impl OptimizationPass for LICMPass {
 
                 // Ensure we have a preheader
                 let preheader =
-                    Self::ensure_preheader(&mut function.cfg, loop_data.header, &loop_data.blocks);
+                    Self::ensure_preheader(function, loop_data.header, &loop_data.blocks);
 
                 // Collect ALL indices to remove (regular hoists + alloc hoists + free removals)
                 let mut indices_to_remove: BTreeMap<IrBlockId, Vec<usize>> = BTreeMap::new();
@@ -2354,9 +2386,21 @@ impl PassManager {
         manager
     }
 
-    /// The rest of `level`'s pipeline, for a module `required_only` has
-    /// already run on: tree fusion is left out, as it has to precede the
-    /// first free insertion.
+    /// What an interpreted start runs before `main`: O0, and tree fusion,
+    /// which has to precede the first free insertion and so cannot wait for
+    /// the rest of O2.
+    pub fn startup() -> Self {
+        let mut manager = Self::new();
+        manager.add_pass(UnreachableBlockEliminationPass::new());
+        manager.add_pass(super::tree_fusion::TreeFusionPass::new());
+        manager.add_pass(super::insert_free::InsertFreePass::new());
+        manager.add_level_passes(OptimizationLevel::O0);
+        manager
+    }
+
+    /// The rest of `level`'s pipeline, for a module `required_only` or
+    /// `startup` has already run on: tree fusion is left out, as it has to
+    /// precede the first free insertion.
     pub fn after_required(level: OptimizationLevel) -> Self {
         let mut manager = Self::new();
         manager.add_level_passes(level);
@@ -2374,6 +2418,8 @@ impl PassManager {
                 //    to expose Alloc+GEP patterns for scalar replacement, preventing memory leaks
                 let mut forced_inline_model = super::inlining::InliningCostModel::default();
                 forced_inline_model.max_inline_size = 15; // Small constructors + Always-hint
+                // An optimization, and one a later O2 run expands again on top.
+                forced_inline_model.expand_self_recursion = false;
                 manager.add_pass(super::inlining::InliningPass::with_cost_model(
                     forced_inline_model,
                 ));
@@ -2489,6 +2535,69 @@ mod tests {
     use super::*;
     use crate::ir::builder::*;
     use crate::tast::SymbolId;
+
+    /// A loop header entered from two blocks outside the loop: the preheader
+    /// takes both edges, so it merges their values, and every header phi
+    /// names only blocks that are still its predecessors.
+    #[test]
+    fn a_preheader_merges_what_two_outside_edges_bring() {
+        let mut builder = IrBuilder::new("test".to_string(), "test.hx".to_string());
+        let sig = FunctionSignatureBuilder::new()
+            .param("c".to_string(), IrType::Bool)
+            .returns(IrType::I32)
+            .build();
+        builder.start_function(SymbolId::from_raw(1), "two_ways_in".to_string(), sig);
+        let c = builder
+            .current_function()
+            .unwrap()
+            .get_param_reg(0)
+            .unwrap();
+        let left = builder.create_block().unwrap();
+        let right = builder.create_block().unwrap();
+        let header = builder.create_block().unwrap();
+        let body = builder.create_block().unwrap();
+        let exit = builder.create_block().unwrap();
+        builder.build_cond_branch(c, left, right);
+        builder.switch_to_block(left);
+        let one = builder.build_int(1, IrType::I32).unwrap();
+        builder.build_branch(header);
+        builder.switch_to_block(right);
+        let two = builder.build_int(2, IrType::I32).unwrap();
+        builder.build_branch(header);
+        builder.switch_to_block(header);
+        let i = builder.build_phi(header, IrType::I32).unwrap();
+        let limit = builder.build_int(10, IrType::I32).unwrap();
+        let more = builder.build_cmp(CompareOp::Lt, i, limit).unwrap();
+        builder.build_cond_branch(more, body, exit);
+        builder.switch_to_block(body);
+        let step = builder.build_int(1, IrType::I32).unwrap();
+        let next = builder.build_add(i, step, false).unwrap();
+        builder.build_branch(header);
+        builder.add_phi_incoming(header, i, left, one);
+        builder.add_phi_incoming(header, i, right, two);
+        builder.add_phi_incoming(header, i, body, next);
+        builder.switch_to_block(exit);
+        builder.build_return(Some(i));
+        builder.finish_function();
+        let mut function = builder.module.functions.values().next().unwrap().clone();
+        function.cfg.recompute_predecessors();
+
+        let blocks = BTreeSet::from([header, body]);
+        let preheader = LICMPass::ensure_preheader(&mut function, header, &blocks);
+        function.cfg.recompute_predecessors();
+
+        for block in function.cfg.blocks.values() {
+            for phi in &block.phi_nodes {
+                let preds: BTreeSet<_> = block.predecessors.iter().copied().collect();
+                let incoming: BTreeSet<_> = phi.incoming.iter().map(|(b, _)| *b).collect();
+                assert_eq!(incoming, preds, "{:?} in {:?}", phi, block.id);
+            }
+        }
+        let merged = &function.cfg.blocks[&preheader].phi_nodes;
+        assert_eq!(merged.len(), 1);
+        let values: BTreeSet<_> = merged[0].incoming.iter().map(|(_, v)| *v).collect();
+        assert_eq!(values, BTreeSet::from([one, two]));
+    }
 
     #[test]
     fn test_constant_folding() {
