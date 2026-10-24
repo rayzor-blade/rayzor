@@ -728,14 +728,7 @@ fn resolve_tier_config(
             compiler::codegen::TierPreset::Custom(custom),
         ),
         None => {
-            let mut config = compiler::codegen::tiered_backend::TieredConfig::from_preset(
-                preset.to_tier_preset(),
-            );
-            // Preserve the historical native CLI default for ad hoc runs
-            // without a manifest-level `[tier]` block. Explicit manifest
-            // configs must be able to tune `start_interpreted`.
-            config.start_interpreted = false;
-            config
+            compiler::codegen::tiered_backend::TieredConfig::from_preset(preset.to_tier_preset())
         }
     };
 
@@ -1190,10 +1183,13 @@ fn run_bundle(
     // is a direct request for whole-module LLVM even when the `.rzb` is
     // shipped without its original rayzor.toml.
     let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry || llvm;
+    let start_interpreted = config.start_interpreted;
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
     // main is entered once and any LLVM upgrade happens before it runs.
     backend.set_osr_probes(false);
+    // Starting interpreted, the LLVM tier is reached when the program turns hot.
+    backend.set_tier_up_to_llvm(start_interpreted && auto_upgrade_to_llvm);
 
     for module in bundle.modules().iter() {
         backend
@@ -1220,7 +1216,7 @@ fn run_bundle(
 
     if auto_upgrade_to_llvm {
         #[cfg(feature = "llvm-backend")]
-        {
+        if !start_interpreted {
             let profile_load = verbose || std::env::var_os("RAYZOR_PROFILE_LOAD").is_some();
             let up_t = profile_load.then(std::time::Instant::now);
             if let Err(e) = backend.upgrade_to_llvm() {
@@ -1646,8 +1642,8 @@ fn run_file(
 
     let raw_mir_requested = std::env::var_os("RAYZOR_RAW_MIR").is_some();
     let opt_level_requested = std::env::var_os("RAYZOR_OPT_LEVEL").is_some();
-    let fast_interpreter_start =
-        resolved_tier_config.start_interpreted && !auto_upgrade_to_llvm && !opt_level_requested;
+    let start_interpreted = resolved_tier_config.start_interpreted;
+    let fast_interpreter_start = start_interpreted && !opt_level_requested;
     let skip_mir_opt = raw_mir_requested || fast_interpreter_start;
 
     // Check MIR cache: if source hash matches, skip compile+merge+shake entirely
@@ -1936,13 +1932,10 @@ fn run_file(
         // (loop unrolling on multi-phi headers, InliningPass dropping a BinOp
         // dest type via phi-fed operands), so O2 is now the run-default.
         //
-        // Exception: an interpreter-first, non-LLVM source run is asking for
-        // first-instruction latency. In that mode the interpreter can execute
-        // raw MIR immediately and the tier system can still promote later.
-        // Spending ~1s+ optimizing before `main` defeats the tier contract, so
-        // skip MIR optimization unless the user explicitly requested an opt
-        // level. Eager LLVM runs keep optimizing up front because LLVM is the
-        // point of that mode.
+        // An interpreted start runs `PassManager::startup` instead: O0, what
+        // every compiled tier runs at least, Haxe `inline` expansion included,
+        // which is a language guarantee rather than an optimization. The rest
+        // of O2 waits for the first native compile.
         if !skip_mir_opt {
             if let Some(ref h) = progress_handle {
                 h.begin_phase("optimize");
@@ -1962,15 +1955,18 @@ fn run_file(
             {
                 h.end_phase("optimize", t_opt.elapsed().as_secs_f64() * 1000.0);
             }
+        } else if fast_interpreter_start {
+            use compiler::ir::optimization::PassManager;
+            let _ = PassManager::startup().run(&mut mir_module);
+            if verbose {
+                eprintln!("[compile] MIR optimize reduced to O0 for startup");
+            }
         } else {
             // Skipping optimization must not skip the passes correctness
             // depends on; see `PassManager::required_only`.
             use compiler::ir::optimization::PassManager;
             let mut pass_manager = PassManager::required_only();
             let _ = pass_manager.run(&mut mir_module);
-            if fast_interpreter_start && verbose {
-                eprintln!("[compile] MIR optimize reduced to required passes for startup");
-            }
         }
 
         startup_times::finished("MIR optimize");
@@ -2079,8 +2075,10 @@ fn run_file(
     // main is entered once and any LLVM upgrade happens before it runs, so no
     // running baseline loop ever has optimised code to move into.
     backend.set_osr_probes(false);
+    // Starting interpreted, the LLVM tier is reached when the program turns hot.
+    backend.set_tier_up_to_llvm(start_interpreted && auto_upgrade_to_llvm);
     if fast_interpreter_start {
-        // Startup ran only the required MIR passes; compiled code gets the rest.
+        // Startup ran O0; compiled code gets the rest of O2.
         backend.defer_mir_optimization(compiler::ir::optimization::OptimizationLevel::O2);
     }
     startup_times::finished("backend construction");
@@ -2116,8 +2114,9 @@ fn run_file(
         .map_err(|e| format!("module initialization failed: {}", e))?;
     startup_times::finished("module init (native compile + static init)");
 
-    // Once module init has populated globals/vtables, force every reachable
-    // function up to LLVM (Maximum tier) before main runs.
+    // A native start forces every reachable function up to LLVM (Maximum tier)
+    // before main runs, once module init has populated globals/vtables. An
+    // interpreted start reaches LLVM when the program turns hot instead.
     //
     // A failure is fatal when the user asked for `--llvm`. Continuing on
     // Cranelift there reports success for a run that never used the tier that
@@ -2127,7 +2126,7 @@ fn run_file(
     // nobody asked for the tier by name.
     if auto_upgrade_to_llvm {
         #[cfg(feature = "llvm-backend")]
-        {
+        if !start_interpreted {
             let profile_load = verbose || std::env::var_os("RAYZOR_PROFILE_LOAD").is_some();
             let up_t = profile_load.then(std::time::Instant::now);
             if let Err(e) = backend.upgrade_to_llvm() {
@@ -2159,7 +2158,7 @@ fn run_file(
         }
     }
 
-    if auto_upgrade_to_llvm {
+    if auto_upgrade_to_llvm && !start_interpreted {
         startup_times::finished("LLVM upgrade");
     }
 
