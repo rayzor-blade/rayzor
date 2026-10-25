@@ -421,8 +421,14 @@ impl AotCompiler {
             return Ok(linker.clone());
         }
 
-        // Try common linkers in order of preference
-        for candidate in &["clang", "gcc", "cc"] {
+        // `$CC` first, then common drivers. Only the link runs through one:
+        // it knows where the platform's startup files and libc live.
+        let from_env = std::env::var("CC").ok().filter(|cc| !cc.is_empty());
+        for candidate in from_env
+            .iter()
+            .map(String::as_str)
+            .chain(["clang", "gcc", "cc"])
+        {
             if Command::new(candidate)
                 .arg("--version")
                 .env_remove("SDKROOT")

@@ -226,7 +226,7 @@ jobs:
           RAYZOR_PROFILE_TIER_EVENTS: "1"
         run: >-
           ./target/release/examples/benchmark_runner ${{ matrix.kernel }} --json --disable-trace --strict
-          --targets rayzor-cranelift,rayzor-precompiled,rayzor-tiered,rayzor-precompiled-tiered,rayzor-llvm,haxe-hashlink,haxe-hashlink-c,ash,haxe-cpp,haxe-jvm
+          --targets rayzor-cranelift,rayzor-precompiled,rayzor-tiered,rayzor-precompiled-tiered,rayzor-llvm,rayzor-aot,haxe-hashlink,haxe-hashlink-c,ash,haxe-cpp,haxe-jvm
 
       - name: Measure ${{ matrix.kernel }} source startup
         run: |

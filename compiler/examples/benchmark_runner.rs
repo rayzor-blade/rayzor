@@ -1619,6 +1619,8 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(format!("AOT execution failed: {}", stderr));
                 }
+                // The program's checksum, as the in-process targets print theirs.
+                print!("{}", String::from_utf8_lossy(&output.stdout));
 
                 compile_times.push(compile_time);
                 exec_times.push(exec_time);
@@ -1980,10 +1982,10 @@ fn main() {
     ];
     #[cfg(feature = "llvm-backend")]
     all_targets_list.push(Target::RayzorLLVM);
-    // rayzor-aot and rayzor-gcc are not measured. AOT returns once it is
-    // stable; the C backend is experimental and does not belong in a reading
-    // the JIT tiers are being judged by. Both arms are kept so they can be
-    // re-listed here.
+    #[cfg(feature = "llvm-backend")]
+    all_targets_list.push(Target::RayzorAOT);
+    // rayzor-gcc is not measured: the C backend is experimental. Its arm is
+    // kept so it can be re-listed here.
 
     if haxe_available() {
         // Independent: the bytecode target needs the VM, the C target needs
