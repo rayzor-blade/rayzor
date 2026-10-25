@@ -232,8 +232,12 @@ fn native_calls_take_stack_arguments_and_c_promotion() {
     let expected = (1..=10).map(|i| i * i).sum::<i64>() as f64 + 50.0 + 250.0;
     let r = interp.execute(&m, f, vec![]).unwrap();
     assert!(matches!(r, InterpValue::F64(v) if v == expected), "{:?}", r);
-    let r = interp.execute(&m, g, vec![]).unwrap();
-    assert!(matches!(r, InterpValue::I64(-5)), "{:?}", r);
+    // Widening an i32 argument is the SysV and Apple rule; Win64 leaves the
+    // upper half undefined, and neither tier widens it there.
+    if !cfg!(windows) {
+        let r = interp.execute(&m, g, vec![]).unwrap();
+        assert!(matches!(r, InterpValue::I64(-5)), "{:?}", r);
+    }
 }
 
 /// Calls a Haxe closure object `{fn, env}` the way compiled code does.
