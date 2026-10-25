@@ -3,6 +3,32 @@
 
 use super::*;
 
+/// A decoded BLADE module: its MIR, metadata, type info and cached maps.
+pub(crate) type DecodedBlade = (
+    IrModule,
+    BladeMetadata,
+    Option<BladeTypeInfo>,
+    Option<BladeCachedMaps>,
+);
+
+/// Where a cached module's bytes come from.
+enum BladeSource {
+    /// This project's own artifact.
+    Artifact(PathBuf),
+    /// A prepared artifact shipped beside the library.
+    File(PathBuf),
+    Embedded(&'static [u8]),
+}
+
+impl BladeSource {
+    fn decode(&self) -> Result<DecodedBlade, crate::ir::blade::BladeError> {
+        match self {
+            BladeSource::Artifact(path) | BladeSource::File(path) => load_blade(path),
+            BladeSource::Embedded(bytes) => crate::ir::blade::load_blade_from_bytes(bytes),
+        }
+    }
+}
+
 impl CompilationUnit {
     /// Keep inferred primitive return types when an import is restored.
     pub(crate) fn cache_inferred_primitive_returns(&mut self, file: &TypedFile) {
@@ -903,6 +929,77 @@ impl CompilationUnit {
         }
     }
 
+    /// Where `try_load_blade_cached_full` may restore `source_path` from, in
+    /// order: this project's own artifact, then the standard library the
+    /// binary carries, so a project that has never been built, or was built
+    /// by another compiler, does not lower the library again.
+    fn blade_sources(&self, source_path: &str) -> Vec<BladeSource> {
+        let mut sources = Vec::new();
+        if let Some(path) = self.blade_cache_path(source_path).filter(|p| p.exists()) {
+            sources.push(BladeSource::Artifact(path));
+        }
+        if let Some(bytes) = self.embedded_snapshot_entry(source_path) {
+            sources.push(BladeSource::Embedded(bytes));
+        } else if let Some(path) = self.prepared_blade_path(source_path).filter(|p| p.exists()) {
+            sources.push(BladeSource::File(path));
+        }
+        sources
+    }
+
+    /// Decodes the cached modules of `sources` on several threads, for
+    /// `try_load_blade_cached_full` to take instead of decoding in turn.
+    pub(crate) fn prefetch_blade_sources(&self, sources: &[String]) {
+        if !self.config.enable_cache {
+            return;
+        }
+        let mut pending: Vec<(&str, BladeSource, u64)> = sources
+            .iter()
+            .filter_map(|path| {
+                let source = self.blade_sources(path).into_iter().next()?;
+                let size = match &source {
+                    BladeSource::Artifact(file) | BladeSource::File(file) => {
+                        std::fs::metadata(file).map_or(0, |m| m.len())
+                    }
+                    BladeSource::Embedded(bytes) => bytes.len() as u64,
+                };
+                Some((path.as_str(), source, size))
+            })
+            .collect();
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(pending.len() / 4);
+        if threads < 2 {
+            return;
+        }
+        // Largest first, each thread taking the next undecoded module, so no
+        // thread is left holding a run of large ones.
+        pending.sort_by_key(|(_, _, size)| std::cmp::Reverse(*size));
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let decoded: Vec<(String, DecodedBlade)> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut out = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some((path, source, _)) = pending.get(i) else {
+                                break out;
+                            };
+                            if let Ok(decoded) = source.decode() {
+                                out.push((path.to_string(), decoded));
+                            }
+                        }
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().unwrap_or_default())
+                .collect()
+        });
+        self.prefetched_blades.borrow_mut().extend(decoded);
+    }
+
     /// Load a BLADE cached file and return all components including type info and cached maps
     pub(crate) fn try_load_blade_cached_full(
         &self,
@@ -918,50 +1015,49 @@ impl CompilationUnit {
             return None;
         }
 
-        // Prefer this project's own artifact. Failing that, take the standard
-        // library the binary carries, so a project that has never been built
-        // does not lower the library again.
-        let loaded = match self.blade_cache_path(source_path) {
-            Some(path) if path.exists() => load_blade(&path),
-            _ => match self.embedded_snapshot_entry(source_path) {
-                Some(bytes) => crate::ir::blade::load_blade_from_bytes(bytes),
-                None => match self.prepared_blade_path(source_path) {
-                    Some(path) if path.exists() => load_blade(&path),
-                    _ => return None,
-                },
-            },
-        };
-
-        match loaded {
-            Ok((mir, metadata, symbols, cached_maps)) => {
-                let current_hash = self.hash_source_for_config(source_path, source);
-                let current_build_id = env!("RAYZOR_BUILD_ID");
-                // Why a cached module was rejected. The `trace!` below says
-                // which check failed but not what the values were, and the
-                // embedded snapshot fails BOTH when it is stale: the build id
-                // changes with every compiler source change, and the source
-                // hash carries the program.
-                if std::env::var_os("RAYZOR_DEBUG_BLADE").is_some() {
-                    eprintln!(
-                        "[blade] {source_path}\n        hash  {} vs {current_hash}\n        build {} vs {current_build_id}",
-                        metadata.source_hash, metadata.build_id
-                    );
+        let mut prefetched = self.prefetched_blades.borrow_mut().remove(source_path);
+        let mut current_hash = None;
+        for candidate in self.blade_sources(source_path) {
+            let loaded = match prefetched.take() {
+                Some(decoded) => Ok(decoded),
+                None => candidate.decode(),
+            };
+            let (mir, metadata, symbols, cached_maps) = match loaded {
+                Ok(decoded) => decoded,
+                Err(e) => {
+                    debug!("[BLADE] Cache read error for {}: {}", source_path, e);
+                    continue;
                 }
-                if metadata.source_hash != current_hash {
-                    debug!("[BLADE] Cache stale (hash mismatch): {}", source_path);
-                    None
-                } else if metadata.build_id != current_build_id {
-                    debug!("[BLADE] Cache stale (build-id mismatch): {}", source_path);
-                    None
-                } else {
-                    Some((mir, metadata, symbols, cached_maps))
-                }
+            };
+            let current_hash = current_hash
+                .get_or_insert_with(|| self.hash_source_for_config(source_path, source));
+            let current_build_id = env!("RAYZOR_BUILD_ID");
+            // Why a cached module was rejected. The `trace!` below says
+            // which check failed but not what the values were, and the
+            // embedded snapshot fails BOTH when it is stale: the build id
+            // changes with every compiler source change, and the source
+            // hash carries the program.
+            if std::env::var_os("RAYZOR_DEBUG_BLADE").is_some() {
+                eprintln!(
+                    "[blade] {source_path}\n        hash  {} vs {current_hash}\n        build {} vs {current_build_id}",
+                    metadata.source_hash, metadata.build_id
+                );
             }
-            Err(e) => {
-                debug!("[BLADE] Cache read error for {}: {}", source_path, e);
-                None
+            if metadata.source_hash != *current_hash {
+                debug!("[BLADE] Cache stale (hash mismatch): {}", source_path);
+            } else if metadata.build_id != current_build_id {
+                debug!("[BLADE] Cache stale (build-id mismatch): {}", source_path);
+            } else {
+                return Some((mir, metadata, symbols, cached_maps));
+            }
+            // A stale artifact of this project's is rewritten by the next
+            // compile of its module; until then it would be decoded first on
+            // every load only to be rejected.
+            if let BladeSource::Artifact(path) = &candidate {
+                let _ = std::fs::remove_file(path);
             }
         }
+        None
     }
 
     /// Restore MIR-level cross-reference maps from cached data using fresh symbol IDs.

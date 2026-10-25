@@ -477,15 +477,8 @@ fn find_benchmark_entry(modules: &[IrModule]) -> Option<(String, String)> {
 /// Prepare the same self-contained program unit as `rayzor run`: select the
 /// final merged module, remove unreachable stdlib code, then resolve wrapper
 /// stubs before optimization and codegen.
-fn prepare_benchmark_modules(
-    mir_modules: &[std::sync::Arc<IrModule>],
-) -> Result<Vec<IrModule>, String> {
-    let mut modules = vec![
-        mir_modules
-            .last()
-            .map(|module| (**module).clone())
-            .ok_or("No MIR modules")?,
-    ];
+fn prepare_benchmark_modules(mut mir_modules: Vec<IrModule>) -> Result<Vec<IrModule>, String> {
+    let mut modules = vec![mir_modules.pop().ok_or("No MIR modules")?];
     if let Some(entry) = find_benchmark_entry(&modules) {
         tree_shake::tree_shake_bundle(&mut modules, &entry.0, &entry.1);
     }
@@ -515,9 +508,7 @@ fn run_benchmark_cranelift(
     unit.lower_to_tast().map_err(|e| format!("tast: {:?}", e))?;
     unit.finalize_mir_references();
 
-    let mir_modules = unit.get_mir_modules();
-
-    let mut modules = prepare_benchmark_modules(&mir_modules)?;
+    let mut modules = prepare_benchmark_modules(unit.take_mir_modules())?;
 
     // Apply MIR optimizations (O2) for fair comparison with tiered backend
     let mut pass_manager = PassManager::for_level(OptimizationLevel::O2);
@@ -695,18 +686,15 @@ fn setup_tiered_benchmark(
     unit.lower_to_tast().map_err(|e| format!("tast: {:?}", e))?;
     unit.finalize_mir_references();
 
-    let lowered_modules = unit.get_mir_modules();
     let mut mir_modules: Vec<std::sync::Arc<IrModule>> =
-        prepare_benchmark_modules(&lowered_modules)?
+        prepare_benchmark_modules(unit.take_mir_modules())?
             .into_iter()
             .map(std::sync::Arc::new)
             .collect();
 
-    // Apply MIR optimization (O2) before loading into tiered backend.
-    // Without this, SRA doesn't run, so 875K heap allocs/frame leak in mandelbrot.
-    // Pre-compiled bundles (.rzb) are already optimized, which is why
-    // rayzor-precompiled-tiered has no memory leak.
-    let mut pass_manager = PassManager::for_level(OptimizationLevel::O2);
+    // As `rayzor run` starts interpreted: the startup pipeline before the
+    // program runs, the rest of O2 when it first compiles natively.
+    let mut pass_manager = PassManager::startup();
     for module in &mut mir_modules {
         let module_mut = std::sync::Arc::make_mut(module);
         let _ = pass_manager.run(module_mut);
@@ -728,6 +716,7 @@ fn setup_tiered_benchmark(
 
     let mut backend =
         TieredBackend::with_symbols(config, symbols).map_err(|e| format!("backend: {}", e))?;
+    backend.defer_mir_optimization(OptimizationLevel::O2);
 
     // Load the final merged module, matching the normal run path.
     for module in &mir_modules {
@@ -901,9 +890,8 @@ fn setup_llvm_benchmark<'ctx>(
     unit.lower_to_tast().map_err(|e| format!("tast: {:?}", e))?;
     unit.finalize_mir_references();
 
-    let lowered_modules = unit.get_mir_modules();
     let mut mir_modules: Vec<std::sync::Arc<IrModule>> =
-        prepare_benchmark_modules(&lowered_modules)?
+        prepare_benchmark_modules(unit.take_mir_modules())?
             .into_iter()
             .map(std::sync::Arc::new)
             .collect();

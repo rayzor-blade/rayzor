@@ -480,7 +480,7 @@ impl CompilationUnit {
             Some(index) => index.get(&name).copied(),
             None => unit
                 .symbol_table
-                .find_symbols(|symbol| {
+                .find_symbols_named(method_name, |symbol| {
                     symbol.kind == crate::tast::SymbolKind::Function
                         && symbol.qualified_name == Some(name)
                 })

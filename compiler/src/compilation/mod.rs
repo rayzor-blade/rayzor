@@ -342,6 +342,13 @@ pub struct CompilationUnit {
     /// not-yet-lowered class's static from its declaration (no decay).
     static_sig_index: Rc<RefCell<crate::tast::sig_index::StaticSigIndex>>,
 
+    /// Imports whose declarations import discovery already fed to
+    /// `static_sig_index`.
+    discovery_indexed: BTreeSet<PathBuf>,
+
+    /// Cached modules decoded ahead of use, by source path.
+    prefetched_blades: RefCell<BTreeMap<String, artifact_cache::DecodedBlade>>,
+
     /// Cache of files that have been successfully compiled (to avoid redundant recompilation)
     /// Maps filename to the TypedFile result
     compiled_files: BTreeMap<PathBuf, TypedFile>,
@@ -696,6 +703,8 @@ impl CompilationUnit {
             static_sig_index: Rc::new(RefCell::new(
                 crate::tast::sig_index::StaticSigIndex::default(),
             )),
+            discovery_indexed: BTreeSet::new(),
+            prefetched_blades: RefCell::new(BTreeMap::new()),
             compiled_files: BTreeMap::new(),
             editor_entry: None,
             settled_editor_imports: BTreeSet::new(),
@@ -794,6 +803,15 @@ impl CompilationUnit {
     /// Returns a vector of MIR modules corresponding to the compiled files.
     pub fn get_mir_modules(&self) -> Vec<std::sync::Arc<crate::ir::IrModule>> {
         self.mir_modules.clone()
+    }
+
+    /// Moves the MIR modules out, cloning only a module something else
+    /// still shares.
+    pub fn take_mir_modules(&mut self) -> Vec<crate::ir::IrModule> {
+        std::mem::take(&mut self.mir_modules)
+            .into_iter()
+            .map(|module| std::sync::Arc::try_unwrap(module).unwrap_or_else(|m| (*m).clone()))
+            .collect()
     }
 
     /// Finalize cross-module MIR references after all imports and user files

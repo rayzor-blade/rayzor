@@ -219,7 +219,7 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
     }
 
     let t_mir = profile_compile.then(std::time::Instant::now);
-    let mir_modules = unit.get_mir_modules();
+    let mut mir_modules = unit.take_mir_modules();
     let mir_ms = t_mir
         .map(|t| t.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
@@ -231,7 +231,7 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
         return Err("No MIR modules generated".to_string());
     }
 
-    let mut module = (**mir_modules.last().unwrap()).clone();
+    let mut module = mir_modules.pop().unwrap();
     // L1: on the wasm/Cranelift-JIT path the stdlib value-type wrappers
     // (Ptr/Usize/Box/SIMD4f) are merged into the module AFTER the single
     // InliningPass runs and so each value-type op stays an un-inlined

@@ -164,39 +164,52 @@ impl CompilationUnit {
                 .unwrap_or_else(|| func.name.clone())
         }
 
-        for m in &self.import_mir_modules {
+        for m in self
+            .import_mir_modules
+            .iter()
+            .chain(self.mir_modules.iter().map(|m| &**m))
+        {
             for (id, func) in &m.functions {
                 if is_empty_forward_ref_stub(func) {
-                    let name = func
-                        .qualified_name
-                        .clone()
-                        .unwrap_or_else(|| func.name.clone());
-                    stub_by_id.insert(*id, (name, func.signature.clone()));
-                }
-                if !func.cfg.blocks.is_empty() {
-                    let qname = func.qualified_name.as_deref().unwrap_or(&func.name);
-                    real_funcs_by_bare_name
-                        .entry(bare_function_name(qname).to_string())
-                        .or_default()
-                        .push((*id, func.signature.clone(), qname.to_string()));
+                    stub_by_id.insert(*id, (effective_name(func), func.signature.clone()));
                 }
             }
         }
-        for m in &self.mir_modules {
-            for (id, func) in &m.functions {
-                if is_empty_forward_ref_stub(func) {
-                    let name = func
-                        .qualified_name
-                        .clone()
-                        .unwrap_or_else(|| func.name.clone());
-                    stub_by_id.insert(*id, (name, func.signature.clone()));
+        // Only names `stdlib_function_name_map` does not resolve are matched
+        // by bare name: those of name records, extern declarations and stubs.
+        let mut wanted_bare_names: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        {
+            let mut want = |name: &str| {
+                if !self.stdlib_function_name_map.contains_key(name) {
+                    wanted_bare_names.insert(bare_function_name(name).to_string());
                 }
+            };
+            for m in self
+                .import_mir_modules
+                .iter()
+                .chain(self.mir_modules.iter().map(|m| &**m))
+            {
+                m.external_function_names.values().for_each(|n| want(n));
+                m.extern_functions.values().for_each(|ext| want(&ext.name));
+            }
+            stub_by_id.values().for_each(|(name, _)| want(name));
+        }
+        for m in self
+            .import_mir_modules
+            .iter()
+            .chain(self.mir_modules.iter().map(|m| &**m))
+        {
+            for (id, func) in &m.functions {
                 if !func.cfg.blocks.is_empty() {
                     let qname = func.qualified_name.as_deref().unwrap_or(&func.name);
-                    real_funcs_by_bare_name
-                        .entry(bare_function_name(qname).to_string())
-                        .or_default()
-                        .push((*id, func.signature.clone(), qname.to_string()));
+                    let bare = bare_function_name(qname);
+                    if wanted_bare_names.contains(bare) {
+                        real_funcs_by_bare_name
+                            .entry(bare.to_string())
+                            .or_default()
+                            .push((*id, func.signature.clone(), qname.to_string()));
+                    }
                 }
             }
         }

@@ -78,6 +78,8 @@ impl OptimizationResult {
 /// Optimization pass manager
 pub struct PassManager {
     passes: Vec<Box<dyn OptimizationPass>>,
+    /// Rounds of the whole pipeline while a transformative pass changes something.
+    max_iterations: usize,
 }
 
 /// Whether to run the MIR loop vectorizer, off unless `RAYZOR_VECTORIZE=1`.
@@ -181,7 +183,10 @@ impl OptimizationPass for StripStackTraceUpdatesPass {
 impl PassManager {
     /// Create a new pass manager
     pub fn new() -> Self {
-        Self { passes: Vec::new() }
+        Self {
+            passes: Vec::new(),
+            max_iterations: 5,
+        }
     }
 
     /// Add a pass to the manager
@@ -215,7 +220,7 @@ impl PassManager {
     /// Only re-iterates when a non-cleanup pass modifies the module.
     pub fn run(&mut self, module: &mut IrModule) -> OptimizationResult {
         let mut total_result = OptimizationResult::unchanged();
-        let max_pipeline_iterations = 5;
+        let max_pipeline_iterations = self.max_iterations;
 
         // Comma-separated pass names to skip, for bisecting a miscompile down to
         // the pass that causes it without a rebuild per candidate.
@@ -545,6 +550,22 @@ impl OptimizationPass for CopyPropagationPass {
             for id in &multi_def {
                 copies.remove(id);
             }
+
+            // To the root of each chain in one run: an intermediate copy's
+            // register may carry no type of its own.
+            let copies: BTreeMap<IrId, IrId> = copies
+                .iter()
+                .map(|(&dest, &src)| {
+                    let mut root = src;
+                    for _ in 0..copies.len() {
+                        match copies.get(&root) {
+                            Some(&next) if next != dest => root = next,
+                            _ => break,
+                        }
+                    }
+                    (dest, root)
+                })
+                .collect();
 
             if !copies.is_empty() {
                 // Replace uses with original sources
@@ -2391,6 +2412,9 @@ impl PassManager {
     /// the rest of O2.
     pub fn startup() -> Self {
         let mut manager = Self::new();
+        // One round: what another would find, O2 finds at the first native
+        // compile.
+        manager.max_iterations = 1;
         manager.add_pass(UnreachableBlockEliminationPass::new());
         manager.add_pass(super::tree_fusion::TreeFusionPass::new());
         manager.add_pass(super::insert_free::InsertFreePass::new());

@@ -805,6 +805,8 @@ impl CompilationUnit {
                     // Indexed here, before anything lowers: a base class needs
                     // to know which of its methods a later file overrides.
                     self.static_sig_index.borrow_mut().index_file(&ast);
+                    self.discovery_indexed
+                        .insert(source_file_identity(&filename));
                     // Type identities precede bodies that resolve module subtypes.
                     let mut headers = ast.clone();
                     headers.declarations.retain(|decl| {
@@ -867,6 +869,12 @@ impl CompilationUnit {
         }
 
         add_profile_ms(&mut self.typecheck_timings.import_discover_ms, t_discover);
+
+        let sources: Vec<String> = all_files
+            .values()
+            .map(|(path, _, _)| path.to_string_lossy().to_string())
+            .collect();
+        self.prefetch_blade_sources(&sources);
 
         // Method declarations supply the slot ABI to implementations that
         // compile before the interface's module in a circular import.
@@ -1165,6 +1173,7 @@ impl CompilationUnit {
         self.fixup_stale_cross_module_refs();
         self.fixup_stale_constructor_ids();
         self.fixup_stale_method_ids();
+        self.prefetched_blades.borrow_mut().clear();
 
         Ok(())
     }
@@ -1263,10 +1272,12 @@ impl CompilationUnit {
             //
             // The default stdlib imports are re-parsed for exactly this reason
             // where the manifest is loaded; a cached import needs it too, and
-            // there the set cannot be known in advance. Parsing is a fraction
-            // of the compile the cache just saved, and only files actually
-            // imported pay it.
-            let _ = self.parse_file(&filename, source);
+            // there the set cannot be known in advance. Import discovery has
+            // usually indexed it already; a tooling session still parses, as
+            // that also records the file's macro dependencies.
+            if self.config.typecheck_only || !self.discovery_indexed.contains(&identity) {
+                let _ = self.parse_file(&filename, source);
+            }
             return true;
         }
 
