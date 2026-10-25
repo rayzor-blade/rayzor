@@ -304,6 +304,7 @@
           <div class="seg" role="group" aria-label="Metric">
             <button type="button" data-metric="exec" aria-pressed="true">execution</button>
             <button type="button" data-metric="total" aria-pressed="false">compile + run</button>
+            <button type="button" data-metric="cold" aria-pressed="false">cold compile + run</button>
           </div>
           <div class="seg" role="group" aria-label="Rayzor tiers">
             <button type="button" data-tiers="default" aria-pressed="true">rayzor run</button>
@@ -316,13 +317,17 @@
         <div class="bench-row"><span class="missing">Loading benchmark results…</span></div>
       </div>
       <div class="footnote">
-        Bars show the mean of the measured iterations after warm-up; hover over a time for its spread, iteration
-        count and compile time. <strong>Execution</strong> times the program alone.
-        <strong>Compile + run</strong> adds what it takes to get there: Rayzor parses, types and JIT-compiles in-process
-        in tens of milliseconds, while hxcpp, HashLink/C and the JVM build ahead of time (tagged
-        <span class="tag">AOT</span>) and their build is added to the bar. <code>Rayzor</code> is what
-        <code>rayzor run</code> does: start on Cranelift and promote hot code to LLVM. <em>All tiers</em> also shows the
-        Cranelift-only and LLVM-only modes and the precompiled bundles (<span class="tag">RZB</span>).
+        Bars show the median of the measured iterations after warm-up; hover over a time for its spread, iteration
+        count and compile times. <strong>Execution</strong> times the program alone.
+        <strong>Compile + run</strong> adds a warm build: each toolchain keeps what it can between builds and rebuilds
+        the program itself every time. Rayzor starts with its standard library already lowered; Haxe targets compile
+        through a running compilation server, and hxcpp reuses its object cache for its runtime and library.
+        <strong>Cold compile + run</strong> adds the first build on a machine with nothing cached: Rayzor sets up its
+        compiler and has no artifact cache, the Haxe compiler starts with no server, and hxcpp builds its runtime.
+        hxcpp, HashLink/C, the JVM and Rayzor <span class="tag">AOT</span> build ahead of time and their build is
+        added to the bar. <code>Rayzor</code> is what <code>rayzor run</code> does: start in the interpreter and compile
+        hot code to LLVM. <em>All tiers</em> also shows the Cranelift-only and LLVM-only modes and the precompiled
+        bundles (<span class="tag">RZB</span>).
         Each kernel runs as its own CI job, so different rows may come from different machines: compare targets
         within a row. Kernel sources live in <a
           href="https://github.com/rayzor-blade/rayzor/tree/main/compiler/benchmarks">compiler/benchmarks</a>.
@@ -396,8 +401,19 @@
         return x.toFixed(1) + 'ms';
       }
 
+      // The build counted under the current metric: none, warm, or cold.
+      function compileOf(r) {
+        if (state.metric === 'exec') return 0;
+        return state.metric === 'cold' ? r.cold_compile_ms : r.compile_time_ms;
+      }
+
       function valueOf(r) {
-        return state.metric === 'exec' ? r.runtime_ms : r.compile_time_ms + r.runtime_ms;
+        return r.runtime_ms + compileOf(r);
+      }
+
+      // Results from before cold builds were measured carry none.
+      function measured(r) {
+        return state.metric !== 'cold' || r.cold_compile_ms > 0;
       }
 
       function engines() {
@@ -443,7 +459,7 @@
           var b = byName[name];
           var results = {};
           (b.results || []).forEach(function (r) {
-            if (r.runtime_ms > 0) results[r.target] = r;
+            if (r.runtime_ms > 0 && measured(r)) results[r.target] = r;
           });
           var rows = engines().filter(function (e) { return results[e.target]; });
           if (!rows.length) return;
@@ -479,10 +495,10 @@
             line.appendChild(label);
 
             var track = el('div', 'bench-track');
-            if (state.metric === 'total') {
+            if (state.metric !== 'exec') {
               var c = el('div', 'seg-compile');
               c.style.background = e.color;
-              c.style.width = Math.max(r.compile_time_ms * unit, 0) + '%';
+              c.style.width = Math.max(compileOf(r) * unit, 0) + '%';
               track.appendChild(c);
             }
             var x = el('div', 'seg-exec');
@@ -497,11 +513,12 @@
             if (v === fastest) ms.style.fontWeight = '700';
             num.appendChild(ms);
             if (base) num.appendChild(el('span', 'ratio', (v / base).toFixed(2) + '×'));
-            var tip = fmtMs(r.runtime_ms) + ' execution, mean of ' + (r.iterations || '?') + ' runs';
+            var tip = fmtMs(r.runtime_ms) + ' execution, median of ' + (r.iterations || '?') + ' runs';
             if (r.runtime_min_ms > 0 && r.runtime_max_ms > 0) {
               tip += ' (' + fmtMs(r.runtime_min_ms) + '–' + fmtMs(r.runtime_max_ms) + ')';
             }
             tip += ' · compile ' + fmtMs(r.compile_time_ms);
+            if (r.cold_compile_ms > 0) tip += ' · cold compile ' + fmtMs(r.cold_compile_ms);
             if (info.cpu_model) tip += ' · ' + info.cpu_model;
             num.title = tip;
             line.appendChild(num);
@@ -514,8 +531,8 @@
 
         renderLegend(present);
         document.getElementById('scale-note').textContent =
-          'lower is better · ' + (state.metric === 'exec' ? 'execution' : 'compile + execution') +
-          ' · mean ms' + (anyBaseline ? ' · 1.00× = hxcpp' : '');
+          'lower is better · ' + ({ exec: 'execution', total: 'compile + execution', cold: 'cold compile + execution' })[state.metric] +
+          ' · median ms' + (anyBaseline ? ' · 1.00× = hxcpp' : '');
 
         var bits = [];
         if (info.cpu_model) bits.push(info.cpu_model);

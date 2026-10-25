@@ -133,6 +133,11 @@ struct BenchmarkResult {
     runtime_min_ms: f64,
     #[serde(default)]
     runtime_max_ms: f64,
+    /// The first build on a machine with nothing cached: no compiler state
+    /// or artifact cache for Rayzor, no compilation server or hxcpp object
+    /// cache for Haxe. Zero in results from before it was measured.
+    #[serde(default)]
+    cold_compile_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,9 +213,9 @@ impl Target {
         match self {
             Target::RayzorInterpreter => "MIR Interpreter (instant startup)",
             Target::RayzorCranelift => "Cranelift JIT (compile from source)",
-            Target::RayzorTiered => "Tiered (source -> interp -> Cranelift -> LLVM)",
+            Target::RayzorTiered => "Tiered (source -> interpreter -> LLVM)",
             Target::RayzorPrecompiled => "Pre-bundled MIR + JIT (skip parsing)",
-            Target::RayzorPrecompiledTiered => "Pre-bundled MIR + tiered + LLVM",
+            Target::RayzorPrecompiledTiered => "Pre-bundled MIR + interpreter -> LLVM",
             #[cfg(feature = "llvm-backend")]
             Target::RayzorLLVM => "LLVM JIT (-O3, maximum optimization)",
             Target::HaxeInterp => "Haxe --interp (eval interpreter)",
@@ -407,12 +412,13 @@ fn setup_precompiled_tiered_benchmark(
         .entry_function_id()
         .ok_or("No entry function ID in bundle")?;
 
-    // Use Benchmark preset - fast automatic tier promotion, immediate bailout
+    // As the source-tiered target: start interpreted, promote straight to LLVM.
     let mut config = TierPreset::Benchmark.to_config();
     apply_threshold_override(&mut config);
 
     let mut backend =
         TieredBackend::with_symbols(config, symbols).map_err(|e| format!("backend: {}", e))?;
+    backend.set_tier_up_to_llvm(true);
 
     // Load ALL modules from bundle
     for module in bundle.modules() {
@@ -499,8 +505,7 @@ fn run_benchmark_cranelift(
     // source. The clock starts after it.
     let mut config = config_for_tier("jit");
     config.pipeline_config = config.pipeline_config.skip_analysis();
-    let mut unit = CompilationUnit::new(config);
-    unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
+    let mut unit = new_unit(config)?;
 
     let compile_start = Instant::now();
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
@@ -549,8 +554,7 @@ fn run_benchmark_interpreter(
     // standard library's symbols is the same work for every program and
     // belongs to the phase that prepares the compiler, not to compiling this
     // source. The clock starts after it.
-    let mut unit = CompilationUnit::new(config_for_tier("interp"));
-    unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
+    let mut unit = new_unit(config_for_tier("interp"))?;
 
     let compile_start = Instant::now();
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
@@ -677,8 +681,7 @@ fn setup_tiered_benchmark(
     // belongs to the phase that prepares the compiler, not to compiling this
     // source. The clock starts after it.
     // Use fast() for lazy stdlib - avoids trace resolution issues
-    let mut unit = CompilationUnit::new(config_for_tier("jit"));
-    unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
+    let mut unit = new_unit(config_for_tier("jit"))?;
 
     let compile_start = Instant::now();
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
@@ -701,21 +704,19 @@ fn setup_tiered_benchmark(
         let _ = strip_stack_trace_updates(module_mut);
     }
 
-    // Use Benchmark preset - optimized for performance testing
-    // - Beadie's heat broker requests asynchronous Maximum promotion on the
-    //   second entry; the runner never upgrades a function directly
-    // - Immediate bailout from interpreter hot loops
-    // - Observe asynchronous promotion before collecting measured iterations
-    // Maximum is reached automatically through Beadie + OSR. Promoting by
-    // hand would measure a different path than the runtime uses on its own.
-    // Suppress beadie/tier-transition chatter — bench output should
-    // stay clean; the runner already reports compile/execute timings.
+    // The Benchmark preset starts interpreted, as `rayzor run` does, and
+    // promotes on heat with thresholds that fit the warmup budget. Beadie's
+    // broker compiles the LLVM tier in the background and the runner waits
+    // for it before measuring; promoting by hand would measure a path the
+    // runtime does not take on its own. Tier-transition chatter is off.
     let mut config = TierPreset::Benchmark.to_config();
     apply_threshold_override(&mut config);
     config.verbosity = 0;
 
     let mut backend =
         TieredBackend::with_symbols(config, symbols).map_err(|e| format!("backend: {}", e))?;
+    // As `rayzor run --llvm`: hot interpreted code compiles straight to LLVM.
+    backend.set_tier_up_to_llvm(true);
     backend.defer_mir_optimization(OptimizationLevel::O2);
 
     // Load the final merged module, matching the normal run path.
@@ -747,8 +748,8 @@ fn setup_tiered_benchmark(
 }
 
 /// The tier beadie's broker installs, and so the one a tiered measurement is
-/// waiting on. `Baseline` is reached during warmup on the calling thread and
-/// says nothing about whether the background compile has landed.
+/// waiting on: the LLVM compile runs in the background, and an iteration
+/// before it lands is still interpreted.
 const TIER_PROMOTION_TARGET: compiler::codegen::tiered_backend::OptimizationTier =
     compiler::codegen::tiered_backend::OptimizationTier::Maximum;
 
@@ -794,72 +795,6 @@ fn run_tiered_iteration(state: &mut TieredBenchmarkState) -> Result<Duration, St
     Ok(exec_start.elapsed())
 }
 
-fn run_benchmark_tiered(
-    bench: &Benchmark,
-    symbols: &[(&str, *const u8)],
-) -> Result<(Duration, Duration), String> {
-    // For single-iteration compatibility, create fresh backend
-    // Setup, not compilation: constructing the unit and registering the
-    // standard library's symbols is the same work for every program and
-    // belongs to the phase that prepares the compiler, not to compiling this
-    // source. The clock starts after it.
-    // Use fast() for lazy stdlib - avoids trace resolution issues
-    let mut unit = CompilationUnit::new(config_for_tier("jit"));
-    unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
-
-    let compile_start = Instant::now();
-    unit.add_file(&bench.source, &format!("{}.hx", bench.name))
-        .map_err(|e| format!("parse: {}", e))?;
-    unit.lower_to_tast().map_err(|e| format!("tast: {:?}", e))?;
-    unit.finalize_mir_references();
-
-    let mir_modules = unit.get_mir_modules();
-
-    // Use Application preset for single-iteration tiered benchmark
-    // This is a legacy function - main benchmark uses setup_tiered_benchmark() with Benchmark preset
-    let mut config = TierPreset::Application.to_config();
-    config.start_interpreted = false; // Start at Baseline (Cranelift) for benchmarks
-    config.verbosity = 0;
-
-    let mut backend =
-        TieredBackend::with_symbols(config, symbols).map_err(|e| format!("backend: {}", e))?;
-
-    let main_module = mir_modules
-        .iter()
-        .rev()
-        .find(|m| {
-            m.functions
-                .values()
-                .any(|f| f.name.ends_with("_main") || f.name == "main")
-        })
-        .ok_or("No main module")?;
-
-    let main_id = main_module
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.ends_with("_main") || f.name == "main")
-        .map(|(id, _)| *id)
-        .ok_or("No main function")?;
-
-    backend
-        .compile_module((**main_module).clone())
-        .map_err(|e| format!("load: {}", e))?;
-
-    let compile_time = compile_start.elapsed();
-
-    // Execute
-    let exec_start = Instant::now();
-    backend
-        .reset_loaded_modules_for_run()
-        .map_err(|e| format!("startup: {}", e))?;
-    backend
-        .execute_function(main_id, vec![])
-        .map_err(|e| format!("exec: {}", e))?;
-    let exec_time = exec_start.elapsed();
-
-    Ok((compile_time, exec_time))
-}
-
 /// LLVM benchmark state - persisted across iterations (context must outlive backend)
 #[cfg(feature = "llvm-backend")]
 struct LLVMBenchmarkState<'ctx> {
@@ -881,8 +816,7 @@ fn setup_llvm_benchmark<'ctx>(
     // belongs to the phase that prepares the compiler, not to compiling this
     // source. The clock starts after it.
     // Use fast() for lazy stdlib like interpreter - avoids trace resolution issues
-    let mut unit = CompilationUnit::new(config_for_tier("llvm"));
-    unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
+    let mut unit = new_unit(config_for_tier("llvm"))?;
 
     let compile_start = Instant::now();
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
@@ -1088,9 +1022,132 @@ fn java_available() -> bool {
         .unwrap_or(false)
 }
 
+/// What a Haxe target keeps warm across its iterations, as Rayzor keeps its
+/// standard library lowered: a compilation server holding the typed standard
+/// library, and hxcpp's object cache holding the compiled runtime and library.
+/// The program itself is rebuilt on every iteration, as Rayzor's is.
+struct HaxeSession {
+    server: Option<std::process::Child>,
+    port: u16,
+    hxcpp_cache: std::path::PathBuf,
+    iteration: usize,
+}
+
+impl HaxeSession {
+    fn start(bench_name: &str) -> Self {
+        let hxcpp_cache =
+            std::env::temp_dir().join(format!("rayzor_haxe_bench_{}/hxcpp_cache", bench_name));
+        let _ = fs::create_dir_all(&hxcpp_cache);
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .unwrap_or(6000);
+        // The server runs the hxcpp build, so it is the process that needs
+        // the cache in its environment.
+        let server = Command::new("haxe")
+            .arg("--wait")
+            .arg(port.to_string())
+            .env("HXCPP_COMPILE_CACHE", &hxcpp_cache)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let listening = server.is_some()
+            && loop {
+                if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    break true;
+                }
+                if Instant::now() > deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+        let mut session = Self {
+            server,
+            port,
+            hxcpp_cache,
+            iteration: 0,
+        };
+        if !listening {
+            eprintln!("  ! haxe compilation server did not start; compiling without it");
+            session.stop();
+        }
+        session
+    }
+
+    /// Nothing warm: no server, and an hxcpp cache nothing has written to.
+    fn cold(bench_name: &str) -> Self {
+        let hxcpp_cache =
+            std::env::temp_dir().join(format!("rayzor_haxe_bench_{}/hxcpp_cold", bench_name));
+        let _ = fs::remove_dir_all(&hxcpp_cache);
+        let _ = fs::create_dir_all(&hxcpp_cache);
+        Self {
+            server: None,
+            port: 0,
+            hxcpp_cache,
+            iteration: 0,
+        }
+    }
+
+    /// `haxe`, sent to the server when there is one.
+    fn haxe(&self) -> Command {
+        let mut cmd = Command::new("haxe");
+        if self.server.is_some() {
+            cmd.arg("--connect").arg(self.port.to_string());
+        }
+        cmd.env("HXCPP_COMPILE_CACHE", &self.hxcpp_cache);
+        cmd
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut server) = self.server.take() {
+            let _ = server.kill();
+            let _ = server.wait();
+        }
+    }
+}
+
+impl Drop for HaxeSession {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Copies the benchmark sources to `dir`, the main file shifted down by
+/// `shift` lines: its generated code differs from every earlier iteration's
+/// in its line markers, so no cache serves the program itself.
+fn stage_haxe_sources(
+    from: &Path,
+    dir: &Path,
+    main_file: &str,
+    shift: usize,
+) -> Result<(), String> {
+    let _ = fs::remove_dir_all(dir);
+    fs::create_dir_all(dir).map_err(|e| format!("create {}: {}", dir.display(), e))?;
+    for entry in fs::read_dir(from).map_err(|e| format!("read {}: {}", from.display(), e))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().is_some_and(|e| e == "hx") {
+            let name = path.file_name().unwrap();
+            let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let text = if name == main_file {
+                "\n".repeat(shift) + &text
+            } else {
+                text
+            };
+            fs::write(dir.join(name), text).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 /// Run a Haxe target benchmark via CLI. Returns (compile_time, exec_time).
 /// For --interp, compile_time is 0 (interpreted). For C++/HL, compile is the haxe compile step.
-fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Duration), String> {
+fn run_haxe_benchmark(
+    bench_name: &str,
+    target: Target,
+    session: &mut HaxeSession,
+) -> Result<(Duration, Duration), String> {
     let (source_file, main_class) = get_haxe_source(bench_name)
         .ok_or_else(|| format!("No Haxe source for benchmark '{}'", bench_name))?;
 
@@ -1103,12 +1160,19 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
     // Create a temp directory for compilation output
     let tmp_dir = std::env::temp_dir().join(format!("rayzor_haxe_bench_{}", bench_name));
     let _ = fs::create_dir_all(&tmp_dir);
+    session.iteration += 1;
+    let haxe_dir = {
+        let staged = tmp_dir.join("src");
+        stage_haxe_sources(&haxe_dir, &staged, source_file, session.iteration)?;
+        staged
+    };
 
     match target {
         Target::HaxeInterp => {
             // haxe --interp: compile + execute in one step
             let start = Instant::now();
-            let output = Command::new("haxe")
+            let output = session
+                .haxe()
                 .arg("--main")
                 .arg(main_class)
                 .arg("-cp")
@@ -1131,7 +1195,8 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
             // Step 1: Compile to .hl bytecode
             let hl_path = tmp_dir.join(format!("{}.hl", bench_name));
             let compile_start = Instant::now();
-            let output = Command::new("haxe")
+            let output = session
+                .haxe()
                 .arg("--main")
                 .arg(main_class)
                 .arg("-cp")
@@ -1178,7 +1243,8 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
             let main_c = c_out_dir.join("main.c");
 
             let compile_start = Instant::now();
-            let output = Command::new("haxe")
+            let output = session
+                .haxe()
                 .arg("--main")
                 .arg(main_class)
                 .arg("-cp")
@@ -1259,9 +1325,12 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
 
         Target::HaxeCpp => {
             // Step 1: Compile to C++
+            // A fresh output directory: what hxcpp reuses comes from its cache.
             let cpp_dir = tmp_dir.join("cpp");
+            let _ = fs::remove_dir_all(&cpp_dir);
             let compile_start = Instant::now();
-            let output = Command::new("haxe")
+            let output = session
+                .haxe()
                 .arg("--main")
                 .arg(main_class)
                 .arg("-cp")
@@ -1297,7 +1366,8 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
             // Step 1: Compile to Java bytecode
             let java_dir = tmp_dir.join("java");
             let compile_start = Instant::now();
-            let output = Command::new("haxe")
+            let output = session
+                .haxe()
                 .arg("--main")
                 .arg(main_class)
                 .arg("-cp")
@@ -1425,6 +1495,8 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
     let symbols = get_runtime_symbols();
     let mut compile_times = Vec::new();
     let mut exec_times = Vec::new();
+    // The target's first build, made cold; see `cold`.
+    let cold_compile: Duration;
 
     // Set trace prefix so output lines are tagged with the target name
     rayzor_runtime::haxe_sys::set_trace_prefix(&format!("[{}] ", target.name()));
@@ -1432,7 +1504,13 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
     match target {
         // Tiered: stateful approach for JIT promotion across iterations
         Target::RayzorTiered => {
-            let mut state = setup_tiered_benchmark(bench, &symbols)?;
+            // The one compile this target makes is its cold one.
+            let (mut state, cold_time) = cold(bench, target, || {
+                let state = setup_tiered_benchmark(bench, &symbols)?;
+                let compile = state.compile_time;
+                Ok((state, compile))
+            })?;
+            cold_compile = cold_time;
             let compile_time = state.compile_time;
 
             // Warmup - runs accumulate, triggering tier promotion
@@ -1480,7 +1558,12 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
         #[cfg(feature = "llvm-backend")]
         Target::RayzorLLVM => {
             let context = Context::create();
-            let mut state = setup_llvm_benchmark(bench, &symbols, &context)?;
+            let (mut state, cold_time) = cold(bench, target, || {
+                let state = setup_llvm_benchmark(bench, &symbols, &context)?;
+                let compile = state.compile_time;
+                Ok((state, compile))
+            })?;
+            cold_compile = cold_time;
             let compile_time = state.compile_time;
 
             // Warmup runs
@@ -1500,6 +1583,8 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
         Target::RayzorPrecompiled => {
             let mut state = setup_precompiled_benchmark(&bench.name, &symbols)?;
             let load_time = state.load_time;
+            // Loading the bundle is all the build there is, and it is the first.
+            cold_compile = load_time;
 
             // Warmup runs (same compiled code, warm caches)
             for _ in 0..warmup_runs {
@@ -1518,6 +1603,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
         Target::RayzorPrecompiledTiered => {
             let mut state = setup_precompiled_tiered_benchmark(&bench.name, &symbols)?;
             let load_time = state.load_time;
+            cold_compile = load_time;
 
             // Warmup - runs accumulate, triggering tier promotion
             for _ in 0..warmup_runs {
@@ -1553,10 +1639,18 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
         | Target::Ash
         | Target::HaxeCpp
         | Target::HaxeJvm => {
-            // No warmup for Haxe targets — matches Haxe benchmark methodology
+            // The same warmup the Rayzor targets get: it fills the server and
+            // the hxcpp cache, as a Rayzor build starts with its library lowered.
+            let mut fresh = HaxeSession::cold(&bench.name);
+            cold_compile = run_haxe_benchmark(&bench.name, target, &mut fresh)?.0;
+            drop(fresh);
+            let mut session = HaxeSession::start(&bench.name);
+            for _ in 0..warmup_runs {
+                run_haxe_benchmark(&bench.name, target, &mut session)?;
+            }
             let trace_iters = std::env::var("RAYZOR_BENCH_TRACE").is_ok();
             for i in 0..bench_runs {
-                match run_haxe_benchmark(&bench.name, target) {
+                match run_haxe_benchmark(&bench.name, target, &mut session) {
                     Ok((compile, exec)) => {
                         if trace_iters {
                             eprintln!(
@@ -1589,39 +1683,48 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let src_path = tmp.join(format!("{}.hx", bench.name));
             std::fs::write(&src_path, &bench.source).map_err(|e| format!("write source: {}", e))?;
 
-            // Compile once (AOT) — O2 for faster compile, LLVM O2 is already very good
-            let compile_start = Instant::now();
-            let compiler = AotCompiler {
-                opt_level: MirOpt::O2,
-                strip: true,
-                verbose: false,
-                ..Default::default()
-            };
-            compiler
-                .compile(&[src_path.to_string_lossy().to_string()], &binary_path)
-                .map_err(|e| format!("AOT compile: {}", e))?;
-            let compile_time = compile_start.elapsed();
+            // Built and run on every iteration, warmups included, as the
+            // Haxe targets are.
+            let build_and_run = || -> Result<(Duration, Duration), String> {
+                let _ = std::fs::remove_file(&binary_path);
+                let compile_start = Instant::now();
+                let compiler = AotCompiler {
+                    opt_level: MirOpt::O2,
+                    strip: true,
+                    verbose: false,
+                    cache_dir: COLD_CACHE.with(|c| c.borrow().clone()),
+                    ..Default::default()
+                };
+                compiler
+                    .compile(&[src_path.to_string_lossy().to_string()], &binary_path)
+                    .map_err(|e| format!("AOT compile: {}", e))?;
+                let compile_time = compile_start.elapsed();
 
-            // Warmup runs
-            for _ in 0..warmup_runs {
-                let _ = Command::new(&binary_path).output();
-            }
-
-            // Benchmark runs
-            for _ in 0..bench_runs {
                 let exec_start = Instant::now();
                 let output = Command::new(&binary_path)
                     .output()
                     .map_err(|e| format!("AOT exec: {}", e))?;
                 let exec_time = exec_start.elapsed();
-
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(format!("AOT execution failed: {}", stderr));
                 }
                 // The program's checksum, as the in-process targets print theirs.
                 print!("{}", String::from_utf8_lossy(&output.stdout));
+                Ok((compile_time, exec_time))
+            };
 
+            // Its compile already counts loading the library.
+            cold_compile = cold(bench, target, || {
+                let (compile, _) = build_and_run()?;
+                Ok(((), compile))
+            })?
+            .1;
+            for _ in 0..warmup_runs {
+                build_and_run()?;
+            }
+            for _ in 0..bench_runs {
+                let (compile_time, exec_time) = build_and_run()?;
                 compile_times.push(compile_time);
                 exec_times.push(exec_time);
             }
@@ -1652,6 +1755,8 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
                 .compile_c(&[src_path.to_string_lossy().to_string()], &binary_path)
                 .map_err(|e| format!("GCC compile: {}", e))?;
             let compile_time = compile_start.elapsed();
+            // Compiled once; that compile is the first.
+            cold_compile = compile_time;
 
             // Warmup runs
             for _ in 0..warmup_runs {
@@ -1678,6 +1783,14 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
 
         // Cranelift and Interpreter: each iteration is independent
         Target::RayzorCranelift | Target::RayzorInterpreter => {
+            cold_compile = cold(bench, target, || {
+                let (compile, _) = match target {
+                    Target::RayzorCranelift => run_benchmark_cranelift(bench, &symbols),
+                    _ => run_benchmark_interpreter(bench, &symbols),
+                }?;
+                Ok(((), compile))
+            })?
+            .1;
             for _ in 0..warmup_runs {
                 let _ = match target {
                     Target::RayzorCranelift => run_benchmark_cranelift(bench, &symbols),
@@ -1723,6 +1836,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
         iterations: exec_times.len() as u32,
         runtime_min_ms: min_exec.as_secs_f64() * 1000.0,
         runtime_max_ms: max_exec.as_secs_f64() * 1000.0,
+        cold_compile_ms: cold_compile.as_secs_f64() * 1000.0,
     })
 }
 
@@ -1949,6 +2063,15 @@ fn generate_chart_html(suite: &BenchmarkSuite) -> Result<(), String> {
     Ok(())
 }
 
+thread_local! {
+    /// While set, compiles use this empty artifact cache: a cold build.
+    static COLD_CACHE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+    /// How long the last `new_unit` took to construct the compiler and load
+    /// its standard library, the setup a warm compile is timed without.
+    static LAST_SETUP: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
 /// The configuration a real run of a backend compiles under.
 ///
 /// The CLI defines the tier it is compiling for, and that define reaches two
@@ -1960,8 +2083,37 @@ fn generate_chart_html(suite: &BenchmarkSuite) -> Result<(), String> {
 fn config_for_tier(tier_define: &str) -> CompilationConfig {
     CompilationConfig {
         extra_defines: vec![tier_define.to_string()],
+        cache_dir: COLD_CACHE.with(|c| c.borrow().clone()),
         ..Default::default()
     }
+}
+
+/// A compiler with its standard library loaded, the time that took recorded
+/// in `LAST_SETUP`.
+fn new_unit(config: CompilationConfig) -> Result<CompilationUnit, String> {
+    let start = Instant::now();
+    let mut unit = CompilationUnit::new(config);
+    unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
+    LAST_SETUP.with(|s| s.set(start.elapsed()));
+    Ok(unit)
+}
+
+/// Runs `build` as a cold build: an empty artifact cache, and the compiler's
+/// setup counted in the compile time it reports.
+fn cold<T>(
+    bench: &Benchmark,
+    target: Target,
+    build: impl FnOnce() -> Result<(T, Duration), String>,
+) -> Result<(T, Duration), String> {
+    let dir = std::env::temp_dir().join(format!("rayzor_cold_{}_{}", bench.name, target.name()));
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::create_dir_all(&dir);
+    COLD_CACHE.with(|c| *c.borrow_mut() = Some(dir));
+    LAST_SETUP.with(|s| s.set(Duration::ZERO));
+    let result = build();
+    COLD_CACHE.with(|c| *c.borrow_mut() = None);
+    let (value, compile) = result?;
+    Ok((value, compile + LAST_SETUP.with(|s| s.get())))
 }
 
 fn main() {

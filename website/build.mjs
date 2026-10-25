@@ -1003,7 +1003,7 @@ function loadBenchmarks(dir) {
   const iterations = firstIterations(data);
   const machine = [info.cpu_model, OS_LABELS[info.os] || info.os, info.arch].filter(Boolean).join(", ");
   const note =
-    (iterations ? `${iterations} measured iterations, mean reported. ` : "") +
+    (iterations ? `${iterations} measured iterations, median reported. ` : "") +
     (machine ? `${machine}, ` : "") +
     `${data.date}.`;
 

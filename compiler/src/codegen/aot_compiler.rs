@@ -391,6 +391,9 @@ impl AotCompiler {
             cmd.args(["kernel32.lib", "ws2_32.lib", "userenv.lib", "bcrypt.lib"]);
         } else {
             // Linux / other Unix
+            if self.linker.is_none() && self.cross_triple().is_none() {
+                cmd.args(lld_flags());
+            }
             cmd.args(["-lc", "-lm", "-lpthread", "-ldl"]);
         }
 
@@ -902,4 +905,26 @@ fn format_command(cmd: &Command) -> String {
         .map(|a| a.to_string_lossy().to_string())
         .collect();
     format!("{} {}", prog, args.join(" "))
+}
+
+/// Driver flags that link an ELF executable with lld, when one is installed:
+/// the driver still supplies the startup files and libc, and lld reads the
+/// runtime archive far faster than the system's default linker.
+fn lld_flags() -> Vec<String> {
+    let on_path = std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("ld.lld").is_file()));
+    if on_path {
+        return vec!["-fuse-ld=lld".to_string()];
+    }
+    // Beside the LLVM this compiler was built against.
+    let dirs = option_env!("LLVM_SYS_211_PREFIX")
+        .map(|prefix| PathBuf::from(prefix).join("bin"))
+        .into_iter()
+        .chain([PathBuf::from("/usr/lib/llvm-21/bin")]);
+    for dir in dirs {
+        if dir.join("ld.lld").is_file() {
+            return vec!["-fuse-ld=lld".to_string(), format!("-B{}", dir.display())];
+        }
+    }
+    Vec::new()
 }
