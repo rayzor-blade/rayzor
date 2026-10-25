@@ -50,6 +50,7 @@ pub enum GpuBufferKind {
 pub struct GpuBuffer {
     /// xgpu's native resource identity. Lazy values acquire it when their
     /// fused graph materializes; the language object itself never changes.
+    #[cfg_attr(not(feature = "webgpu-backend"), allow(dead_code))]
     pub(crate) handle: i32,
     pub(crate) kind: GpuBufferKind,
     pub numel: usize,

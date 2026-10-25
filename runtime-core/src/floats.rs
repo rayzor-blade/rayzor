@@ -7,3 +7,8 @@
 pub fn roundf(x: f32) -> f32 {
     libm::roundf(x)
 }
+
+#[inline(always)]
+pub fn expf(x: f32) -> f32 {
+    libm::expf(x)
+}

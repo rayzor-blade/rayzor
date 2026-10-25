@@ -10,13 +10,13 @@
 
 pub mod event;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "native", target_os = "macos"))]
 mod cocoa;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "native", target_os = "linux"))]
 mod x11;
 
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "native", target_os = "windows"))]
 mod win32;
 
 #[cfg(feature = "wasm-host")]

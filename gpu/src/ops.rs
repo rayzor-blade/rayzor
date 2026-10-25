@@ -511,6 +511,9 @@ unsafe fn matmul_impl(ctx: i64, a: i64, b: i64, m: usize, k: usize, n: usize) ->
 ///
 /// # Safety
 /// `addr` must point to `byte_size` readable bytes.
+// Without a backend every context is unavailable, and the upload below is
+// never reached.
+#[cfg_attr(not(feature = "webgpu-backend"), allow(unreachable_code))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_buffer_from_bytes(
     ctx: i64,
@@ -692,6 +695,8 @@ pub unsafe extern "C" fn rayzor_gpu_compute_write_bytes(
 ///
 /// `C[m,n] = A[m,k] * dequant(Bq4)[n,k]^T` with B as raw Q4_K_M blocks.
 /// `k` must be a multiple of 256 (the Q4_K super-block size).
+// The shape is only used by the WebGPU kernel.
+#[cfg_attr(not(feature = "webgpu-backend"), allow(unused_variables))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_matmul_q4k(
     ctx: i64,

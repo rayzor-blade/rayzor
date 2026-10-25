@@ -1151,7 +1151,7 @@ pub unsafe fn silu_slice_neon(src: *const f32, dst: *mut f32, n: usize) {
         }
         while i < n {
             let x = *src.add(i);
-            *dst.add(i) = x / (1.0 + (-x).exp());
+            *dst.add(i) = x / (1.0 + crate::floats::expf(-x));
             i += 1;
         }
     }

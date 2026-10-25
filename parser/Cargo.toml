@@ -10,9 +10,9 @@ nom_locate = "5.0.0"
 diagnostics = { path = "../diagnostics" }
 
 
-[[bin]]
+[[example]]
 name = "demo_enhanced_errors"
-path = "tests/demo_enhanced_errors.rs"
+path = "examples/demo_enhanced_errors.rs"
 
 
 

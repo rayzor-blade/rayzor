@@ -113,6 +113,14 @@ impl NativeContext {
     ///
     /// # Safety
     /// `data` must point to at least `byte_size` readable bytes.
+    #[cfg_attr(
+        not(any(
+            feature = "metal-backend",
+            feature = "webgpu-backend",
+            feature = "cuda-backend"
+        )),
+        allow(unused_unsafe)
+    )]
     pub unsafe fn buffer_from_data(
         &self,
         data: *const u8,

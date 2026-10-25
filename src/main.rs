@@ -1183,6 +1183,7 @@ fn run_bundle(
     // is a direct request for whole-module LLVM even when the `.rzb` is
     // shipped without its original rayzor.toml.
     let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry || llvm;
+    #[cfg(feature = "llvm-backend")]
     let start_interpreted = config.start_interpreted;
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;

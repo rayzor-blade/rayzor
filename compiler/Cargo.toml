@@ -28,7 +28,6 @@ libloading = "0.8"  # For HDLL dynamic library loading
 libc = "0.2"  # For dlopen flags on Linux
 postcard = { version = "1.0", features = ["alloc"] }
 memmap2 = "0.9"
-fxhash = "0.2.1"
 smallvec = "1.13"  # Stack-allocated Vec for small collections (FFI args)
 log = "0.4"
 env_logger = "0.11"
@@ -50,7 +49,6 @@ cranelift-jit = "0.135"
 cranelift-codegen = "0.135"
 cranelift-frontend = "0.135"
 cranelift-native = "0.135"
-target-lexicon = "0.12"
 
 # WASM backend — direct MIR → WebAssembly via wasm-encoder
 wasm-encoder = "0.245"
@@ -65,8 +63,6 @@ wit-component = "0.245"  # WASI P2 Component wrapping (core module → component
 wasmtime = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144", optional = true }
 wasi-common = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144", package = "wasmtime-wasi", optional = true }
 
-# wgpu-backed Tensor compute for `rayzor run --wasm` (native compute via Metal/Vulkan/DX12)
-rayzor-gpu = { path = "../gpu", default-features = false, features = ["webgpu-backend"], optional = true }
 pollster = { version = "0.4", optional = true }
 wgpu = { version = "24", optional = true }
 
@@ -105,7 +101,7 @@ llvm-backend = ["inkwell", "llvm-sys"]
 # `llvm-<v>-dev` lists `Polly` as a static component but ships no libPolly.a
 # (Debian/Ubuntu) — the shared lib bundles Polly, sidestepping the missing .a.
 llvm-dynamic = ["llvm-sys/force-dynamic"]
-wasm-runtime = ["wasmtime", "wasi-common", "rayzor-gpu", "pollster", "wgpu"]
+wasm-runtime = ["wasmtime", "wasi-common", "pollster", "wgpu"]
 all-backends = ["cranelift-backend", "llvm-backend"]
 
 [[bin]]

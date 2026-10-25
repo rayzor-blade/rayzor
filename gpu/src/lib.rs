@@ -277,10 +277,10 @@ mod native_plugin {
     }
 
     static ALL_METHODS: LazyLock<Vec<NativeMethodDesc>> = LazyLock::new(|| {
-        let mut methods: Vec<_> = GPU_METHODS.iter().map(copy_method).collect();
+        let methods = GPU_METHODS.iter();
         #[cfg(feature = "webgpu-backend")]
-        methods.extend(XIDL_METHODS.iter().map(copy_method));
-        methods
+        let methods = methods.chain(XIDL_METHODS.iter());
+        methods.map(copy_method).collect()
     });
 
     /// Symbol table entry for plugin registration

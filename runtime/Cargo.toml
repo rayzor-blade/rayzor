@@ -9,7 +9,6 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 [dependencies]
 inventory = "0.3"
 rayzor-plugin = { path = "../plugin" }
-rayzor-runtime-core = { path = "../runtime-core" }
 lazy_static = "1.4"
 libc = "0.2"
 chrono = "0.4"
@@ -18,13 +17,8 @@ rustc-hash = "2"
 parking_lot = "0.12"
 regex = "1"
 fancy-regex = "0.18"
-rayon = "1.8"
 backtrace = "0.3"
 flate2 = "1"
-# Half-precision floats (IEEE f16 + brain float bf16). Phase 3b uses
-# this for CPU storage conversions; Phase 3c lowers selectively to NEON
-# vcvt on aarch64.
-half = "2"
 rustls = "0.23"
 webpki-roots = "0.26"
 rustls-pemfile = "2"
@@ -58,7 +52,3 @@ tcc-runtime = ["cc"]
 # runtime: RAYZOR_DUMP_ALLOC_AT_EXIT / RAYZOR_ALLOC_GRAPH /
 # RAYZOR_CPU_PROFILE. See memory/project_debugger_feasibility.md.
 profile = []
-
-[profile.release]
-opt-level = 3
-lto = true
