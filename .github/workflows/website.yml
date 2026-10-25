@@ -51,7 +51,7 @@ jobs:
             # Try direct artifact download from triggering run
             mkdir -p artifacts
             for NAME in benchmark-charts benchmark-results; do
-              ARTIFACT_ID=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}/artifacts" \
+              ARTIFACT_ID=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}/artifacts?per_page=100" \
                 --jq ".artifacts[] | select(.name==\"$NAME\") | .id" | head -1)
               if [ -n "$ARTIFACT_ID" ]; then
                 echo "Downloading $NAME from triggering run (artifact $ARTIFACT_ID)..."
@@ -90,7 +90,7 @@ jobs:
           mkdir -p artifacts
 
           for NAME in benchmark-charts benchmark-results; do
-            ARTIFACT_ID=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts" \
+            ARTIFACT_ID=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts?per_page=100" \
               --jq ".artifacts[] | select(.name==\"$NAME\") | .id" | head -1)
             if [ -n "$ARTIFACT_ID" ]; then
               echo "Downloading $NAME (artifact $ARTIFACT_ID) from run $RUN_ID..."
@@ -187,7 +187,7 @@ jobs:
             echo "No successful Conformance run yet — skipping"
             exit 0
           fi
-          ARTIFACT_ID=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts" \
+          ARTIFACT_ID=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts?per_page=100" \
             --jq '.artifacts[] | select(.name=="conformance-results") | .id' | head -1)
           if [ -z "$ARTIFACT_ID" ]; then
             echo "Run $RUN_ID has no conformance-results artifact — skipping"
