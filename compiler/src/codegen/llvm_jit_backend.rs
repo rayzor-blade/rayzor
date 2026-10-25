@@ -164,6 +164,10 @@ pub struct LLVMJitBackend<'ctx> {
     /// Maps MIR function IDs to LLVM functions
     function_map: BTreeMap<IrFunctionId, FunctionValue<'ctx>>,
 
+    /// Each function's name, taken before `finalize` optimizes: global DCE
+    /// erases functions nothing references, freeing their `FunctionValue`.
+    finalized_names: BTreeMap<IrFunctionId, String>,
+
     /// Maps MIR block IDs to LLVM basic blocks
     block_map: BTreeMap<IrBlockId, BasicBlock<'ctx>>,
 
@@ -325,6 +329,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             value_map: BTreeMap::new(),
             addr_adds: BTreeMap::new(),
             function_map: BTreeMap::new(),
+            finalized_names: BTreeMap::new(),
             block_map: BTreeMap::new(),
             phi_map: BTreeMap::new(),
             function_pointers: BTreeMap::new(),
@@ -1195,11 +1200,11 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         }
 
         // JIT-compile on demand
-        let llvm_func = self
-            .function_map
+        let func_name = self
+            .finalized_names
             .get(&func_id)
+            .cloned()
             .ok_or_else(|| format!("Function {:?} not found in function_map", func_id))?;
-        let func_name = llvm_func.get_name().to_string_lossy().to_string();
 
         let engine = self
             .execution_engine
@@ -1235,8 +1240,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             return Some(ptr);
         }
         let engine = self.execution_engine.as_ref()?;
-        let llvm_func = self.function_map.get(&func_id)?;
-        let func_name = llvm_func.get_name().to_string_lossy().to_string();
+        let func_name = self.finalized_names.get(&func_id)?.clone();
         if let Ok(fn_ptr) = engine.get_function_address(&func_name) {
             if fn_ptr != 0 {
                 if std::env::var_os("RAYZOR_DUMP_FN_PTRS").is_some() {
@@ -1257,9 +1261,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
         // Get pointers for all functions in function_map that we haven't cached yet
         let mut null_ptrs: Vec<String> = Vec::new();
-        for (&func_id, llvm_func) in &self.function_map {
+        for (&func_id, func_name) in &self.finalized_names {
             if !self.function_pointers.contains_key(&func_id) {
-                let func_name = llvm_func.get_name().to_string_lossy().to_string();
+                let func_name = func_name.clone();
                 if let Ok(fn_ptr) = engine.get_function_address(&func_name) {
                     if fn_ptr != 0 {
                         if std::env::var_os("RAYZOR_DUMP_FN_PTRS").is_some() {
@@ -2522,6 +2526,11 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         if self.execution_engine.is_some() {
             return Ok(()); // Already finalized
         }
+        self.finalized_names = self
+            .function_map
+            .iter()
+            .map(|(id, f)| (*id, f.get_name().to_string_lossy().to_string()))
+            .collect();
 
         // Dump IR before optimization if requested
         if std::env::var("RAYZOR_DUMP_LLVM_IR").is_ok() {
