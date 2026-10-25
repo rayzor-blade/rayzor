@@ -275,6 +275,11 @@ impl Machine {
     fn native<T>(&self, call: impl FnOnce() -> Result<T, String>) -> Result<T, InterpError> {
         let d = self.native_depth.get();
         self.native_depth.set(d + 1);
+        // The interpreter's frames hold copies of values whose live copies
+        // are in its registers; a collection the callee asks for must not
+        // read them as references.
+        let (low, high) = (stack_mark(), ENTRY_SP.with(|e| e.get()));
+        let _opaque = (low < high).then(|| rayzor_runtime::gc::OpaqueFrames::new(low, high));
         let r = call();
         self.native_depth.set(d);
         r.map_err(InterpError::RuntimeError)
@@ -318,6 +323,15 @@ impl Machine {
 
 thread_local! {
     static CURRENT: Cell<*const Machine> = const { Cell::new(std::ptr::null()) };
+    /// The native stack address the innermost interpreter activation began at.
+    static ENTRY_SP: Cell<usize> = const { Cell::new(0) };
+}
+
+/// An address in the calling frame.
+#[inline(always)]
+fn stack_mark() -> usize {
+    let here = 0u8;
+    std::hint::black_box(&here) as *const u8 as usize
 }
 
 fn current() -> *const Machine {
@@ -328,20 +342,24 @@ fn set_current(m: *const Machine) {
     CURRENT.with(|c| c.set(m));
 }
 
-/// The machine native callbacks on this thread re-enter, for one scope.
-struct Entered(*const Machine);
+/// The machine native callbacks on this thread re-enter, for one scope, and
+/// where on the native stack that activation began.
+struct Entered(*const Machine, usize);
 
 impl Entered {
+    #[inline(always)]
     fn new(m: &Machine) -> Self {
         let prev = current();
         set_current(m);
-        Self(prev)
+        let prev_entry = ENTRY_SP.with(|e| e.replace(stack_mark()));
+        Self(prev, prev_entry)
     }
 }
 
 impl Drop for Entered {
     fn drop(&mut self) {
         set_current(self.0);
+        ENTRY_SP.with(|e| e.set(self.1));
     }
 }
 

@@ -25,6 +25,29 @@ unsafe impl Send for Registration {}
 
 static REGISTRATIONS: Mutex<Vec<Registration>> = Mutex::new(Vec::new());
 
+thread_local! {
+    static OPAQUE: std::cell::RefCell<Vec<(usize, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// While alive, the native stack from `low` up to `high` holds no program
+/// value: an interpreter's own frames, whose values live in its registers on
+/// the heap. A collection does not read it, so a dead copy of a handle left
+/// there does not keep a target alive.
+pub struct OpaqueFrames;
+
+impl OpaqueFrames {
+    pub fn new(low: usize, high: usize) -> Self {
+        OPAQUE.with(|o| o.borrow_mut().push((low, high)));
+        Self
+    }
+}
+
+impl Drop for OpaqueFrames {
+    fn drop(&mut self) {
+        OPAQUE.with(|o| o.borrow_mut().pop());
+    }
+}
+
 /// `Gc.finalise(f, v)`: run `f` once `v` is no longer reachable. Only
 /// anonymous objects are tracked; any other target is never reported.
 ///
@@ -77,10 +100,15 @@ fn stack_base() -> Option<usize> {
     None
 }
 
-/// Whether `value` is stored in any stack word between `low` and `high`.
-fn on_stack(value: usize, low: usize, high: usize) -> bool {
+/// Whether `value` is stored in any stack word between `low` and `high`
+/// outside the `opaque` ranges.
+fn on_stack(value: usize, low: usize, high: usize, opaque: &[(usize, usize)]) -> bool {
     let mut at = low & !7;
     while at + 8 <= high {
+        if let Some(&(_, end)) = opaque.iter().find(|(lo, hi)| (*lo..*hi).contains(&at)) {
+            at = end.next_multiple_of(8);
+            continue;
+        }
         if unsafe { *(at as *const usize) } == value {
             return true;
         }
@@ -158,6 +186,7 @@ fn collect_above(low: usize) {
     let Some(high) = stack_base().filter(|high| *high > low) else {
         return;
     };
+    let opaque = OPAQUE.with(|o| o.borrow().clone());
     let due: Vec<Registration> = match REGISTRATIONS.lock() {
         Ok(mut registrations) => {
             let (dead, live): (Vec<_>, Vec<_>) = std::mem::take(&mut *registrations)
@@ -168,7 +197,7 @@ fn collect_above(low: usize) {
                         .target
                         .strong_count()
                         .saturating_sub(usize::from(r.held.is_some()));
-                    others == 0 || (others == 1 && !on_stack(r.handle, low, high))
+                    others == 0 || (others == 1 && !on_stack(r.handle, low, high, &opaque))
                 });
             *registrations = live;
             dead
