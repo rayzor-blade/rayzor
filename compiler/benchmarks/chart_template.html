@@ -183,6 +183,9 @@
 
     .bench-bars { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 6px }
     .bench-line { display: flex; align-items: center; gap: 10px }
+    .bench-group { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted, #8A9099);
+      border-top: 1px solid var(--rule, rgba(138, 144, 153, .25)); padding-top: 6px; margin-top: 4px }
+    .bench-group:first-child { border-top: 0; padding-top: 0; margin-top: 0 }
 
     .bench-label {
       width: clamp(84px, 20vw, 132px);
@@ -324,8 +327,8 @@
         through a running compilation server, and hxcpp reuses its object cache for its runtime and library.
         <strong>Cold compile + run</strong> adds the first build on a machine with nothing cached: Rayzor sets up its
         compiler and has no artifact cache, the Haxe compiler starts with no server, and hxcpp builds its runtime.
-        hxcpp, HashLink/C, the JVM and Rayzor <span class="tag">AOT</span> build ahead of time and their build is
-        added to the bar. <code>Rayzor</code> is what <code>rayzor run</code> does: start in the interpreter and compile
+        hxcpp, HashLink/C, Ash and Rayzor <span class="tag">AOT</span> build native executables ahead of time; the JVM
+        and HashLink compile to bytecode and JIT it as they run. Each build is added to the bar. <code>Rayzor</code> is what <code>rayzor run</code> does: start in the interpreter and compile
         hot code to LLVM. <em>All tiers</em> also shows the Cranelift-only and LLVM-only modes and the precompiled
         bundles (<span class="tag">RZB</span>).
         Each kernel runs as its own CI job, so different rows may come from different machines: compare targets
@@ -360,7 +363,8 @@
         { target: 'haxe-hashlink-c', label: 'HashLink/C', color: '#8A9099', tier: 'default', tag: 'AOT' },
         { target: 'haxe-hashlink', label: 'HashLink', color: '#5B616B', tier: 'default' },
         { target: 'ash', label: 'Ash', color: '#14B8A6', tier: 'default' },
-        { target: 'haxe-jvm', label: 'JVM', color: '#6E8CA0', tier: 'default', tag: 'AOT' },
+        { target: 'ash-aot', label: 'Ash', color: '#0F766E', tier: 'default', tag: 'AOT' },
+        { target: 'haxe-jvm', label: 'JVM', color: '#6E8CA0', tier: 'default' },
         { target: 'haxe-interp', label: 'Haxe eval', color: '#3A3D45', tier: 'default' }
       ];
       var BASELINE = 'haxe-cpp';
@@ -486,7 +490,21 @@
             bars.appendChild(gap);
           }
 
-          rows.forEach(function (e) {
+          // JIT runs first, then the ahead-of-time builds, each under its own
+          // heading: the two pay for compilation at different times.
+          var jit = rows.filter(function (e) { return e.tag !== 'AOT'; });
+          var aot = rows.filter(function (e) { return e.tag === 'AOT'; });
+          var grouped = [];
+          if (jit.length) grouped.push({ heading: 'JIT' });
+          grouped = grouped.concat(jit);
+          if (aot.length) grouped.push({ heading: 'AOT' });
+          grouped = grouped.concat(aot);
+
+          grouped.forEach(function (e) {
+            if (e.heading) {
+              bars.appendChild(el('div', 'bench-group', e.heading));
+              return;
+            }
             var r = results[e.target];
             var v = valueOf(r);
             var line = el('div', 'bench-line');
