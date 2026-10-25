@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -348,8 +348,17 @@ pub struct TieredBackend {
     /// The MIR pipeline startup skipped, run before the first native compile.
     deferred_mir_opt: Option<crate::ir::optimization::OptimizationLevel>,
 
-    /// Interpreted code that turns hot compiles straight to LLVM.
-    tier_up_to_llvm: bool,
+    /// LLVM is the top tier: code that stays hot after Cranelift is
+    /// compiled again with it.
+    llvm_top_tier: bool,
+
+    /// Where functions that turn hot are sent to be compiled on another
+    /// thread, while the program carries on interpreted. Set when starting
+    /// interpreted.
+    background_requests: Option<std::sync::mpsc::Sender<BackgroundRequest>>,
+
+    /// Set once the program is done: the background compiler starts nothing more.
+    background_stopped: Arc<AtomicBool>,
 
     /// The modules interpreted code started on, left unchanged for the frames
     /// still reading them once a native compile has replaced them.
@@ -1216,8 +1225,10 @@ impl TieredBackend {
             promotion_barrier: Arc::new(PromotionBarrier::new()),
             activity: CompileActivity::default(),
             pending_osr: BTreeMap::new(),
+            background_requests: None,
+            background_stopped: Arc::new(AtomicBool::new(false)),
             deferred_mir_opt: None,
-            tier_up_to_llvm: false,
+            llvm_top_tier: false,
             retired_modules: Vec::new(),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
@@ -1289,8 +1300,10 @@ impl TieredBackend {
             promotion_barrier: Arc::new(PromotionBarrier::new()),
             activity: CompileActivity::default(),
             pending_osr: BTreeMap::new(),
+            background_requests: None,
+            background_stopped: Arc::new(AtomicBool::new(false)),
             deferred_mir_opt: None,
-            tier_up_to_llvm: false,
+            llvm_top_tier: false,
             retired_modules: Vec::new(),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
@@ -2004,6 +2017,7 @@ impl TieredBackend {
         args: Vec<InterpValue>,
     ) -> Result<InterpValue, String> {
         self.ensure_loaded_modules_initialized()?;
+        self.start_background_tier_up();
 
         // Record the call for profiling
         self.record_call(func_id);
@@ -2189,10 +2203,10 @@ impl TieredBackend {
         self.deferred_mir_opt = Some(level);
     }
 
-    /// Compile interpreted code straight to LLVM once it turns hot, in place
-    /// of the baseline tier. Only meaningful when starting interpreted.
-    pub fn set_tier_up_to_llvm(&mut self, on: bool) {
-        self.tier_up_to_llvm = on;
+    /// Make LLVM the top tier: code that stays hot after reaching Cranelift
+    /// is compiled again with LLVM, in the background.
+    pub fn set_llvm_top_tier(&mut self, on: bool) {
+        self.llvm_top_tier = on;
     }
 
     /// Get a function pointer (for execution)
@@ -2402,6 +2416,10 @@ impl TieredBackend {
             }
         };
 
+        if should_promote.is_some() && self.request_background_compile(func_id) {
+            return;
+        }
+
         if let Some(target_tier) = should_promote {
             emit_tier_event(
                 "promote_target",
@@ -2446,6 +2464,90 @@ impl TieredBackend {
         }
     }
 
+    /// The program has finished: compiles it asked for in the background and
+    /// that have not started never will. One already running is not waited
+    /// for.
+    pub fn stop_background_compiles(&mut self) {
+        self.background_stopped.store(true, Ordering::Release);
+        self.background_requests = None;
+    }
+
+    /// Send `func_id` to the background compiler, when there is one. False
+    /// means the caller compiles it as before.
+    fn request_background_compile(&self, func_id: IrFunctionId) -> bool {
+        let Some(requests) = &self.background_requests else {
+            return false;
+        };
+        if self
+            .function_pointers
+            .read()
+            .unwrap()
+            .contains_key(&func_id)
+        {
+            return true;
+        }
+        let module = self
+            .modules
+            .read()
+            .unwrap()
+            .iter()
+            .find(|m| m.functions.contains_key(&func_id))
+            .map(|m| m as *const IrModule as usize);
+        if let Some(module) = module {
+            let _ = requests.send((module, func_id, None));
+        }
+        true
+    }
+
+    /// Compile hot interpreted functions on another thread: Cranelift first,
+    /// to reach native code fast, then LLVM for what stays hot when it is
+    /// the top tier. The interpreter keeps running and moves to each
+    /// function's code as it is published: calls at their next entry, a
+    /// running loop at its next header.
+    fn start_background_tier_up(&mut self) {
+        // `RAYZOR_TIER_UP_SYNC=1` compiles on the calling thread instead, as
+        // before background tiering; safe to run with, slower to start.
+        if self.background_requests.is_some()
+            || !self.start_interpreted
+            || !self.config.enable_tier_promotion
+            || std::env::var_os("RAYZOR_TIER_UP_SYNC").is_some()
+        {
+            return;
+        }
+        let (requests, received) = std::sync::mpsc::channel::<BackgroundRequest>();
+        let stopped = Arc::clone(&self.background_stopped);
+        let worker = BackgroundTierUp {
+            modules: Arc::clone(&self.modules),
+            function_pointers: Arc::clone(&self.function_pointers),
+            function_tiers: Arc::clone(&self.function_tiers),
+            program: self.interpreter.lock().unwrap().program(),
+            runtime_symbols: Arc::clone(&self.runtime_symbols),
+            deferred_mir_opt: self.deferred_mir_opt,
+            stack_traces: self.config.enable_stack_traces,
+            attempted: Mutex::new(BTreeSet::new()),
+            llvm: self.llvm_top_tier && cfg!(feature = "llvm-backend"),
+            baseline_loops: Mutex::new(BTreeMap::new()),
+        };
+        let spawned = std::thread::Builder::new()
+            .name("rayzor-tier-up".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || worker.run(received, &stopped));
+        let Ok(_) = spawned else {
+            return;
+        };
+        let interpreter_requests = Mutex::new(requests.clone());
+        self.interpreter
+            .lock()
+            .unwrap()
+            .compile_in_background(Box::new(move |module, func, at| {
+                let _ = interpreter_requests
+                    .lock()
+                    .unwrap()
+                    .send((module, func, at));
+            }));
+        self.background_requests = Some(requests);
+    }
+
     fn maybe_promote_interpreter_threshold_to_baseline(
         &mut self,
         func_id: IrFunctionId,
@@ -2469,6 +2571,10 @@ impl TieredBackend {
             .copied()
             .unwrap_or(OptimizationTier::Interpreted);
         if current_tier != OptimizationTier::Interpreted {
+            return Ok(());
+        }
+
+        if self.request_background_compile(func_id) {
             return Ok(());
         }
 
@@ -2604,11 +2710,6 @@ impl TieredBackend {
             }
         }
         let osr_ids: BTreeSet<IrFunctionId> = resume_points.iter().map(|r| r.2).collect();
-
-        #[cfg(feature = "llvm-backend")]
-        if self.tier_up_to_llvm {
-            return self.tier_up_with_llvm(resume_points, osr_ids, kept_indirect);
-        }
 
         // Convert runtime symbols to the format Cranelift expects
         let symbols: Vec<(&str, *const u8)> = self
@@ -2748,78 +2849,6 @@ impl TieredBackend {
         }
 
         Ok(())
-    }
-
-    /// The LLVM counterpart of the baseline compile above, for interpreted code
-    /// turning hot: everything compiles at the top tier, the suspended frames'
-    /// resume points with it.
-    #[cfg(feature = "llvm-backend")]
-    fn tier_up_with_llvm(
-        &mut self,
-        resume_points: Vec<(usize, IrFunctionId, IrFunctionId, crate::ir::osr::OsrLayout)>,
-        osr_ids: BTreeSet<IrFunctionId>,
-        kept_indirect: BTreeSet<IrFunctionId>,
-    ) -> Result<(), String> {
-        {
-            let modules = self.modules.read().unwrap();
-            for module in modules.iter() {
-                Self::register_enum_rtti_from_module(module);
-                Self::register_class_rtti_from_module(module);
-            }
-        }
-        if self.config.enable_stack_traces
-            && let Some((_, ptr)) = self
-                .runtime_symbols
-                .iter()
-                .find(|(name, _)| name == "rayzor_set_stack_traces_enabled")
-        {
-            let enable_fn: extern "C" fn(i32) = unsafe { std::mem::transmute(*ptr) };
-            enable_fn(1);
-        }
-
-        let mut compiled = self
-            .llvm_mcjit_compile(Some(&kept_indirect))
-            .map_err(|e| format!("LLVM tier-up failed: {e}"))?;
-        let variants: BTreeMap<IrFunctionId, usize> = osr_ids
-            .iter()
-            .filter_map(|id| compiled.remove(id).map(|ptr| (*id, ptr)))
-            .collect();
-        self.register_source_info_for_pointers(&compiled);
-        {
-            let mut pointers = self.function_pointers.write().unwrap();
-            let mut tiers = self.function_tiers.write().unwrap();
-            for (func_id, ptr) in &compiled {
-                pointers.insert(*func_id, *ptr);
-                tiers.insert(*func_id, OptimizationTier::Maximum);
-            }
-        }
-
-        {
-            let mut interp = self.interpreter.lock().unwrap();
-            if let Some(interpreted) = self.retired_modules.last() {
-                for (module, parent, variant, layout) in resume_points {
-                    if let Some(&ptr) = variants.get(&variant) {
-                        interp.install_resume_point(
-                            &interpreted[module],
-                            parent,
-                            ptr as *const u8,
-                            layout,
-                        );
-                    }
-                }
-            }
-            for (func_id, ptr) in &compiled {
-                interp.install_native(*func_id, *ptr as *const u8);
-            }
-        }
-        if !osr_ids.is_empty() {
-            for module in self.modules.write().unwrap().iter_mut() {
-                module.functions.retain(|id, _| !osr_ids.contains(id));
-            }
-        }
-
-        // As after a baseline compile: registrations again, at the new addresses.
-        self.rerun_loaded_modules_startup_jit(!self.start_interpreted)
     }
 
     /// Instrument all MIR functions with shadow call stack push/pop instructions.
@@ -3478,18 +3507,12 @@ impl TieredBackend {
         self.compile_all_with_llvm_mcjit()
     }
 
-    /// Compile with MCJIT (for x86_64 and Linux)
-    ///
-    /// MCJIT is stable on these platforms and provides the best JIT experience.
-    #[cfg(feature = "llvm-backend")]
-    #[allow(dead_code)]
     /// Extend `targets` with everything they call that nothing else can serve.
     ///
     /// Almost every callee already has an address from the tier below, and
     /// binds to it. The exceptions are functions that tier skipped -- 256-bit
     /// vectors have no Cranelift type, for one -- which exist only as a body
     /// nobody has compiled.
-    #[cfg(feature = "llvm-backend")]
     fn add_unserved_callees(
         modules: &[crate::ir::IrModule],
         known: &BTreeMap<IrFunctionId, usize>,
@@ -4590,6 +4613,14 @@ mod tests {
             other => panic!("unexpected result: {:?}", other),
         }
 
+        // The compile runs in the background; the call that asked for it does
+        // not wait.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while backend.function_tier(func_id) != Some(OptimizationTier::Baseline)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert_eq!(
             backend.function_tier(func_id),
             Some(OptimizationTier::Baseline)
@@ -4687,6 +4718,443 @@ mod tests {
             Some(OptimizationTier::Baseline)
         );
     }
+}
+
+impl Drop for TieredBackend {
+    fn drop(&mut self) {
+        self.background_stopped.store(true, Ordering::Release);
+    }
+}
+
+/// A function to compile in the background: its module's address, and the
+/// block an interpreted frame of it was entering when it turned hot.
+type BackgroundRequest = (usize, IrFunctionId, Option<crate::ir::IrBlockId>);
+
+/// How long Cranelift must have had nothing to compile before the LLVM tier
+/// starts: a program still turning functions hot is still starting up, and
+/// one that finishes inside the quiet period never pays for LLVM's compile.
+const LLVM_TIER_QUIESCENCE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Where the background compiler is with the LLVM tier.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LlvmTier {
+    /// Nothing has Cranelift code yet: the program may finish interpreted.
+    Waiting,
+    /// Compiled once the hot set settles.
+    Due,
+    /// Compiled, or there is no LLVM tier.
+    Done,
+}
+
+/// Compiles functions the interpreter found hot, on its own thread, from a
+/// copy of the modules: the program keeps running on the originals.
+struct BackgroundTierUp {
+    modules: Arc<RwLock<Vec<IrModule>>>,
+    function_pointers: Arc<RwLock<BTreeMap<IrFunctionId, usize>>>,
+    function_tiers: Arc<RwLock<BTreeMap<IrFunctionId, OptimizationTier>>>,
+    program: Arc<crate::codegen::mir_interpreter::Program>,
+    runtime_symbols: Arc<Vec<(String, usize)>>,
+    deferred_mir_opt: Option<crate::ir::optimization::OptimizationLevel>,
+    stack_traces: bool,
+    /// Loops given a resume point, or tried: a frame keeps asking for one
+    /// while it interprets, and a loop that cannot have one is not retried.
+    attempted: Mutex<BTreeSet<(IrFunctionId, crate::ir::IrBlockId)>>,
+    /// Cranelift probes its loops for an LLVM version to move into.
+    llvm: bool,
+    /// The MIR each function with a loop was compiled from at the Cranelift
+    /// tier, and its module's index: a loop running there moves to LLVM
+    /// through a variant built from exactly what its probes describe.
+    baseline_loops: Mutex<BTreeMap<IrFunctionId, (usize, IrFunction)>>,
+}
+
+/// A copy of the modules prepared for one compile.
+struct Unit {
+    work: Vec<IrModule>,
+    seed: BTreeSet<IrFunctionId>,
+    resume_points: Vec<(usize, IrFunctionId, IrFunctionId, crate::ir::osr::OsrLayout)>,
+    targets: Vec<IrFunctionId>,
+}
+
+impl BackgroundTierUp {
+    /// Serve requests until the program finishes: Cranelift for each function
+    /// that turns hot, then, when `llvm` and the hot set has settled, LLVM for
+    /// all of it.
+    fn run(&self, received: std::sync::mpsc::Receiver<BackgroundRequest>, stopped: &AtomicBool) {
+        use std::sync::mpsc::RecvTimeoutError;
+        let mut seen = BTreeSet::new();
+        let mut llvm_tier = if self.llvm {
+            LlvmTier::Waiting
+        } else {
+            LlvmTier::Done
+        };
+        let mut last_work = std::time::Instant::now();
+        loop {
+            let next = if llvm_tier == LlvmTier::Due {
+                let quiet = LLVM_TIER_QUIESCENCE.saturating_sub(last_work.elapsed());
+                match received.recv_timeout(quiet) {
+                    Ok(request) => Some(request),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            } else {
+                match received.recv() {
+                    Ok(request) => Some(request),
+                    Err(_) => break,
+                }
+            };
+            if stopped.load(Ordering::Acquire) {
+                break;
+            }
+            let Some((module, func_id, at)) = next else {
+                emit_tier_event("background_llvm_start", None, None, "");
+                let started = std::time::Instant::now();
+                let detail = match self.compile_llvm_tier() {
+                    Ok(phases) => format!("{phases} dur_ms={:.3}", ms_since(started)),
+                    Err(e) => format!("error={}", e.replace(char::is_whitespace, "_")),
+                };
+                emit_tier_event("background_llvm_finish", None, None, &detail);
+                llvm_tier = LlvmTier::Done;
+                continue;
+            };
+            if !seen.insert((func_id, at)) {
+                continue;
+            }
+            let from = at.map(|b| format!("at={b:?}")).unwrap_or_default();
+            emit_tier_event("background_compile_start", Some(func_id), None, &from);
+            let started = std::time::Instant::now();
+            let detail = match self.compile_baseline(module, func_id, at) {
+                Ok(Some(phases)) => {
+                    if llvm_tier == LlvmTier::Waiting {
+                        llvm_tier = LlvmTier::Due;
+                    }
+                    last_work = std::time::Instant::now();
+                    format!("{phases} dur_ms={:.3}", ms_since(started))
+                }
+                // Asked again for what already has everything it can get:
+                // not work, so the quiet period carries on.
+                Ok(None) => continue,
+                Err(e) => format!("error={}", e.replace(char::is_whitespace, "_")),
+            };
+            emit_tier_event("background_compile_finish", Some(func_id), None, &detail);
+        }
+    }
+
+    /// Run `level`'s pipeline over the functions in `compiling` alone: the
+    /// others are declarations while it runs and get their bodies back after.
+    fn optimize_only(
+        module: &mut IrModule,
+        compiling: &BTreeSet<IrFunctionId>,
+        level: crate::ir::optimization::OptimizationLevel,
+    ) {
+        if !module.functions.keys().any(|id| compiling.contains(id)) {
+            return;
+        }
+        let mut bodies = BTreeMap::new();
+        for (id, function) in module.functions.iter_mut() {
+            if !compiling.contains(id) && !function.cfg.blocks.is_empty() {
+                let mut declared = function.clone();
+                declared.cfg.blocks.clear();
+                bodies.insert(*id, std::mem::replace(function, declared));
+            }
+        }
+        let _ = crate::ir::optimization::PassManager::after_required(level).run(module);
+        for (id, body) in bodies {
+            module.functions.insert(id, body);
+        }
+    }
+
+    /// Copy the modules, add `waiting`'s resume points, and optimize the
+    /// functions `roots` reach: each root and its callees, skipping those
+    /// `bound` serves. Optimizing can call what was not called before, so the
+    /// unit is taken again after.
+    fn prepare(
+        &self,
+        live: &[IrModule],
+        roots: &[IrFunctionId],
+        waiting: Vec<(usize, IrFunction, Vec<(crate::ir::IrBlockId, bool)>)>,
+        bound: &BTreeMap<IrFunctionId, usize>,
+    ) -> Unit {
+        let mut work = live.to_vec();
+        let seed = crate::ir::abi::indirect_targets(live);
+        if self.stack_traces {
+            TieredBackend::instrument_modules_for_stack_traces(&mut work);
+        } else {
+            TieredBackend::strip_stack_trace_updates(&mut work);
+        }
+        let resume_points = TieredBackend::add_resume_points(&mut work, waiting);
+        let unit = |work: &[IrModule]| {
+            let mut targets = roots.to_vec();
+            targets.extend(resume_points.iter().map(|p| p.2));
+            TieredBackend::add_unserved_callees(work, bound, &mut targets);
+            targets
+        };
+        // Startup skipped most of the MIR pipeline; compiled code gets the rest.
+        if let Some(level) = self.deferred_mir_opt {
+            let compiling: BTreeSet<IrFunctionId> = unit(&work).into_iter().collect();
+            for module in work.iter_mut() {
+                Self::optimize_only(module, &compiling, level);
+            }
+        }
+        let targets = unit(&work);
+        Unit {
+            work,
+            seed,
+            resume_points,
+            targets,
+        }
+    }
+
+    /// Publish compiled code at `tier`. `replace` puts it over code already
+    /// installed; otherwise that code stays.
+    fn install(
+        &self,
+        compiled: &BTreeMap<IrFunctionId, usize>,
+        tier: OptimizationTier,
+        replace: bool,
+    ) -> usize {
+        let natives: BTreeMap<IrFunctionId, usize> = {
+            let installed = self.function_pointers.read().unwrap();
+            compiled
+                .iter()
+                .filter(|(id, _)| replace || !installed.contains_key(id))
+                .map(|(id, ptr)| (*id, *ptr))
+                .collect()
+        };
+        if self.stack_traces {
+            TieredBackend::register_source_info_static(
+                &self.modules,
+                &natives,
+                &self.runtime_symbols,
+            );
+        }
+        {
+            let mut pointers = self.function_pointers.write().unwrap();
+            let mut tiers = self.function_tiers.write().unwrap();
+            for (id, ptr) in &natives {
+                pointers.insert(*id, *ptr);
+                tiers.insert(*id, tier);
+            }
+        }
+        for (id, ptr) in &natives {
+            self.program.install_native(*id, *ptr);
+        }
+        natives.len()
+    }
+
+    /// The first native code for `func_id` of the module at `module`: a
+    /// Cranelift compile of it and of whatever it calls that has no code, with
+    /// a resume point for the loop its frame at `at` is running. A function
+    /// that already has code is asked for again only by a frame still
+    /// interpreting it, which needs that resume point and nothing else.
+    fn compile_baseline(
+        &self,
+        module: usize,
+        func_id: IrFunctionId,
+        at: Option<crate::ir::IrBlockId>,
+    ) -> Result<Option<String>, String> {
+        let started = std::time::Instant::now();
+        let has_code = self
+            .function_pointers
+            .read()
+            .unwrap()
+            .contains_key(&func_id);
+        let known = self.function_pointers.read().unwrap().clone();
+        let unit = {
+            let live = self.modules.read().unwrap();
+            let index = live
+                .iter()
+                .position(|m| m as *const IrModule as usize == module)
+                .ok_or("the module it was asked from is no longer loaded")?;
+            let function = live[index]
+                .functions
+                .get(&func_id)
+                .filter(|f| !f.cfg.blocks.is_empty())
+                .ok_or("no body to compile")?;
+            let header = at.and_then(|block| {
+                let domtree = crate::ir::loop_analysis::DominatorTree::compute(function);
+                let loops = crate::ir::loop_analysis::LoopNestInfo::analyze(function, &domtree);
+                loops.block_to_loop.get(&block).copied()
+            });
+            let resumable = header.filter(|h| {
+                !self.program.has_resume_point(module, func_id, *h)
+                    && self.attempted.lock().unwrap().insert((func_id, *h))
+            });
+            if has_code && resumable.is_none() {
+                return Ok(None);
+            }
+            // Built from the function as interpreted frames run it, without
+            // the line updates a resumed frame never had.
+            let mut parent = function.clone();
+            let updates = TieredBackend::frame_update_ids(&live[index]);
+            for block in parent.cfg.blocks.values_mut() {
+                block.instructions.retain(|inst| {
+                    !matches!(inst, IrInstruction::CallDirect { func_id, .. }
+                        if updates.contains(func_id))
+                });
+            }
+            let waiting = vec![(
+                index,
+                parent,
+                resumable.into_iter().map(|h| (h, true)).collect(),
+            )];
+            let roots: Vec<IrFunctionId> = (!has_code).then_some(func_id).into_iter().collect();
+            self.prepare(&live, &roots, waiting, &known)
+        };
+        let mir_ms = ms_since(started);
+        let cranelift_started = std::time::Instant::now();
+
+        // What already has code is bound to it.
+        let served = known.clone();
+        let lookup: Box<dyn Fn(&str) -> Option<*const u8> + Send> = Box::new(move |name| {
+            let id = name.strip_prefix("__rayzor_served_")?.parse().ok()?;
+            served.get(&IrFunctionId(id)).map(|&addr| addr as *const u8)
+        });
+        let symbols: Vec<(&str, *const u8)> = self
+            .runtime_symbols
+            .iter()
+            .map(|(name, ptr)| (name.as_str(), *ptr as *const u8))
+            .collect();
+        let mut backend = CraneliftBackend::with_symbols_lookup_and_opt(
+            OptimizationTier::Standard.cranelift_opt_level(),
+            &symbols,
+            Some(lookup),
+        )?;
+        backend.set_osr_probes(self.llvm);
+        backend.seed_indirect_target_ids(unit.seed.iter().copied());
+        backend.compile_only(unit.targets.iter().copied().collect());
+        for module in &unit.work {
+            backend.compile_module_without_finalize(module)?;
+        }
+        backend.finalize()?;
+        let mut compiled = BTreeMap::new();
+        for id in &unit.targets {
+            if let Ok(ptr) = backend.get_function_ptr(*id) {
+                compiled.insert(*id, ptr as usize);
+            }
+        }
+        Box::leak(Box::new(backend));
+
+        if self.llvm {
+            let mut loops = self.baseline_loops.lock().unwrap();
+            for (index, module) in unit.work.iter().enumerate() {
+                for id in compiled.keys() {
+                    if let Some(f) = module.functions.get(id)
+                        && !crate::ir::osr::find_loop_headers(f).is_empty()
+                    {
+                        loops.insert(*id, (index, f.clone()));
+                    }
+                }
+            }
+        }
+
+        let variants: BTreeSet<IrFunctionId> = unit.resume_points.iter().map(|p| p.2).collect();
+        let functions: BTreeMap<IrFunctionId, usize> = compiled
+            .iter()
+            .filter(|(id, _)| !variants.contains(id))
+            .map(|(id, ptr)| (*id, *ptr))
+            .collect();
+        let installed = self.install(&functions, OptimizationTier::Baseline, false);
+        for (_, parent, variant, layout) in unit.resume_points {
+            if let Some(&ptr) = compiled.get(&variant) {
+                self.program
+                    .install_resume_point(module, parent, ptr, layout);
+            }
+        }
+        Ok(Some(format!(
+            "functions={installed} mir_ms={mir_ms:.3} cranelift_ms={:.3}",
+            ms_since(cranelift_started)
+        )))
+    }
+
+    /// LLVM code for the whole program, optimized across all of it, installed
+    /// over the Cranelift code. A loop still running in Cranelift code moves
+    /// across at its next back edge, through a variant of the MIR it was
+    /// compiled from.
+    #[cfg(feature = "llvm-backend")]
+    fn compile_llvm_tier(&self) -> Result<String, String> {
+        let started = std::time::Instant::now();
+        let (mut work, seed) = {
+            let live = self.modules.read().unwrap();
+            (live.clone(), crate::ir::abi::indirect_targets(&live))
+        };
+        if self.stack_traces {
+            TieredBackend::instrument_modules_for_stack_traces(&mut work);
+        } else {
+            TieredBackend::strip_stack_trace_updates(&mut work);
+        }
+        if let Some(level) = self.deferred_mir_opt {
+            for module in work.iter_mut() {
+                let _ = crate::ir::optimization::PassManager::after_required(level).run(module);
+            }
+        }
+        let mut targets: Vec<IrFunctionId> = work
+            .iter()
+            .flat_map(|m| m.functions.iter())
+            .filter(|(_, f)| !f.cfg.blocks.is_empty())
+            .map(|(id, _)| *id)
+            .collect();
+        let mut next_id = work
+            .iter()
+            .flat_map(|m| m.functions.keys().map(|id| id.0 + 1))
+            .chain(work.iter().map(|m| m.next_function_id))
+            .max()
+            .unwrap_or(0);
+        let mut transfers = Vec::new();
+        for (index, parent) in self.baseline_loops.lock().unwrap().values() {
+            for header in crate::ir::osr::find_loop_headers(parent) {
+                let id = IrFunctionId(next_id);
+                if let Ok(variant) = crate::ir::osr::build_osr_variant(parent, header, id) {
+                    next_id += 1;
+                    transfers.push((id, parent.name.clone(), variant.layout.site_key()));
+                    work[*index].add_function(variant.function);
+                    targets.push(id);
+                }
+            }
+        }
+        let mir_ms = ms_since(started);
+        let llvm_started = std::time::Instant::now();
+        let compiled = {
+            let _llvm_guard = super::llvm_jit_backend::llvm_lock();
+            let context = Box::leak(Box::new(Context::create()));
+            let symbols: Vec<(&str, *const u8)> = self
+                .runtime_symbols
+                .iter()
+                .map(|(name, ptr)| (name.as_str(), *ptr as *const u8))
+                .collect();
+            let mut backend = LLVMJitBackend::with_symbols(context, &symbols)?;
+            backend.seed_indirect_target_ids(seed);
+            let compiled = backend.compile_functions(&work, &targets, &BTreeMap::new())?;
+            Box::leak(Box::new(backend));
+            compiled
+        };
+        let variants: BTreeSet<IrFunctionId> = transfers.iter().map(|t| t.0).collect();
+        let functions: BTreeMap<IrFunctionId, usize> = compiled
+            .iter()
+            .filter(|(id, _)| !variants.contains(id))
+            .map(|(id, ptr)| (*id, *ptr))
+            .collect();
+        let installed = self.install(&functions, OptimizationTier::Maximum, true);
+        let mut armed = 0;
+        for (id, parent, site) in &transfers {
+            if let Some(&ptr) = compiled.get(id) {
+                crate::ir::osr::publish_helper(parent, *site, ptr as *mut ());
+                armed += 1;
+            }
+        }
+        Ok(format!(
+            "functions={installed} loops={armed} mir_ms={mir_ms:.3} llvm_ms={:.3}",
+            ms_since(llvm_started)
+        ))
+    }
+
+    #[cfg(not(feature = "llvm-backend"))]
+    fn compile_llvm_tier(&self) -> Result<String, String> {
+        Err("built without the LLVM backend".to_string())
+    }
+}
+
+fn ms_since(since: std::time::Instant) -> f64 {
+    since.elapsed().as_secs_f64() * 1000.0
 }
 
 /// Compile one hot function with LLVM, wherever this is called.

@@ -594,8 +594,11 @@ pub(crate) struct Function {
     pub block_ids: Vec<IrBlockId>,
     /// Each register's machine type.
     pub reg_mts: Vec<Mt>,
-    /// Compiled resume points by loop header, found once compiled code exists.
-    pub osr: std::sync::OnceLock<HashMap<u32, Arc<super::exec::OsrTarget>>>,
+    /// Compiled resume points by loop header, as of the last ones published.
+    pub osr: super::exec::OsrCache,
+    /// Blocks entered while interpreted, counted when compiling it is asked
+    /// for in the background.
+    pub heat: std::sync::atomic::AtomicU64,
     pub abi: Abi,
     pub return_type: IrType,
     /// MIR parameters in order, after the hidden ones.
@@ -955,7 +958,8 @@ pub(crate) fn decode(
         module: d.module_addr,
         block_ids: order,
         reg_mts,
-        osr: std::sync::OnceLock::new(),
+        osr: super::exec::OsrCache::default(),
+        heat: std::sync::atomic::AtomicU64::new(0),
         abi,
         return_type: function.signature.return_type.clone(),
         params,

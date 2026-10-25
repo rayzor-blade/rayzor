@@ -5,7 +5,7 @@ package unit;
 class Test {
     public function new() {}
 
-    // `pos` matches upstream's signature; tests forward their own.
+    // `pos` matches upstream's signatures; tests forward their own.
     function eq<T>(v:T, v2:T, ?pos:haxe.PosInfos):Void {
         unit.ConfCheck.ok();
         // Marker first, values second. Rendering a wrong value can crash --
@@ -19,7 +19,7 @@ class Test {
             Sys.println("FAILVALUES " + v + " != " + v2);
         }
     }
-    function feq(v:Float, v2:Float):Void {
+    function feq(v:Float, v2:Float, ?pos:haxe.PosInfos):Void {
         unit.ConfCheck.ok();
         var d = v - v2; if (d < 0) d = -d;
         if (d > 1e-9) {
@@ -29,7 +29,7 @@ class Test {
     }
     // Upstream is utest's Assert.same, a structural comparison: elements that
     // are distinct objects still match when they print alike.
-    function aeq<T>(expected:Array<T>, actual:Array<T>):Void {
+    function aeq<T>(expected:Array<T>, actual:Array<T>, ?pos:haxe.PosInfos):Void {
         unit.ConfCheck.ok();
         if (expected.length != actual.length) { unit.ConfCheck.fail("aeq length"); return; }
         for (i in 0...expected.length) {
@@ -39,41 +39,41 @@ class Test {
             }
         }
     }
-    function t(v:Bool):Void {
+    function t(v:Bool, ?pos:haxe.PosInfos):Void {
         unit.ConfCheck.ok();
         if (!v) { unit.ConfCheck.fail("t: expected true"); }
     }
-    function f(v:Bool):Void {
+    function f(v:Bool, ?pos:haxe.PosInfos):Void {
         unit.ConfCheck.ok();
         if (v) { unit.ConfCheck.fail("f: expected false"); }
     }
-    function assert(?message:String):Void {
+    function assert(?message:String, ?pos:haxe.PosInfos):Void {
         unit.ConfCheck.fail("assert: " + (message == null ? "" : message));
     }
-    function check(v:Bool):Void {
+    function check(v:Bool, ?pos:haxe.PosInfos):Void {
         unit.ConfCheck.ok();
         if (!v) { unit.ConfCheck.fail("check: expected true"); }
     }
-    function noAssert():Void { unit.ConfCheck.ok(); }
-    function unspec(f:Void->Void):Void { unit.ConfCheck.ok(); }
+    function noAssert(?pos:haxe.PosInfos):Void { unit.ConfCheck.ok(); }
+    function unspec(f:Void->Void, ?pos:haxe.PosInfos):Void { unit.ConfCheck.ok(); }
     // Upstream is utest's Assert.contains.
-    function allow<T>(v:T, values:Array<T>):Void {
+    function allow<T>(v:T, values:Array<T>, ?pos:haxe.PosInfos):Void {
         unit.ConfCheck.ok();
         if (values.indexOf(v) < 0) { unit.ConfCheck.fail("allow: value not in the allowed set"); }
     }
-    function hf(c:Class<Dynamic>, n:String):Void {
+    function hf(c:Class<Dynamic>, n:String, ?pos:haxe.PosInfos):Void {
         t(Type.getInstanceFields(c).indexOf(n) >= 0);
     }
-    function nhf(c:Class<Dynamic>, n:String):Void {
+    function nhf(c:Class<Dynamic>, n:String, ?pos:haxe.PosInfos):Void {
         f(Type.getInstanceFields(c).indexOf(n) >= 0);
     }
-    function hsf(c:Class<Dynamic>, n:String):Void {
+    function hsf(c:Class<Dynamic>, n:String, ?pos:haxe.PosInfos):Void {
         t(Type.getClassFields(c).indexOf(n) >= 0);
     }
-    function nhsf(c:Class<Dynamic>, n:String):Void {
+    function nhsf(c:Class<Dynamic>, n:String, ?pos:haxe.PosInfos):Void {
         f(Type.getClassFields(c).indexOf(n) >= 0);
     }
-    function exc(fn:Void->Void):Void {
+    function exc(fn:Void->Void, ?pos:haxe.PosInfos):Void {
         unit.ConfCheck.ok();
         try { fn(); unit.ConfCheck.fail("exc: no exception"); }
         catch (e:Dynamic) {}

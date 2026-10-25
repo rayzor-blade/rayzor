@@ -180,6 +180,7 @@ enum Target {
     HaxeHashLink,  // haxe -hl → hl
     HaxeHashLinkC, // haxe -hl → hlc (compile to C → gcc native)
     Ash,           // haxe -hl → ash (HashLink bytecode, hybrid JIT)
+    AshAot,        // haxe -hl → ash --build (LLVM native executable)
     HaxeCpp,       // haxe -cpp → compiled binary
     HaxeJvm,       // haxe -java → JVM bytecode
     #[cfg(feature = "llvm-backend")]
@@ -201,6 +202,7 @@ impl Target {
             Target::HaxeHashLink => "haxe-hashlink",
             Target::HaxeHashLinkC => "haxe-hashlink-c",
             Target::Ash => "ash",
+            Target::AshAot => "ash-aot",
             Target::HaxeCpp => "haxe-cpp",
             Target::HaxeJvm => "haxe-jvm",
             #[cfg(feature = "llvm-backend")]
@@ -222,6 +224,7 @@ impl Target {
             Target::HaxeHashLink => "Haxe HashLink JIT",
             Target::HaxeHashLinkC => "Haxe HashLink/C (native via gcc)",
             Target::Ash => "Ash (HashLink bytecode, hybrid JIT)",
+            Target::AshAot => "Ash AOT (HashLink bytecode -> native via LLVM)",
             Target::HaxeCpp => "Haxe C++ (hxcpp)",
             Target::HaxeJvm => "Haxe JVM (java bytecode)",
             #[cfg(feature = "llvm-backend")]
@@ -237,6 +240,7 @@ impl Target {
                 | Target::HaxeHashLink
                 | Target::HaxeHashLinkC
                 | Target::Ash
+                | Target::AshAot
                 | Target::HaxeCpp
                 | Target::HaxeJvm
         )
@@ -412,13 +416,13 @@ fn setup_precompiled_tiered_benchmark(
         .entry_function_id()
         .ok_or("No entry function ID in bundle")?;
 
-    // As the source-tiered target: start interpreted, promote straight to LLVM.
+    // As the source-tiered target: start interpreted, Cranelift then LLVM.
     let mut config = TierPreset::Benchmark.to_config();
     apply_threshold_override(&mut config);
 
     let mut backend =
         TieredBackend::with_symbols(config, symbols).map_err(|e| format!("backend: {}", e))?;
-    backend.set_tier_up_to_llvm(true);
+    backend.set_llvm_top_tier(true);
 
     // Load ALL modules from bundle
     for module in bundle.modules() {
@@ -715,8 +719,8 @@ fn setup_tiered_benchmark(
 
     let mut backend =
         TieredBackend::with_symbols(config, symbols).map_err(|e| format!("backend: {}", e))?;
-    // As `rayzor run --llvm`: hot interpreted code compiles straight to LLVM.
-    backend.set_tier_up_to_llvm(true);
+    // As `rayzor run --llvm`: Cranelift first, then LLVM for what stays hot.
+    backend.set_llvm_top_tier(true);
     backend.defer_mir_optimization(OptimizationLevel::O2);
 
     // Load the final merged module, matching the normal run path.
@@ -1035,8 +1039,12 @@ struct HaxeSession {
 
 impl HaxeSession {
     fn start(bench_name: &str) -> Self {
+        // Emptied first: a cache an earlier run filled would hold this
+        // program's own builds, which the source shifts below only keep out
+        // within one run.
         let hxcpp_cache =
             std::env::temp_dir().join(format!("rayzor_haxe_bench_{}/hxcpp_cache", bench_name));
+        let _ = fs::remove_dir_all(&hxcpp_cache);
         let _ = fs::create_dir_all(&hxcpp_cache);
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .and_then(|l| l.local_addr())
@@ -1228,6 +1236,52 @@ fn run_haxe_benchmark(
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(format!("{} execution failed: {}", vm, stderr));
+            }
+
+            Ok((compile_time, exec_time))
+        }
+
+        Target::AshAot => {
+            // The same bytecode the HashLink and Ash rows run, built ahead of
+            // time by Ash; its build is counted with the Haxe compile.
+            let hl_path = tmp_dir.join(format!("{}.hl", bench_name));
+            let binary = tmp_dir.join("ash_aot_binary");
+            let _ = fs::remove_file(&binary);
+            let compile_start = Instant::now();
+            let output = session
+                .haxe()
+                .arg("--main")
+                .arg(main_class)
+                .arg("-cp")
+                .arg(&haxe_dir)
+                .arg("-hl")
+                .arg(&hl_path)
+                .output()
+                .map_err(|e| format!("Failed to compile to HL: {}", e))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("haxe -hl compile failed: {}", stderr));
+            }
+            let output = Command::new(ash_binary())
+                .arg("--build")
+                .arg(&binary)
+                .arg(&hl_path)
+                .output()
+                .map_err(|e| format!("Failed to run ash --build: {}", e))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("ash --build failed: {}", stderr));
+            }
+            let compile_time = compile_start.elapsed();
+
+            let exec_start = Instant::now();
+            let output = Command::new(&binary)
+                .output()
+                .map_err(|e| format!("Failed to run the Ash AOT binary: {}", e))?;
+            let exec_time = exec_start.elapsed();
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("Ash AOT execution failed: {}", stderr));
             }
 
             Ok((compile_time, exec_time))
@@ -1637,6 +1691,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
         | Target::HaxeHashLink
         | Target::HaxeHashLinkC
         | Target::Ash
+        | Target::AshAot
         | Target::HaxeCpp
         | Target::HaxeJvm => {
             // The same warmup the Rayzor targets get: it fills the server and
@@ -2150,6 +2205,7 @@ fn main() {
         }
         if ash_available() {
             all_targets_list.push(Target::Ash);
+            all_targets_list.push(Target::AshAot);
         }
         all_targets_list.push(Target::HaxeCpp);
         if java_available() {

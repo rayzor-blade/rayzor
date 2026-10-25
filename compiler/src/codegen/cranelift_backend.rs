@@ -25,6 +25,11 @@ use crate::ir::{
 use tracing::{debug, info, trace, warn};
 
 /// Cranelift JIT backend for compiling MIR to native code
+/// The import a compile that leaves `func` alone reaches it through.
+pub fn served_symbol(func: IrFunctionId) -> String {
+    format!("__rayzor_served_{}", func.0)
+}
+
 pub struct CraneliftBackend {
     /// Cranelift JIT module
     module: JITModule,
@@ -82,6 +87,11 @@ pub struct CraneliftBackend {
     /// running here can transfer into optimised code instead of finishing at
     /// this tier.
     emit_osr_probes: bool,
+
+    /// When set, only these functions are compiled. Every other function with
+    /// a body is an import named by [`served_symbol`], which the symbol
+    /// lookup binds to the code already serving it.
+    compile_only: Option<std::collections::BTreeSet<IrFunctionId>>,
 
     /// Module counter for unique function naming across multiple MIR modules
     /// Each MIR module starts function IDs from 0, so we need to disambiguate
@@ -419,6 +429,7 @@ impl CraneliftBackend {
             runtime_functions: BTreeMap::new(),
             pointer_type,
             emit_osr_probes: crate::ir::osr::osr_enabled(),
+            compile_only: None,
             module_counter: 0,
             defined_functions: BTreeSet::new(),
             pending_stub_safety_net: Vec::new(),
@@ -990,6 +1001,12 @@ impl CraneliftBackend {
 
     /// Functions that keep their environment parameter whatever the modules
     /// now say: callers built before the modules last changed pass one.
+    /// Compile only `functions`; calls to any other reach it through an
+    /// import named by [`served_symbol`]. Set before compiling a module.
+    pub fn compile_only(&mut self, functions: std::collections::BTreeSet<IrFunctionId>) {
+        self.compile_only = Some(functions);
+    }
+
     pub fn seed_indirect_target_ids(&mut self, ids: impl IntoIterator<Item = IrFunctionId>) {
         self.indirect_target_functions.extend(ids);
     }
@@ -1143,6 +1160,13 @@ impl CraneliftBackend {
         for (func_id, function) in &mir_module.functions {
             if function.cfg.blocks.is_empty() {
                 debug!("Skipping extern function: {}", function.name);
+                continue;
+            }
+            if self
+                .compile_only
+                .as_ref()
+                .is_some_and(|only| !only.contains(func_id))
+            {
                 continue;
             }
             if function.uses_wide_vectors() {
@@ -1801,6 +1825,22 @@ impl CraneliftBackend {
             if return_type != types::INVALID {
                 sig.returns.push(AbiParam::new(return_type));
             }
+        }
+
+        // A function this compile leaves alone is reached through the code
+        // already serving it.
+        if !is_extern
+            && self
+                .compile_only
+                .as_ref()
+                .is_some_and(|only| !only.contains(&mir_func_id))
+        {
+            let func_id = self
+                .module
+                .declare_function(&served_symbol(mir_func_id), Linkage::Import, &sig)
+                .map_err(|e| format!("Failed to declare function: {}", e))?;
+            self.function_map.insert(mir_func_id, func_id);
+            return Ok(());
         }
 
         // CRITICAL: Check if this function was already declared (by name).

@@ -1188,8 +1188,8 @@ fn run_bundle(
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
     // main is entered once and any LLVM upgrade happens before it runs.
     backend.set_osr_probes(false);
-    // Starting interpreted, the LLVM tier is reached when the program turns hot.
-    backend.set_tier_up_to_llvm(start_interpreted && auto_upgrade_to_llvm);
+    // Hot code reaches Cranelift first; LLVM recompiles what stays hot.
+    backend.set_llvm_top_tier(auto_upgrade_to_llvm);
 
     for module in bundle.modules().iter() {
         backend
@@ -2075,8 +2075,8 @@ fn run_file(
     // main is entered once and any LLVM upgrade happens before it runs, so no
     // running baseline loop ever has optimised code to move into.
     backend.set_osr_probes(false);
-    // Starting interpreted, the LLVM tier is reached when the program turns hot.
-    backend.set_tier_up_to_llvm(start_interpreted && auto_upgrade_to_llvm);
+    // Hot code reaches Cranelift first; LLVM recompiles what stays hot.
+    backend.set_llvm_top_tier(auto_upgrade_to_llvm);
     if fast_interpreter_start {
         // Startup ran O0; compiled code gets the rest of O2.
         backend.defer_mir_optimization(compiler::ir::optimization::OptimizationLevel::O2);
@@ -2183,6 +2183,7 @@ fn run_file(
         .execute_function(main_func_id, vec![])
         .map_err(|e| format!("Execution failed: {}", e))?;
     startup_times::finished("main returned");
+    backend.stop_background_compiles();
     let activity = backend.compile_activity();
     startup_times::report(
         native_before_main,

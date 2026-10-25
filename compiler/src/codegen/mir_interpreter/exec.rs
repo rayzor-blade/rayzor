@@ -350,12 +350,30 @@ fn transfer(m: &Machine, fr: &Frame, t: &OsrTarget) -> Result<u64, InterpError> 
     m.native(|| unsafe { native::call(t.helper, &args, ret) })
 }
 
+/// A function's compiled resume points, rebuilt when more are published.
+#[derive(Debug)]
+pub(crate) struct OsrCache {
+    generation: AtomicU64,
+    points: std::sync::RwLock<Arc<HashMap<u32, Arc<OsrTarget>>>>,
+}
+
+impl Default for OsrCache {
+    fn default() -> Self {
+        Self {
+            generation: AtomicU64::new(u64::MAX),
+            points: std::sync::RwLock::new(Arc::new(HashMap::new())),
+        }
+    }
+}
+
 /// The compiled resume point for `block`, if it is a loop header that has one.
 fn osr_target(m: &Machine, f: &Function, block: u32) -> Option<Arc<OsrTarget>> {
-    f.osr
-        .get_or_init(|| resume_points(m, f))
-        .get(&block)
-        .cloned()
+    let generation = m.program.resume_generation();
+    if f.osr.generation.load(Ordering::Acquire) != generation {
+        *f.osr.points.write().unwrap() = Arc::new(resume_points(m, f));
+        f.osr.generation.store(generation, Ordering::Release);
+    }
+    f.osr.points.read().unwrap().get(&block).cloned()
 }
 
 fn resume_points(m: &Machine, f: &Function) -> HashMap<u32, Arc<OsrTarget>> {
@@ -404,12 +422,35 @@ fn resume_points(m: &Machine, f: &Function) -> HashMap<u32, Arc<OsrTarget>> {
     out
 }
 
+/// Count one more block run in `f`, entering `block`; every threshold's
+/// worth, ask for it compiled. A frame still interpreting it after it has
+/// code asks again, for the loop it is in to be given a resume point.
+#[inline(always)]
+fn warm(m: &Machine, f: &Function, block: u32) {
+    let threshold = m.max_iterations.get().max(1);
+    if (f.heat.fetch_add(1, Ordering::Relaxed) + 1) % threshold == 0 {
+        let at = f.block_ids.get(block as usize).copied();
+        m.program.request_compile(f.module, f.id, at);
+    }
+}
+
 /// Count a block entered. Past the threshold, suspend so the program can be
 /// compiled; once it has been, a loop header with a resume point transfers.
+/// When compiles run in the background, the function that turned hot is
+/// asked for instead, and interpretation carries on.
 #[inline(always)]
 fn entered(m: &Machine, f: &Function, block: u32) -> Option<Action> {
+    if m.program.has_natives()
+        && let Some(t) = osr_target(m, f, block)
+    {
+        return Some(Action::Transfer(t));
+    }
+    if m.program.compiles_in_background() {
+        warm(m, f, block);
+        return None;
+    }
     if m.program.has_natives() {
-        return osr_target(m, f, block).map(Action::Transfer);
+        return None;
     }
     let n = m.iterations.get() + 1;
     m.iterations.set(n);
@@ -700,6 +741,11 @@ fn step(m: &Machine, fr: &mut Frame, region_here: bool) -> Result<Action, Stop> 
     let f: &Function = unsafe { &*Arc::as_ptr(&fr.f) };
     let mut block = fr.block;
     let mut pc = fr.pc;
+    // A call's first block is entered without a branch, so it is counted
+    // here: a function that never branches still turns hot.
+    if pc == 0 && block == f.entry && m.program.compiles_in_background() {
+        warm(m, f, block);
+    }
     if pc == 0 && m.program.has_natives() {
         if let Some(t) = osr_target(m, f, block) {
             return Ok(Action::Transfer(t));

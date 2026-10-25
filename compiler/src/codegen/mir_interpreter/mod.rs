@@ -147,6 +147,11 @@ impl std::error::Error for InterpError {}
 
 type ResumeKey = (usize, IrFunctionId, crate::ir::IrBlockId);
 
+/// Takes the module address and function the interpreter wants compiled, and
+/// the block a frame of it was entering when it turned hot, if one was.
+pub(crate) type CompileRequest =
+    Box<dyn Fn(usize, IrFunctionId, Option<crate::ir::IrBlockId>) + Send + Sync>;
+
 /// What every thread running one program's interpreted code shares.
 pub(crate) struct Program {
     symbols: RwLock<HashMap<String, usize>>,
@@ -158,6 +163,11 @@ pub(crate) struct Program {
     /// Compiled resume points by module address, function and loop header,
     /// with the frame each takes.
     resume_points: RwLock<HashMap<ResumeKey, (usize, Arc<crate::ir::osr::OsrLayout>)>>,
+    /// Bumped whenever resume points are published, so a function looks again.
+    resume_generation: std::sync::atomic::AtomicU64,
+    /// Where a function that turns hot is sent to be compiled while the
+    /// interpreter carries on. Unset, a hot loop suspends the program instead.
+    compile_request: std::sync::OnceLock<CompileRequest>,
     /// Loops that carried on in compiled code.
     transfers: std::sync::atomic::AtomicU64,
     literals: Mutex<HashMap<String, &'static [u8]>>,
@@ -173,6 +183,8 @@ impl Program {
             natives: RwLock::new(HashMap::new()),
             compiled: AtomicBool::new(false),
             resume_points: RwLock::new(HashMap::new()),
+            resume_generation: std::sync::atomic::AtomicU64::new(0),
+            compile_request: std::sync::OnceLock::new(),
             transfers: std::sync::atomic::AtomicU64::new(0),
             literals: Mutex::new(HashMap::new()),
             cache: AtomicBool::new(true),
@@ -226,6 +238,75 @@ impl Program {
     #[inline(always)]
     pub(crate) fn has_natives(&self) -> bool {
         self.compiled.load(Ordering::Acquire)
+    }
+
+    #[inline(always)]
+    pub(crate) fn resume_generation(&self) -> u64 {
+        self.resume_generation.load(Ordering::Acquire)
+    }
+
+    #[inline(always)]
+    pub(crate) fn compiles_in_background(&self) -> bool {
+        self.compile_request.get().is_some()
+    }
+
+    /// Ask for `func` of the module at `module` to be compiled, with a frame
+    /// of it at `at`.
+    pub(crate) fn request_compile(
+        &self,
+        module: usize,
+        func: IrFunctionId,
+        at: Option<crate::ir::IrBlockId>,
+    ) {
+        if let Some(request) = self.compile_request.get() {
+            request(module, func, at);
+        }
+    }
+
+    /// Compiled code for `func`: trampolines handed out for it jump there from
+    /// now on, and new function values point at it directly. Safe from any
+    /// thread.
+    pub(crate) fn install_native(&self, func: IrFunctionId, code: usize) {
+        self.natives.write().unwrap().insert(func, code);
+        self.compiled.store(true, Ordering::Release);
+        let stubs = trampoline::forward(func, code);
+        // The runtime keys closures by code address; a stub handed out before
+        // now is the same function as the compiled code.
+        if let Some(alias) = self.symbol("haxe_closure_alias_code") {
+            let alias: extern "C" fn(usize, usize) = unsafe { std::mem::transmute(alias) };
+            for stub in stubs {
+                alias(stub, code);
+            }
+        }
+    }
+
+    /// Whether `func` of the module at `module` resumes at `header`.
+    pub(crate) fn has_resume_point(
+        &self,
+        module: usize,
+        func: IrFunctionId,
+        header: crate::ir::IrBlockId,
+    ) -> bool {
+        self.resume_points
+            .read()
+            .unwrap()
+            .contains_key(&(module, func, header))
+    }
+
+    /// Compiled code that resumes `func` of the module at `module` at
+    /// `layout.header`. Safe from any thread.
+    pub(crate) fn install_resume_point(
+        &self,
+        module: usize,
+        func: IrFunctionId,
+        code: usize,
+        layout: crate::ir::osr::OsrLayout,
+    ) {
+        self.resume_points
+            .write()
+            .unwrap()
+            .insert((module, func, layout.header), (code, Arc::new(layout)));
+        self.resume_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     fn indirect_targets(&self, module: &IrModule) -> Arc<BTreeSet<IrFunctionId>> {
@@ -482,22 +563,7 @@ impl MirInterpreter {
     /// Compiled code for `func`: trampolines handed out for it jump there from
     /// now on, and new function values point at it directly.
     pub fn install_native(&mut self, func: IrFunctionId, code: *const u8) {
-        self.machine
-            .program
-            .natives
-            .write()
-            .unwrap()
-            .insert(func, code as usize);
-        self.machine.program.compiled.store(true, Ordering::Release);
-        let stubs = trampoline::forward(func, code as usize);
-        // The runtime keys closures by code address; a stub handed out before
-        // now is the same function as the compiled code.
-        if let Some(alias) = self.machine.program.symbol("haxe_closure_alias_code") {
-            let alias: extern "C" fn(usize, usize) = unsafe { std::mem::transmute(alias) };
-            for stub in stubs {
-                alias(stub, code as usize);
-            }
-        }
+        self.machine.program.install_native(func, code as usize);
     }
 
     /// Compiled code that resumes `func` of `module` at `layout.header`,
@@ -510,13 +576,23 @@ impl MirInterpreter {
         code: *const u8,
         layout: crate::ir::osr::OsrLayout,
     ) {
-        let key = (module as *const IrModule as usize, func, layout.header);
-        self.machine
-            .program
-            .resume_points
-            .write()
-            .unwrap()
-            .insert(key, (code as usize, Arc::new(layout)));
+        self.machine.program.install_resume_point(
+            module as *const IrModule as usize,
+            func,
+            code as usize,
+            layout,
+        );
+    }
+
+    /// What compiled code is published through, from any thread.
+    pub(crate) fn program(&self) -> Arc<Program> {
+        self.machine.program.clone()
+    }
+
+    /// Send functions that turn hot to `request` and keep interpreting,
+    /// rather than suspending for a compile. Set once.
+    pub(crate) fn compile_in_background(&self, request: CompileRequest) {
+        let _ = self.machine.program.compile_request.set(request);
     }
 
     /// How many interpreted loops have carried on in compiled code.
