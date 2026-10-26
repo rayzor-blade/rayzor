@@ -4353,3 +4353,58 @@ class Builder {
     let hover = hover_text(&s.request("textDocument/hover", width));
     assert!(hover.contains("width:Int"), "{hover}");
 }
+
+#[test]
+fn reflected_enum_fields_keep_declared_types_positions_and_typed_initializers() {
+    let main = "import theme.Palette; class Main { static function main() { var colors = Builder.colors(); } }";
+    let palette = "package theme;\n#if macro\nenum abstract Palette(String) { var Wrong = 'macro'; }\n#else\nenum abstract Palette(String) {\n#if palette_alternate\n var Zed = 'zed'; var Alpha = 'alpha';\n#else\n var Wrong = 'without-define';\n#end\n public static final ALL:Array<Palette> = [Zed, Alpha]; }\n#end\n";
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp .\n-D palette_alternate\n--hl out.hl\n"),
+        ("Main.hx", main),
+        ("theme/Palette.hx", palette),
+        (
+            "Builder.hx",
+            r#"
+import haxe.macro.Context;
+import haxe.macro.Expr;
+using haxe.macro.TypeTools;
+class Builder {
+    public static macro function colors():Expr {
+        var fields = switch Context.getType("theme.Palette") {
+            case TAbstract(a, _):
+                if (a.get().impl == null) throw "missing implementation: " + a.get().pack.join(".") + ":" + a.get().name + ":" + a.get().module;
+                var self = a.get().pack.concat([a.get().name]).join(".");
+                [for (field in a.get().impl.get().statics.get())
+                    if (field.meta.has(":enum") && field.type.toString() == self) field];
+            case _: throw "expected an abstract";
+        }
+        fields.sort((x, y) -> Context.getPosInfos(x.pos).min - Context.getPosInfos(y.pos).min);
+        var names = [for (field in fields) switch field.expr() {
+            case {expr:TCast({expr:TConst(TString(value))}, _)} | {expr:TConst(TString(value))}: value;
+            case _: throw "expected a typed string initializer";
+        }];
+        if (names.join(",") != "zed,alpha") throw "wrong enum field reflection: " + names.join(",");
+        return macro $v{names.join(",")};
+    }
+}
+"#,
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    s.open("theme/Palette.hx");
+    s.change(
+        "theme/Palette.hx",
+        &palette.replace(
+            "var Zed = 'zed'; var Alpha = 'alpha';",
+            "var Alpha = 'alpha'; var Zed = 'zed';",
+        ),
+    );
+    let diagnostics = s.change("Main.hx", main);
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("wrong enum field reflection: alpha,zed"))),
+        "{diagnostics:#?}"
+    );
+}

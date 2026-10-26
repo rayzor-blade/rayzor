@@ -1843,3 +1843,71 @@ class Main { static function main() return Builder.make(); }
         Some("true")
     );
 }
+
+#[test]
+fn quoted_splices_and_comprehensions_keep_lexical_captures() {
+    for (body, expected) in [
+        (
+            r#"var style = macro ashui.types.Style;
+            function keyword(type:String, value:String) return () -> macro $style.$type.$value;
+            var make = keyword("Display", "Flex"); return make();"#,
+            "ashui.types.Style.Display.Flex",
+        ),
+        (
+            r#"function scale(value:Int) return () -> [for (i in [1, 2]) if (i > 0) i * value];
+            var make = scale(3); return macro $v{make()[1]};"#,
+            "6",
+        ),
+        (
+            r#"var source = macro null;
+            function positioned() return () -> macro @:pos(source.pos) 1;
+            var make = positioned(); return make();"#,
+            "1",
+        ),
+    ] {
+        let file = parse(&format!(
+            "class Builder {{ public static macro function make() {{ {body} }} }} class Main {{ static function main() return Builder.make(); }}"
+        ));
+        let mut classes = class_registry::ClassRegistry::new();
+        classes.register_file(&file);
+        let result = MacroExpander::with_class_registry(classes).expand_file(file);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            result
+                .expansion_origins
+                .last()
+                .and_then(|origin| origin.expanded_text.as_deref()),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn whole_object_pattern_alternatives_bind_the_selected_payload() {
+    let source = r#"
+enum Kind { Text(value:String); Wrap(child:Dynamic, target:Dynamic); }
+class Builder {
+    public static macro function make() {
+        var inputs = [{expr:Wrap({expr:Text("wrapped")}, null)}, {expr:Text("plain")}];
+        var names = [for (input in inputs) switch input {
+            case {expr:Wrap({expr:Text(value)}, _)} | {expr:Text(value)}: value;
+            case _: throw "wrong expression";
+        }];
+        return macro $v{names.join(",")};
+    }
+}
+class Main { static function main() return Builder.make(); }
+"#;
+    let file = parse(source);
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result
+            .expansion_origins
+            .last()
+            .and_then(|origin| origin.expanded_text.as_deref()),
+        Some("\"wrapped,plain\"")
+    );
+}

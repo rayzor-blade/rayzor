@@ -785,8 +785,7 @@ impl MacroContext {
     }
 
     /// `Context.typeExpr(expr)` — type an expression, returning a TypedExpr
-    /// view. Only `t` carries a real value; the macros in the wild read `.t`
-    /// and hand it to `TypeTools.toString`.
+    /// view with source retained for `Context.storeTypedExpr`.
     pub fn type_expr(
         &mut self,
         expr: &parser::Expr,
@@ -810,12 +809,56 @@ impl MacroContext {
         // the `storeTypedExpr(typeExpr(e))` idiom actually needs.
         let source = MacroValue::Expr(Arc::new(expr.clone()));
         obj.insert("__source__".to_string(), source.clone());
-        let typed_def = match self.typed_field_access(expr) {
+        let typed_def = match self
+            .typed_literal(expr, location)
+            .or_else(|| self.typed_field_access(expr))
+        {
             Some(def) => def,
             None => self.typed_binop(expr, location).unwrap_or(source),
         };
         obj.insert("expr".to_string(), typed_def);
         Ok(MacroValue::Object(Arc::new(obj)))
+    }
+
+    fn typed_literal(
+        &mut self,
+        expr: &parser::Expr,
+        location: SourceLocation,
+    ) -> Option<MacroValue> {
+        use super::value::MacroValue as V;
+        use parser::ExprKind;
+        let enumeration = |owner: &str, name: &str, args: Vec<V>| {
+            V::Enum(Arc::from(owner), Arc::from(name), Arc::new(args))
+        };
+        let (name, args) = match &expr.kind {
+            ExprKind::Int(value) => ("TInt", vec![V::Int(*value)]),
+            ExprKind::Float(value) => ("TFloat", vec![V::from_str(&value.to_string())]),
+            ExprKind::String(value) => ("TString", vec![V::from_str(value)]),
+            ExprKind::Bool(value) => ("TBool", vec![V::Bool(*value)]),
+            ExprKind::Null => ("TNull", Vec::new()),
+            ExprKind::This => ("TThis", Vec::new()),
+            ExprKind::Super => ("TSuper", Vec::new()),
+            ExprKind::Paren(inner) => {
+                return Some(enumeration(
+                    "TypedExprDef",
+                    "TParenthesis",
+                    vec![self.type_expr(inner, location).ok()?],
+                ));
+            }
+            ExprKind::Cast { expr: inner, .. } => {
+                return Some(enumeration(
+                    "TypedExprDef",
+                    "TCast",
+                    vec![self.type_expr(inner, location).ok()?, V::Null],
+                ));
+            }
+            _ => return None,
+        };
+        Some(enumeration(
+            "TypedExprDef",
+            "TConst",
+            vec![enumeration("TConstant", name, args)],
+        ))
     }
 
     /// `TBinop(op, e1, e2)` for a binary operation, each operand typed in turn.

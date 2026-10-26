@@ -3445,10 +3445,10 @@ impl MacroInterpreter {
                     .as_mut()
                     .and_then(|ctx| ctx.type_ref_view(*id))
                     .ok_or(MacroError::NeedsTyper { location })?;
-                Ok(self
-                    .class_registry
-                    .as_ref()
-                    .map_or_else(|| view.clone(), |r| r.enrich_type_view(view.clone())))
+                Ok(self.class_registry.as_ref().map_or_else(
+                    || view.clone(),
+                    |r| r.enrich_typed_view(view.clone(), Some(*id)),
+                ))
             }
             MacroValue::Type(_)
                 if matches!(
@@ -3839,6 +3839,40 @@ impl MacroInterpreter {
             && let Some(typed) = obj.get("__expr__")
         {
             return Ok(typed.clone());
+        }
+        if method == "expr"
+            && _args.is_empty()
+            && let Some(source) = obj.get("__field_expr__")
+        {
+            let MacroValue::Expr(source) = source else {
+                return Ok(MacroValue::Null);
+            };
+            let position = match obj.get("pos") {
+                Some(MacroValue::Position(pos)) => *pos,
+                _ => location,
+            };
+            let typed = self
+                .macro_context
+                .as_mut()
+                .ok_or(MacroError::NeedsTyper { location })?
+                .type_expr(source, position)?;
+            if obj.get("__enum_value__") == Some(&MacroValue::Bool(true))
+                && let (Some(ty), MacroValue::Object(fields)) = (obj.get("type"), &typed)
+                && fields.get("t") != Some(ty)
+            {
+                let mut fields = fields.as_ref().clone();
+                fields.insert("t".to_string(), ty.clone());
+                fields.insert(
+                    "expr".to_string(),
+                    MacroValue::Enum(
+                        Arc::from("TypedExprDef"),
+                        Arc::from("TCast"),
+                        Arc::new(vec![typed, MacroValue::Null]),
+                    ),
+                );
+                return Ok(MacroValue::Object(Arc::new(fields)));
+            }
+            return Ok(typed);
         }
         // `.get()` on plain objects acts as a Ref/Null<T> dereference — it
         // returns the object itself. This lets Haxe macro idioms like
@@ -4962,6 +4996,18 @@ impl MacroInterpreter {
             }) => self
                 .match_quoted_value(value, &MacroValue::Expr(Arc::new(pattern.as_ref().clone()))),
 
+            parser::Pattern::Const(expr)
+                if matches!(
+                    expr.kind,
+                    ExprKind::Binary {
+                        op: BinaryOp::BitOr,
+                        ..
+                    }
+                ) =>
+            {
+                self.match_pattern(value, &pattern_of_expr(expr))
+            }
+
             // An object literal in a pattern matches field by field: a name
             // captures, a call is a constructor, anything else compares.
             parser::Pattern::Const(expr) if matches!(expr.kind, ExprKind::Object(_)) => {
@@ -5609,8 +5655,45 @@ fn collect_free_vars(
                 collect_free_vars(a, bound, free);
             }
         }
-        ExprKind::Field { expr: obj, .. } => {
+        ExprKind::Field {
+            expr: obj, field, ..
+        } => {
             collect_free_vars(obj, bound, free);
+            if let Some(name) = field.strip_prefix('$')
+                && !bound.contains(name)
+            {
+                free.insert(name.to_string());
+            }
+        }
+        ExprKind::DollarIdent { name, arg } => match arg {
+            Some(value) => collect_free_vars(value, bound, free),
+            None if !bound.contains(name) => {
+                free.insert(name.clone());
+            }
+            None => {}
+        },
+        ExprKind::ArrayComprehension { for_parts, expr } => {
+            let mut inner_bound = bound.clone();
+            for part in for_parts {
+                collect_free_vars(&part.iter, &mut inner_bound, free);
+                inner_bound.insert(part.var.clone());
+                inner_bound.extend(part.key_var.iter().cloned());
+            }
+            collect_free_vars(expr, &mut inner_bound, free);
+        }
+        ExprKind::MapComprehension {
+            for_parts,
+            key,
+            value,
+        } => {
+            let mut inner_bound = bound.clone();
+            for part in for_parts {
+                collect_free_vars(&part.iter, &mut inner_bound, free);
+                inner_bound.insert(part.var.clone());
+                inner_bound.extend(part.key_var.iter().cloned());
+            }
+            collect_free_vars(key, &mut inner_bound, free);
+            collect_free_vars(value, &mut inner_bound, free);
         }
         ExprKind::Index { expr: obj, index } => {
             collect_free_vars(obj, bound, free);
@@ -5676,8 +5759,17 @@ fn collect_free_vars(
         }
         ExprKind::Cast { expr: inner, .. }
         | ExprKind::Macro(inner)
+        | ExprKind::Reify(inner)
+        | ExprKind::Untyped(inner)
+        | ExprKind::Inline(inner)
         | ExprKind::TypeCheck { expr: inner, .. } => {
             collect_free_vars(inner, bound, free);
+        }
+        ExprKind::Meta { meta, expr } => {
+            for value in &meta.params {
+                collect_free_vars(value, bound, free);
+            }
+            collect_free_vars(expr, bound, free);
         }
         ExprKind::New { args, .. } => {
             for a in args {

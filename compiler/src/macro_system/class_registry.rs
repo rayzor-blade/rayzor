@@ -54,6 +54,7 @@ pub(crate) struct GenericBuildInfo {
 
 struct TypeDefinition {
     qualified_name: String,
+    source_file: String,
     runtime_class: bool,
     parents: Vec<String>,
     module: String,
@@ -66,6 +67,7 @@ struct TypeDefinition {
 
 struct FieldDefinition {
     name: String,
+    span: parser::Span,
     metadata: Vec<Metadata>,
     is_static: bool,
     is_enum_value: bool,
@@ -88,6 +90,7 @@ pub struct ClassRegistry {
     /// short_name → qualified_name (for unambiguous lookups)
     short_name_index: BTreeMap<String, String>,
     type_definitions: BTreeMap<String, Arc<TypeDefinition>>,
+    reflected_definitions: std::sync::Mutex<BTreeMap<String, Option<Arc<TypeDefinition>>>>,
     enum_constants: BTreeMap<String, std::collections::BTreeSet<String>>,
     enum_constructors: BTreeMap<String, BTreeMap<String, usize>>,
     generic_builds: BTreeMap<String, Arc<GenericBuildInfo>>,
@@ -97,6 +100,12 @@ pub struct ClassRegistry {
     pub(super) dependencies: super::dependencies::Dependencies,
     class_paths: Vec<std::path::PathBuf>,
     defines: BTreeMap<String, String>,
+    source_overrides: Arc<BTreeMap<std::path::PathBuf, String>>,
+    reflection_config: Option<(
+        parser::preprocessor::PreprocessorConfig,
+        parser::preprocessor::PreprocessorConfig,
+        Vec<std::path::PathBuf>,
+    )>,
 }
 
 impl ClassRegistry {
@@ -107,6 +116,7 @@ impl ClassRegistry {
             using_members: BTreeMap::new(),
             short_name_index: BTreeMap::new(),
             type_definitions: BTreeMap::new(),
+            reflected_definitions: Default::default(),
             enum_constants: BTreeMap::new(),
             enum_constructors: BTreeMap::new(),
             generic_builds: BTreeMap::new(),
@@ -114,6 +124,8 @@ impl ClassRegistry {
             dependencies: Default::default(),
             class_paths: Vec::new(),
             defines: BTreeMap::new(),
+            source_overrides: Default::default(),
+            reflection_config: None,
         }
     }
 
@@ -133,6 +145,26 @@ impl ClassRegistry {
 
     pub fn set_defines(&mut self, defines: BTreeMap<String, String>) {
         self.defines = defines;
+    }
+
+    pub fn set_source_overrides(&mut self, sources: Arc<BTreeMap<std::path::PathBuf, String>>) {
+        self.source_overrides = sources;
+    }
+
+    pub(crate) fn set_reflection_config(
+        &mut self,
+        project: parser::preprocessor::PreprocessorConfig,
+        stdlib: parser::preprocessor::PreprocessorConfig,
+        paths: Vec<std::path::PathBuf>,
+    ) {
+        self.reflection_config = Some((
+            project,
+            stdlib,
+            paths
+                .into_iter()
+                .map(|path| path.canonicalize().unwrap_or(path))
+                .collect(),
+        ));
     }
 
     pub(crate) fn macro_context(&self) -> super::context_api::MacroContext {
@@ -299,6 +331,7 @@ impl ClassRegistry {
             };
             let mut next_value: i64 = 0;
             let definition = Arc::new(TypeDefinition {
+                source_file: file.filename.clone(),
                 qualified_name: format!("{package_prefix}{name}"),
                 runtime_class: matches!(
                     decl,
@@ -402,6 +435,7 @@ impl ClassRegistry {
                         }
                         FieldDefinition {
                             name: name.clone(),
+                            span: field.span,
                             metadata: field.meta.clone(),
                             is_static: field.modifiers.contains(&Modifier::Static) || is_enum_value,
                             is_enum_value,
@@ -630,6 +664,82 @@ impl ClassRegistry {
     }
 
     pub fn enrich_type_view(&self, view: super::value::MacroValue) -> super::value::MacroValue {
+        self.enrich_typed_view(view, None)
+    }
+
+    /// Runtime imports retain source declarations only when reflection requests them.
+    fn reflected_definition(&self, name: &str, module: &str) -> Option<Arc<TypeDefinition>> {
+        if let Some(definition) = self.type_definitions.get(name) {
+            return Some(definition.clone());
+        }
+        if let Some(definition) = self.reflected_definitions.lock().unwrap().get(name) {
+            return definition.clone();
+        }
+        let relative = format!("{}.hx", module.replace('.', "/"));
+        let source = self.class_paths.iter().find_map(|root| {
+            let path = root.join(&relative);
+            let path = path.canonicalize().unwrap_or(path);
+            let source = self
+                .source_overrides
+                .get(&path)
+                .cloned()
+                .or_else(|| std::fs::read_to_string(&path).ok())?;
+            self.dependencies.register_source(&path);
+            Some((path, source))
+        });
+        let definition = source.and_then(|(path, source)| {
+            let mut config = self
+                .reflection_config
+                .as_ref()
+                .map(|(project, stdlib, paths)| {
+                    if paths.iter().any(|root| path.starts_with(root)) {
+                        stdlib.clone()
+                    } else {
+                        project.clone()
+                    }
+                })
+                .unwrap_or_else(|| parser::preprocessor::PreprocessorConfig {
+                    defines: self
+                        .defines
+                        .keys()
+                        .filter(|name| name.as_str() != "macro")
+                        .cloned()
+                        .collect(),
+                    values: self.defines.clone(),
+                });
+            config.defines.remove("macro");
+            config.values.remove("macro");
+            let file = parser::haxe_parser::parse_haxe_file_with_config(
+                &path.to_string_lossy(),
+                &source,
+                true,
+                true,
+                &config,
+            )
+            .ok()?;
+            let mut declarations = ClassRegistry::new();
+            declarations.register_file(&file);
+            let definition = declarations.type_definitions.get(name).cloned();
+            self.reflected_definitions.lock().unwrap().extend(
+                declarations
+                    .type_definitions
+                    .into_iter()
+                    .map(|(name, definition)| (name, Some(definition))),
+            );
+            definition
+        });
+        self.reflected_definitions
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), definition.clone());
+        definition
+    }
+
+    pub fn enrich_typed_view(
+        &self,
+        view: super::value::MacroValue,
+        declared_type: Option<crate::tast::TypeId>,
+    ) -> super::value::MacroValue {
         use super::value::MacroValue as V;
         let V::Object(mut view) = view else {
             return view;
@@ -642,7 +752,8 @@ impl ClassRegistry {
             _ => Vec::new(),
         };
         path.push(name.to_string());
-        let Some(definition) = self.type_definitions.get(&path.join(".")) else {
+        let module = view.get("module").and_then(V::as_string).unwrap_or("");
+        let Some(definition) = self.reflected_definition(&path.join("."), module) else {
             return V::Object(view);
         };
         let view = Arc::make_mut(&mut view);
@@ -711,6 +822,27 @@ impl ClassRegistry {
                     "name".to_string(),
                     V::String(Arc::from(field.name.as_str())),
                 );
+                entry.insert(
+                    "pos".to_string(),
+                    V::Position(super::context_api::source_position(
+                        &definition.source_file,
+                        field.span,
+                    )),
+                );
+                entry.insert(
+                    "__field_expr__".to_string(),
+                    field
+                        .init_expr
+                        .as_ref()
+                        .map(|expr| V::Expr(expr.clone()))
+                        .unwrap_or(V::Null),
+                );
+                if field.is_enum_value {
+                    if let Some(ty) = declared_type {
+                        entry.insert("type".to_string(), V::Type(ty));
+                    }
+                    entry.insert("__enum_value__".to_string(), V::Bool(true));
+                }
                 let mut metadata = metadata_entries(&field.metadata);
                 if definition.is_abstract {
                     metadata.push(metadata_entry(":impl"));
