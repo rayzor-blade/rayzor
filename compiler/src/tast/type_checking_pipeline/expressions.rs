@@ -669,20 +669,31 @@ impl<'a> TypeCheckingPhase<'a> {
                 self.check_map_literal_expr(entries, expr.source_location)?;
             }
             TypedExpressionKind::ArrayLiteral { elements } => {
-                // Check each element
-                if !elements.is_empty() {
-                    // All elements should have compatible types
-                    let first_type = self.check_expression(&elements[0])?;
-
-                    for (i, element) in elements.iter().enumerate().skip(1) {
+                let array_type = crate::tast::type_substitution::TypeSubstitutions {
+                    type_table: self.type_table,
+                    symbol_table: self.symbol_table,
+                    class_type_params: None,
+                }
+                .resolve_alias_type(expr.expr_type);
+                let element_type = self
+                    .type_table
+                    .borrow()
+                    .get(array_type)
+                    .and_then(|ty| match ty.kind {
+                        TypeKind::Array { element_type } => Some(element_type),
+                        _ => None,
+                    })
+                    .or_else(|| elements.first().map(|element| element.expr_type));
+                if let Some(expected) = element_type {
+                    for (i, element) in elements.iter().enumerate() {
                         let element_type = self.check_expression(element)?;
                         let compatibility = self
                             .type_checker
-                            .check_compatibility(element_type, first_type);
+                            .check_compatibility(element_type, expected);
                         if matches!(compatibility, TypeCompatibility::Incompatible) {
                             self.emit_error(TypeCheckError {
                                 kind: TypeErrorKind::TypeMismatch {
-                                    expected: first_type,
+                                    expected,
                                     actual: element_type,
                                 },
                                 location: element.source_location,
@@ -692,6 +703,10 @@ impl<'a> TypeCheckingPhase<'a> {
                                 ),
                             });
                         }
+                    }
+                } else {
+                    for element in elements {
+                        self.check_expression(element)?;
                     }
                 }
             }

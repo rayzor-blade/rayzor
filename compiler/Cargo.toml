@@ -69,6 +69,7 @@ wgpu = { version = "24", optional = true }
 inkwell = { version = "0.7.1", features = ["llvm21-1"], optional = true}
 llvm-sys = { version = "211", optional = true }
 regex = "1.12.3"
+md-5 = { version = "=0.10.6", default-features = false }
 
 
 [build-dependencies]

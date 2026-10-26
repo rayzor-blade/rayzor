@@ -569,6 +569,7 @@ impl CompilationUnit {
         // declaring file lowers later (no untyped-placeholder decay).
         lowering.set_static_sig_index(Rc::clone(&self.static_sig_index));
         lowering.set_resources(std::sync::Arc::clone(&self.config.resources));
+        lowering.macro_resources = self.macro_resources.clone();
         lowering.seed_const_generics(
             self.user_files
                 .iter()
@@ -1721,6 +1722,15 @@ impl CompilationUnit {
         add_profile_ms(&mut self.typecheck_timings.user_files_ms, t_user_files);
 
         // Step 5: Report all errors if any were found
+        if !self.config.typecheck_only && self.macro_resources.lock().unwrap().has_stale_table() {
+            all_errors.push(CompilationError {
+                message: "Macro resources changed after an embedded resource table was compiled".into(),
+                location: SourceLocation::unknown(),
+                category: ErrorCategory::MacroExpansionError,
+                suggestion: Some("Register resources in an initialization macro before runtime modules are compiled".into()),
+                related_errors: Vec::new(),
+            });
+        }
         let deferred = std::mem::take(&mut self.deferred_errors);
         all_errors.splice(0..0, deferred);
         if !all_errors.is_empty() {

@@ -1460,6 +1460,10 @@ impl CompilationUnit {
     /// Returns true if cache hit (MIR loaded + symbols registered), false if miss.
     pub(crate) fn try_load_import_from_cache(&mut self, filename: &str, source: &str) -> bool {
         crate::cooperative::poll();
+        // Resource literals must observe this compile's registration order.
+        if !self.config.typecheck_only && source.contains("__resources__") {
+            return false;
+        }
         // Try to load from BLADE cache
         let (mir, _metadata, symbols, cached_maps) =
             match self.try_load_blade_cached_full(filename, source) {

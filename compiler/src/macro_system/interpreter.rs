@@ -2758,16 +2758,88 @@ impl MacroInterpreter {
                 {
                     dependencies.register_read(path);
                 }
-                super::filesystem::call(method, args, location)
+                let result = super::filesystem::call(method, args, location)?;
+                if method == "createDirectory"
+                    && let Some(path) = args.first().and_then(MacroValue::as_string)
+                    && let Some(dependencies) = self.dependencies()
+                {
+                    dependencies.refresh_written(path);
+                }
+                Ok(result)
+            }
+            "haxe.Json" if method == "parse" => {
+                let text = args
+                    .first()
+                    .and_then(MacroValue::as_string)
+                    .ok_or_else(|| MacroError::TypeError {
+                        message: "Json.parse expects a string".into(),
+                        location,
+                    })?;
+                let value =
+                    serde_json::from_str(text).map_err(|error| MacroError::RuntimeError {
+                        message: format!("Json.parse failed: {error}"),
+                        location,
+                    })?;
+                Ok(Some(super::assets::json_value(value)))
+            }
+            "haxe.crypto.Md5" if method == "encode" => {
+                let value = args
+                    .first()
+                    .and_then(MacroValue::as_string)
+                    .ok_or_else(|| MacroError::TypeError {
+                        message: "Md5.encode expects a string".into(),
+                        location,
+                    })?;
+                Ok(Some(MacroValue::from_string(super::assets::md5(
+                    value.as_bytes(),
+                ))))
+            }
+            "haxe.io.Bytes" if method == "ofString" => {
+                if args.get(1).is_some_and(|encoding| !matches!(encoding, MacroValue::Null) && !matches!(encoding, MacroValue::Enum(_, name, _) if name.as_ref() == "UTF8")) {
+                    return Err(MacroError::UnsupportedOperation { operation: "Bytes.ofString with non-UTF8 encoding".into(), location });
+                }
+                let value = args
+                    .first()
+                    .and_then(MacroValue::as_string)
+                    .ok_or_else(|| MacroError::TypeError {
+                        message: "Bytes.ofString expects a string".into(),
+                        location,
+                    })?;
+                Ok(Some(super::assets::bytes_value(value.as_bytes().to_vec())))
             }
             "sys.io.File" => match method {
+                "getBytes" => {
+                    let path = args
+                        .first()
+                        .and_then(MacroValue::as_string)
+                        .ok_or_else(|| MacroError::TypeError {
+                            message: "File.getBytes expects a path string".into(),
+                            location,
+                        })?;
+                    if let Some(dependencies) = self.dependencies() {
+                        dependencies.register_read(path);
+                    }
+                    let bytes = std::fs::read(path).map_err(|error| MacroError::RuntimeError {
+                        message: format!("File.getBytes('{path}') failed: {error}"),
+                        location,
+                    })?;
+                    if let Some(dependencies) = self.dependencies() {
+                        dependencies.register_content(path, &bytes);
+                    }
+                    Ok(Some(super::assets::bytes_value(bytes)))
+                }
                 "getContent" => {
                     let path = args.first().map(|v| value_to_string(v)).unwrap_or_default();
                     if let Some(dependencies) = self.dependencies() {
                         dependencies.register_read(&path);
                     }
                     match std::fs::read_to_string(&path) {
-                        Ok(content) => Ok(Some(MacroValue::String(Arc::from(content.as_str())))),
+                        Ok(content) => {
+                            if let Some(dependencies) = self.dependencies() {
+                                dependencies.register_content(&path, content.as_bytes());
+                            }
+                            Ok(Some(MacroValue::String(Arc::from(content.as_str()))))
+                        }
                         Err(e) => Err(MacroError::RuntimeError {
                             message: format!("File.getContent('{}') failed: {}", path, e),
                             location,
@@ -3966,6 +4038,39 @@ impl MacroInterpreter {
             .and_then(|v| v.as_string().map(|s| s.to_string()));
 
         match type_name.as_deref() {
+            Some("haxe.io.Bytes") => {
+                let data = super::assets::bytes_data(&MacroValue::Object(obj.clone())).ok_or_else(
+                    || MacroError::TypeError {
+                        message: "invalid Bytes storage".into(),
+                        location,
+                    },
+                )?;
+                match method {
+                    "toString" => Ok(MacroValue::from_string(
+                        String::from_utf8_lossy(&data).into_owned(),
+                    )),
+                    "toHex" => Ok(MacroValue::from_string(
+                        data.iter().map(|byte| format!("{byte:02x}")).collect(),
+                    )),
+                    "get" => {
+                        let index = _args
+                            .first()
+                            .and_then(MacroValue::as_int)
+                            .and_then(|index| usize::try_from(index).ok());
+                        index
+                            .and_then(|index| data.get(index))
+                            .map(|byte| MacroValue::Int((*byte).into()))
+                            .ok_or_else(|| MacroError::RuntimeError {
+                                message: "Bytes index out of bounds".into(),
+                                location,
+                            })
+                    }
+                    _ => Err(MacroError::UnsupportedOperation {
+                        operation: format!("Bytes.{method}()"),
+                        location,
+                    }),
+                }
+            }
             Some("EReg") => self.regexp_method(obj, method, &_args, location),
             Some("StringBuf") => self.string_buffer_method(obj, method, _args, location),
             Some("sys.io.ProcessOutput" | "sys.io.ProcessStdout") => match method {

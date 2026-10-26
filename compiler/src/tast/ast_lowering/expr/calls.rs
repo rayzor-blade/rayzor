@@ -1898,7 +1898,10 @@ impl<'a> AstLowering<'a> {
         ) {
             return self.retype_literal_to(arg, formal_ty);
         }
-        let arg = self.upcast_to_abstract_interface(arg, formal_ty);
+        let mut arg = self.upcast_to_abstract_interface(arg, formal_ty);
+        if let Some(abstract_type) = self.enum_abstract_value_type(&arg) {
+            arg.expr_type = abstract_type;
+        }
         // The formal's abstract symbol, through generic instantiation.
         let abstract_symbol = {
             let tt = self.context.type_table.borrow();
@@ -1948,7 +1951,7 @@ impl<'a> AstLowering<'a> {
             self.abstract_from_methods.insert(abstract_symbol, imported);
         }
         // Method bodies can refine their forward signatures and generic parameters.
-        let candidates: Vec<_> = {
+        let mut candidates: Vec<_> = {
             let table = self.context.type_table.borrow();
             self.abstract_from_methods[&abstract_symbol]
                 .iter()
@@ -1968,6 +1971,27 @@ impl<'a> AstLowering<'a> {
         };
         if candidates.is_empty() {
             return arg;
+        }
+        // Prefer the expected instantiation over conversions that infer another one.
+        if !self.type_mentions_type_param(&self.context.type_table.borrow(), formal_ty) {
+            candidates.sort_by_cached_key(|(method, _)| {
+                let result = {
+                    let table = self.context.type_table.borrow();
+                    self.context
+                        .symbol_table
+                        .get_symbol(*method)
+                        .and_then(|symbol| table.get(symbol.type_id))
+                        .and_then(|ty| match ty.kind {
+                            TypeKind::Function { return_type, .. } => Some(return_type),
+                            _ => None,
+                        })
+                };
+                !result.is_some_and(|result| {
+                    let result =
+                        self.bind_return_type_params(result, *method, std::slice::from_ref(&arg));
+                    self.same_type(result, formal_ty)
+                })
+            });
         }
         // Bind generic source parameters before checking the conversion's source.
         let pick = {
@@ -2976,18 +3000,25 @@ impl<'a> AstLowering<'a> {
                 let mut bindings = BTreeMap::new();
                 for (i, a) in arg_exprs.iter().enumerate() {
                     if let Some(formal) = formal_at(i) {
-                        if self.abstract_symbol_of(a.expr_type).is_none() {
+                        let bare_parameter = matches!(
+                            self.context
+                                .type_table
+                                .borrow()
+                                .get(formal)
+                                .map(|ty| &ty.kind),
+                            Some(TypeKind::TypeParameter { .. })
+                        );
+                        if self.abstract_symbol_of(a.expr_type).is_none() || !bare_parameter {
                             self.bind_type_params(formal, a.expr_type, &mut bindings);
                         }
                     }
                 }
                 let mut coerced: Vec<TypedExpression> = Vec::with_capacity(arg_exprs.len());
+                let bindings: Vec<_> = bindings.into_iter().collect();
                 for (i, a) in arg_exprs.into_iter().enumerate() {
-                    let formal = formal_at(i);
-                    let a = self.coerce_arg_via_abstract_to(
-                        a,
-                        formal.map(|f| self.substitute_bound_type_params(f, &bindings)),
-                    );
+                    let formal = formal_at(i)
+                        .map(|formal| self.substitute_type_bindings(formal, &bindings, false));
+                    let a = self.coerce_arg_via_abstract_to(a, formal);
                     let a = self.coerce_arg_via_abstract_from(a, formal);
                     // A top-level Int argument for a Float formal is left to the
                     // call's own coercion; literals inside structures are retyped.
@@ -4109,7 +4140,13 @@ impl<'a> AstLowering<'a> {
                         }
                     });
                     if let Some(params) = params {
+                        let mut bindings = BTreeMap::new();
+                        for (formal, argument) in params.iter().zip(&arg_exprs) {
+                            self.bind_type_params(*formal, argument.expr_type, &mut bindings);
+                        }
+                        let bindings: Vec<_> = bindings.into_iter().collect();
                         for (argument, formal) in arg_exprs.iter_mut().zip(params) {
+                            let formal = self.substitute_type_bindings(formal, &bindings, false);
                             *argument =
                                 self.coerce_arg_via_abstract_from(argument.clone(), Some(formal));
                         }

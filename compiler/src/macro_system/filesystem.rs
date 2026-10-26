@@ -11,7 +11,12 @@ pub(super) fn call(
 ) -> Result<Option<MacroValue>, MacroError> {
     if !matches!(
         method,
-        "exists" | "isDirectory" | "fullPath" | "absolutePath" | "readDirectory"
+        "exists"
+            | "isDirectory"
+            | "fullPath"
+            | "absolutePath"
+            | "readDirectory"
+            | "createDirectory"
     ) {
         return Ok(None);
     }
@@ -31,6 +36,10 @@ pub(super) fn call(
     Ok(Some(match method {
         "exists" => MacroValue::Bool(std::path::Path::new(path).exists()),
         "isDirectory" => MacroValue::Bool(std::path::Path::new(path).is_dir()),
+        "createDirectory" => {
+            std::fs::create_dir_all(path).map_err(fail)?;
+            MacroValue::Null
+        }
         "fullPath" => string(std::fs::canonicalize(path).map_err(fail)?),
         "absolutePath" if std::path::Path::new(path).is_absolute() => {
             MacroValue::String(Arc::from(path))

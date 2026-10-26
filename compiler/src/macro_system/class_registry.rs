@@ -98,6 +98,7 @@ pub struct ClassRegistry {
     /// every macro call of the compile, as macro-time statics are.
     statics: MacroStatics,
     pub(super) dependencies: super::dependencies::Dependencies,
+    resources: super::assets::Resources,
     class_paths: Vec<std::path::PathBuf>,
     defines: BTreeMap<String, String>,
     source_overrides: Arc<BTreeMap<std::path::PathBuf, String>>,
@@ -122,6 +123,7 @@ impl ClassRegistry {
             generic_builds: BTreeMap::new(),
             statics: MacroStatics::default(),
             dependencies: Default::default(),
+            resources: Default::default(),
             class_paths: Vec::new(),
             defines: BTreeMap::new(),
             source_overrides: Default::default(),
@@ -137,6 +139,10 @@ impl ClassRegistry {
 
     pub fn use_dependencies(&mut self, dependencies: super::dependencies::Dependencies) {
         self.dependencies = dependencies;
+    }
+
+    pub(crate) fn use_resources(&mut self, resources: super::assets::Resources) {
+        self.resources = resources;
     }
 
     pub fn set_class_paths(&mut self, paths: Vec<std::path::PathBuf>) {
@@ -172,6 +178,7 @@ impl ClassRegistry {
         context.class_paths = self.class_paths.clone();
         context.defines = self.defines.clone();
         context.dependencies = self.dependencies.clone();
+        context.resources = self.resources.clone();
         context
     }
 

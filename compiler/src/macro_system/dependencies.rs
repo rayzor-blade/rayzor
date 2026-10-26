@@ -11,6 +11,7 @@ use std::{
 pub struct Dependency {
     pub path: PathBuf,
     stamp: Option<(u64, u128)>,
+    content_digest: Option<[u8; 16]>,
 }
 
 impl Dependency {
@@ -26,11 +27,38 @@ impl Dependency {
         Self {
             path: path.into(),
             stamp,
+            content_digest: None,
         }
     }
 
     pub fn is_current(&self) -> bool {
-        *self == Self::capture(&self.path)
+        let current = Self::capture(&self.path);
+        if self.stamp == current.stamp {
+            return true;
+        }
+        let Some(expected) = self.content_digest else {
+            return false;
+        };
+        if self.stamp.map(|(length, _)| length) != current.stamp.map(|(length, _)| length) {
+            return false;
+        }
+        use md5::{Digest, Md5};
+        use std::io::Read;
+        let Ok(mut file) = std::fs::File::open(&self.path) else {
+            return false;
+        };
+        let mut digest = Md5::new();
+        let mut buffer = [0; 8192];
+        loop {
+            let Ok(length) = file.read(&mut buffer) else {
+                return false;
+            };
+            if length == 0 {
+                break;
+            }
+            digest.update(&buffer[..length]);
+        }
+        <[u8; 16]>::from(digest.finalize()) == expected
     }
 }
 
@@ -54,6 +82,21 @@ impl Dependencies {
     /// Keep the first read's stamp so a change during analysis rejects its result.
     pub fn register_read(&self, path: impl AsRef<Path>) {
         self.capture_read("", path.as_ref());
+    }
+
+    /// Preserve the first bytes read, so rewriting identical generated output stays reusable.
+    pub fn register_content(&self, path: impl AsRef<Path>, bytes: &[u8]) {
+        use md5::{Digest, Md5};
+        let path = dependency_path(path.as_ref());
+        let mut groups = self.0.lock().unwrap();
+        let entry = groups
+            .entry(String::new())
+            .or_default()
+            .entry(path.clone())
+            .or_insert_with(|| Dependency::capture(&path));
+        entry
+            .content_digest
+            .get_or_insert_with(|| Md5::digest(bytes).into());
     }
 
     pub fn register_source(&self, path: impl AsRef<Path>) {
@@ -116,4 +159,42 @@ fn dependency_path(path: &Path) -> PathBuf {
             _ => absolute,
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_file_rewrites_keep_identical_content_current() {
+        let path =
+            std::env::temp_dir().join(format!("rayzor-macro-dependency-{}", std::process::id()));
+        std::fs::write(&path, b"first").unwrap();
+        let dependencies = Dependencies::default();
+        dependencies.register_read(&path);
+        dependencies.register_content(&path, b"first");
+        let next = std::fs::metadata(&path).unwrap().modified().unwrap()
+            + std::time::Duration::from_secs(1);
+        std::fs::write(&path, b"first").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(next)
+            .unwrap();
+        assert!(dependencies.is_current());
+        let snapshot = dependencies.snapshot();
+        assert!(snapshot.iter().all(Dependency::is_current));
+        std::fs::write(&path, b"other").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(next + std::time::Duration::from_secs(1))
+            .unwrap();
+        dependencies.register_content(&path, b"other");
+        assert!(!dependencies.is_current());
+        assert!(!snapshot.iter().all(Dependency::is_current));
+        std::fs::remove_file(path).unwrap();
+    }
 }

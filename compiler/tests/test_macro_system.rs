@@ -2016,3 +2016,89 @@ class Main { static function main() return Builder.make(); }
         Some("10")
     );
 }
+
+#[test]
+fn macro_filesystem_creates_nested_directories_and_reports_errors() {
+    let root = std::env::temp_dir().join(format!("rayzor-macro-mkdir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let nested = root.join("cache/styles");
+    let path = serde_json::to_string(nested.to_str().unwrap()).unwrap();
+    let blocked = serde_json::to_string(root.join("blocked/child").to_str().unwrap()).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("blocked"), "file").unwrap();
+    let file = parse(&format!(
+        r#"
+class Builder {{ public static macro function make() {{
+    var path = {path};
+    sys.FileSystem.createDirectory(path);
+    sys.FileSystem.createDirectory(path);
+    if (!sys.FileSystem.isDirectory(path)) throw "directory missing";
+    var failed = false;
+    try sys.FileSystem.createDirectory({blocked}) catch (_:Dynamic) failed = true;
+    if (!failed) throw "filesystem failure was swallowed";
+    return macro true;
+}} }}
+class Main {{ static function main() return Builder.make(); }}
+"#
+    ));
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result
+            .expansion_origins
+            .last()
+            .and_then(|origin| origin.expanded_text.as_deref()),
+        Some("true")
+    );
+}
+
+#[test]
+fn binary_macro_assets_and_resources_preserve_all_bytes() {
+    let path = std::env::temp_dir().join(format!("rayzor-macro-bytes-{}", std::process::id()));
+    std::fs::write(&path, [0, 1, 254, 255]).unwrap();
+    let path_literal = serde_json::to_string(path.to_str().unwrap()).unwrap();
+    let file = parse(&format!(
+        r#"
+class Builder {{
+    static function check():String return haxe.macro.Context.getResources().get("binary").toHex();
+    public static macro function make() {{
+        var manifest = haxe.Json.parse('{{"imports":[],"classes":["panel"],"ok":true,"count":3,"unset":null}}');
+        if (manifest.classes[0] != "panel" || !manifest.ok || manifest.count != 3 || manifest.unset != null) throw "manifest JSON";
+        var invalid = false;
+        try haxe.Json.parse("invalid JSON") catch (_:Dynamic) invalid = true;
+        if (!invalid) throw "invalid JSON was accepted";
+        if (haxe.crypto.Md5.encode("") != "d41d8cd98f00b204e9800998ecf8427e") throw "empty MD5";
+        if (haxe.crypto.Md5.encode("abc") != "900150983cd24fb0d6963f7d28e17f72") throw "MD5";
+        var bytes = sys.io.File.getBytes({path_literal});
+        if (bytes.length != 4 || bytes.get(2) != 254) throw "bytes";
+        haxe.macro.Context.addResource("binary", bytes);
+        if (check() != "0001feff") throw "binary resource";
+        haxe.macro.Context.addResource("text", haxe.io.Bytes.ofString("héllo"));
+        if (haxe.macro.Context.getResources().get("text").toString() != "héllo") throw "UTF8";
+        return macro $v{{check()}};
+    }}
+}}
+class Main {{ static function main() return Builder.make(); }}
+"#
+    ));
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let mut expander = MacroExpander::with_class_registry(classes);
+    let result = expander.expand_file(file);
+    std::fs::remove_file(path).unwrap();
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result
+            .expansion_origins
+            .last()
+            .and_then(|origin| origin.expanded_text.as_deref()),
+        Some("\"0001feff\"")
+    );
+    assert_eq!(
+        expander.context().resource("binary").unwrap(),
+        [0, 1, 254, 255]
+    );
+}

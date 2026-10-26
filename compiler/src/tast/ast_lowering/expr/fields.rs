@@ -366,7 +366,31 @@ impl<'a> AstLowering<'a> {
                         .or_else(|| {
                             self.resolve_symbol_in_scope_hierarchy(qualified_class_interned)
                         })
-                        .or_else(|| self.resolve_class_like_symbol_by_name(class_name_interned));
+                        .or_else(|| {
+                            let owner = if package_parts.len() == 1 {
+                                let name = self.context.intern_string(&package_parts[0]);
+                                self.resolve_class_like_symbol_by_name(name)
+                            } else {
+                                let name = self.context.intern_string(package_parts.last()?);
+                                let package = package_parts[..package_parts.len() - 1]
+                                    .iter()
+                                    .map(|name| self.context.intern_string(name))
+                                    .collect();
+                                self.context.namespace_resolver.lookup_symbol(
+                                    &crate::tast::namespace::QualifiedPath::new(package, name),
+                                )
+                            };
+                            if owner.is_some_and(|owner| {
+                                self.class_fields.get(&owner).is_some_and(|fields| {
+                                    fields.iter().any(|(name, _, is_static)| {
+                                        *name == class_name_interned && *is_static
+                                    })
+                                })
+                            }) {
+                                return None;
+                            }
+                            self.resolve_class_like_symbol_by_name(class_name_interned)
+                        });
 
                     if let Some(symbol_id) = symbol_id_opt {
                         if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {

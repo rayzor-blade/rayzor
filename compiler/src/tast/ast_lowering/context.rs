@@ -129,6 +129,7 @@ impl<'a> AstLowering<'a> {
             method_overloads: BTreeMap::new(),
             annotated_dynamic_params: std::collections::BTreeSet::new(),
             resources: None,
+            macro_resources: Default::default(),
         }
     }
 

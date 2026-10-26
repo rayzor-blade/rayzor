@@ -8,6 +8,7 @@ impl CompilationUnit {
         let mut classes = ClassRegistry::new();
         classes.use_statics(self.macro_statics.clone());
         classes.use_dependencies(self.macro_dependencies.clone());
+        classes.use_resources(self.macro_resources.clone());
         classes.set_source_overrides(self.config.source_overrides.clone());
         classes.set_reflection_config(
             self.preprocessor_config_for("<macro-reflection>"),

@@ -1830,6 +1830,7 @@ pub struct AstLowering<'a> {
     pub(crate) annotated_dynamic_params: std::collections::BTreeSet<SymbolId>,
     /// The `--resource` files, (name, bytes), that `__resources__()` lists.
     resources: Option<std::sync::Arc<Vec<(String, Vec<u8>)>>>,
+    pub(crate) macro_resources: crate::macro_system::assets::Resources,
 }
 
 /// Result of type parameter substitution for generic method return types

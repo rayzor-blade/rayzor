@@ -56,6 +56,7 @@
 //! - **`ast_bridge`**: Conversion between parser AST and macro values
 //! - **`errors`**: Macro-specific error types and diagnostics
 
+pub(crate) mod assets;
 pub mod ast_bridge;
 pub mod budget;
 pub mod build_macros;

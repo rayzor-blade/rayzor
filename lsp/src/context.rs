@@ -861,8 +861,22 @@ impl LspContext {
         self.analyses.get(uri).is_some_and(|analysis| {
             self.open_files.get(uri).is_some_and(|source| {
                 let unit = analysis.unit.borrow();
-                unit.source_matches(analysis.index.file_id, source)
-                    && unit.macro_dependencies.is_current()
+                if !unit.source_matches(analysis.index.file_id, source) {
+                    return false;
+                }
+                let current = unit.macro_dependencies.is_current();
+                if !current && std::env::var_os("RAYZOR_LSP_PROFILE").is_some() {
+                    for dependency in unit
+                        .macro_dependencies
+                        .snapshot()
+                        .iter()
+                        .filter(|dependency| !dependency.is_current())
+                        .take(4)
+                    {
+                        eprintln!("lsp-stale-macro-input: {}", dependency.path.display());
+                    }
+                }
+                current
             })
         })
     }

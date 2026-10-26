@@ -801,7 +801,7 @@ impl MacroVm {
             MacroValue::Object(obj)
                 if matches!(
                     obj.get("__type__").and_then(MacroValue::as_string),
-                    Some("StringBuf" | "haxe.iterators.ArrayIterator")
+                    Some("StringBuf" | "haxe.iterators.ArrayIterator" | "haxe.io.Bytes")
                 ) =>
             {
                 Err(VmError::new("native object requires the macro host"))
@@ -966,6 +966,14 @@ impl MacroVm {
         args: Vec<MacroValue>,
     ) -> Result<MacroValue, VmError> {
         match (class, method) {
+            ("haxe.Json" | "Json", "parse")
+            | ("haxe.crypto.Md5" | "Md5", "encode")
+            | ("haxe.io.Bytes" | "Bytes", "ofString")
+            | ("sys.io.File" | "File", "getBytes")
+            | ("sys.FileSystem" | "FileSystem", "createDirectory")
+            | ("haxe.macro.Context" | "Context", "addResource" | "getResources") => {
+                Err(VmError::new("asset operations require the macro host"))
+            }
             ("trace" | "Sys", "println") | (_, "trace")
                 if method == "trace" || method == "println" =>
             {
@@ -1376,6 +1384,19 @@ mod tests {
         let iterator = MacroValue::array_iterator(Arc::new(vec![MacroValue::Int(1)]));
         assert!(vm.get_field(iterator.clone(), "length").is_err());
         assert!(vm.call_method(iterator, "hasNext", vec![]).is_err());
+    }
+
+    #[test]
+    fn binary_asset_operations_request_the_macro_host() {
+        let mut vm = MacroVm::new();
+        for (class, method) in [
+            ("haxe.Json", "parse"),
+            ("haxe.crypto.Md5", "encode"),
+            ("sys.FileSystem", "createDirectory"),
+            ("Context", "addResource"),
+        ] {
+            assert!(vm.call_static(class, method, Vec::new()).is_err());
+        }
     }
 
     #[test]

@@ -1716,6 +1716,98 @@ class Main {
 }
 
 #[test]
+fn generic_property_keys_bind_abstract_conversion_value_types() {
+    for (project_file, configuration) in [
+        ("build.hxml", "--hl out.hl\n"),
+        (
+            "rayzor.toml",
+            "[project]\nname=\"generic-properties\"\n[cache]\nenabled=false\n",
+        ),
+    ] {
+        for (value, valid) in [
+            ("116", true),
+            ("(116:Single)", true),
+            ("widgets.Styles.Display.Flex", false),
+            ("\"wrong\"", false),
+        ] {
+            let source = format!(
+                "import widgets.Prop; import widgets.Node; class Main {{ static function main() {{ var node = new Node(); node.set(Prop.Width, {value}); node.set(Prop.Display, widgets.Styles.Display.Flex); }} }}"
+            );
+            let mut s = Session::start(&[
+                ("Main.hx", &source),
+                (project_file, configuration),
+                (
+                    "widgets/Styles.hx",
+                    "package widgets; class Styles {} enum abstract Display(Int) to Int { var Flex = 0; }",
+                ),
+                (
+                    "widgets/Prop.hx",
+                    "package widgets; abstract Prop<T>(Int) { public static inline var Width:Prop<Single> = cast 1; public static inline var Display:Prop<Styles.Display> = cast 2; }",
+                ),
+                (
+                    "widgets/IntoReactive.hx",
+                    "package widgets; enum ReactiveValue<T> { Const(value:T); } abstract IntoReactive<T>(ReactiveValue<T>) from ReactiveValue<T> { @:from public static function fromConst<T>(value:T):IntoReactive<T> return Const(value); @:from public static function fromInt(value:Int):IntoReactive<Single> return Const((value:Single)); }",
+                ),
+                (
+                    "widgets/Node.hx",
+                    "package widgets; class Node { public function new() {} public function set<T>(prop:Prop<T>, value:IntoReactive<T>):Void {} }",
+                ),
+            ]);
+            let diagnostics = s.open("Main.hx");
+            assert_eq!(diagnostics.is_empty(), valid, "{value}: {diagnostics:#?}");
+        }
+    }
+}
+
+#[test]
+fn sibling_components_in_arrays_use_their_common_element_type() {
+    for (kind, valid) in [("Element", true), ("Dynamic", true), ("Title", false)] {
+        let source = format!(
+            "class Main {{ static function main() {{ var children:Array<{kind}> = [new Title(), new Description()]; }} }} class Element {{ public function new() {{}} }} class Component<T> extends Element {{}} class Title extends Component<{{title:String}}> {{}} class Description extends Component<{{description:String}}> {{}}"
+        );
+        let mut s = Session::start(&[("Main.hx", &source)]);
+        let diagnostics = s.open("Main.hx");
+        assert_eq!(diagnostics.is_empty(), valid, "{kind}: {diagnostics:#?}");
+    }
+}
+
+#[test]
+fn identical_macro_asset_rewrites_do_not_restart_analysis_for_hover() {
+    let source =
+        "class Main { static function main() { var value = Assets.read(); trace(value); } }";
+    let mut s = Session::start(&[
+        ("Main.hx", source),
+        (
+            "Assets.hx",
+            "class Assets { public static macro function read() { var path = haxe.macro.Context.resolvePath('asset.bin'); var bytes = sys.io.File.getBytes(path); return macro $v{bytes.toString()}; } }",
+        ),
+        ("asset.bin", "same"),
+    ]);
+    assert!(s.open("Main.hx").is_empty());
+    let before = s.activity.len();
+    let path = s.root.join("asset.bin");
+    let next =
+        std::fs::metadata(&path).unwrap().modified().unwrap() + std::time::Duration::from_secs(1);
+    std::fs::write(&path, "same").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(next)
+        .unwrap();
+    let at = s.at("Main.hx", 0, source.find("value").unwrap() as u32);
+    let hover = hover_text(&s.request("textDocument/hover", at));
+    assert!(hover.contains("String"), "{hover}");
+    assert!(
+        !s.activity[before..]
+            .iter()
+            .any(|activity| activity["state"] == "checking"),
+        "{:?}",
+        &s.activity[before..]
+    );
+}
+
+#[test]
 fn method_callbacks_use_structural_function_compatibility() {
     let source = r#"typedef Callback = Int->Void;
 class Main {

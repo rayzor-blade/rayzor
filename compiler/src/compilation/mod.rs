@@ -297,6 +297,7 @@ pub struct CompilationUnit {
     /// order (dependencies first), so shared values are deterministic.
     pub(crate) macro_statics: crate::macro_system::class_registry::MacroStatics,
     pub macro_dependencies: crate::macro_system::dependencies::Dependencies,
+    pub(crate) macro_resources: crate::macro_system::assets::Resources,
     /// `onAfterTyping`/`onGenerate` callbacks registered by expanded macros.
     pub(crate) macro_hooks: Vec<(String, crate::macro_system::MacroValue)>,
     pub(crate) global_metadata: Vec<crate::macro_system::compiler_api::GlobalMetadata>,
@@ -688,6 +689,9 @@ impl CompilationUnit {
             blade_functions: None,
             macro_statics: Default::default(),
             macro_dependencies: Default::default(),
+            macro_resources: crate::macro_system::assets::ResourceStore::configured(
+                config.resources.clone(),
+            ),
             macro_hooks: Vec::new(),
             global_metadata: Vec::new(),
             initialization_macro_files: Vec::new(),

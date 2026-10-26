@@ -225,6 +225,8 @@ impl MacroExpander {
         let mut context = MacroContext::new();
         context.defines = self.context.defines.clone();
         context.class_paths = self.context.class_paths.clone();
+        context.resources = self.context.resources.clone();
+        context.dependencies = self.context.dependencies.clone();
         context.current_module = self.context.current_module.clone();
         context.current_class = self.context.current_class.clone();
         context.current_method = self.context.current_method.clone();
@@ -1382,6 +1384,8 @@ impl MacroExpander {
         // (and the call position with it, for currentPos()).
         let mut ctx = super::context_api::MacroContext::new();
         ctx.class_paths = self.context.class_paths.clone();
+        ctx.resources = self.context.resources.clone();
+        ctx.dependencies = self.context.dependencies.clone();
         ctx.defines = self.context.defines.clone();
         ctx.current_module = self.context.current_module.clone();
         ctx.current_class = self.context.current_class.clone();

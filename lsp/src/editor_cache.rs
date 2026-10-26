@@ -306,7 +306,7 @@ impl Snapshot {
 }
 
 // Payload schema is independent of the outer BLADE envelope.
-const SCHEMA: &[u8; 4] = b"LSP2";
+const SCHEMA: &[u8; 4] = b"LSP3";
 
 fn encode_snapshot(snapshot: &Snapshot) -> Result<Vec<u8>, postcard::Error> {
     let mut bytes = SCHEMA.to_vec();

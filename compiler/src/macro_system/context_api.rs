@@ -210,6 +210,7 @@ pub struct MacroContext {
     /// Resource lookup order, shared with the compilation's module resolver.
     pub class_paths: Vec<std::path::PathBuf>,
     pub dependencies: super::dependencies::Dependencies,
+    pub(crate) resources: super::assets::Resources,
 
     // --- Output collectors ---
     /// Diagnostics emitted by the macro
@@ -377,6 +378,7 @@ impl MacroContext {
             defines: BTreeMap::new(),
             class_paths: Vec::new(),
             dependencies: Default::default(),
+            resources: Default::default(),
             typer: None,
             monomorphs: std::collections::BTreeSet::new(),
             mono_bindings: BTreeMap::new(),
@@ -411,6 +413,7 @@ impl MacroContext {
                 defines: BTreeMap::new(),
                 class_paths: Vec::new(),
                 dependencies: Default::default(),
+                resources: Default::default(),
                 typer: None,
                 monomorphs: std::collections::BTreeSet::new(),
                 mono_bindings: BTreeMap::new(),
@@ -426,6 +429,10 @@ impl MacroContext {
     /// Set the macro call position
     pub fn set_call_position(&mut self, pos: SourceLocation) {
         self.call_position = pos;
+    }
+
+    pub fn resource(&self, name: &str) -> Option<Vec<u8>> {
+        self.resources.lock().unwrap().get(name).cloned()
     }
 
     /// Install the live typer for the span of one deferred re-expansion.
@@ -1126,6 +1133,40 @@ impl MacroContext {
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
         match method {
+            "addResource" => {
+                let name = args
+                    .first()
+                    .and_then(MacroValue::as_string)
+                    .ok_or_else(|| MacroError::TypeError {
+                        message: "Context.addResource expects a name string".into(),
+                        location,
+                    })?;
+                let bytes = args
+                    .get(1)
+                    .and_then(super::assets::bytes_data)
+                    .ok_or_else(|| MacroError::TypeError {
+                        message: "Context.addResource expects Bytes".into(),
+                        location,
+                    })?;
+                self.resources
+                    .lock()
+                    .unwrap()
+                    .insert(name.to_owned(), bytes);
+                Ok(MacroValue::Null)
+            }
+            "getResources" => Ok(MacroValue::Map(Arc::new(
+                self.resources
+                    .lock()
+                    .unwrap()
+                    .entries()
+                    .map(|(name, bytes)| {
+                        (
+                            MacroValue::from_str(name),
+                            super::assets::bytes_value(bytes.clone()),
+                        )
+                    })
+                    .collect(),
+            ))),
             "error" => {
                 let msg = arg_as_string(args, 0, "error", location)?;
                 let pos = arg_as_position(args, 1).unwrap_or(location);

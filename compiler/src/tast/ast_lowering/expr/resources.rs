@@ -16,13 +16,22 @@ impl<'a> AstLowering<'a> {
             span,
             quoted: false,
         };
-        let entries = self
+        let mut macros = self.macro_resources.lock().unwrap();
+        if self.macro_probe_depth == 0 {
+            macros.mark_embedded();
+        }
+        let mut resources: std::collections::BTreeMap<_, _> = self
             .resources
             .iter()
             .flat_map(|resources| resources.iter())
+            .map(|(name, bytes)| (name.as_str(), bytes))
+            .collect();
+        resources.extend(macros.iter().map(|(name, bytes)| (name.as_str(), bytes)));
+        let entries = resources
+            .into_iter()
             .map(|(name, bytes)| {
                 node(ExprKind::Object(vec![
-                    field("name", node(ExprKind::String(name.clone()))),
+                    field("name", node(ExprKind::String(name.to_owned()))),
                     field("data", node(ExprKind::String(base64(bytes)))),
                     field("str", node(ExprKind::Null)),
                 ]))
