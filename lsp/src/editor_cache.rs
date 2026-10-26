@@ -284,7 +284,22 @@ impl Snapshot {
             if method == "rayzor/expandMacro" {
                 return Some(expansion.unwrap_or(Value::Null));
             }
-            return Some(expansion.map(|expansion| serde_json::json!({"contents":{"kind":"markdown","value":format!("**Macro expansion: `{}`**\n\n```haxe\n{}\n```", expansion["name"].as_str().unwrap_or("macro"), expansion["expansion"].as_str().unwrap_or(""))},"range":expansion["range"]})).unwrap_or(Value::Null));
+            return Some(
+                expansion
+                    .and_then(|expansion| {
+                        let text = expansion["expansion"]
+                            .as_str()
+                            .filter(|text| !text.trim().is_empty())?;
+                        Some(serde_json::json!({
+                            "contents": {"kind":"markdown", "value":format!(
+                                "**Macro expansion: `{}`**\n\n```haxe\n{}\n```",
+                                expansion["name"].as_str().unwrap_or("macro"), text
+                            )},
+                            "range": expansion["range"]
+                        }))
+                    })
+                    .unwrap_or(Value::Null),
+            );
         }
         None
     }
@@ -859,6 +874,29 @@ mod tests {
             json!({"textDocument":{"uri":uri},"position":{"line":2,"character":6}}),
         );
         assert_eq!(restored.answer(&request, "").unwrap(), expansion);
+    }
+
+    #[test]
+    fn unfinished_macro_expansions_do_not_produce_empty_hovers() {
+        let uri = "file:///Main.hx";
+        for text in [Value::Null, json!(""), json!(" \n")] {
+            let snapshot =
+                Snapshot {
+                    complete: true,
+                    expansions: vec![Expansion::from_json(json!({
+                    "name":"Build.run", "expansion":text,
+                    "range":{"start":{"line":0,"character":0},"end":{"line":0,"character":5}}
+                })).unwrap()],
+                    ..Default::default()
+                };
+            let snapshot = decode_snapshot(&encode_snapshot(&snapshot).unwrap()).unwrap();
+            let request = Request::new(
+                1.into(),
+                "textDocument/hover".into(),
+                json!({"textDocument":{"uri":uri},"position":{"line":0,"character":2}}),
+            );
+            assert_eq!(snapshot.answer(&request, ""), Some(Value::Null));
+        }
     }
 
     #[test]

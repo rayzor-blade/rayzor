@@ -799,9 +799,12 @@ impl MacroVm {
     fn get_field(&self, base: MacroValue, name: &str) -> Result<MacroValue, VmError> {
         match &base {
             MacroValue::Object(obj)
-                if obj.get("__type__").and_then(MacroValue::as_string) == Some("StringBuf") =>
+                if matches!(
+                    obj.get("__type__").and_then(MacroValue::as_string),
+                    Some("StringBuf" | "haxe.iterators.ArrayIterator")
+                ) =>
             {
-                Err(VmError::new("StringBuf requires the macro host"))
+                Err(VmError::new("native object requires the macro host"))
             }
             MacroValue::Object(obj) => Ok(obj.get(name).cloned().unwrap_or(MacroValue::Null)),
             MacroValue::Array(arr) => match name {
@@ -936,6 +939,11 @@ impl MacroVm {
                 .ok_or_else(|| VmError::new(format!("unsupported Map method: {method}"))),
             MacroValue::String(s) => self.call_string_method(s, method, args),
             MacroValue::Object(obj) => {
+                if obj.get("__type__").and_then(MacroValue::as_string)
+                    == Some("haxe.iterators.ArrayIterator")
+                {
+                    return Err(VmError::new("iterator protocol requires the macro host"));
+                }
                 // Check if the object has a function field with this name
                 if let Some(MacroValue::Function(func)) = obj.get(method) {
                     return self.call_function(func, args);
@@ -1131,10 +1139,7 @@ impl MacroVm {
                 new_arr.reverse();
                 Ok(MacroValue::Array(Arc::new(new_arr)))
             }
-            "iterator" => {
-                // Return the array itself as an iterator-like value
-                Ok(MacroValue::Array(arr.clone()))
-            }
+            "iterator" => Ok(MacroValue::array_iterator(arr.clone())),
             _ => Ok(MacroValue::Null),
         }
     }
@@ -1363,6 +1368,14 @@ mod tests {
             kind,
             span: Span { start: 0, end: 0 },
         }
+    }
+
+    #[test]
+    fn iterator_protocol_requests_the_macro_host() {
+        let mut vm = MacroVm::new();
+        let iterator = MacroValue::array_iterator(Arc::new(vec![MacroValue::Int(1)]));
+        assert!(vm.get_field(iterator.clone(), "length").is_err());
+        assert!(vm.call_method(iterator, "hasNext", vec![]).is_err());
     }
 
     #[test]

@@ -412,11 +412,7 @@ impl MacroInterpreter {
                         Arc::new(Vec::new()),
                     ));
                 }
-                if let Some((owner, 0)) = self
-                    .class_registry
-                    .as_ref()
-                    .and_then(|registry| registry.enum_constructor(None, name))
-                {
+                if let Some((owner, 0)) = self.scoped_enum_constructor(name) {
                     return Ok(MacroValue::Enum(
                         Arc::from(owner),
                         Arc::from(name.as_str()),
@@ -1618,10 +1614,7 @@ impl MacroInterpreter {
                 if let Some(tag) = enum_ctor_tag(name) {
                     return Ok(build_enum_ctor_value(tag, &arg_vals));
                 }
-                if let Some((owner, arity)) = self
-                    .class_registry
-                    .as_ref()
-                    .and_then(|registry| registry.enum_constructor(None, name))
+                if let Some((owner, arity)) = self.scoped_enum_constructor(name)
                     && arg_vals.len() <= arity
                 {
                     return self.enum_value(&owner, name, arg_vals, location);
@@ -1705,6 +1698,7 @@ impl MacroInterpreter {
                         Some(rest.remove(0))
                     };
                     let rest = MacroValue::Array(Arc::new(rest));
+                    self.replace_references(&base_val, &rest);
                     self.assign_base(base, rest)?;
                     return Ok(removed.unwrap_or(MacroValue::Null));
                 }
@@ -1718,6 +1712,7 @@ impl MacroInterpreter {
                     "push" | "pop" | "shift" | "unshift" | "splice" | "sort" | "reverse"
                 );
                 if is_mutating && matches!(result, MacroValue::Array(_)) {
+                    self.replace_references(&base_val, &result);
                     self.assign_base(base, result.clone())?;
                 }
 
@@ -2391,6 +2386,47 @@ impl MacroInterpreter {
             .as_ref()?
             .runtime_class_name(&resolved)
             .map(str::to_string)
+    }
+
+    fn scoped_enum_constructor(&self, name: &str) -> Option<(String, usize)> {
+        let registry = self.class_registry.as_ref()?;
+        if let Some((owner, constructor)) = self
+            .import_map
+            .get(name)
+            .and_then(|path| path.rsplit_once('.'))
+            && constructor == name
+            && let Some(found) = registry.enum_constructor(Some(owner), name)
+        {
+            return Some(found);
+        }
+        let candidates: std::collections::BTreeSet<_> = self
+            .import_map
+            .iter()
+            .filter(|(key, _)| key.as_str() != WILDCARD_OWNERS_KEY)
+            .filter_map(|(_, owner)| registry.enum_constructor(Some(owner), name))
+            .collect();
+        if candidates.len() == 1 {
+            return candidates.into_iter().next();
+        }
+        if let Some((package, _)) = self
+            .macro_class_stack
+            .last()
+            .and_then(|owner| owner.rsplit_once('.'))
+            && let Some(found) = registry.enum_constructor_in_scope(package, name)
+        {
+            return Some(found);
+        }
+        let wildcards: std::collections::BTreeSet<_> = self
+            .import_map
+            .get(WILDCARD_OWNERS_KEY)
+            .into_iter()
+            .flat_map(|owners| owners.lines())
+            .filter_map(|owner| registry.enum_constructor_in_scope(owner, name))
+            .collect();
+        if wildcards.len() == 1 {
+            return wildcards.into_iter().next();
+        }
+        registry.enum_constructor(None, name)
     }
 
     fn is_of_type(&self, value: &MacroValue, expected: &MacroValue) -> bool {
@@ -3469,7 +3505,7 @@ impl MacroInterpreter {
                         location,
                     })
             }
-            MacroValue::Array(arr) => self.array_method(arr.as_ref(), method, args, location),
+            MacroValue::Array(arr) => self.array_method(arr, method, args, location),
             MacroValue::Map(_) => {
                 base.map_method(method, &args)
                     .ok_or_else(|| MacroError::UnsupportedOperation {
@@ -3509,7 +3545,7 @@ impl MacroInterpreter {
     /// Built-in array methods
     fn array_method(
         &mut self,
-        arr: &[MacroValue],
+        arr: &Arc<Vec<MacroValue>>,
         method: &str,
         args: Vec<MacroValue>,
         location: SourceLocation,
@@ -3548,7 +3584,7 @@ impl MacroInterpreter {
             "map" => {
                 if let Some(MacroValue::Function(func)) = args.first() {
                     let mut result = Vec::with_capacity(arr.len());
-                    for item in arr {
+                    for item in arr.iter() {
                         let mapped =
                             self.call_function(func.as_ref(), vec![item.clone()], location)?;
                         result.push(mapped);
@@ -3564,7 +3600,7 @@ impl MacroInterpreter {
             "filter" => {
                 if let Some(MacroValue::Function(func)) = args.first() {
                     let mut result = Vec::new();
-                    for item in arr {
+                    for item in arr.iter() {
                         let keep =
                             self.call_function(func.as_ref(), vec![item.clone()], location)?;
                         if keep.is_truthy() {
@@ -3636,14 +3672,7 @@ impl MacroInterpreter {
                 Ok(MacroValue::Array(Arc::new(items)))
             }
             "copy" => Ok(MacroValue::Array(Arc::new(arr.to_vec()))),
-            "iterator" => Ok(MacroValue::Object(Arc::new(BTreeMap::from([
-                (
-                    "__type__".into(),
-                    MacroValue::from_str("haxe.iterators.ArrayIterator"),
-                ),
-                ("array".into(), MacroValue::Array(Arc::new(arr.to_vec()))),
-                ("current".into(), MacroValue::Int(0)),
-            ])))),
+            "iterator" => Ok(MacroValue::array_iterator(arr.clone())),
             "slice" => {
                 let len = arr.len() as i64;
                 let norm = |v: Option<&MacroValue>, default: i64| match v {
@@ -5045,11 +5074,7 @@ impl MacroInterpreter {
                 {
                     return Ok(*value == constant);
                 }
-                if self
-                    .class_registry
-                    .as_ref()
-                    .is_some_and(|registry| registry.enum_constructor(None, name).is_some())
-                {
+                if self.scoped_enum_constructor(name).is_some() {
                     return Ok(
                         matches!(value, MacroValue::Enum(_, variant, payload) if variant.as_ref() == name && payload.is_empty()),
                     );

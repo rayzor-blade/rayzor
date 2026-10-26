@@ -1911,3 +1911,108 @@ class Main { static function main() return Builder.make(); }
         Some("\"wrapped,plain\"")
     );
 }
+
+#[test]
+fn enum_constructors_follow_the_helpers_import_scope() {
+    let mut classes = class_registry::ClassRegistry::new();
+    for (name, source) in [
+        (
+            "alpha/Factory.hx",
+            "package alpha; enum Paint { CurrentColor; Solid(value:Int); } class Factory { public static function current():Paint return CurrentColor; public static function solid():Paint return Solid(3); }",
+        ),
+        (
+            "beta/Factory.hx",
+            "package beta; enum Paint { CurrentColor; Solid(value:Int); } class Factory { public static function current():Paint return CurrentColor; public static function solid():Paint return Solid(5); }",
+        ),
+        (
+            "helper/Palette.hx",
+            "package helper; import alpha.Factory.Paint; class Palette { public static function current():Paint return CurrentColor; public static function solid():Paint return Solid(7); }",
+        ),
+    ] {
+        classes.register_file(&parser::parse_haxe_file(name, source, false).unwrap());
+    }
+    let file = parse(
+        r#"
+class Builder { public static macro function make() {
+    var a = alpha.Factory.current(), b = beta.Factory.current();
+    if (Type.enumEq(a, b)) throw "merged distinct enum values";
+    if (!Type.enumEq(a, helper.Palette.current())) throw "ignored imported enum";
+    if (Type.enumConstructor(a) != "CurrentColor" || Type.enumConstructor(b) != "CurrentColor") throw "wrong constructor";
+    return macro $v{Type.enumParameters(alpha.Factory.solid())[0] + Type.enumParameters(beta.Factory.solid())[0] + Type.enumParameters(helper.Palette.solid())[0]};
+} }
+class Main { static function main() return Builder.make(); }
+"#,
+    );
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result
+            .expansion_origins
+            .last()
+            .and_then(|origin| origin.expanded_text.as_deref()),
+        Some("15")
+    );
+}
+
+#[test]
+fn map_iterators_support_the_protocol_and_preserve_shared_state() {
+    let file = parse(
+        r#"
+class Builder { public static macro function make() {
+    var map = ["a" => 2, "b" => 3];
+    var iterator = map.iterator(), alias = iterator;
+    var total = iterator.next() + alias.next();
+    if (iterator.hasNext()) throw "iterator alias did not advance";
+    var keys = map.keys(), count = 0;
+    while (keys.hasNext()) { keys.next(); count++; }
+    for (pair in map.keyValueIterator()) total += pair.value;
+    for (key in map.keys()) count++;
+    return macro $v{total + count};
+} }
+class Main { static function main() return Builder.make(); }
+"#,
+    );
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result
+            .expansion_origins
+            .last()
+            .and_then(|origin| origin.expanded_text.as_deref()),
+        Some("14")
+    );
+}
+
+#[test]
+fn array_iterators_share_progress_and_observe_array_mutations() {
+    let file = parse(
+        r#"
+class Builder { public static macro function make() {
+    var values = [2], iterator = values.iterator(), alias = iterator;
+    var total = iterator.next();
+    if (alias.hasNext()) throw "iterator alias did not advance";
+    values.push(3);
+    if (!iterator.hasNext()) throw "iterator did not observe push";
+    total += alias.next();
+    if (iterator.hasNext()) throw "iterator did not finish";
+    for (value in values.iterator()) total += value;
+    return macro $v{total};
+} }
+class Main { static function main() return Builder.make(); }
+"#,
+    );
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result
+            .expansion_origins
+            .last()
+            .and_then(|origin| origin.expanded_text.as_deref()),
+        Some("10")
+    );
+}

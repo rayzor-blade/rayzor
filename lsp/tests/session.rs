@@ -1671,6 +1671,51 @@ fn generic_switch_branches_use_the_inferred_common_base() {
 }
 
 #[test]
+fn deferred_macro_switch_branches_use_the_inferred_common_base() {
+    let source = r#"import widgets.For;
+class Main {
+ static function pane(which:String):widgets.Element return switch which {
+  case "activity": Builder.each([[1, 2]]);
+  case "elements": Builder.each([["a"]]);
+  case "debug": Builder.each([true]);
+  case _: Builder.each([[{text:"hello"}]]);
+ };
+ static function main() {}
+}"#;
+    let mut s = Session::start(&[
+        ("Main.hx", source),
+        (
+            "Builder.hx",
+            "import haxe.macro.Context; import haxe.macro.Expr; class Builder { public static macro function each(values:Expr):Expr { Context.typeof(values); return macro new widgets.For(() -> $values, value -> new widgets.Element()); } }",
+        ),
+        (
+            "widgets/Element.hx",
+            "package widgets; class Element { public function new() {} }",
+        ),
+        (
+            "widgets/For.hx",
+            "package widgets; class For<T> extends Element { public function new(each:Void->Array<T>, item:T->Element) {super();} }",
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let offset = source.find("Builder.each([true])").unwrap();
+    let before = &source[..offset];
+    let at = s.at(
+        "Main.hx",
+        before.bytes().filter(|&byte| byte == b'\n').count() as u32,
+        before.rsplit('\n').next().unwrap().len() as u32,
+    );
+    let expanded = s.request("rayzor/expandMacro", at);
+    assert!(
+        expanded["expansion"]
+            .as_str()
+            .is_some_and(|text| text.contains("new widgets.For")),
+        "{expanded}"
+    );
+}
+
+#[test]
 fn method_callbacks_use_structural_function_compatibility() {
     let source = r#"typedef Callback = Int->Void;
 class Main {

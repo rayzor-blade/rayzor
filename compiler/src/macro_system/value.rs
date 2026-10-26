@@ -211,16 +211,91 @@ impl MacroValue {
                     .iter()
                     .any(|(key, _)| key.map_key_eq(args.first().unwrap_or(&Self::Null))),
             ),
-            "keys" => Self::Array(Arc::new(
+            "keys" => Self::array_iterator(Arc::new(
                 entries.iter().map(|(key, _)| key.clone()).collect(),
             )),
-            "iterator" => Self::Array(Arc::new(
+            "iterator" => Self::array_iterator(Arc::new(
                 entries.iter().map(|(_, value)| value.clone()).collect(),
+            )),
+            "keyValueIterator" => Self::array_iterator(Arc::new(
+                entries
+                    .iter()
+                    .map(|(key, value)| {
+                        Self::Object(Arc::new(BTreeMap::from([
+                            ("key".to_string(), key.clone()),
+                            ("value".to_string(), value.clone()),
+                        ])))
+                    })
+                    .collect(),
             )),
             "copy" => Self::Map(Arc::new(entries.as_ref().clone())),
             "toString" => Self::from_string(self.to_display_string()),
             _ => return None,
         })
+    }
+
+    pub(crate) fn array_iterator(values: Arc<Vec<Self>>) -> Self {
+        use parser::{BinaryOp, ExprKind, Span, UnaryOp};
+        let expression = |kind| Expr {
+            kind,
+            span: Span::default(),
+        };
+        let array = || expression(ExprKind::Ident("array".to_string()));
+        let current = || expression(ExprKind::Ident("current".to_string()));
+        let captures = BTreeMap::from([
+            (
+                "array".to_string(),
+                Arc::new(std::sync::Mutex::new(Self::Array(values))),
+            ),
+            (
+                "current".to_string(),
+                Arc::new(std::sync::Mutex::new(Self::Int(0))),
+            ),
+        ]);
+        let method = |name: &str, body| {
+            Self::Function(Arc::new(MacroFunction {
+                name: format!("<iterator.{name}>"),
+                params: Vec::new(),
+                body: Arc::new(expression(body)),
+                captures: captures.clone(),
+                context: None,
+                return_type: None,
+            }))
+        };
+        Self::Object(Arc::new(BTreeMap::from([
+            (
+                "__type__".to_string(),
+                Self::from_str("haxe.iterators.ArrayIterator"),
+            ),
+            (
+                "hasNext".to_string(),
+                method(
+                    "hasNext",
+                    ExprKind::Binary {
+                        left: Box::new(current()),
+                        op: BinaryOp::Lt,
+                        right: Box::new(expression(ExprKind::Field {
+                            expr: Box::new(array()),
+                            field: "length".to_string(),
+                            is_optional: false,
+                        })),
+                    },
+                ),
+            ),
+            (
+                "next".to_string(),
+                method(
+                    "next",
+                    ExprKind::Index {
+                        expr: Box::new(array()),
+                        index: Box::new(expression(ExprKind::Unary {
+                            op: UnaryOp::PostIncr,
+                            expr: Box::new(current()),
+                        })),
+                    },
+                ),
+            ),
+        ])))
     }
 
     /// Mutate a map and return the Haxe method's result separately from its storage.

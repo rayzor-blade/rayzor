@@ -1113,7 +1113,9 @@ fn handle_hover(ctx: &LspContext, params: HoverParams) -> Option<Hover> {
     let info = ctx.hover_info(uri, pos.line + 1, pos.character + 1);
     if info.is_none()
         && let Some(preview) = ctx.expand_macro(uri, pos)
-        && let Some(expansion) = preview["expansion"].as_str()
+        && let Some(expansion) = preview["expansion"]
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
     {
         return Some(Hover {
             contents: HoverContents::Markup(MarkupContent {

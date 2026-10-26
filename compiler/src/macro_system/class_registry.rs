@@ -937,6 +937,31 @@ impl ClassRegistry {
             .flatten()
     }
 
+    pub(crate) fn enum_constructor_in_scope(
+        &self,
+        scope: &str,
+        name: &str,
+    ) -> Option<(String, usize)> {
+        if let Some(found) = self.enum_constructor(Some(scope), name) {
+            return Some(found);
+        }
+        let mut found = self
+            .enum_constructors
+            .get(name)?
+            .iter()
+            .filter(|(owner, _)| {
+                owner
+                    .rsplit_once('.')
+                    .is_some_and(|(package, _)| package == scope)
+                    || self
+                        .type_definitions
+                        .get(*owner)
+                        .is_some_and(|definition| definition.module == scope)
+            });
+        let (owner, &arity) = found.next()?;
+        found.next().is_none().then(|| (owner.clone(), arity))
+    }
+
     /// Find a class by name (tries exact match, then short name index).
     pub fn find_class(&self, name: &str) -> Option<&ClassInfo> {
         if let Some(info) = self.classes.get(name) {
