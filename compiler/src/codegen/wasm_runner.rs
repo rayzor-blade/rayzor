@@ -1929,12 +1929,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     let mut builder = wasi_common::WasiCtxBuilder::new();
     builder.inherit_stdio().inherit_env();
     if let Ok(cwd) = std::env::current_dir() {
-        let _ = builder.preopened_dir(
-            &cwd,
-            ".",
-            wasi_common::DirPerms::all(),
-            wasi_common::FilePerms::all(),
-        );
+        let _ = builder.preopened_dir(&cwd, ".", wasi_common::FsPerms::ReadWrite);
     }
 
     let state = WasmState {

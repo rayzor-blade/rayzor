@@ -356,6 +356,7 @@ pub fn cmd_run_wasm(
     let _loaded_rpkgs = compile_inputs.loaded_rpkgs;
     let _loaded_native_libs = compile_inputs.loaded_native_libs;
 
+    optimize_wasm_mir(&mut mir_result.module);
     compiler::codegen::wasm_backend::WasmBackend::strip_wide_vector_functions(
         &mut mir_result.module,
     )?;
@@ -367,18 +368,16 @@ pub fn cmd_run_wasm(
     let host_functions = collect_wasm_host_functions(project.as_ref(), true);
 
     // Link with runtime
-    let runtime_path = find_wasm_runtime();
-    let linked_wasm = if let Some(rt_path) = &runtime_path {
-        let rt_bytes =
-            std::fs::read(rt_path).map_err(|e| format!("failed to read runtime: {}", e))?;
-        compiler::codegen::wasm_linker::WasmLinker::link_with_hosts(
-            &user_wasm,
-            &rt_bytes,
-            &host_functions,
-        )?
-    } else {
-        user_wasm
-    };
+    let rt_path = find_wasm_runtime().ok_or(
+        "WASM runtime not found; build it with \
+         `cd runtime-wasm && cargo build --release --target wasm32-wasip1-threads`",
+    )?;
+    let rt_bytes = std::fs::read(&rt_path).map_err(|e| format!("failed to read runtime: {}", e))?;
+    let linked_wasm = compiler::codegen::wasm_linker::WasmLinker::link_with_hosts(
+        &user_wasm,
+        &rt_bytes,
+        &host_functions,
+    )?;
 
     // Binaryen post-pass (DEFAULT-ON): rayzor's wasm_backend materializes every
     // SSA value into a local (local.set/local.get round-trips) which wasmtime
@@ -448,6 +447,7 @@ pub fn cmd_build_wasm(
     let _loaded_rpkgs = compile_inputs.loaded_rpkgs;
     let _loaded_native_libs = compile_inputs.loaded_native_libs;
 
+    optimize_wasm_mir(&mut mir_result.module);
     compiler::codegen::wasm_backend::WasmBackend::strip_wide_vector_functions(
         &mut mir_result.module,
     )?;
@@ -676,6 +676,13 @@ pub fn cmd_build_wasm(
     Ok(())
 }
 
+/// The MIR pipeline the native AOT path runs. Free insertion is part of it,
+/// and without it a wasm program frees nothing.
+fn optimize_wasm_mir(module: &mut compiler::ir::IrModule) {
+    use compiler::ir::optimization::{OptimizationLevel, PassManager};
+    let _ = PassManager::for_level(OptimizationLevel::O2).run(module);
+}
+
 /// Find the pre-built WASM runtime library.
 /// Searches: ./runtime-wasm/target/..., ~/.rayzor/lib/, alongside the rayzor binary.
 pub fn find_wasm_runtime() -> Option<PathBuf> {
@@ -696,6 +703,13 @@ pub fn find_wasm_runtime() -> Option<PathBuf> {
         // Installed: alongside rayzor binary
         candidates.push(bin_dir.join("rayzor_runtime_wasm.wasm"));
     }
+
+    // Development: the checkout this binary was built from, wherever its
+    // target dir is.
+    candidates.push(PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/runtime-wasm/target/wasm32-wasip1-threads/release/rayzor_runtime_wasm.wasm"
+    )));
 
     // User home
     candidates.push(dirs_next().join("lib/rayzor_runtime_wasm.wasm"));

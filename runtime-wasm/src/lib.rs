@@ -13,15 +13,23 @@
 // (host `cargo test`) the gated intrinsics are cfg'd out, so this is inert there.
 #![cfg_attr(target_arch = "wasm32", feature(stdarch_wasm_atomic_wait))]
 
+mod bytes_io;
 pub mod concurrent;
+mod exceptions;
 pub mod gguf_wasm;
 pub mod kernels;
+mod maps;
 pub mod qtensor;
+pub mod reflect_strings;
 pub mod tensor;
 pub mod type_system;
+pub mod typed_values;
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests;
 
 use core::slice;
-use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::alloc::{Layout, alloc, dealloc, realloc};
 use std::ptr;
 use std::sync::Mutex;
 
@@ -111,11 +119,7 @@ fn rt_alloc(size: usize) -> i32 {
     unsafe {
         let layout = Layout::from_size_align_unchecked(size, 8);
         let ptr = alloc(layout);
-        if ptr.is_null() {
-            0
-        } else {
-            ptr as i32
-        }
+        if ptr.is_null() { 0 } else { ptr as i32 }
     }
 }
 
@@ -137,11 +141,7 @@ pub extern "C" fn realloc_block(ptr: i32, old_size: i32, new_size: i32) -> i32 {
     unsafe {
         let old_layout = Layout::from_size_align_unchecked(old_size as usize, 8);
         let new_ptr = realloc(ptr as *mut u8, old_layout, new_size as usize);
-        if new_ptr.is_null() {
-            0
-        } else {
-            new_ptr as i32
-        }
+        if new_ptr.is_null() { 0 } else { new_ptr as i32 }
     }
 }
 
@@ -323,7 +323,7 @@ static GLOBAL_ALLOC: alloc_track::Tracking = alloc_track::Tracking;
 /// Internal: read HaxeString fields from a WASM pointer.
 /// Returns (data_ptr, len, cap) as raw u32 values.
 #[inline]
-unsafe fn read_haxe_string(s: i32) -> (u32, u32, u32) {
+pub(crate) unsafe fn read_haxe_string(s: i32) -> (u32, u32, u32) {
     let base = s as *const u32;
     let data_ptr = *base;
     let len = *base.add(1);
@@ -654,13 +654,10 @@ pub extern "C" fn haxe_string_free(s: i32) {
 /// view — views share the owner's `data_ptr`, so freeing a view would leave
 /// the owner (and siblings) dangling. The GGUF loader frees the whole-file
 /// buffer once, after every tensor/QTensor has copied its slice out of it.
-// Returns i32 (a dummy 0) rather than `()` — the wasm backend lowers this
-// Void-returning extern method with the default i32 result, so the runtime
-// signature must match `(i32) -> i32` or the linker stubs it out.
 #[unsafe(no_mangle)]
-pub extern "C" fn haxe_bytes_free(b: i32) -> i32 {
+pub extern "C" fn haxe_bytes_free(b: i32) {
     if b == 0 {
-        return 0;
+        return;
     }
     unsafe {
         let base = b as *const u32;
@@ -671,7 +668,6 @@ pub extern "C" fn haxe_bytes_free(b: i32) -> i32 {
             dealloc(data_ptr as *mut u8, layout);
         }
     }
-    0
 }
 
 /// Trace a HaxeString struct to stdout (with "trace: " prefix and newline).
@@ -754,21 +750,42 @@ pub extern "C" fn haxe_math_pow(x: f64, y: f64) -> f64 {
     libm::pow(x, y)
 }
 
+// Math.floor, ceil and round return Int, as the native runtime's do; the
+// f-prefixed forms keep Float.
 #[unsafe(no_mangle)]
-pub extern "C" fn haxe_math_floor(x: f64) -> f64 {
+pub extern "C" fn haxe_math_floor(x: f64) -> i32 {
+    libm::floor(x) as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_math_ceil(x: f64) -> i32 {
+    libm::ceil(x) as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_math_round(x: f64) -> i32 {
+    round_half_up(x) as i32
+}
+
+/// Halves round toward positive infinity.
+fn round_half_up(x: f64) -> f64 {
+    let down = libm::floor(x);
+    if x - down >= 0.5 { down + 1.0 } else { down }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_math_ffloor(x: f64) -> f64 {
     libm::floor(x)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn haxe_math_ceil(x: f64) -> f64 {
+pub extern "C" fn haxe_math_fceil(x: f64) -> f64 {
     libm::ceil(x)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn haxe_math_round(x: f64) -> f64 {
-    // Halves round toward positive infinity.
-    let down = libm::floor(x);
-    if x - down >= 0.5 { down + 1.0 } else { down }
+pub extern "C" fn haxe_math_fround(x: f64) -> f64 {
+    round_half_up(x)
 }
 
 #[unsafe(no_mangle)]
@@ -821,20 +838,12 @@ pub extern "C" fn haxe_math_positive_infinity() -> f64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_is_nan(x: f64) -> i32 {
-    if x.is_nan() {
-        1
-    } else {
-        0
-    }
+    if x.is_nan() { 1 } else { 0 }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_math_is_finite(x: f64) -> i32 {
-    if x.is_finite() {
-        1
-    } else {
-        0
-    }
+    if x.is_finite() { 1 } else { 0 }
 }
 
 // ============================================================================
@@ -1104,14 +1113,13 @@ const ARRAY_ELEM_SIZE: u32 = 4; // i32 elements for basic array
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_new() -> i32 {
     unsafe {
-        // Allocate the HaxeArray header (32 bytes to match MIR layout with i64 fields)
-        let header = rt_alloc(32);
+        // The MIR header: ptr, len, cap, elem_size, flags as i64 words. Zero
+        // flags marks a plain array, whose index ops the compiler inlines.
+        let header = rt_alloc(40);
         if header == 0 {
             return 0;
         }
-
-        // Zero the header
-        core::ptr::write_bytes(header as *mut u8, 0, 32);
+        core::ptr::write_bytes(header as *mut u8, 0, 40);
 
         // Allocate data buffer via rt_alloc
         let data_size = (ARRAY_INITIAL_CAP * ARRAY_ELEM_SIZE) as usize;
@@ -1151,6 +1159,55 @@ unsafe fn write_array(arr: i32, data_ptr: u32, len: u32, cap: u32, elem_size: u3
     *h.add(2) = len;
     *h.add(4) = cap;
     *h.add(6) = elem_size;
+}
+
+/// Slot width of an array: its `elem_size`, where 0 means the MIR's 8.
+#[inline]
+fn slot_width(elem_size: u32) -> u32 {
+    if elem_size == 0 { 8 } else { elem_size }
+}
+
+/// Address of slot `i`.
+#[inline]
+fn slot_at(data_ptr: u32, elem_size: u32, i: u32) -> u32 {
+    data_ptr + i * slot_width(elem_size)
+}
+
+/// A new empty array whose slots are `elem_size` wide, so a copy keeps
+/// every bit of its source's slots.
+fn array_with_width(elem_size: u32) -> i32 {
+    let arr = haxe_array_new();
+    let es = slot_width(elem_size);
+    if arr != 0 && es != ARRAY_ELEM_SIZE {
+        let data = rt_alloc((ARRAY_INITIAL_CAP * es) as usize);
+        unsafe {
+            let (old, _, _, _) = read_array(arr);
+            dealloc(
+                old as *mut u8,
+                Layout::from_size_align_unchecked(
+                    (ARRAY_INITIAL_CAP * ARRAY_ELEM_SIZE) as usize,
+                    8,
+                ),
+            );
+            write_array(arr, data as u32, 0, ARRAY_INITIAL_CAP, es);
+        }
+    }
+    arr
+}
+
+/// Appends the whole slot at `src`, `es` bytes wide, to `arr`.
+unsafe fn push_slot_from(arr: i32, src: u32, es: u32) {
+    unsafe {
+        array_ensure_capacity(arr);
+        let (data_ptr, len, _, dst_es) = read_array(arr);
+        let dst = slot_at(data_ptr, dst_es, len);
+        ptr::copy_nonoverlapping(
+            src as *const u8,
+            dst as *mut u8,
+            es.min(slot_width(dst_es)) as usize,
+        );
+        *(arr as *mut u32).add(2) = len + 1;
+    }
 }
 
 /// Ensure the array has capacity for at least one more element.
@@ -1345,11 +1402,7 @@ pub extern "C" fn haxe_object_is_instance(ptr: i32, type_id: i32) -> i32 {
         return 0;
     }
     let actual = haxe_object_get_type_id(ptr);
-    if actual == type_id {
-        1
-    } else {
-        0
-    }
+    if actual == type_id { 1 } else { 0 }
 }
 
 /// Allocate an anonymous object with `n_fields` slots.
@@ -1868,7 +1921,7 @@ pub extern "C" fn haxe_string_substr_ptr(s: i32, pos: i32, len: i32) -> i32 {
 }
 
 /// A new HaxeString* holding `bytes`.
-fn wasm_string_of(bytes: &[u8]) -> i32 {
+pub(crate) fn wasm_string_of(bytes: &[u8]) -> i32 {
     let out = rt_alloc(12);
     if out != 0 {
         haxe_string_from_bytes(out, bytes.as_ptr() as i32, bytes.len() as i32);
@@ -2080,11 +2133,11 @@ pub extern "C" fn haxe_array_pop_i64(arr: i32) -> i32 {
         return 0;
     }
     unsafe {
-        let (data_ptr, len, _, _) = read_array(arr);
+        let (data_ptr, len, _, es) = read_array(arr);
         if len == 0 {
             return 0;
         }
-        let val = *(data_ptr as *const i32).add((len - 1) as usize);
+        let val = *(slot_at(data_ptr, es, len - 1) as *const i32);
         // Decrement length
         let h = arr as *mut u32;
         *h.add(2) = len - 1;
@@ -2145,15 +2198,18 @@ pub extern "C" fn haxe_array_shift(arr: i32) -> i32 {
         return 0;
     }
     unsafe {
-        let (data_ptr, len, _, _) = read_array(arr);
+        let (data_ptr, len, _, es) = read_array(arr);
         if len == 0 {
             return 0;
         }
-        let data = data_ptr as *mut i32;
-        let val = *data;
-        // Shift remaining elements left
+        let w = slot_width(es);
+        let val = *(data_ptr as *const i32);
         if len > 1 {
-            ptr::copy(data.add(1), data, (len - 1) as usize);
+            ptr::copy(
+                (data_ptr + w) as *const u8,
+                data_ptr as *mut u8,
+                ((len - 1) * w) as usize,
+            );
         }
         let h = arr as *mut u32;
         *h.add(2) = len - 1;
@@ -2175,13 +2231,17 @@ pub extern "C" fn haxe_array_unshift(arr: i32, val: i32) {
     }
     unsafe {
         array_ensure_capacity(arr);
-        let (data_ptr, len, _, _) = read_array(arr);
-        let data = data_ptr as *mut i32;
-        // Shift existing elements right
+        let (data_ptr, len, _, es) = read_array(arr);
+        let w = slot_width(es);
         if len > 0 {
-            ptr::copy(data, data.add(1), len as usize);
+            ptr::copy(
+                data_ptr as *const u8,
+                (data_ptr + w) as *mut u8,
+                (len * w) as usize,
+            );
         }
-        *data = val;
+        ptr::write_bytes(data_ptr as *mut u8, 0, w as usize);
+        *(data_ptr as *mut i32) = val;
         let h = arr as *mut u32;
         *h.add(2) = len + 1;
     }
@@ -2194,15 +2254,14 @@ pub extern "C" fn haxe_array_index_of(arr: i32, val: i32, start: i32) -> i32 {
         return -1;
     }
     unsafe {
-        let (data_ptr, len, _, _) = read_array(arr);
-        let data = data_ptr as *const i32;
+        let (data_ptr, len, _, es) = read_array(arr);
         let from = if start < 0 {
             0u32
         } else {
             (start as u32).min(len)
         };
         for i in from..len {
-            if *data.add(i as usize) == val {
+            if *(slot_at(data_ptr, es, i) as *const i32) == val {
                 return i as i32;
             }
         }
@@ -2217,11 +2276,10 @@ pub extern "C" fn haxe_array_last_index_of(arr: i32, val: i32, start: i32) -> i3
         return -1;
     }
     unsafe {
-        let (data_ptr, len, _, _) = read_array(arr);
+        let (data_ptr, len, _, es) = read_array(arr);
         if len == 0 {
             return -1;
         }
-        let data = data_ptr as *const i32;
         let from = if start < 0 || (start as u32) >= len {
             (len - 1) as isize
         } else {
@@ -2229,7 +2287,7 @@ pub extern "C" fn haxe_array_last_index_of(arr: i32, val: i32, start: i32) -> i3
         };
         let mut i = from;
         while i >= 0 {
-            if *data.add(i as usize) == val {
+            if *(slot_at(data_ptr, es, i as u32) as *const i32) == val {
                 return i as i32;
             }
             i -= 1;
@@ -2251,7 +2309,11 @@ pub extern "C" fn haxe_array_contains(arr: i32, val: i32) -> i32 {
 /// Slice array from `start` to `end` (exclusive). Writes result into `out`.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_slice(out: i32, arr: i32, start: i32, end: i32) {
-    let result = haxe_array_new();
+    let result = array_with_width(if arr == 0 {
+        0
+    } else {
+        unsafe { read_array(arr).3 }
+    });
     if result == 0 || arr == 0 {
         if out != 0 && result != 0 {
             unsafe {
@@ -2262,7 +2324,7 @@ pub extern "C" fn haxe_array_slice(out: i32, arr: i32, start: i32, end: i32) {
         return;
     }
     unsafe {
-        let (data_ptr, len, _, _) = read_array(arr);
+        let (data_ptr, len, _, es) = read_array(arr);
         let slen = len as i32;
 
         // Resolve negative indices
@@ -2277,11 +2339,8 @@ pub extern "C" fn haxe_array_slice(out: i32, arr: i32, start: i32, end: i32) {
             end.min(slen)
         };
 
-        if s < e {
-            let data = data_ptr as *const i32;
-            for i in s..e {
-                haxe_array_push_i64(result, *data.add(i as usize));
-            }
+        for i in s..e {
+            push_slot_from(result, slot_at(data_ptr, es, i as u32), slot_width(es));
         }
 
         if out != 0 {
@@ -2293,18 +2352,19 @@ pub extern "C" fn haxe_array_slice(out: i32, arr: i32, start: i32, end: i32) {
 
 /// Internal: shallow copy of array, returns new array pointer.
 fn haxe_array_copy_internal(arr: i32) -> i32 {
-    let result = haxe_array_new();
-    if result == 0 || arr == 0 {
-        return result;
+    if arr == 0 {
+        return haxe_array_new();
     }
     unsafe {
-        let (data_ptr, len, _, _) = read_array(arr);
-        let data = data_ptr as *const i32;
-        for i in 0..len {
-            haxe_array_push_i64(result, *data.add(i as usize));
+        let (data_ptr, len, _, es) = read_array(arr);
+        let result = array_with_width(es);
+        if result != 0 {
+            for i in 0..len {
+                push_slot_from(result, slot_at(data_ptr, es, i), slot_width(es));
+            }
         }
+        result
     }
-    result
 }
 
 /// Shallow copy of array. Writes result into `out` (pre-allocated array header).
@@ -2326,10 +2386,9 @@ pub extern "C" fn haxe_array_concat(out: i32, arr: i32, other: i32) {
     let result = haxe_array_copy_internal(arr);
     if result != 0 && other != 0 {
         unsafe {
-            let (data_ptr, len, _, _) = read_array(other);
-            let data = data_ptr as *const i32;
+            let (data_ptr, len, _, es) = read_array(other);
             for i in 0..len {
-                haxe_array_push_i64(result, *data.add(i as usize));
+                push_slot_from(result, slot_at(data_ptr, es, i), slot_width(es));
             }
         }
     }
@@ -2350,6 +2409,7 @@ pub extern "C" fn haxe_array_resize(arr: i32, new_len: i32) {
     }
     unsafe {
         let (data_ptr, len, cap, elem_size) = read_array(arr);
+        let elem_size = slot_width(elem_size);
         let nl = new_len as u32;
 
         if nl <= len {
@@ -2364,9 +2424,9 @@ pub extern "C" fn haxe_array_resize(arr: i32, new_len: i32) {
             let new_cap = nl.max(cap * 2);
             let old_size = (cap * elem_size) as usize;
             let new_size = (new_cap * elem_size) as usize;
-            let old_layout = Layout::from_size_align_unchecked(old_size, 4);
-            let new_data = if data_ptr == 0 {
-                alloc(Layout::from_size_align_unchecked(new_size, 4))
+            let old_layout = Layout::from_size_align_unchecked(old_size, 8);
+            let new_data = if data_ptr == 0 || cap == 0 {
+                alloc(Layout::from_size_align_unchecked(new_size, 8))
             } else {
                 realloc(data_ptr as *mut u8, old_layout, new_size)
             };
@@ -2376,6 +2436,7 @@ pub extern "C" fn haxe_array_resize(arr: i32, new_len: i32) {
             let h = arr as *mut u32;
             *h = new_data as u32;
             *h.add(4) = new_cap;
+            *h.add(6) = elem_size;
         }
 
         // Zero-fill new elements
@@ -2407,7 +2468,7 @@ pub extern "C" fn haxe_array_to_string(arr: i32) -> i32 {
         return out;
     }
     unsafe {
-        let (data_ptr, len, _, _) = read_array(arr);
+        let (data_ptr, len, _, elem_size) = read_array(arr);
         if len == 0 {
             let s = b"[]";
             haxe_string_from_bytes(out, s.as_ptr() as i32, s.len() as i32);
@@ -2429,7 +2490,6 @@ pub extern "C" fn haxe_array_to_string(arr: i32) -> i32 {
         *buf_ptr = b'[';
         pos += 1;
 
-        let data = data_ptr as *const i32;
         for i in 0..len {
             if i > 0 {
                 *buf_ptr.add(pos) = b',';
@@ -2437,7 +2497,7 @@ pub extern "C" fn haxe_array_to_string(arr: i32) -> i32 {
                 *buf_ptr.add(pos) = b' ';
                 pos += 1;
             }
-            let val = *data.add(i as usize);
+            let val = *(slot_at(data_ptr, elem_size, i) as *const i32);
             let mut ibuf = [0u8; 12];
             let s = int_to_buf(val, &mut ibuf);
             ptr::copy_nonoverlapping(s.as_ptr(), buf_ptr.add(pos), s.len());
@@ -2471,7 +2531,7 @@ pub extern "C" fn haxe_array_join(arr: i32, sep: i32) -> i32 {
         return out;
     }
     unsafe {
-        let (data_ptr, len, _, _) = read_array(arr);
+        let (data_ptr, len, _, elem_size) = read_array(arr);
         if len == 0 {
             haxe_string_from_bytes(out, 0, 0);
             return out;
@@ -2494,14 +2554,13 @@ pub extern "C" fn haxe_array_join(arr: i32, sep: i32) -> i32 {
 
         let buf_ptr = buf as *mut u8;
         let mut pos = 0usize;
-        let data = data_ptr as *const i32;
 
         for i in 0..len {
             if i > 0 && sep_len > 0 {
                 ptr::copy_nonoverlapping(sep_ptr, buf_ptr.add(pos), sep_len as usize);
                 pos += sep_len as usize;
             }
-            let val = *data.add(i as usize);
+            let val = *(slot_at(data_ptr, elem_size, i) as *const i32);
             let mut ibuf = [0u8; 12];
             let s = int_to_buf(val, &mut ibuf);
             ptr::copy_nonoverlapping(s.as_ptr(), buf_ptr.add(pos), s.len());
@@ -2516,7 +2575,11 @@ pub extern "C" fn haxe_array_join(arr: i32, sep: i32) -> i32 {
 /// Remove `len` elements starting at `pos`. Writes removed elements array into `out`.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_splice(out: i32, arr: i32, pos: i32, len: i32) {
-    let removed = haxe_array_new();
+    let removed = array_with_width(if arr == 0 {
+        0
+    } else {
+        unsafe { read_array(arr).3 }
+    });
     if removed == 0 || arr == 0 || len <= 0 {
         if out != 0 && removed != 0 {
             unsafe {
@@ -2527,7 +2590,8 @@ pub extern "C" fn haxe_array_splice(out: i32, arr: i32, pos: i32, len: i32) {
         return;
     }
     unsafe {
-        let (data_ptr, arr_len, _, _) = read_array(arr);
+        let (data_ptr, arr_len, _, es) = read_array(arr);
+        let w = slot_width(es);
         let slen = arr_len as i32;
 
         let actual_pos = if pos < 0 {
@@ -2545,20 +2609,16 @@ pub extern "C" fn haxe_array_splice(out: i32, arr: i32, pos: i32, len: i32) {
             return;
         }
 
-        let data = data_ptr as *mut i32;
-
-        // Copy removed elements to result array
         for i in 0..actual_len {
-            haxe_array_push_i64(removed, *data.add((actual_pos + i) as usize));
+            push_slot_from(removed, slot_at(data_ptr, es, (actual_pos + i) as u32), w);
         }
 
-        // Shift remaining elements left
         let remaining = slen - actual_pos - actual_len;
         if remaining > 0 {
             ptr::copy(
-                data.add((actual_pos + actual_len) as usize),
-                data.add(actual_pos as usize),
-                remaining as usize,
+                slot_at(data_ptr, es, (actual_pos + actual_len) as u32) as *const u8,
+                slot_at(data_ptr, es, actual_pos as u32) as *mut u8,
+                (remaining as u32 * w) as usize,
             );
         }
 
@@ -2567,41 +2627,6 @@ pub extern "C" fn haxe_array_splice(out: i32, arr: i32, pos: i32, len: i32) {
 
         if out != 0 {
             let (dp, l, c, es) = read_array(removed);
-            write_array(out, dp, l, c, es);
-        }
-    }
-}
-
-/// Sort array using a comparator function pointer. Stub — not yet implemented for WASM.
-#[unsafe(no_mangle)]
-pub extern "C" fn haxe_array_sort(_out: i32, _arr: i32, _cmp: i32) {
-    // Stub: would require call_indirect with a comparator function table index.
-    // Phase 1: no-op.
-}
-
-/// Map array elements through a function. Stub — not yet implemented for WASM.
-#[unsafe(no_mangle)]
-pub extern "C" fn haxe_array_map(out: i32, _arr: i32, _fn_ptr: i32, _extra: i32) {
-    // Stub: would require call_indirect.
-    // Write an empty array header into out.
-    let result = haxe_array_new();
-    if out != 0 && result != 0 {
-        unsafe {
-            let (dp, l, c, es) = read_array(result);
-            write_array(out, dp, l, c, es);
-        }
-    }
-}
-
-/// Filter array elements through a predicate. Stub — not yet implemented for WASM.
-#[unsafe(no_mangle)]
-pub extern "C" fn haxe_array_filter(out: i32, _arr: i32, _fn_ptr: i32, _extra: i32) {
-    // Stub: would require call_indirect.
-    // Write an empty array header into out.
-    let result = haxe_array_new();
-    if out != 0 && result != 0 {
-        unsafe {
-            let (dp, l, c, es) = read_array(result);
             write_array(out, dp, l, c, es);
         }
     }
@@ -2662,7 +2687,7 @@ unsafe fn anon_slot_ptr(obj: i32, idx: u32) -> *mut i64 {
     (obj as usize + ANON_HEADER_BYTES + (idx as usize * 8)) as *mut i64
 }
 
-unsafe fn haxe_string_to_string(s: i32) -> Option<String> {
+pub(crate) unsafe fn haxe_string_to_string(s: i32) -> Option<String> {
     let (ptr, len, _) = read_haxe_string(s);
     if ptr == 0 {
         return None;
@@ -2818,125 +2843,82 @@ pub extern "C" fn haxe_reflect_has_field(obj: i32, name: i32) -> i32 {
         .get(&shape_id)
         .map(|fields| fields.iter().any(|field| field == &name))
         .unwrap_or(false);
-    if found {
-        1
-    } else {
-        0
-    }
+    if found { 1 } else { 0 }
 }
 
 // ============================================================================
 // Section 14: File I/O Stubs
 // ============================================================================
 
-/// Read a file's contents via WASI. Returns HaxeString pointer, 0 on error.
+/// `File.read(path, binary)`: a FileInput handle, 0 on error.
 #[unsafe(no_mangle)]
-pub extern "C" fn haxe_file_read(path: i32, _dummy: i32) -> i32 {
-    unsafe {
-        let (p, plen, _) = read_haxe_string(path);
-        if p == 0 || plen == 0 {
-            return 0;
-        }
-        let path_bytes = core::slice::from_raw_parts(p as *const u8, plen as usize);
-        let path_str = match core::str::from_utf8(path_bytes) {
-            Ok(s) => s,
-            Err(_) => return 0,
-        };
-        match std::fs::read(path_str) {
-            Ok(contents) => {
-                let str_data = rt_alloc(contents.len() + 1);
-                if str_data == 0 {
-                    return 0;
-                }
-                core::ptr::copy_nonoverlapping(
-                    contents.as_ptr(),
-                    str_data as *mut u8,
-                    contents.len(),
-                );
-                *((str_data as usize + contents.len()) as *mut u8) = 0;
-                let hs = rt_alloc(12);
-                if hs == 0 {
-                    return 0;
-                }
-                let h = hs as *mut u32;
-                *h = str_data as u32;
-                *h.add(1) = contents.len() as u32;
-                *h.add(2) = contents.len() as u32;
-                hs
-            }
-            Err(_) => 0,
-        }
-    }
+pub extern "C" fn haxe_file_read(path: i32, _binary: i32) -> i32 {
+    bytes_io::open_input(path)
 }
 
-/// Write content to a file via WASI. Returns 0 on success.
+/// `File.write(path, binary)`: a FileOutput handle (create or truncate), 0 on error.
 #[unsafe(no_mangle)]
-pub extern "C" fn haxe_file_write(path: i32, data: i32) -> i32 {
-    unsafe {
-        let (pp, plen, _) = read_haxe_string(path);
-        let (dp, dlen, _) = read_haxe_string(data);
-        if pp == 0 || dp == 0 {
-            return -1;
-        }
-        let ps = core::slice::from_raw_parts(pp as *const u8, plen as usize);
-        let ds = core::slice::from_raw_parts(dp as *const u8, dlen as usize);
-        let path_str = match core::str::from_utf8(ps) {
-            Ok(s) => s,
-            Err(_) => return -1,
-        };
-        match std::fs::write(path_str, ds) {
-            Ok(()) => 0,
-            Err(_) => -1,
-        }
-    }
-}
-
-/// Append content to a file via WASI.
-#[unsafe(no_mangle)]
-pub extern "C" fn haxe_file_append(path: i32, data: i32) -> i32 {
-    unsafe {
-        let (pp, plen, _) = read_haxe_string(path);
-        let (dp, dlen, _) = read_haxe_string(data);
-        if pp == 0 || dp == 0 {
-            return -1;
-        }
-        let ps = core::slice::from_raw_parts(pp as *const u8, plen as usize);
-        let ds = core::slice::from_raw_parts(dp as *const u8, dlen as usize);
-        let path_str = match core::str::from_utf8(ps) {
-            Ok(s) => s,
-            Err(_) => return -1,
-        };
-        use std::io::Write;
-        match std::fs::OpenOptions::new()
-            .append(true)
+pub extern "C" fn haxe_file_write(path: i32, _binary: i32) -> i32 {
+    bytes_io::open_output(
+        path,
+        std::fs::OpenOptions::new()
+            .write(true)
             .create(true)
-            .open(path_str)
-        {
-            Ok(mut f) => {
-                let _ = f.write_all(ds);
-                0
-            }
-            Err(_) => -1,
-        }
-    }
+            .truncate(true),
+    )
 }
 
-/// Update (overwrite) a file — same as write.
+/// `File.append(path, binary)`: a FileOutput handle positioned at the end, 0 on error.
 #[unsafe(no_mangle)]
-pub extern "C" fn haxe_file_update(path: i32, data: i32) -> i32 {
-    haxe_file_write(path, data)
+pub extern "C" fn haxe_file_append(path: i32, _binary: i32) -> i32 {
+    bytes_io::open_output(path, std::fs::OpenOptions::new().append(true).create(true))
 }
 
-/// sys.io.File.saveContent(path, content) — Haxe stdlib wrapper.
+/// `File.update(path, binary)`: a read/write FileOutput handle at offset 0, no truncation.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_file_update(path: i32, _binary: i32) -> i32 {
+    bytes_io::open_output(
+        path,
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+}
+
+/// `File.saveContent(path, content)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_save_content(path: i32, content: i32) {
-    haxe_file_write(path, content);
+    if path == 0 || content == 0 {
+        return;
+    }
+    unsafe {
+        let Some(path) = haxe_string_to_string(path) else {
+            return;
+        };
+        let (dp, dlen, _) = read_haxe_string(content);
+        if dp == 0 {
+            return;
+        }
+        let data = core::slice::from_raw_parts(dp as *const u8, dlen as usize);
+        let _ = std::fs::write(path, data);
+    }
 }
 
-/// sys.io.File.getContent(path) — Haxe stdlib wrapper. Returns HaxeString*.
+/// `File.getContent(path)`: a HaxeString*, 0 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_file_get_content(path: i32) -> i32 {
-    haxe_file_read(path, 0)
+    if path == 0 {
+        return 0;
+    }
+    let Some(path) = (unsafe { haxe_string_to_string(path) }) else {
+        return 0;
+    };
+    match std::fs::read(path) {
+        Ok(contents) => wasm_string_of(&contents),
+        Err(_) => 0,
+    }
 }
 
 // ============================================================================

@@ -38,11 +38,8 @@ chrono = "0.4"  # Date/time for benchmark results
 zstd = "0.13"  # Bundle compression
 toml = "0.8"   # Workspace manifest parsing
 
-# Cranelift JIT compilation. Versions are sourced from the
-# `darmie/wasmtime` fork (cranelift 0.133.0 series) via the
-# `[patch.crates-io]` block in the rayzor workspace root. The
-# 0.133 declaration here just lines the resolver up with the patched
-# source — the actual code comes from the git checkout.
+# Cranelift JIT compilation. The same series as wasmtime's below, so the
+# two share one cranelift.
 cranelift = { version = "0.135", features = ["jit", "module", "native"] }
 cranelift-module = "0.135"
 cranelift-jit = "0.135"
@@ -55,13 +52,12 @@ wasm-encoder = "0.245"
 wasmparser = "0.245"  # WASM linker — parse runtime .wasm for merging
 wit-component = "0.245"  # WASI P2 Component wrapping (core module → component)
 
-# WASM runtime — embedded wasmtime for `rayzor run --wasm`. Pinned to
-# bytecodealliance release-46.0.0 (cranelift 0.133) so wasmtime-cranelift
-# shares the patched cranelift and the Cranelift JIT compiles in. With
-# the old crates.io 43.0.2 (cranelift 0.130) the 0.133 patch made
-# wasmtime-cranelift unresolvable → Pulley interpreter → ~50x slowdown.
-wasmtime = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144", optional = true }
-wasi-common = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144", package = "wasmtime-wasi", optional = true }
+# WASM runtime — embedded wasmtime for `rayzor run --wasm`. wasmtime 48 is
+# built on cranelift 0.135, the series the JIT above uses: with the two on
+# different cranelifts the resolver can leave wasmtime without its compiler,
+# and it falls back to the much slower Pulley interpreter.
+wasmtime = { version = "48.0.7", optional = true }
+wasi-common = { version = "48.0.7", package = "wasmtime-wasi", optional = true }
 
 pollster = { version = "0.4", optional = true }
 wgpu = { version = "24", optional = true }

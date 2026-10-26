@@ -130,19 +130,6 @@ opt-level = 2
 # level), so we can't disable it just for this crate. It's a rare rebuild
 # (Binaryen is cached after the first compile), so we leave it.
 
-# Cranelift 0.133.0 isn't on crates.io yet — sourced from upstream
-# bytecodealliance/wasmtime `release-46.0.0` (the macOS cranelift-object
-# fix is merged upstream; this branch carries the 0.133 codegen that
-# rayzor's native backend targets). wasmtime + wasmtime-wasi are pinned
-# to the SAME branch in compiler/Cargo.toml so wasmtime-cranelift uses
-# this exact cranelift — otherwise the resolver drops the JIT compiler
-# and wasmtime silently falls back to the Pulley interpreter (~50x
-# slower). Drop this block once 0.133 lands on crates.io.
-[patch.crates-io]
-cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
-cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
-cranelift-native = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
-
 # inkwell 0.7.1 still calls LLVMConstMul and its NSW/NUW variants, which LLVM 21
 # removed. Nothing here references those methods, so a normal build never links
 # them — but a test binary pulls in the object file that contains them and the

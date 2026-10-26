@@ -508,6 +508,8 @@ struct LinkerCtx {
 
     /// Names of unresolved imports (for diagnostics).
     unresolved_imports: Vec<String>,
+    /// The signature the program expects of each unresolved import.
+    unresolved_sigs: BTreeMap<String, FuncSig>,
 
     /// Non-rayzor imports preserved as real WASM imports (from host modules).
     /// These are emitted in the import section so the JS host can provide them.
@@ -543,6 +545,7 @@ impl LinkerCtx {
             n_wasi_imports: 0,
             stub_type_indices: Vec::new(),
             unresolved_imports: Vec::new(),
+            unresolved_sigs: BTreeMap::new(),
             preserved_imports: Vec::new(),
             host_functions: BTreeMap::new(),
             total_func_count: 0,
@@ -677,9 +680,12 @@ impl LinkerCtx {
                             .get(&imp.type_idx)
                             .copied()
                             .unwrap_or(0);
+                        let sig = |idx: u32| self.merged_types.get(idx as usize).cloned();
                         eprintln!(
-                            "[wasm-linker] ERROR: signature mismatch for rayzor::{} (user type {}, runtime type {})",
-                            imp.name, user_type, rt_type
+                            "[wasm-linker] ERROR: signature mismatch for rayzor::{}: program expects {:?}, runtime has {:?}",
+                            imp.name,
+                            sig(user_type),
+                            sig(rt_type)
                         );
                         self.unresolved_imports
                             .push(format!("{}(sig mismatch)", imp.name));
@@ -710,6 +716,9 @@ impl LinkerCtx {
                     // unknown function. This handles both first-party and third-party
                     // rpkg imports without a hardcoded whitelist.
                     self.unresolved_imports.push(imp.name.clone());
+                    if let Some(sig) = self.merged_types.get(type_idx as usize) {
+                        self.unresolved_sigs.insert(imp.name.clone(), sig.clone());
+                    }
                     user_import_kinds.push(UserImportKind::Preserved(
                         "rayzor".to_string(),
                         imp.name.clone(),
@@ -821,7 +830,10 @@ impl LinkerCtx {
                 self.unresolved_imports.len()
             );
             for name in &self.unresolved_imports {
-                eprintln!("  - {name}");
+                match self.unresolved_sigs.get(name) {
+                    Some(sig) => eprintln!("  - {name} {:?} -> {:?}", sig.params, sig.results),
+                    None => eprintln!("  - {name}"),
+                }
             }
         }
 
@@ -988,7 +1000,18 @@ impl LinkerCtx {
         // User closures store raw func indices; they need table entries to be callable
         // via call_indirect and from JS.
         let rt_table_size = rt.tables.first().map(|(init, _)| *init).unwrap_or(0);
-        let table_size = rt_table_size.max(self.total_func_count);
+        // User slots start past the runtime's, which hold the Rust function
+        // pointers its dyn dispatch calls through.
+        let table_base = rt_table_size;
+        let user_table_size = user.tables.first().map(|(init, _)| *init).unwrap_or(0);
+        let table_base_global = user
+            .exports
+            .iter()
+            .find(|e| e.kind == ExportItemKind::Global && e.name == "__table_base")
+            .map(|e| e.index);
+        let table_size = rt_table_size
+            .max(self.total_func_count)
+            .max(table_base + user_table_size);
         eprintln!(
             "[wasm-linker] table: rt={}, total_funcs={}, merged={}",
             rt_table_size, self.total_func_count, table_size
@@ -1034,8 +1057,12 @@ impl LinkerCtx {
                 &enc_init,
             );
         }
-        for g in &user.globals {
-            let enc_init = encode_global_init(&g.init, &self.user_global_remap);
+        for (i, g) in user.globals.iter().enumerate() {
+            let enc_init = if Some(i as u32) == table_base_global {
+                ConstExpr::i32_const(table_base as i32)
+            } else {
+                encode_global_init(&g.init, &self.user_global_remap)
+            };
             global_section.global(
                 EncGlobalType {
                     val_type: g.val_type,
@@ -1139,7 +1166,7 @@ impl LinkerCtx {
                 + rt.functions.len() as u32
                 + self.stub_type_indices.len() as u32;
             let user_func_count = user.functions.len() as u32;
-            if user_func_count > 0 {
+            if user_func_count > 0 && table_base_global.is_none() {
                 let user_funcs: Vec<u32> =
                     (0..user_func_count).map(|i| user_func_start + i).collect();
                 elem_section.active(
@@ -1148,50 +1175,16 @@ impl LinkerCtx {
                     wasm_encoder::Elements::Functions(std::borrow::Cow::Owned(user_funcs)),
                 );
             }
-            // Closure-indirect-call support in multi-threaded builds.
-            //
-            // `MakeClosure` in wasm_backend.rs emits
-            //     I32Const(fn_idx_pre_link)         ;; table slot
-            //     RefFunc(fn_idx_pre_link)          ;; merged via user_func_remap
-            //     TableSet(0)
-            //     … and writes fn_idx_pre_link into closure+0.
-            // That works on the main thread because the `TableSet` runs at
-            // closure-creation time and the linker rewrote `RefFunc` to the
-            // merged index. But the raw `I32Const` slot is NOT remapped, so
-            // each closure lives at `table[fn_idx_pre_link]` — NOT at
-            // `table[merged_idx]`. On a second wasm instance (a Web Worker
-            // re-instantiating the same module), `MakeClosure` was never
-            // run, so those slots are empty and `call_indirect` through a
-            // closure returns `null` → 0.
-            //
-            // Fix: statically mirror every user function at its backend
-            // (pre-link) index slot via a second element segment. Then the
-            // worker's freshly-instantiated table already has valid funcrefs
-            // where the closure `fn_idx` points, and dispatched closures
-            // run correctly on every thread.
+            // A closure holds its function's table slot, `__table_base` plus
+            // its pre-link index, and `MakeClosure` fills that slot with
+            // `table.set` only on the instance that ran it. Mirroring every
+            // user function there statically gives worker instances the same
+            // table.
             if !self.user_func_remap.is_empty() {
-                // Slots claimed by the runtime's own element entries. The
-                // runtime stores these indices as Rust function-pointer
-                // VALUES (dyn/vtable dispatch); if the user mirror
-                // overwrites them, runtime-internal call_indirect runs the
-                // wrong function — observed as memory corruption inside
-                // GGUF parsing once the mirror contents shifted. The rt
-                // entries win for their declared ranges; mirror entries
-                // for those slots are dropped (they'd only matter for a
-                // closure over a user IMPORT at a colliding pre-link
-                // index, which cannot share the slot either way).
-                let mut rt_claimed: std::collections::BTreeSet<u32> =
-                    std::collections::BTreeSet::new();
-                for (_, offset, func_indices) in &rt.elements {
-                    for k in 0..func_indices.len() as u32 {
-                        rt_claimed.insert(*offset + k);
-                    }
-                }
                 let mut remap_pairs: Vec<(u32, u32)> = self
                     .user_func_remap
                     .iter()
-                    .map(|(&b, &m)| (b, m))
-                    .filter(|(b, _)| !rt_claimed.contains(b))
+                    .map(|(&b, &m)| (table_base + b, m))
                     .collect();
                 remap_pairs.sort_by_key(|(b, _)| *b);
                 // Collapse contiguous backend-index runs into one element
@@ -2492,6 +2485,76 @@ mod tests {
         assert_eq!(idx1, idx2, "identical types should be deduplicated");
         assert_ne!(idx1, idx3, "different types should have different indices");
         assert_eq!(linker.merged_types.len(), 2);
+    }
+
+    fn make_table_module(runtime: bool) -> Vec<u8> {
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+        let mut funcs = FunctionSection::new();
+        funcs.function(0);
+        module.section(&funcs);
+        let mut tables = wasm_encoder::TableSection::new();
+        tables.table(wasm_encoder::TableType {
+            element_type: wasm_encoder::RefType::FUNCREF,
+            minimum: if runtime { 8 } else { 1 },
+            maximum: None,
+            table64: false,
+            shared: false,
+        });
+        module.section(&tables);
+        if !runtime {
+            let mut globals = GlobalSection::new();
+            globals.global(
+                EncGlobalType {
+                    val_type: ValType::I32,
+                    mutable: false,
+                    shared: false,
+                },
+                &ConstExpr::i32_const(0),
+            );
+            module.section(&globals);
+            let mut exports = ExportSection::new();
+            exports.export("__table_base", ExportKind::Global, 0);
+            exports.export("_start", ExportKind::Func, 0);
+            module.section(&exports);
+        }
+        let mut elements = wasm_encoder::ElementSection::new();
+        elements.active(
+            Some(0),
+            &ConstExpr::i32_const(if runtime { 1 } else { 0 }),
+            wasm_encoder::Elements::Functions(Cow::Borrowed(&[0])),
+        );
+        module.section(&elements);
+        let mut code = CodeSection::new();
+        let mut func = Function::new([]);
+        func.instruction(&Instruction::End);
+        code.function(&func);
+        module.section(&code);
+        module.finish()
+    }
+
+    #[test]
+    fn user_closure_slots_preserve_runtime_function_pointers() {
+        let runtime = make_table_module(true);
+        let user = make_table_module(false);
+        let linked = WasmLinker::link(&user, &runtime).unwrap();
+        wasmparser::Validator::new().validate_all(&linked).unwrap();
+        let parsed = ParsedModule::parse(&linked, "linked").unwrap();
+        let mut slots = BTreeMap::new();
+        for (_, offset, functions) in &parsed.elements {
+            for (index, function) in functions.iter().enumerate() {
+                slots.insert(*offset + index as u32, *function);
+            }
+        }
+        assert_eq!(slots.get(&1), Some(&0), "runtime function pointer changed");
+        assert_eq!(
+            slots.get(&8),
+            Some(&1),
+            "user closure slot was not relocated"
+        );
+        assert!(matches!(parsed.globals[0].init, GlobalInit::I32(8)));
     }
 
     #[test]

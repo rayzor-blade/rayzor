@@ -337,6 +337,9 @@ struct CompileCtx {
     ir_global_to_idx: BTreeMap<IrGlobalId, u32>,
     /// User globals (excluding __stack_pointer which is always index 0).
     user_globals: Vec<(IrGlobalId, ValType, i64)>,
+    /// `__table_base`, the immutable global every function-table slot this
+    /// module emits is offset by; the linker sets it past the runtime's slots.
+    table_base_global: u32,
 
     // ----- Function return types -----
     /// IrFunctionId -> WASM return type. Used for CallDirect dest type inference.
@@ -395,6 +398,7 @@ impl CompileCtx {
             data_offset: DATA_SECTION_BASE,
             ir_global_to_idx: BTreeMap::new(),
             user_globals: Vec::new(),
+            table_base_global: 0,
             func_return_types: BTreeMap::new(),
             func_param_types: BTreeMap::new(),
             exported_classes: std::collections::BTreeSet::new(),
@@ -1221,6 +1225,7 @@ impl CompileCtx {
                 }
             }
         }
+        self.table_base_global = next_global_idx;
     }
 
     // ------------------------------------------------------------------
@@ -1379,6 +1384,14 @@ impl CompileCtx {
                 &expr,
             );
         }
+        global_section.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: false,
+                shared: false,
+            },
+            &ConstExpr::i32_const(0),
+        );
         wasm_module.section(&global_section);
 
         // --- Export section ---
@@ -1386,6 +1399,7 @@ impl CompileCtx {
         let mut export_section = ExportSection::new();
         export_section.export("memory", ExportKind::Memory, 0);
         export_section.export("__indirect_function_table", ExportKind::Table, 0);
+        export_section.export("__table_base", ExportKind::Global, self.table_base_global);
         if let Some(entry_name) = entry_function {
             // Search by name in func_name_to_idx
             let idx = self
@@ -4187,7 +4201,7 @@ impl<'a> FunctionLowerer<'a> {
                 ..
             } => {
                 // GEP: result = ptr + sum(index * elem_size)
-                let elem_size: i32 = gep_pointee_size(ty);
+                let elem_size: i32 = gep_slot_size(ty);
                 self.get_reg(f, *ptr);
                 for idx_reg in indices {
                     self.get_reg(f, *idx_reg);
@@ -4237,16 +4251,8 @@ impl<'a> FunctionLowerer<'a> {
                 offset,
                 ty,
             } => {
-                // PtrAdd offsets are ELEMENT indices scaled by the pointee
-                // size — Cranelift multiplies by type_size(pointee); the
-                // raw I32Add here silently dropped the scale, so e.g. the
-                // QTensor_fusedQkvMatmul wrapper's Ptr<I64> header stores
-                // landed at byte offsets 0/1/2/3 instead of 0/8/16/24,
-                // corrupting the HaxeArray header (wild pushes → OOB at
-                // prefill). Use the SAME size rule as the GEP arm above so
-                // the two stay consistent on this backend; Ptr<U8> users
-                // (byte offsets) keep scale 1 and are unaffected.
-                let elem_size: i32 = gep_pointee_size(ty);
+                // PtrAdd offsets are element indices scaled by the pointee size.
+                let elem_size: i32 = ptr_add_scale(ty);
                 self.get_reg(f, *ptr);
                 self.get_reg(f, *offset);
                 if elem_size != 1 {
@@ -4544,8 +4550,13 @@ impl<'a> FunctionLowerer<'a> {
                 true_val,
                 false_val,
             } => {
-                self.get_reg(f, *true_val);
-                self.get_reg(f, *false_val);
+                // `select` needs both operands in one type; IR can pair a
+                // pointer (i32) with the same value widened to I64.
+                let ty = self.local_type_of(*dest).unwrap_or(ValType::I32);
+                for v in [*true_val, *false_val] {
+                    self.get_reg(f, v);
+                    emit_bitcast(f, self.local_type_of(v).unwrap_or(ty), ty);
+                }
                 self.get_reg(f, *condition);
                 f.instruction(&Instruction::Select);
                 self.set_reg(f, *dest);
@@ -4580,12 +4591,12 @@ impl<'a> FunctionLowerer<'a> {
                 }
                 self.set_reg(f, *dest);
 
-                f.instruction(&Instruction::I32Const(idx as i32));
+                self.emit_table_slot(f, idx);
                 f.instruction(&Instruction::RefFunc(idx));
                 f.instruction(&Instruction::TableSet(0));
 
                 self.get_reg(f, *dest);
-                f.instruction(&Instruction::I32Const(idx as i32));
+                self.emit_table_slot(f, idx);
                 f.instruction(&Instruction::I32Store(MemArg {
                     offset: 0,
                     align: 2,
@@ -4635,13 +4646,13 @@ impl<'a> FunctionLowerer<'a> {
                 // `ref.func` is what the linker remaps during module merging, so emitting
                 // `table.set(fn_idx, ref.func(fn_idx))` lets subsequent table.get calls
                 // resolve to the correct post-link function.
-                f.instruction(&Instruction::I32Const(fn_idx as i32));
+                self.emit_table_slot(f, fn_idx);
                 f.instruction(&Instruction::RefFunc(fn_idx));
                 f.instruction(&Instruction::TableSet(0));
 
-                // 3. Store fn_idx at closure offset 0.
+                // 3. Store fn_idx's table slot at closure offset 0.
                 self.get_reg(f, *dest);
-                f.instruction(&Instruction::I32Const(fn_idx as i32));
+                self.emit_table_slot(f, fn_idx);
                 f.instruction(&Instruction::I32Store(MemArg {
                     offset: 0,
                     align: 2,
@@ -5447,11 +5458,11 @@ impl<'a> FunctionLowerer<'a> {
             }
             IrValue::Function(fid) => {
                 let idx = self.ctx.ir_func_to_idx.get(fid).copied().unwrap_or(0);
-                f.instruction(&Instruction::I32Const(idx as i32));
+                self.emit_table_slot(f, idx);
             }
             IrValue::Closure { function, .. } => {
                 let idx = self.ctx.ir_func_to_idx.get(function).copied().unwrap_or(0);
-                f.instruction(&Instruction::I32Const(idx as i32));
+                self.emit_table_slot(f, idx);
             }
             IrValue::Array(_) | IrValue::Struct(_) => {
                 f.instruction(&Instruction::I32Const(0));
@@ -6011,6 +6022,13 @@ impl<'a> FunctionLowerer<'a> {
         f.instruction(&Instruction::LocalGet(idx));
     }
 
+    /// Push function `idx`'s table slot: its index here plus `__table_base`.
+    fn emit_table_slot(&self, f: &mut Function, idx: u32) {
+        f.instruction(&Instruction::I32Const(idx as i32));
+        f.instruction(&Instruction::GlobalGet(self.ctx.table_base_global));
+        f.instruction(&Instruction::I32Add);
+    }
+
     fn set_reg(&self, f: &mut Function, id: IrId) {
         let idx = self.reg_to_local.get(&id).copied().unwrap_or(0);
         f.instruction(&Instruction::LocalSet(idx));
@@ -6215,20 +6233,29 @@ fn vec_element(ty: &IrType) -> IrType {
 /// scaled *everything* non-byte by 8, so f32 tensor-buffer indexing strode 8
 /// bytes per element and read every other lane as garbage. `ty` may be either a
 /// `Ptr(inner)` (the common GEP shape) or a bare element type, so handle both.
-fn gep_pointee_size(ty: &IrType) -> i32 {
+fn gep_slot_size(ty: &IrType) -> i32 {
+    // As every native backend: object and array slots are 8 bytes whatever
+    // they hold; `*i8` alone is byte-addressed.
+    match ty {
+        IrType::Ptr(inner) if matches!(**inner, IrType::I8) => 1,
+        _ => 8,
+    }
+}
+
+/// `PtrAdd` scale: the pointee's size, as Cranelift's `type_size`. Pointers
+/// keep their 8-byte slot, which the MIR layouts assume on every target.
+fn ptr_add_scale(ty: &IrType) -> i32 {
     fn size_of(t: &IrType) -> i32 {
         match t {
-            IrType::U8 | IrType::I8 => 1,
-            IrType::U16 | IrType::I16 => 2,
-            IrType::U32 | IrType::I32 | IrType::F32 => 4,
-            // I64/U64/F64/Bool/Ptr/Void/struct/etc. — 8-byte slot layout.
+            IrType::I8 | IrType::U8 | IrType::Bool => 1,
+            IrType::I16 | IrType::U16 => 2,
+            IrType::I32 | IrType::U32 | IrType::F32 => 4,
+            IrType::Void => 0,
+            IrType::Vector { element, count } => size_of(element) * *count as i32,
             _ => 8,
         }
     }
     match ty {
-        // `*u8` is a boxed `Null<T>` slot's type, not a byte pointer; the
-        // byte-buffer emitters spell theirs `*i8`.
-        IrType::Ptr(inner) if matches!(**inner, IrType::U8) => 8,
         IrType::Ptr(inner) => size_of(inner),
         other => size_of(other),
     }

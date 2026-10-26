@@ -23,14 +23,14 @@
 //! - Fat pointers are `[obj: i64][slot_1: i64]…[slot_n: i64]` — the
 //!   dispatch site loads `fat + 8*(method_index+1)` as i64.
 
-use std::alloc::{alloc, Layout};
+use std::alloc::{Layout, alloc};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-static VTABLES: Mutex<Option<HashMap<u32, Vec<i64>>>> = Mutex::new(None);
+pub(crate) static VTABLES: Mutex<Option<HashMap<u32, Vec<i64>>>> = Mutex::new(None);
 static IFACE_VTABLES: Mutex<Option<HashMap<(u32, u32), Vec<i64>>>> = Mutex::new(None);
-static IFACE_IMPLS: Mutex<Option<HashMap<i64, Vec<i64>>>> = Mutex::new(None);
-static CONSTRUCTORS: Mutex<Option<HashMap<i64, i64>>> = Mutex::new(None);
+pub(crate) static IFACE_IMPLS: Mutex<Option<HashMap<i64, Vec<i64>>>> = Mutex::new(None);
+pub(crate) static CONSTRUCTORS: Mutex<Option<HashMap<i64, i64>>> = Mutex::new(None);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_vtable_init(type_id: i32, slot_count: i32) {
@@ -70,11 +70,32 @@ pub unsafe extern "C" fn haxe_vtable_lookup(obj_ptr: i32, slot_index: i32) -> i6
     0
 }
 
+/// `haxe_vtable_lookup` with the receiver's static class, which only a
+/// whole-program pass uses; the wasm backend passes the closure as a pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn haxe_vtable_lookup_in(obj_ptr: i32, slot_index: i32, _class: i32) -> i32 {
+    unsafe { haxe_vtable_lookup(obj_ptr, slot_index) as i32 }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_register_constructor(type_id: i32, ctor_closure_ptr: i32) {
     let mut g = CONSTRUCTORS.lock().unwrap();
     g.get_or_insert_with(HashMap::new)
         .insert(type_id as i64, ctor_closure_ptr as u32 as i64);
+}
+
+/// The class's own `toString()`, `fn(this) -> HaxeString*`, keyed by the
+/// class id the object header carries, as the native runtime keeps it.
+pub(crate) static TO_STRING: Mutex<Option<HashMap<i64, i64>>> = Mutex::new(None);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_type_register_to_string(type_id: i32, fn_ptr: i32) {
+    if type_id == 0 || fn_ptr == 0 {
+        return;
+    }
+    let mut g = TO_STRING.lock().unwrap();
+    g.get_or_insert_with(HashMap::new)
+        .insert(type_id as i64, fn_ptr as u32 as i64);
 }
 
 #[unsafe(no_mangle)]
@@ -143,4 +164,46 @@ pub unsafe extern "C" fn haxe_iface_fat_ptr_build(obj_ptr: i32, iface_type_id: i
         core::ptr::write_unaligned(fat.add(8 + 8 * i) as *mut i64, slot);
     }
     fat as i32
+}
+
+/// Which fields of a class own their referent, keyed by class id. Field i
+/// is bit i; the mask arrives as an i32, so fields past 31 are never freed.
+static OWNED_FIELD_MASKS: Mutex<Option<HashMap<u32, u32>>> = Mutex::new(None);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_register_owned_mask(class_type_id: i32, mask: i32) {
+    if class_type_id == 0 || mask == 0 {
+        return;
+    }
+    OWNED_FIELD_MASKS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(class_type_id as u32, mask as u32);
+}
+
+/// Releases a class instance and, leaves first, every field it owns.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_object_free_deep(ptr: i32) {
+    if ptr == 0 {
+        return;
+    }
+    let type_id = unsafe { core::ptr::read_unaligned(ptr as *const i64) } as u32;
+    let mask = OWNED_FIELD_MASKS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&type_id).copied())
+        .unwrap_or(0);
+    let mut bits = mask;
+    while bits != 0 {
+        let index = bits.trailing_zeros();
+        bits &= bits - 1;
+        // Field i sits at (i + 1) * 8; slot 0 is the type-id header.
+        let child = unsafe { *((ptr as u32 + (index + 1) * 8) as *const i32) };
+        if child != 0 {
+            haxe_object_free_deep(child);
+        }
+    }
+    crate::rayzor_obj_free(ptr);
 }
