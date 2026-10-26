@@ -894,10 +894,7 @@ impl LspContext {
         unit.macro_expansions
             .iter()
             .filter(|origin| origin.call_site.file_id == analysis.index.file_id)
-            .filter_map(|origin| {
-                let (line, column) = line_column(source, origin.call_span.start);
-                self.expand_macro(uri, lsp_types::Position::new(line - 1, column - 1))
-            })
+            .map(|origin| macro_expansion_response(origin, source))
             .collect()
     }
 
@@ -1384,22 +1381,7 @@ impl LspContext {
                 )
             })?
             .1;
-        let pos = |at| {
-            let (line, character) = line_column(source, at);
-            serde_json::json!({"line":line-1,"character":character-1})
-        };
-        Some(serde_json::json!({
-            "name": origin.macro_name,
-            "expansion": origin.expanded_text,
-            "range": {"start":pos(origin.call_span.start),"end":pos(origin.call_span.end)},
-            "definition": origin.definition_file.as_ref().zip(origin.definition_site).and_then(|(file, at)| {
-                let (line, character) = if at.line > 0 && at.column > 0 { (at.line, at.column) } else {
-                    let text = std::fs::read_to_string(file).ok()?;
-                    line_column(&text, at.byte_offset as usize)
-                };
-                Some(serde_json::json!({"uri":file_uri(file),"range":{"start":{"line":line-1,"character":character-1},"end":{"line":line-1,"character":character}}}))
-            })
-        }))
+        Some(macro_expansion_response(origin, source))
     }
 
     /// The macro expansions in the document, for inlay hints.
@@ -1492,6 +1474,28 @@ pub enum DiagSeverity {
     Warning,
     Info,
     Hint,
+}
+
+fn macro_expansion_response(
+    origin: &compiler::macro_system::expander::ExpansionOrigin,
+    source: &str,
+) -> serde_json::Value {
+    let pos = |at| {
+        let (line, character) = line_column(source, at);
+        serde_json::json!({"line":line-1,"character":character-1})
+    };
+    serde_json::json!({
+        "name": origin.macro_name,
+        "expansion": origin.expanded_text,
+        "range": {"start":pos(origin.call_span.start),"end":pos(origin.call_span.end)},
+        "definition": origin.definition_file.as_ref().zip(origin.definition_site).and_then(|(file, at)| {
+            let (line, character) = if at.line > 0 && at.column > 0 { (at.line, at.column) } else {
+                let text = std::fs::read_to_string(file).ok()?;
+                line_column(&text, at.byte_offset as usize)
+            };
+            Some(serde_json::json!({"uri":file_uri(file),"range":{"start":{"line":line-1,"character":character-1},"end":{"line":line-1,"character":character}}}))
+        })
+    })
 }
 
 /// The 1-based (line, column) of byte `offset` in `text`, clamped to its end.

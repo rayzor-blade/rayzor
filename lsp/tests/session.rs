@@ -4144,7 +4144,10 @@ import haxe.macro.Context;
 using haxe.macro.ExprTools;
 class Wrapper {
     static function lower(e:Expr):Expr return switch e.expr {
-        case EMeta({name:":markup"}, _): macro @:pos(e.pos) Builder.make($e);
+        case EMeta({name:":markup"}, _):
+            var p = Context.getPosInfos(e.pos);
+            var call = Context.makePosition({file:p.file, min:p.min, max:p.min + 1});
+            macro @:pos(call) Builder.make($e);
         case _: e.map(lower);
     }
     public static macro function build():Array<Field> {
@@ -4207,13 +4210,20 @@ class Wrapper {
                 let definition = s.request("textDocument/definition", at);
                 assert!(definition.to_string().contains(file), "{definition}");
             }
-            let at = s.at("Main.hx", 0, source.find("<arbitrary-name").unwrap() as u32);
-            let expansion = s.request("rayzor/expandMacro", at);
-            let text = expansion["expansion"].as_str().unwrap_or_default();
-            assert!(
-                text.contains("new widgets.Panel") && text.contains("new widgets.Controls.Action"),
-                "{expansion}"
-            );
+            for offset in [0, 1, 8] {
+                let at = s.at(
+                    "Main.hx",
+                    0,
+                    source.find("<arbitrary-name").unwrap() as u32 + offset,
+                );
+                let expansion = s.request("rayzor/expandMacro", at);
+                let text = expansion["expansion"].as_str().unwrap_or_default();
+                assert!(
+                    text.contains("new widgets.Panel")
+                        && text.contains("new widgets.Controls.Action"),
+                    "{expansion}"
+                );
+            }
             if !cached {
                 let root = s.root.clone();
                 s.temporary = false;
