@@ -1415,13 +1415,8 @@ impl<'a> TypeCheckingPhase<'a> {
         if !branch_types.is_empty()
             && expr_type != self.type_checker.type_table.borrow().void_type()
         {
-            let expected_type = branch_types[0];
-            for (i, (&branch_type, &location)) in branch_types
-                .iter()
-                .zip(branch_locations.iter())
-                .enumerate()
-                .skip(1)
-            {
+            let expected_type = expr_type;
+            for (&branch_type, &location) in branch_types.iter().zip(branch_locations.iter()) {
                 let compatibility = self
                     .type_checker
                     .check_compatibility(branch_type, expected_type);

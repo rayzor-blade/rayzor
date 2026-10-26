@@ -1631,6 +1631,7 @@ class Builder {
         return macro @:pos(tag) new widgets.ContextMenu();
     }
 }
+
 "#,
         ),
     ]);
@@ -1639,6 +1640,34 @@ class Builder {
     let at = s.at("Main.hx", 0, source.find("context-menu").unwrap() as u32);
     let hover = hover_text(&s.request("textDocument/hover", at));
     assert!(hover.contains("class ContextMenu extends Base"), "{hover}");
+}
+
+#[test]
+fn generic_switch_branches_use_the_inferred_common_base() {
+    for (result, explicit, valid) in [
+        ("Element", false, true),
+        ("Element", true, true),
+        ("For<Int>", true, false),
+    ] {
+        let [ints, bools, strings] = if explicit {
+            ["For<Int>", "For<Bool>", "For<String>"]
+        } else {
+            ["For", "For", "For"]
+        };
+        let source = format!(
+            "class Main {{ static function pane(which:String):{result} return switch which {{case \"one\": new {ints}(() -> [1], n -> new Element()); case \"two\": new {bools}(() -> [true], n -> new Element()); case _:new {strings}(() -> [\"x\"], n -> new Element());}}; static function main() {{}} }}"
+        );
+        let mut s = Session::start(&[
+            ("Main.hx", &source),
+            ("Element.hx", "class Element { public function new() {} }"),
+            (
+                "For.hx",
+                "class For<T> extends Element { public function new(each:Void->Array<T>, item:T->Element) {super();} }",
+            ),
+        ]);
+        let diagnostics = s.open("Main.hx");
+        assert_eq!(diagnostics.is_empty(), valid, "{result}: {diagnostics:#?}");
+    }
 }
 
 #[test]
