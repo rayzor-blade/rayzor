@@ -281,6 +281,19 @@ impl<'a> AstLowering<'a> {
             return;
         }
 
+        // Macro declarations carry compile-time Expr types; editor call sites
+        // use the projected runtime signature even after the method is typed.
+        if self
+            .context
+            .symbol_table
+            .get_symbol(method_symbol)
+            .is_some_and(|symbol| symbol.flags.contains(crate::tast::SymbolFlags::MACRO))
+            && let Some(sig) = self.resolve_declared_method_sig(class_symbol, method_name, true)
+        {
+            self.apply_declared_sig(method_symbol, &sig);
+            return;
+        }
+
         let has_type = self
             .context
             .symbol_table
@@ -350,6 +363,10 @@ impl<'a> AstLowering<'a> {
         let Some(sig) = self.resolve_declared_method_sig(class_symbol, method_name, true) else {
             return;
         };
+        if sig.is_macro {
+            self.apply_declared_sig(method_symbol, &sig);
+            return;
+        }
         if !sig.type_params.is_empty() {
             return;
         }
@@ -456,6 +473,9 @@ impl<'a> AstLowering<'a> {
             symbol
                 .flags
                 .remove(crate::tast::SymbolFlags::METHOD_PLACEHOLDER);
+            if sig.is_macro {
+                symbol.flags.insert(crate::tast::SymbolFlags::MACRO);
+            }
         }
         fn_ty
     }

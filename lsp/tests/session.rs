@@ -3480,7 +3480,7 @@ fn unavailable_expression_macros_keep_their_declared_runtime_type() {
         ),
         (
             "src/Main.hx",
-            "import widgets.Builder; import widgets.Sheet;\nclass Main { public static function main() { var sheet:Sheet = Builder.make('body'); var count:Int = sheet.count; } }",
+            "import widgets.Builder; import widgets.Sheet;\nclass Main { public static function main() { var sheet:Sheet = Builder.make('body'); var other:Sheet = Builder.make('other'); var count:Int = sheet.count; } }",
         ),
     ]);
     let diagnostics = s.open("src/Main.hx");
@@ -3506,30 +3506,85 @@ fn unavailable_expression_macros_keep_their_declared_runtime_type() {
 }
 
 #[test]
-fn recovered_typed_macros_still_check_the_payload_type() {
+fn native_manifest_recovered_macros_keep_their_runtime_signature() {
     let mut s = Session::start(&[
         (
+            "rayzor.toml",
+            "[project]\nname = 'macro-signatures'\n[cache]\nenabled = false\n",
+        ),
+        (
+            "Sheet.hx",
+            "class Sheet { public function new() {} public var count:Int = 7; }",
+        ),
+        (
             "Builder.hx",
-            "#if macro\nimport haxe.macro.Expr;\n#end\nclass Builder { public static macro function make(value:ExprOf<Int>):ExprOf<Int> { throw 'unavailable dependency'; } }",
+            "#if macro\nimport haxe.macro.Expr;\n#end\nclass Builder { public static macro function make(template:Expr):ExprOf<Sheet> { throw 'unavailable dependency'; } }",
         ),
         (
             "Main.hx",
-            "class Main { public static function main() { var count:Int = Builder.make('wrong'); } }",
+            "class Main { public static function main() { var sheet:Sheet = Builder.make('body'); var other:Sheet = Builder.make('other'); var count:Int = sheet.count; } }",
         ),
     ]);
     let diagnostics = s.open("Main.hx");
     assert!(
         diagnostics.iter().any(|d| d["message"]
             .as_str()
-            .is_some_and(|message| message == "Type mismatch: expected `Int`, found `String`")),
+            .is_some_and(|message| message.contains("unavailable dependency"))),
         "{diagnostics:#?}"
     );
     assert!(
-        !diagnostics.iter().any(|d| d["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("Type mismatch") && message.contains("Expr"))),
+        !diagnostics
+            .iter()
+            .any(|d| d["message"].as_str().is_some_and(|message| message
+                .contains("Type mismatch")
+                || message.contains("Cannot find"))),
         "{diagnostics:#?}"
     );
+    let source = std::fs::read_to_string(s.root.join("Main.hx")).unwrap();
+    let at = source.find("make(").unwrap() as u32 + 1;
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 0, at)));
+    assert!(
+        hover.contains("Sheet") && !hover.contains("Expr"),
+        "{hover}"
+    );
+}
+
+#[test]
+fn recovered_typed_macros_still_check_the_payload_type() {
+    for configuration in [
+        ("build.hxml", "-cp .\n"),
+        (
+            "rayzor.toml",
+            "[project]\nname = 'typed-macro-signatures'\n[cache]\nenabled = false\n",
+        ),
+    ] {
+        let mut s = Session::start(&[
+            configuration,
+            (
+                "Builder.hx",
+                "#if macro\nimport haxe.macro.Expr;\n#end\nclass Builder { public static macro function make(value:ExprOf<Int>):ExprOf<Int> { throw 'unavailable dependency'; } }",
+            ),
+            (
+                "Main.hx",
+                "class Main { public static function main() { var count:Int = Builder.make('wrong'); } }",
+            ),
+        ]);
+        let diagnostics = s.open("Main.hx");
+        assert!(
+            diagnostics.iter().any(|d| d["message"]
+                .as_str()
+                .is_some_and(|message| message == "Type mismatch: expected `Int`, found `String`")),
+            "{diagnostics:#?}"
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d["message"].as_str().is_some_and(|message| message
+                    .contains("Type mismatch")
+                    && message.contains("Expr"))),
+            "{diagnostics:#?}"
+        );
+    }
 }
 
 #[test]
