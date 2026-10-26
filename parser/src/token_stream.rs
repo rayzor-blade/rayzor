@@ -10,15 +10,15 @@ pub struct TokenStream<'a> {
     tokens: &'a [Token],
     pos: usize,
     source: &'a str,
-    /// Counts the `>` slots already virtually consumed from a leading
-    /// `>>` (Shr) or `>>>` (Ushr) token by `expect_closing_gt`. Each
-    /// call increments this until the token is fully claimed, then
-    /// `advance()` resets it and moves past the token.
-    ///
-    /// - `0`: no virtual consumption yet; treat current token as whole.
-    /// - `1`: one `>` slot taken — still pointing at the same Shr/Ushr.
-    /// - `2`: two `>` slots taken — only meaningful for Ushr.
-    split_gt_consumed: u8,
+    /// The unconsumed suffix of a token split in a type context.
+    remainder: Option<Token>,
+    consumed_remainder: Option<Token>,
+}
+
+#[derive(Clone)]
+pub struct StreamPosition {
+    pos: usize,
+    remainder: Option<Token>,
 }
 
 impl<'a> TokenStream<'a> {
@@ -27,21 +27,27 @@ impl<'a> TokenStream<'a> {
             tokens,
             pos: 0,
             source,
-            split_gt_consumed: 0,
+            remainder: None,
+            consumed_remainder: None,
         }
     }
 
     /// Look at the current token without consuming it.
     pub fn peek(&self) -> &Token {
-        self.tokens.get(self.pos).unwrap_or_else(|| {
-            self.tokens
-                .last()
-                .expect("token stream must have at least EOF")
+        self.remainder.as_ref().unwrap_or_else(|| {
+            self.tokens.get(self.pos).unwrap_or_else(|| {
+                self.tokens
+                    .last()
+                    .expect("token stream must have at least EOF")
+            })
         })
     }
 
     /// Look ahead by n tokens (0 = current).
     pub fn peek_at(&self, n: usize) -> &Token {
+        if n == 0 {
+            return self.peek();
+        }
         self.tokens.get(self.pos + n).unwrap_or_else(|| {
             self.tokens
                 .last()
@@ -51,11 +57,16 @@ impl<'a> TokenStream<'a> {
 
     /// Consume and return the current token.
     pub fn advance(&mut self) -> &Token {
-        let token = self.peek();
-        if token.kind != TokenKind::Eof {
+        if let Some(token) = self.remainder.take() {
+            self.consumed_remainder = Some(token);
+            self.pos += 1;
+            return self.consumed_remainder.as_ref().unwrap();
+        }
+        let pos = self.pos;
+        if self.peek().kind != TokenKind::Eof {
             self.pos += 1;
         }
-        &self.tokens[self.pos - 1]
+        &self.tokens[pos]
     }
 
     /// Check if the current token matches the given kind.
@@ -96,25 +107,17 @@ impl<'a> TokenStream<'a> {
         }
     }
 
-    /// Consume the closing `>` of a type-parameter list, virtually
-    /// splitting a multi-`>` token on the fly. This handles nested
-    /// generics like `Array<Thread<Int>>` (closing `>>` = Shr) and
-    /// `Array<Array<Array<Int>>>` (closing `>>>` = Ushr).
-    ///
-    /// Each call claims one `>` slot:
-    /// - At `Gt`: advance fully.
-    /// - At `Shr` (worth 2 slots): increment counter; on slot 2, advance.
-    /// - At `Ushr` (worth 3 slots): increment counter; on slot 3, advance.
-    /// - Anything else: standard expect-Gt error.
+    /// Consume one generic closing bracket, leaving any operator suffix
+    /// available to the enclosing type or assignment expression.
     pub fn expect_closing_gt(&mut self) -> Result<Span, ParseError> {
-        if self.at(TokenKind::Gt) {
-            let token = self.advance();
-            return Ok(token.span);
-        }
         let token = self.peek();
-        let total_slots = match token.kind {
-            TokenKind::Shr => 2,
-            TokenKind::Ushr => 3,
+        let suffix = match token.kind {
+            TokenKind::Gt => return self.expect(TokenKind::Gt),
+            TokenKind::Ge => TokenKind::Assign,
+            TokenKind::Shr => TokenKind::Gt,
+            TokenKind::Ushr => TokenKind::Shr,
+            TokenKind::ShrAssign => TokenKind::Ge,
+            TokenKind::UshrAssign => TokenKind::ShrAssign,
             _ => {
                 return Err(ParseError {
                     message: format!(
@@ -126,31 +129,25 @@ impl<'a> TokenStream<'a> {
                 });
             }
         };
-        let slot_idx = self.split_gt_consumed;
-        let span_start = token.span.start + slot_idx as usize;
-        let span_end = span_start + 1;
         let claimed = Span {
-            start: span_start,
-            end: span_end,
+            start: token.span.start,
+            end: token.span.start + 1,
         };
-        if (slot_idx as u32) + 1 == total_slots {
-            // Last slot — consume the whole token and reset.
-            self.split_gt_consumed = 0;
-            self.advance();
-        } else {
-            // Virtual consume — token stays, counter advances.
-            self.split_gt_consumed = slot_idx + 1;
-        }
+        self.remainder = Some(Token::new(suffix, claimed.end, token.span.end));
         Ok(claimed)
     }
 
-    /// Like `at(Gt)` but also returns true at `>>` (Shr) or `>>>` (Ushr)
-    /// — the lexer's multi-char tokens that the parser splits on the
-    /// fly for nested generic close. Use this for the loop condition
-    /// inside `parse_type_param_args` and friends.
+    /// Whether the current token starts with a generic closing bracket.
     pub fn at_closing_gt(&self) -> bool {
-        let kind = self.peek().kind;
-        kind == TokenKind::Gt || kind == TokenKind::Shr || kind == TokenKind::Ushr
+        matches!(
+            self.peek().kind,
+            TokenKind::Gt
+                | TokenKind::Ge
+                | TokenKind::Shr
+                | TokenKind::Ushr
+                | TokenKind::ShrAssign
+                | TokenKind::UshrAssign
+        )
     }
 
     /// Get the text of the current token.
@@ -170,7 +167,9 @@ impl<'a> TokenStream<'a> {
 
     /// Create a span from a start offset to the current position.
     pub fn span_from(&self, start: usize) -> Span {
-        let end = if self.pos > 0 {
+        let end = if let Some(remainder) = &self.remainder {
+            remainder.span.start
+        } else if self.pos > 0 {
             self.tokens[self.pos - 1].span.end
         } else {
             start
@@ -189,13 +188,17 @@ impl<'a> TokenStream<'a> {
     }
 
     /// Save current position for backtracking.
-    pub fn save(&self) -> usize {
-        self.pos
+    pub fn save(&self) -> StreamPosition {
+        StreamPosition {
+            pos: self.pos,
+            remainder: self.remainder.clone(),
+        }
     }
 
     /// Restore to a saved position.
-    pub fn restore(&mut self, pos: usize) {
-        self.pos = pos;
+    pub fn restore(&mut self, position: StreamPosition) {
+        self.pos = position.pos;
+        self.remainder = position.remainder;
     }
 }
 
@@ -255,6 +258,52 @@ mod tests {
         assert!(stream.eat(TokenKind::KwIf).is_some());
         assert!(stream.eat(TokenKind::KwElse).is_none()); // doesn't match
         assert!(stream.eat(TokenKind::LParen).is_some());
+    }
+
+    #[test]
+    fn generic_closers_preserve_assignment_suffix_and_backtracking() {
+        for (source, closers) in [
+            (">=x", 1),
+            (">>=x", 2),
+            (">>>=x", 3),
+            (">>x", 2),
+            (">>>x", 3),
+        ] {
+            let tokens = Lexer::new(source).tokenize().unwrap();
+            let mut stream = TokenStream::new(&tokens, source);
+            let original = stream.save();
+            for index in 0..closers {
+                assert!(stream.at_closing_gt());
+                let saved = stream.save();
+                let span = stream.expect_closing_gt().unwrap();
+                assert_eq!(
+                    span,
+                    Span {
+                        start: index,
+                        end: index + 1
+                    }
+                );
+                assert_eq!(stream.span_from(0).end, index + 1);
+                stream.restore(saved);
+                assert_eq!(stream.expect_closing_gt().unwrap(), span);
+                assert_eq!(stream.peek_at(0), stream.peek());
+            }
+            if source.contains('=') {
+                assert_eq!(stream.peek_at(1).text(source), "x");
+                let assignment = stream.advance();
+                assert_eq!(assignment.kind, TokenKind::Assign);
+                assert_eq!(
+                    assignment.span,
+                    Span {
+                        start: closers,
+                        end: closers + 1
+                    }
+                );
+            }
+            assert_eq!(stream.current_text(), "x");
+            stream.restore(original);
+            assert_eq!(stream.current_text(), &source[..source.len() - 1]);
+        }
     }
 
     #[test]

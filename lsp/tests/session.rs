@@ -4060,3 +4060,39 @@ fn iterable_arguments_still_check_structure_and_element_types() {
         );
     }
 }
+
+#[test]
+fn compact_generics_in_imported_modules_preserve_nullable_receiver_fields() {
+    let source = "import JamSession.Position;\nclass Main { final file:String; final session:Void->Null<JamSession>; public function new(file:String, session:Void->Null<JamSession>) { this.file=file; this.session=session; } function current():Null<JamSession> { var current=session(); return current != null && current.file == file ? current : null; } static function main() {} }";
+    let mut s = Session::start(&[
+        ("Main.hx", source),
+        (
+            "JamSession.hx",
+            "typedef Position = { id:String }; class JamSession { public final file:String; public function new(file:String) this.file=file; function refresh():Void { var marks:Array<String>=[], positions:Array<Position>=[], nested:Array<Array<Int>>=[[]], deep:Array<Array<Array<Int>>>=[[[]]]; } }",
+        ),
+    ]);
+    assert!(s.open("Main.hx").is_empty(), "{:?}", s.diagnostics);
+    let line = source.lines().nth(1).unwrap();
+    let column = line.find("current=session").unwrap() as u32 + 1;
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 1, column)));
+    assert!(hover.contains("current:Null<JamSession>"), "{hover}");
+    let column = line.find("current.file").unwrap() as u32 + "current.".len() as u32 + 1;
+    let position = s.at("Main.hx", 1, column);
+    let hover = hover_text(&s.request("textDocument/hover", position.clone()));
+    assert!(hover.contains("file:String"), "{hover}");
+    let definition = s.request("textDocument/definition", position);
+    assert!(
+        definition.to_string().contains("JamSession.hx"),
+        "{definition}"
+    );
+    let diagnostics = s.change(
+        "Main.hx",
+        &source.replace("? current : null", "? current.file : null"),
+    );
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Type mismatch"))),
+        "returning the String field as a session must still fail: {diagnostics:?}"
+    );
+}
