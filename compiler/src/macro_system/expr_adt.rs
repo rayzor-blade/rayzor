@@ -730,13 +730,17 @@ pub fn def_of(kind: &ExprKind, span: Span) -> Option<MacroValue> {
             let mut text = String::new();
             for part in parts {
                 match part {
-                    StringPart::Literal(l) => text.push_str(l),
+                    StringPart::Literal(l) => text.push_str(&l.replace('$', "$$")),
                     StringPart::Interpolation(e) => match &e.kind {
                         ExprKind::Ident(n) => {
                             text.push('$');
                             text.push_str(n);
                         }
-                        _ => text.push_str("${...}"),
+                        _ => {
+                            text.push_str("${");
+                            text.push_str(&super::expander::expanded_expr_source(e));
+                            text.push('}');
+                        }
                     },
                 }
             }
@@ -1193,6 +1197,19 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
             Some(mk(match &**variant {
                 "CInt" => ExprKind::Int(text.parse().unwrap_or(0)),
                 "CFloat" => ExprKind::Float(text.parse().unwrap_or(0.0)),
+                "CString"
+                    if matches!(args.get(1), Some(MacroValue::Enum(_, quotes, _))
+                        if &**quotes == "SingleQuotes") =>
+                {
+                    let code = format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"));
+                    let MacroValue::Expr(parsed) = super::context_api::MacroContext::new()
+                        .parse(&code, span_to_location(span))
+                        .ok()?
+                    else {
+                        return None;
+                    };
+                    parsed.kind.clone()
+                }
                 "CString" => ExprKind::String(text),
                 "CIdent" => match text.as_str() {
                     "true" => ExprKind::Bool(true),
@@ -1595,6 +1612,30 @@ pub fn constant_of(e: &Expr) -> Option<MacroValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interpolated_strings_survive_macro_round_trips() {
+        for value in ["'foo$i'", "'answer ${i + 2}, $$literal'", "'line\\n$i'"] {
+            let source = format!("class Main {{ var value = {value}; }}");
+            let file = parser::rd::rd_parse(&source, "Main.hx", false, false).unwrap();
+            let parser::TypeDeclaration::Class(class) = &file.declarations[0] else {
+                panic!("class")
+            };
+            let parser::ClassFieldKind::Var {
+                expr: Some(before), ..
+            } = &class.fields[0].kind
+            else {
+                panic!("field")
+            };
+            let encoded = def_of(&before.kind, before.span).unwrap();
+            let after = try_expr_of(&encoded, before.span).unwrap();
+            assert_eq!(
+                super::super::expander::expanded_expr_source(before),
+                super::super::expander::expanded_expr_source(&after),
+                "{value}"
+            );
+        }
+    }
 
     #[test]
     fn arrow_kind_and_body_survive_macro_round_trips() {
