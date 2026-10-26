@@ -35,10 +35,6 @@ use std::path::PathBuf;
 /// stack large enough for any program the command line compiles.
 const SESSION_STACK: usize = 256 << 20;
 
-/// How long one macro invocation may run before it is stopped,
-/// unless the client sets `initializationOptions.macroBudgetMs`.
-const MACRO_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// Run the LSP server on stdio. Blocks until the client disconnects.
 pub fn run_lsp() -> Result<(), String> {
     let (connection, io_threads) = crate::transport::stdio();
@@ -242,7 +238,8 @@ fn serve_worker(
         .as_ref()
         .and_then(|o| o.get("macroBudgetMs"))
         .and_then(|ms| ms.as_u64())
-        .map_or(MACRO_BUDGET, std::time::Duration::from_millis);
+        .filter(|ms| *ms != 0)
+        .map(std::time::Duration::from_millis);
     ctx.configure_editor_cache();
     publish_configuration_warnings(connection, &mut ctx);
     for problem in &ctx.config_problems {
@@ -778,7 +775,7 @@ pub(crate) fn analyze_document(
         let _ = conn.sender.send(Message::Notification(Notification::new("rayzor/indexProgress".into(), serde_json::json!({"uri":uri,"version":version,"phase":"declarations","subject":subject,"completed":count}))));
     }
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _budget = compiler::macro_system::budget::limit(Some(ctx.macro_budget));
+        let _budget = compiler::macro_system::budget::limit(ctx.macro_budget);
         ctx.compile_file(uri, &source)
     }));
     let diags = compiled.unwrap_or_else(|payload| {

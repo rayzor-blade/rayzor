@@ -782,7 +782,7 @@ mod tests {
                 stdlib_paths: vec![],
                 defines: vec![],
                 macros: vec![],
-                macro_budget: Duration::from_secs(1),
+                macro_budget: Some(Duration::from_secs(1)),
                 options: Default::default(),
             },
             &root,
@@ -918,7 +918,7 @@ mod tests {
                 stdlib_paths: vec![],
                 defines: vec![],
                 macros: vec![],
-                macro_budget: Duration::from_secs(5),
+                macro_budget: Some(Duration::from_secs(5)),
                 options: Default::default(),
             },
             &root,
@@ -989,7 +989,7 @@ mod tests {
             stdlib_paths: vec![root.join("std")],
             defines: vec![],
             macros: vec![],
-            macro_budget: Duration::from_secs(5),
+            macro_budget: Some(Duration::from_secs(5)),
             options: Default::default(),
         };
         let cache = EditorCache::default();
@@ -1050,7 +1050,7 @@ mod tests {
             stdlib_paths: vec![],
             defines: vec![],
             macros: vec![],
-            macro_budget: Duration::from_secs(5),
+            macro_budget: Some(Duration::from_secs(5)),
             options: Default::default(),
         };
         let open = Notification::new(

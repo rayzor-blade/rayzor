@@ -407,7 +407,7 @@ fn busy_page_session() -> Session {
                 "class Fast { static function main() { var answer:Int = Quick.value(); } }",
             ),
         ],
-        json!({"macroBudgetMs":2000}),
+        json!({}),
     );
     let path = s.root.join("Busy.hx");
     let source = std::fs::read_to_string(&path).unwrap().replace(
@@ -433,6 +433,33 @@ fn start_busy_page(s: &Session) {
             "slow macro never started"
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn default_and_zero_macro_budgets_allow_unbounded_evaluation() {
+    let source = "class Main { static function main() { var value = Builder.make(); } }";
+    for options in [json!({}), json!({"macroBudgetMs":0})] {
+        let mut s = Session::start_with(
+            &[
+                (
+                    "Builder.hx",
+                    "class Builder { public static macro function make() { var total = 0; for (i in 0...4096) total += i; return macro $v{total}; } }",
+                ),
+                ("Main.hx", source),
+            ],
+            options,
+        );
+        let diagnostics = s.open("Main.hx");
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let at = s.at("Main.hx", 0, source.find("Builder.make").unwrap() as u32);
+        let expansion = s.request("rayzor/expandMacro", at);
+        assert!(
+            expansion["expansion"]
+                .as_str()
+                .is_some_and(|text| text == "8386560"),
+            "{expansion}"
+        );
     }
 }
 

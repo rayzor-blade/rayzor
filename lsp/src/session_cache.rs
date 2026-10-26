@@ -15,7 +15,7 @@ pub(crate) struct SessionKey {
     pub stdlib_paths: Vec<PathBuf>,
     pub defines: Vec<String>,
     pub macros: Vec<String>,
-    pub macro_budget: Duration,
+    pub macro_budget: Option<Duration>,
     pub options: crate::build_config::Options,
 }
 

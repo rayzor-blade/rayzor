@@ -1883,6 +1883,44 @@ fn quoted_splices_and_comprehensions_keep_lexical_captures() {
 }
 
 #[test]
+fn quoted_control_flow_evaluates_complex_splice_arguments() {
+    for (quote, expected) in [
+        ("for (child in ${children()}) trace(child)", "[1, 2]"),
+        (
+            "@:pos((macro null).pos) for (child in ${children()}) trace(child)",
+            "[1, 2]",
+        ),
+        ("if (${condition()}) ${value()} else ${value()}", "42"),
+        ("while (${condition()}) ${value()}", "42"),
+        ("${condition()} ? ${value()} : ${value()}", "42"),
+        ("(cast ${value()} : Int)", "42"),
+        ("target[${value()}] = ${value()}", "42"),
+        ("[$v{1 + 2}, ${macro $v{4 + 5}}]", "[3, 9]"),
+    ] {
+        let file = parse(&format!(
+            "class Builder {{ static function children() return macro [1, 2]; static function condition() return macro true; static function value() return macro 42; public static macro function make() return macro {quote}; }} class Main {{ static function main() return Builder.make(); }}"
+        ));
+        let mut classes = class_registry::ClassRegistry::new();
+        classes.register_file(&file);
+        let result = MacroExpander::with_class_registry(classes).expand_file(file);
+        assert!(
+            result.diagnostics.is_empty(),
+            "{quote}: {:?}",
+            result.diagnostics
+        );
+        let expansion = result
+            .expansion_origins
+            .last()
+            .unwrap()
+            .expanded_text
+            .as_ref()
+            .unwrap();
+        assert!(expansion.contains(expected), "{quote}: {expansion}");
+        assert!(!expansion.contains("${"), "{quote}: {expansion}");
+    }
+}
+
+#[test]
 fn whole_object_pattern_alternatives_bind_the_selected_payload() {
     let source = r#"
 enum Kind { Text(value:String); Wrap(child:Dynamic, target:Dynamic); }

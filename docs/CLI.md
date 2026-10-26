@@ -187,6 +187,12 @@ format `@param`, `@return`/`@returns`, `@throws`, `@see`, `@deprecated` and
 `@example` tags. The same documentation is available in completion and
 signature help. Adjacent line comments are also displayed.
 
+LSP macro evaluation has no time limit by default. Set
+`initializationOptions.macroBudgetMs` to a positive number of milliseconds to
+limit each top-level macro invocation; nested calls share that allowance.
+Zero or an omitted value leaves evaluation unbounded. Cooperative scheduling
+and cancellation remain active while macros run.
+
 Pages with the same class paths, defines, initialization macros and source
 versions share a live typed dependency graph. Opening another page reuses
 already typed imports instead of loading and expanding them again. Changes to

@@ -1208,15 +1208,13 @@ impl MacroInterpreter {
             ExprKind::Macro(inner) => {
                 // macro expr — reify the expression, resolving dollar-idents from the environment
                 // e.g., `macro trace($e{msg})` resolves $e{msg} using the current env
-                let prepared = self.pre_eval_dollar_args((**inner).clone())?;
-                ReificationEngine::reify_expr(&prepared, &self.env)
+                self.reify_expression((**inner).clone())
             }
 
             // --- Reification block ---
             ExprKind::Reify(inner) => {
                 // macro { ... } — reify the expression
-                let prepared = self.pre_eval_dollar_args((**inner).clone())?;
-                ReificationEngine::reify_expr(&prepared, &self.env)
+                self.reify_expression((**inner).clone())
             }
 
             // --- Dollar identifier ---
@@ -1795,10 +1793,7 @@ impl MacroInterpreter {
                 _ => None,
             };
             let expr = match expr {
-                Some(e) => {
-                    let prepared = self.pre_eval_dollar_args(e)?;
-                    ReificationEngine::reify_expr(&prepared, &self.env)?
-                }
+                Some(e) => self.reify_expression(e)?,
                 None => MacroValue::Null,
             };
             let mut kind = BTreeMap::new();
@@ -4843,14 +4838,6 @@ impl MacroInterpreter {
         }
     }
 
-    /// Match a value against a pattern (for switch cases)
-    /// Reification's own evaluator handles only simple shapes inside
-    /// `$v{...}` / `$e{...}` — an identifier, a literal, `Std.string(x)`. A
-    /// full expression (`$v{TypeTools.toString(mono)}`) needs the real
-    /// evaluator, which reification cannot reach. So before reifying, walk
-    /// the quoted AST: any dollar-brace whose payload is not already simple
-    /// is evaluated HERE, bound to a synthetic name, and the payload becomes
-    /// that identifier — reification then sees only what it can handle.
     fn capture_implicit_receiver(&self, free: &mut std::collections::BTreeSet<String>) {
         let Some(this) = self.env.get("this") else {
             return;
@@ -4905,6 +4892,17 @@ impl MacroInterpreter {
             })
     }
 
+    fn reify_expression(&mut self, expr: Expr) -> Result<MacroValue, MacroError> {
+        // Nested helper quotes must not overwrite the outer quote's splice temporaries.
+        self.env.push_scope();
+        let result = self
+            .pre_eval_dollar_args(expr)
+            .and_then(|prepared| ReificationEngine::reify_expr(&prepared, &self.env));
+        self.env.pop_scope();
+        result
+    }
+
+    /// Evaluate complex splice payloads before the environment-only reifier runs.
     fn pre_eval_dollar_args(&mut self, expr: Expr) -> Result<Expr, MacroError> {
         fn is_simple(e: &Expr) -> bool {
             matches!(
@@ -5042,7 +5040,84 @@ impl MacroInterpreter {
                     op,
                     right: Box::new(walk(interp, *right, counter)?),
                 },
+                ExprKind::Assign { left, op, right } => ExprKind::Assign {
+                    left: Box::new(walk(interp, *left, counter)?),
+                    op,
+                    right: Box::new(walk(interp, *right, counter)?),
+                },
+                ExprKind::Index { expr, index } => ExprKind::Index {
+                    expr: Box::new(walk(interp, *expr, counter)?),
+                    index: Box::new(walk(interp, *index, counter)?),
+                },
+                ExprKind::Unary { op, expr } => ExprKind::Unary {
+                    op,
+                    expr: Box::new(walk(interp, *expr, counter)?),
+                },
+                ExprKind::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                } => ExprKind::If {
+                    cond: Box::new(walk(interp, *cond, counter)?),
+                    then_branch: Box::new(walk(interp, *then_branch, counter)?),
+                    else_branch: else_branch
+                        .map(|branch| walk(interp, *branch, counter).map(Box::new))
+                        .transpose()?,
+                },
+                ExprKind::Ternary {
+                    cond,
+                    then_expr,
+                    else_expr,
+                } => ExprKind::Ternary {
+                    cond: Box::new(walk(interp, *cond, counter)?),
+                    then_expr: Box::new(walk(interp, *then_expr, counter)?),
+                    else_expr: Box::new(walk(interp, *else_expr, counter)?),
+                },
+                ExprKind::For {
+                    var,
+                    key_var,
+                    iter,
+                    body,
+                } => ExprKind::For {
+                    var,
+                    key_var,
+                    iter: Box::new(walk(interp, *iter, counter)?),
+                    body: Box::new(walk(interp, *body, counter)?),
+                },
+                ExprKind::While { cond, body } => ExprKind::While {
+                    cond: Box::new(walk(interp, *cond, counter)?),
+                    body: Box::new(walk(interp, *body, counter)?),
+                },
+                ExprKind::Cast { expr, type_hint } => ExprKind::Cast {
+                    expr: Box::new(walk(interp, *expr, counter)?),
+                    type_hint,
+                },
+                ExprKind::TypeCheck { expr, type_hint } => ExprKind::TypeCheck {
+                    expr: Box::new(walk(interp, *expr, counter)?),
+                    type_hint,
+                },
+                ExprKind::Meta { mut meta, expr } => {
+                    meta.params = meta
+                        .params
+                        .into_iter()
+                        .map(|param| walk(interp, param, counter))
+                        .collect::<Result<_, _>>()?;
+                    ExprKind::Meta {
+                        meta,
+                        expr: Box::new(walk(interp, *expr, counter)?),
+                    }
+                }
+                ExprKind::Throw(inner) => ExprKind::Throw(Box::new(walk(interp, *inner, counter)?)),
+                ExprKind::Untyped(inner) => {
+                    ExprKind::Untyped(Box::new(walk(interp, *inner, counter)?))
+                }
                 ExprKind::Paren(inner) => ExprKind::Paren(Box::new(walk(interp, *inner, counter)?)),
+                ExprKind::Tuple(items) => ExprKind::Tuple(
+                    items
+                        .into_iter()
+                        .map(|item| walk(interp, item, counter))
+                        .collect::<Result<_, _>>()?,
+                ),
                 ExprKind::Block(elements) => ExprKind::Block(
                     elements
                         .into_iter()

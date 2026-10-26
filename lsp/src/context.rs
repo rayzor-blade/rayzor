@@ -33,8 +33,8 @@ pub struct LspContext {
     requested_hxml: Option<String>,
     /// What could not be applied from the configuration.
     pub config_problems: Vec<String>,
-    /// How long the macros of one compile may run in all.
-    pub macro_budget: std::time::Duration,
+    /// Optional execution allowance per top-level macro invocation.
+    pub macro_budget: Option<std::time::Duration>,
     /// The last analysis of each open document that produced an index.
     analyses: HashMap<String, Analysis>,
     sessions: VecDeque<crate::session_cache::SessionCache>,
@@ -134,7 +134,7 @@ impl LspContext {
             hxml: None,
             requested_hxml: None,
             config_problems: Vec::new(),
-            macro_budget: std::time::Duration::from_secs(5),
+            macro_budget: None,
             analyses: HashMap::new(),
             sessions: VecDeque::new(),
             failed_analyses: HashSet::new(),
@@ -1681,7 +1681,7 @@ mod cache_tests {
                     let mut context = LspContext::new(root.clone());
                     context.load_workspace_config(None);
                     context.initialization_macros.clear();
-                    context.macro_budget = std::time::Duration::from_millis(500);
+                    context.macro_budget = Some(std::time::Duration::from_millis(500));
                     for name in ["Accordion", "ContextMenu", "Library", "Input"] {
                         let path = root
                             .join(format!(
@@ -1735,7 +1735,7 @@ mod cache_tests {
                     project.options.extra_defines.push("hl".into());
                     project.options.cache_enabled = false;
                 }
-                context.macro_budget = std::time::Duration::from_secs(5);
+                context.macro_budget = Some(std::time::Duration::from_secs(5));
                 context.open_files.insert(uri.clone(), source.clone());
                 let diagnostics = context.compile_file(&uri, &source);
                 let own: Vec<_> = diagnostics
@@ -1862,7 +1862,7 @@ mod cache_tests {
                 let source = std::fs::read_to_string(&path).unwrap();
                 let uri = file_uri(path.to_str().unwrap());
                 context.open_files.insert(uri.clone(), source.clone());
-                let _budget = compiler::macro_system::budget::limit(Some(context.macro_budget));
+                let _budget = compiler::macro_system::budget::limit(context.macro_budget);
                 context.compile_file(&uri, &source);
                 for (tag, class) in [
                     ("menubar-menu", "MenubarMenu"),
