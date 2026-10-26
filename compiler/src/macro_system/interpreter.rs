@@ -591,8 +591,7 @@ impl MacroInterpreter {
             } => {
                 let mut out = Vec::new();
                 self.eval_comprehension(for_parts, &mut |slf| {
-                    out.push(slf.eval_expr(body)?);
-                    Ok(())
+                    slf.eval_array_comprehension_body(body, &mut out)
                 })?;
                 Ok(MacroValue::Array(Arc::new(out)))
             }
@@ -5160,6 +5159,64 @@ impl MacroInterpreter {
         }
     }
 
+    /// A failed comprehension guard emits nothing; an explicit null remains a value.
+    fn eval_array_comprehension_body(
+        &mut self,
+        body: &Expr,
+        out: &mut Vec<MacroValue>,
+    ) -> Result<(), MacroError> {
+        match &body.kind {
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                if self.eval_expr(cond)?.is_truthy() {
+                    self.eval_array_comprehension_body(then_branch, out)?;
+                } else if let Some(otherwise) = else_branch {
+                    self.eval_array_comprehension_body(otherwise, out)?;
+                }
+            }
+            ExprKind::Paren(inner) => self.eval_array_comprehension_body(inner, out)?,
+            ExprKind::Block(elements) => {
+                self.env.push_scope();
+                let result = (|| {
+                    if let Some((last, prefix)) = elements.split_last() {
+                        for element in prefix {
+                            if let parser::BlockElement::Expr(expr) = element {
+                                self.eval_expr(expr)?;
+                            }
+                        }
+                        if let parser::BlockElement::Expr(expr) = last {
+                            self.eval_array_comprehension_body(expr, out)?;
+                        }
+                    }
+                    Ok(())
+                })();
+                self.env.pop_scope();
+                result?;
+            }
+            ExprKind::For {
+                var,
+                key_var,
+                iter,
+                body: nested,
+            } => {
+                let part = parser::ComprehensionFor {
+                    var: var.clone(),
+                    key_var: key_var.clone(),
+                    iter: *iter.clone(),
+                    span: body.span,
+                };
+                self.eval_comprehension(&[part], &mut |slf| {
+                    slf.eval_array_comprehension_body(nested, out)
+                })?;
+            }
+            _ => out.push(self.eval_expr(body)?),
+        }
+        Ok(())
+    }
+
     /// Run `each` once per combination the comprehension's `for` parts yield,
     /// with their variables bound.
     fn eval_comprehension(
@@ -6586,6 +6643,32 @@ mod tests {
         assert_eq!(
             eval("return null == null;").unwrap(),
             MacroValue::Bool(true)
+        );
+    }
+
+    #[test]
+    fn array_comprehension_guards_filter_without_inserting_nulls() {
+        assert_eq!(
+            eval("var values = [for (i in 0...6) if (i > 0) if (i % 2 == 0) i]; return values;")
+                .unwrap(),
+            MacroValue::Array(Arc::new(vec![MacroValue::Int(2), MacroValue::Int(4)]))
+        );
+        assert_eq!(
+            eval("return [for (i in 0...3) {var x = i * 2; if (x > 0) x;}];").unwrap(),
+            MacroValue::Array(Arc::new(vec![MacroValue::Int(2), MacroValue::Int(4)]))
+        );
+        assert_eq!(
+            eval("return [for (i in 0...3) if (i > 0) for (j in 0...2) i + j];").unwrap(),
+            MacroValue::Array(Arc::new(vec![
+                MacroValue::Int(1),
+                MacroValue::Int(2),
+                MacroValue::Int(2),
+                MacroValue::Int(3)
+            ]))
+        );
+        assert_eq!(
+            eval("return [for (i in 0...2) if (i == 0) null else i];").unwrap(),
+            MacroValue::Array(Arc::new(vec![MacroValue::Null, MacroValue::Int(1)]))
         );
     }
 
