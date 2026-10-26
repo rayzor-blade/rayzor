@@ -307,6 +307,22 @@ impl LspContext {
         }
     }
 
+    pub(crate) fn configuration_warnings(&self) -> Vec<LspDiagnostic> {
+        let mut files = std::collections::BTreeSet::new();
+        self.projects.iter()
+            .filter(|project| project.options.hxml_target_missing)
+            .filter_map(|project| project.hxml.clone())
+            .filter(|path| files.insert(path.clone()))
+            .map(|path| {
+                let mut warning = LspDiagnostic::error(
+                    &path.to_string_lossy(), 1, 1,
+                    "No Haxe target is configured for the selected HXML build. Target-dependent types and #if branches may be inaccurate; select an explicit target such as --hl, --js, or --cpp.".into(),
+                );
+                warning.severity = DiagSeverity::Warning;
+                warning
+            }).collect()
+    }
+
     /// Compile a file and return diagnostics. Also builds the symbol index.
     pub fn compile_file(&mut self, uri: &str, source: &str) -> Vec<LspDiagnostic> {
         let profiling = std::env::var_os("RAYZOR_LSP_PROFILE").is_some();

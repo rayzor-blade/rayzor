@@ -1452,6 +1452,85 @@ fn a_namesake_enum_constructor_does_not_replace_a_standard_library_class() {
 }
 
 #[test]
+fn hashlink_library_selects_the_target_and_other_missing_targets_warn() {
+    let source = "class Main { static function main() {\n#if hl\nvar selected:Int = 1;\n#elseif js\nvar selected:Bool = true;\n#else\nvar selected:String = 'check';\n#end\n} }";
+    for (hxml, line, expected, missing) in [
+        ("-cp .\n", 6, "String", true),
+        ("-cp .\n-L hashlink\n", 2, "Int", false),
+        ("-cp .\n-L hashlink:1.0.0\n--no-output\n", 2, "Int", false),
+        ("-cp .\n-L hashlink\n--js app.js\n", 4, "Bool", false),
+        ("-cp .\n--no-output\n", 6, "String", true),
+    ] {
+        let mut session = Session::start(&[
+            ("build.hxml", hxml),
+            ("Main.hx", source),
+            (
+                "haxelib.json",
+                r#"{"name":"hashlink","version":"1.0.0","classPath":"."}"#,
+            ),
+        ]);
+        assert!(
+            session.open("Main.hx").is_empty(),
+            "{:?}",
+            session.diagnostics
+        );
+        let position = session.at("Main.hx", line, 5);
+        let hover = hover_text(&session.request("textDocument/hover", position));
+        assert!(
+            hover.contains(&format!("selected:{expected}")),
+            "{hxml}: {hover}"
+        );
+        let warning = session
+            .diagnostics
+            .iter()
+            .filter(|note| note["uri"] == session.uri("build.hxml"))
+            .flat_map(|note| note["diagnostics"].as_array().unwrap())
+            .any(|diagnostic| {
+                diagnostic["severity"] == 2
+                    && diagnostic["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("No Haxe target"))
+            });
+        assert_eq!(warning, missing, "{hxml}: {:?}", session.diagnostics);
+    }
+}
+
+#[test]
+fn missing_target_warning_is_cleared_when_configuration_adds_a_target() {
+    let mut session = Session::start(&[
+        ("build.hxml", "-cp .\n"),
+        ("Main.hx", "class Main { static function main() {} }"),
+    ]);
+    session.open("Main.hx");
+    assert!(
+        session
+            .diagnostics
+            .iter()
+            .any(|note| note["uri"] == session.uri("build.hxml")
+                && note["diagnostics"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|d| d["severity"] == 2)),
+        "{:?}",
+        session.diagnostics
+    );
+    std::fs::write(session.root.join("build.hxml"), "-cp .\n--js app.js\n").unwrap();
+    session.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes":[{"uri":session.uri("build.hxml"),"type":2}]}),
+    );
+    session.request("workspace/symbol", json!({"query":"Main"}));
+    let last = session
+        .diagnostics
+        .iter()
+        .rev()
+        .find(|note| note["uri"] == session.uri("build.hxml"))
+        .unwrap();
+    assert_eq!(last["diagnostics"], json!([]), "{last}");
+}
+
+#[test]
 fn analysis_status_and_diagnostics_track_document_versions() {
     let source = "class Main { static function main() {} }";
     let mut s = Session::start(&[("Main.hx", source)]);
@@ -2845,22 +2924,36 @@ fn initialization_failures_belong_to_configuration_and_survive_cache_reuse() {
             .diagnostics
             .iter()
             .any(|update| update["uri"] == config
-                && !update["diagnostics"].as_array().unwrap().is_empty()),
+                && update["diagnostics"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|diagnostic| {
+                        diagnostic["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains("setup failed"))
+                    })),
         "{:?}",
         restarted.diagnostics
     );
     let uri = restarted.uri("Main.hx");
     restarted.notify("textDocument/didClose", json!({"textDocument":{"uri":uri}}));
     restarted.request("workspace/symbol", json!({"query":"Main"}));
+    let remaining = restarted
+        .diagnostics
+        .iter()
+        .rfind(|update| update["uri"] == config)
+        .unwrap()["diagnostics"]
+        .as_array()
+        .unwrap();
+    assert_eq!(remaining.len(), 1, "{remaining:?}");
+    assert_eq!(remaining[0]["severity"], 2, "{remaining:?}");
     assert!(
-        restarted
-            .diagnostics
-            .iter()
-            .rfind(|update| update["uri"] == config)
-            .unwrap()["diagnostics"]
-            .as_array()
+        remaining[0]["message"]
+            .as_str()
             .unwrap()
-            .is_empty()
+            .contains("No Haxe target"),
+        "{remaining:?}"
     );
 }
 

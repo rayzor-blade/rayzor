@@ -244,6 +244,7 @@ fn serve_worker(
         .and_then(|ms| ms.as_u64())
         .map_or(MACRO_BUDGET, std::time::Duration::from_millis);
     ctx.configure_editor_cache();
+    publish_configuration_warnings(connection, &mut ctx);
     for problem in &ctx.config_problems {
         log_message(connection, problem);
     }
@@ -677,11 +678,13 @@ fn handle_notification(
             }
         }
         ctx.reload_workspace_config();
+        publish_configuration_warnings(conn, ctx);
         for uri in ctx.open_files.keys() {
             mark(uri);
         }
     } else if cast_notification::<lsp_types::notification::DidChangeConfiguration>(&not).is_some() {
         ctx.reload_workspace_config();
+        publish_configuration_warnings(conn, ctx);
         for uri in ctx.open_files.keys() {
             mark(uri);
         }
@@ -694,6 +697,7 @@ fn handle_notification(
         let uri = params.text_document.uri.as_str();
         if !params.text_document.uri.path().as_str().ends_with(".hx") {
             ctx.reload_workspace_config();
+            publish_configuration_warnings(conn, ctx);
             for uri in ctx.open_files.keys() {
                 mark(uri);
             }
@@ -715,6 +719,7 @@ fn handle_notification(
             .any(|change| !change.uri.path().as_str().ends_with(".hx"))
         {
             ctx.reload_workspace_config();
+            publish_configuration_warnings(conn, ctx);
             for uri in ctx.open_files.keys() {
                 mark(uri);
             }
@@ -1063,6 +1068,13 @@ where
 {
     let not = lsp_server::Notification::new(N::METHOD.to_string(), params);
     let _ = conn.sender.send(Message::Notification(not));
+}
+
+fn publish_configuration_warnings(conn: &Connection, ctx: &mut LspContext) {
+    let warnings = ctx.configuration_warnings();
+    let owner = crate::context::file_uri(&ctx.root.to_string_lossy());
+    let updates = ctx.update_diagnostics(&owner, warnings);
+    publish_diagnostic_updates(conn, updates, None);
 }
 
 fn publish_diagnostic_updates(

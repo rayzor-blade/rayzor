@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Options {
     pub rayzor: bool,
+    pub hxml_target_missing: bool,
     pub extra_defines: Vec<String>,
     pub native_libs: Vec<PathBuf>,
     pub packages: Vec<PathBuf>,
@@ -320,7 +321,21 @@ fn load_project(root: &Path, explicit_hxml: Option<&str>) -> Settings {
 fn apply_hxml(settings: &mut Settings, path: &Path) -> Vec<compiler::haxelib::Dependency> {
     settings.options.configuration_files.push(path.into());
     let build = match compiler::hxml::HxmlConfig::builds_from_file(path) {
-        Ok(builds) => builds.into_iter().next().unwrap_or_default(),
+        Ok(builds) => {
+            let mut build = builds.into_iter().next().unwrap_or_default();
+            if settings.hxml.as_deref() == Some(path) && !settings.options.rayzor {
+                if build.target.is_none()
+                    && build.libraries.iter().any(|spec| {
+                        compiler::haxelib::Dependency::parse(spec, &settings.root).name
+                            == "hashlink"
+                    })
+                {
+                    build.target = Some("hl".into());
+                }
+                settings.options.hxml_target_missing = build.target.is_none();
+            }
+            build
+        }
         Err(message) => {
             settings.problems.push(message);
             return Vec::new();
@@ -503,6 +518,67 @@ fn prepare_packages(settings: &mut Settings) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hxml_target_is_inferred_only_from_hashlink_and_respects_explicit_targets() {
+        let root = std::env::temp_dir().join(format!("rayzor-hxml-target-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("haxelib.json"),
+            r#"{"name":"hashlink","version":"1.0.0","classPath":"."}"#,
+        )
+        .unwrap();
+        for (source, expected_hl, missing) in [
+            ("-cp .\n", false, true),
+            ("-cp .\n-L hashlink\n", true, false),
+            ("-cp .\n-L hashlink:1.0.0\n--no-output\n", true, false),
+            ("-cp .\n-L hashlink\n--js app.js\n", false, false),
+            ("-cp .\n--no-output\n", false, true),
+            ("-cp .\n--each\n-main One\n--next\n-main Two\n", false, true),
+        ] {
+            std::fs::write(root.join("build.hxml"), source).unwrap();
+            let settings = super::load(&root, None).remove(0);
+            assert_eq!(
+                settings
+                    .options
+                    .extra_defines
+                    .iter()
+                    .any(|define| define == "hl"),
+                expected_hl,
+                "{source}: {:?}",
+                settings.options.extra_defines
+            );
+            assert_eq!(settings.options.hxml_target_missing, missing, "{source}");
+        }
+        std::fs::write(root.join("build.hxml"), "--js app.js\n").unwrap();
+        std::fs::write(root.join("extraParams.hxml"), "-L hashlink\n").unwrap();
+        let mut settings = super::load(&root, None).remove(0);
+        super::apply_hxml(&mut settings, &root.join("extraParams.hxml"));
+        assert!(
+            !settings
+                .options
+                .extra_defines
+                .iter()
+                .any(|define| define == "hl")
+        );
+        assert!(!settings.options.hxml_target_missing);
+        std::fs::write(root.join("build.hxml"), "-cp .\n-L hashlink\n").unwrap();
+        std::fs::write(
+            root.join("rayzor.toml"),
+            "[project]\nname = 'native'\nhxml = 'build.hxml'\n",
+        )
+        .unwrap();
+        let settings = super::load(&root, None).remove(0);
+        assert!(
+            !settings
+                .options
+                .extra_defines
+                .iter()
+                .any(|define| define == "hl")
+        );
+        assert!(!settings.options.hxml_target_missing);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn manifest_disables_delegated_flags_and_keeps_values_and_target() {
         let root =
