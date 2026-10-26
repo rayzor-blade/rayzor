@@ -649,15 +649,19 @@ fn test_binary_operations_comprehensive() {
         loc,
     )
     .unwrap();
-    assert_eq!(
-        range,
-        MacroValue::Array(Arc::new(vec![
-            MacroValue::Int(0),
-            MacroValue::Int(1),
-            MacroValue::Int(2),
-            MacroValue::Int(3),
-            MacroValue::Int(4),
-        ]))
+    let mut interpreter = MacroInterpreter::new(MacroRegistry::new());
+    interpreter.define_variable("range", range);
+    let probe = parse(
+        "class Probe {static function main() {var sum=0; for (value in range) sum+=value; return sum;}}",
+    );
+    let parser::TypeDeclaration::Class(class) = &probe.declarations[0] else {
+        panic!()
+    };
+    let parser::ClassFieldKind::Function(function) = &class.fields[0].kind else {
+        panic!()
+    };
+    assert!(
+        matches!(interpreter.eval_expr(function.body.as_ref().unwrap()),Err(MacroError::Return {value:Some(value)}) if *value==MacroValue::Int(10))
     );
 
     // Division by zero
@@ -1510,4 +1514,332 @@ fn diagnostic_context_does_not_replace_the_live_typer() {
             assert_eq!(&source[call.span.start..call.span.end], "probe()");
         }
     }
+}
+
+#[test]
+fn typed_macro_helpers_convert_abstracts_across_closures_and_inheritance() {
+    let source = r#"
+import haxe.macro.Expr;
+typedef TemplateData = {text:String};
+@:forward abstract Template(TemplateData) from TemplateData {
+    @:from static function fromExpr(e:Expr):Template {
+        switch e { case macro @:markup $body: e = body; case _: }
+        return switch e.expr {
+            case EConst(CString(text)): {text:text};
+            case _: throw "a template must contain text";
+        }
+    }
+}
+class Base {
+    var initial:Int;
+    public function new(source:Template) initial = source.text.length;
+    public function measure(source:Template):Int return initial + source.text.length;
+}
+class Worker extends Base { public function new(source:Template) {super(source);} }
+class Builder {
+    public static macro function make(template:Expr):Expr {
+        function local(source:Template):Int {
+            var worker = new Worker(template);
+            return source.text.length + worker.measure(template);
+        }
+        return macro $v{local(template)};
+    }
+}
+class Main { static function main() return Builder.make(<div/>); }
+"#;
+    let file = parse(source);
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let mut expander = MacroExpander::with_class_registry(classes);
+    let result = expander.expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert!(
+        result
+            .expansion_origins
+            .iter()
+            .any(|origin| origin.expanded_text.as_deref() == Some("18")),
+        "{:?}",
+        result.expansion_origins
+    );
+}
+
+#[test]
+fn quoted_loop_bindings_splice_their_identifier() {
+    let source = r#"
+class Builder {
+    public static macro function make() {
+        var name = "piece";
+        return macro for ($i{name} in [1, 2]) $i{name};
+    }
+}
+class Main { static function main() Builder.make(); }
+"#;
+    let result = expander::expand_macros(parse(source));
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let expansion = result.expansion_origins[0].expanded_text.as_ref().unwrap();
+    assert!(
+        expansion.contains("for (piece in") && expansion.contains(") piece"),
+        "{expansion}"
+    );
+}
+
+#[test]
+fn generated_constructor_positions_follow_macro_arguments() {
+    let source = r#"
+import haxe.macro.Expr;
+import haxe.macro.Context;
+class Builder {
+    public static macro function make(e:Expr):Expr {
+        var position = Context.getPosInfos(e.pos);
+        if (position.file != "test.hx") throw "lost caller filename";
+        var tag = Context.makePosition({file:position.file, min:position.min + 1, max:position.min + 10});
+        return macro @:pos(tag) new Widget();
+    }
+}
+class Main { static function main() return Builder.make(<left-card/>); }
+"#;
+    let file = parse(source);
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let origin = &result.expansion_origins[0];
+    assert_eq!(
+        origin.expanded_span.start,
+        source.find("left-card").unwrap()
+    );
+    assert_eq!(origin.expanded_span.end, origin.expanded_span.start + 9);
+    assert!(
+        origin
+            .expanded_text
+            .as_ref()
+            .unwrap()
+            .contains("new Widget")
+    );
+}
+
+#[test]
+fn macro_methods_isolate_locals_and_preserve_shared_receivers() {
+    let source = r#"
+class Counter {
+    var pos:Int = 1;
+    public function new() {}
+    public function bump():Void pos++;
+    public function read():Int return pos;
+    public function captured():Void->Int return () -> pos;
+}
+class Tools { public static function mutate(box:{n:Int}):Void box.n += 1; }
+class Builder {
+    public static macro function make() {
+        var counter = new Counter();
+        var pos = 100;
+        counter.bump();
+        var read = counter.captured();
+        var box = {n:1};
+        Tools.mutate(box);
+        return macro $v{pos + counter.read() + read() + box.n};
+    }
+}
+class Main { static function main() return Builder.make(); }
+"#;
+    let file = parse(source);
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result.expansion_origins[0].expanded_text.as_deref(),
+        Some("106")
+    );
+}
+
+#[test]
+fn macro_regex_matches_and_captures_without_enum_pattern_dispatch() {
+    let source = r#"
+class Builder {
+    public static macro function make() {
+        var lower = ~/[A-Z]/;
+        if (lower.match("div")) throw "lowercase tag rejected";
+        var capture = new EReg("([a-z]+)-([0-9]+)", "");
+        if (!capture.match("<menu-42/>")) throw "missing match";
+        var position = capture.matchedPos();
+        return macro $v{capture.matched(1) + ":" + capture.matched(2) + ":" + position.pos + ":" + position.len};
+    }
+}
+class Main { static function main() return Builder.make(); }
+"#;
+    let result = expander::expand_macros(parse(source));
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result.expansion_origins[0].expanded_text.as_deref(),
+        Some("\"menu:42:1:7\"")
+    );
+}
+
+#[test]
+fn macro_parent_classes_resolve_through_enclosing_packages() {
+    let parent = parser::parse_haxe_file("outer/Base.hx", "package outer; class Base { var value:Int; public function new(n:Int) value = n; public function read():Int return value; }", false).unwrap();
+    let child = parser::parse_haxe_file(
+        "outer/inner/Child.hx",
+        "package outer.inner; class Child extends Base { public function new() super(7); }",
+        false,
+    )
+    .unwrap();
+    let file = parse(
+        "class Builder { public static macro function make() return macro $v{new outer.inner.Child().read()}; } class Main { static function main() return Builder.make(); }",
+    );
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_files(&[parent, child]);
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result.expansion_origins[0].expanded_text.as_deref(),
+        Some("7")
+    );
+}
+
+#[test]
+fn missing_macro_typer_suspends_before_catch_fallback() {
+    let source = r#"
+import haxe.macro.Context;
+class Builder {
+    public static macro function make() {
+        var type = try Context.getType("Widget") catch (_:Dynamic) null;
+        if (type == null) throw "unknown widget";
+        return macro new Widget();
+    }
+}
+class Main { static function main() return Builder.make(); }
+"#;
+    let result = expander::expand_macros(parse(source));
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(result.deferred.len(), 1);
+}
+
+#[test]
+fn generic_abstract_operators_select_the_matching_operand_order() {
+    let source = r#"
+abstract Continue(Dynamic) {
+    @:op(a + b) static function then<A>(e:Continue, a:A):A return a;
+    @:op(a + b) static function before<A>(a:A, e:Continue):A return a;
+}
+class Builder {
+    public static macro function make() {
+        var next:Continue = null;
+        return macro $v{(next + "left") + ("right" + next)};
+    }
+}
+class Main { static function main() return Builder.make(); }
+"#;
+    let file = parse(source);
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result.expansion_origins[0].expanded_text.as_deref(),
+        Some("\"leftright\"")
+    );
+}
+
+#[test]
+fn macro_position_values_admit_declared_extension_helpers() {
+    let source = r#"
+using PositionTools;
+class PositionTools {
+    public static function sanitize(p:haxe.macro.Expr.Position) return p;
+}
+class Builder {
+    public static macro function make(e:haxe.macro.Expr) return macro $v{haxe.macro.Context.getPosInfos(e.pos.sanitize()).min};
+}
+class Main { static function main() return Builder.make(7); }
+"#;
+    let file = parse(source);
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result.expansion_origins[0].expanded_text.as_deref(),
+        Some(source.rfind('7').unwrap().to_string().as_str())
+    );
+}
+
+#[test]
+fn macro_typed_catches_match_the_thrown_class() {
+    let source = r#"
+class Case { public function new() {} }
+class Problem { public function new() {} }
+class Builder {
+    public static macro function make() {
+        var answer = try { throw new Problem(); 0; } catch (_:Case) 1 catch (_:Problem) 2;
+        return macro $v{answer};
+    }
+}
+class Main { static function main() return Builder.make(); }
+"#;
+    let file = parse(source);
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result.expansion_origins[0].expanded_text.as_deref(),
+        Some("2")
+    );
+}
+
+#[test]
+fn abstract_inequality_negates_declared_equality() {
+    let source = r#"
+typedef Data = {value:String};
+@:forward abstract Slice(Data) from Data {
+    @:op(a == b) static function equals(a:Slice, b:String):Bool return a.value == b;
+}
+class Builder {
+    public static macro function make() {
+        var slice:Slice = {value:"menu"};
+        return macro $v{(slice == "menu") && !(slice != "menu") && slice != "other"};
+    }
+}
+class Main { static function main() return Builder.make(); }
+"#;
+    let file = parse(source);
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result.expansion_origins[0].expanded_text.as_deref(),
+        Some("true")
+    );
+}
+
+#[test]
+fn macro_optional_enum_payloads_and_structural_alternatives_match() {
+    let source = r#"
+enum OptionalValue { Value(text:String, ?kind:String); }
+class Builder {
+    public static macro function make() {
+        var expr = EConst(CString("class"));
+        var text = switch expr { case EConst(CString(s, _)): s; case _: throw "lost optional Constant payload"; }
+        var optional = Value(text);
+        var valid = switch optional { case Value("class", null): true; case _: false; }
+        var tag = {name:"Signal"};
+        var reactive = switch tag { case {name:"Signal" | "Computed"}: true; case _: false; }
+        return macro $v{valid && reactive};
+    }
+}
+class Main { static function main() return Builder.make(); }
+"#;
+    let file = parse(source);
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result.expansion_origins[0].expanded_text.as_deref(),
+        Some("true")
+    );
 }

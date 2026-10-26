@@ -1781,6 +1781,7 @@ mod tests {
             optional: false,
             rest: false,
             default_value: None,
+            type_hint: None,
         }];
 
         let chunk = BytecodeCompiler::compile("test", &params, &body).unwrap();

@@ -1793,6 +1793,7 @@ pub struct AstLowering<'a> {
     class_value_bindings: BTreeMap<SymbolId, SymbolId>,
     /// Keep editor analysis usable after a macro error, retaining its diagnostic.
     pub(crate) recover_macro_errors: bool,
+    pub(crate) partial_typed_file: Option<TypedFile>,
     pub(crate) editor_macro_diagnostics: Vec<crate::macro_system::MacroDiagnostic>,
     failed_editor_macros: std::collections::BTreeSet<(usize, usize)>,
     /// Deferred call sites by (span.start, span.end), mapped to the registry

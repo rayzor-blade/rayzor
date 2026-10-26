@@ -605,6 +605,7 @@ impl CompilationUnit {
 
         let t_ast_lower = profile_timer(self.config.profile_typecheck);
         let lowered = lowering.lower_file(ast_file);
+        let partial = lowering.partial_typed_file.take();
         self.macro_diagnostics
             .append(&mut lowering.editor_macro_diagnostics);
         file_ast_ms = finish_profile_ms(&mut self.typecheck_timings.ast_lower_ms, t_ast_lower);
@@ -643,17 +644,28 @@ impl CompilationUnit {
                         + 1) as u32,
                     offset as u32,
                 );
+                for wrapper in &mut self.macro_expansions {
+                    if wrapper.call_site.file_id == file_id_u32
+                        && wrapper.expanded_span == origin.call_span
+                        && wrapper.expanded_text.is_none()
+                    {
+                        wrapper.expanded_span = origin.expanded_span;
+                        wrapper.expanded_text = origin.expanded_text.clone();
+                    }
+                }
                 self.macro_expansions.push(origin);
             }
         }
-        let typed_file = lowered.map_err(|e| vec![e.to_compilation_error()])?;
-
         // Normal (non-safety) warnings: untyped empty array literals whose
         // element type stayed uncertain (never bound by a push/assign), so they
         // remain Array<Dynamic>. Always emitted — unlike ownership/safety
         // warnings these are not gated by `emit_safety_warnings`. (Last use of
         // `lowering` so its &mut borrow ends before the diagnostics push.)
         let array_warnings = lowering.take_empty_array_warnings();
+        if let Some(partial) = &partial {
+            self.record_source_symbols(partial, filename, source);
+        }
+        let typed_file = lowered.map_err(|e| vec![e.to_compilation_error()])?;
         for (loc, msg) in array_warnings {
             let pos = diagnostics::SourcePosition::new(
                 loc.line.max(1) as usize,
@@ -678,24 +690,8 @@ impl CompilationUnit {
             });
         }
 
-        crate::tast::definition_locations::record_definition_locations(
-            &typed_file,
-            source,
-            &mut self.symbol_table,
-            &self.string_interner,
-        );
-
-        // Send/Sync validation — check thread safety constraints (user files only)
+        self.record_source_symbols(&typed_file, filename, source);
         let is_stdlib = filename.contains("haxe-std/") || filename.contains("haxe-std\\");
-        if self.config.record_references && !is_stdlib {
-            let references = crate::tast::references::collect_references(
-                &typed_file,
-                source,
-                &self.symbol_table,
-                &self.string_interner,
-            );
-            self.symbol_references.extend(references);
-        }
         let t_send_sync = profile_timer(self.config.profile_typecheck);
         if !is_stdlib {
             use crate::tast::send_sync_validator::SendSyncValidator;
@@ -1381,6 +1377,28 @@ impl CompilationUnit {
                 .loaded_import_haxe_files
                 .iter()
                 .any(haxe_file_source_has_macro_hook)
+    }
+
+    fn record_source_symbols(&mut self, typed_file: &TypedFile, filename: &str, source: &str) {
+        crate::tast::definition_locations::record_definition_locations(
+            typed_file,
+            source,
+            &mut self.symbol_table,
+            &self.string_interner,
+        );
+
+        // Send/Sync validation — check thread safety constraints (user files only)
+        let is_stdlib = filename.contains("haxe-std/") || filename.contains("haxe-std\\");
+        if self.config.record_references && !is_stdlib {
+            let references = crate::tast::references::collect_references(
+                typed_file,
+                source,
+                &self.symbol_table,
+                &self.string_interner,
+                &self.type_table.borrow(),
+            );
+            self.symbol_references.extend(references);
+        }
     }
 
     pub(crate) fn compile_user_ast_collecting_errors(

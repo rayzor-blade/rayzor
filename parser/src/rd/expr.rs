@@ -998,18 +998,28 @@ impl<'a, 'b> RdParser<'a, 'b> {
         })
     }
 
+    fn parse_loop_binding(&mut self) -> Result<String, ParseError> {
+        let name = self.stream.current_text().to_string();
+        self.stream.advance();
+        if name == "$i" && self.stream.eat(TokenKind::LBrace).is_some() {
+            let start = self.stream.current_offset();
+            self.parse_expression()?;
+            let end = self.stream.expect(TokenKind::RBrace)?;
+            return Ok(format!("$i{{{}}}", &self.source[start..end.start]));
+        }
+        Ok(name)
+    }
+
     fn parse_for_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.stream.current_offset();
         self.stream.expect(TokenKind::KwFor)?;
         self.stream.expect(TokenKind::LParen)?;
-        let var_name = self.stream.current_text().to_string();
-        self.stream.advance();
+        let var_name = self.parse_loop_binding()?;
 
         // Check for key => value syntax: `for (key => value in map)`
         let key_var = if self.stream.eat(TokenKind::FatArrow).is_some() {
             let key = var_name.clone();
-            let value_name = self.stream.current_text().to_string();
-            self.stream.advance();
+            let value_name = self.parse_loop_binding()?;
             // var_name becomes value, key_var is the key
             self.stream.expect(TokenKind::KwIn)?;
             let iter = self.parse_expression()?;

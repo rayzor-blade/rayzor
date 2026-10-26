@@ -115,6 +115,7 @@ impl<'a> AstLowering<'a> {
             macro_private_access: false,
             class_value_bindings: BTreeMap::new(),
             recover_macro_errors: false,
+            partial_typed_file: None,
             editor_macro_diagnostics: Vec::new(),
             failed_editor_macros: Default::default(),
             deferred_macro_calls: BTreeMap::new(),

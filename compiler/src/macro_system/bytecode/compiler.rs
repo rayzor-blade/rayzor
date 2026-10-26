@@ -1109,6 +1109,7 @@ impl BytecodeCompiler {
                 optional: p.optional,
                 rest: p.rest,
                 default_value: p.default_value.clone(),
+                type_hint: p.type_hint.clone(),
             })
             .collect();
 
@@ -1137,6 +1138,7 @@ impl BytecodeCompiler {
                 optional: false,
                 rest: false,
                 default_value: None,
+                type_hint: None,
             })
             .collect();
 

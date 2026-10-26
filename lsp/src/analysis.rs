@@ -164,9 +164,9 @@ impl FileSymbolIndex {
             .filter(|r| r.at.file_id == file_id && r.at.line > 0 && r.at.column > 0)
         {
             let position = (r.at.line, column(r.at.line, r.at.byte_offset, r.at.column));
-            let len = symbol_table
-                .get_symbol(r.symbol)
-                .and_then(|symbol| interner.get(symbol.name))
+            let offset = r.at.byte_offset as usize;
+            let len = source
+                .get(offset..offset.saturating_add(r.len as usize))
                 .map_or(r.len, |name| name.encode_utf16().count() as u32);
             names.insert(position, (len, r.symbol));
             if r.type_id != TypeId::invalid() {

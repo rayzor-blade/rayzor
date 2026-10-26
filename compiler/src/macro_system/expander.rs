@@ -90,6 +90,7 @@ pub struct MacroExpander {
     max_iterations: usize,
     /// Tracked expansion origins for diagnostics
     expansion_origins: Vec<ExpansionOrigin>,
+    typing_origins: std::rc::Rc<std::cell::RefCell<Vec<ExpansionOrigin>>>,
     /// Memoization cache: (macro_name, args_hash) -> expanded Expr
     call_cache: BTreeMap<(String, u64), Expr>,
     failed_call: Option<SourceLocation>,
@@ -125,6 +126,7 @@ impl MacroExpander {
             expansions_count: 0,
             max_iterations: 100,
             expansion_origins: Vec::new(),
+            typing_origins: Default::default(),
             call_cache: BTreeMap::new(),
             failed_call: None,
             deferred: Vec::new(),
@@ -148,6 +150,7 @@ impl MacroExpander {
             expansions_count: 0,
             max_iterations: 100,
             expansion_origins: Vec::new(),
+            typing_origins: Default::default(),
             call_cache: BTreeMap::new(),
             failed_call: None,
             deferred: Vec::new(),
@@ -171,6 +174,7 @@ impl MacroExpander {
             expansions_count: 0,
             max_iterations: 100,
             expansion_origins: Vec::new(),
+            typing_origins: Default::default(),
             call_cache: BTreeMap::new(),
             failed_call: None,
             deferred: Vec::new(),
@@ -212,7 +216,9 @@ impl MacroExpander {
     }
 
     pub(crate) fn take_expansion_origins(&mut self) -> Vec<ExpansionOrigin> {
-        std::mem::take(&mut self.expansion_origins)
+        let mut origins = std::mem::take(&mut self.expansion_origins);
+        origins.extend(self.typing_origins.take());
+        origins
     }
 
     pub(crate) fn fork_for_typing(&self) -> Self {
@@ -228,6 +234,7 @@ impl MacroExpander {
         fork.file_imports = self.file_imports.clone();
         fork.source_file = self.source_file.clone();
         fork.deferred_builds = self.deferred_builds;
+        fork.typing_origins = self.typing_origins.clone();
         fork
     }
 
@@ -615,7 +622,21 @@ impl MacroExpander {
                 self.expansion_origins[index].expanded_text.as_deref() == Some(&source)
             });
         }
-        let (expanded, changed) = self.walk_expr_inner(expr)?;
+        let span = expr.span;
+        let (expanded, changed) = match self.walk_expr_inner(expr) {
+            Ok(result) => result,
+            Err(error) => {
+                for &index in &origins {
+                    self.expansion_origins[index].expanded_text = None;
+                }
+                return Err(error);
+            }
+        };
+        if !changed && self.deferred.iter().any(|call| call.span == span) {
+            for &index in &origins {
+                self.expansion_origins[index].expanded_text = None;
+            }
+        }
         if changed && !origins.is_empty() {
             let source = expanded_expr_source(&expanded);
             for index in origins {
@@ -1322,7 +1343,13 @@ impl MacroExpander {
         // but nested macro calls have already been expanded above.
         let arg_values: Vec<MacroValue> = expanded_args
             .iter()
-            .map(|a| MacroValue::Expr(Arc::new(a.clone())))
+            .map(|argument| {
+                let value = MacroValue::Expr(Arc::new(argument.clone()));
+                self.source_file.as_deref().map_or_else(
+                    || value.clone(),
+                    |file| super::ast_bridge::with_source_positions(&value, file),
+                )
+            })
             .collect();
 
         // Check argument count
@@ -1820,6 +1847,11 @@ impl MacroExpander {
         unsafe { self.context.set_typer(typer) };
         let result = self.expand_macro_call(name, args, call);
         self.context.clear_typer();
+        // Reentrant typing uses a fork while its parent's expander is borrowed.
+        // Its completed expansions still belong to the calling source file.
+        self.typing_origins
+            .borrow_mut()
+            .append(&mut self.expansion_origins);
         result
     }
 }

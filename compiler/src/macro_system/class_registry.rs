@@ -16,6 +16,8 @@ pub struct MethodInfo {
     pub params: Vec<FunctionParam>,
     pub body: Arc<Expr>,
     pub is_static: bool,
+    pub return_type: Option<parser::Type>,
+    pub owner: String,
     pub location: crate::tast::SourceLocation,
 }
 
@@ -38,6 +40,9 @@ pub struct ClassInfo {
     pub instance_vars: Vec<FieldVarInfo>,
     pub static_vars: Vec<FieldVarInfo>,
     pub imports: Arc<BTreeMap<String, String>>,
+    pub parent: Option<String>,
+    pub abstract_decl: Option<Arc<parser::AbstractDecl>>,
+    pub field_types: BTreeMap<String, parser::Type>,
 }
 
 pub(crate) struct GenericBuildInfo {
@@ -56,7 +61,7 @@ struct TypeDefinition {
     fields: Vec<FieldDefinition>,
     is_abstract: bool,
     is_enum_abstract: bool,
-    constructors: BTreeMap<String, usize>,
+    constructors: BTreeMap<String, (usize, usize)>,
 }
 
 struct FieldDefinition {
@@ -78,6 +83,8 @@ pub type MacroStatics = Arc<std::sync::Mutex<BTreeMap<String, super::value::Macr
 pub struct ClassRegistry {
     /// qualified_name → ClassInfo
     classes: BTreeMap<String, ClassInfo>,
+    pub(super) using_members: BTreeMap<String, Vec<String>>,
+    pub(super) aliases: BTreeMap<String, (parser::Type, Arc<BTreeMap<String, String>>)>,
     /// short_name → qualified_name (for unambiguous lookups)
     short_name_index: BTreeMap<String, String>,
     type_definitions: BTreeMap<String, Arc<TypeDefinition>>,
@@ -96,6 +103,8 @@ impl ClassRegistry {
     pub fn new() -> Self {
         Self {
             classes: BTreeMap::new(),
+            aliases: BTreeMap::new(),
+            using_members: BTreeMap::new(),
             short_name_index: BTreeMap::new(),
             type_definitions: BTreeMap::new(),
             enum_constants: BTreeMap::new(),
@@ -137,7 +146,19 @@ impl ClassRegistry {
     /// The static variable `name` declared by `class_name`, with the class's
     /// qualified name.
     pub fn find_static_var(&self, class_name: &str, name: &str) -> Option<(String, Arc<Expr>)> {
-        let (qualified, init) = if let Some(class) = self.find_class(class_name) {
+        let enum_value = self
+            .type_definitions
+            .get(class_name)
+            .and_then(|definition| {
+                definition
+                    .fields
+                    .iter()
+                    .find(|field| field.is_enum_value && field.name == name)
+                    .map(|field| (definition.qualified_name.clone(), field.init_expr.clone()))
+            });
+        let (qualified, init) = if let Some(value) = enum_value {
+            value
+        } else if let Some(class) = self.find_class(class_name) {
             let var = class.static_vars.iter().find(|v| v.name == name)?;
             (class.qualified_name.clone(), var.init_expr.clone())
         } else {
@@ -194,7 +215,7 @@ impl ClassRegistry {
 
     /// Register all classes from a single HaxeFile.
     pub fn register_file(&mut self, file: &HaxeFile) {
-        let mut file_imports = super::interpreter::build_import_map(&file.imports);
+        let mut file_imports = super::interpreter::build_file_import_map(file);
         let package_prefix = match &file.package {
             Some(pkg) if !pkg.path.is_empty() => format!("{}.", pkg.path.join(".")),
             _ => String::new(),
@@ -215,6 +236,29 @@ impl ClassRegistry {
             };
             file_imports.insert(name.clone(), format!("{package_prefix}{name}"));
         }
+        let members = file
+            .declarations
+            .iter()
+            .filter_map(|declaration| match declaration {
+                TypeDeclaration::Class(class) => Some(format!("{package_prefix}{}", class.name)),
+                TypeDeclaration::Abstract(class) => Some(format!("{package_prefix}{}", class.name)),
+                TypeDeclaration::Typedef(alias) => match &alias.type_def {
+                    parser::Type::Path { path, .. } => Some(
+                        path.package
+                            .iter()
+                            .chain(std::iter::once(&path.name))
+                            .chain(path.sub.iter())
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("."),
+                    ),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        self.using_members
+            .insert(format!("{package_prefix}{module_name}"), members);
         let file_imports = Arc::new(file_imports);
         for decl in &file.declarations {
             let (name, access, metadata, fields, is_abstract, is_enum_abstract) = match decl {
@@ -297,7 +341,21 @@ impl ClassRegistry {
                     TypeDeclaration::Enum(declaration) => declaration
                         .constructors
                         .iter()
-                        .map(|constructor| (constructor.name.clone(), constructor.params.len()))
+                        .map(|constructor| {
+                            (
+                                constructor.name.clone(),
+                                (
+                                    constructor.params.len(),
+                                    constructor
+                                        .params
+                                        .iter()
+                                        .filter(|param| {
+                                            !param.optional && param.default_value.is_none()
+                                        })
+                                        .count(),
+                                ),
+                            )
+                        })
                         .collect(),
                     _ => BTreeMap::new(),
                 },
@@ -370,7 +428,7 @@ impl ClassRegistry {
                     .or_default()
                     .insert(definition.qualified_name.clone());
             }
-            for (name, &arity) in &definition.constructors {
+            for (name, &(arity, _)) in &definition.constructors {
                 self.enum_constructors
                     .entry(name.clone())
                     .or_default()
@@ -387,7 +445,32 @@ impl ClassRegistry {
         }
 
         for decl in &file.declarations {
-            if let TypeDeclaration::Class(class) = decl {
+            if let TypeDeclaration::Typedef(alias) = decl {
+                self.aliases.insert(
+                    format!("{package_prefix}{}", alias.name),
+                    (alias.type_def.clone(), file_imports.clone()),
+                );
+            }
+            let (class, abstract_decl) = match decl {
+                TypeDeclaration::Class(class) => (std::borrow::Cow::Borrowed(class), None),
+                TypeDeclaration::Abstract(decl) => (
+                    std::borrow::Cow::Owned(parser::ClassDecl {
+                        name: decl.name.clone(),
+                        fields: decl.fields.clone(),
+                        meta: decl.meta.clone(),
+                        access: decl.access,
+                        modifiers: decl.modifiers.clone(),
+                        type_params: decl.type_params.clone(),
+                        extends: None,
+                        implements: vec![],
+                        span: decl.span,
+                        is_abstract: false,
+                    }),
+                    Some(Arc::new(decl.clone())),
+                ),
+                _ => continue,
+            };
+            {
                 let qualified_name = format!("{}{}", package_prefix, class.name);
                 if class
                     .meta
@@ -397,14 +480,14 @@ impl ClassRegistry {
                     self.generic_builds.insert(
                         qualified_name.clone(),
                         Arc::new(GenericBuildInfo {
-                            class: class.clone(),
+                            class: class.as_ref().clone(),
                             pack: file
                                 .package
                                 .as_ref()
                                 .map(|p| p.path.clone())
                                 .unwrap_or_default(),
                             module: module_name.to_string(),
-                            imports: super::interpreter::build_import_map(&file.imports),
+                            imports: super::interpreter::build_file_import_map(file),
                         }),
                     );
                 }
@@ -418,6 +501,45 @@ impl ClassRegistry {
                     instance_vars: Vec::new(),
                     static_vars: Vec::new(),
                     imports: file_imports.clone(),
+                    parent: class.extends.as_ref().and_then(|ty| match ty {
+                        parser::Type::Path { path, .. } => Some(if path.package.is_empty() {
+                            file_imports
+                                .get(&path.name)
+                                .cloned()
+                                .unwrap_or_else(|| format!("{package_prefix}{}", path.name))
+                        } else {
+                            path.package
+                                .iter()
+                                .chain(std::iter::once(&path.name))
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(".")
+                        }),
+                        _ => None,
+                    }),
+                    abstract_decl,
+                    field_types: class
+                        .fields
+                        .iter()
+                        .filter_map(|field| match &field.kind {
+                            ClassFieldKind::Var {
+                                name,
+                                type_hint: Some(ty),
+                                ..
+                            }
+                            | ClassFieldKind::Final {
+                                name,
+                                type_hint: Some(ty),
+                                ..
+                            }
+                            | ClassFieldKind::Property {
+                                name,
+                                type_hint: Some(ty),
+                                ..
+                            } => Some((name.clone(), ty.clone())),
+                            _ => None,
+                        })
+                        .collect(),
                 };
 
                 for field in &class.fields {
@@ -441,6 +563,8 @@ impl ClassRegistry {
                                 params: func.params.clone(),
                                 body,
                                 is_static,
+                                return_type: func.return_type.clone(),
+                                owner: qualified_name.clone(),
                                 location: super::errors::location_in_source(
                                     file.input.as_deref(),
                                     func.span,
@@ -525,6 +649,19 @@ impl ClassRegistry {
         view.insert(
             "module".to_string(),
             V::String(Arc::from(definition.module.as_str())),
+        );
+        view.insert(
+            "pack".to_string(),
+            V::Array(Arc::new(
+                definition
+                    .module
+                    .rsplit_once('.')
+                    .map_or("", |(pack, _)| pack)
+                    .split('.')
+                    .filter(|part| !part.is_empty())
+                    .map(V::from_str)
+                    .collect(),
+            )),
         );
         let mut metadata = metadata_entries(&definition.metadata);
         if let Some(V::Object(meta)) = view.get("meta")
@@ -638,6 +775,14 @@ impl ClassRegistry {
             .flatten()
     }
 
+    pub(crate) fn enum_constructor_required(&self, owner: &str, name: &str) -> Option<usize> {
+        self.type_definitions
+            .get(owner)?
+            .constructors
+            .get(name)
+            .map(|(_, required)| *required)
+    }
+
     pub(crate) fn enum_constructor(
         &self,
         owner: Option<&str>,
@@ -647,7 +792,7 @@ impl ClassRegistry {
             let definition = self.type_definitions.get(owner)?;
             return Some((
                 definition.qualified_name.clone(),
-                *definition.constructors.get(name)?,
+                definition.constructors.get(name)?.0,
             ));
         }
         let constructors = self.enum_constructors.get(name)?;
@@ -765,9 +910,42 @@ impl ClassRegistry {
     }
 
     /// Find an instance method on a class.
+    pub(super) fn parent_class(&self, class: &ClassInfo) -> Option<&ClassInfo> {
+        let parent = class.parent.as_deref()?;
+        if let Some(parent) = self.find_class(parent) {
+            return Some(parent);
+        }
+        let short = parent.rsplit('.').next()?;
+        if let Some((mut package, _)) = class.qualified_name.rsplit_once('.') {
+            while let Some((enclosing, _)) = package.rsplit_once('.') {
+                if let Some(parent) = self.find_class(&format!("{enclosing}.{short}")) {
+                    return Some(parent);
+                }
+                package = enclosing;
+            }
+        }
+        for imported in class
+            .imports
+            .get(super::interpreter::WILDCARD_OWNERS_KEY)
+            .into_iter()
+            .flat_map(|paths| paths.split('\n'))
+        {
+            if let Some(parent) = self.find_class(&format!("{imported}.{short}")) {
+                return Some(parent);
+            }
+        }
+        None
+    }
+
     pub fn find_instance_method(&self, class_name: &str, method: &str) -> Option<&MethodInfo> {
-        self.find_class(class_name)
-            .and_then(|c| c.instance_methods.get(method))
+        let mut class = self.find_class(class_name)?;
+        for _ in 0..128 {
+            if let Some(found) = class.instance_methods.get(method) {
+                return Some(found);
+            }
+            class = self.parent_class(class)?;
+        }
+        None
     }
 
     /// Get the number of registered classes.

@@ -2095,6 +2095,20 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 V::Bool(matches!(kind, TypeKind::Interface { .. })),
             ),
         ]);
+        if let Some((pack, module)) = self.lowering.static_sig_index.as_ref().and_then(|index| {
+            index.borrow_mut().declaration_module(qualified, &|name| {
+                self.lowering
+                    .context
+                    .namespace_resolver
+                    .resolve_qualified_path_to_file_force(name)
+            })
+        }) {
+            view.insert(
+                "pack".to_string(),
+                array(pack.iter().map(|part| string(part)).collect()),
+            );
+            view.insert("module".to_string(), string(&module));
+        }
         let mut metadata = Vec::new();
         if matches!(
             kind,
@@ -2142,6 +2156,56 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         view.insert(
             "type".to_string(),
             underlying.map(V::Type).unwrap_or(V::Null),
+        );
+        let hierarchy = symbol.and_then(|symbol| {
+            self.lowering
+                .context
+                .symbol_table
+                .get_class_hierarchy(symbol)
+        });
+        let parent_ref = |id: TypeId| {
+            let table = self.lowering.context.type_table.borrow();
+            let (base, args) = match table.get(id).map(|ty| &ty.kind) {
+                Some(TypeKind::GenericInstance {
+                    base_type,
+                    type_args,
+                    ..
+                }) => (*base_type, type_args.as_slice()),
+                Some(TypeKind::Class { type_args, .. } | TypeKind::Interface { type_args, .. }) => {
+                    (id, type_args.as_slice())
+                }
+                _ => (id, &[][..]),
+            };
+            object(BTreeMap::from([
+                ("t".to_string(), V::Type(base)),
+                (
+                    "params".to_string(),
+                    array(args.iter().copied().map(V::Type).collect()),
+                ),
+            ]))
+        };
+        view.insert(
+            "superClass".to_string(),
+            symbol
+                .and_then(|symbol| {
+                    self.lowering
+                        .context
+                        .symbol_table
+                        .get_class_super_type(symbol)
+                })
+                .or_else(|| hierarchy.and_then(|hierarchy| hierarchy.superclass))
+                .map_or(V::Null, parent_ref),
+        );
+        view.insert(
+            "interfaces".to_string(),
+            array(
+                hierarchy
+                    .into_iter()
+                    .flat_map(|hierarchy| hierarchy.interfaces.iter())
+                    .copied()
+                    .map(parent_ref)
+                    .collect(),
+            ),
         );
         let mut fields = Vec::new();
         let mut statics = Vec::new();

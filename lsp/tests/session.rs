@@ -4096,3 +4096,174 @@ fn compact_generics_in_imported_modules_preserve_nullable_receiver_fields() {
         "returning the String field as a session must still fail: {diagnostics:?}"
     );
 }
+
+#[test]
+fn markup_tags_resolve_to_generated_classes_and_survive_cache_reload() {
+    let source = "@:build(Wrapper.build()) class Main { static function main() { var value = Builder.identity(7); var panel = <arbitrary-name><clickable/></arbitrary-name>; } }";
+    let builder = r#"
+#if macro
+import haxe.macro.Context;
+import haxe.macro.Expr;
+#end
+class Builder {
+    public static macro function identity(e:Expr):Expr {
+        var type = Context.typeof(e);
+        return e;
+    }
+    public static macro function make(template:Expr):Expr {
+        var type = try Context.getType("widgets.Panel") catch (_:Dynamic) null;
+        var cls = switch type { case TInst(c, _): c.get(); case _: throw "missing generated class"; }
+        if (cls.superClass == null || cls.superClass.params.length != 1) throw "missing generic superclass";
+        switch Context.follow(cls.superClass.params[0]) {
+            case TAnonymous(a): if (a.get().fields[0].name != "label") throw "missing props";
+            case _: throw "expected structural props";
+        }
+        var action = switch Context.getType("widgets.Controls.Action") { case TInst(c, _): c.get(); case _: throw "missing action"; }
+        if (action.pack.join(".") != "widgets" || action.module != "widgets.Controls") throw "incorrect module path";
+        var p = Context.getPosInfos(template.pos);
+        var outer = Context.makePosition({file:p.file, min:p.min + 1, max:p.min + 15});
+        var inner = Context.makePosition({file:p.file, min:p.min + 17, max:p.min + 26});
+        var child:Expr = {expr:ENew({pack:["widgets"], name:"Controls", sub:"Action"}, []), pos:inner};
+        return macro @:pos(outer) new widgets.Panel([$child]);
+    }
+}
+"#;
+    for config in [
+        ("build.hxml", "-cp .\n--hl out.hl\n"),
+        ("rayzor.toml", "[project]\nname = 'generated-tag-types'\n"),
+    ] {
+        let mut s = Session::start(&[
+            config,
+            ("Main.hx", source),
+            ("Builder.hx", builder),
+            (
+                "Wrapper.hx",
+                r#"
+import haxe.macro.Expr;
+import haxe.macro.Context;
+using haxe.macro.ExprTools;
+class Wrapper {
+    static function lower(e:Expr):Expr return switch e.expr {
+        case EMeta({name:":markup"}, _): macro @:pos(e.pos) Builder.make($e);
+        case _: e.map(lower);
+    }
+    public static macro function build():Array<Field> {
+        var fields = Context.getBuildFields();
+        for (field in fields) switch field.kind {
+            case FFun(fn): if (fn.expr != null) fn.expr = lower(fn.expr);
+            case _:
+        }
+        return fields;
+    }
+}
+"#,
+            ),
+            (
+                "widgets/Panel.hx",
+                "package widgets; import widgets.Controls.Action; /** A composed panel. */ class Panel extends Base<{label:String}> { public function new(children:Array<Action>) {super();} }",
+            ),
+            (
+                "widgets/Base.hx",
+                "package widgets; class Base<T> { public function new() {} }",
+            ),
+            (
+                "widgets/Controls.hx",
+                "package widgets; class Controls {} /** A composed action. */ class Action { public function new() {} }",
+            ),
+        ]);
+        for cached in [false, true] {
+            assert!(s.open("Main.hx").is_empty(), "{:?}", s.diagnostics);
+            if cached {
+                assert!(
+                    s.activity.iter().all(|event| event["state"] != "checking"),
+                    "{:?}",
+                    s.activity
+                );
+            }
+            for (tag, class, file, docs) in [
+                (
+                    "arbitrary-name",
+                    "Panel",
+                    "widgets/Panel.hx",
+                    "A composed panel",
+                ),
+                (
+                    "clickable",
+                    "Action",
+                    "widgets/Controls.hx",
+                    "A composed action",
+                ),
+            ] {
+                let at = s.at("Main.hx", 0, source.find(tag).unwrap() as u32 + 1);
+                let hover = hover_text(&s.request("textDocument/hover", at.clone()));
+                assert!(
+                    hover.contains(class) && hover.contains(docs),
+                    "{tag}: {hover}"
+                );
+                assert!(
+                    !hover.contains("Macro expansion") && !hover.contains("Builder.make"),
+                    "{hover}"
+                );
+                let definition = s.request("textDocument/definition", at);
+                assert!(definition.to_string().contains(file), "{definition}");
+            }
+            let at = s.at("Main.hx", 0, source.find("<arbitrary-name").unwrap() as u32);
+            let expansion = s.request("rayzor/expandMacro", at);
+            let text = expansion["expansion"].as_str().unwrap_or_default();
+            assert!(
+                text.contains("new widgets.Panel") && text.contains("new widgets.Controls.Action"),
+                "{expansion}"
+            );
+            if !cached {
+                let root = s.root.clone();
+                s.temporary = false;
+                drop(s);
+                s = Session::connect(root, json!({}), true);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_failed_method_keeps_generated_tag_references_in_other_methods() {
+    let main = "class Main { static function broken():Int return missing; static function main() { var element = Builder.make(<custom-tag/>); var size = element.width; } }";
+    let mut s = Session::start(&[
+        ("Main.hx", main),
+        (
+            "Widget.hx",
+            "class Widget { public var width:Int = 42; public function new() {} }",
+        ),
+        (
+            "Builder.hx",
+            r#"
+import haxe.macro.Expr;
+import haxe.macro.Context;
+class Builder {
+    public static macro function make(e:Expr):Expr {
+        var info = Context.getPosInfos(e.pos);
+        var tag = Context.makePosition({file:info.file, min:info.min + 1, max:info.min + 11});
+        return macro @:pos(tag) new Widget();
+    }
+}
+"#,
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("missing"))),
+        "{diagnostics:?}"
+    );
+    let at = s.at("Main.hx", 0, main.find("custom-tag").unwrap() as u32 + 1);
+    let hover = hover_text(&s.request("textDocument/hover", at.clone()));
+    assert!(hover.contains("class Widget"), "{hover}");
+    assert!(
+        s.request("textDocument/definition", at)
+            .to_string()
+            .contains("Widget.hx")
+    );
+    let width = s.at("Main.hx", 0, main.find("width").unwrap() as u32 + 1);
+    let hover = hover_text(&s.request("textDocument/hover", width));
+    assert!(hover.contains("width:Int"), "{hover}");
+}

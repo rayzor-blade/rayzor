@@ -143,6 +143,24 @@ impl CompilationUnit {
             )?;
             let dependencies = Self::extract_all_dependencies(&parsed);
             pending.extend(Self::enclosing_package_candidates(&parsed, &dependencies));
+            for import in &parsed.imports {
+                if matches!(
+                    import.mode,
+                    parser::ImportMode::Wildcard | parser::ImportMode::WildcardWithExclusions(_)
+                ) {
+                    let package = import.path.join(".");
+                    pending.extend(
+                        dependencies
+                            .iter()
+                            .filter(|name| {
+                                !name.contains('.')
+                                    && name.chars().next().is_some_and(char::is_uppercase)
+                            })
+                            .map(|name| format!("{package}.{name}")),
+                    );
+                }
+            }
+
             pending.extend(dependencies);
             self.initialization_macro_files.push(parsed);
         }

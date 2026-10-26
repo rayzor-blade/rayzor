@@ -109,6 +109,9 @@ impl MacroDefinition {
     pub fn bind_argument(&self, i: usize, arg: MacroValue) -> MacroValue {
         match (&arg, self.value_params.get(i)) {
             (MacroValue::Expr(e), Some(true)) => super::expr_adt::constant_of(e).unwrap_or(arg),
+            (_, Some(true)) => super::expr_adt::try_expr_of(&arg, parser::Span::default())
+                .and_then(|expr| super::expr_adt::constant_of(&expr))
+                .unwrap_or(arg),
             _ => arg,
         }
     }
@@ -179,7 +182,7 @@ impl MacroRegistry {
         source_file: &str,
     ) -> Result<(), MacroError> {
         // Resolved once for the whole file and shared by every macro in it.
-        let file_imports = std::sync::Arc::new(super::interpreter::build_import_map(&file.imports));
+        let file_imports = std::sync::Arc::new(super::interpreter::build_file_import_map(file));
         let package_prefix = file
             .package
             .as_ref()

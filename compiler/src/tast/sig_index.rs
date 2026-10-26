@@ -124,6 +124,7 @@ pub struct StaticSigIndex {
     /// Typedef alias (`haxe.io.Bytes`) → target path (`rayzor.Bytes`).
     aliases: BTreeMap<String, String>,
     type_sources: BTreeMap<String, TypeSourceSig>,
+    declaration_modules: BTreeMap<String, (Vec<String>, String)>,
     /// Files already indexed (canonical path string) — parse each once.
     indexed_files: BTreeSet<String>,
     /// Qualified names whose on-demand parse failed — don't retry.
@@ -146,6 +147,15 @@ pub(crate) struct TypeSourceSig {
 }
 
 impl StaticSigIndex {
+    pub(crate) fn declaration_module(
+        &mut self,
+        name: &str,
+        resolve_file: &dyn Fn(&str) -> Option<std::path::PathBuf>,
+    ) -> Option<(Vec<String>, String)> {
+        self.ensure_indexed(name, resolve_file);
+        self.declaration_modules.get(name).cloned()
+    }
+
     pub(crate) fn type_source(
         &mut self,
         name: &str,
@@ -703,7 +713,31 @@ impl StaticSigIndex {
             .as_ref()
             .map(|p| p.path.join("."))
             .unwrap_or_default();
+        let pack = file
+            .package
+            .as_ref()
+            .map(|package| package.path.clone())
+            .unwrap_or_default();
+        let module = std::path::Path::new(&file.filename)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("");
         for decl in &file.declarations {
+            let name = match decl {
+                parser::TypeDeclaration::Class(decl) => &decl.name,
+                parser::TypeDeclaration::Interface(decl) => &decl.name,
+                parser::TypeDeclaration::Abstract(decl) => &decl.name,
+                parser::TypeDeclaration::Typedef(decl) => &decl.name,
+                parser::TypeDeclaration::Enum(decl) => &decl.name,
+                _ => continue,
+            };
+            let identity = (pack.clone(), Self::qualify(&package, module));
+            self.declaration_modules
+                .insert(Self::qualify(&package, name), identity.clone());
+            self.declaration_modules.insert(
+                Self::qualify(&package, &format!("{module}.{name}")),
+                identity,
+            );
             let source = match decl {
                 parser::TypeDeclaration::Typedef(alias) => Some((
                     &alias.name,

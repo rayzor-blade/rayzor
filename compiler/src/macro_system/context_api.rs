@@ -978,7 +978,17 @@ impl MacroContext {
             })?;
 
         // Convert build fields to an array of objects
-        let field_values: Vec<MacroValue> = fields.iter().map(build_field_to_value).collect();
+        let source = named_file(self.call_position.file_id).map(|(file, _)| file);
+        let field_values: Vec<MacroValue> = fields
+            .iter()
+            .map(build_field_to_value)
+            .map(|value| {
+                source.as_deref().map_or_else(
+                    || value.clone(),
+                    |file| super::ast_bridge::with_source_positions(&value, file),
+                )
+            })
+            .collect();
 
         Ok(MacroValue::Array(Arc::new(field_values)))
     }
@@ -1351,8 +1361,10 @@ impl MacroContext {
                 self.get_type(&spelling, location)
             }
             "typeof" => {
-                if let Some(MacroValue::Expr(expr)) = args.first() {
-                    let expr = expr.clone();
+                if let Some(expr) = args
+                    .first()
+                    .and_then(|value| super::expr_adt::try_expr_of(value, parser::Span::default()))
+                {
                     self.typeof_expr(&expr, location)
                 } else {
                     Err(MacroError::ContextError {
@@ -1363,8 +1375,10 @@ impl MacroContext {
                 }
             }
             "typeExpr" => {
-                if let Some(MacroValue::Expr(expr)) = args.first() {
-                    let expr = expr.clone();
+                if let Some(expr) = args
+                    .first()
+                    .and_then(|value| super::expr_adt::try_expr_of(value, parser::Span::default()))
+                {
                     self.type_expr(&expr, location)
                 } else {
                     Err(MacroError::ContextError {
@@ -1835,6 +1849,20 @@ fn named_file_id(name: &str) -> u32 {
         };
         super::errors::NAMED_FILE_ID + index as u32
     })
+}
+
+pub(crate) fn position_span(value: &MacroValue) -> Option<parser::Span> {
+    let MacroValue::Position(position) = value.underlying() else {
+        return None;
+    };
+    Some(parser::Span::new(
+        position.byte_offset as usize,
+        if position.file_id >= super::errors::NAMED_FILE_ID {
+            position.column as usize
+        } else {
+            position.byte_offset as usize + 1
+        },
+    ))
 }
 
 pub(crate) fn source_position(file: &str, span: parser::Span) -> SourceLocation {

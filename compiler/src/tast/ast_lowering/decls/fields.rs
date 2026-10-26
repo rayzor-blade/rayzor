@@ -534,7 +534,35 @@ impl<'a> AstLowering<'a> {
         // A method body is never inside the coroutine body that lowering
         // may have been in when it reached this method.
         let coroutine_scopes = std::mem::take(&mut self.coroutine_scopes);
+        let scope = self.context.current_scope;
+        let parameters = self.context.type_parameter_stack.len();
+        let return_type = self.context.expected_return_type;
+        let new_hint = self.context.expected_new_type_hint;
+        let switch_type = self.context.switch_discriminant_type;
+        let static_method = self.in_static_method;
+        let method_name = self.current_method_name;
+        let closure_depth = self.closure_depth;
+        let lambda_params = self.expected_lambda_params_stack.len();
+        let argument_types = self.expected_arg_type_stack.len();
+        let cases = self.context.case_type_bindings.clone();
+        let callee = self.lowering_callee;
+        let initializer = self.var_init_expected;
+        let map_scopes = self.map_first_uses.len();
         let result = self.lower_function_from_field_inner(field, func);
+        self.context.current_scope = scope;
+        self.context.type_parameter_stack.truncate(parameters);
+        self.context.expected_return_type = return_type;
+        self.context.expected_new_type_hint = new_hint;
+        self.context.switch_discriminant_type = switch_type;
+        self.in_static_method = static_method;
+        self.current_method_name = method_name;
+        self.closure_depth = closure_depth;
+        self.expected_lambda_params_stack.truncate(lambda_params);
+        self.expected_arg_type_stack.truncate(argument_types);
+        self.context.case_type_bindings = cases;
+        self.lowering_callee = callee;
+        self.var_init_expected = initializer;
+        self.map_first_uses.truncate(map_scopes);
         self.coroutine_scopes = coroutine_scopes;
         result
     }

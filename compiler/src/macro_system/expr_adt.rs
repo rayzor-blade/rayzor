@@ -1175,7 +1175,12 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
     let mk = |kind| Expr { kind, span };
     match v {
         MacroValue::Expr(e) => Some((**e).clone()),
-        MacroValue::Object(m) if matches!(m.get("expr"), Some(MacroValue::Enum(e, _, _)) if &**e == "ExprDef") => {
+        MacroValue::Object(m) if matches!(m.get("expr"), Some(MacroValue::Enum(e, _, _)) if &**e == "ExprDef") =>
+        {
+            let span = m
+                .get("pos")
+                .and_then(super::context_api::position_span)
+                .unwrap_or(span);
             try_expr_of(m.get("expr")?, span)
         }
         MacroValue::Enum(e, variant, args) if &**e == "Constant" => {

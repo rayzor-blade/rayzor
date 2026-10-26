@@ -88,6 +88,10 @@ impl ReificationEngine {
         let Some(var) = name.strip_prefix('$') else {
             return Ok(name.to_string());
         };
+        let var = var
+            .strip_prefix("i{")
+            .and_then(|var| var.strip_suffix('}'))
+            .unwrap_or(var);
         match env.get(var) {
             Some(MacroValue::String(value)) => Ok(value.to_string()),
             _ => Err(MacroError::ReificationError {
@@ -151,6 +155,31 @@ impl ReificationEngine {
     }
 
     fn process_expr(expr: &Expr, env: &Environment) -> Result<Expr, MacroError> {
+        if let ExprKind::Meta { meta, expr: inner } = &expr.kind
+            && meta.name.trim_start_matches(':') == "pos"
+            && let Some(position) = meta.params.first()
+        {
+            let position = Self::eval_simple_expr(position, env, expr.span)?;
+            if super::context_api::position_span(&position).is_some() {
+                let mut scoped = env.clone();
+                scoped.push_scope();
+                scoped.define("\0reify_position", position);
+                return Self::process_expr(inner, &scoped);
+            }
+        }
+        let mut result = Self::process_expr_inner(expr, env)?;
+        if !matches!(expr.kind, ExprKind::DollarIdent { .. })
+            && let Some(span) = env
+                .get("\0reify_position")
+                .as_ref()
+                .and_then(super::context_api::position_span)
+        {
+            result.span = span;
+        }
+        Ok(result)
+    }
+
+    fn process_expr_inner(expr: &Expr, env: &Environment) -> Result<Expr, MacroError> {
         match &expr.kind {
             // Dollar identifier — splice from environment
             ExprKind::DollarIdent { name, arg } => {
@@ -519,8 +548,11 @@ impl ReificationEngine {
                 body,
             } => Ok(Expr {
                 kind: ExprKind::For {
-                    var: var.clone(),
-                    key_var: key_var.clone(),
+                    var: Self::process_name(var, env, expr.span)?,
+                    key_var: key_var
+                        .as_ref()
+                        .map(|key| Self::process_name(key, env, expr.span))
+                        .transpose()?,
                     iter: Box::new(Self::process_expr(iter, env)?),
                     body: Box::new(Self::process_expr(body, env)?),
                 },

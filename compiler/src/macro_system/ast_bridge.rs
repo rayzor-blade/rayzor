@@ -73,6 +73,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
 pub fn value_to_expr(value: &MacroValue) -> Expr {
     let span = Span::default();
     match value {
+        MacroValue::Abstract(_, inner) => return value_to_expr(inner),
         MacroValue::Null => Expr {
             kind: ExprKind::Null,
             span,
@@ -147,8 +148,8 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
             if fields.len() <= 3
                 && matches!(fields.get("expr"), Some(MacroValue::Enum(e, _, _)) if &**e == "ExprDef") =>
         {
-            match fields.get("expr") {
-                Some(v) => value_to_expr(v),
+            match super::expr_adt::try_expr_of(value, span) {
+                Some(expr) => expr,
                 None => Expr {
                     kind: ExprKind::Null,
                     span,
@@ -284,6 +285,12 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
 /// For non-literal expressions, the Expr is returned as-is.
 pub fn unwrap_expr_value(val: &MacroValue) -> MacroValue {
     match val {
+        MacroValue::Abstract(_, inner) => unwrap_expr_value(inner),
+        MacroValue::Object(object) if object.contains_key("expr") && object.contains_key("pos") => {
+            super::expr_adt::try_expr_of(val, Span::default())
+                .and_then(|expr| super::expr_adt::constant_of(&expr))
+                .unwrap_or_else(|| val.clone())
+        }
         MacroValue::Expr(expr) => {
             // Try to extract a concrete value from the expression
             match expr_to_value(expr) {
@@ -377,8 +384,11 @@ pub fn apply_binary_op(
                 message: "interval end must be Int".to_string(),
                 location,
             })?;
-            let arr: Vec<MacroValue> = (start..end).map(MacroValue::Int).collect();
-            Ok(MacroValue::Array(Arc::new(arr)))
+            Ok(MacroValue::Object(Arc::new(BTreeMap::from([
+                ("__type__".into(), MacroValue::from_str("IntIterator")),
+                ("min".into(), MacroValue::Int(start)),
+                ("max".into(), MacroValue::Int(end)),
+            ]))))
         }
 
         // Arrow (for function types, not typically used in macro values)
@@ -529,6 +539,55 @@ pub fn expr_kind_to_value(kind: &ExprKind, span: Span) -> MacroValue {
             span,
         }))
     })
+}
+
+/// Marshal expression syntax with its source file, including nested expressions.
+pub(crate) fn with_source_positions(value: &MacroValue, file: &str) -> MacroValue {
+    match value {
+        MacroValue::Expr(expr) => {
+            let Some(definition) = super::expr_adt::def_of(&expr.kind, expr.span) else {
+                return value.clone();
+            };
+            MacroValue::Object(Arc::new(BTreeMap::from([
+                ("expr".into(), with_source_positions(&definition, file)),
+                (
+                    "pos".into(),
+                    MacroValue::Position(super::context_api::source_position(file, expr.span)),
+                ),
+            ])))
+        }
+        MacroValue::Array(values) => MacroValue::Array(Arc::new(
+            values
+                .iter()
+                .map(|value| with_source_positions(value, file))
+                .collect(),
+        )),
+        MacroValue::Enum(owner, variant, args) => MacroValue::Enum(
+            owner.clone(),
+            variant.clone(),
+            Arc::new(
+                args.iter()
+                    .map(|value| with_source_positions(value, file))
+                    .collect(),
+            ),
+        ),
+        MacroValue::Object(fields) => MacroValue::Object(Arc::new(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), with_source_positions(value, file)))
+                .collect(),
+        )),
+        MacroValue::Position(position) if position.file_id < super::errors::NAMED_FILE_ID => {
+            MacroValue::Position(super::context_api::source_position(
+                file,
+                Span::new(
+                    position.byte_offset as usize,
+                    position.byte_offset as usize + 1,
+                ),
+            ))
+        }
+        _ => value.clone(),
+    }
 }
 
 /// Convert a parser Span to a SourceLocation

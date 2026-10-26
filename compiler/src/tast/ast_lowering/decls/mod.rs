@@ -274,6 +274,9 @@ impl<'a> AstLowering<'a> {
         if !all_errors.is_empty() {
             // Store all errors in context for pipeline to access
             self.context.errors = all_errors.clone();
+            if self.recover_macro_errors {
+                self.partial_typed_file = Some(typed_file);
+            }
             return Err(all_errors.into_iter().next().unwrap());
         }
 

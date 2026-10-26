@@ -794,6 +794,15 @@ impl<'a> AstLowering<'a> {
         &mut self,
         type_path: &parser::TypePath,
     ) -> LoweringResult<TypeId> {
+        if let Some(sub) = &type_path.sub {
+            let mut package = type_path.package.clone();
+            package.push(type_path.name.clone());
+            return self.resolve_type_path(&parser::TypePath {
+                package,
+                name: sub.clone(),
+                sub: None,
+            });
+        }
         if let Some(bound) = self.generic_placeholder_type(type_path) {
             return Ok(bound);
         }

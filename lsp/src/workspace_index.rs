@@ -280,6 +280,22 @@ impl WorkspaceIndex {
         matches.next().is_none().then(|| first.clone())
     }
 
+    pub fn definition(&self, qualified: &str) -> Option<(PathBuf, lsp_types::Range)> {
+        self.poll(false);
+        let state = self.state.borrow();
+        let mut matches = state.files.iter().flat_map(|(path, entries)| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry.qualified == qualified
+                        || entry.aliases.iter().any(|alias| alias == qualified)
+                })
+                .map(move |entry| (path, entry.range))
+        });
+        let (path, range) = matches.next()?;
+        matches.next().is_none().then(|| (path.clone(), range))
+    }
+
     pub fn type_identities(&self) -> BTreeMap<String, TypeIdentity> {
         self.poll(false);
         let state = self.state.borrow();

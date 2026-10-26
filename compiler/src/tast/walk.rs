@@ -14,6 +14,7 @@ pub trait SymbolSink {
     fn declares(&mut self, symbol: SymbolId, at: SourceLocation);
     /// `member`: the name follows a `.` when written qualified.
     fn refers(&mut self, _symbol: SymbolId, _at: SourceLocation, _member: bool) {}
+    fn constructs(&mut self, _ty: TypeId, _at: SourceLocation) {}
     fn refers_typed(&mut self, symbol: SymbolId, at: SourceLocation, member: bool, _ty: TypeId) {
         self.refers(symbol, at, member);
     }
@@ -384,7 +385,12 @@ pub fn walk_expression(e: &TypedExpression, sink: &mut impl SymbolSink) {
         | K::Throw { expression }
         | K::Meta { expression, .. }
         | K::Await { expression, .. } => walk_expression(expression, sink),
-        K::New { arguments, .. } => {
+        K::New {
+            class_type,
+            arguments,
+            ..
+        } => {
+            sink.constructs(*class_type, at);
             for a in arguments {
                 walk_expression(a, sink);
             }

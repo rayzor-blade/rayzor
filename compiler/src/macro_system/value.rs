@@ -15,6 +15,15 @@ pub struct MacroFunction {
     pub body: Arc<Expr>,
     /// Shared lexical variables retained by the closure.
     pub captures: BTreeMap<String, super::environment::VariableBinding>,
+    pub context: Option<MacroFunctionContext>,
+    pub return_type: Option<parser::Type>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MacroFunctionContext {
+    pub imports: BTreeMap<String, String>,
+    pub source_file: Option<String>,
+    pub owner: Option<String>,
 }
 
 /// A parameter in a macro function definition
@@ -28,6 +37,7 @@ pub struct MacroParam {
     pub rest: bool,
     /// Default value expression (if optional)
     pub default_value: Option<Box<Expr>>,
+    pub type_hint: Option<parser::Type>,
 }
 
 impl MacroParam {
@@ -37,6 +47,7 @@ impl MacroParam {
             optional: param.optional,
             rest: param.rest,
             default_value: param.default_value.clone(),
+            type_hint: param.type_hint.clone(),
         }
     }
 }
@@ -53,6 +64,9 @@ impl MacroParam {
 pub enum MacroValue {
     /// Null value
     Null,
+
+    /// A macro-time abstract retains its declaration for conversions and operators.
+    Abstract(Arc<str>, Arc<MacroValue>),
 
     /// Boolean value
     Bool(bool),
@@ -96,7 +110,7 @@ pub enum MacroValue {
 
 #[derive(Default)]
 pub(crate) struct ReferenceUpdates {
-    values: BTreeMap<(u8, usize), (MacroValue, MacroValue)>,
+    values: BTreeMap<(u8, usize), (MacroValue, MacroValue, bool)>,
     bindings: std::collections::BTreeSet<usize>,
 }
 
@@ -126,15 +140,45 @@ impl ReferenceUpdates {
 }
 
 impl MacroValue {
-    pub(crate) fn map_key_eq(&self, other: &Self) -> bool {
+    pub(crate) fn underlying(&self) -> &Self {
+        let mut value = self;
+        while let Self::Abstract(_, inner) = value {
+            value = inner;
+        }
+        value
+    }
+
+    pub(crate) fn same_reference(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Object(a), Self::Object(b)) => Arc::ptr_eq(a, b),
             (Self::Array(a), Self::Array(b)) => Arc::ptr_eq(a, b),
             (Self::Map(a), Self::Map(b)) => Arc::ptr_eq(a, b),
             (Self::Expr(a), Self::Expr(b)) => Arc::ptr_eq(a, b),
             (Self::Function(a), Self::Function(b)) => Arc::ptr_eq(a, b),
-            _ => self == other,
+            (Self::Abstract(owner, a), Self::Abstract(other, b)) => {
+                owner == other && Arc::ptr_eq(a, b)
+            }
+            (Self::Enum(owner, tag, a), Self::Enum(other, variant, b)) => {
+                owner == other && tag == variant && Arc::ptr_eq(a, b)
+            }
+            _ => false,
         }
+    }
+
+    pub(crate) fn map_key_eq(&self, other: &Self) -> bool {
+        let (left, right) = (self.underlying(), other.underlying());
+        left.same_reference(right)
+            || match (left, right) {
+                (
+                    Self::Object(_)
+                    | Self::Array(_)
+                    | Self::Map(_)
+                    | Self::Expr(_)
+                    | Self::Function(_),
+                    _,
+                ) => false,
+                _ => left == right,
+            }
     }
 
     pub(crate) fn insert_map_entry(entries: &mut Vec<(Self, Self)>, key: Self, value: Self) {
@@ -215,16 +259,18 @@ impl MacroValue {
         new: &Self,
         updates: &mut ReferenceUpdates,
     ) -> bool {
-        let same = match (&*self, old) {
-            (Self::Object(a), Self::Object(b)) => Arc::ptr_eq(a, b),
-            (Self::Expr(a), Self::Expr(b)) => Arc::ptr_eq(a, b),
-            (Self::Array(a), Self::Array(b)) => Arc::ptr_eq(a, b),
-            (Self::Map(a), Self::Map(b)) => Arc::ptr_eq(a, b),
-            _ => false,
-        };
+        let same = self.same_reference(old);
         if same {
             *self = new.clone();
             return true;
+        }
+        if let Self::Abstract(_, inner) = self {
+            let mut value = (**inner).clone();
+            if value.replace_reference(old, new, updates) {
+                *inner = Arc::new(value);
+                return true;
+            }
+            return false;
         }
         if let Self::Function(function) = self {
             for binding in function.captures.values() {
@@ -239,9 +285,11 @@ impl MacroValue {
             Self::Map(value) => (3, Arc::as_ptr(value) as usize),
             _ => return false,
         };
-        if let Some((_, value)) = updates.values.get(&key) {
-            *self = value.clone();
-            return true;
+        if let Some((_, value, changed)) = updates.values.get(&key) {
+            if *changed {
+                *self = value.clone();
+            }
+            return *changed;
         }
         // Retain the original allocation so its address cannot be reused while
         // the memo is shared across bindings. Parents retain their aliases too.
@@ -257,11 +305,11 @@ impl MacroValue {
                             .then(|| (key.clone(), value))
                     })
                     .collect();
-                if changes.is_empty() {
-                    return false;
+                let changed = !changes.is_empty();
+                if changed {
+                    Arc::make_mut(fields).extend(changes);
                 }
-                Arc::make_mut(fields).extend(changes);
-                true
+                changed
             }
             Self::Array(values) | Self::Enum(_, _, values) => {
                 let changes: Vec<_> = values
@@ -274,13 +322,11 @@ impl MacroValue {
                             .then_some((i, value))
                     })
                     .collect();
-                if changes.is_empty() {
-                    return false;
-                }
+                let changed = !changes.is_empty();
                 for (i, value) in changes {
                     Arc::make_mut(values)[i] = value;
                 }
-                true
+                changed
             }
             Self::Map(entries) => {
                 let mut replacement = entries.as_ref().clone();
@@ -296,9 +342,9 @@ impl MacroValue {
             }
             _ => false,
         };
-        if changed {
-            updates.values.insert(key, (original, self.clone()));
-        }
+        updates
+            .values
+            .insert(key, (original, self.clone(), changed));
         changed
     }
 
@@ -336,6 +382,7 @@ impl MacroValue {
     /// Returns the type name of this value for error messages
     pub fn type_name(&self) -> &'static str {
         match self {
+            MacroValue::Abstract(_, inner) => inner.type_name(),
             MacroValue::Null => "Null",
             MacroValue::Bool(_) => "Bool",
             MacroValue::Int(_) => "Int",
@@ -356,6 +403,7 @@ impl MacroValue {
     /// Check if this value is truthy
     pub fn is_truthy(&self) -> bool {
         match self {
+            MacroValue::Abstract(_, inner) => inner.is_truthy(),
             MacroValue::Null => false,
             MacroValue::Bool(b) => *b,
             MacroValue::Int(i) => *i != 0,
@@ -385,6 +433,7 @@ impl MacroValue {
     /// Try to convert to an integer
     pub fn as_int(&self) -> Option<i64> {
         match self {
+            MacroValue::Abstract(_, inner) => inner.as_int(),
             MacroValue::Int(i) => Some(*i),
             MacroValue::Float(f) => Some(*f as i64),
             MacroValue::Bool(b) => Some(if *b { 1 } else { 0 }),
@@ -405,6 +454,7 @@ impl MacroValue {
     /// Try to convert to a float
     pub fn as_float(&self) -> Option<f64> {
         match self {
+            MacroValue::Abstract(_, inner) => inner.as_float(),
             MacroValue::Float(f) => Some(*f),
             MacroValue::Int(i) => Some(*i as f64),
             MacroValue::Expr(_) => {
@@ -423,6 +473,7 @@ impl MacroValue {
     /// Try to convert to a string
     pub fn as_string(&self) -> Option<&str> {
         match self {
+            MacroValue::Abstract(_, inner) => inner.as_string(),
             MacroValue::String(s) => Some(s),
             _ => None,
         }
@@ -431,6 +482,7 @@ impl MacroValue {
     /// Try to convert to a boolean
     pub fn as_bool(&self) -> Option<bool> {
         match self {
+            MacroValue::Abstract(_, inner) => inner.as_bool(),
             MacroValue::Bool(b) => Some(*b),
             _ => None,
         }
@@ -439,6 +491,7 @@ impl MacroValue {
     /// Try to get as an array reference
     pub fn as_array(&self) -> Option<&Vec<MacroValue>> {
         match self {
+            MacroValue::Abstract(_, inner) => inner.as_array(),
             MacroValue::Array(a) => Some(a),
             _ => None,
         }
@@ -455,6 +508,7 @@ impl MacroValue {
     /// Try to get as an object reference
     pub fn as_object(&self) -> Option<&BTreeMap<String, MacroValue>> {
         match self {
+            MacroValue::Abstract(_, inner) => inner.as_object(),
             MacroValue::Object(o) => Some(o),
             _ => None,
         }
@@ -479,6 +533,7 @@ impl MacroValue {
     /// Convert value to a display string (like Haxe's Std.string())
     pub fn to_display_string(&self) -> String {
         match self {
+            MacroValue::Abstract(_, inner) => inner.to_display_string(),
             MacroValue::Null => "null".to_string(),
             MacroValue::Bool(b) => b.to_string(),
             MacroValue::Int(i) => i.to_string(),
@@ -567,6 +622,9 @@ impl fmt::Display for MacroValue {
 impl PartialEq for MacroValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (MacroValue::Abstract(_, inner), other) => inner.as_ref() == other,
+            (other, MacroValue::Abstract(_, inner)) => other == inner.as_ref(),
+
             (MacroValue::Class(a), MacroValue::Class(b)) => a == b,
             (MacroValue::Null, MacroValue::Null) => true,
             (MacroValue::Bool(a), MacroValue::Bool(b)) => a == b,

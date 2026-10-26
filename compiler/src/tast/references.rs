@@ -3,7 +3,7 @@
 use super::definition_locations::name_location;
 use super::node::TypedFile;
 use super::walk::{SymbolSink, walk_file};
-use super::{SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId};
+use super::{SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeKind, TypeTable};
 
 /// A name in the source and the symbol it resolves to. `at` is the name's
 /// first byte; it spans `len` bytes.
@@ -26,11 +26,21 @@ pub fn collect_references(
     source: &str,
     symbols: &SymbolTable,
     interner: &StringInterner,
+    types: &TypeTable,
 ) -> Vec<SymbolReference> {
     let mut sink = Collect {
         source: source.as_bytes(),
         symbols,
         interner,
+        types,
+        markup: parser::lexer::Lexer::new(source)
+            .tokenize()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|token| token.kind == parser::token::TokenKind::MarkupLit)
+            .map(|token| token.span)
+            .collect(),
+        constructed_tags: std::collections::HashSet::new(),
         out: Vec::new(),
     };
     walk_file(file, &mut sink);
@@ -43,11 +53,75 @@ struct Collect<'a> {
     source: &'a [u8],
     symbols: &'a SymbolTable,
     interner: &'a StringInterner,
+    types: &'a TypeTable,
+    markup: Vec<parser::Span>,
+    constructed_tags: std::collections::HashSet<(u32, usize)>,
     out: Vec<SymbolReference>,
 }
 
 impl SymbolSink for Collect<'_> {
     fn declares(&mut self, _symbol: SymbolId, _at: SourceLocation) {}
+
+    fn constructs(&mut self, mut ty: TypeId, at: SourceLocation) {
+        let type_id = ty;
+        let mut symbol = None;
+        for _ in 0..128 {
+            ty = self.types.resolve_alias_type(ty);
+            match self.types.get(ty).map(|ty| &ty.kind) {
+                Some(TypeKind::Class { symbol_id, .. } | TypeKind::Abstract { symbol_id, .. }) => {
+                    symbol = Some(*symbol_id);
+                    break;
+                }
+                Some(TypeKind::GenericInstance { base_type, .. }) if *base_type != ty => {
+                    ty = *base_type
+                }
+                _ => return,
+            }
+        }
+        let Some(symbol) = symbol else { return };
+        let mut start = at.byte_offset as usize;
+        if !self
+            .markup
+            .iter()
+            .any(|span| span.start <= start && start < span.end)
+        {
+            return;
+        }
+        if self.source.get(start) == Some(&b'<') {
+            start += 1;
+        }
+        if start == 0 || self.source.get(start - 1) != Some(&b'<') {
+            return;
+        }
+        let len = self.source[start..]
+            .iter()
+            .take_while(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
+            })
+            .count();
+        if len == 0 {
+            return;
+        }
+        // The outer constructor owns the tag; generated helper constructors
+        // can inherit its position too.
+        if !self.constructed_tags.insert((at.file_id, start)) {
+            return;
+        }
+        let before = &self.source[..start];
+        let row = 1 + before.iter().filter(|byte| **byte == b'\n').count() as u32;
+        let column = start
+            - before
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |offset| offset + 1)
+            + 1;
+        self.out.push(SymbolReference {
+            symbol,
+            at: SourceLocation::new(at.file_id, row, column as u32, start as u32),
+            len: len as u32,
+            type_id,
+        });
+    }
 
     fn refers(&mut self, symbol: SymbolId, at: SourceLocation, member: bool) {
         self.refers_typed(symbol, at, member, TypeId::invalid());

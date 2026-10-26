@@ -1148,21 +1148,33 @@ impl LspContext {
     pub fn goto_definition(&self, uri: &str, line: u32, col: u32) -> Option<(String, u32, u32)> {
         let (a, sym_id) = self.symbol_at(uri, line, col)?;
         let unit = a.unit.borrow();
-        let loc = analysis::symbol_at_use(
+        let symbol = analysis::symbol_at_use(
             &unit,
             &a.index,
             self.open_files.get(uri)?,
             line,
             col,
             sym_id,
-        )?
-        .definition_location;
-        if !loc.is_valid() {
-            return None;
+        )?;
+        let loc = symbol.definition_location;
+        if loc.is_valid()
+            && let Some(path) = unit.file_path_of(loc.file_id)
+        {
+            let path = PathBuf::from(path);
+            let file = self.editor_path(&path.canonicalize().unwrap_or(path).to_string_lossy());
+            return Some((file, loc.line, loc.column));
         }
-        let path = PathBuf::from(unit.file_path_of(loc.file_id)?);
+        let qualified = symbol.qualified_name?;
+        let qualified = unit.string_interner.get(qualified)?;
+        if let Some(path) = unit
+            .namespace_resolver
+            .resolve_qualified_path_to_file_force(qualified)
+        {
+            self.workspace_index.ensure_disk_file(&path);
+        }
+        let (path, range) = self.workspace_index.definition(qualified)?;
         let file = self.editor_path(&path.canonicalize().unwrap_or(path).to_string_lossy());
-        Some((file, loc.line, loc.column))
+        Some((file, range.start.line + 1, range.start.character + 1))
     }
 
     /// Every place the symbol at a position is named, across the compiled
@@ -1359,12 +1371,19 @@ impl LspContext {
         let origin = unit
             .macro_expansions
             .iter()
-            .filter(|o| {
+            .enumerate()
+            .filter(|(_, o)| {
                 o.call_site.file_id == analysis.index.file_id
                     && o.call_span.start <= offset
                     && offset < o.call_span.end
             })
-            .min_by_key(|o| o.call_span.end.saturating_sub(o.call_span.start))?;
+            .min_by_key(|(index, o)| {
+                (
+                    o.call_span.end.saturating_sub(o.call_span.start),
+                    std::cmp::Reverse(*index),
+                )
+            })?
+            .1;
         let pos = |at| {
             let (line, character) = line_column(source, at);
             serde_json::json!({"line":line-1,"character":character-1})
@@ -1769,7 +1788,7 @@ mod cache_tests {
     }
 
     #[test]
-    #[ignore = "requires sibling RayDE; macro interpreter lacks ParserSource conversion"]
+    #[ignore = "requires the sibling RayDE workspace and installed Ashui libraries"]
     fn rayde_markup_reaches_the_generated_div_type() {
         std::thread::Builder::new()
             .stack_size(64 << 20)
@@ -1790,6 +1809,10 @@ mod cache_tests {
                 let hover = context.hover_info(&uri, 1, column).unwrap_or_default();
                 assert!(hover.contains("Div"), "box hover: {hover}");
                 let at = source.find("<div/>").unwrap() as u32;
+                let hover = context.hover_info(&uri, 1, at + 2).unwrap_or_default();
+                assert!(hover.contains("class Div") && hover.contains("A box:"), "{hover}");
+                let definition = context.goto_definition(&uri, 1, at + 2).unwrap();
+                assert!(definition.0.ends_with("/ashui/ui/Div.hx"), "{definition:?}");
                 let expansion = context
                     .expand_macro(&uri, lsp_types::Position::new(0, at))
                     .unwrap();
@@ -1799,6 +1822,57 @@ mod cache_tests {
                     }),
                     "{expansion}"
                 );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the sibling RayDE workspace and installed Ashui libraries"]
+    fn rayde_desktop_menu_tags_resolve_to_component_classes() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../RayDE")
+                    .canonicalize()
+                    .unwrap();
+                let mut context = LspContext::new(root.clone());
+                context.load_workspace_config(None);
+                let path = root.join("src/rayde/ui/DesktopMenus.hx");
+                let source = std::fs::read_to_string(&path).unwrap();
+                let uri = file_uri(path.to_str().unwrap());
+                context.open_files.insert(uri.clone(), source.clone());
+                let _budget = compiler::macro_system::budget::limit(Some(context.macro_budget));
+                context.compile_file(&uri, &source);
+                for (tag, class) in [
+                    ("menubar-menu", "MenubarMenu"),
+                    ("menubar-trigger", "MenubarTrigger"),
+                    ("menubar-content", "MenubarContent"),
+                    ("menubar-separator", "MenubarSeparator"),
+                    ("menubar-item", "MenubarItem"),
+                ] {
+                    let offset = source.find(&format!("<{tag}")).unwrap() + 1;
+                    let (line, column) = line_column(&source, offset);
+                    let hover = context.hover_info(&uri, line, column).unwrap_or_default();
+                    assert!(hover.contains(&format!("class {class}")), "{tag}: {hover}");
+                    let definition = context.goto_definition(&uri, line, column).unwrap();
+                    assert!(
+                        definition.0.ends_with("/ashui/components/Menubar.hx"),
+                        "{definition:?}"
+                    );
+                    let expansion = context
+                        .expand_macro(&uri, lsp_types::Position::new(line - 1, column - 1))
+                        .unwrap();
+                    assert!(
+                        expansion["expansion"]
+                            .as_str()
+                            .is_some_and(|text| text
+                                .contains(&format!("new ashui.components.Menubar.{class}"))),
+                        "{expansion}"
+                    );
+                }
             })
             .unwrap()
             .join()
