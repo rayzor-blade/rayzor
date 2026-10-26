@@ -1787,6 +1787,71 @@ fn generic_property_keys_bind_abstract_conversion_value_types() {
 }
 
 #[test]
+fn throwing_switch_branches_do_not_supply_void_return_values() {
+    for (branches, valid) in [
+        (
+            "case File(bytes): bytes; case Dir: throw 'directory'; case null: throw 'missing';",
+            true,
+        ),
+        (
+            "case Dir: throw 'directory'; case null: throw 'missing'; case File(bytes): bytes;",
+            true,
+        ),
+        (
+            "case File(bytes): bytes; case Dir: { trace('directory'); throw 'directory'; } case null: throw 'missing';",
+            true,
+        ),
+        ("case File(bytes): bytes; default: throw 'missing';", true),
+        (
+            "case File(bytes): node != null ? bytes : throw 'missing'; case Dir: throw 'directory'; case null: throw 'missing';",
+            true,
+        ),
+        (
+            "case File(bytes): bytes; case Dir: { if (node != null) throw 'directory'; else throw 'missing'; } case null: throw 'missing';",
+            true,
+        ),
+        (
+            "case File(bytes): bytes; case Dir: nothing(); case null: throw 'missing';",
+            false,
+        ),
+        (
+            "case File(bytes): bytes; case Dir: 0; case null: throw 'missing';",
+            false,
+        ),
+        (
+            "case File(bytes): bytes; case Dir: return 0; case null: throw 'missing';",
+            false,
+        ),
+    ] {
+        let source = format!(
+            "import haxe.io.Bytes; enum Node {{ File(bytes:Bytes); Dir; }} class Main {{ static function nothing():Void {{}} static function read(node:Null<Node>):Bytes return switch node {{ {branches} }} static function main() {{ read(File(Bytes.alloc(0))); }} }}"
+        );
+        let mut s = Session::start(&[("Main.hx", &source)]);
+        let diagnostics = s.open("Main.hx");
+        assert_eq!(
+            diagnostics.is_empty(),
+            valid,
+            "{branches}: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires the sibling RayDE workspace"]
+fn rayde_memory_workspace_keeps_bytes_returning_switches() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../RayDE/src/rayde/workspace");
+    let source = std::fs::read_to_string(root.join("MemoryWorkspace.hx")).unwrap();
+    let interface = std::fs::read_to_string(root.join("Workspace.hx")).unwrap();
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp .\n--hl out.hl\n"),
+        ("rayde/workspace/MemoryWorkspace.hx", &source),
+        ("rayde/workspace/Workspace.hx", &interface),
+    ]);
+    let diagnostics = s.open("rayde/workspace/MemoryWorkspace.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
 fn sibling_components_in_arrays_use_their_common_element_type() {
     for (kind, valid) in [("Element", true), ("Dynamic", true), ("Title", false)] {
         let source = format!(

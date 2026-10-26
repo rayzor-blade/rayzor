@@ -2,6 +2,54 @@
 
 use super::*;
 
+// Exclude proven exits from value joins; unknown control flow remains checked.
+fn expression_completes_normally(expression: &TypedExpression) -> bool {
+    match &expression.kind {
+        TypedExpressionKind::Throw { .. }
+        | TypedExpressionKind::Return { .. }
+        | TypedExpressionKind::Break
+        | TypedExpressionKind::Continue => false,
+        TypedExpressionKind::Block { statements, .. } => {
+            statements.iter().all(statement_completes_normally)
+        }
+        TypedExpressionKind::Conditional {
+            then_expr,
+            else_expr: Some(otherwise),
+            ..
+        } => expression_completes_normally(then_expr) || expression_completes_normally(otherwise),
+        TypedExpressionKind::Switch {
+            cases,
+            default_case: Some(default),
+            ..
+        } => {
+            expression_completes_normally(default)
+                || cases
+                    .iter()
+                    .any(|case| statement_completes_normally(&case.body))
+        }
+        _ => true,
+    }
+}
+
+fn statement_completes_normally(statement: &TypedStatement) -> bool {
+    match statement {
+        TypedStatement::Return { .. }
+        | TypedStatement::Throw { .. }
+        | TypedStatement::Break { .. }
+        | TypedStatement::Continue { .. } => false,
+        TypedStatement::Expression { expression, .. } => expression_completes_normally(expression),
+        TypedStatement::Block { statements, .. } => {
+            statements.iter().all(statement_completes_normally)
+        }
+        TypedStatement::If {
+            then_branch,
+            else_branch: Some(otherwise),
+            ..
+        } => statement_completes_normally(then_branch) || statement_completes_normally(otherwise),
+        _ => true,
+    }
+}
+
 impl<'a> TypeCheckingPhase<'a> {
     /// Check an expression and return its type
     pub fn check_expression(&mut self, expr: &TypedExpression) -> Result<TypeId, String> {
@@ -417,6 +465,8 @@ impl<'a> TypeCheckingPhase<'a> {
                     // Branches should have compatible types
                     let branch_compat = self.type_checker.check_compatibility(then_type, else_type);
                     if value_used
+                        && expression_completes_normally(then_expr)
+                        && expression_completes_normally(else_expr)
                         && matches!(branch_compat, TypeCompatibility::Incompatible)
                         && matches!(
                             self.type_checker.check_compatibility(else_type, then_type),
@@ -1413,7 +1463,9 @@ impl<'a> TypeCheckingPhase<'a> {
             self.check_statement(&case.body)?;
 
             // For switch expressions, extract the expression type from the body
-            if let TypedStatement::Expression { expression, .. } = &case.body {
+            if let TypedStatement::Expression { expression, .. } = &case.body
+                && expression_completes_normally(expression)
+            {
                 branch_types.push(expression.expr_type);
                 branch_locations.push(expression.source_location);
             }
@@ -1422,8 +1474,10 @@ impl<'a> TypeCheckingPhase<'a> {
         // Check default case if present
         if let Some(default) = default_case {
             let default_type = self.check_expression(default)?;
-            branch_types.push(default_type);
-            branch_locations.push(default.source_location);
+            if expression_completes_normally(default) {
+                branch_types.push(default_type);
+                branch_locations.push(default.source_location);
+            }
         }
 
         // For switch expressions, ensure all branches have compatible types
