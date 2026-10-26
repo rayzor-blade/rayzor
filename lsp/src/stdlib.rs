@@ -21,20 +21,7 @@ fn beside_executable(exe: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// An explicit Rayzor library wins; otherwise an editor uses Haxe's library.
-/// Bundled Rayzor discovery remains available when Haxe is not installed.
-pub(crate) fn discover() -> Result<Vec<PathBuf>, String> {
-    if let Some(path) = std::env::var_os("RAYZOR_STD_PATH").filter(|p| !p.is_empty()) {
-        let path = PathBuf::from(path);
-        return if valid(&path) {
-            Ok(vec![path])
-        } else {
-            Err(format!(
-                "RAYZOR_STD_PATH does not contain StdTypes.hx: {}",
-                path.display()
-            ))
-        };
-    }
+fn haxe_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     candidates.extend(std::env::var_os("HAXE_STD_PATH").map(PathBuf::from));
     if let Some(home) = std::env::var_os("HAXEPATH") {
@@ -59,34 +46,63 @@ pub(crate) fn discover() -> Result<Vec<PathBuf>, String> {
         ]
         .map(PathBuf::from),
     );
-    if let Some(path) = candidates.into_iter().find(|p| valid(p)) {
-        return Ok(vec![path.canonicalize().unwrap_or(path)]);
+    candidates
+}
+
+/// An installed Haxe SDK precedes an inherited native override for HXML files.
+fn preferred_library(
+    rayzor_override: Option<&Path>,
+    haxe_candidates: &[PathBuf],
+) -> Result<Option<Vec<PathBuf>>, String> {
+    if let Some(path) = haxe_candidates.iter().find(|path| valid(path)) {
+        return Ok(Some(vec![
+            path.canonicalize().unwrap_or_else(|_| path.clone()),
+        ]));
     }
-    let paths = compiler::compilation::CompilationConfig::discover_stdlib_paths();
-    if paths.iter().any(|p| valid(p)) {
-        Ok(paths)
-    } else {
-        Err("No Haxe standard library found; set HAXE_STD_PATH or RAYZOR_STD_PATH".into())
+    if let Some(path) = rayzor_override {
+        if !valid(path) {
+            return Err(format!(
+                "RAYZOR_STD_PATH does not contain StdTypes.hx: {}",
+                path.display()
+            ));
+        }
+        return Ok(Some(vec![path.into()]));
     }
+    Ok(None)
 }
 
 /// Native manifests use Rayzor's library, including its rayzor.* packages.
 pub(crate) fn discover_for_project(root: &Path, native: bool) -> Result<Vec<PathBuf>, String> {
-    if !native || std::env::var_os("RAYZOR_STD_PATH").is_some_and(|path| !path.is_empty()) {
-        return discover();
+    let rayzor_override = std::env::var_os("RAYZOR_STD_PATH")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    let haxe = if native {
+        Vec::new()
+    } else {
+        haxe_candidates()
+    };
+    if let Some(paths) = preferred_library(rayzor_override.as_deref(), &haxe)? {
+        return Ok(paths);
     }
-    for directory in root.ancestors() {
-        for relative in ["compiler/haxe-std", "haxe-std"] {
-            let path = directory.join(relative);
-            if valid(&path) {
-                return Ok(vec![path.canonicalize().unwrap_or(path)]);
+    if native {
+        for directory in root.ancestors() {
+            for relative in ["compiler/haxe-std", "haxe-std"] {
+                let path = directory.join(relative);
+                if valid(&path) {
+                    return Ok(vec![path.canonicalize().unwrap_or(path)]);
+                }
             }
         }
     }
     let paths = compiler::compilation::CompilationConfig::discover_stdlib_paths();
     let paths: Vec<_> = paths.into_iter().filter(|path| valid(path)).collect();
     if paths.is_empty() {
-        Err("Rayzor standard library not found for rayzor.toml; set RAYZOR_STD_PATH".into())
+        Err(if native {
+            "Rayzor standard library not found for rayzor.toml; set RAYZOR_STD_PATH"
+        } else {
+            "No Haxe standard library found; set HAXE_STD_PATH or RAYZOR_STD_PATH"
+        }
+        .into())
     } else {
         Ok(paths)
     }
@@ -95,6 +111,34 @@ pub(crate) fn discover_for_project(root: &Path, native: bool) -> Result<Vec<Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hxml_sdk_precedes_inherited_native_override() {
+        let root =
+            std::env::temp_dir().join(format!("rayzor-lsp-sdk-choice-{}", std::process::id()));
+        let native = root.join("native");
+        let stock = root.join("haxe");
+        for directory in [&native, &stock] {
+            std::fs::create_dir_all(directory).unwrap();
+            std::fs::write(directory.join("StdTypes.hx"), "").unwrap();
+        }
+        assert_eq!(
+            preferred_library(Some(&native), std::slice::from_ref(&stock)).unwrap(),
+            Some(vec![stock.canonicalize().unwrap()])
+        );
+        assert_eq!(
+            preferred_library(Some(&native), &[]).unwrap(),
+            Some(vec![native.clone()])
+        );
+        let missing = root.join("missing");
+        assert_eq!(
+            preferred_library(Some(&missing), std::slice::from_ref(&stock)).unwrap(),
+            Some(vec![stock.canonicalize().unwrap()])
+        );
+        assert!(preferred_library(Some(&missing), &[]).is_err());
+        assert_eq!(preferred_library(None, &[]).unwrap(), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn bundled_symbols_cover_native_apis_and_reject_another_library() {
