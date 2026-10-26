@@ -11,6 +11,28 @@ thread_local! {
     static IN_MACRO: Cell<bool> = const { Cell::new(false) };
 }
 
+/// A suspended compiler task's macro allowance; paused time is not execution.
+#[derive(Default)]
+pub struct State {
+    remaining: Option<Duration>,
+    allowance: Option<Duration>,
+    active: bool,
+    ticks: u32,
+}
+
+/// Exchanges the current thread's budget with a task's saved state.
+pub fn replace_state(state: State) -> State {
+    let now = Instant::now();
+    State {
+        remaining: DEADLINE
+            .replace(state.remaining.map(|remaining| now + remaining))
+            .map(|deadline| deadline.saturating_duration_since(now)),
+        allowance: ALLOWANCE.replace(state.allowance),
+        active: IN_MACRO.replace(state.active),
+        ticks: TICKS.replace(state.ticks),
+    }
+}
+
 /// Restores the previous budget when dropped.
 pub struct Budget(Option<Instant>, Option<Duration>);
 
@@ -52,6 +74,7 @@ pub fn invocation() -> Invocation {
 /// Whether the budget has run out. Cheap enough for every loop iteration and
 /// call: the clock is read once per 1024 checks.
 pub fn exhausted() -> bool {
+    crate::cooperative::checkpoint();
     let Some(deadline) = DEADLINE.with(Cell::get) else {
         return false;
     };
@@ -66,6 +89,27 @@ pub fn exhausted() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suspended_tasks_keep_separate_allowances_and_invocation_state() {
+        let _budget = limit(Some(Duration::from_secs(30)));
+        let _call = invocation();
+        TICKS.set(17);
+        let suspended = replace_state(State::default());
+        assert!(!IN_MACRO.get());
+        assert_eq!(ALLOWANCE.get(), None);
+        {
+            let _other = limit(Some(Duration::from_secs(2)));
+            let _other_call = invocation();
+            assert_eq!(ALLOWANCE.get(), Some(Duration::from_secs(2)));
+        }
+        let empty = replace_state(suspended);
+        assert!(!empty.active);
+        assert!(IN_MACRO.get());
+        assert_eq!(ALLOWANCE.get(), Some(Duration::from_secs(30)));
+        assert_eq!(TICKS.get(), 17);
+        assert!(DEADLINE.get().unwrap() > Instant::now() + Duration::from_secs(29));
+    }
 
     #[test]
     fn a_spent_budget_is_reported_and_lifted_by_the_guard() {

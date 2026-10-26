@@ -712,6 +712,7 @@ impl CompilationUnit {
 
         let t_discover = profile_timer(self.config.profile_typecheck);
         while let Some(qualified_path) = to_process.pop_front() {
+            crate::cooperative::poll();
             if is_stdtypes_ambient_import(&qualified_path) || visited.contains(&qualified_path) {
                 continue;
             }
@@ -1458,6 +1459,7 @@ impl CompilationUnit {
     /// Try to load an import file from BLADE cache.
     /// Returns true if cache hit (MIR loaded + symbols registered), false if miss.
     pub(crate) fn try_load_import_from_cache(&mut self, filename: &str, source: &str) -> bool {
+        crate::cooperative::poll();
         // Try to load from BLADE cache
         let (mir, _metadata, symbols, cached_maps) =
             match self.try_load_blade_cached_full(filename, source) {
@@ -1581,6 +1583,7 @@ impl CompilationUnit {
         qualified_path: &str,
         depth: usize,
     ) -> Result<(), String> {
+        crate::cooperative::poll();
         const MAX_DEPTH: usize = 10;
 
         if depth > MAX_DEPTH {

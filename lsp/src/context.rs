@@ -64,6 +64,61 @@ impl Analysis {
 }
 
 impl LspContext {
+    /// Moves mutable compiler graphs into one task; suspended tasks never
+    /// share them with a query or another compile.
+    pub(crate) fn fork_analysis(&mut self) -> Self {
+        // Each runnable task owns at most one graph. Older pages retain their
+        // editor answers in BLADE rather than multiplying suspended heaps.
+        while self.sessions.len() > 1 {
+            let oldest = self.sessions.pop_front().unwrap();
+            self.analyses
+                .retain(|_, analysis| !Rc::ptr_eq(&analysis.unit, &oldest.unit));
+        }
+        let mut task = Self::new(self.root.clone());
+        task.editor_cache = self.editor_cache.clone();
+        task.workspace_roots = self.workspace_roots.clone();
+        task.open_files = self.open_files.clone();
+        task.document_versions = self.document_versions.clone();
+        task.class_paths = self.class_paths.clone();
+        task.defines = self.defines.clone();
+        task.initialization_macros = self.initialization_macros.clone();
+        task.build_options = self.build_options.clone();
+        task.projects = self.projects.clone();
+        task.hxml = self.hxml.clone();
+        task.requested_hxml = self.requested_hxml.clone();
+        task.config_problems = self.config_problems.clone();
+        task.macro_budget = self.macro_budget;
+        task.analysis_cache_capacity = 1;
+        task.workspace_index = self.workspace_index.clone();
+        task.analyses = std::mem::take(&mut self.analyses);
+        task.sessions = std::mem::take(&mut self.sessions);
+        task
+    }
+
+    pub(crate) fn adopt_analysis(&mut self, uri: &str, mut task: Self) -> Vec<LspDiagnostic> {
+        let diagnostics = task.diagnostics.remove(uri).unwrap_or_default();
+        self.failed_analyses.remove(uri);
+        if task.failed_analyses.contains(uri) {
+            self.failed_analyses.insert(uri.to_string());
+        }
+        self.analyses.extend(
+            task.analyses
+                .into_iter()
+                .filter(|(uri, _)| self.open_files.contains_key(uri)),
+        );
+        self.sessions.append(&mut task.sessions);
+        while self.sessions.len() > self.analysis_cache_capacity.clamp(1, 8) {
+            let oldest = self.sessions.pop_front().unwrap();
+            self.analyses
+                .retain(|_, analysis| !Rc::ptr_eq(&analysis.unit, &oldest.unit));
+        }
+        diagnostics
+    }
+
+    pub(crate) fn mark_analysis_failed(&mut self, uri: &str) {
+        self.failed_analyses.insert(uri.to_string());
+    }
+
     pub fn new(root: PathBuf) -> Self {
         Self {
             editor_cache: Default::default(),
@@ -784,12 +839,6 @@ impl LspContext {
         self.open_files.contains_key(uri)
             && !self.has_current_analysis(uri)
             && !self.failed_analyses.contains(uri)
-    }
-
-    pub fn needs_analysis_uri(&mut self, req: &lsp_server::Request) -> bool {
-        req.params["textDocument"]["uri"]
-            .as_str()
-            .is_some_and(|uri| self.needs_analysis(uri))
     }
 
     pub fn has_current_analysis(&self, uri: &str) -> bool {

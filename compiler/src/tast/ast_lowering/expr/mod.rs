@@ -274,6 +274,7 @@ impl<'a> AstLowering<'a> {
         &mut self,
         expression: &Expr,
     ) -> LoweringResult<TypedExpression> {
+        crate::cooperative::checkpoint();
         if let ExprKind::Meta { meta, expr } = &expression.kind
             && meta.name.trim_start_matches(':') == super::coroutines::BODY_META
         {

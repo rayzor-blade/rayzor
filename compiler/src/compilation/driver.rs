@@ -1555,6 +1555,7 @@ impl CompilationUnit {
     /// IMPORTANT: On error, this automatically prints formatted diagnostics to stderr
 
     pub fn lower_to_tast(&mut self) -> Result<Vec<TypedFile>, Vec<CompilationError>> {
+        crate::cooperative::poll();
         self.typecheck_timings = TypecheckStageTimings::default();
 
         // Step 0: Discover @:hlNative metadata in user files and load HDLL plugins

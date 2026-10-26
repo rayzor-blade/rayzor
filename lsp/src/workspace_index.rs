@@ -51,9 +51,9 @@ pub(crate) enum IndexActivity {
 
 pub(crate) type IndexProgress = std::sync::Arc<dyn Fn(IndexActivity) + Send + Sync>;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct WorkspaceIndex {
-    state: RefCell<State>,
+    state: std::rc::Rc<RefCell<State>>,
     defines: Vec<String>,
     profiles: Vec<(PathBuf, Vec<String>)>,
     roots: Vec<(PathBuf, PathBuf)>,
@@ -168,10 +168,10 @@ impl WorkspaceIndex {
                 let _ = sender.send(Event::Finished);
             });
         Self {
-            state: RefCell::new(State {
+            state: std::rc::Rc::new(RefCell::new(State {
                 receiver: worker.ok().map(|_| receiver),
                 ..Default::default()
-            }),
+            })),
             defines,
             profiles,
             roots,

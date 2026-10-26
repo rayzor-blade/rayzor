@@ -276,80 +276,263 @@ fn serve_worker(
         let _ = connection.sender.send(Message::Request(request));
     }
 
-    // Apply edits first. Serve requests for unchanged indexed pages before
-    // starting unrelated queued analysis; requests for edited pages wait.
-    let mut changed: Vec<String> = Vec::new();
+    let mut pending = std::collections::VecDeque::new();
+    let mut tasks = std::collections::VecDeque::<crate::indexing::Task>::new();
+    let mut deferred = Vec::new();
     loop {
-        let first = if ctx.poll_workspace_index() {
+        ctx.poll_workspace_index();
+        let first = if tasks.is_empty() && pending.is_empty() {
             match connection
                 .receiver
                 .recv_timeout(std::time::Duration::from_millis(100))
             {
-                Ok(message) => message,
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Ok(message) => Some(message),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => None,
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
         } else {
-            match connection.receiver.recv() {
-                Ok(message) => message,
-                Err(_) => break,
+            match connection.receiver.try_recv() {
+                Ok(message) => Some(message),
+                Err(crossbeam_channel::TryRecvError::Empty) => None,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
             }
         };
+        let mut changed = Vec::new();
         let mut requests = Vec::new();
-        for msg in std::iter::once(first).chain(connection.receiver.try_iter()) {
-            match msg {
-                Message::Request(req) => requests.push(req),
-                Message::Notification(not) => {
-                    handle_notification(connection, &mut ctx, not, &mut changed)
+        for message in first.into_iter().chain(connection.receiver.try_iter()) {
+            match message {
+                Message::Request(request) => requests.push(request),
+                Message::Notification(notification) if notification.method == "$/cancelRequest" => {
+                    let id = &notification.params["id"];
+                    for queue in [&mut requests, &mut deferred] {
+                        queue.retain(|request: &Request| {
+                            if serde_json::to_value(&request.id).ok().as_ref() == Some(id) {
+                                let _ =
+                                    connection.sender.send(Message::Response(Response::new_err(
+                                        request.id.clone(),
+                                        -32800,
+                                        "Request cancelled".into(),
+                                    )));
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                    }
+                }
+                Message::Notification(notification) => {
+                    let invalidate = match notification.method.as_str() {
+                        "textDocument/didChange"
+                        | "workspace/didChangeWatchedFiles"
+                        | "workspace/didChangeConfiguration"
+                        | "workspace/didChangeWorkspaceFolders" => true,
+                        "textDocument/didOpen" => {
+                            let uri = notification.params["textDocument"]["uri"].as_str();
+                            let text = notification.params["textDocument"]["text"].as_str();
+                            uri.zip(text).is_some_and(|(uri, text)| {
+                                std::fs::read_to_string(crate::context::uri_to_path(uri))
+                                    .ok()
+                                    .as_deref()
+                                    != Some(text)
+                            })
+                        }
+                        "textDocument/didClose" => notification.params["textDocument"]["uri"]
+                            .as_str()
+                            .and_then(|uri| ctx.open_files.get(uri).map(|text| (uri, text)))
+                            .is_some_and(|(uri, text)| {
+                                std::fs::read_to_string(crate::context::uri_to_path(uri))
+                                    .ok()
+                                    .as_ref()
+                                    != Some(text)
+                            }),
+                        "textDocument/didSave" => notification.params["textDocument"]["uri"]
+                            .as_str()
+                            .is_some_and(|uri| !uri.ends_with(".hx")),
+                        _ => false,
+                    };
+                    handle_notification(connection, &mut ctx, notification, &mut changed);
+                    if invalidate {
+                        let mut interrupted = Vec::new();
+                        for mut task in tasks.drain(..) {
+                            task.cancel();
+                            if ctx.open_files.contains_key(&task.uri) {
+                                interrupted.push(task.uri.clone());
+                            }
+                        }
+                        interrupted.append(&mut changed);
+                        changed = interrupted;
+                    }
                 }
                 Message::Response(_) => {}
             }
         }
-        let mut deferred = Vec::new();
-        for req in requests {
-            let ready = req
-                .params
-                .get("textDocument")
-                .and_then(|doc| doc.get("uri"))
-                .and_then(|uri| uri.as_str())
-                .is_some_and(|uri| {
-                    !changed.iter().any(|changed| changed == uri) && ctx.has_current_analysis(uri)
-                });
-            if ready {
-                if answer_request(connection, &ctx, req)? {
-                    return Ok(());
-                }
-            } else {
-                deferred.push(req);
-            }
-        }
-        for uri in changed.drain(..) {
-            publish_diagnostics(connection, &mut ctx, &uri);
-        }
-        for req in deferred {
-            // A request that raced the cache's configuration is answered from
-            // the persisted index rather than waiting for a fresh analysis.
-            if ctx.needs_analysis_uri(&req)
-                && let Some(result) = ctx.editor_cache.answer(&req)
+        pending.retain(|(uri, _)| ctx.open_files.contains_key(uri));
+        let mut seen = std::collections::HashSet::new();
+        let changed: Vec<_> = changed
+            .into_iter()
+            .rev()
+            .filter(|uri| seen.insert(uri.clone()))
+            .collect();
+        for uri in changed.into_iter().rev() {
+            if let Some(snapshot) = ctx
+                .editor_cache
+                .lookup(&uri)
+                .filter(|snapshot| snapshot.complete)
             {
-                send_response(connection, req.id, Some(result));
+                publish_diagnostic_updates(
+                    connection,
+                    ctx.update_diagnostics(&uri, snapshot.diagnostics.clone()),
+                    ctx.document_versions
+                        .get(&uri)
+                        .copied()
+                        .map(|version| (uri.as_str(), version)),
+                );
+                analysis_status(
+                    connection,
+                    &uri,
+                    ctx.document_versions.get(&uri).copied(),
+                    "ready",
+                );
                 continue;
             }
-            if let Some(uri) = req
-                .params
-                .get("textDocument")
-                .and_then(|doc| doc.get("uri"))
-                .and_then(|uri| uri.as_str())
-                && ctx.needs_analysis(uri)
-            {
-                analyze_document(connection, &mut ctx, uri, false);
+            enqueue_document(connection, &ctx, &mut pending, &mut tasks, uri, true);
+        }
+        for request in requests {
+            if request.method == "shutdown" {
+                for task in &mut tasks {
+                    task.cancel();
+                }
+                answer_request(connection, &ctx, request)?;
+                return Ok(());
             }
-            if answer_request(connection, &ctx, req)? {
+            let uri = request.params["textDocument"]["uri"]
+                .as_str()
+                .map(str::to_string);
+            if let Some(uri) = uri
+                && ctx.open_files.contains_key(&uri)
+                && ctx.needs_analysis(&uri)
+                && ctx.editor_cache.answer(&request).is_none()
+            {
+                enqueue_document(connection, &ctx, &mut pending, &mut tasks, uri, false);
+            }
+            deferred.push(request);
+        }
+        while tasks.len() < 2 {
+            let Some((uri, allow_index)) = pending.pop_front() else {
+                break;
+            };
+            if ctx.open_files.contains_key(&uri) {
+                let context = ctx.fork_analysis();
+                tasks.push_back(crate::indexing::Task::new(context, uri, allow_index));
+            }
+        }
+        if let Some(mut task) = tasks.pop_front() {
+            if !ctx.open_files.contains_key(&task.uri)
+                || ctx.document_versions.get(&task.uri).copied() != task.version
+            {
+                task.cancel();
+            } else {
+                let step = task.step();
+                for message in task.messages() {
+                    if let Message::Notification(note) = &message
+                        && (note.method == "rayzor/indexProgress"
+                            || note.method == "window/logMessage"
+                            || note.method == "rayzor/analysisStatus"
+                                && note.params["state"] == "checking")
+                    {
+                        let _ = connection.sender.send(message);
+                    }
+                }
+                if step == krio_fiber::FiberStep::Yielded {
+                    tasks.push_back(task);
+                } else if task.fingerprint.is_some()
+                    && task.fingerprint != ctx.editor_cache.fingerprint(&task.uri, &ctx.open_files)
+                {
+                    pending.push_back((task.uri.clone(), true));
+                } else {
+                    let diagnostics = if let Some(context) = task.take_result() {
+                        ctx.adopt_analysis(&task.uri, context)
+                    } else {
+                        ctx.mark_analysis_failed(&task.uri);
+                        let message = task
+                            .error()
+                            .map(|error| panic_message(&error))
+                            .unwrap_or_else(|| "indexing task failed".into());
+                        vec![crate::context::LspDiagnostic::error(
+                            &crate::context::uri_to_path(&task.uri),
+                            1,
+                            1,
+                            message,
+                        )]
+                    };
+                    publish_diagnostic_updates(
+                        connection,
+                        ctx.update_diagnostics(&task.uri, diagnostics),
+                        task.version.map(|version| (task.uri.as_str(), version)),
+                    );
+                    analysis_status(connection, &task.uri, task.version, "ready");
+                }
+            }
+        }
+        let mut waiting = Vec::new();
+        for request in deferred.drain(..) {
+            if let Some(result) = ctx.editor_cache.answer(&request) {
+                send_response(connection, request.id, Some(result));
+            } else if request.params["textDocument"]["uri"]
+                .as_str()
+                .is_some_and(|uri| {
+                    tasks.iter().any(|task| task.uri == uri)
+                        || pending.iter().any(|(document, _)| document == uri)
+                })
+            {
+                waiting.push(request);
+            } else if answer_request(connection, &ctx, request)? {
                 return Ok(());
             }
         }
+        deferred = waiting;
     }
     Ok(())
+}
+
+fn enqueue_document(
+    connection: &Connection,
+    ctx: &LspContext,
+    pending: &mut std::collections::VecDeque<(String, bool)>,
+    tasks: &mut std::collections::VecDeque<crate::indexing::Task>,
+    uri: String,
+    allow_index: bool,
+) {
+    if let Some(index) = tasks.iter().position(|task| task.uri == uri) {
+        if tasks[index].version == ctx.document_versions.get(&uri).copied() {
+            return;
+        }
+        let mut task = tasks.remove(index).unwrap();
+        task.cancel();
+    }
+    let was_queued = pending.iter().any(|(document, _)| *document == uri);
+    let allow_index = if let Some(index) = pending.iter().position(|(document, _)| *document == uri)
+    {
+        let previous = pending.remove(index).unwrap().1;
+        allow_index && previous
+    } else {
+        allow_index
+    };
+    // Reserve a slot for newly active work; unfinished background pages remain queued.
+    if tasks.len() >= 2 {
+        let mut background = tasks.pop_back().unwrap();
+        background.cancel();
+        pending.push_back((background.uri.clone(), true));
+    }
+    if !was_queued {
+        analysis_status(
+            connection,
+            &uri,
+            ctx.document_versions.get(&uri).copied(),
+            "queued",
+        );
+    }
+    pending.push_front((uri, allow_index));
 }
 
 fn answer_request(connection: &Connection, ctx: &LspContext, req: Request) -> Result<bool, String> {
@@ -552,13 +735,12 @@ fn handle_notification(
     }
 }
 
-/// Compiles `uri` at its current text and publishes what it finds. A panic
-/// inside the compiler becomes a diagnostic; the last analysis stays.
-fn publish_diagnostics(conn: &Connection, ctx: &mut LspContext, uri: &str) {
-    analyze_document(conn, ctx, uri, true);
-}
-
-fn analyze_document(conn: &Connection, ctx: &mut LspContext, uri: &str, allow_index: bool) {
+pub(crate) fn analyze_document(
+    conn: &Connection,
+    ctx: &mut LspContext,
+    uri: &str,
+    allow_index: bool,
+) {
     let Some(source) = ctx.open_files.get(uri).cloned() else {
         return;
     };
@@ -682,6 +864,7 @@ fn build_editor_snapshot(
     let mut records = std::collections::HashMap::new();
     let mut member_records = std::collections::HashMap::new();
     for (line, column, len, symbol) in names {
+        compiler::cooperative::checkpoint();
         let params =
             json!({"textDocument":{"uri":uri},"position":{"line":line,"character":column}});
         let metadata = if let Some(&record) = records.get(&symbol) {
@@ -821,6 +1004,7 @@ fn declaration_snapshot(
             "textDocument/definition",
             json!({"uri":uri,"range":declaration.range}),
         );
+        responses.mark_syntax();
         let kind = match declaration.kind {
             lsp_types::SymbolKind::CLASS => CompletionItemKind::CLASS,
             lsp_types::SymbolKind::INTERFACE => CompletionItemKind::INTERFACE,
@@ -852,6 +1036,7 @@ fn declaration_snapshot(
     snapshot
         .document
         .insert("textDocument/documentSymbol", json!(outline));
+    snapshot.document.mark_syntax();
     (snapshot, subject)
 }
 

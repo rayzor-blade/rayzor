@@ -42,6 +42,80 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
+    /// Partial facts only accumulate within one fingerprint. Typed facts
+    /// supersede syntax facts; record offsets are local to each incoming block.
+    fn join_partial(&mut self, other: &Self) {
+        let mut positions: BTreeMap<_, _> = self
+            .names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| ((name.line, name.column), index))
+            .collect();
+        let mut records = HashMap::new();
+        for name in &other.names {
+            let position = (name.line, name.column);
+            if let Some(&index) = positions.get(&position) {
+                let own = &mut self.names[index];
+                match (own.metadata, name.metadata) {
+                    (Some(left), Some(right)) => {
+                        self.records[left].join(&other.records[right]);
+                        records.entry(right).or_insert(left);
+                    }
+                    (None, Some(right)) => {
+                        let record = *records.entry(right).or_insert_with(|| {
+                            self.records.push(other.records[right].clone());
+                            self.records.len() - 1
+                        });
+                        own.metadata = Some(record);
+                    }
+                    _ => {}
+                }
+                own.responses.join(&name.responses);
+            } else {
+                let mut name = name.clone();
+                if let Some(record) = name.metadata {
+                    name.metadata = Some(*records.entry(record).or_insert_with(|| {
+                        self.records.push(other.records[record].clone());
+                        self.records.len() - 1
+                    }));
+                }
+                positions.insert(position, self.names.len());
+                self.names.push(name);
+            }
+        }
+        for (position, &record) in &other.members {
+            if let Some(&own) = self.members.get(position) {
+                if other.member_results[record] > self.member_results[own] {
+                    self.member_results[own] = other.member_results[record].clone();
+                }
+            } else {
+                let index = self.member_results.len();
+                self.member_results
+                    .push(other.member_results[record].clone());
+                self.members.insert(*position, index);
+            }
+        }
+        self.document.join(&other.document);
+        for expansion in &other.expansions {
+            if let Some(own) = self
+                .expansions
+                .iter_mut()
+                .find(|own| own.range == expansion.range)
+            {
+                if expansion.response > own.response {
+                    *own = expansion.clone();
+                }
+            } else {
+                self.expansions.push(expansion.clone());
+            }
+        }
+        for dependency in &other.dependencies {
+            if !self.dependencies.contains(dependency) {
+                self.dependencies.push(dependency.clone());
+            }
+        }
+    }
+
     fn heap_bytes(&self) -> usize {
         fn nodes<K, V>(len: usize) -> usize {
             if len == 0 {
@@ -395,7 +469,12 @@ impl EditorCache {
     }
 
     pub fn fingerprint(&self, uri: &str, documents: &HashMap<String, String>) -> Option<u64> {
-        let state = self.0.lock().unwrap();
+        let mut state = self.0.lock().unwrap();
+        // Current tasks share the inventory used by queries. A suspended
+        // generation computes its own identity rather than borrowing new text.
+        if documents == &state.documents {
+            return state.identity(uri).map(|identity| identity.0);
+        }
         let config = state.config_for(uri)?;
         let inputs = Inputs::capture(&config.key, documents);
         inputs.reusable.then(|| {
@@ -408,7 +487,12 @@ impl EditorCache {
     }
 
     pub fn save(&self, uri: &str, input_hash: u64, snapshot: Snapshot) {
-        if !snapshot.complete {
+        if !snapshot.complete
+            || !snapshot
+                .dependencies
+                .iter()
+                .all(|dependency| dependency.is_current())
+        {
             return;
         }
         let Ok(bytes) = encode_snapshot(&snapshot) else {
@@ -418,6 +502,12 @@ impl EditorCache {
             return;
         }
         let mut state = self.0.lock().unwrap();
+        if state
+            .identity(uri)
+            .is_none_or(|identity| identity.0 != input_hash)
+        {
+            return;
+        }
         let Some(config) = state.config_for(uri) else {
             return;
         };
@@ -431,11 +521,40 @@ impl EditorCache {
     }
 
     pub fn publish_partial(&self, uri: &str, input_hash: u64, snapshot: Snapshot) {
+        if !snapshot
+            .dependencies
+            .iter()
+            .all(|dependency| dependency.is_current())
+        {
+            return;
+        }
+        let mut state = self.0.lock().unwrap();
+        if state
+            .identity(uri)
+            .is_none_or(|identity| identity.0 != input_hash)
+        {
+            return;
+        }
+        let snapshot = if let Some(old) = state.retained.iter().find(|entry| {
+            entry.uri == uri
+                && entry.inputs == input_hash
+                && entry
+                    .snapshot
+                    .dependencies
+                    .iter()
+                    .all(|dependency| dependency.is_current())
+        }) {
+            if old.snapshot.complete {
+                return;
+            }
+            let mut merged = (*old.snapshot).clone();
+            merged.join_partial(&snapshot);
+            merged
+        } else {
+            snapshot
+        };
         let heap_bytes = snapshot.heap_bytes();
-        self.0
-            .lock()
-            .unwrap()
-            .retain(uri, input_hash, Arc::new(snapshot), heap_bytes);
+        state.retain(uri, input_hash, Arc::new(snapshot), heap_bytes);
     }
 }
 
@@ -505,6 +624,202 @@ impl State {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn partial_block(line: u32) -> Snapshot {
+        let mut block = Snapshot::default();
+        block.records.push(
+            [(
+                "textDocument/definition",
+                json!({"uri":format!("type{line}")}),
+            )]
+            .into(),
+        );
+        block.names.push(Name {
+            line,
+            column: 0,
+            len: 1,
+            metadata: Some(0),
+            responses: [(
+                "textDocument/hover",
+                json!({"contents":format!("type{line}")}),
+            )]
+            .into(),
+        });
+        block.members.insert((line, 0), 0);
+        block
+            .member_results
+            .push(json!([{"label":format!("member{line}")}]).into());
+        block
+    }
+
+    #[test]
+    fn partial_blocks_join_in_either_order_without_losing_record_identities() {
+        let a = partial_block(0);
+        let b = partial_block(1);
+        let mut left = a.clone();
+        left.join_partial(&b);
+        let mut right = b;
+        right.join_partial(&a);
+        left.join_partial(&left.clone());
+        assert_eq!(left.names.len(), 2);
+        assert_eq!(left.records.len(), 2);
+        for line in [0, 1] {
+            for method in [
+                "textDocument/hover",
+                "textDocument/definition",
+                "textDocument/completion",
+            ] {
+                let column = if method == "textDocument/completion" {
+                    2
+                } else {
+                    0
+                };
+                let request = Request::new(
+                    1.into(),
+                    method.into(),
+                    json!({"position":{"line":line,"character":column}}),
+                );
+                let answer = left.answer(&request, "a.\nb.").unwrap();
+                assert_eq!(Some(answer.clone()), right.answer(&request, "a.\nb."));
+                if method == "textDocument/definition" {
+                    assert_eq!(answer["uri"], format!("type{line}"));
+                }
+                if method == "textDocument/completion" {
+                    assert_eq!(answer[0]["label"], format!("member{line}"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn interleaved_syntax_and_typed_facts_converge_associatively() {
+        let mut syntax = partial_block(0);
+        syntax.records.clear();
+        syntax.names[0].metadata = None;
+        syntax.names[0]
+            .responses
+            .insert("textDocument/hover", json!("syntax"));
+        syntax.names[0].responses.mark_syntax();
+        syntax
+            .document
+            .insert("textDocument/completion", json!("syntax"));
+        syntax.document.mark_syntax();
+        let mut metadata = partial_block(0);
+        metadata.names[0].responses = Default::default();
+        let mut typed = partial_block(0);
+        typed.names[0]
+            .responses
+            .insert("textDocument/hover", json!("a"));
+        typed.document.insert("textDocument/completion", json!("a"));
+        let blocks = [syntax, metadata, typed];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let mut left = blocks[order[0]].clone();
+            left.join_partial(&blocks[order[1]]);
+            left.join_partial(&blocks[order[2]]);
+            let mut tail = blocks[order[1]].clone();
+            tail.join_partial(&blocks[order[2]]);
+            let mut right = blocks[order[0]].clone();
+            right.join_partial(&tail);
+            for merged in [&left, &right] {
+                assert_eq!(
+                    merged.names[0].responses.get("textDocument/hover"),
+                    Some(json!("a"))
+                );
+                assert_eq!(
+                    merged.document.get("textDocument/completion"),
+                    Some(json!("a"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn growing_prefixes_reuse_metadata_for_later_occurrences() {
+        let mut prefix = partial_block(0);
+        let mut next = prefix.clone();
+        let mut occurrence = next.names[0].clone();
+        occurrence.line = 1;
+        next.names.push(occurrence);
+        prefix.join_partial(&next);
+        prefix.join_partial(&next);
+        assert_eq!(prefix.records.len(), 1);
+        assert_eq!(prefix.names[0].metadata, prefix.names[1].metadata);
+    }
+
+    #[test]
+    fn late_partial_and_complete_results_cannot_replace_a_new_generation() {
+        let root =
+            std::env::temp_dir().join(format!("rayzor-editor-generations-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Main.hx"), "a.\nb.").unwrap();
+        let uri = crate::context::file_uri(root.join("Main.hx").to_str().unwrap());
+        let cache = EditorCache::default();
+        cache.configure(
+            SessionKey {
+                class_paths: vec![root.clone()],
+                stdlib_paths: vec![],
+                defines: vec![],
+                macros: vec![],
+                macro_budget: Duration::from_secs(1),
+                options: Default::default(),
+            },
+            &root,
+        );
+        cache.track(&Notification::new(
+            "textDocument/didOpen".into(),
+            json!({"textDocument":{"uri":uri,"text":"a.\nb."}}),
+        ));
+        let old = cache
+            .fingerprint(&uri, &HashMap::from([(uri.clone(), "a.\nb.".into())]))
+            .unwrap();
+        cache.publish_partial(&uri, old, partial_block(0));
+        cache.publish_partial(&uri, old, partial_block(1));
+        let mut complete = (*cache.lookup(&uri).unwrap()).clone();
+        complete.complete = true;
+        cache.save(&uri, old, complete.clone());
+        cache.publish_partial(&uri, old, partial_block(0));
+        assert!(cache.lookup(&uri).unwrap().complete);
+        assert_eq!(cache.lookup(&uri).unwrap().names.len(), 2);
+        cache.track(&Notification::new(
+            "textDocument/didChange".into(),
+            json!({"textDocument":{"uri":uri},"contentChanges":[{"text":"changed"}]}),
+        ));
+        let current = cache
+            .fingerprint(&uri, &HashMap::from([(uri.clone(), "changed".into())]))
+            .unwrap();
+        assert_ne!(old, current);
+        cache.publish_partial(&uri, current, partial_block(2));
+        cache.publish_partial(&uri, old, partial_block(0));
+        cache.save(&uri, old, complete);
+        let retained = cache.lookup(&uri).unwrap();
+        assert!(!retained.complete);
+        assert_eq!(retained.names[0].line, 2);
+        assert_eq!(retained.names.len(), 1);
+        let resource = root.join("style.css");
+        std::fs::write(&resource, "before").unwrap();
+        let dependencies = compiler::macro_system::dependencies::Dependencies::default();
+        dependencies.register_read(&resource);
+        let mut stale = partial_block(3);
+        stale.dependencies = dependencies.snapshot();
+        cache.publish_partial(&uri, current, stale.clone());
+        std::fs::write(&resource, "after resource edit").unwrap();
+        cache.publish_partial(&uri, current, partial_block(4));
+        cache.publish_partial(&uri, current, stale.clone());
+        stale.complete = true;
+        cache.save(&uri, current, stale);
+        let retained = cache.lookup(&uri).unwrap();
+        assert_eq!(retained.names.len(), 1);
+        assert_eq!(retained.names[0].line, 4);
+        assert!(!retained.complete);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn binary_snapshot_preserves_diagnostics_and_expansions() {

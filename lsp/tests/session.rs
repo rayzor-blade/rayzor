@@ -248,6 +248,195 @@ const MAIN: &str = "class Main {
 ";
 
 #[test]
+fn a_burst_of_code_tabs_eventually_completes_every_page() {
+    let files: Vec<_> = (0..65)
+        .map(|index| {
+            (
+                format!("Page{index}.hx"),
+                format!("class Page{index} {{ public var value:Int = {index}; }}"),
+            )
+        })
+        .collect();
+    let borrowed: Vec<_> = files
+        .iter()
+        .map(|(name, text)| (name.as_str(), text.as_str()))
+        .collect();
+    let mut s = Session::start(&borrowed);
+    for (name, text) in &files {
+        s.notify(
+            "textDocument/didOpen",
+            json!({"textDocument":{
+                "uri":s.uri(name),"languageId":"haxe","version":1,"text":text
+            }}),
+        );
+    }
+    let mut ready = std::collections::HashSet::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while ready.len() < files.len() {
+        if let Message::Notification(note) = s
+            .client
+            .receiver
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("queued page did not finish")
+        {
+            if note.method == "textDocument/publishDiagnostics" {
+                assert_eq!(note.params["diagnostics"], json!([]), "{:?}", note.params);
+            }
+            if note.method == "rayzor/analysisStatus" && note.params["state"] == "ready" {
+                ready.insert(note.params["uri"].as_str().unwrap().to_string());
+            }
+        }
+    }
+    for (index, (name, _)) in files.iter().enumerate() {
+        let hover = hover_text(&s.request("textDocument/hover", s.at(name, 0, 7)));
+        assert!(hover.contains(&format!("class Page{index}")), "{hover}");
+    }
+}
+
+#[test]
+fn a_fresh_page_finishes_while_another_pages_macro_is_running() {
+    let mut s = busy_page_session();
+    start_busy_page(&s);
+    s.notify(
+        "textDocument/didOpen",
+        json!({"textDocument":{
+            "uri":s.uri("Fast.hx"),"languageId":"haxe","version":1,
+            "text":std::fs::read_to_string(s.root.join("Fast.hx")).unwrap()
+        }}),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let message = s
+            .client
+            .receiver
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap();
+        if let Message::Notification(note) = message {
+            if note.method == "textDocument/publishDiagnostics"
+                && note.params["uri"] == s.uri("Fast.hx")
+            {
+                assert_eq!(note.params["diagnostics"], json!([]), "{:?}", note.params);
+            }
+            if note.method == "rayzor/analysisStatus" && note.params["state"] == "ready" {
+                assert_eq!(
+                    note.params["uri"],
+                    s.uri("Fast.hx"),
+                    "the slow page monopolized indexing"
+                );
+                break;
+            }
+        }
+    }
+    let source = std::fs::read_to_string(s.root.join("Fast.hx")).unwrap();
+    let at = s.at("Fast.hx", 0, source.find("answer").unwrap() as u32 + 1);
+    assert!(!s.request("textDocument/hover", at).is_null());
+}
+
+#[test]
+fn a_waiting_request_can_be_cancelled_while_its_page_is_indexing() {
+    let s = busy_page_session();
+    start_busy_page(&s);
+    s.client
+        .sender
+        .send(Message::Request(Request::new(
+            999.into(),
+            "rayzor/expandMacro".into(),
+            s.at("Slow.hx", 0, 50),
+        )))
+        .unwrap();
+    s.notify("$/cancelRequest", json!({"id":999}));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Message::Response(response) = s
+            .client
+            .receiver
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap()
+            && response.id == 999.into()
+        {
+            assert_eq!(response.error.unwrap().code, -32800);
+            break;
+        }
+    }
+}
+
+#[test]
+fn editing_a_suspended_page_discards_the_old_generation() {
+    let mut s = busy_page_session();
+    start_busy_page(&s);
+    let replacement = "class Slow { static function main() { var answer:Bool = true; } }";
+    s.notify(
+        "textDocument/didChange",
+        json!({"textDocument":{"uri":s.uri("Slow.hx"),"version":2},
+        "contentChanges":[{"text":replacement}]}),
+    );
+    assert!(s.wait_ready("Slow.hx", 2).is_empty(), "{:?}", s.diagnostics);
+    assert!(
+        !s.activity.iter().any(|note| note["uri"] == s.uri("Slow.hx")
+            && note["version"] == 1
+            && note["state"] == "ready")
+    );
+    assert!(
+        !s.diagnostics
+            .iter()
+            .any(|note| note["uri"] == s.uri("Slow.hx") && note["version"] == 1)
+    );
+    let at = s.at("Slow.hx", 0, replacement.find("answer").unwrap() as u32 + 1);
+    let hover = hover_text(&s.request("textDocument/hover", at));
+    assert!(hover.contains("Bool"), "{hover}");
+}
+
+fn busy_page_session() -> Session {
+    let s = Session::start_with(
+        &[
+            ("build.hxml", "-cp .\n"),
+            (
+                "Busy.hx",
+                "import haxe.macro.Expr; class Busy { public static macro function make():Expr { sys.io.File.saveContent('MARKER', 'started'); while (true) {} return macro 0; } }",
+            ),
+            (
+                "Quick.hx",
+                "class Quick { public static macro function value() return macro 42; }",
+            ),
+            (
+                "Slow.hx",
+                "class Slow { static function main() { var answer = Busy.make(); } }",
+            ),
+            (
+                "Fast.hx",
+                "class Fast { static function main() { var answer:Int = Quick.value(); } }",
+            ),
+        ],
+        json!({"macroBudgetMs":2000}),
+    );
+    let path = s.root.join("Busy.hx");
+    let source = std::fs::read_to_string(&path).unwrap().replace(
+        "'MARKER'",
+        &format!("{:?}", s.root.join("started").to_string_lossy()),
+    );
+    std::fs::write(path, source).unwrap();
+    s
+}
+
+fn start_busy_page(s: &Session) {
+    s.notify(
+        "textDocument/didOpen",
+        json!({"textDocument":{
+            "uri":s.uri("Slow.hx"),"languageId":"haxe","version":1,
+            "text":std::fs::read_to_string(s.root.join("Slow.hx")).unwrap()
+        }}),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !s.root.join("started").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "slow macro never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
 fn hover_answers_at_declarations_and_uses() {
     let mut s = Session::start(&[("Main.hx", MAIN)]);
     assert!(s.open("Main.hx").is_empty());
@@ -1280,13 +1469,26 @@ fn analysis_status_and_diagnostics_track_document_versions() {
         }
         s.request("textDocument/hover", s.at("Main.hx", 0, 7));
         s.request("workspace/symbol", json!({"query":"Main"}));
+        // A partial hover can answer before the document's diagnostics finish.
+        if !s
+            .activity
+            .iter()
+            .any(|event| event["version"] == version && event["state"] == "ready")
+        {
+            s.wait_ready("Main.hx", version);
+        }
         let activity: Vec<_> = s
             .activity
             .iter()
             .filter(|event| event["version"] == version)
             .map(|event| event["state"].as_str().unwrap())
             .collect();
-        assert_eq!(activity, ["checking", "ready"]);
+        assert_eq!(
+            activity,
+            ["queued", "checking", "ready"],
+            "{:?}",
+            s.activity
+        );
         assert!(
             s.diagnostics
                 .iter()

@@ -84,7 +84,7 @@ impl EncodedValue {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct BinaryResponse(Arc<[u8]>);
 
 impl From<Value> for BinaryResponse {
@@ -121,7 +121,7 @@ impl<'de> Deserialize<'de> for BinaryResponse {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 enum Method {
     Hover,
     Signature,
@@ -154,29 +154,52 @@ impl Method {
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
-pub(crate) struct Responses(Vec<(Method, BinaryResponse)>);
+pub(crate) struct Responses(Vec<(Method, bool, BinaryResponse)>);
 
 impl Responses {
+    /// A deterministic union of facts from the same source generation.
+    pub fn join(&mut self, other: &Self) {
+        for (method, typed, response) in &other.0 {
+            if let Some((_, old_typed, old)) = self.0.iter_mut().find(|(key, _, _)| key == method) {
+                if (*typed, response) > (*old_typed, &*old) {
+                    *old_typed = *typed;
+                    *old = response.clone();
+                }
+            } else {
+                self.0.push((*method, *typed, response.clone()));
+            }
+        }
+        self.0.sort_by_key(|(method, _, _)| *method);
+    }
+
+    /// Preserve provenance per fact when syntax and typed blocks interleave.
+    pub fn mark_syntax(&mut self) {
+        for (_, typed, _) in &mut self.0 {
+            *typed = false;
+        }
+    }
+
     pub fn insert(&mut self, method: &str, value: Value) {
         let method = Method::from_name(method).expect("indexed LSP method");
-        if let Some((_, old)) = self.0.iter_mut().find(|(key, _)| *key == method) {
+        if let Some((_, typed, old)) = self.0.iter_mut().find(|(key, _, _)| *key == method) {
+            *typed = true;
             *old = value.into();
         } else {
-            self.0.push((method, value.into()));
+            self.0.push((method, true, value.into()));
         }
     }
 
     pub fn get(&self, method: &str) -> Option<Value> {
         let method = Method::from_name(method)?;
-        self.0.iter().find(|(key, _)| *key == method)?.1.decode()
+        self.0.iter().find(|(key, _, _)| *key == method)?.2.decode()
     }
 
     pub fn heap_bytes(&self) -> usize {
-        self.0.capacity() * std::mem::size_of::<(Method, BinaryResponse)>()
+        self.0.capacity() * std::mem::size_of::<(Method, bool, BinaryResponse)>()
             + self
                 .0
                 .iter()
-                .map(|(_, response)| response.heap_bytes())
+                .map(|(_, _, response)| response.heap_bytes())
                 .sum::<usize>()
     }
 }

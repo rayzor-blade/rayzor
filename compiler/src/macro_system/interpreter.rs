@@ -282,6 +282,7 @@ impl MacroInterpreter {
     }
 
     pub fn eval_expr(&mut self, expr: &Expr) -> Result<MacroValue, MacroError> {
+        crate::cooperative::checkpoint();
         let location = self.source_file.as_deref().map_or_else(
             || span_to_location(expr.span),
             |file| super::context_api::source_position(file, expr.span),

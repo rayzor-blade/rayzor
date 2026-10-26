@@ -15,6 +15,7 @@ serde_json = "1"
 postcard = { version = "1.0", features = ["alloc"] }
 log = "0.4"
 crossbeam-channel = "0.5"
+krio-fiber = { git = "https://github.com/darmie/krio.git", rev = "286f5e0710e20772179fc2ca96f6fda8d13e3a70" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

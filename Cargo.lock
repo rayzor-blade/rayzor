@@ -3021,6 +3021,7 @@ dependencies = [
  "compiler",
  "crossbeam-channel",
  "diagnostics",
+ "krio-fiber",
  "libc",
  "log",
  "lsp-server",
