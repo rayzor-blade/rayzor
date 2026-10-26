@@ -244,7 +244,7 @@ impl<'a> AstLowering<'a> {
                     let owner = named_package(s.package_id);
                     s.package_id.is_some() && owner != pkg
                 }
-                _ => false,
+                _ => true,
             })
     }
 

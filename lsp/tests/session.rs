@@ -1595,6 +1595,53 @@ fn imported_subclasses_are_assignable_to_their_base_classes() {
 }
 
 #[test]
+fn enum_abstract_values_do_not_replace_imported_class_identities() {
+    let source = "import keys.NamedKey; import widgets.ContextMenu; class Main { static function accept(value:widgets.Base):Void {} static function main() { var key = NamedKey.ContextMenu; var offset = widgets.Scroll.of(2); var menu = Builder.make(<context-menu/>); accept(menu); } }";
+    let mut s = Session::start(&[
+        ("Main.hx", source),
+        (
+            "keys/NamedKey.hx",
+            "package keys; enum abstract NamedKey(Int) { var ContextMenu = 42; var Scroll = 1; }",
+        ),
+        (
+            "widgets/Base.hx",
+            "package widgets; class Base { public function new() {} }",
+        ),
+        (
+            "widgets/ContextMenu.hx",
+            "package widgets; class ContextMenu extends Base {}",
+        ),
+        (
+            "widgets/Scroll.hx",
+            "package widgets; class Scroll { public static function of(value:Int):Int return value; }",
+        ),
+        (
+            "Builder.hx",
+            r#"
+import haxe.macro.Expr;
+import haxe.macro.Context;
+class Builder {
+    public static macro function make(template:Expr):Expr {
+        switch Context.getType("ContextMenu") {
+            case TInst(c, _): if (c.get().pack.join(".") != "widgets") throw "wrong class";
+            case _: throw "expected a class";
+        }
+        var p = Context.getPosInfos(template.pos);
+        var tag = Context.makePosition({file:p.file, min:p.min + 1, max:p.min + 13});
+        return macro @:pos(tag) new widgets.ContextMenu();
+    }
+}
+"#,
+        ),
+    ]);
+    let diagnostics = s.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let at = s.at("Main.hx", 0, source.find("context-menu").unwrap() as u32);
+    let hover = hover_text(&s.request("textDocument/hover", at));
+    assert!(hover.contains("class ContextMenu extends Base"), "{hover}");
+}
+
+#[test]
 fn method_callbacks_use_structural_function_compatibility() {
     let source = r#"typedef Callback = Int->Void;
 class Main {
