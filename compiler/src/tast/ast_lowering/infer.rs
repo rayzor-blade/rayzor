@@ -567,8 +567,14 @@ impl<'a> AstLowering<'a> {
                 ..
             } => {
                 // Extract return type from function signature
+                let signature = crate::tast::type_substitution::TypeSubstitutions {
+                    type_table: self.context.type_table,
+                    symbol_table: self.context.symbol_table,
+                    class_type_params: Some(&self.class_type_params),
+                }
+                .callable_type(function.expr_type);
                 let type_table = self.context.type_table.borrow();
-                match type_table.get(function.expr_type) {
+                match type_table.get(signature) {
                     Some(function_type) => match &function_type.kind {
                         crate::tast::core::TypeKind::Function {
                             params,

@@ -194,36 +194,23 @@ impl<'a> TypeCheckingPhase<'a> {
                 }
             }
             TypedExpressionKind::Variable { symbol_id } => {
-                // Check if we're accessing an instance member from a static context
-                if let Some((is_static_context, class_symbol_id)) = self.current_method_context {
-                    if is_static_context {
-                        // We're in a static method - check if the variable is an instance member
-                        if let Some(symbol) = self.type_checker.symbol_table.get_symbol(*symbol_id)
-                        {
-                            // In Haxe, unqualified field names in methods resolve to this.field
-                            // So we need to check if this variable name matches an instance field
-                            if let Some(class_def) = self.find_class_by_symbol(class_symbol_id) {
-                                // Check if this variable name matches any instance field name in the class
-                                let matching_instance_field = class_def
-                                    .fields
-                                    .iter()
-                                    .find(|f| f.name == symbol.name && !f.is_static);
-
-                                if let Some(_field) = matching_instance_field {
-                                    // This is an unqualified access to an instance field from a static method
-                                    self.emit_error(TypeCheckError {
-                                                kind: TypeErrorKind::InstanceAccessFromStatic {
-                                                    member_name: symbol.name,
-                                                    class_name: class_def.name,
-                                                },
-                                                location: expr.source_location,
-                                                context: "Instance members cannot be accessed from static context".to_string(),
-                                                suggestion: Some("Static methods cannot access instance fields without an explicit instance".to_string()),
-                                            });
-                                }
-                            }
-                        }
-                    }
+                // A lexical binding may shadow an instance field's name.
+                if let Some((true, class_symbol_id)) = self.current_method_context
+                    && let Some(class_def) = self.find_class_by_symbol(class_symbol_id)
+                    && let Some(field) = class_def
+                        .fields
+                        .iter()
+                        .find(|field| field.symbol_id == *symbol_id && !field.is_static)
+                {
+                    self.emit_error(TypeCheckError {
+                        kind: TypeErrorKind::InstanceAccessFromStatic {
+                            member_name: field.name,
+                            class_name: class_def.name,
+                        },
+                        location: expr.source_location,
+                        context: "Instance members cannot be accessed from static context".into(),
+                        suggestion: Some("Static methods cannot access instance fields without an explicit instance".into()),
+                    });
                 }
             }
             TypedExpressionKind::ArrayAccess { array, index } => {

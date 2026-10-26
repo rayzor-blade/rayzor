@@ -10,6 +10,23 @@ pub(crate) struct TypeSubstitutions<'a> {
 }
 
 impl TypeSubstitutions<'_> {
+    /// A callback's signature through nullable wrappers and instantiated typedefs.
+    pub(crate) fn callable_type(&self, mut ty: TypeId) -> TypeId {
+        for _ in 0..64 {
+            ty = self.resolve_alias_type(ty);
+            let inner = match self.type_table.borrow().get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) if *inner_type != ty => Some(*inner_type),
+                _ => None,
+            };
+            if let Some(inner) = inner {
+                ty = inner;
+            } else {
+                break;
+            }
+        }
+        ty
+    }
+
     /// Expand transparent typedefs, including forward Class nodes, with each
     /// use's arguments bound to the declaration's parameters.
     pub(crate) fn resolve_alias_type(&self, mut ty: TypeId) -> TypeId {

@@ -3618,6 +3618,92 @@ fn expression_macro_hovers_expose_the_generated_value_type() {
 }
 
 #[test]
+fn static_callback_parameters_and_captured_locals_shadow_instance_fields() {
+    let source = r#"class Main<T, R> {
+ final work:Int = 0;
+ final ready:Int = 0;
+ final value:String = 'field';
+ public function new() {}
+ static function run<T, R>(value:T, work:(T, Void->Bool)->R, ready:Null<Void->Void>):R {
+  var invoke = () -> perform(value, work, ready);
+  return invoke();
+ }
+ static function perform<T, R>(value:T, work:(T, Void->Bool)->R, ready:Null<Void->Void>):R {
+  var result = work(value, () -> true);
+  if (ready != null) ready();
+  return result;
+ }
+ static function locals():Int {
+  var work = (value:Int, check:Void->Bool) -> value;
+  var ready:Null<Void->Void> = () -> {};
+  var value = 4;
+  var invoke = () -> { if (ready != null) ready(); return work(value, () -> true); };
+  var wrap = (work:Void->Int) -> () -> work();
+  return wrap(invoke)();
+ }
+ static function main() {
+  var result:Int = run(42, (value, check) -> value, () -> {});
+  var local:Int = locals();
+ }
+}"#;
+    let mut s = Session::start(&[("Main.hx", source)]);
+    assert!(s.open("Main.hx").is_empty(), "{:?}", s.diagnostics);
+    let line = source.lines().nth(6).unwrap();
+    let at = s.at("Main.hx", 6, line.find("work,").unwrap() as u32 + 1);
+    let hover = hover_text(&s.request("textDocument/hover", at.clone()));
+    assert!(
+        hover.contains("work:") && hover.contains("Bool") && hover.contains("R"),
+        "{hover}"
+    );
+    let definition = s.request("textDocument/definition", at);
+    assert_eq!(definition["range"]["start"]["line"], 5, "{definition}");
+    assert_eq!(
+        definition["range"]["start"]["character"],
+        source.lines().nth(5).unwrap().find("work:").unwrap(),
+        "{definition}"
+    );
+}
+
+#[test]
+fn nullable_callback_aliases_keep_their_argument_and_return_types() {
+    let source = "typedef Callback<T> = Null<T->Int>;\nclass Main { static function invoke(callback:Callback<String>):Int { if (callback != null) { var result = callback('ready'); return result; } return 0; } static function main() {} }";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    assert!(s.open("Main.hx").is_empty(), "{:?}", s.diagnostics);
+    let at = s.at(
+        "Main.hx",
+        1,
+        source.lines().nth(1).unwrap().find("result =").unwrap() as u32 + 1,
+    );
+    let hover = hover_text(&s.request("textDocument/hover", at));
+    assert!(hover.contains("result:Int"), "{hover}");
+    for invalid in ["callback(42)", "callback()", "callback('ready', 'extra')"] {
+        let diagnostics = s.change("Main.hx", &source.replace("callback('ready')", invalid));
+        assert!(
+            diagnostics.iter().any(|d| d["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("Type mismatch"))),
+            "{invalid}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn real_instance_fields_still_fail_in_static_closures() {
+    let source = "class Main { var value:Int = 1; var work:Void->Int = () -> 1; static function direct():Int return value; static function capture():Void->Int return () -> work(); static function qualified():Int return Main.value; static function main() {} }";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    let diagnostics = s.open("Main.hx");
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| {
+            d["message"].as_str().is_some_and(|message| {
+                message.contains("Instance member") && message.contains("static context")
+            })
+        })
+        .collect();
+    assert_eq!(errors.len(), 3, "{diagnostics:?}");
+}
+
+#[test]
 fn runtime_callback_names_shadow_macro_aliases_inside_closures() {
     let mut s = Session::start(&[
         (

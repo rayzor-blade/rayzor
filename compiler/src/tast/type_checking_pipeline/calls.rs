@@ -15,7 +15,7 @@ impl TypeCheckingPhase<'_> {
             symbol_table: self.symbol_table,
             class_type_params: None,
         };
-        let declared = self.type_table.borrow().resolve_alias_type(declared);
+        let declared = substitutions.callable_type(declared);
         let mut parameters = std::collections::BTreeSet::new();
         substitutions.collect_type_param_symbols(declared, 0, &mut parameters);
         // Receiver bindings are fixed: arguments cannot rebind Map<K, Bool>'s
@@ -68,7 +68,7 @@ impl TypeCheckingPhase<'_> {
         } else {
             instantiated
         };
-        self.type_table.borrow().resolve_alias_type(instantiated)
+        substitutions.resolve_alias_type(instantiated)
     }
 
     pub(super) fn accepts_argument_count(&self, signature: TypeId, count: usize) -> bool {
