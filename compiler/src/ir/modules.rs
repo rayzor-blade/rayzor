@@ -271,6 +271,17 @@ impl StringPool {
         self.strings.get(&id).map(|s| s.as_str())
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &str)> {
+        self.strings.iter().map(|(&id, text)| (id, text.as_str()))
+    }
+
+    /// Remove unused payloads without renumbering pool references in global initializers.
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(u32, &str) -> bool) {
+        self.strings.retain(|&id, text| keep(id, text));
+        self.string_to_id
+            .retain(|_, id| self.strings.contains_key(id));
+    }
+
     /// Merge strings from another pool into this one (deduplicating by value)
     pub fn merge_from(&mut self, other: &StringPool) {
         for (_id, s) in &other.strings {

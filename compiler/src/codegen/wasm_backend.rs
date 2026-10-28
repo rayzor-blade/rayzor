@@ -985,10 +985,8 @@ impl CompileCtx {
     fn collect_strings(&mut self, modules: &[&IrModule]) {
         for module in modules {
             // Walk the string pool.
-            let mut id = 0u32;
-            while let Some(s) = module.string_pool.get(id) {
+            for (_, s) in module.string_pool.iter() {
                 self.intern_string(s);
-                id += 1;
             }
             // Walk function bodies for IrValue::String constants.
             for func in module.functions.values() {
@@ -6465,6 +6463,18 @@ fn emit_typed_store_offset(f: &mut Function, vt: ValType, offset: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn string_collection_keeps_entries_after_pruned_pool_ids() {
+        let mut module = IrModule::new("Main".into(), "Main.hx".into());
+        let dead = module.string_pool.add("unused icon".into());
+        module.string_pool.add("used icon".into());
+        module.string_pool.retain(|id, _| id != dead);
+        let mut compiler = CompileCtx::new();
+        compiler.collect_strings(&[&module]);
+        assert!(!compiler.string_offsets.contains_key("unused icon"));
+        assert!(compiler.string_offsets.contains_key("used icon"));
+    }
 
     #[test]
     fn test_ir_type_to_wasm() {

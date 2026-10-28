@@ -204,6 +204,47 @@ pub struct TreeShakeStats {
     pub registrations_removed: usize,
 }
 
+fn prune_string_pool(module: &mut IrModule) {
+    fn strings<'a>(value: &'a IrValue, live: &mut BTreeSet<&'a str>) {
+        match value {
+            IrValue::String(text) => {
+                live.insert(text);
+            }
+            IrValue::Array(values) | IrValue::Struct(values) => {
+                for value in values {
+                    strings(value, live);
+                }
+            }
+            IrValue::Closure { environment, .. } => strings(environment, live),
+            _ => {}
+        }
+    }
+
+    let mut live = BTreeSet::new();
+    let mut global_pool_ids = BTreeSet::new();
+    for global in module.globals.values() {
+        if let Some(value) = &global.initializer {
+            strings(value, &mut live);
+            // Legacy string globals store a pool id as an integer initializer.
+            if let Some(id) = integer_bits(value) {
+                global_pool_ids.insert(id);
+            }
+        }
+    }
+    for function in module.functions.values() {
+        for block in function.cfg.blocks.values() {
+            for instruction in &block.instructions {
+                if let IrInstruction::Const { value, .. } = instruction {
+                    strings(value, &mut live);
+                }
+            }
+        }
+    }
+    module
+        .string_pool
+        .retain(|id, text| global_pool_ids.contains(&id) || live.contains(text));
+}
+
 /// Tree-shake a set of modules, keeping only what's reachable from the entry point.
 ///
 /// Walks the call graph starting from the entry function and marks all transitively
@@ -511,6 +552,8 @@ pub fn tree_shake_bundle(
             .globals
             .retain(|id, _| reachable_globals.contains(&(mod_idx, *id)));
 
+        prune_string_pool(module);
+
         stats.functions_removed += orig_funcs - module.functions.len();
         stats.extern_functions_removed += orig_externs - module.extern_functions.len();
         stats.globals_removed += orig_globals - module.globals.len();
@@ -578,6 +621,128 @@ mod tests {
                 uses_sret: false,
             },
         )
+    }
+
+    #[test]
+    fn unused_icon_payloads_are_absent_from_serialized_bundles() {
+        use crate::compilation::{CompilationConfig, CompilationUnit};
+        use crate::ir::blade::RayzorBundle;
+
+        let mut config = CompilationConfig::default();
+        config.enable_cache = false;
+        config.pipeline_config = config.pipeline_config.skip_analysis();
+        let mut unit = CompilationUnit::new(config);
+        unit.load_stdlib().unwrap();
+        unit.add_file(
+            r#"
+            @:dce class Icons {
+                public static var USED(get,never):String;
+                public static var UNUSED(get,never):String;
+                static var used:String;
+                static var unused:String;
+                static inline function get_USED():String {
+                    if (used == null) used = "USED_SVG_PAYLOAD_83ac";
+                    return used;
+                }
+                static inline function get_UNUSED():String {
+                    if (unused == null) unused = "UNUSED_SVG_PAYLOAD_f6b2";
+                    return unused;
+                }
+            }
+            class Main { static function main() { trace(Icons.USED); } }
+        "#,
+            "Main.hx",
+        )
+        .unwrap();
+        unit.lower_to_tast().unwrap();
+        unit.finalize_mir_references();
+        let mir = unit.get_mir_modules();
+        let module = (**mir.last().unwrap()).clone();
+        let entry_module = module.name.clone();
+        let entry_function = module.entry_function().unwrap().name.clone();
+        let mut modules = vec![module];
+        tree_shake_bundle(&mut modules, &entry_module, &entry_function);
+        assert!(modules[0].functions.values().any(|f| f.name == "get_USED"));
+        assert!(
+            !modules[0]
+                .functions
+                .values()
+                .any(|f| f.name == "get_UNUSED")
+        );
+        let wasm = crate::codegen::wasm_backend::WasmBackend::compile(
+            &modules.iter().collect::<Vec<_>>(),
+            Some(&entry_function),
+        )
+        .unwrap();
+        wasmparser::Validator::new().validate_all(&wasm).unwrap();
+        assert!(
+            wasm.windows(b"USED_SVG_PAYLOAD_83ac".len())
+                .any(|v| v == b"USED_SVG_PAYLOAD_83ac")
+        );
+        assert!(
+            !wasm
+                .windows(b"UNUSED_SVG_PAYLOAD_f6b2".len())
+                .any(|v| v == b"UNUSED_SVG_PAYLOAD_f6b2")
+        );
+        let bundle = RayzorBundle::new(modules, &entry_module, &entry_function, None);
+        let bytes = postcard::to_allocvec(&bundle).unwrap();
+        assert!(
+            bytes
+                .windows(b"USED_SVG_PAYLOAD_83ac".len())
+                .any(|v| v == b"USED_SVG_PAYLOAD_83ac")
+        );
+        assert!(
+            !bytes
+                .windows(b"UNUSED_SVG_PAYLOAD_f6b2".len())
+                .any(|v| v == b"UNUSED_SVG_PAYLOAD_f6b2")
+        );
+    }
+
+    #[test]
+    fn string_pool_pruning_keeps_sparse_ids_and_global_references() {
+        use crate::ir::modules::{IrGlobal, IrGlobalId};
+        use crate::ir::{IrBlockId, IrId, IrInstruction, IrSourceLocation, IrValue, Linkage};
+
+        let mut module = IrModule::new("Main".into(), "Main.hx".into());
+        let dead = module.string_pool.add("unused".into());
+        let global = module.string_pool.add("global value".into());
+        let direct = module.string_pool.add("direct value".into());
+        let mut main = make_function(0, 1, "main");
+        main.cfg
+            .blocks
+            .get_mut(&IrBlockId::entry())
+            .unwrap()
+            .instructions
+            .push(IrInstruction::Const {
+                dest: IrId::new(0),
+                value: IrValue::Struct(vec![IrValue::String("direct value".into())]),
+            });
+        module.add_function(main);
+        module.add_global(IrGlobal {
+            id: IrGlobalId(0),
+            name: "text".into(),
+            symbol_id: SymbolId::from_raw(2),
+            ty: IrType::String,
+            initializer: Some(IrValue::I32(global as i32)),
+            mutable: false,
+            linkage: Linkage::Internal,
+            alignment: None,
+            source_location: IrSourceLocation::unknown(),
+        });
+        super::prune_string_pool(&mut module);
+        assert_eq!(module.string_pool.get(dead), None);
+        assert_eq!(module.string_pool.get(global), Some("global value"));
+        assert_eq!(module.string_pool.get(direct), Some("direct value"));
+        assert_eq!(
+            module
+                .string_pool
+                .iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![global, direct]
+        );
+        assert_eq!(module.string_pool.add("global value".into()), global);
+        assert!(module.string_pool.add("unused".into()) > direct);
     }
 
     #[test]

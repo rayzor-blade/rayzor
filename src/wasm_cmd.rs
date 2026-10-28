@@ -356,7 +356,7 @@ pub fn cmd_run_wasm(
     let _loaded_rpkgs = compile_inputs.loaded_rpkgs;
     let _loaded_native_libs = compile_inputs.loaded_native_libs;
 
-    optimize_wasm_mir(&mut mir_result.module);
+    mir_result.module = optimize_wasm_mir(mir_result.module);
     compiler::codegen::wasm_backend::WasmBackend::strip_wide_vector_functions(
         &mut mir_result.module,
     )?;
@@ -447,7 +447,7 @@ pub fn cmd_build_wasm(
     let _loaded_rpkgs = compile_inputs.loaded_rpkgs;
     let _loaded_native_libs = compile_inputs.loaded_native_libs;
 
-    optimize_wasm_mir(&mut mir_result.module);
+    mir_result.module = optimize_wasm_mir(mir_result.module);
     compiler::codegen::wasm_backend::WasmBackend::strip_wide_vector_functions(
         &mut mir_result.module,
     )?;
@@ -678,9 +678,19 @@ pub fn cmd_build_wasm(
 
 /// The MIR pipeline the native AOT path runs. Free insertion is part of it,
 /// and without it a wasm program frees nothing.
-fn optimize_wasm_mir(module: &mut compiler::ir::IrModule) {
+fn optimize_wasm_mir(module: compiler::ir::IrModule) -> compiler::ir::IrModule {
     use compiler::ir::optimization::{OptimizationLevel, PassManager};
-    let _ = PassManager::for_level(OptimizationLevel::O2).run(module);
+    let entry = module
+        .entry_function()
+        .map(|f| (module.name.clone(), f.name.clone()));
+    let mut modules = vec![module];
+    if let Some((entry_module, entry_function)) = entry {
+        compiler::ir::tree_shake::tree_shake_bundle(&mut modules, &entry_module, &entry_function);
+    }
+    let mut module = modules.pop().expect("entry module survives tree shaking");
+    module.link_selfcontained_wrapper_stubs();
+    let _ = PassManager::for_level(OptimizationLevel::O2).run(&mut module);
+    module
 }
 
 /// Find the pre-built WASM runtime library.
@@ -2120,4 +2130,46 @@ run().catch(e => {{ console.error("WASM error:", e); if (typeof process !== "und
         host_init = host_init,
         host_import_objects = host_import_objects
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wasm_application_prunes_unused_catalog_payloads() {
+        let source = r#"
+            @:dce class Catalog {
+                public static var USED(get,never):String;
+                public static var UNUSED(get,never):String;
+                static inline function get_USED():String return "USED_ICON_b296";
+                static inline function get_UNUSED():String return "UNUSED_ICON_7c3d";
+            }
+            class Main {
+                static function main() { trace(Catalog.USED); }
+                @:keep static function kept() { trace("KEPT_ICON_531a"); }
+            }
+        "#;
+        let result = compile_haxe_to_mir_with_defines_and_cache(
+            source,
+            "Main.hx",
+            Vec::new(),
+            &[],
+            false,
+            &["wasm"],
+            false,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        let module = optimize_wasm_mir(result.module);
+        assert!(!module.functions.values().any(|f| f.name == "get_UNUSED"));
+        let wasm = compiler::codegen::wasm_backend::WasmBackend::compile(&[&module], Some("main"))
+            .unwrap();
+        for payload in [b"USED_ICON_b296".as_slice(), b"KEPT_ICON_531a".as_slice()] {
+            assert!(wasm.windows(payload.len()).any(|v| v == payload));
+        }
+        let unused = b"UNUSED_ICON_7c3d";
+        assert!(!wasm.windows(unused.len()).any(|v| v == unused));
+    }
 }
