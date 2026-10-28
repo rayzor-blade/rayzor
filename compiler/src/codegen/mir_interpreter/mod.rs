@@ -359,7 +359,7 @@ impl Machine {
         // The interpreter's frames hold copies of values whose live copies
         // are in its registers; a collection the callee asks for must not
         // read them as references.
-        let (low, high) = (stack_mark(), ENTRY_SP.with(|e| e.get()));
+        let (low, high) = (stack_pointer(), ENTRY_SP.with(|e| e.get()));
         let _opaque = (low < high).then(|| rayzor_runtime::gc::OpaqueFrames::new(low, high));
         let r = call();
         self.native_depth.set(d);
@@ -413,6 +413,29 @@ thread_local! {
 fn stack_mark() -> usize {
     let here = 0u8;
     std::hint::black_box(&here) as *const u8 as usize
+}
+
+/// The frame's lower boundary includes spill slots below local variables.
+#[inline(always)]
+fn stack_pointer() -> usize {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let pointer: usize;
+        unsafe {
+            std::arch::asm!("mov {}, sp", out(reg) pointer, options(nomem, nostack, preserves_flags));
+        }
+        pointer
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let pointer: usize;
+        unsafe {
+            std::arch::asm!("mov {}, rsp", out(reg) pointer, options(nomem, nostack, preserves_flags));
+        }
+        pointer
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    stack_mark()
 }
 
 fn current() -> *const Machine {
