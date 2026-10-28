@@ -1233,12 +1233,7 @@ pub(crate) fn forwarded_member(
                 }
                 _ => return None,
             };
-            if !unit
-                .symbol_table
-                .get_symbol(symbol)?
-                .flags
-                .contains(SymbolFlags::FORWARD)
-            {
+            if !unit.forwards_instance_member(symbol, name) {
                 return None;
             }
             underlying
@@ -1554,8 +1549,14 @@ pub fn member_completions(
     };
     let mut entries: Vec<CompletionEntry> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let mut visited_classes = std::collections::BTreeSet::new();
+    let mut forwarded_owners = Vec::new();
+    let mut member_receiver = receiver_type;
     drop(tt);
     while let Some(class_id) = class {
+        if !visited_classes.insert(class_id) {
+            break;
+        }
         let Some(prefix) = symbol_table
             .get_symbol(class_id)
             .and_then(|c| c.qualified_name.or(Some(c.name)))
@@ -1589,6 +1590,12 @@ pub fn member_completions(
             let Some(name) = interner.get(member.name) else {
                 continue;
             };
+            if forwarded_owners
+                .iter()
+                .any(|owner| !unit.forwards_instance_member(*owner, name))
+            {
+                continue;
+            }
             if !wanted || name.starts_with("__") || name == "new" || !seen.insert(name.to_string())
             {
                 continue;
@@ -1596,7 +1603,7 @@ pub fn member_completions(
             let mut member_type = if is_type {
                 member.type_id
             } else {
-                unit.receiver_member_type(member.type_id, receiver_type)
+                unit.receiver_member_type(member.type_id, member_receiver)
             };
             if !is_type
                 && matches!(
@@ -1618,6 +1625,24 @@ pub fn member_completions(
                 deprecated: member.flags.contains(SymbolFlags::DEPRECATED),
                 sort_priority: completion_sort_priority(member),
             });
+        }
+        if !is_type
+            && symbol_table
+                .get_symbol(class_id)
+                .is_some_and(|symbol| symbol.flags.contains(SymbolFlags::FORWARD))
+        {
+            let underlying = type_table.borrow().resolve_abstract_underlying(class_id);
+            if let Some(underlying) = underlying {
+                member_receiver = unit.receiver_member_type(underlying, member_receiver);
+                class = class_of_type(
+                    member_receiver,
+                    symbol_table,
+                    &type_table.borrow(),
+                    interner,
+                );
+                forwarded_owners.push(class_id);
+                continue;
+            }
         }
         // An instance has its superclasses' members; Haxe does not inherit
         // statics, so `Sub.baseStatic` is not offered.

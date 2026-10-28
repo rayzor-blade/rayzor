@@ -311,11 +311,11 @@ impl<'a> HirToMirContext<'a> {
                 .is_some_and(|s| s.kind == crate::tast::SymbolKind::Interface),
             _ => false,
         };
-        let type_id = self.resolve_through_aliases(type_id);
+        let type_id = self.resolve_storage_type(type_id);
         match self.type_table.get(type_id).map(|t| &t.kind) {
             Some(TypeKind::Optional { inner_type }) => is_interface(
                 self.type_table
-                    .get(self.resolve_through_aliases(*inner_type))
+                    .get(self.resolve_storage_type(*inner_type))
                     .map(|t| &t.kind),
             ),
             kind => is_interface(kind),
@@ -331,7 +331,7 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn get_interface_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
-        let type_id = self.resolve_through_aliases(type_id);
+        let type_id = self.resolve_storage_type(type_id);
         let type_table = self.type_table;
         let type_ref = type_table.get(type_id)?;
         match &type_ref.kind {

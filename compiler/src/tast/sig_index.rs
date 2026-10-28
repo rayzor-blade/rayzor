@@ -96,6 +96,7 @@ struct ClassSigs {
     implements: Vec<String>,
     /// None without metadata, an empty list forwards every static member.
     forward_statics: Option<Vec<String>>,
+    forward_instances: Option<Vec<String>>,
     /// Declared parameters of an abstract that forwards its constructor.
     forward_constructor: Option<Vec<String>>,
 }
@@ -267,6 +268,14 @@ impl StaticSigIndex {
         self.classes
             .get(name)
             .and_then(|class| class.forward_statics.as_ref())
+            .is_some_and(|names| names.is_empty() || names.iter().any(|name| name == member))
+    }
+
+    pub fn forwards_instance(&mut self, name: &str, member: &str) -> bool {
+        self.ensure_indexed_from_known_files(name);
+        self.classes
+            .get(name)
+            .and_then(|class| class.forward_instances.as_ref())
             .is_some_and(|names| names.is_empty() || names.iter().any(|name| name == member))
     }
 
@@ -819,6 +828,26 @@ impl StaticSigIndex {
                 // Abstract constructors use their own lowering path rather
                 // than the class allocation path recorded by this index.
                 self.index_fields(package, &a.name, &a.fields, None, false);
+                if let Some(metadata) = a
+                    .meta
+                    .iter()
+                    .find(|metadata| metadata.name.trim_start_matches(':') == "forward")
+                {
+                    let names = metadata
+                        .params
+                        .iter()
+                        .filter_map(|parameter| match &parameter.kind {
+                            parser::ExprKind::Ident(name) | parser::ExprKind::String(name) => {
+                                Some(name.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    self.classes
+                        .get_mut(&Self::qualify(package, &a.name))
+                        .unwrap()
+                        .forward_instances = Some(names);
+                }
                 if a.meta.iter().any(|metadata| {
                     metadata.name.strip_prefix(':').unwrap_or(&metadata.name) == "forward.new"
                 }) && !a.fields.iter().any(|field| {

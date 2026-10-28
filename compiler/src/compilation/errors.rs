@@ -104,6 +104,21 @@ impl CompilationUnit {
         substitutions.substitute_receiver_type(member, receiver)
     }
 
+    pub fn forwards_instance_member(&self, owner: crate::tast::SymbolId, member: &str) -> bool {
+        let Some(symbol) = self.symbol_table.get_symbol(owner) else {
+            return false;
+        };
+        let Some(name) = self
+            .string_interner
+            .get(symbol.qualified_name.unwrap_or(symbol.name))
+        else {
+            return false;
+        };
+        self.static_sig_index
+            .borrow_mut()
+            .forwards_instance(name, member)
+    }
+
     /// Extract the type name from an unresolved type error message
     pub(crate) fn extract_type_name_from_error(&self, message: &str) -> Option<String> {
         // Try to extract type name from error message formats:

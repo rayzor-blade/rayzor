@@ -980,6 +980,18 @@ impl<'a> AstLowering<'a> {
                 // look up the method in that class's scope.
                 let receiver_typed = self.lower_expression(obj).ok()?;
                 let receiver_type_id = receiver_typed.expr_type;
+                let method_name = self.context.string_interner.intern(field);
+                if let Some(storage) = self.forwarded_method_receiver(receiver_type_id, method_name)
+                {
+                    let class = self.resolve_type_to_class_symbol(storage)?;
+                    let method = self.resolve_class_method_symbol(class, method_name)?;
+                    return self.function_param_types_from_symbol(method).map(|params| {
+                        params
+                            .into_iter()
+                            .map(|param| self.substitute_receiver_type(param, storage))
+                            .collect()
+                    });
+                }
 
                 // An Array receiver has no class scope. Its callback-taking
                 // methods answer with a formal whose parameter is the element

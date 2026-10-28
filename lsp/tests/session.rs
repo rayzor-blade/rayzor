@@ -4690,3 +4690,81 @@ class Builder {
         assert!(hover.contains("Widget"), "{hover}");
     }
 }
+
+#[test]
+fn forwarded_generic_signal_reads_preserve_comprehension_and_closure_types() {
+    let main = r#"import reactive.Signal;
+import model.Task;
+class Main {
+    final tasks:Signal<Array<Task>>;
+    final query:Signal<String>;
+    public function new(tasks:Signal<Array<Task>>, query:Signal<String>) { this.tasks = tasks; this.query = query; }
+    function move(id:Int, lane:String):Void {
+        var text = query.get().toLowerCase();
+        var filtered = tasks.get().filter(task -> task.title.indexOf(text) >= 0);
+        tasks.set([for (task in tasks.get()) task.id != id ? task : {id:task.id, title:task.title, lane:lane}]);
+        query.set("next");
+    }
+}"#;
+    let mut session = Session::start(&[
+        ("build.hxml", "-cp .\n--hl out.hl\n"),
+        ("Main.hx", main),
+        (
+            "model/Task.hx",
+            "package model; typedef Task = { final id:Int; final title:String; final lane:String; };",
+        ),
+        (
+            "reactive/ISignal.hx",
+            "package reactive; interface ISignal<T> { function get():T; function set(value:T):Void; }",
+        ),
+        (
+            "reactive/Signal.hx",
+            "package reactive; @:forward(get, set) abstract Signal<T>(ISignal<T>) from ISignal<T> to ISignal<T> {}",
+        ),
+    ]);
+    let diagnostics = session.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    for (needle, expected) in [
+        ("text =", "text:String"),
+        ("task ->", "task:model.Task"),
+        ("task.id", "task:model.Task"),
+    ] {
+        let line = main.lines().position(|line| line.contains(needle)).unwrap();
+        let source_line = main.lines().nth(line).unwrap();
+        let at = session.at(
+            "Main.hx",
+            line as u32,
+            source_line.find(needle).unwrap() as u32 + 1,
+        );
+        let hover = hover_text(&session.request("textDocument/hover", at));
+        assert!(hover.contains(expected), "expected {expected}, got {hover}");
+    }
+    session.notify(
+        "textDocument/didClose",
+        json!({"textDocument":{"uri":session.uri("Main.hx")}}),
+    );
+    let diagnostics = session.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let line = main
+        .lines()
+        .position(|line| line.contains("task.id"))
+        .unwrap();
+    let column = main.lines().nth(line).unwrap().find("task.id").unwrap();
+    let at = session.at("Main.hx", line as u32, column as u32 + 1);
+    assert!(hover_text(&session.request("textDocument/hover", at)).contains("task:model.Task"));
+    let diagnostics = session.change(
+        "Main.hx",
+        &main.replace("query.set(\"next\")", "query.set(42)"),
+    );
+    assert!(
+        diagnostics.iter().any(|d| d["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("String") && message.contains("Int"))),
+        "{diagnostics:#?}"
+    );
+    let diagnostics = session.change("Main.hx", &main.replace("title:task.title", "title:42"));
+    assert!(
+        !diagnostics.is_empty(),
+        "an incompatible task field must remain an error"
+    );
+}

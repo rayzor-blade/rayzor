@@ -4235,6 +4235,62 @@ impl<'a> AstLowering<'a> {
             return self.retype_literal_to(expr, u);
         }
         match &mut expr.kind {
+            TypedExpressionKind::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                if self.structure_fields(target).is_none() {
+                    return expr;
+                }
+                let value = std::mem::replace(then_expr.as_mut(), expr_placeholder(target));
+                **then_expr = self.retype_literal_to(value, target);
+                if let Some(otherwise) = else_expr {
+                    let value = std::mem::replace(otherwise.as_mut(), expr_placeholder(target));
+                    **otherwise = self.retype_literal_to(value, target);
+                }
+                let mut checker = crate::tast::TypeChecker::new(
+                    self.context.type_table,
+                    self.context.symbol_table,
+                    self.context.scope_tree,
+                    self.context.string_interner,
+                );
+                if checker.check_compatibility(then_expr.expr_type, target)
+                    != crate::tast::type_checker::TypeCompatibility::Incompatible
+                    && else_expr.as_ref().is_some_and(|other| {
+                        checker.check_compatibility(other.expr_type, target)
+                            != crate::tast::type_checker::TypeCompatibility::Incompatible
+                    })
+                {
+                    expr.expr_type = target;
+                }
+                expr
+            }
+            TypedExpressionKind::ArrayComprehension {
+                expression,
+                element_type,
+                ..
+            } => {
+                if let Some(element) = self.array_element_of(target)
+                    && self.structure_fields(element).is_some()
+                {
+                    let value = std::mem::replace(expression.as_mut(), expr_placeholder(element));
+                    **expression = self.retype_literal_to(value, element);
+                    let mut checker = crate::tast::TypeChecker::new(
+                        self.context.type_table,
+                        self.context.symbol_table,
+                        self.context.scope_tree,
+                        self.context.string_interner,
+                    );
+                    if checker.check_compatibility(expression.expr_type, element)
+                        != crate::tast::type_checker::TypeCompatibility::Incompatible
+                    {
+                        *element_type = element;
+                        expr.expr_type = target;
+                    }
+                }
+                expr
+            }
             TypedExpressionKind::ObjectLiteral { fields } => {
                 let Some(target_fields) = self.structure_fields(target) else {
                     return expr;

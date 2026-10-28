@@ -15,6 +15,56 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// Resolve an allowed forwarded member on the instantiated storage type.
+    pub(crate) fn forwarded_method_receiver(
+        &mut self,
+        receiver: TypeId,
+        method: InternedString,
+    ) -> Option<TypeId> {
+        let owner = self.resolve_type_to_class_symbol(receiver)?;
+        if self.context.symbol_table.get_symbol(owner)?.kind != crate::tast::SymbolKind::Abstract {
+            return None;
+        }
+        let index = self.static_sig_index.as_ref()?.clone();
+        let member = self.context.string_interner.get(method)?.to_owned();
+        let mut current = receiver;
+        let mut visited = std::collections::BTreeSet::new();
+        while visited.insert(current) {
+            let symbol = self.resolve_type_to_class_symbol(current)?;
+            if self
+                .resolve_declared_method_sig(symbol, method, false)
+                .is_some()
+            {
+                return (current != receiver).then_some(current);
+            }
+            let declaration = self.context.symbol_table.get_symbol(symbol)?;
+            let name = self
+                .context
+                .string_interner
+                .get(declaration.qualified_name.unwrap_or(declaration.name))?;
+            if !index.borrow_mut().forwards_instance(name, &member) {
+                return None;
+            }
+            let underlying = {
+                let table = self.context.type_table.borrow();
+                match table.get(current).map(|t| &t.kind) {
+                    Some(TypeKind::Abstract {
+                        underlying: Some(underlying),
+                        ..
+                    }) => Some(*underlying),
+                    _ => None,
+                }
+                .or_else(|| match table.get(declaration.type_id).map(|t| &t.kind) {
+                    Some(TypeKind::Abstract { underlying, .. }) => *underlying,
+                    _ => None,
+                })
+                .or_else(|| table.resolve_abstract_underlying(symbol))?
+            };
+            current = self.substitute_receiver_type(underlying, current);
+        }
+        None
+    }
+
     /// Whether an expression spells `_` anywhere, which only a pattern does.
     fn expr_has_wildcard(expr: &Expr) -> bool {
         match &expr.kind {
@@ -3933,6 +3983,20 @@ impl<'a> AstLowering<'a> {
                 // as an indirect call through the field value — the same shape as
                 // `var f = obj.fieldFn; f(args)`. Dispatching it as a method traps
                 // at runtime because there is no method body of that name.
+                if let Some(storage) =
+                    self.forwarded_method_receiver(receiver_expr.expr_type, method_name)
+                {
+                    receiver_expr = TypedExpression {
+                        expr_type: storage,
+                        kind: TypedExpressionKind::Cast {
+                            expression: Box::new(receiver_expr.clone()),
+                            target_type: storage,
+                            // Forwarding exposes storage without requiring a public `to` cast.
+                            cast_kind: CastKind::Unsafe,
+                        },
+                        ..receiver_expr
+                    };
+                }
                 let arg_types: Vec<TypeId> = arg_exprs.iter().map(|a| a.expr_type).collect();
                 if let Some((field_sym, fn_type)) = self.resolve_function_typed_field(
                     receiver_expr.expr_type,
