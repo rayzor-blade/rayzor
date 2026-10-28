@@ -14,14 +14,54 @@ fn source_property_access(access: &bsym::BladeAccess) -> parser::PropertyAccess 
 }
 
 impl CompilationUnit {
+    pub(crate) fn load_macro_stdlib_declarations(&mut self) {
+        let Ok(manifest) = load_symbol_manifest_from_bytes(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/stdlib.bsym"
+        ))) else {
+            return;
+        };
+        use std::hash::{Hash, Hasher};
+        for module in &manifest.modules {
+            let Some(path) = self
+                .config
+                .stdlib_paths
+                .iter()
+                .map(|root| root.join(&module.source_path))
+                .find(|path| path.is_file())
+            else {
+                return;
+            };
+            let Ok(source) = self.read_source(&path) else {
+                return;
+            };
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            source.hash(&mut hash);
+            if hash.finish() != module.source_hash {
+                return;
+            }
+            self.macro_dependencies.register_source(&path);
+        }
+        let mut declarations = self.macro_class_registry();
+        declarations.register_manifest(&manifest, &self.config.stdlib_paths);
+        self.macro_stdlib_snapshot = Some(std::sync::Arc::new(declarations));
+    }
+
     // === BLADE Symbol Loading Methods ===
 
     /// Load pre-compiled stdlib symbols from .bsym manifest
     /// Returns true if symbols were loaded successfully
     pub fn load_stdlib_symbols(&mut self) -> bool {
+        self.macro_stdlib_snapshot = None;
         let manifest_path = PathBuf::from(".rayzor/blade/stdlib/stdlib.bsym");
         let manifest = if manifest_path.exists() && !self.config.typecheck_only {
-            load_symbol_manifest(&manifest_path)
+            load_symbol_manifest(&manifest_path).or_else(|error| {
+                debug!("[BLADE] Ignoring incompatible local stdlib manifest: {error}");
+                load_symbol_manifest_from_bytes(include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/stdlib.bsym"
+                )))
+            })
         } else {
             debug!(
                 "[BLADE] No symbol manifest at {}; using the bundled one",
@@ -51,7 +91,7 @@ impl CompilationUnit {
                             return false;
                         };
                         self.macro_dependencies.register_source(&path);
-                        let Ok(source) = std::fs::read_to_string(&path) else {
+                        let Ok(source) = self.read_source(&path) else {
                             return false;
                         };
                         let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -67,6 +107,9 @@ impl CompilationUnit {
                     manifest.modules.len()
                 );
                 self.register_symbols_from_manifest(&manifest);
+                let mut declarations = self.macro_class_registry();
+                declarations.register_manifest(&manifest, &self.config.stdlib_paths);
+                self.macro_stdlib_snapshot = Some(std::sync::Arc::new(declarations));
                 // Also register builtin globals like 'trace' that aren't in the manifest
                 self.register_builtin_globals();
                 true
@@ -406,14 +449,17 @@ impl CompilationUnit {
                 .set_class_super_type(symbol_id, Some(superclass));
         }
 
-        // Register instance methods
+        let mut restored_fields = Vec::new();
+        // Methods and variables share the field table used by macro reflection.
         for method in &class_info.methods {
-            self.register_method_from_blade(method, symbol_id, class_scope, false);
+            let member = self.register_method_from_blade(method, symbol_id, class_scope, false);
+            restored_fields.push((self.string_interner.intern(&method.name), member, false));
         }
 
         // Register static methods
         for method in &class_info.static_methods {
-            self.register_method_from_blade(method, symbol_id, class_scope, true);
+            let member = self.register_method_from_blade(method, symbol_id, class_scope, true);
+            restored_fields.push((self.string_interner.intern(&method.name), member, true));
         }
 
         // Register constructor if present, and record it as the class's
@@ -433,7 +479,6 @@ impl CompilationUnit {
         // `global_class_fields` when a later file is lowered. Without this,
         // manifest-restored externs such as Math expose methods but not
         // constants like Math.POSITIVE_INFINITY.
-        let mut restored_fields = Vec::new();
         for field in &class_info.fields {
             let field_symbol = self.register_field_from_blade(field, symbol_id, class_scope);
             let field_name = self.string_interner.intern(&field.name);
@@ -598,6 +643,14 @@ impl CompilationUnit {
         }
 
         // Create function type
+        let labels = method
+            .params
+            .iter()
+            .map(|param| crate::tast::core::FunctionArgLabel {
+                name: Some(self.string_interner.intern(&param.name)),
+                optional: param.is_optional || param.has_default,
+            })
+            .collect();
         let func_type = self
             .type_table
             .borrow_mut()
@@ -605,7 +658,7 @@ impl CompilationUnit {
                 params: param_types,
                 return_type,
                 effects: crate::tast::core::FunctionEffects::default(),
-                labels: Vec::new(),
+                labels,
             });
 
         // Resolve native_name from the cached `@:native` metadata before we
@@ -1118,7 +1171,7 @@ impl CompilationUnit {
                         name: self.string_interner.intern(&f.name),
                         type_id: self.resolve_blade_type(&f.ty),
                         is_public: true,
-                        optional: matches!(f.ty, bsym::BladeType::Optional(_)),
+                        optional: f.is_optional,
 
                         access: parser::AnonFieldAccess {
                             is_final: f.is_final,

@@ -556,7 +556,7 @@ impl MacroRegistry {
 
         // Iterate all classes in the registry
         for class_name in class_registry.iter_class_names() {
-            if let Some(class_info) = class_registry.find_class(class_name) {
+            if let Some(class_info) = class_registry.find_loaded_class(class_name) {
                 // The macro host owns StringBuf; target bodies can call native externs.
                 if class_info.qualified_name == "StringBuf" {
                     continue;

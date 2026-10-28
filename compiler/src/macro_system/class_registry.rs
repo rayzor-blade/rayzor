@@ -9,6 +9,13 @@ use parser::{
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
+mod snapshot;
+
+pub struct MethodSignature {
+    pub function: parser::Function,
+    pub is_static: bool,
+    pub is_extern: bool,
+}
 
 /// Info about a single method (static or instance)
 pub struct MethodInfo {
@@ -43,6 +50,8 @@ pub struct ClassInfo {
     pub parent: Option<String>,
     pub abstract_decl: Option<Arc<parser::AbstractDecl>>,
     pub field_types: BTreeMap<String, parser::Type>,
+    pub method_signatures: BTreeMap<String, MethodSignature>,
+    source_view: Option<Arc<std::sync::OnceLock<Option<Box<ClassRegistry>>>>>,
 }
 
 pub(crate) struct GenericBuildInfo {
@@ -83,6 +92,7 @@ pub type MacroStatics = Arc<std::sync::Mutex<BTreeMap<String, super::value::Macr
 
 /// The interpreter falls back to this registry when hardcoded class dispatch doesn't match.
 pub struct ClassRegistry {
+    snapshot: Option<Arc<ClassRegistry>>,
     /// qualified_name → ClassInfo
     classes: BTreeMap<String, ClassInfo>,
     pub(super) using_members: BTreeMap<String, Vec<String>>,
@@ -112,6 +122,7 @@ pub struct ClassRegistry {
 impl ClassRegistry {
     pub fn new() -> Self {
         Self {
+            snapshot: None,
             classes: BTreeMap::new(),
             aliases: BTreeMap::new(),
             using_members: BTreeMap::new(),
@@ -129,6 +140,105 @@ impl ClassRegistry {
             source_overrides: Default::default(),
             reflection_config: None,
         }
+    }
+
+    pub(crate) fn use_snapshot(&mut self, snapshot: Arc<ClassRegistry>) {
+        self.snapshot = Some(snapshot);
+    }
+
+    pub(crate) fn find_alias(
+        &self,
+        name: &str,
+    ) -> Option<&(parser::Type, Arc<BTreeMap<String, String>>)> {
+        self.aliases
+            .get(name)
+            .or_else(|| self.snapshot.as_ref()?.find_alias(name))
+    }
+
+    fn definition(&self, name: &str) -> Option<&Arc<TypeDefinition>> {
+        self.type_definitions
+            .get(name)
+            .or_else(|| self.snapshot.as_ref()?.definition(name))
+    }
+
+    /// Snapshot declarations load executable macro-view bodies only on demand.
+    pub fn find_executable_class(&self, name: &str) -> Option<&ClassInfo> {
+        let class = self.find_class(name)?;
+        let Some(view) = &class.source_view else {
+            return Some(class);
+        };
+        let declarations = view.get_or_init(|| {
+            let path = std::path::PathBuf::from(&class.source_file);
+            let path = path.canonicalize().unwrap_or(path);
+            let source = self
+                .source_overrides
+                .get(&path)
+                .cloned()
+                .or_else(|| std::fs::read_to_string(&path).ok())?;
+            self.dependencies.register_source(&path);
+            self.dependencies.register_content(&path, source.as_bytes());
+            let mut config = self
+                .reflection_config
+                .as_ref()
+                .map(|(_, stdlib, _)| stdlib.clone())
+                .unwrap_or_default();
+            config.defines.insert("macro".into());
+            let mut file = parser::haxe_parser::parse_haxe_file_with_config(
+                &path.to_string_lossy(),
+                &source,
+                true,
+                true,
+                &config,
+            )
+            .ok()?;
+            crate::tast::ast_lowering::module_statics::desugar(&mut file);
+            let mut declarations = ClassRegistry::new();
+            declarations.register_file(&file);
+            Some(Box::new(declarations))
+        });
+        declarations.as_ref()?.find_class(&class.qualified_name)
+    }
+
+    pub(crate) fn find_loaded_class(&self, name: &str) -> Option<&ClassInfo> {
+        let class = self.find_class(name)?;
+        match &class.source_view {
+            None => Some(class),
+            Some(view) => view.get()?.as_ref()?.find_class(&class.qualified_name),
+        }
+    }
+
+    pub fn method_signature(&self, owner: &str, name: &str) -> Option<&MethodSignature> {
+        let mut owner = owner.to_string();
+        for _ in 0..64 {
+            if self.find_class(&owner).is_some() {
+                break;
+            }
+            let (parser::Type::Path { path, .. }, imports) = self.find_alias(&owner)? else {
+                return None;
+            };
+            owner = if path.package.is_empty() {
+                imports
+                    .get(&path.name)
+                    .cloned()
+                    .unwrap_or_else(|| path.name.clone())
+            } else {
+                path.package
+                    .iter()
+                    .chain(std::iter::once(&path.name))
+                    .chain(path.sub.iter())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(".")
+            };
+        }
+        let mut class = self.find_class(&owner)?;
+        for _ in 0..128 {
+            if let Some(method) = class.method_signatures.get(name) {
+                return Some(method);
+            }
+            class = self.find_class(class.parent.as_deref()?)?;
+        }
+        None
     }
 
     /// Read and write macro-time statics in `statics`, the compile's shared
@@ -185,23 +295,20 @@ impl ClassRegistry {
     /// The static variable `name` declared by `class_name`, with the class's
     /// qualified name.
     pub fn find_static_var(&self, class_name: &str, name: &str) -> Option<(String, Arc<Expr>)> {
-        let enum_value = self
-            .type_definitions
-            .get(class_name)
-            .and_then(|definition| {
-                definition
-                    .fields
-                    .iter()
-                    .find(|field| field.is_enum_value && field.name == name)
-                    .map(|field| (definition.qualified_name.clone(), field.init_expr.clone()))
-            });
+        let enum_value = self.definition(class_name).and_then(|definition| {
+            definition
+                .fields
+                .iter()
+                .find(|field| field.is_enum_value && field.name == name)
+                .map(|field| (definition.qualified_name.clone(), field.init_expr.clone()))
+        });
         let (qualified, init) = if let Some(value) = enum_value {
             value
-        } else if let Some(class) = self.find_class(class_name) {
+        } else if let Some(class) = self.find_executable_class(class_name) {
             let var = class.static_vars.iter().find(|v| v.name == name)?;
             (class.qualified_name.clone(), var.init_expr.clone())
         } else {
-            let definition = self.type_definitions.get(class_name)?;
+            let definition = self.definition(class_name)?;
             let field = definition
                 .fields
                 .iter()
@@ -582,6 +689,32 @@ impl ClassRegistry {
                             _ => None,
                         })
                         .collect(),
+                    method_signatures: class
+                        .fields
+                        .iter()
+                        .filter_map(|field| {
+                            let ClassFieldKind::Function(function) = &field.kind else {
+                                return None;
+                            };
+                            let signature = parser::Function {
+                                name: function.name.clone(),
+                                type_params: function.type_params.clone(),
+                                params: function.params.clone(),
+                                return_type: function.return_type.clone(),
+                                body: None,
+                                span: function.span,
+                            };
+                            Some((
+                                function.name.clone(),
+                                MethodSignature {
+                                    function: signature,
+                                    is_static: field.modifiers.contains(&Modifier::Static),
+                                    is_extern: field.modifiers.contains(&Modifier::Extern),
+                                },
+                            ))
+                        })
+                        .collect(),
+                    source_view: None,
                 };
 
                 for field in &class.fields {
@@ -678,7 +811,7 @@ impl ClassRegistry {
 
     /// Runtime imports retain source declarations only when reflection requests them.
     fn reflected_definition(&self, name: &str, module: &str) -> Option<Arc<TypeDefinition>> {
-        if let Some(definition) = self.type_definitions.get(name) {
+        if let Some(definition) = self.definition(name) {
             return Some(definition.clone());
         }
         if let Some(definition) = self.reflected_definitions.lock().unwrap().get(name) {
@@ -910,15 +1043,16 @@ impl ClassRegistry {
     }
 
     pub(crate) fn enum_constant_owner(&self, name: &str) -> Option<String> {
-        let owners = self.enum_constants.get(name)?;
+        let Some(owners) = self.enum_constants.get(name) else {
+            return self.snapshot.as_ref()?.enum_constant_owner(name);
+        };
         (owners.len() == 1)
             .then(|| owners.first().cloned())
             .flatten()
     }
 
     pub(crate) fn enum_constructor_required(&self, owner: &str, name: &str) -> Option<usize> {
-        self.type_definitions
-            .get(owner)?
+        self.definition(owner)?
             .constructors
             .get(name)
             .map(|(_, required)| *required)
@@ -930,13 +1064,15 @@ impl ClassRegistry {
         name: &str,
     ) -> Option<(String, usize)> {
         if let Some(owner) = owner {
-            let definition = self.type_definitions.get(owner)?;
+            let definition = self.definition(owner)?;
             return Some((
                 definition.qualified_name.clone(),
                 definition.constructors.get(name)?.0,
             ));
         }
-        let constructors = self.enum_constructors.get(name)?;
+        let Some(constructors) = self.enum_constructors.get(name) else {
+            return self.snapshot.as_ref()?.enum_constructor(None, name);
+        };
         (constructors.len() == 1)
             .then(|| {
                 constructors
@@ -954,19 +1090,20 @@ impl ClassRegistry {
         if let Some(found) = self.enum_constructor(Some(scope), name) {
             return Some(found);
         }
-        let mut found = self
-            .enum_constructors
-            .get(name)?
-            .iter()
-            .filter(|(owner, _)| {
-                owner
-                    .rsplit_once('.')
-                    .is_some_and(|(package, _)| package == scope)
-                    || self
-                        .type_definitions
-                        .get(*owner)
-                        .is_some_and(|definition| definition.module == scope)
-            });
+        let Some(constructors) = self.enum_constructors.get(name) else {
+            return self
+                .snapshot
+                .as_ref()?
+                .enum_constructor_in_scope(scope, name);
+        };
+        let mut found = constructors.iter().filter(|(owner, _)| {
+            owner
+                .rsplit_once('.')
+                .is_some_and(|(package, _)| package == scope)
+                || self
+                    .definition(owner)
+                    .is_some_and(|definition| definition.module == scope)
+        });
         let (owner, &arity) = found.next()?;
         found.next().is_none().then(|| (owner.clone(), arity))
     }
@@ -979,13 +1116,22 @@ impl ClassRegistry {
         if let Some(qualified) = self.short_name_index.get(name) {
             return self.classes.get(qualified);
         }
-        let definition = self.type_definitions.get(name)?;
-        let short_name = name.rsplit('.').next()?;
-        let package = definition.module.rsplit_once('.').map(|(pack, _)| pack);
-        let qualified = package
-            .map(|pack| format!("{pack}.{short_name}"))
-            .unwrap_or_else(|| short_name.to_string());
-        self.classes.get(&qualified)
+        if let Some(definition) = self.type_definitions.get(name) {
+            let short_name = name.rsplit('.').next()?;
+            let package = definition.module.rsplit_once('.').map(|(pack, _)| pack);
+            let qualified = package
+                .map(|pack| format!("{pack}.{short_name}"))
+                .unwrap_or_else(|| short_name.to_string());
+            if let Some(class) = self.classes.get(&qualified) {
+                return Some(class);
+            }
+        }
+        let snapshot = self.snapshot.as_ref()?;
+        if name.contains('.') {
+            snapshot.find_class(name)
+        } else {
+            snapshot.classes.get(name)
+        }
     }
 
     pub fn runtime_class_name(&self, name: &str) -> Option<&str> {
@@ -1000,8 +1146,18 @@ impl ClassRegistry {
             .values()
             .filter(|d| d.runtime_class && d.qualified_name.rsplit('.').next() == Some(name))
             .map(|d| d.qualified_name.as_str());
-        let first = names.next()?;
-        names.all(|other| other == first).then_some(first)
+        if let Some(first) = names.next() {
+            return names.all(|other| other == first).then_some(first);
+        }
+        let snapshot = self.snapshot.as_ref()?;
+        if name.contains('.') {
+            snapshot.runtime_class_name(name)
+        } else {
+            snapshot
+                .classes
+                .get(name)
+                .map(|class| class.qualified_name.as_str())
+        }
     }
 
     pub fn is_subclass(&self, actual: &str, expected: &str) -> bool {
@@ -1014,7 +1170,7 @@ impl ClassRegistry {
             if name == expected {
                 return true;
             }
-            if let Some(definition) = self.type_definitions.get(&name) {
+            if let Some(definition) = self.definition(&name) {
                 if definition.qualified_name == expected {
                     return true;
                 }
@@ -1029,7 +1185,7 @@ impl ClassRegistry {
     /// arguments carry their metadata.
     pub fn local_class_view(&self, qualified_name: &str) -> Option<super::value::MacroValue> {
         use super::value::MacroValue as V;
-        let info = self.classes.get(qualified_name)?;
+        let info = self.find_class(qualified_name)?;
         let pack: Vec<V> = qualified_name
             .rsplit_once('.')
             .map(|(pack, _)| pack.split('.').map(|p| V::String(Arc::from(p))).collect())
@@ -1065,26 +1221,26 @@ impl ClassRegistry {
 
     /// Find a static method on a class.
     pub fn find_static_method(&self, class_name: &str, method: &str) -> Option<&MethodInfo> {
-        self.find_class(class_name)
+        self.find_executable_class(class_name)
             .and_then(|c| c.static_methods.get(method))
     }
 
     /// Find a constructor on a class.
     pub fn find_constructor(&self, class_name: &str) -> Option<&MethodInfo> {
-        self.find_class(class_name)
+        self.find_executable_class(class_name)
             .and_then(|c| c.constructor.as_ref())
     }
 
     /// Find an instance method on a class.
     pub(super) fn parent_class(&self, class: &ClassInfo) -> Option<&ClassInfo> {
         let parent = class.parent.as_deref()?;
-        if let Some(parent) = self.find_class(parent) {
+        if let Some(parent) = self.find_executable_class(parent) {
             return Some(parent);
         }
         let short = parent.rsplit('.').next()?;
         if let Some((mut package, _)) = class.qualified_name.rsplit_once('.') {
             while let Some((enclosing, _)) = package.rsplit_once('.') {
-                if let Some(parent) = self.find_class(&format!("{enclosing}.{short}")) {
+                if let Some(parent) = self.find_executable_class(&format!("{enclosing}.{short}")) {
                     return Some(parent);
                 }
                 package = enclosing;
@@ -1096,7 +1252,7 @@ impl ClassRegistry {
             .into_iter()
             .flat_map(|paths| paths.split('\n'))
         {
-            if let Some(parent) = self.find_class(&format!("{imported}.{short}")) {
+            if let Some(parent) = self.find_executable_class(&format!("{imported}.{short}")) {
                 return Some(parent);
             }
         }
@@ -1104,7 +1260,7 @@ impl ClassRegistry {
     }
 
     pub fn find_instance_method(&self, class_name: &str, method: &str) -> Option<&MethodInfo> {
-        let mut class = self.find_class(class_name)?;
+        let mut class = self.find_executable_class(class_name)?;
         for _ in 0..128 {
             if let Some(found) = class.instance_methods.get(method) {
                 return Some(found);
@@ -1116,12 +1272,18 @@ impl ClassRegistry {
 
     /// Get the number of registered classes.
     pub fn class_count(&self) -> usize {
-        self.classes.len()
+        self.iter_class_names().count()
     }
 
     /// Iterate over all registered class names.
     pub fn iter_class_names(&self) -> impl Iterator<Item = &str> {
-        self.classes.keys().map(|s| s.as_str())
+        self.classes.keys().map(|s| s.as_str()).chain(
+            self.snapshot
+                .iter()
+                .flat_map(|snapshot| snapshot.classes.keys())
+                .filter(|name| !self.classes.contains_key(*name))
+                .map(String::as_str),
+        )
     }
 }
 

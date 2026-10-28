@@ -471,7 +471,7 @@ fn hover_answers_at_declarations_and_uses() {
     let at = s.at("Main.hx", 1, 21);
     let decl = s.request("textDocument/hover", at);
     assert!(
-        hover_text(&decl).contains("function add(Int, Int):Int"),
+        hover_text(&decl).contains("function add(a:Int, b:Int):Int"),
         "{decl}"
     );
     let at = s.at("Main.hx", 5, 21);
@@ -824,7 +824,7 @@ fn dialog_constructor_hints_use_utf16_positions() {
             .count() as u32
     };
     let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 0, at("Box("))));
-    assert!(hover.contains("new Box(String)"), "{hover}");
+    assert!(hover.contains("new Box(label:String)"), "{hover}");
     let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 0, at("get();"))));
     assert!(hover.contains("get():Bool"), "{hover}");
     assert!(s.labels("Main.hx", 0, at("get();")).contains(&"get".into()));
@@ -4432,6 +4432,8 @@ class Builder {
         return macro @:pos(outer) new widgets.Panel([$child]);
     }
 }
+
+
 "#;
     for config in [
         ("build.hxml", "-cp .\n--hl out.hl\n"),
@@ -4636,4 +4638,55 @@ class Builder {
             .is_some_and(|message| message.contains("wrong enum field reflection: alpha,zed"))),
         "{diagnostics:#?}"
     );
+}
+
+#[test]
+fn macro_expansion_uses_stdlib_signatures_and_host_commands() {
+    let main = "class Main { static function main() { var panel = Builder.make(); panel.title; } }";
+    let builder = r#"
+import haxe.macro.Context;
+import haxe.macro.Expr;
+class Builder {
+    public static macro function make():Expr {
+        var sys = switch Context.getType("Sys") {
+            case TInst(c, _): c.get();
+            case _: throw "missing Sys class";
+        }
+        var command = null;
+        for (field in sys.statics.get()) if (field.name == "command") command = field;
+        if (command == null) throw "missing command declaration";
+        switch command.type {
+            case TFun(arguments, result):
+                if (arguments.length != 2 || arguments[0].name != "cmd" || !arguments[1].opt)
+                    throw "incorrect command parameters";
+                if (!Context.unify(result, Context.typeof(macro 1))) throw "incorrect command result";
+            case _: throw "command is not a function";
+        }
+        var status = Sys.systemName() == "Windows"
+            ? Sys.command("cmd", ["/C", "exit 7"])
+            : Sys.command("/bin/sh", ["-c", "printf macro-host-output; exit 7"]);
+        if (status != 7) throw "incorrect host exit status";
+        return macro new Widget();
+    }
+}
+"#;
+    for configuration in [
+        ("build.hxml", "-cp .\n--hl out.hl\n"),
+        ("rayzor.toml", "[project]\nname = 'macro-stdlib-snapshot'\n"),
+    ] {
+        let mut session = Session::start(&[
+            configuration,
+            ("Main.hx", main),
+            ("Builder.hx", builder),
+            (
+                "Widget.hx",
+                "class Widget { public var title:String; public function new() { title = 'panel'; } }",
+            ),
+        ]);
+        let diagnostics = session.open("Main.hx");
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let at = session.at("Main.hx", 0, main.rfind("panel").unwrap() as u32 + 1);
+        let hover = hover_text(&session.request("textDocument/hover", at));
+        assert!(hover.contains("Widget"), "{hover}");
+    }
 }

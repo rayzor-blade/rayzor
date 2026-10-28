@@ -269,6 +269,7 @@ pub struct CompilationUnit {
     /// In that mode top-level extern-only stdlib imports are already known and
     /// should not be resolved back to source during cold import discovery.
     stdlib_manifest_loaded: bool,
+    macro_stdlib_snapshot: Option<std::sync::Arc<crate::macro_system::ClassRegistry>>,
 
     /// Short name → symbol for manifest types published under their qualified
     /// name. A manifest records a field or parameter type as it was written in
@@ -680,6 +681,7 @@ impl CompilationUnit {
             import_hx_files: Vec::new(),
             user_files: Vec::new(),
             stdlib_manifest_loaded: false,
+            macro_stdlib_snapshot: None,
             manifest_types_by_short_name: BTreeMap::new(),
             manifest_type_params: BTreeMap::new(),
             macro_diagnostics: Vec::new(),

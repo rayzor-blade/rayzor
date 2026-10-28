@@ -972,6 +972,7 @@ impl MacroVm {
         args: Vec<MacroValue>,
     ) -> Result<MacroValue, VmError> {
         match (class, method) {
+            ("Sys" | "sys.Sys", _) => Err(VmError::new("Sys operations require the macro host")),
             ("haxe.Json" | "Json", "parse")
             | ("haxe.crypto.Md5" | "Md5", "encode")
             | ("haxe.io.Bytes" | "Bytes", "ofString")

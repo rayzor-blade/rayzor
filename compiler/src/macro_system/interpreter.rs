@@ -20,6 +20,7 @@ use super::value::{MacroFunction, MacroParam, MacroValue};
 use crate::tast::SourceLocation;
 mod abstract_runtime;
 mod regular_expressions;
+mod system;
 
 use parser::{AssignOp, BinaryOp, Expr, ExprKind, Span, UnaryOp};
 use std::collections::BTreeMap;
@@ -1029,7 +1030,7 @@ impl MacroInterpreter {
                     let alias = self
                         .class_registry
                         .as_ref()
-                        .and_then(|registry| registry.aliases.get(&resolved_name));
+                        .and_then(|registry| registry.find_alias(&resolved_name));
                     let Some((parser::Type::Path { path, .. }, imports)) = alias else {
                         break;
                     };
@@ -1097,7 +1098,7 @@ impl MacroInterpreter {
                         if self
                             .class_registry
                             .as_ref()
-                            .and_then(|registry| registry.find_class(&resolved_name))
+                            .and_then(|registry| registry.find_executable_class(&resolved_name))
                             .is_some_and(|class| class.abstract_decl.is_some())
                         {
                             return self.construct_abstract(&resolved_name, arg_vals, location);
@@ -1110,7 +1111,7 @@ impl MacroInterpreter {
                         } else {
                             // Cache miss: extract from registry and cache
                             let data = self.class_registry.as_ref().and_then(|cr| {
-                                cr.find_class(&resolved_name).map(|ci| {
+                                cr.find_executable_class(&resolved_name).map(|ci| {
                                     Arc::new(CachedClassData {
                                         qualified_name: ci.qualified_name.clone(),
                                         instance_vars: {
@@ -1523,7 +1524,7 @@ impl MacroInterpreter {
                         let registry = self.class_registry.as_ref()?;
                         Some(
                             registry
-                                .parent_class(registry.find_class(owner)?)?
+                                .parent_class(registry.find_executable_class(owner)?)?
                                 .qualified_name
                                 .clone(),
                         )
@@ -1554,7 +1555,7 @@ impl MacroInterpreter {
                     && self
                         .class_registry
                         .as_ref()
-                        .and_then(|registry| registry.find_class(&owner))
+                        .and_then(|registry| registry.find_executable_class(&owner))
                         .is_some_and(|class| {
                             class.abstract_decl.is_some()
                                 && class.instance_methods.contains_key(name)
@@ -2296,7 +2297,7 @@ impl MacroInterpreter {
             .unwrap_or_else(|| class_name.into());
         if !name.contains('.')
             && registry.find_class(&name).is_none()
-            && !registry.aliases.contains_key(&name)
+            && registry.find_alias(&name).is_none()
         {
             let local = self
                 .macro_class_stack
@@ -2304,7 +2305,7 @@ impl MacroInterpreter {
                 .and_then(|owner| owner.rsplit_once('.'))
                 .map(|(pack, _)| format!("{pack}.{name}"));
             if let Some(local) = local.filter(|name| {
-                registry.find_class(name).is_some() || registry.aliases.contains_key(name)
+                registry.find_class(name).is_some() || registry.find_alias(name).is_some()
             }) {
                 name = local;
             } else {
@@ -2316,7 +2317,7 @@ impl MacroInterpreter {
                 {
                     let candidate = format!("{owner}.{name}");
                     if registry.find_class(&candidate).is_some()
-                        || registry.aliases.contains_key(&candidate)
+                        || registry.find_alias(&candidate).is_some()
                     {
                         name = candidate;
                         break;
@@ -2325,10 +2326,14 @@ impl MacroInterpreter {
             }
         }
         for _ in 0..64 {
+            // Host implementations use the portable API across target-specific typedefs.
+            if Self::intrinsic_class(&name) && registry.find_alias(&name).is_some() {
+                return name;
+            }
             if let Some(class) = registry.find_class(&name) {
                 return class.qualified_name.clone();
             }
-            let Some((parser::Type::Path { path, .. }, imports)) = registry.aliases.get(&name)
+            let Some((parser::Type::Path { path, .. }, imports)) = registry.find_alias(&name)
             else {
                 break;
             };
@@ -2356,8 +2361,18 @@ impl MacroInterpreter {
 
     fn runtime_class_name(&self, name: &str) -> Option<String> {
         let resolved = self.resolve_class_name(name);
-        if matches!(
-            resolved.as_str(),
+        if Self::intrinsic_class(&resolved) {
+            return Some(resolved);
+        }
+        self.class_registry
+            .as_ref()?
+            .runtime_class_name(&resolved)
+            .map(str::to_string)
+    }
+
+    fn intrinsic_class(name: &str) -> bool {
+        matches!(
+            name,
             "String"
                 | "Int"
                 | "Float"
@@ -2370,13 +2385,21 @@ impl MacroInterpreter {
                 | "Math"
                 | "StringTools"
                 | "Lambda"
-        ) {
-            return Some(resolved);
-        }
-        self.class_registry
-            .as_ref()?
-            .runtime_class_name(&resolved)
-            .map(str::to_string)
+                | "Sys"
+                | "StringBuf"
+                | "EReg"
+                | "haxe.io.Bytes"
+                | "haxe.Json"
+                | "haxe.crypto.Md5"
+                | "sys.io.File"
+                | "sys.io.Process"
+                | "sys.FileSystem"
+                | "haxe.macro.Context"
+                | "haxe.macro.Compiler"
+                | "haxe.macro.ExprTools"
+                | "haxe.macro.TypeTools"
+                | "haxe.macro.ComplexTypeTools"
+        )
     }
 
     fn scoped_enum_constructor(&self, name: &str) -> Option<(String, usize)> {
@@ -2459,6 +2482,31 @@ impl MacroInterpreter {
         args: &[MacroValue],
         location: SourceLocation,
     ) -> Result<Option<MacroValue>, MacroError> {
+        let owner = self.resolve_class_name(class_name);
+        if let Some(signature) = self
+            .class_registry
+            .as_ref()
+            .and_then(|registry| registry.method_signature(&owner, method))
+            .filter(|signature| signature.is_static)
+        {
+            let params = &signature.function.params;
+            let required = params
+                .iter()
+                .filter(|param| !param.optional && !param.rest && param.default_value.is_none())
+                .count();
+            if args.len() < required
+                || (!params.iter().any(|param| param.rest) && args.len() > params.len())
+            {
+                return Err(MacroError::TypeError {
+                    message: format!(
+                        "{owner}.{method} expects {required}..{} arguments, found {}",
+                        params.len(),
+                        args.len()
+                    ),
+                    location,
+                });
+            }
+        }
         match self.try_intrinsic_static_call(class_name, method, args, location)? {
             Some(value) => Ok(Some(value)),
             None => {
@@ -2851,32 +2899,7 @@ impl MacroInterpreter {
                 }
                 _ => Ok(None),
             },
-            "Sys" | "sys.Sys" => match method {
-                "getCwd" => {
-                    let cwd = std::env::current_dir()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    Ok(Some(MacroValue::String(Arc::from(cwd.as_str()))))
-                }
-                "getEnv" => {
-                    let key = args.first().map(|v| value_to_string(v)).unwrap_or_default();
-                    let val = std::env::var(&key).unwrap_or_default();
-                    Ok(Some(MacroValue::String(Arc::from(val.as_str()))))
-                }
-                "systemName" => {
-                    let name = if cfg!(target_os = "macos") {
-                        "Mac"
-                    } else if cfg!(target_os = "linux") {
-                        "Linux"
-                    } else if cfg!(target_os = "windows") {
-                        "Windows"
-                    } else {
-                        "Unknown"
-                    };
-                    Ok(Some(MacroValue::String(Arc::from(name))))
-                }
-                _ => Ok(None),
-            },
+            "Sys" | "sys.Sys" => self.system_call(method, args, location),
             "Reflect" => {
                 let target = args.first().cloned().unwrap_or(MacroValue::Null);
                 let name = args
@@ -3190,7 +3213,7 @@ impl MacroInterpreter {
         location: SourceLocation,
     ) -> Result<Option<MacroValue>, MacroError> {
         let resolved = self.resolve_class_name(class_name);
-        let method = self
+        let candidate = self
             .class_registry
             .as_ref()
             .and_then(|registry| registry.find_static_method(&resolved, method))
@@ -3202,7 +3225,20 @@ impl MacroInterpreter {
                     method.owner.clone(),
                 )
             });
-        let Some((body, params, ret, owner)) = method else {
+        let Some((body, params, ret, owner)) = candidate else {
+            if self
+                .class_registry
+                .as_ref()
+                .and_then(|registry| registry.method_signature(&resolved, method))
+                .is_some_and(|signature| signature.is_static)
+            {
+                return Err(MacroError::UnsupportedOperation {
+                    operation: format!(
+                        "macro host implementation for declared method {resolved}.{method}"
+                    ),
+                    location,
+                });
+            }
             return Ok(None);
         };
         self.invoke_declared(&owner, body, &params, ret, args.to_vec(), None, location)
@@ -3245,14 +3281,14 @@ impl MacroInterpreter {
             return Ok(Some(value));
         }
         let owner = registry
-            .find_class(&qualified)
+            .find_executable_class(&qualified)
             .map(|class| (class.imports.clone(), class.source_file.clone()));
         let caller_imports = owner
             .as_ref()
             .map(|(imports, _)| std::mem::replace(&mut self.import_map, (**imports).clone()));
         let caller_source = owner.map(|(_, source)| self.source_file.replace(source));
         let hint = registry
-            .find_class(&qualified)
+            .find_executable_class(&qualified)
             .and_then(|class| class.field_types.get(name))
             .cloned();
         self.macro_class_stack.push(qualified);
@@ -4182,33 +4218,7 @@ impl MacroInterpreter {
         args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
-        let cmd =
-            args.first()
-                .map(|v| value_to_string(v))
-                .ok_or_else(|| MacroError::TypeError {
-                    message: "sys.io.Process requires a command string".to_string(),
-                    location,
-                })?;
-
-        let proc_args: Vec<String> = if let Some(arr_val) = args.get(1) {
-            // Unwrap Expr if needed
-            let unwrapped = ast_bridge::unwrap_expr_value(arr_val);
-            match unwrapped {
-                MacroValue::Array(arr) => arr.iter().map(|v| value_to_string(v)).collect(),
-                _ => Vec::new(),
-            }
-        } else {
-            Vec::new()
-        };
-
-        // Execute the process
-        let output = std::process::Command::new(&cmd)
-            .args(&proc_args)
-            .output()
-            .map_err(|e| MacroError::RuntimeError {
-                message: format!("failed to execute '{}': {}", cmd, e),
-                location,
-            })?;
+        let output = self.host_process_output("sys.io.Process", &args, location)?;
 
         let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
@@ -4298,7 +4308,7 @@ impl MacroInterpreter {
         let context = self
             .class_registry
             .as_ref()
-            .and_then(|registry| registry.find_class(qualified_name))
+            .and_then(|registry| registry.find_executable_class(qualified_name))
             .map(|class| (class.imports.clone(), class.source_file.clone()));
         let previous = context.map(|(imports, source)| {
             (

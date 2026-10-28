@@ -514,7 +514,7 @@ impl<'a> AstLowering<'a> {
         let labels = parameters
             .iter()
             .map(|p| crate::tast::core::FunctionArgLabel {
-                name: None,
+                name: Some(p.name),
                 optional: p.is_optional || p.default_value.is_some(),
             })
             .collect();
@@ -1011,7 +1011,7 @@ impl<'a> AstLowering<'a> {
     }
 
     pub(crate) fn declaration_function_type(
-        &self,
+        &mut self,
         parameters: &[FunctionParam],
         types: Vec<TypeId>,
         result: TypeId,
@@ -1019,7 +1019,7 @@ impl<'a> AstLowering<'a> {
         let labels = parameters
             .iter()
             .map(|parameter| crate::tast::core::FunctionArgLabel {
-                name: None,
+                name: Some(self.context.intern_string(&parameter.name)),
                 optional: parameter.optional || parameter.default_value.is_some(),
             })
             .collect();

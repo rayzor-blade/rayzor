@@ -102,7 +102,7 @@ impl MacroInterpreter {
                         }
                         self.class_registry
                             .as_ref()
-                            .and_then(|registry| registry.aliases.get(&name))
+                            .and_then(|registry| registry.find_alias(&name))
                             .is_some_and(|(ty, _)| match ty {
                                 Type::Anonymous { fields, .. } => {
                                     value.as_object().is_some_and(|object| {
@@ -192,7 +192,7 @@ impl MacroInterpreter {
                 if let Some((target, imports)) = self
                     .class_registry
                     .as_ref()
-                    .and_then(|registry| registry.aliases.get(&name))
+                    .and_then(|registry| registry.find_alias(&name))
                     .cloned()
                 {
                     let previous = std::mem::replace(&mut self.import_map, (*imports).clone());
@@ -211,7 +211,7 @@ impl MacroInterpreter {
                         && self
                             .class_registry
                             .as_ref()
-                            .and_then(|registry| registry.find_class(&name))
+                            .and_then(|registry| registry.find_executable_class(&name))
                             .is_none()
                     {
                         return Ok(value);
@@ -220,7 +220,7 @@ impl MacroInterpreter {
                     let to = self
                         .class_registry
                         .as_ref()
-                        .and_then(|registry| registry.find_class(&owner))
+                        .and_then(|registry| registry.find_executable_class(&owner))
                         .and_then(|class| class.abstract_decl.as_ref())
                         .and_then(|decl| {
                             decl.fields.iter().find_map(|field| {
@@ -259,7 +259,7 @@ impl MacroInterpreter {
                 let declaration =
                     self.class_registry
                         .as_ref()
-                        .and_then(|registry| registry.find_class(&name))
+                        .and_then(|registry| registry.find_executable_class(&name))
                         .and_then(|class| {
                             class.abstract_decl.clone().map(|decl| {
                                 (decl, class.imports.clone(), class.qualified_name.clone())
@@ -335,7 +335,7 @@ impl MacroInterpreter {
         let class = self
             .class_registry
             .as_ref()
-            .and_then(|registry| registry.find_class(owner))
+            .and_then(|registry| registry.find_executable_class(owner))
             .unwrap();
         let constructor = class
             .constructor
@@ -355,7 +355,7 @@ impl MacroInterpreter {
         let method = self
             .class_registry
             .as_ref()
-            .and_then(|registry| registry.find_class(owner))
+            .and_then(|registry| registry.find_executable_class(owner))
             .and_then(|class| class.constructor.as_ref())
             .map(|method| (method.body.clone(), method.params.clone()));
         let Some((body, params)) = method else {
@@ -400,7 +400,7 @@ impl MacroInterpreter {
                 .cloned()
                 .unwrap_or_else(|| vec![module]);
             for owner in owners {
-                let Some(class) = registry.find_class(&owner) else {
+                let Some(class) = registry.find_executable_class(&owner) else {
                     continue;
                 };
                 let Some(candidate) = class.static_methods.get(method) else {
@@ -425,7 +425,7 @@ impl MacroInterpreter {
     }
 
     pub(super) fn abstract_array_access(&self, owner: &str, index: &MacroValue) -> Option<String> {
-        let class = self.class_registry.as_ref()?.find_class(owner)?;
+        let class = self.class_registry.as_ref()?.find_executable_class(owner)?;
         class
             .abstract_decl
             .as_ref()?
@@ -464,7 +464,7 @@ impl MacroInterpreter {
             let MacroValue::Abstract(owner, _) = value else {
                 continue;
             };
-            let Some(class) = registry.find_class(owner) else {
+            let Some(class) = registry.find_executable_class(owner) else {
                 continue;
             };
             let Some(decl) = &class.abstract_decl else {
@@ -644,7 +644,7 @@ impl MacroInterpreter {
         let context = self
             .class_registry
             .as_ref()
-            .and_then(|registry| registry.find_class(owner))
+            .and_then(|registry| registry.find_executable_class(owner))
             .map(|class| MacroFunctionContext {
                 imports: (*class.imports).clone(),
                 source_file: Some(class.source_file.clone()),

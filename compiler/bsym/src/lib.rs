@@ -83,7 +83,7 @@ impl From<postcard::Error> for BladeError {
 const SYMBOL_MAGIC: &[u8; 4] = b"BSYM";
 
 /// Current symbol format version
-const SYMBOL_VERSION: u32 = 3;
+const SYMBOL_VERSION: u32 = 4;
 
 /// A BLADE editor index contains portable query data, without executable MIR
 /// or compiler-local symbol IDs. The editor owns the payload schema.
@@ -230,6 +230,7 @@ pub struct BladeProperty {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BladeAnonField {
     pub name: String,
+    pub is_optional: bool,
     pub ty: BladeType,
     pub is_final: bool,
     pub getter: BladeAccess,
@@ -983,6 +984,7 @@ pub fn type_to_blade(ty: &parser::Type) -> BladeType {
                 .iter()
                 .map(|f| BladeAnonField {
                     name: f.name.clone(),
+                    is_optional: f.optional,
                     ty: type_to_blade(&f.type_hint),
                     is_final: f.access.is_final,
                     getter: match &f.access.getter {
@@ -1084,7 +1086,7 @@ mod source_identity_tests {
     #[test]
     fn anonymous_field_access_survives_binary_symbols() {
         let file = parser::rd::rd_parse(
-            "typedef View = { final value:Int; var read(default, null):Int; };",
+            "typedef View = { final value:Int; var read(default, null):Int; ?label:String; @:optional var enabled:Bool; required:Null<Int>; };",
             "View.hx",
             false,
             false,
@@ -1102,6 +1104,8 @@ mod source_identity_tests {
         };
         assert!(fields[0].is_final);
         assert_eq!(fields[1].setter, super::BladeAccess::Null);
+        assert!(fields[2].is_optional && fields[3].is_optional);
+        assert!(!fields[4].is_optional);
     }
 
     #[test]

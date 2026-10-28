@@ -6,6 +6,9 @@ use crate::macro_system::{ClassRegistry, MacroInterpreter, MacroRegistry};
 impl CompilationUnit {
     pub(crate) fn macro_class_registry(&self) -> ClassRegistry {
         let mut classes = ClassRegistry::new();
+        if let Some(snapshot) = &self.macro_stdlib_snapshot {
+            classes.use_snapshot(snapshot.clone());
+        }
         classes.use_statics(self.macro_statics.clone());
         classes.use_dependencies(self.macro_dependencies.clone());
         classes.use_resources(self.macro_resources.clone());

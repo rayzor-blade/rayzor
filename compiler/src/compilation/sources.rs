@@ -124,6 +124,9 @@ impl CompilationUnit {
             false
         };
         self.stdlib_manifest_loaded = bsym_loaded;
+        if !bsym_loaded {
+            self.load_macro_stdlib_declarations();
+        }
 
         // Load default stdlib imports (StdTypes, etc.). The BLADE manifest
         // restores their SYMBOLS, so re-running pre-registration on top would
