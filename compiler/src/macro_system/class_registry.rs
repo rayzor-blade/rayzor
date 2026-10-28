@@ -243,7 +243,7 @@ impl ClassRegistry {
         &self,
         old: &super::value::MacroValue,
         new: &super::value::MacroValue,
-        updates: &mut super::value::ReferenceUpdates,
+        updates: &mut super::value::ReferenceUpdates<'_>,
     ) {
         if let Ok(mut statics) = self.statics.lock() {
             for value in statics.values_mut() {

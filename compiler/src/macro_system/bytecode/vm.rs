@@ -74,6 +74,7 @@ pub struct MacroVm {
     /// Compiled class data for constructor/method dispatch.
     class_chunks: BTreeMap<String, CompiledClassInfo>,
     reference_updates: Vec<(MacroValue, MacroValue)>,
+    reference_index: super::super::value::ReferenceIndex,
 }
 
 impl MacroVm {
@@ -84,6 +85,7 @@ impl MacroVm {
             trace_output: Vec::new(),
             class_chunks: BTreeMap::new(),
             reference_updates: Vec::new(),
+            reference_index: Default::default(),
         }
     }
 
@@ -913,8 +915,12 @@ impl MacroVm {
     }
 
     fn replace_references(&mut self, old: &MacroValue, new: &MacroValue) {
+        if old.reference_key().is_none() || old.same_reference(new) {
+            return;
+        }
         self.reference_updates.push((old.clone(), new.clone()));
-        let mut updates = super::super::value::ReferenceUpdates::new();
+        let mut updates =
+            super::super::value::ReferenceUpdates::indexed(old, &mut self.reference_index);
         for value in &mut self.stack {
             value.replace_reference(old, new, &mut updates);
         }

@@ -108,15 +108,142 @@ pub enum MacroValue {
     Position(SourceLocation),
 }
 
-#[derive(Default)]
-pub(crate) struct ReferenceUpdates {
-    values: BTreeMap<(u8, usize), (MacroValue, MacroValue, bool)>,
-    bindings: std::collections::BTreeSet<usize>,
+enum ReferenceOwner {
+    Object(std::sync::Weak<BTreeMap<String, MacroValue>>),
+    Values(std::sync::Weak<Vec<MacroValue>>),
+    Map(std::sync::Weak<Vec<(MacroValue, MacroValue)>>),
+    Expr(std::sync::Weak<Expr>),
+    Function(std::sync::Weak<MacroFunction>),
+    Abstract(std::sync::Weak<MacroValue>),
 }
 
-impl ReferenceUpdates {
+impl ReferenceOwner {
+    fn alive(&self) -> bool {
+        match self {
+            Self::Object(value) => value.strong_count() != 0,
+            Self::Values(value) => value.strong_count() != 0,
+            Self::Map(value) => value.strong_count() != 0,
+            Self::Expr(value) => value.strong_count() != 0,
+            Self::Function(value) => value.strong_count() != 0,
+            Self::Abstract(value) => value.strong_count() != 0,
+        }
+    }
+}
+
+struct ReferenceSummary {
+    owner: ReferenceOwner,
+    serial: u64,
+    maximum: u64,
+}
+
+/// Closed backing stores cache the greatest identity they contain. Captured
+/// variable cells remain unbounded because they can acquire later values.
+#[derive(Default)]
+pub(crate) struct ReferenceIndex {
+    values: std::collections::HashMap<(u8, usize), ReferenceSummary>,
+    serial: u64,
+    mutations: u64,
+    #[cfg(test)]
+    summarized: usize,
+}
+
+impl ReferenceIndex {
+    fn summarize(&mut self, value: &MacroValue) -> (u64, u64) {
+        let Some(key) = value.reference_key() else {
+            return (0, 0);
+        };
+        if let Some(summary) = self.values.get(&key) {
+            return (summary.serial, summary.maximum);
+        }
+        let owner = match value {
+            MacroValue::Object(value) => ReferenceOwner::Object(Arc::downgrade(value)),
+            MacroValue::Array(value) | MacroValue::Enum(_, _, value) => {
+                ReferenceOwner::Values(Arc::downgrade(value))
+            }
+            MacroValue::Map(value) => ReferenceOwner::Map(Arc::downgrade(value)),
+            MacroValue::Expr(value) => ReferenceOwner::Expr(Arc::downgrade(value)),
+            MacroValue::Function(value) => ReferenceOwner::Function(Arc::downgrade(value)),
+            MacroValue::Abstract(_, value) => ReferenceOwner::Abstract(Arc::downgrade(value)),
+            _ => unreachable!("reference identity"),
+        };
+        self.serial = self.serial.saturating_add(1);
+        let serial = self.serial;
+        // Weak ownership prevents address reuse and makes a cached store's next
+        // COW write acquire a new identity, even with one strong owner.
+        self.values.insert(
+            key,
+            ReferenceSummary {
+                owner,
+                serial,
+                maximum: u64::MAX,
+            },
+        );
+        #[cfg(test)]
+        {
+            self.summarized += 1;
+        }
+        let mut maximum = serial;
+        match value {
+            MacroValue::Object(values) => {
+                for value in values.values() {
+                    maximum = maximum.max(self.summarize(value).1);
+                }
+            }
+            MacroValue::Array(values) | MacroValue::Enum(_, _, values) => {
+                for value in values.iter() {
+                    maximum = maximum.max(self.summarize(value).1);
+                }
+            }
+            MacroValue::Map(values) => {
+                for (key, value) in values.iter() {
+                    maximum = maximum
+                        .max(self.summarize(key).1)
+                        .max(self.summarize(value).1);
+                }
+            }
+            MacroValue::Abstract(_, value) => maximum = maximum.max(self.summarize(value).1),
+            MacroValue::Function(function) if !function.captures.is_empty() => maximum = u64::MAX,
+            _ => {}
+        }
+        self.values.get_mut(&key).unwrap().maximum = maximum;
+        (serial, maximum)
+    }
+
+    fn target(&mut self, old: &MacroValue) -> u64 {
+        self.mutations += 1;
+        if self.values.len() > 4096 && self.mutations.is_multiple_of(128) {
+            self.values.retain(|_, summary| summary.owner.alive());
+        }
+        self.summarize(old).0
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ReferenceUpdates<'a> {
+    values: BTreeMap<(u8, usize), (MacroValue, MacroValue, bool)>,
+    bindings: std::collections::BTreeSet<usize>,
+    index: Option<&'a mut ReferenceIndex>,
+    target: u64,
+}
+
+impl<'a> ReferenceUpdates<'a> {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn indexed(old: &MacroValue, index: &'a mut ReferenceIndex) -> Self {
+        let target = index.target(old);
+        Self {
+            index: Some(index),
+            target,
+            ..Default::default()
+        }
+    }
+
+    fn excludes(&mut self, value: &MacroValue) -> bool {
+        self.index
+            .as_deref_mut()
+            .is_some_and(|index| index.summarize(value).1 < self.target)
     }
 
     pub(crate) fn replace_binding(
@@ -146,6 +273,19 @@ impl MacroValue {
             value = inner;
         }
         value
+    }
+
+    pub(crate) fn reference_key(&self) -> Option<(u8, usize)> {
+        Some(match self {
+            Self::Object(value) => (0, Arc::as_ptr(value) as usize),
+            Self::Array(value) => (1, Arc::as_ptr(value) as usize),
+            Self::Enum(_, _, value) => (2, Arc::as_ptr(value) as usize),
+            Self::Map(value) => (3, Arc::as_ptr(value) as usize),
+            Self::Expr(value) => (4, Arc::as_ptr(value) as usize),
+            Self::Function(value) => (5, Arc::as_ptr(value) as usize),
+            Self::Abstract(_, value) => (6, Arc::as_ptr(value) as usize),
+            _ => return None,
+        })
     }
 
     pub(crate) fn same_reference(&self, other: &Self) -> bool {
@@ -332,12 +472,15 @@ impl MacroValue {
         &mut self,
         old: &Self,
         new: &Self,
-        updates: &mut ReferenceUpdates,
+        updates: &mut ReferenceUpdates<'_>,
     ) -> bool {
         let same = self.same_reference(old);
         if same {
             *self = new.clone();
             return true;
+        }
+        if updates.excludes(self) {
+            return false;
         }
         if let Self::Abstract(_, inner) = self {
             let mut value = (**inner).clone();
@@ -714,5 +857,91 @@ impl PartialEq for MacroValue {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod reference_index_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn object(value: i64) -> MacroValue {
+        MacroValue::Object(Arc::new(BTreeMap::from([(
+            "value".into(),
+            MacroValue::Int(value),
+        )])))
+    }
+
+    #[test]
+    fn unrelated_catalogue_is_not_walked_again_for_local_mutations() {
+        let mut catalogue = MacroValue::Array(Arc::new((0..1000).map(object).collect()));
+        let mut index = ReferenceIndex::default();
+        index.summarize(&catalogue);
+        let initial = index.summarized;
+        for value in 0..40 {
+            let old = object(value);
+            let new = object(value + 1);
+            let mut updates = ReferenceUpdates::indexed(&old, &mut index);
+            assert!(!catalogue.replace_reference(&old, &new, &mut updates));
+            assert!(updates.values.is_empty());
+        }
+        assert_eq!(index.summarized, initial + 40);
+    }
+
+    #[test]
+    fn captured_cells_can_acquire_references_after_a_summary() {
+        let binding = Arc::new(Mutex::new(MacroValue::Null));
+        let function = MacroFunction {
+            name: "capture".into(),
+            params: Vec::new(),
+            body: Arc::new(Expr {
+                kind: parser::ExprKind::Null,
+                span: parser::Span::new(0, 0),
+            }),
+            captures: BTreeMap::from([("cell".into(), binding.clone())]),
+            context: None,
+            return_type: None,
+        };
+        let mut parent =
+            MacroValue::Array(Arc::new(vec![MacroValue::Function(Arc::new(function))]));
+        let mut index = ReferenceIndex::default();
+        index.summarize(&parent);
+        let old = object(1);
+        let new = object(2);
+        *binding.lock().unwrap() = old.clone();
+        parent.replace_reference(&old, &new, &mut ReferenceUpdates::indexed(&old, &mut index));
+        assert!(binding.lock().unwrap().same_reference(&new));
+    }
+
+    #[test]
+    fn a_cow_write_invalidates_a_cached_closed_store() {
+        let mut parent = MacroValue::Array(Arc::new(vec![MacroValue::Int(0)]));
+        let mut index = ReferenceIndex::default();
+        index.summarize(&parent);
+        let old = object(1);
+        let new = object(2);
+        let MacroValue::Array(values) = &mut parent else {
+            unreachable!()
+        };
+        Arc::make_mut(values).push(old.clone());
+        assert!(parent.replace_reference(
+            &old,
+            &new,
+            &mut ReferenceUpdates::indexed(&old, &mut index)
+        ));
+        let MacroValue::Array(values) = parent else {
+            unreachable!()
+        };
+        assert!(values[1].same_reference(&new));
+    }
+
+    #[test]
+    fn dead_stores_do_not_accumulate_in_the_index() {
+        let mut index = ReferenceIndex::default();
+        for value in 0..10_000 {
+            let target = object(value);
+            index.target(&target);
+        }
+        assert!(index.values.len() < 4096 + 128);
     }
 }

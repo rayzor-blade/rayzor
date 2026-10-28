@@ -85,7 +85,7 @@ impl Environment {
         &mut self,
         old: &MacroValue,
         new: &MacroValue,
-        updates: &mut super::value::ReferenceUpdates,
+        updates: &mut super::value::ReferenceUpdates<'_>,
     ) {
         for scope in &mut self.scopes {
             for binding in scope.values() {

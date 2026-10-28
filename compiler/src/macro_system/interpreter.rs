@@ -58,6 +58,7 @@ pub struct MacroInterpreter {
     /// Variable environment with lexical scoping
     env: Environment,
     call_frames: Vec<Environment>,
+    reference_index: super::value::ReferenceIndex,
     /// Macro registry for looking up macro definitions
     registry: MacroRegistry,
     /// Current call depth (for recursion detection)
@@ -144,6 +145,7 @@ impl MacroInterpreter {
         Self {
             env: Environment::new(),
             call_frames: Vec::new(),
+            reference_index: Default::default(),
             registry,
             call_depth: 0,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
@@ -172,6 +174,7 @@ impl MacroInterpreter {
         Self {
             env: Environment::new(),
             call_frames: Vec::new(),
+            reference_index: Default::default(),
             registry,
             call_depth: 0,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
@@ -206,6 +209,7 @@ impl MacroInterpreter {
         Self {
             env: Environment::new(),
             call_frames: Vec::new(),
+            reference_index: Default::default(),
             registry,
             call_depth: 0,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
@@ -1427,30 +1431,22 @@ impl MacroInterpreter {
     }
 
     fn mutate_object_field(&mut self, name: &str, field: &str, value: MacroValue) -> bool {
-        let old = self.env.get(name);
-        if !self.env.mutate_object_field(name, field, value) {
+        let Some(old) = self.env.get(name) else {
+            return false;
+        };
+        let mut new = old.clone();
+        if !new.set_field(field, value) {
             return false;
         }
-        if let Some((old, new)) = old.zip(self.env.get(name)) {
-            self.replace_references(&old, &new);
-        }
+        self.replace_references(&old, &new);
         true
     }
 
     fn replace_references(&mut self, old: &MacroValue, new: &MacroValue) {
-        if old.same_reference(new)
-            || matches!(
-                old,
-                MacroValue::Null
-                    | MacroValue::Bool(_)
-                    | MacroValue::Int(_)
-                    | MacroValue::Float(_)
-                    | MacroValue::String(_)
-            ) && old == new
-        {
+        if old.reference_key().is_none() || old.same_reference(new) {
             return;
         }
-        let mut updates = super::value::ReferenceUpdates::new();
+        let mut updates = super::value::ReferenceUpdates::indexed(old, &mut self.reference_index);
         self.env.replace_references_with(old, new, &mut updates);
         for frame in &mut self.call_frames {
             frame.replace_references_with(old, new, &mut updates);
