@@ -444,21 +444,74 @@ pub fn span_to_location(span: Span) -> SourceLocation {
     SourceLocation::new(0, 0, 0, span.start as u32)
 }
 
-/// A position in the exact source view that produced an AST span.
-pub(crate) fn location_in_source(source: Option<&str>, span: Span) -> SourceLocation {
-    let mut location = span_to_location(span);
-    if location.file_id != 0 {
-        return location;
+/// Positions in the exact source view that produced AST spans.
+pub(crate) struct SourceLocations<'a> {
+    source: Option<&'a str>,
+    line_starts: Vec<usize>,
+}
+
+impl<'a> SourceLocations<'a> {
+    pub(crate) fn new(source: Option<&'a str>) -> Self {
+        let mut line_starts = vec![0];
+        if let Some(source) = source {
+            line_starts.extend(
+                source
+                    .bytes()
+                    .enumerate()
+                    .filter_map(|(at, byte)| (byte == b'\n').then_some(at + 1)),
+            );
+        }
+        Self {
+            source,
+            line_starts,
+        }
     }
-    if let Some(before) = source.and_then(|text| text.get(..span.start)) {
-        location.line = before.bytes().filter(|&b| b == b'\n').count() as u32 + 1;
-        location.column = before
-            .rsplit('\n')
-            .next()
-            .unwrap_or("")
-            .encode_utf16()
-            .count() as u32
-            + 1;
+
+    pub(crate) fn location(&self, span: Span) -> SourceLocation {
+        let mut location = span_to_location(span);
+        if location.file_id != 0 {
+            return location;
+        }
+        if let Some(before) = self.source.and_then(|text| text.get(..span.start)) {
+            let line = self.line_starts.partition_point(|&at| at <= span.start) - 1;
+            location.line = line as u32 + 1;
+            location.column = before[self.line_starts[line]..].encode_utf16().count() as u32 + 1;
+        }
+        location
     }
-    location
+}
+
+#[cfg(test)]
+mod source_location_tests {
+    use super::*;
+
+    #[test]
+    fn indexed_locations_preserve_utf16_columns_and_unknown_spans() {
+        let source = "first\r\n😀é last\n";
+        let locations = SourceLocations::new(Some(source));
+        for at in 0..=source.len() {
+            let span = Span::new(at, at);
+            let location = locations.location(span);
+            if let Some(before) = source.get(..at) {
+                assert_eq!(
+                    location.line,
+                    before.bytes().filter(|&b| b == b'\n').count() as u32 + 1
+                );
+                assert_eq!(
+                    location.column,
+                    before.rsplit('\n').next().unwrap().encode_utf16().count() as u32 + 1
+                );
+            } else {
+                assert_eq!(location, span_to_location(span));
+            }
+        }
+        let named = Span::new(NAMED_FILE_SPAN + 3, NAMED_FILE_SPAN + 8);
+        assert_eq!(locations.location(named), span_to_location(named));
+        let beyond = Span::new(source.len() + 1, source.len() + 1);
+        assert_eq!(locations.location(beyond), span_to_location(beyond));
+        assert_eq!(
+            SourceLocations::new(None).location(Span::new(3, 4)),
+            span_to_location(Span::new(3, 4))
+        );
+    }
 }

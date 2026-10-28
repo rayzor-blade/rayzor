@@ -254,6 +254,7 @@ impl ClassRegistry {
 
     /// Register all classes from a single HaxeFile.
     pub fn register_file(&mut self, file: &HaxeFile) {
+        let mut locations = None;
         let mut file_imports = super::interpreter::build_file_import_map(file);
         let package_prefix = match &file.package {
             Some(pkg) if !pkg.path.is_empty() => format!("{}.", pkg.path.join(".")),
@@ -606,10 +607,11 @@ impl ClassRegistry {
                                 is_static,
                                 return_type: func.return_type.clone(),
                                 owner: qualified_name.clone(),
-                                location: super::errors::location_in_source(
-                                    file.input.as_deref(),
-                                    func.span,
-                                ),
+                                location: locations
+                                    .get_or_insert_with(|| {
+                                        super::errors::SourceLocations::new(file.input.as_deref())
+                                    })
+                                    .location(func.span),
                             };
 
                             if func.name == "new" {

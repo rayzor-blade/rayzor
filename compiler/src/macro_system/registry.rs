@@ -253,16 +253,16 @@ impl MacroRegistry {
             }
         }
 
+        let mut locations = None;
         for definition in self.macros.values_mut().filter(|d| {
             d.source_file == source_file
                 && d.definition_site.line == 0
                 && d.definition_site.file_id == 0
         }) {
             let offset = definition.definition_site.byte_offset as usize;
-            definition.definition_site = super::errors::location_in_source(
-                file.input.as_deref(),
-                parser::Span::new(offset, offset),
-            );
+            definition.definition_site = locations
+                .get_or_insert_with(|| super::errors::SourceLocations::new(file.input.as_deref()))
+                .location(parser::Span::new(offset, offset));
         }
         Ok(())
     }
