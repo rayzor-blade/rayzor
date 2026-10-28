@@ -1286,7 +1286,34 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                         })
                         .collect(),
                 ),
-                "EArrayDecl" => ExprKind::Array(exprs_of(a(0), span)),
+                "EArrayDecl" => {
+                    let items = exprs_of(a(0), span);
+                    if !items.is_empty()
+                        && items.iter().all(|item| {
+                            matches!(
+                                item.kind,
+                                ExprKind::Binary {
+                                    op: BinaryOp::Arrow,
+                                    ..
+                                }
+                            )
+                        })
+                    {
+                        ExprKind::Map(
+                            items
+                                .into_iter()
+                                .map(|item| {
+                                    let ExprKind::Binary { left, right, .. } = item.kind else {
+                                        unreachable!()
+                                    };
+                                    (*left, *right)
+                                })
+                                .collect(),
+                        )
+                    } else {
+                        ExprKind::Array(items)
+                    }
+                }
                 "ECall" => ExprKind::Call {
                     expr: bx(0),
                     args: exprs_of(a(1), span),
@@ -1612,6 +1639,29 @@ pub fn constant_of(e: &Expr) -> Option<MacroValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_literals_survive_macro_round_trips() {
+        let file = parser::rd::rd_parse(
+            "class Main { var values = [1 => 2, 3 => 4]; }",
+            "Main.hx",
+            false,
+            false,
+        )
+        .unwrap();
+        let parser::TypeDeclaration::Class(class) = &file.declarations[0] else {
+            panic!("class")
+        };
+        let parser::ClassFieldKind::Var {
+            expr: Some(before), ..
+        } = &class.fields[0].kind
+        else {
+            panic!("field")
+        };
+        let encoded = def_of(&before.kind, before.span).unwrap();
+        let after = try_expr_of(&encoded, before.span).unwrap();
+        assert!(matches!(after.kind, ExprKind::Map(_)));
+    }
 
     #[test]
     fn interpolated_strings_survive_macro_round_trips() {
