@@ -22,6 +22,76 @@ fn s(v: &str) -> MacroValue {
     MacroValue::String(Arc::from(v))
 }
 
+fn comprehension_entry(expression: &Expr) -> Option<(Expr, Expr)> {
+    match &expression.kind {
+        ExprKind::Paren(inner) => comprehension_entry(inner),
+        ExprKind::Binary {
+            op: BinaryOp::Arrow,
+            left,
+            right,
+        } => Some(((**left).clone(), (**right).clone())),
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch: None,
+        } => {
+            let (key, value) = comprehension_entry(then_branch)?;
+            Some((
+                Expr {
+                    kind: ExprKind::If {
+                        cond: cond.clone(),
+                        then_branch: Box::new(key),
+                        else_branch: None,
+                    },
+                    span: expression.span,
+                },
+                value,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn comprehension_body(key: &Expr, value: &Expr) -> Expr {
+    match &key.kind {
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch: None,
+        } => Expr {
+            kind: ExprKind::If {
+                cond: cond.clone(),
+                then_branch: Box::new(comprehension_body(then_branch, value)),
+                else_branch: None,
+            },
+            span: key.span,
+        },
+        _ => Expr {
+            kind: ExprKind::Binary {
+                op: BinaryOp::Arrow,
+                left: Box::new(key.clone()),
+                right: Box::new(value.clone()),
+            },
+            span: key.span,
+        },
+    }
+}
+
+fn comprehension_loops(parts: &[parser::ComprehensionFor], mut body: Expr, span: Span) -> Expr {
+    for part in parts.iter().rev() {
+        body = Expr {
+            kind: ExprKind::For {
+                var: part.var.clone(),
+                key_var: part.key_var.clone(),
+                iter: Box::new(part.iter.clone()),
+                body: Box::new(body),
+            },
+            span,
+        };
+    }
+    body
+}
+
 fn property_name(access: &parser::PropertyAccess) -> &str {
     match access {
         parser::PropertyAccess::Default => "default",
@@ -1039,15 +1109,15 @@ pub fn def_of(kind: &ExprKind, span: Span) -> Option<MacroValue> {
             ],
         ),
         ExprKind::ArrayComprehension { for_parts, expr } => {
-            let mut inner = (**expr).clone();
-            for part in for_parts.iter().rev() {
-                inner = mk(ExprKind::For {
-                    var: part.var.clone(),
-                    key_var: part.key_var.clone(),
-                    iter: Box::new(part.iter.clone()),
-                    body: Box::new(inner),
-                });
-            }
+            let inner = comprehension_loops(for_parts, (**expr).clone(), span);
+            en("ExprDef", "EArrayDecl", vec![arr(vec![sub(&inner)])])
+        }
+        ExprKind::MapComprehension {
+            for_parts,
+            key,
+            value,
+        } => {
+            let inner = comprehension_loops(for_parts, comprehension_body(key, value), span);
             en("ExprDef", "EArrayDecl", vec![arr(vec![sub(&inner)])])
         }
         ExprKind::Switch {
@@ -1335,8 +1405,38 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                         .collect(),
                 ),
                 "EArrayDecl" => {
-                    let items = exprs_of(a(0), span);
-                    if !items.is_empty()
+                    let mut items = exprs_of(a(0), span);
+                    if items.len() == 1 && matches!(items[0].kind, ExprKind::For { .. }) {
+                        let mut body = items.pop().unwrap();
+                        let mut for_parts = Vec::new();
+                        while let ExprKind::For {
+                            var,
+                            key_var,
+                            iter,
+                            body: inner,
+                        } = body.kind
+                        {
+                            for_parts.push(parser::ComprehensionFor {
+                                var,
+                                key_var,
+                                iter: *iter,
+                                span: body.span,
+                            });
+                            body = *inner;
+                        }
+                        if let Some((key, value)) = comprehension_entry(&body) {
+                            ExprKind::MapComprehension {
+                                for_parts,
+                                key: Box::new(key),
+                                value: Box::new(value),
+                            }
+                        } else {
+                            ExprKind::ArrayComprehension {
+                                for_parts,
+                                expr: Box::new(body),
+                            }
+                        }
+                    } else if !items.is_empty()
                         && items.iter().all(|item| {
                             matches!(
                                 item.kind,
@@ -1711,6 +1811,41 @@ mod tests {
             before.iter().map(|field| &field.access).collect::<Vec<_>>(),
             after.iter().map(|field| &field.access).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn comprehensions_survive_macro_round_trips() {
+        for code in [
+            "[for (i in 0...3) i * 2]",
+            "[for (i in 0...2) for (j in 0...2) if (i != j) i + j]",
+            "[for (i in 0...3) i => i * 2]",
+            "[for (i in 0...3) if (i > 0) i => i * 2]",
+        ] {
+            let source = format!("class Main {{ var values = {code}; }}");
+            let file = parser::rd::rd_parse(&source, "Main.hx", false, false).unwrap();
+            let parser::TypeDeclaration::Class(class) = &file.declarations[0] else {
+                panic!("class")
+            };
+            let parser::ClassFieldKind::Var {
+                expr: Some(before), ..
+            } = &class.fields[0].kind
+            else {
+                panic!("field")
+            };
+            let after =
+                try_expr_of(&def_of(&before.kind, before.span).unwrap(), before.span).unwrap();
+            match (&before.kind, &after.kind) {
+                (
+                    ExprKind::ArrayComprehension { for_parts: a, .. },
+                    ExprKind::ArrayComprehension { for_parts: b, .. },
+                )
+                | (
+                    ExprKind::MapComprehension { for_parts: a, .. },
+                    ExprKind::MapComprehension { for_parts: b, .. },
+                ) => assert_eq!(a.len(), b.len()),
+                _ => panic!("lost comprehension {code}: {:?}", after.kind),
+            }
+        }
     }
 
     #[test]
