@@ -629,7 +629,7 @@ fn field_property<'a>(full: &'a str, input: &'a str) -> PResult<'a, ClassFieldKi
 }
 
 /// Parse property access mode
-fn property_access(input: &str) -> PResult<PropertyAccess> {
+pub(crate) fn property_access(input: &str) -> PResult<PropertyAccess> {
     alt((
         value(PropertyAccess::Default, keyword("default")),
         value(PropertyAccess::Null, keyword("null")),

@@ -552,6 +552,18 @@ impl<'a> AstLowering<'a> {
             .map(|t| self.lower_type(t))
             .collect::<Result<Vec<_>, _>>()?;
 
+        let mut hierarchy = crate::tast::class_builder::ClassHierarchyBuilder::new();
+        hierarchy.register_class(interface_symbol, None, extends.clone());
+        hierarchy.finalize(self.context.symbol_table);
+        if let Some(info) = self
+            .context
+            .symbol_table
+            .class_hierarchies
+            .get_mut(&interface_symbol)
+        {
+            info.is_interface = true;
+        }
+
         // Process fields - separate method signatures from other fields
         let mut method_signatures = Vec::with_capacity(interface_decl.fields.len());
         let mut fields = Vec::new();

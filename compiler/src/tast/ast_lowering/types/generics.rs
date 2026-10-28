@@ -32,25 +32,51 @@ impl<'a> AstLowering<'a> {
         type_params: &[TypeParam],
     ) -> LoweringResult<BTreeMap<InternedString, TypeId>> {
         let mut map = BTreeMap::new();
-        for tp in self.lower_type_parameters(type_params)? {
-            let constraint_kinds = tp
-                .constraints
-                .iter()
-                .map(|_| crate::tast::type_checker::ConstraintKind::Implements {
-                    interface_type: TypeId::invalid(),
-                })
-                .collect();
-            let symbol_id = self
+        if type_params.is_empty() {
+            return Ok(map);
+        }
+        for parameter in type_params {
+            let name = self.context.intern_string(&parameter.name);
+            let symbol = self
                 .context
                 .symbol_table
-                .create_type_parameter(tp.name, constraint_kinds);
-            let type_id = self.context.type_table.borrow_mut().create_type_parameter(
-                symbol_id,
-                tp.constraints.clone(),
-                tp.variance.into(),
+                .create_type_parameter(name, Vec::new());
+            let ty = self.context.type_table.borrow_mut().create_type_parameter(
+                symbol,
+                Vec::new(),
+                parameter.variance.into(),
             );
-            map.insert(tp.name, type_id);
+            map.insert(name, ty);
         }
+        self.context.push_type_parameters(map.clone());
+        let result = (|| -> LoweringResult<()> {
+            for parameter in type_params {
+                let name = self.context.intern_string(&parameter.name);
+                let symbol = {
+                    let table = self.context.type_table.borrow();
+                    let TypeKind::TypeParameter { symbol_id, .. } =
+                        &table.get(map[&name]).unwrap().kind
+                    else {
+                        unreachable!("function type parameter")
+                    };
+                    *symbol_id
+                };
+                let constraints = parameter
+                    .constraints
+                    .iter()
+                    .map(|constraint| self.lower_type(constraint))
+                    .collect::<LoweringResult<Vec<_>>>()?;
+                let ty = self.context.type_table.borrow_mut().create_type_parameter(
+                    symbol,
+                    constraints,
+                    parameter.variance.into(),
+                );
+                map.insert(name, ty);
+            }
+            Ok(())
+        })();
+        self.context.pop_type_parameters();
+        result?;
         Ok(map)
     }
 

@@ -1039,6 +1039,8 @@ pub struct TypeChecker<'a> {
     subtype_cache: BTreeMap<(TypeId, TypeId), bool>,
 
     checking_conversions: std::collections::BTreeSet<(TypeId, TypeId)>,
+    allow_conversion_methods: bool,
+    invariant: bool,
     checking_structures: std::collections::BTreeSet<(TypeId, TypeId)>,
 
     /// Generic instantiation context
@@ -1101,6 +1103,8 @@ impl<'a> TypeChecker<'a> {
             errors: Vec::new(),
             subtype_cache: BTreeMap::new(),
             checking_conversions: Default::default(),
+            allow_conversion_methods: true,
+            invariant: false,
             checking_structures: Default::default(),
             generic_context: GenericContext::default(),
             stats: TypeCheckerStats {
@@ -1153,23 +1157,37 @@ impl<'a> TypeChecker<'a> {
             return result;
         }
         let outgoing = match source_type {
-            TypeKind::Abstract { symbol_id, .. } => self
-                .type_table
-                .borrow()
-                .abstract_casts
-                .get(&symbol_id)
-                .map(|(_, to)| to.clone())
-                .unwrap_or_default(),
+            TypeKind::Abstract { symbol_id, .. } => {
+                let table = self.type_table.borrow();
+                let casts = if self.allow_conversion_methods
+                    && !table.abstract_to_conversions.contains_key(&symbol_id)
+                {
+                    &table.abstract_casts
+                } else {
+                    &table.abstract_declared_casts
+                };
+                casts
+                    .get(&symbol_id)
+                    .map(|(_, to)| to.clone())
+                    .unwrap_or_default()
+            }
             _ => Vec::new(),
         };
         let incoming = match target_type {
-            TypeKind::Abstract { symbol_id, .. } => self
-                .type_table
-                .borrow()
-                .abstract_casts
-                .get(&symbol_id)
-                .map(|(from, _)| from.clone())
-                .unwrap_or_default(),
+            TypeKind::Abstract { symbol_id, .. } => {
+                let table = self.type_table.borrow();
+                let casts = if self.allow_conversion_methods
+                    && !table.abstract_from_conversions.contains_key(&symbol_id)
+                {
+                    &table.abstract_casts
+                } else {
+                    &table.abstract_declared_casts
+                };
+                casts
+                    .get(&symbol_id)
+                    .map(|(from, _)| from.clone())
+                    .unwrap_or_default()
+            }
             _ => Vec::new(),
         };
         let substitute = |ty, receiver| {
@@ -1190,16 +1208,292 @@ impl<'a> TypeChecker<'a> {
             .collect();
         let convertible = outgoing
             .into_iter()
-            .any(|ty| self.check_compatibility(ty, target) != TypeCompatibility::Incompatible)
+            .any(|ty| self.compatible_without_abstract_conversion(ty, target))
             || incoming
                 .into_iter()
-                .any(|ty| self.check_compatibility(source, ty) != TypeCompatibility::Incompatible);
+                .any(|ty| self.compatible_without_abstract_conversion(source, ty))
+            || (self.allow_conversion_methods
+                && (self.matches_abstract_conversion(source, target, true)
+                    || self.matches_abstract_conversion(source, target, false)));
         self.checking_conversions.remove(&(source, target));
+        if convertible && self.invariant {
+            let source_storage = self.abstract_storage_type(source);
+            let target_storage = self.abstract_storage_type(target);
+            if (source_storage == source && target_storage == target)
+                || self.check_compatibility(source_storage, target_storage)
+                    == TypeCompatibility::Incompatible
+            {
+                return result;
+            }
+        }
         if convertible {
             TypeCompatibility::Convertible
         } else {
             result
         }
+    }
+
+    fn abstract_storage_type(&self, mut ty: TypeId) -> TypeId {
+        let mut visited = BTreeSet::new();
+        while visited.insert(ty) {
+            let underlying = {
+                let table = self.type_table.borrow();
+                let Some(TypeKind::Abstract {
+                    symbol_id,
+                    underlying,
+                    ..
+                }) = table.get(ty).map(|ty| &ty.kind)
+                else {
+                    break;
+                };
+                underlying.or_else(|| {
+                    self.symbol_table
+                        .get_symbol(*symbol_id)
+                        .and_then(|symbol| table.get(symbol.type_id))
+                        .and_then(|declaration| match declaration.kind {
+                            TypeKind::Abstract { underlying, .. } => underlying,
+                            _ => None,
+                        })
+                })
+            };
+            let Some(underlying) = underlying else { break };
+            ty = super::type_substitution::TypeSubstitutions {
+                type_table: self.type_table,
+                symbol_table: self.symbol_table,
+                class_type_params: None,
+            }
+            .substitute_receiver_type(underlying, ty);
+        }
+        ty
+    }
+
+    fn bind_conversion_parameters(
+        &self,
+        formal: TypeId,
+        actual: TypeId,
+        parameters: &[TypeId],
+        bindings: &mut Vec<(SymbolId, TypeId)>,
+        depth: usize,
+    ) {
+        if depth > 32 {
+            return;
+        }
+        let table = self.type_table.borrow();
+        let formal = table.resolve_alias_type(formal);
+        let actual = table.resolve_alias_type(actual);
+        let (Some(formal_kind), Some(actual_kind)) = (
+            table.get(formal).map(|ty| &ty.kind),
+            table.get(actual).map(|ty| &ty.kind),
+        ) else {
+            return;
+        };
+        if let TypeKind::TypeParameter { symbol_id, .. } = formal_kind {
+            if parameters.contains(&formal)
+                && !bindings.iter().any(|(symbol, _)| symbol == symbol_id)
+            {
+                bindings.push((*symbol_id, actual));
+            }
+            return;
+        }
+        let named = |kind: &TypeKind| match kind {
+            TypeKind::Abstract {
+                symbol_id,
+                type_args,
+                ..
+            }
+            | TypeKind::Class {
+                symbol_id,
+                type_args,
+            }
+            | TypeKind::Interface {
+                symbol_id,
+                type_args,
+            }
+            | TypeKind::Enum {
+                symbol_id,
+                type_args,
+            } => Some((*symbol_id, type_args.clone())),
+            TypeKind::GenericInstance {
+                base_type,
+                type_args,
+                ..
+            } => table
+                .get_type_symbol(*base_type)
+                .map(|symbol| (symbol, type_args.clone())),
+            _ => None,
+        };
+        let children: Vec<_> = match (formal_kind, actual_kind) {
+            (TypeKind::Array { element_type: a }, TypeKind::Array { element_type: b })
+            | (TypeKind::Optional { inner_type: a }, TypeKind::Optional { inner_type: b }) => {
+                vec![(*a, *b)]
+            }
+            (TypeKind::Anonymous { fields: a }, TypeKind::Anonymous { fields: b }) => a
+                .iter()
+                .filter_map(|a| {
+                    b.iter()
+                        .find(|b| a.name == b.name)
+                        .map(|b| (a.type_id, b.type_id))
+                })
+                .collect(),
+            (
+                TypeKind::Function {
+                    params: a,
+                    return_type: ar,
+                    ..
+                },
+                TypeKind::Function {
+                    params: b,
+                    return_type: br,
+                    ..
+                },
+            ) if a.len() == b.len() => a
+                .iter()
+                .copied()
+                .zip(b.iter().copied())
+                .chain(std::iter::once((*ar, *br)))
+                .collect(),
+            _ => match (named(formal_kind), named(actual_kind)) {
+                (Some((a, aa)), Some((b, ba))) if a == b && aa.len() == ba.len() => {
+                    aa.into_iter().zip(ba).collect()
+                }
+                _ => Vec::new(),
+            },
+        };
+        drop(table);
+        for (formal, actual) in children {
+            self.bind_conversion_parameters(formal, actual, parameters, bindings, depth + 1);
+        }
+    }
+
+    fn matches_abstract_conversion(
+        &mut self,
+        source: TypeId,
+        target: TypeId,
+        incoming: bool,
+    ) -> bool {
+        let receiver = if incoming { target } else { source };
+        let (methods, class_bindings) = {
+            let table = self.type_table.borrow();
+            let Some(TypeKind::Abstract {
+                symbol_id,
+                type_args,
+                ..
+            }) = table.get(receiver).map(|ty| &ty.kind)
+            else {
+                return false;
+            };
+            let conversions = if incoming {
+                &table.abstract_from_conversions
+            } else {
+                &table.abstract_to_conversions
+            };
+            let methods = conversions.get(symbol_id).cloned().unwrap_or_default();
+            let bindings = self
+                .symbol_table
+                .get_class_type_params(*symbol_id)
+                .into_iter()
+                .flatten()
+                .zip(type_args)
+                .filter_map(|(parameter, argument)| {
+                    match table.get(*parameter).map(|ty| &ty.kind) {
+                        Some(TypeKind::TypeParameter { symbol_id, .. }) => {
+                            Some((*symbol_id, *argument))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            (methods, bindings)
+        };
+        for method in methods {
+            let mut bindings = class_bindings.clone();
+            if let Some(result) = method.result {
+                self.bind_conversion_parameters(
+                    result,
+                    target,
+                    &method.parameters,
+                    &mut bindings,
+                    0,
+                );
+            }
+            if let Some(input) = method.input {
+                self.bind_conversion_parameters(
+                    input,
+                    source,
+                    &method.parameters,
+                    &mut bindings,
+                    0,
+                );
+            }
+            let substitute = |ty| {
+                super::type_substitution::TypeSubstitutions {
+                    type_table: self.type_table,
+                    symbol_table: self.symbol_table,
+                    class_type_params: None,
+                }
+                .substitute_type_bindings(ty, &bindings, false)
+            };
+            let input = method.input.map(substitute);
+            let result = method.result.map(substitute);
+            let constraints = {
+                let table = self.type_table.borrow();
+                method
+                    .parameters
+                    .iter()
+                    .flat_map(|parameter| match table.get(*parameter).map(|ty| &ty.kind) {
+                        Some(TypeKind::TypeParameter {
+                            symbol_id,
+                            constraints,
+                            ..
+                        }) => {
+                            let actual = bindings
+                                .iter()
+                                .find(|(symbol, _)| symbol == symbol_id)
+                                .map(|(_, ty)| *ty);
+                            constraints
+                                .iter()
+                                .map(|constraint| (actual, *constraint))
+                                .collect::<Vec<_>>()
+                        }
+                        _ => Vec::new(),
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let constraints: Vec<_> = constraints
+                .into_iter()
+                .map(|(actual, constraint)| (actual, substitute(constraint)))
+                .collect();
+            if constraints.into_iter().all(|(actual, constraint)| {
+                actual.is_some_and(|actual| {
+                    self.compatible_without_abstract_conversion(actual, constraint)
+                })
+            }) && input
+                .is_none_or(|input| self.compatible_without_abstract_conversion(source, input))
+                && result.is_none_or(|result| {
+                    self.compatible_without_abstract_conversion(result, target)
+                })
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    // An implicit conversion may use one abstract cast, with ordinary numeric
+    // widening or subtyping on either side, but may not chain abstract casts.
+    fn compatible_without_abstract_conversion(&mut self, source: TypeId, target: TypeId) -> bool {
+        let result = self.check_compatibility(source, target);
+        if result != TypeCompatibility::Convertible {
+            return result != TypeCompatibility::Incompatible;
+        }
+        let table = self.type_table.borrow();
+        ![source, target].into_iter().any(|ty| {
+            let ty = table.resolve_alias_type(ty);
+            matches!(
+                table.get(ty).map(|ty| &ty.kind),
+                Some(TypeKind::Abstract { .. })
+            )
+        })
     }
 
     /// Internal compatibility checking implementation
@@ -1219,7 +1513,7 @@ impl<'a> TypeChecker<'a> {
             | (TypeKind::String, TypeKind::String) => TypeCompatibility::Identical,
 
             // === Numeric Conversions ===
-            (TypeKind::Int, TypeKind::Float) => TypeCompatibility::Convertible,
+            (TypeKind::Int, TypeKind::Float) if !self.invariant => TypeCompatibility::Convertible,
 
             // === Dynamic Type (compatible with everything) ===
             (_, TypeKind::Dynamic) | (TypeKind::Dynamic, _) => TypeCompatibility::Assignable,
@@ -1283,17 +1577,11 @@ impl<'a> TypeChecker<'a> {
                 TypeKind::Array {
                     element_type: target_elem,
                 },
-            ) => {
-                // Arrays are covariant in Haxe
-                let source_elem_id = *source_elem; // Copy the TypeIds
-                let target_elem_id = *target_elem;
-                let elem_compat = self.check_compatibility(source_elem_id, target_elem_id);
-                match elem_compat {
-                    TypeCompatibility::Identical => TypeCompatibility::Identical,
-                    TypeCompatibility::Assignable => TypeCompatibility::Assignable,
-                    _ => TypeCompatibility::Incompatible,
-                }
-            }
+            ) => match self.check_invariant_compatibility(*source_elem, *target_elem) {
+                TypeCompatibility::Incompatible => TypeCompatibility::Incompatible,
+                TypeCompatibility::Identical => TypeCompatibility::Identical,
+                _ => TypeCompatibility::Assignable,
+            },
 
             // === Function Types ===
             (
@@ -1322,11 +1610,30 @@ impl<'a> TypeChecker<'a> {
             }
 
             // === Named Types ===
+            (
+                TypeKind::Class {
+                    symbol_id: source,
+                    type_args: source_args,
+                },
+                TypeKind::Class {
+                    symbol_id: target,
+                    type_args: target_args,
+                },
+            ) if self.invariant => {
+                if source == target && source_args.len() == target_args.len() {
+                    self.check_generic_compatibility(source_args, target_args)
+                } else {
+                    TypeCompatibility::Incompatible
+                }
+            }
             (TypeKind::Class { .. }, TypeKind::Class { .. }) => {
                 self.check_inheritance_compatibility(source_id, _target_id)
             }
 
-            (TypeKind::Class { .. }, TypeKind::Interface { .. }) => {
+            (TypeKind::Class { .. }, TypeKind::Interface { .. })
+            | (TypeKind::Interface { .. }, TypeKind::Interface { .. })
+                if !self.invariant =>
+            {
                 self.check_inheritance_compatibility(source_id, _target_id)
             }
 
@@ -1343,14 +1650,33 @@ impl<'a> TypeChecker<'a> {
                     ..
                 },
             ) => {
-                if source_sym == target_sym {
-                    // Same base enum: always compatible. Different constructors of the
-                    // same enum (e.g., Ok(1) and Err("failed")) may have different
-                    // partially-inferred type arguments but are the same enum type.
-                    if source_args == target_args {
-                        TypeCompatibility::Identical
-                    } else {
+                if source_sym == target_sym && source_args.len() == target_args.len() {
+                    let unbound = self
+                        .symbol_table
+                        .get_symbol(*source_sym)
+                        .and_then(|symbol| {
+                            let table = self.type_table.borrow();
+                            match table.get(symbol.type_id).map(|ty| &ty.kind) {
+                                Some(TypeKind::Enum { type_args, .. }) => Some(type_args.clone()),
+                                _ => None,
+                            }
+                        })
+                        .unwrap_or_default();
+                    let compatible =
+                        source_args
+                            .iter()
+                            .zip(target_args)
+                            .all(|(&source, &target)| {
+                                source == target
+                                    || unbound.contains(&source)
+                                    || unbound.contains(&target)
+                                    || self.check_invariant_compatibility(source, target)
+                                        != TypeCompatibility::Incompatible
+                            });
+                    if compatible {
                         TypeCompatibility::Assignable
+                    } else {
+                        TypeCompatibility::Incompatible
                     }
                 } else {
                     TypeCompatibility::Incompatible
@@ -1377,6 +1703,28 @@ impl<'a> TypeChecker<'a> {
             }
 
             // === Generic Instances ===
+            (
+                TypeKind::Anonymous { fields },
+                TypeKind::GenericInstance {
+                    base_type,
+                    type_args,
+                    ..
+                },
+            ) if type_args.len() == 1
+                && matches!(
+                    self.type_table.borrow().get(*base_type).map(|ty| &ty.kind),
+                    Some(TypeKind::Dynamic)
+                ) =>
+            {
+                if fields.iter().all(|field| {
+                    self.check_compatibility(field.type_id, type_args[0])
+                        != TypeCompatibility::Incompatible
+                }) {
+                    TypeCompatibility::Assignable
+                } else {
+                    TypeCompatibility::Incompatible
+                }
+            }
             (
                 TypeKind::GenericInstance {
                     base_type: source_base,
@@ -1476,19 +1824,47 @@ impl<'a> TypeChecker<'a> {
                 if !self.checking_structures.insert((source_id, _target_id)) {
                     return TypeCompatibility::Assignable;
                 }
-                let compatible = tgt_fields.iter().all(|target| {
-                    match src_fields.iter().find(|source| source.name == target.name) {
-                        Some(source) => {
-                            (!source.optional || target.optional)
-                                && (!target.is_public || source.is_public)
-                                && self.check_compatibility(source.type_id, target.type_id)
-                                    != TypeCompatibility::Incompatible
+                let compatible = (!self.invariant || src_fields.len() == tgt_fields.len())
+                    && tgt_fields.iter().all(|target| {
+                        match src_fields.iter().find(|source| source.name == target.name) {
+                            Some(source) => {
+                                (!source.optional || target.optional)
+                                    && (!target.is_public || source.is_public)
+                                    && Self::field_access_compatible(
+                                        &source.access,
+                                        &target.access,
+                                        false,
+                                    )
+                                    && self.check_representation_compatibility(
+                                        source.type_id,
+                                        target.type_id,
+                                    ) != TypeCompatibility::Incompatible
+                            }
+                            None => target.optional,
                         }
-                        None => target.optional,
-                    }
-                });
+                    });
                 self.checking_structures.remove(&(source_id, _target_id));
                 if compatible {
+                    TypeCompatibility::Assignable
+                } else {
+                    TypeCompatibility::Incompatible
+                }
+            }
+
+            (TypeKind::String, TypeKind::Anonymous { fields }) => {
+                let length = self.string_interner.intern("length");
+                let integer = self.type_table.borrow().int_type();
+                let access = parser::AnonFieldAccess {
+                    setter: parser::PropertyAccess::Null,
+                    ..Default::default()
+                };
+                if fields.iter().all(|field| {
+                    field.optional
+                        || (field.name == length
+                            && Self::field_access_compatible(&access, &field.access, true)
+                            && self.check_representation_compatibility(integer, field.type_id)
+                                != TypeCompatibility::Incompatible)
+                }) {
                     TypeCompatibility::Assignable
                 } else {
                     TypeCompatibility::Incompatible
@@ -1509,6 +1885,8 @@ impl<'a> TypeChecker<'a> {
                         type_id,
                         is_public: true,
                         optional: false,
+
+                        access: Default::default(),
                     };
                     let iterator = table.create_type(TypeKind::Anonymous {
                         fields: vec![field("hasNext", has_next), field("next", next)],
@@ -1523,14 +1901,65 @@ impl<'a> TypeChecker<'a> {
             }
 
             // === Structural Subtyping: Anonymous ← Class ===
-            (TypeKind::Class { .. }, TypeKind::Anonymous { .. }) => {
-                // Class instances can satisfy anonymous structural types.
-                // Actual field checking is done at the MIR level during materialization.
+            (TypeKind::Class { symbol_id, .. }, TypeKind::Anonymous { fields }) => {
+                for target in fields {
+                    let mut current = Some(*symbol_id);
+                    let mut seen = BTreeSet::new();
+                    while let Some(class) = current {
+                        if !seen.insert(class) {
+                            break;
+                        }
+                        let Some(owner) = self.symbol_table.get_symbol(class) else {
+                            break;
+                        };
+                        if let Some(source) = self
+                            .symbol_table
+                            .find_symbols_named(target.name, |symbol| {
+                                symbol.scope_id == owner.scope_id && !symbol.is_static()
+                            })
+                            .first()
+                        {
+                            let access = self
+                                .type_table
+                                .borrow()
+                                .field_access
+                                .get(&source.id)
+                                .cloned()
+                                .unwrap_or_default();
+                            if !Self::field_access_compatible(&access, &target.access, true) {
+                                return TypeCompatibility::Incompatible;
+                            }
+                            break;
+                        }
+                        current = self
+                            .get_parent_class(class)
+                            .and_then(|ty| self.get_class_symbol_from_type(ty));
+                    }
+                }
                 TypeCompatibility::Assignable
             }
 
             // === Default: Incompatible ===
             _ => TypeCompatibility::Incompatible,
+        }
+    }
+
+    fn field_access_compatible(
+        source: &parser::AnonFieldAccess,
+        target: &parser::AnonFieldAccess,
+        class_source: bool,
+    ) -> bool {
+        use parser::PropertyAccess as A;
+        if !matches!(target.getter, A::Null | A::Never) && source.getter != target.getter {
+            return false;
+        }
+        if target.is_final {
+            return source.is_final || (!class_source && source.setter == A::Never);
+        }
+        match target.setter {
+            A::Never => !class_source || !source.is_final,
+            A::Null => !source.is_final,
+            _ => !source.is_final && source.setter == target.setter,
         }
     }
 
@@ -1638,6 +2067,30 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    fn check_invariant_compatibility(
+        &mut self,
+        source: TypeId,
+        target: TypeId,
+    ) -> TypeCompatibility {
+        let previous = self.invariant;
+        self.invariant = true;
+        let result = self.check_representation_compatibility(source, target);
+        self.invariant = previous;
+        result
+    }
+
+    fn check_representation_compatibility(
+        &mut self,
+        source: TypeId,
+        target: TypeId,
+    ) -> TypeCompatibility {
+        let previous = self.allow_conversion_methods;
+        self.allow_conversion_methods = false;
+        let result = self.check_compatibility(source, target);
+        self.allow_conversion_methods = previous;
+        result
+    }
+
     /// Check function type compatibility (contravariant in parameters, covariant in return)
     fn check_function_compatibility(
         &mut self,
@@ -1654,7 +2107,7 @@ impl<'a> TypeChecker<'a> {
         // Check parameter compatibility (contravariant)
         let mut param_compat = TypeCompatibility::Identical;
         for (source_param, target_param) in source_params.iter().zip(target_params.iter()) {
-            let compat = self.check_compatibility(*target_param, *source_param); // Note: reversed for contravariance
+            let compat = self.check_representation_compatibility(*target_param, *source_param); // Note: reversed for contravariance
             match compat {
                 TypeCompatibility::Incompatible => return TypeCompatibility::Incompatible,
                 TypeCompatibility::Convertible => param_compat = TypeCompatibility::Assignable,
@@ -1675,7 +2128,7 @@ impl<'a> TypeChecker<'a> {
         {
             TypeCompatibility::Assignable
         } else {
-            self.check_compatibility(source_return, target_return)
+            self.check_representation_compatibility(source_return, target_return)
         };
         match return_compat {
             TypeCompatibility::Incompatible => TypeCompatibility::Incompatible,
@@ -1796,17 +2249,28 @@ impl<'a> TypeChecker<'a> {
 
     /// Check if a class implements an interface
     pub fn implements_interface(&self, class_id: TypeId, interface_id: TypeId) -> bool {
-        if let Some(class_sym) = self
-            .type_table
-            .borrow()
-            .get_type_symbol(class_id)
-            .filter(|ty| ty.is_valid())
-        {
-            if let Some(hierarchy) = self.symbol_table.get_class_hierarchy(class_sym) {
-                return hierarchy.all_supertypes.contains(&interface_id);
+        let Some(target) = self.get_class_symbol_from_type(interface_id) else {
+            return false;
+        };
+        let mut pending = vec![class_id];
+        let mut visited = BTreeSet::new();
+        while let Some(ty) = pending.pop() {
+            let Some(symbol) = self.get_class_symbol_from_type(ty) else {
+                continue;
+            };
+            if symbol == target {
+                return true;
+            }
+            if !visited.insert(symbol) {
+                continue;
+            }
+            if let Some(hierarchy) = self.symbol_table.get_class_hierarchy(symbol) {
+                pending.extend(hierarchy.interfaces.iter().copied());
+                pending.extend(hierarchy.superclass);
+            } else {
+                pending.extend(self.symbol_table.get_class_super_type(symbol));
             }
         }
-
         false
     }
 

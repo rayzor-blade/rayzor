@@ -15,6 +15,69 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    pub(crate) fn record_abstract_method_conversions(
+        &mut self,
+        owner: SymbolId,
+        declaration: &parser::AbstractDecl,
+    ) {
+        let mut from = Vec::new();
+        let mut to = Vec::new();
+        for field in &declaration.fields {
+            let ClassFieldKind::Function(function) = &field.kind else {
+                continue;
+            };
+            let has = |tag: &str| {
+                field
+                    .meta
+                    .iter()
+                    .any(|meta| meta.name.trim_start_matches(':') == tag)
+            };
+            if !has("from") && !has("to") {
+                continue;
+            }
+            let Ok(parameters) = self.function_type_parameter_map(&function.type_params) else {
+                continue;
+            };
+            let ordered: Vec<_> = parameters.values().copied().collect();
+            self.context.push_type_parameters(parameters);
+            let input = function
+                .params
+                .first()
+                .and_then(|parameter| parameter.type_hint.as_ref())
+                .and_then(|hint| self.lower_type(hint).ok());
+            let result = function
+                .return_type
+                .as_ref()
+                .and_then(|hint| self.lower_type(hint).ok())
+                .or_else(|| {
+                    (function.name == "toString")
+                        .then(|| self.context.type_table.borrow().string_type())
+                });
+            self.context.pop_type_parameters();
+            if has("from") && input.is_some() {
+                from.push(crate::tast::core::AbstractConversion {
+                    input,
+                    result,
+                    parameters: ordered.clone(),
+                });
+            }
+            if has("to") && result.is_some() {
+                to.push(crate::tast::core::AbstractConversion {
+                    input: field
+                        .modifiers
+                        .contains(&parser::Modifier::Static)
+                        .then_some(input)
+                        .flatten(),
+                    result,
+                    parameters: ordered,
+                });
+            }
+        }
+        let mut table = self.context.type_table.borrow_mut();
+        table.abstract_from_conversions.insert(owner, from);
+        table.abstract_to_conversions.insert(owner, to);
+    }
+
     /// The span of a write to `this`, if the expression contains one.
     ///
     /// Deliberately conservative: it walks the shapes a method body actually
@@ -325,6 +388,12 @@ impl<'a> AstLowering<'a> {
         // (`from Y` / `to Y`) are joined by the method forms — an
         // `@:from static function ofX(v:Y)` admits Y, an `@:to function
         // toY():Y` offers Y — since both spell the same implicit cast.
+        self.context
+            .type_table
+            .borrow_mut()
+            .abstract_declared_casts
+            .insert(abstract_symbol, (from_types.clone(), to_types.clone()));
+        self.record_abstract_method_conversions(abstract_symbol, abstract_decl);
         let mut recorded_from = from_types.clone();
         let mut recorded_to = to_types.clone();
         for field in &abstract_decl.fields {
@@ -413,6 +482,16 @@ impl<'a> AstLowering<'a> {
                         .context
                         .symbol_table
                         .create_function_in_scope(method_name, abstract_scope);
+                    let visibility = if field.access.is_none()
+                        && abstract_decl.modifiers.contains(&parser::Modifier::Extern)
+                    {
+                        crate::tast::Visibility::Public
+                    } else {
+                        self.lower_access(&field.access)
+                    };
+                    if let Some(symbol) = self.context.symbol_table.get_symbol_mut(sym) {
+                        symbol.visibility = visibility;
+                    }
                     if let Some(scope) = self.context.scope_tree.get_scope_mut(abstract_scope) {
                         scope.add_symbol(sym, method_name);
                     }
@@ -562,7 +641,7 @@ impl<'a> AstLowering<'a> {
                     // Enum-abstract constants are reachable bare (`eq(1, Red)`)
                     // as well as qualified (`Color.Red`), so also alias them into
                     // the module scope for bare-name resolution.
-                    if abstract_decl.is_enum_abstract {
+                    if abstract_decl.is_enum_abstract && !is_static {
                         self.module_enum_abstract_values.insert(member_name, sym);
                         self.context.symbol_table.add_symbol_alias(
                             sym,

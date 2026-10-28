@@ -691,6 +691,8 @@ impl<'a> AstLowering<'a> {
                         type_id: field_type_id,
                         is_public: true, // Anonymous fields are typically public
                         optional: field.optional,
+
+                        access: field.access.clone().into(),
                     });
                 }
 

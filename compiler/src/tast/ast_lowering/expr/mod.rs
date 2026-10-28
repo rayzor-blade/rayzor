@@ -303,6 +303,12 @@ impl<'a> AstLowering<'a> {
         let result = self
             .lower_expression_unnested(expression)
             .and_then(|mut typed| {
+                if self.macro_probe_depth > 0
+                    && let TypedExpressionKind::Variable { symbol_id } = typed.kind
+                    && let Some(view) = self.macro_source_types.get(&symbol_id)
+                {
+                    typed.expr_type = *view;
+                }
                 let refined =
                     self.substitute_alias_args(typed.expr_type, &self.context.case_type_bindings);
                 if refined != typed.expr_type
@@ -328,7 +334,7 @@ impl<'a> AstLowering<'a> {
                     typed.source_location = self.context.create_location_from_span(expression.span);
                 }
                 if self.macro_probe_depth > 0 {
-                    self.validate_macro_probe_expression(&typed)?;
+                    self.validate_macro_probe_expression(&typed, expression)?;
                 }
                 Ok(typed)
             });
@@ -1107,7 +1113,16 @@ impl<'a> AstLowering<'a> {
                 }
                 let slot = self.dynamic_method_slot(left);
                 let left: &Expr = slot.as_ref().unwrap_or(left);
-                let target_expr = self.lower_expression(left)?;
+                let mut target = left;
+                while let ExprKind::Paren(inner) = &target.kind {
+                    target = inner;
+                }
+                let previous_target = self.macro_probe_write_target;
+                self.macro_probe_write_target =
+                    (*op == parser::AssignOp::Assign).then_some(target.span);
+                let target_expr = self.lower_expression(left);
+                self.macro_probe_write_target = previous_target;
+                let target_expr = target_expr?;
                 let widened = self.widen_function_literal(right, target_expr.expr_type);
                 let right: &Expr = widened.as_ref().unwrap_or(right);
                 // Same `@:multiType` propagation as Var declarations: when
@@ -2535,7 +2550,7 @@ impl<'a> AstLowering<'a> {
                 self.expected_arg_type_stack.push(Some(target_type));
                 let lowered = self.lower_value_expression(expr);
                 self.expected_arg_type_stack.pop();
-                let typed_expr = lowered?;
+                let typed_expr = self.retype_literal_to(lowered?, target_type);
 
                 TypedExpressionKind::Cast {
                     expression: Box::new(typed_expr),
@@ -3041,6 +3056,7 @@ impl<'a> AstLowering<'a> {
                     self.context.current_scope,
                     var_type,
                 );
+                self.record_declared_macro_view(var_symbol, type_hint.as_ref());
                 // A macro sees an enum abstract value's variable as the abstract.
                 if declared_type.is_none()
                     && let Some(abstract_type) = self.enum_abstract_value_type(&initializer)
@@ -3255,6 +3271,7 @@ impl<'a> AstLowering<'a> {
                     self.context.current_scope,
                     var_type,
                 );
+                self.record_declared_macro_view(var_symbol, type_hint.as_ref());
 
                 // Add the variable to the current scope so it can be resolved later
                 if let Some(scope) = self
@@ -4132,7 +4149,10 @@ impl<'a> AstLowering<'a> {
 impl<'a> AstLowering<'a> {
     /// The structure a type stands for, through aliases, typedefs registered
     /// as classes, and `Null<T>`.
-    fn structure_fields(&self, ty: TypeId) -> Option<Vec<crate::tast::core::AnonymousField>> {
+    pub(crate) fn structure_fields(
+        &self,
+        ty: TypeId,
+    ) -> Option<Vec<crate::tast::core::AnonymousField>> {
         use crate::tast::core::TypeKind;
         let tt = self.context.type_table.borrow();
         let mut ty = ty;
@@ -4238,6 +4258,31 @@ impl<'a> AstLowering<'a> {
                         field.value = self.retype_literal_to(value, t.type_id);
                     }
                 }
+                let source_fields = {
+                    let table = self.context.type_table.borrow();
+                    match table.get(expr.expr_type).map(|ty| &ty.kind) {
+                        Some(crate::tast::TypeKind::Anonymous { fields }) => Some(fields.clone()),
+                        _ => None,
+                    }
+                };
+                if let Some(mut source_fields) = source_fields {
+                    for source in &mut source_fields {
+                        if let Some(target) = target_fields
+                            .iter()
+                            .find(|target| target.name == source.name)
+                        {
+                            source.access = target.access.clone();
+                        }
+                        if let Some(value) = fields.iter().find(|value| value.name == source.name) {
+                            source.type_id = value.value.expr_type;
+                        }
+                    }
+                    expr.expr_type = self.context.type_table.borrow_mut().create_type(
+                        crate::tast::TypeKind::Anonymous {
+                            fields: source_fields,
+                        },
+                    );
+                }
                 // Only a literal that leaves out an optional field is laid
                 // out differently from its own type.
                 let omits_optional = target_fields
@@ -4275,6 +4320,28 @@ impl<'a> AstLowering<'a> {
                             },
                         );
                         *slot = self.retype_literal_to(value, element);
+                    }
+                    let mut checker = crate::tast::TypeChecker::new(
+                        self.context.type_table,
+                        self.context.symbol_table,
+                        self.context.scope_tree,
+                        self.context.string_interner,
+                    );
+                    let dynamic_element = matches!(
+                        self.context
+                            .type_table
+                            .borrow()
+                            .get(element)
+                            .map(|ty| &ty.kind),
+                        Some(crate::tast::TypeKind::Dynamic)
+                    );
+                    if !dynamic_element
+                        && elements.iter().all(|value| {
+                            checker.check_compatibility(value.expr_type, element)
+                                != crate::tast::type_checker::TypeCompatibility::Incompatible
+                        })
+                    {
+                        expr.expr_type = target;
                     }
                 }
                 expr

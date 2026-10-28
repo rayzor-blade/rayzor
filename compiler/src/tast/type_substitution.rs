@@ -343,6 +343,8 @@ impl TypeSubstitutions<'_> {
                         ),
                         is_public: f.is_public,
                         optional: f.optional,
+
+                        access: f.access.clone(),
                     })
                     .collect();
                 if rebuilt

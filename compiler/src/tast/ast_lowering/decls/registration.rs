@@ -1150,6 +1150,25 @@ impl<'a> AstLowering<'a> {
         else {
             return;
         };
+        let Ok(parameters) = self.function_type_parameter_map(&abstract_decl.type_params) else {
+            return;
+        };
+        if !parameters.is_empty() {
+            let ordered = abstract_decl
+                .type_params
+                .iter()
+                .filter_map(|parameter| {
+                    parameters
+                        .get(&self.context.string_interner.intern(&parameter.name))
+                        .copied()
+                })
+                .collect();
+            self.context
+                .symbol_table
+                .set_class_type_params(abstract_symbol, ordered);
+        }
+        self.context.push_type_parameters(parameters);
+        self.record_abstract_method_conversions(abstract_symbol, abstract_decl);
         let mut from_types: Vec<TypeId> = Vec::new();
         let mut to_types: Vec<TypeId> = Vec::new();
         for ty in &abstract_decl.from {
@@ -1162,6 +1181,11 @@ impl<'a> AstLowering<'a> {
                 to_types.push(id);
             }
         }
+        self.context
+            .type_table
+            .borrow_mut()
+            .abstract_declared_casts
+            .insert(abstract_symbol, (from_types.clone(), to_types.clone()));
         for field in &abstract_decl.fields {
             let parser::ClassFieldKind::Function(func) = &field.kind else {
                 continue;
@@ -1193,6 +1217,7 @@ impl<'a> AstLowering<'a> {
             .insert(abstract_symbol, (from_types.clone(), to_types.clone()));
         self.abstract_casts
             .insert(abstract_symbol, (from_types, to_types));
+        self.context.pop_type_parameters();
     }
 
     pub(crate) fn pre_register_abstract_fields(
@@ -1276,7 +1301,9 @@ impl<'a> AstLowering<'a> {
                 .expect("abstract field map was initialized")
                 .push((member_name, field_symbol, true));
 
-            if abstract_decl.is_enum_abstract {
+            if abstract_decl.is_enum_abstract
+                && !field.modifiers.contains(&parser::Modifier::Static)
+            {
                 self.context.symbol_table.add_symbol_alias(
                     field_symbol,
                     ScopeId::first(),

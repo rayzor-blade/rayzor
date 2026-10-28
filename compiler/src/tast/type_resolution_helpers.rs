@@ -187,6 +187,8 @@ impl<'a> TypeResolutionHelpers<'a> {
                 type_id,
                 is_public: true,
                 optional: false,
+
+                access: Default::default(),
             })
             .collect();
 

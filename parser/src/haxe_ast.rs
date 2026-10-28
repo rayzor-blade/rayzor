@@ -513,7 +513,7 @@ pub enum ClassFieldKind {
 }
 
 /// Property access mode
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PropertyAccess {
     /// Default getter/setter
     Default,
@@ -641,7 +641,25 @@ pub struct AnonField {
     pub name: String,
     pub optional: bool,
     pub type_hint: Type,
+    pub access: AnonFieldAccess,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AnonFieldAccess {
+    pub is_final: bool,
+    pub getter: PropertyAccess,
+    pub setter: PropertyAccess,
+}
+
+impl Default for AnonFieldAccess {
+    fn default() -> Self {
+        Self {
+            is_final: false,
+            getter: PropertyAccess::Default,
+            setter: PropertyAccess::Default,
+        }
+    }
 }
 
 /// Expressions

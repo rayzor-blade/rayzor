@@ -238,6 +238,16 @@ impl AstLowering<'_> {
         Some(table.create_generic_instance(dynamic, vec![value]))
     }
 
+    pub(crate) fn record_declared_macro_view(
+        &mut self,
+        symbol: crate::tast::SymbolId,
+        hint: Option<&parser::Type>,
+    ) {
+        if let Some(view) = hint.and_then(|hint| self.dynamic_of_view(hint)) {
+            self.macro_source_types.insert(symbol, view);
+        }
+    }
+
     /// What macro typing sees for a declared local beyond its runtime type:
     /// a closure handing back an untyped `var x = null` local, that local
     /// once an annotated declaration binds it through such a closure's
@@ -1474,6 +1484,38 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
 
         match result {
             Ok(typed) if probe_errors.is_empty() => {
+                let source_map = diagnostics::SourceMap::new();
+                let mut diagnostics = diagnostics::Diagnostics::new();
+                let context = &self.lowering.context;
+                let mut checker = crate::tast::type_checking_pipeline::TypeCheckingPhase::new(
+                    context.type_table,
+                    context.symbol_table,
+                    context.scope_tree,
+                    context.string_interner,
+                    &source_map,
+                    &mut diagnostics,
+                );
+                checker.set_namespace_resolver(context.namespace_resolver);
+                checker.set_signature_index(self.lowering.static_sig_index.clone());
+                let checked = checker.check_macro_probe(
+                    &typed,
+                    context.expected_return_type,
+                    context
+                        .class_context_stack
+                        .last()
+                        .copied()
+                        .map(|class| (self.lowering.in_static_method, class)),
+                    context.current_package,
+                );
+                drop(checker);
+                if diagnostics.has_errors() {
+                    return Err(diagnostics
+                        .errors()
+                        .map(|d| d.message.clone())
+                        .collect::<Vec<_>>()
+                        .join("\n"));
+                }
+                checked?;
                 if let crate::tast::TypedExpressionKind::Variable { symbol_id } = &typed.kind
                     && let Some(&source) = self.lowering.macro_source_types.get(symbol_id)
                 {
@@ -3259,6 +3301,29 @@ fn render_type_as(
                         .get(f.name)
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| "<field>".to_string());
+                    let name = if f.access.is_final {
+                        format!("final {name}")
+                    } else if f.access.getter != parser::PropertyAccess::Default
+                        || f.access.setter != parser::PropertyAccess::Default
+                    {
+                        let accessor = |access: &parser::PropertyAccess| {
+                            match access {
+                                parser::PropertyAccess::Default => "default",
+                                parser::PropertyAccess::Null => "null",
+                                parser::PropertyAccess::Never => "never",
+                                parser::PropertyAccess::Dynamic => "dynamic",
+                                parser::PropertyAccess::Custom(name) => name.as_str(),
+                            }
+                            .to_string()
+                        };
+                        format!(
+                            "var {name}({}, {})",
+                            accessor(&f.access.getter),
+                            accessor(&f.access.setter)
+                        )
+                    } else {
+                        name
+                    };
                     format!(
                         "{} : {}",
                         name,

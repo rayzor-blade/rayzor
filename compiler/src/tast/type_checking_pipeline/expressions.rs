@@ -9,6 +9,65 @@ fn expression_completes_normally(expression: &TypedExpression) -> bool {
         | TypedExpressionKind::Return { .. }
         | TypedExpressionKind::Break
         | TypedExpressionKind::Continue => false,
+        TypedExpressionKind::Cast { expression, .. }
+        | TypedExpressionKind::Meta { expression, .. }
+        | TypedExpressionKind::UnaryOp {
+            operand: expression,
+            ..
+        }
+        | TypedExpressionKind::FieldAccess {
+            object: expression, ..
+        }
+        | TypedExpressionKind::VarDeclarationExpr {
+            initializer: expression,
+            ..
+        }
+        | TypedExpressionKind::FinalDeclarationExpr {
+            initializer: expression,
+            ..
+        } => expression_completes_normally(expression),
+        TypedExpressionKind::BinaryOp {
+            left,
+            operator,
+            right,
+        } => {
+            let right_runs = match operator {
+                BinaryOperator::And | BinaryOperator::Or => matches!(
+                    &left.kind,
+                    TypedExpressionKind::Literal { value: crate::tast::node::LiteralValue::Bool(value) }
+                    if *value == (*operator == BinaryOperator::And)
+                ),
+                _ => true,
+            };
+            expression_completes_normally(left)
+                && (!right_runs || expression_completes_normally(right))
+        }
+        TypedExpressionKind::FunctionCall {
+            function,
+            arguments,
+            ..
+        } => {
+            expression_completes_normally(function)
+                && arguments.iter().all(expression_completes_normally)
+        }
+        TypedExpressionKind::MethodCall {
+            receiver,
+            arguments,
+            ..
+        } => {
+            expression_completes_normally(receiver)
+                && arguments.iter().all(expression_completes_normally)
+        }
+        TypedExpressionKind::StaticMethodCall { arguments, .. }
+        | TypedExpressionKind::New { arguments, .. } => {
+            arguments.iter().all(expression_completes_normally)
+        }
+        TypedExpressionKind::ArrayAccess { array, index } => {
+            expression_completes_normally(array) && expression_completes_normally(index)
+        }
+        TypedExpressionKind::ArrayLiteral { elements } => {
+            elements.iter().all(expression_completes_normally)
+        }
         TypedExpressionKind::Block { statements, .. } => {
             statements.iter().all(statement_completes_normally)
         }
@@ -88,6 +147,7 @@ impl<'a> TypeCheckingPhase<'a> {
                     arguments,
                     type_arguments,
                     expr.source_location,
+                    expr.expr_type,
                 )?;
             }
             TypedExpressionKind::FieldAccess {
@@ -175,8 +235,14 @@ impl<'a> TypeCheckingPhase<'a> {
                     .get_symbol(*method_symbol)
                     .map(|s| s.type_id);
                 if let Some(method_type_id) = method_type_id {
-                    let method_type_id =
-                        self.call_signature(method_type_id, None, type_arguments, &arg_types);
+                    let method_type_id = self.call_signature(
+                        method_type_id,
+                        None,
+                        type_arguments,
+                        &arg_types,
+                        expr.expr_type,
+                        expr.source_location,
+                    );
                     let param_info = {
                         let type_table = self.type_checker.type_table.borrow();
                         type_table.get(method_type_id).and_then(|t| {
@@ -188,6 +254,9 @@ impl<'a> TypeCheckingPhase<'a> {
                         })
                     };
                     if let Some(param_types) = param_info {
+                        let param_types = self
+                            .argument_parameter_types(method_type_id, &arg_types)
+                            .unwrap_or(param_types);
                         if !self.accepts_argument_count(method_type_id, arg_types.len()) {
                             self.emit_error(TypeCheckError {
                                 kind: TypeErrorKind::TypeMismatch {
@@ -360,6 +429,7 @@ impl<'a> TypeCheckingPhase<'a> {
                     arguments,
                     type_arguments,
                     expr.source_location,
+                    expr.expr_type,
                 )?;
             }
             TypedExpressionKind::MethodReference {
@@ -373,6 +443,9 @@ impl<'a> TypeCheckingPhase<'a> {
             }
             TypedExpressionKind::UnaryOp { operand, operator } => {
                 let operand_type = self.check_expression(operand)?;
+                if self.has_declared_unary_operator(operand_type, *operator) {
+                    return Ok(expr.expr_type);
+                }
 
                 // Check operand compatibility for the operator
                 match operator {
@@ -464,10 +537,27 @@ impl<'a> TypeCheckingPhase<'a> {
 
                     // Branches should have compatible types
                     let branch_compat = self.type_checker.check_compatibility(then_type, else_type);
+                    let concrete_join = !matches!(
+                        self.type_table
+                            .borrow()
+                            .get(expr.expr_type)
+                            .map(|ty| &ty.kind),
+                        Some(TypeKind::Dynamic | TypeKind::Unknown | TypeKind::Error) | None
+                    );
+                    let branches_fit_join = concrete_join
+                        && self
+                            .type_checker
+                            .check_compatibility(then_type, expr.expr_type)
+                            != TypeCompatibility::Incompatible
+                        && self
+                            .type_checker
+                            .check_compatibility(else_type, expr.expr_type)
+                            != TypeCompatibility::Incompatible;
                     if value_used
                         && expression_completes_normally(then_expr)
                         && expression_completes_normally(else_expr)
                         && matches!(branch_compat, TypeCompatibility::Incompatible)
+                        && !branches_fit_join
                         && matches!(
                             self.type_checker.check_compatibility(else_type, then_type),
                             TypeCompatibility::Incompatible
@@ -967,8 +1057,34 @@ impl<'a> TypeCheckingPhase<'a> {
             }
         }
 
-        // Return the annotated type
-        let result_type = expr.expr_type;
+        // A proven exit supplies no value to its parent, while its contents
+        // have still been checked above.
+        let result_type = if expression_completes_normally(expr) {
+            if let TypedExpressionKind::Variable { symbol_id } = expr.kind
+                && let Some(symbol) = self.symbol_table.get_symbol(symbol_id)
+                && symbol.kind.is_type()
+            {
+                let name = self
+                    .string_interner
+                    .intern(if symbol.kind == SymbolKind::Enum {
+                        "Enum"
+                    } else {
+                        "Class"
+                    });
+                let meta = self
+                    .symbol_table
+                    .lookup_symbol(super::super::ScopeId::first(), name);
+                meta.map_or(expr.expr_type, |meta| {
+                    self.type_table
+                        .borrow_mut()
+                        .create_generic_instance(meta.type_id, vec![expr.expr_type])
+                })
+            } else {
+                expr.expr_type
+            }
+        } else {
+            self.type_table.borrow().dynamic_type()
+        };
 
         Ok(result_type)
     }
@@ -993,6 +1109,22 @@ impl<'a> TypeCheckingPhase<'a> {
 
         // Check operand compatibility for the operator
         match op {
+            BinaryOperator::Assign => {
+                if matches!(
+                    self.type_checker.check_compatibility(rhs_type, lhs_type),
+                    TypeCompatibility::Incompatible
+                ) {
+                    self.emit_enhanced_type_error(
+                        rhs_type,
+                        lhs_type,
+                        source_location,
+                        "Assignment has an incompatible type",
+                        &TypeErrorContext::Assignment {
+                            target_type: lhs_type,
+                        },
+                    );
+                }
+            }
             BinaryOperator::Add => {
                 // Add can be either numeric addition or string concatenation
                 let type_table = self.type_checker.type_table.borrow();
@@ -1008,14 +1140,20 @@ impl<'a> TypeCheckingPhase<'a> {
 
                 let lhs_is_numeric = matches!(
                     lhs_compat_int,
-                    TypeCompatibility::Identical | TypeCompatibility::Assignable
+                    TypeCompatibility::Identical
+                        | TypeCompatibility::Assignable
+                        | TypeCompatibility::Convertible
                 ) || matches!(
                     lhs_compat_float,
-                    TypeCompatibility::Identical | TypeCompatibility::Assignable
+                    TypeCompatibility::Identical
+                        | TypeCompatibility::Assignable
+                        | TypeCompatibility::Convertible
                 );
                 let lhs_is_string = matches!(
                     lhs_compat_string,
-                    TypeCompatibility::Identical | TypeCompatibility::Assignable
+                    TypeCompatibility::Identical
+                        | TypeCompatibility::Assignable
+                        | TypeCompatibility::Convertible
                 );
 
                 let rhs_compat_int = self.type_checker.check_compatibility(rhs_type, int_type);
@@ -1025,14 +1163,20 @@ impl<'a> TypeCheckingPhase<'a> {
 
                 let rhs_is_numeric = matches!(
                     rhs_compat_int,
-                    TypeCompatibility::Identical | TypeCompatibility::Assignable
+                    TypeCompatibility::Identical
+                        | TypeCompatibility::Assignable
+                        | TypeCompatibility::Convertible
                 ) || matches!(
                     rhs_compat_float,
-                    TypeCompatibility::Identical | TypeCompatibility::Assignable
+                    TypeCompatibility::Identical
+                        | TypeCompatibility::Assignable
+                        | TypeCompatibility::Convertible
                 );
                 let rhs_is_string = matches!(
                     rhs_compat_string,
-                    TypeCompatibility::Identical | TypeCompatibility::Assignable
+                    TypeCompatibility::Identical
+                        | TypeCompatibility::Assignable
+                        | TypeCompatibility::Convertible
                 );
 
                 // Check if this is valid string concatenation or numeric addition
@@ -1077,10 +1221,14 @@ impl<'a> TypeCheckingPhase<'a> {
 
                 let is_numeric = matches!(
                     lhs_compat_int,
-                    TypeCompatibility::Identical | TypeCompatibility::Assignable
+                    TypeCompatibility::Identical
+                        | TypeCompatibility::Assignable
+                        | TypeCompatibility::Convertible
                 ) || matches!(
                     lhs_compat_float,
-                    TypeCompatibility::Identical | TypeCompatibility::Assignable
+                    TypeCompatibility::Identical
+                        | TypeCompatibility::Assignable
+                        | TypeCompatibility::Convertible
                 );
 
                 if !is_numeric {
@@ -1102,10 +1250,14 @@ impl<'a> TypeCheckingPhase<'a> {
 
                 let rhs_is_numeric = matches!(
                     rhs_compat_int,
-                    TypeCompatibility::Identical | TypeCompatibility::Assignable
+                    TypeCompatibility::Identical
+                        | TypeCompatibility::Assignable
+                        | TypeCompatibility::Convertible
                 ) || matches!(
                     rhs_compat_float,
-                    TypeCompatibility::Identical | TypeCompatibility::Assignable
+                    TypeCompatibility::Identical
+                        | TypeCompatibility::Assignable
+                        | TypeCompatibility::Convertible
                 );
 
                 if !rhs_is_numeric {
@@ -1156,6 +1308,7 @@ impl<'a> TypeCheckingPhase<'a> {
         arguments: &[TypedExpression],
         type_arguments: &[TypeId],
         source_location: SourceLocation,
+        result_type: TypeId,
     ) -> Result<(), String> {
         let callee_type = self.check_expression(function)?;
 
@@ -1165,7 +1318,14 @@ impl<'a> TypeCheckingPhase<'a> {
             let arg_type = self.check_expression(arg)?;
             arg_types.push(arg_type);
         }
-        let callee_type = self.call_signature(callee_type, None, type_arguments, &arg_types);
+        let callee_type = self.call_signature(
+            callee_type,
+            None,
+            type_arguments,
+            &arg_types,
+            result_type,
+            source_location,
+        );
 
         if matches!(
             self.type_table.borrow().get(callee_type).map(|ty| &ty.kind),
@@ -1186,6 +1346,10 @@ impl<'a> TypeCheckingPhase<'a> {
                 (Vec::new(), false)
             }
         };
+
+        let param_types = self
+            .argument_parameter_types(callee_type, &arg_types)
+            .unwrap_or(param_types);
 
         if is_function {
             // Check parameter count
@@ -1265,6 +1429,7 @@ impl<'a> TypeCheckingPhase<'a> {
         arguments: &[TypedExpression],
         type_arguments: &[TypeId],
         source_location: SourceLocation,
+        result_type: TypeId,
     ) -> Result<(), String> {
         // Check receiver type
         let receiver_type = self.check_expression(receiver)?;
@@ -1340,6 +1505,8 @@ impl<'a> TypeCheckingPhase<'a> {
                 Some(receiver_type),
                 type_arguments,
                 &arg_types,
+                result_type,
+                source_location,
             );
 
             // Check if it's a function type
@@ -1354,6 +1521,10 @@ impl<'a> TypeCheckingPhase<'a> {
                     (Vec::new(), false)
                 }
             };
+
+            let param_types = self
+                .argument_parameter_types(method_type, &arg_types)
+                .unwrap_or(param_types);
 
             if is_function {
                 // First try the main signature

@@ -3,6 +3,16 @@
 
 use super::*;
 
+fn source_property_access(access: &bsym::BladeAccess) -> parser::PropertyAccess {
+    match access {
+        bsym::BladeAccess::Default => parser::PropertyAccess::Default,
+        bsym::BladeAccess::Null => parser::PropertyAccess::Null,
+        bsym::BladeAccess::Never => parser::PropertyAccess::Never,
+        bsym::BladeAccess::Dynamic => parser::PropertyAccess::Dynamic,
+        bsym::BladeAccess::Method(name) => parser::PropertyAccess::Custom(name.clone()),
+    }
+}
+
 impl CompilationUnit {
     // === BLADE Symbol Loading Methods ===
 
@@ -500,7 +510,33 @@ impl CompilationUnit {
         // Method parameters shadow the enclosing class's generic parameters.
         let method_type_params = self.register_manifest_type_params(&method.type_params);
         let outer_type_params = self.manifest_type_params.clone();
-        self.manifest_type_params.extend(method_type_params);
+        self.manifest_type_params.extend(method_type_params.clone());
+        let mut generic_parameters = Vec::new();
+        for (index, name) in method.type_params.iter().enumerate() {
+            let original = method_type_params[name];
+            let symbol = {
+                let table = self.type_table.borrow();
+                let TypeKind::TypeParameter { symbol_id, .. } = &table.get(original).unwrap().kind
+                else {
+                    unreachable!("manifest type parameter")
+                };
+                *symbol_id
+            };
+            let constraints = method
+                .type_param_constraints
+                .get(index)
+                .into_iter()
+                .flatten()
+                .map(|constraint| self.resolve_blade_type(constraint))
+                .collect();
+            let parameter = self.type_table.borrow_mut().create_type_parameter(
+                symbol,
+                constraints,
+                crate::tast::core::Variance::Invariant,
+            );
+            self.manifest_type_params.insert(name.clone(), parameter);
+            generic_parameters.push(parameter);
+        }
         let param_types: Vec<TypeId> = method
             .params
             .iter()
@@ -508,6 +544,58 @@ impl CompilationUnit {
             .collect();
         let return_type = self.resolve_blade_type_or_dynamic(method.return_type.as_ref());
         self.manifest_type_params = outer_type_params;
+        if method.is_from
+            && let Some(&input) = param_types.first()
+        {
+            let mut table = self.type_table.borrow_mut();
+            table
+                .abstract_from_conversions
+                .entry(class_symbol)
+                .or_default()
+                .push(crate::tast::core::AbstractConversion {
+                    input: Some(input),
+                    result: method.return_type.as_ref().map(|_| return_type),
+                    parameters: generic_parameters.clone(),
+                });
+            table
+                .abstract_casts
+                .entry(class_symbol)
+                .or_default()
+                .0
+                .push(input);
+        }
+        if method.is_to {
+            let result = method
+                .return_type
+                .as_ref()
+                .map(|_| return_type)
+                .or_else(|| {
+                    (method.name == "toString").then(|| self.type_table.borrow().string_type())
+                });
+            if result.is_some() {
+                self.type_table
+                    .borrow_mut()
+                    .abstract_to_conversions
+                    .entry(class_symbol)
+                    .or_default()
+                    .push(crate::tast::core::AbstractConversion {
+                        input: if is_static {
+                            param_types.first().copied()
+                        } else {
+                            None
+                        },
+                        result,
+                        parameters: generic_parameters,
+                    });
+            }
+            self.type_table
+                .borrow_mut()
+                .abstract_casts
+                .entry(class_symbol)
+                .or_default()
+                .1
+                .push(return_type);
+        }
 
         // Create function type
         let func_type = self
@@ -537,6 +625,15 @@ impl CompilationUnit {
             }
             if method.is_inline {
                 sym.flags = sym.flags.union(SymbolFlags::INLINE);
+            }
+            if method.is_extern {
+                sym.flags = sym.flags.union(SymbolFlags::EXTERN);
+            }
+            if method.is_from {
+                sym.flags = sym.flags.union(SymbolFlags::FROM_CONVERSION);
+            }
+            if method.is_to {
+                sym.flags = sym.flags.union(SymbolFlags::TO_CONVERSION);
             }
             if !method.is_public {
                 sym.visibility = crate::tast::symbols::Visibility::Private;
@@ -595,6 +692,24 @@ impl CompilationUnit {
 
         // Parse field type
         let field_type = self.resolve_blade_type_or_dynamic(field.field_type.as_ref());
+        self.type_table.borrow_mut().set_field_access(
+            field_symbol,
+            parser::AnonFieldAccess {
+                is_final: field.is_final,
+                getter: field
+                    .property
+                    .as_ref()
+                    .map_or(parser::PropertyAccess::Default, |property| {
+                        source_property_access(&property.getter)
+                    }),
+                setter: field
+                    .property
+                    .as_ref()
+                    .map_or(parser::PropertyAccess::Default, |property| {
+                        source_property_access(&property.setter)
+                    }),
+            },
+        );
 
         // A property reads and writes through methods. Restoring it as a plain
         // field leaves an access lowering to a load from a slot the class does
@@ -917,17 +1032,21 @@ impl CompilationUnit {
             .cloned()
             .zip(parameters)
             .collect();
-        let from = abstract_info
+        let from: Vec<TypeId> = abstract_info
             .from_types
             .iter()
             .map(|t| self.parse_type_string(t))
             .collect();
-        let to = abstract_info
+        let to: Vec<TypeId> = abstract_info
             .to_types
             .iter()
             .map(|t| self.parse_type_string(t))
             .collect();
         self.manifest_type_params = previous;
+        self.type_table
+            .borrow_mut()
+            .abstract_declared_casts
+            .insert(symbol_id, (from.clone(), to.clone()));
         self.type_table
             .borrow_mut()
             .abstract_casts
@@ -1000,6 +1119,13 @@ impl CompilationUnit {
                         type_id: self.resolve_blade_type(&f.ty),
                         is_public: true,
                         optional: matches!(f.ty, bsym::BladeType::Optional(_)),
+
+                        access: parser::AnonFieldAccess {
+                            is_final: f.is_final,
+                            getter: source_property_access(&f.getter),
+                            setter: source_property_access(&f.setter),
+                        }
+                        .into(),
                     })
                     .collect();
                 self.type_table

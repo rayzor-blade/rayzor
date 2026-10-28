@@ -29,7 +29,7 @@ pub struct TypeCheckingPhase<'a> {
     diagnostics: &'a mut Diagnostics,
     string_interner: &'a StringInterner,
     /// Type table (stored separately for SendSyncValidator)
-    type_table: &'a Rc<RefCell<TypeTable>>,
+    type_table: &'a RefCell<TypeTable>,
     /// Symbol table (stored separately for SendSyncValidator)
     symbol_table: &'a SymbolTable,
     /// Stack of expected return types for nested function contexts
@@ -47,6 +47,7 @@ pub struct TypeCheckingPhase<'a> {
     type_flow_guard: Option<TypeFlowGuard<'a>>,
     /// Whether to enable flow-sensitive analysis
     enable_flow_analysis: bool,
+    signature_index: Option<Rc<RefCell<super::sig_index::StaticSigIndex>>>,
 }
 
 // `super::node` in the modules below named `tast::node` before this file
@@ -69,7 +70,7 @@ mod statements;
 impl<'a> TypeCheckingPhase<'a> {
     /// Create a new type checking phase
     pub fn new(
-        type_table: &'a Rc<RefCell<TypeTable>>,
+        type_table: &'a RefCell<TypeTable>,
         symbol_table: &'a SymbolTable,
         scope_tree: &'a ScopeTree,
         string_interner: &'a StringInterner,
@@ -94,6 +95,7 @@ impl<'a> TypeCheckingPhase<'a> {
             package_access_validator: None,
             type_flow_guard: None,
             enable_flow_analysis: true, // Enable by default
+            signature_index: None,
         }
     }
 
@@ -109,6 +111,26 @@ impl<'a> TypeCheckingPhase<'a> {
     /// Enable or disable flow-sensitive analysis
     pub fn set_flow_analysis(&mut self, enabled: bool) {
         self.enable_flow_analysis = enabled;
+    }
+
+    pub(crate) fn set_signature_index(
+        &mut self,
+        index: Option<Rc<RefCell<super::sig_index::StaticSigIndex>>>,
+    ) {
+        self.signature_index = index;
+    }
+
+    pub(crate) fn check_macro_probe(
+        &mut self,
+        expression: &TypedExpression,
+        expected_return: Option<TypeId>,
+        method: Option<(bool, SymbolId)>,
+        package: Option<super::namespace::PackageId>,
+    ) -> Result<TypeId, String> {
+        self.expected_return_types.extend(expected_return);
+        self.current_method_context = method;
+        self.current_package = package;
+        self.check_expression(expression)
     }
 
     /// Initialize TypeFlowGuard for flow-sensitive analysis

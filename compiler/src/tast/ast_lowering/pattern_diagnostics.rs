@@ -42,6 +42,16 @@ impl AstLowering<'_> {
         let fail = |message: String| LoweringError::SemanticError { message, location };
 
         for case in cases {
+            if case.patterns.len() > 1
+                && case
+                    .patterns
+                    .iter()
+                    .any(|pattern| matches!(pattern, Pattern::Extractor { .. }))
+            {
+                return Err(fail(
+                    "Extractors cannot be combined in an or-pattern".to_string(),
+                ));
+            }
             for pattern in &case.patterns {
                 match (&columns, pattern) {
                     (Columns::Tuple(types), Pattern::Array(parts))
@@ -119,6 +129,12 @@ impl AstLowering<'_> {
                 }
             }
             Pattern::Or(alternatives) => {
+                if alternatives
+                    .iter()
+                    .any(|pattern| matches!(pattern, Pattern::Extractor { .. }))
+                {
+                    return Err("Extractors cannot be combined in an or-pattern".to_string());
+                }
                 let sets = alternatives
                     .iter()
                     .map(|alt| self.pattern_bindings(alt, ty))
@@ -195,6 +211,24 @@ impl AstLowering<'_> {
             Columns::Single(ty) => vec![*ty],
             Columns::Tuple(types) => types.iter().map(|t| Some(*t)).collect(),
         };
+        // Top-level enum switches may omit null; nested constructor arguments
+        // still have to cover every value of their declared nullable type.
+        let types: Vec<_> = types
+            .into_iter()
+            .map(|ty| {
+                ty.map(|mut ty| {
+                    let table = self.context.type_table.borrow();
+                    for _ in 0..32 {
+                        ty = Self::resolve_alias_chain(&table, ty);
+                        match table.get(ty).map(|ty| &ty.kind) {
+                            Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                            _ => break,
+                        }
+                    }
+                    ty
+                })
+            })
+            .collect();
         let mut rows: Vec<Vec<Pat>> = Vec::new();
         for case in cases {
             // A guarded case may not match, so it covers nothing.
@@ -266,7 +300,7 @@ impl AstLowering<'_> {
                 }
                 _ => Pat::Lit,
             }]),
-            Pattern::Null => Some(vec![Pat::Lit]),
+            Pattern::Null => Some(vec![Pat::Con("null".to_string(), Vec::new())]),
             Pattern::Or(alternatives) => {
                 let mut all = Vec::new();
                 for alt in alternatives {
@@ -400,6 +434,7 @@ impl AstLowering<'_> {
     /// What values a column of type `ty` can hold.
     fn signature(&mut self, ty: TypeId) -> Sig {
         let mut current = ty;
+        let mut nullable = false;
         for _ in 0..8 {
             let kind = self
                 .context
@@ -408,7 +443,10 @@ impl AstLowering<'_> {
                 .get(current)
                 .map(|t| t.kind.clone());
             match kind {
-                Some(TypeKind::Optional { inner_type }) => current = inner_type,
+                Some(TypeKind::Optional { inner_type }) => {
+                    nullable = true;
+                    current = inner_type;
+                }
                 Some(TypeKind::TypeAlias { target_type, .. }) => current = target_type,
                 Some(TypeKind::GenericInstance { base_type, .. }) => current = base_type,
                 Some(TypeKind::Bool) => {
@@ -424,7 +462,14 @@ impl AstLowering<'_> {
                 }
                 Some(TypeKind::Int | TypeKind::Float | TypeKind::String) => return Sig::Open,
                 Some(TypeKind::Enum { symbol_id, .. }) => {
-                    return self.enum_signature(symbol_id, ty);
+                    let mut signature = self.enum_signature(symbol_id, ty);
+                    if nullable && let Sig::Closed(constructors) = &mut signature {
+                        constructors.push(Ctor {
+                            name: "null".to_string(),
+                            args: Vec::new(),
+                        });
+                    }
+                    return signature;
                 }
                 Some(TypeKind::Abstract { symbol_id, .. })
                     if self.enum_abstracts.contains(&symbol_id)

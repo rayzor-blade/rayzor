@@ -942,6 +942,8 @@ impl<'a> TypeResolver<'a> {
                         type_id: field_type,
                         is_public: true,
                         optional: field.optional,
+
+                        access: field.access.clone().into(),
                     });
                 }
                 Ok(self
@@ -1184,12 +1186,16 @@ pub fn get_regex_type(type_table: &RefCell<TypeTable>, string_interner: &StringI
                 type_id: string_type,
                 is_public: false,
                 optional: false,
+
+                access: Default::default(),
             },
             AnonymousField {
                 name: options,
                 type_id: string_type,
                 is_public: false,
                 optional: false,
+
+                access: Default::default(),
             },
         ];
         type_table
@@ -1224,6 +1230,8 @@ pub fn create_anonymous_object_type(
             type_id,
             is_public: true,
             optional: false,
+
+            access: Default::default(),
         })
         .collect();
 
@@ -1373,6 +1381,8 @@ pub fn infer_object_literal_type(
                 type_id: *type_id,
                 is_public: true,
                 optional: false,
+
+                access: Default::default(),
             })
             .collect();
         type_table.borrow_mut().create_type(TypeKind::Anonymous {

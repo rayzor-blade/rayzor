@@ -289,6 +289,37 @@ impl<'a> AstLowering<'a> {
         if operands.iter().all(Option::is_none) {
             return None;
         }
+        let methods: Vec<_> = operands
+            .iter()
+            .map(|operand| {
+                operand
+                    .as_ref()
+                    .and_then(|(owner, _)| {
+                        self.static_sig_index
+                            .as_ref()
+                            .map(|index| index.borrow_mut().operator_methods(owner, key))
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        if methods[0].is_empty()
+            && !methods[1].is_empty()
+            && !methods[1].iter().any(|(_, _, commutative)| *commutative)
+        {
+            let mut checker = crate::tast::TypeChecker::new(
+                self.context.type_table,
+                self.context.symbol_table,
+                self.context.scope_tree,
+                self.context.string_interner,
+            );
+            let numeric = self.context.type_table.borrow().float_type();
+            if [left.expr_type, right.expr_type].into_iter().any(|ty| {
+                checker.check_compatibility(ty, numeric)
+                    == crate::tast::type_checker::TypeCompatibility::Incompatible
+            }) {
+                return Some(format!("Cannot reverse a non-commutative {key} operator"));
+            }
+        }
         let basic = |ty: TypeId, abstract_info: &Option<(String, Option<&'static str>)>| {
             if let Some((_, underlying)) = abstract_info {
                 return *underlying;

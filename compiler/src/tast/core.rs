@@ -265,6 +265,40 @@ pub struct AnonymousField {
     pub type_id: TypeId,
     pub is_public: bool,
     pub optional: bool,
+    pub access: FieldAccessInfo,
+}
+
+/// Access rules share storage across instantiated structure fields.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FieldAccessInfo(std::sync::Arc<parser::AnonFieldAccess>);
+
+impl Default for FieldAccessInfo {
+    fn default() -> Self {
+        static DEFAULT: std::sync::OnceLock<std::sync::Arc<parser::AnonFieldAccess>> =
+            std::sync::OnceLock::new();
+        Self(
+            DEFAULT
+                .get_or_init(|| std::sync::Arc::new(parser::AnonFieldAccess::default()))
+                .clone(),
+        )
+    }
+}
+
+impl From<parser::AnonFieldAccess> for FieldAccessInfo {
+    fn from(access: parser::AnonFieldAccess) -> Self {
+        if access == parser::AnonFieldAccess::default() {
+            Self::default()
+        } else {
+            Self(std::sync::Arc::new(access))
+        }
+    }
+}
+
+impl std::ops::Deref for FieldAccessInfo {
+    type Target = parser::AnonFieldAccess;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 /// Complete type representation
@@ -427,6 +461,13 @@ impl Type {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct AbstractConversion {
+    pub input: Option<TypeId>,
+    pub result: Option<TypeId>,
+    pub parameters: Vec<TypeId>,
+}
+
 /// High-performance type table for efficient storage and lookup
 pub struct TypeTable {
     /// Arena for allocating types
@@ -443,6 +484,11 @@ pub struct TypeTable {
 
     /// Declared abstract conversions shared by every file in this type graph.
     pub(crate) abstract_casts: BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>)>,
+    /// Representation casts written in the abstract's from/to clauses.
+    pub(crate) abstract_declared_casts: BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>)>,
+    pub(crate) abstract_from_conversions: BTreeMap<SymbolId, Vec<AbstractConversion>>,
+    pub(crate) abstract_to_conversions: BTreeMap<SymbolId, Vec<AbstractConversion>>,
+    pub(crate) field_access: BTreeMap<SymbolId, FieldAccessInfo>,
 
     /// Generic instances cache for performance
     generic_cache: BTreeMap<(TypeId, Vec<TypeId>), TypeId>,
@@ -485,6 +531,14 @@ struct CommonTypesCache {
 }
 
 impl TypeTable {
+    pub(crate) fn set_field_access(&mut self, symbol: SymbolId, access: parser::AnonFieldAccess) {
+        if access == parser::AnonFieldAccess::default() {
+            self.field_access.remove(&symbol);
+        } else {
+            self.field_access.insert(symbol, access.into());
+        }
+    }
+
     /// Rank operator operands by exact type, underlying type, then widening.
     pub(crate) fn operator_operand_score(&self, formal: TypeId, actual: TypeId) -> Option<u32> {
         self.operator_operand_score_inner(formal, actual, 0)
@@ -574,6 +628,10 @@ impl TypeTable {
             symbol_index,
             generic_cache,
             abstract_casts: BTreeMap::new(),
+            abstract_declared_casts: BTreeMap::new(),
+            abstract_from_conversions: BTreeMap::new(),
+            abstract_to_conversions: BTreeMap::new(),
+            field_access: BTreeMap::new(),
             usage_stats,
             string_interner: StringInterner::new(),
             type_cache: Rc::new(TypeCache::new()),
@@ -621,6 +679,10 @@ impl TypeTable {
             symbol_index,
             generic_cache,
             abstract_casts: BTreeMap::new(),
+            abstract_declared_casts: BTreeMap::new(),
+            abstract_from_conversions: BTreeMap::new(),
+            abstract_to_conversions: BTreeMap::new(),
+            field_access: BTreeMap::new(),
             usage_stats,
             string_interner: StringInterner::new(),
             type_cache: Rc::new(TypeCache::new()),
@@ -1541,6 +1603,8 @@ impl std::hash::Hash for AnonymousField {
         self.name.hash(state);
         self.type_id.hash(state);
         self.optional.hash(state);
+        self.is_public.hash(state);
+        self.access.hash(state);
     }
 }
 

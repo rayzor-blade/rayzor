@@ -83,7 +83,7 @@ impl From<postcard::Error> for BladeError {
 const SYMBOL_MAGIC: &[u8; 4] = b"BSYM";
 
 /// Current symbol format version
-const SYMBOL_VERSION: u32 = 2;
+const SYMBOL_VERSION: u32 = 3;
 
 /// A BLADE editor index contains portable query data, without executable MIR
 /// or compiler-local symbol IDs. The editor owns the payload schema.
@@ -231,6 +231,9 @@ pub struct BladeProperty {
 pub struct BladeAnonField {
     pub name: String,
     pub ty: BladeType,
+    pub is_final: bool,
+    pub getter: BladeAccess,
+    pub setter: BladeAccess,
 }
 
 /// Complete symbol information for a field
@@ -282,8 +285,12 @@ pub struct BladeMethodInfo {
     pub is_static: bool,
     /// Is this an inline method?
     pub is_inline: bool,
+    pub is_extern: bool,
+    pub is_from: bool,
+    pub is_to: bool,
     /// Type parameters for generic methods
     pub type_params: Vec<String>,
+    pub type_param_constraints: Vec<Vec<BladeType>>,
     /// Native name from `@:native` metadata (e.g. `to_haxe_string`).
     /// Used by stdlib runtime mapping when the Haxe method name differs
     /// from the FFI symbol. `#[serde(default)]` so older cache files
@@ -597,6 +604,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                                 is_public,
                                 is_static,
                                 is_inline,
+                                field.modifiers.contains(&parser::Modifier::Extern),
                             );
                             if func.name == "new" {
                                 constructor = Some(method_info);
@@ -717,6 +725,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                             is_public,
                             is_static,
                             is_inline,
+                            field.modifiers.contains(&parser::Modifier::Extern),
                         );
                         if is_static {
                             static_methods.push(method_info);
@@ -762,6 +771,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                             is_public,
                             is_static,
                             is_inline,
+                            field.modifiers.contains(&parser::Modifier::Extern),
                         );
                         methods.push(method_info);
                     }
@@ -867,6 +877,7 @@ fn extract_method_from_ast(
     is_public: bool,
     is_static: bool,
     is_inline: bool,
+    is_extern: bool,
 ) -> BladeMethodInfo {
     let params: Vec<BladeParamInfo> = func
         .params
@@ -888,6 +899,18 @@ fn extract_method_from_ast(
         is_public,
         is_static,
         is_inline,
+        is_extern,
+        is_from: field_meta
+            .iter()
+            .any(|meta| matches!(meta.name.as_str(), "from" | ":from")),
+        is_to: field_meta
+            .iter()
+            .any(|meta| matches!(meta.name.as_str(), "to" | ":to")),
+        type_param_constraints: func
+            .type_params
+            .iter()
+            .map(|parameter| parameter.constraints.iter().map(type_to_blade).collect())
+            .collect(),
         type_params,
         native_name: extract_native_meta(field_meta),
     }
@@ -961,6 +984,21 @@ pub fn type_to_blade(ty: &parser::Type) -> BladeType {
                 .map(|f| BladeAnonField {
                     name: f.name.clone(),
                     ty: type_to_blade(&f.type_hint),
+                    is_final: f.access.is_final,
+                    getter: match &f.access.getter {
+                        parser::PropertyAccess::Default => BladeAccess::Default,
+                        parser::PropertyAccess::Null => BladeAccess::Null,
+                        parser::PropertyAccess::Never => BladeAccess::Never,
+                        parser::PropertyAccess::Dynamic => BladeAccess::Dynamic,
+                        parser::PropertyAccess::Custom(name) => BladeAccess::Method(name.clone()),
+                    },
+                    setter: match &f.access.setter {
+                        parser::PropertyAccess::Default => BladeAccess::Default,
+                        parser::PropertyAccess::Null => BladeAccess::Null,
+                        parser::PropertyAccess::Never => BladeAccess::Never,
+                        parser::PropertyAccess::Dynamic => BladeAccess::Dynamic,
+                        parser::PropertyAccess::Custom(name) => BladeAccess::Method(name.clone()),
+                    },
                 })
                 .collect(),
         },
@@ -1023,6 +1061,49 @@ pub fn build_manifest(stdlib_root: &Path) -> Vec<BladeModuleSymbols> {
 
 #[cfg(test)]
 mod source_identity_tests {
+    #[test]
+    fn conversion_signatures_survive_binary_symbols() {
+        let file = parser::rd::rd_parse(
+            "abstract Value(Int) { @:from extern static inline function of<T:{length:Int}>(value:T):Value; }",
+            "Value.hx", false, false,
+        ).unwrap();
+        let symbols = super::extract_type_info_from_ast(&file);
+        let bytes = postcard::to_allocvec(&symbols).unwrap();
+        let restored: super::BladeTypeInfo = postcard::from_bytes(&bytes).unwrap();
+        let method = &restored.abstracts[0].static_methods[0];
+        assert!(method.is_from && method.is_inline && method.is_extern);
+        assert!(!method.is_to);
+        assert_eq!(method.type_params, ["T"]);
+        assert_eq!(method.type_param_constraints.len(), 1);
+        assert!(matches!(
+            method.type_param_constraints[0][0],
+            super::BladeType::Anonymous { .. }
+        ));
+    }
+
+    #[test]
+    fn anonymous_field_access_survives_binary_symbols() {
+        let file = parser::rd::rd_parse(
+            "typedef View = { final value:Int; var read(default, null):Int; };",
+            "View.hx",
+            false,
+            false,
+        )
+        .unwrap();
+        let parser::TypeDeclaration::Typedef(declaration) = &file.declarations[0] else {
+            panic!("typedef")
+        };
+        let original = super::type_to_blade(&declaration.type_def);
+        let bytes = postcard::to_allocvec(&original).unwrap();
+        let restored: super::BladeType = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(original, restored);
+        let super::BladeType::Anonymous { fields } = restored else {
+            panic!("structure")
+        };
+        assert!(fields[0].is_final);
+        assert_eq!(fields[1].setter, super::BladeAccess::Null);
+    }
+
     #[test]
     fn manifest_fingerprint_tracks_source_contents_at_a_stable_path() {
         let root = std::env::temp_dir().join(format!("rayzor-bsym-source-{}", std::process::id()));

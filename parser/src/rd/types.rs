@@ -367,6 +367,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     name: field_name,
                     optional: optional_from_meta,
                     type_hint,
+                    access: AnonFieldAccess::default(),
                     span: field_span,
                 });
                 if !self.stream.at(TokenKind::RBrace) && self.stream.eat(TokenKind::Comma).is_none()
@@ -378,24 +379,20 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
             // Skip optional `var` or `final` keyword in struct fields
             self.stream.eat(TokenKind::KwVar);
-            self.stream.eat(TokenKind::KwFinal);
+            let is_final = self.stream.eat(TokenKind::KwFinal).is_some();
+            let mut access = AnonFieldAccess {
+                is_final,
+                ..Default::default()
+            };
             let optional_from_question = self.stream.eat(TokenKind::Question).is_some();
             let field_name = self.stream.current_text().to_string();
             self.stream.advance();
-            // Property accessors: `var id(default, never):Int`. What the field
-            // reads and writes as is the declared type either way, so the
-            // accessor pair only has to be consumed.
             if self.stream.at(TokenKind::LParen) {
                 self.stream.advance();
-                let mut depth = 1;
-                while depth > 0 && !self.stream.is_eof() {
-                    if self.stream.at(TokenKind::LParen) {
-                        depth += 1;
-                    } else if self.stream.at(TokenKind::RParen) {
-                        depth -= 1;
-                    }
-                    self.stream.advance();
-                }
+                access.getter = self.parse_property_access()?;
+                self.stream.expect(TokenKind::Comma)?;
+                access.setter = self.parse_property_access()?;
+                self.stream.expect(TokenKind::RParen)?;
             }
             self.stream.expect(TokenKind::Colon)?;
             let type_hint = self.parse_type()?;
@@ -404,6 +401,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 name: field_name,
                 optional: optional_from_meta || optional_from_question,
                 type_hint,
+                access,
                 span: self.stream.span_from(field_start),
             });
 

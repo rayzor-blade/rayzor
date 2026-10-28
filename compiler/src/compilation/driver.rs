@@ -1549,6 +1549,7 @@ impl CompilationUnit {
             &mut diagnostics,
         );
         checker.set_namespace_resolver(&self.namespace_resolver);
+        checker.set_signature_index(Some(Rc::clone(&self.static_sig_index)));
         checker.set_flow_analysis(false);
         let _ = checker.check_file(&mut file);
         diagnostics

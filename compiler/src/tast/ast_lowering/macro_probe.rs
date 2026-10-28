@@ -12,11 +12,18 @@ impl AstLowering<'_> {
     pub(crate) fn validate_macro_probe_expression(
         &self,
         expression: &TypedExpression,
+        source: &Expr,
     ) -> LoweringResult<()> {
         let error = |message| LoweringError::SemanticError {
             message,
             location: expression.source_location,
         };
+        if let ExprKind::Ident(name) = &source.kind
+            && let Some(symbol) =
+                self.resolve_symbol_in_scope_hierarchy(self.context.string_interner.intern(name))
+        {
+            self.macro_probe_method_value(symbol, expression)?;
+        }
         // An exit (`final a = return;`) types as a monomorph in Haxe.
         let exits = |mut init: &TypedExpression| {
             while let TypedExpressionKind::Cast {
@@ -35,7 +42,123 @@ impl AstLowering<'_> {
                     | TypedExpressionKind::Continue
             )
         };
+        let super_value = |mut value: &TypedExpression| {
+            while let TypedExpressionKind::Cast { expression, .. }
+            | TypedExpressionKind::Meta { expression, .. } = &value.kind
+            {
+                value = expression;
+            }
+            matches!(value.kind, TypedExpressionKind::Super { .. })
+        };
+        let values: Vec<&TypedExpression> = match &expression.kind {
+            TypedExpressionKind::VarDeclarationExpr { initializer, .. }
+            | TypedExpressionKind::FinalDeclarationExpr { initializer, .. } => vec![initializer],
+            TypedExpressionKind::ArrayLiteral { elements } => elements.iter().collect(),
+            TypedExpressionKind::ObjectLiteral { fields } => {
+                fields.iter().map(|field| &field.value).collect()
+            }
+            TypedExpressionKind::FunctionCall { arguments, .. }
+            | TypedExpressionKind::MethodCall { arguments, .. }
+            | TypedExpressionKind::StaticMethodCall { arguments, .. } => arguments.iter().collect(),
+            TypedExpressionKind::Return { value: Some(value) } => vec![value],
+            TypedExpressionKind::BinaryOp {
+                operator: BinaryOperator::Assign,
+                right,
+                ..
+            } => vec![right],
+            _ => Vec::new(),
+        };
+        if values.into_iter().any(super_value) {
+            return Err(error("Cannot use super as a value".to_string()));
+        }
         match &expression.kind {
+            TypedExpressionKind::New { class_type, .. } => {
+                let symbol = {
+                    let table = self.context.type_table.borrow();
+                    table.get_type_symbol(Self::resolve_alias_chain(&table, *class_type))
+                };
+                if let Some(symbol) =
+                    symbol.and_then(|symbol| self.context.symbol_table.get_symbol(symbol))
+                    && symbol.kind == SymbolKind::Class
+                {
+                    if symbol
+                        .flags
+                        .contains(crate::tast::symbols::SymbolFlags::ABSTRACT)
+                    {
+                        return Err(error("Cannot instantiate an abstract class".to_string()));
+                    }
+                    let name = self
+                        .context
+                        .string_interner
+                        .get(symbol.qualified_name.unwrap_or(symbol.name));
+                    if let (Some(name), Some(index)) = (name, self.static_sig_index.as_ref())
+                        && index.borrow_mut().lacks_constructor(name)
+                    {
+                        return Err(error("Class has no constructor".to_string()));
+                    }
+                }
+            }
+            TypedExpressionKind::Try { catch_clauses, .. } => {
+                let table = self.context.type_table.borrow();
+                let carrier = |mut ty| {
+                    for _ in 0..32 {
+                        ty = Self::resolve_alias_chain(&table, ty);
+                        match table.get(ty).map(|ty| &ty.kind) {
+                            Some(TypeKind::Abstract {
+                                underlying: Some(inner),
+                                ..
+                            }) => ty = *inner,
+                            _ => break,
+                        }
+                    }
+                    ty
+                };
+                let carriers: Vec<_> = catch_clauses
+                    .iter()
+                    .map(|catch| carrier(catch.exception_type))
+                    .collect();
+                drop(table);
+                let mut checker = crate::tast::TypeChecker::new(
+                    self.context.type_table,
+                    self.context.symbol_table,
+                    self.context.scope_tree,
+                    self.context.string_interner,
+                );
+                for (index, &current) in carriers.iter().enumerate() {
+                    let current_dynamic = matches!(
+                        self.context
+                            .type_table
+                            .borrow()
+                            .get(current)
+                            .map(|ty| &ty.kind),
+                        Some(TypeKind::Dynamic)
+                    );
+                    let covered = carriers[..index].iter().any(|&previous| {
+                        let previous_dynamic = matches!(
+                            self.context
+                                .type_table
+                                .borrow()
+                                .get(previous)
+                                .map(|ty| &ty.kind),
+                            Some(TypeKind::Dynamic)
+                        );
+                        previous_dynamic
+                            || (!current_dynamic
+                                && checker.check_compatibility(current, previous)
+                                    != crate::tast::type_checker::TypeCompatibility::Incompatible)
+                    });
+                    if covered {
+                        return Err(error("Catch type is already covered".to_string()));
+                    }
+                }
+            }
+            TypedExpressionKind::Return { value: Some(value) }
+                if matches!(value.kind, TypedExpressionKind::Null)
+                    && self.context.expected_return_type
+                        == Some(self.context.type_table.borrow().void_type()) =>
+            {
+                return Err(error("Cannot return null from a Void function".to_string()));
+            }
             TypedExpressionKind::VarDeclarationExpr {
                 var_type,
                 initializer,
@@ -98,6 +221,9 @@ impl AstLowering<'_> {
                 field_symbol,
                 ..
             } => {
+                if self.macro_probe_write_target != Some(source.span) {
+                    self.macro_probe_field_access(object, *field_symbol, false, expression)?;
+                }
                 if self.macro_probe_is_any(object.expr_type) {
                     let field = self
                         .context
@@ -116,12 +242,18 @@ impl AstLowering<'_> {
                 self.macro_probe_member_access(*field_symbol, expression)?;
             }
             TypedExpressionKind::Variable { symbol_id } => {
+                self.macro_probe_method_value(*symbol_id, expression)?;
                 self.macro_probe_member_access(*symbol_id, expression)?;
             }
-            TypedExpressionKind::MethodCall { method_symbol, .. }
-            | TypedExpressionKind::MethodReference { method_symbol, .. }
-            | TypedExpressionKind::StaticMethodCall { method_symbol, .. } => {
+            TypedExpressionKind::MethodReference { method_symbol, .. } => {
+                self.macro_probe_method_value(*method_symbol, expression)?;
                 self.macro_probe_member_access(*method_symbol, expression)?;
+            }
+            TypedExpressionKind::MethodCall { method_symbol, .. }
+            | TypedExpressionKind::StaticMethodCall { method_symbol, .. } => {
+                if matches!(source.kind, ExprKind::Call { .. }) {
+                    self.macro_probe_member_access(*method_symbol, expression)?;
+                }
             }
             TypedExpressionKind::ArrayAccess { array, .. }
                 if self.macro_probe_is_any(array.expr_type) =>
@@ -162,6 +294,20 @@ impl AstLowering<'_> {
                 if let Some(message) = self.macro_probe_structure_mismatch(literal, *target_type) {
                     return Err(error(message));
                 }
+                let mut checker = crate::tast::TypeChecker::new(
+                    self.context.type_table,
+                    self.context.symbol_table,
+                    self.context.scope_tree,
+                    self.context.string_interner,
+                );
+                if matches!(
+                    checker.check_compatibility(literal.expr_type, *target_type),
+                    crate::tast::type_checker::TypeCompatibility::Incompatible
+                ) {
+                    return Err(error(
+                        "Type annotation has an incompatible type".to_string(),
+                    ));
+                }
             }
             TypedExpressionKind::MapLiteral { entries } => {
                 if let Some(message) = self.macro_probe_map_literal(entries) {
@@ -184,6 +330,14 @@ impl AstLowering<'_> {
                 operator: BinaryOperator::Assign,
                 right,
             } => {
+                if let TypedExpressionKind::FieldAccess {
+                    object,
+                    field_symbol,
+                    ..
+                } = &left.kind
+                {
+                    self.macro_probe_field_access(object, *field_symbol, true, expression)?;
+                }
                 if let Some(message) = self.macro_probe_structure_mismatch(right, left.expr_type) {
                     return Err(error(message));
                 }
@@ -655,6 +809,88 @@ impl AstLowering<'_> {
             })
     }
 
+    fn macro_probe_field_access(
+        &self,
+        object: &TypedExpression,
+        member: SymbolId,
+        write: bool,
+        expression: &TypedExpression,
+    ) -> LoweringResult<()> {
+        let access = self
+            .context
+            .symbol_table
+            .get_symbol(member)
+            .and_then(|symbol| {
+                self.structure_fields(object.expr_type).and_then(|fields| {
+                    fields
+                        .into_iter()
+                        .find(|field| field.name == symbol.name)
+                        .map(|field| field.access)
+                })
+            })
+            .or_else(|| {
+                self.context
+                    .type_table
+                    .borrow()
+                    .field_access
+                    .get(&member)
+                    .cloned()
+            });
+        let Some(access) = access else { return Ok(()) };
+        let accessor = if write {
+            &access.setter
+        } else {
+            &access.getter
+        };
+        let forbidden = (write && access.is_final)
+            || matches!(accessor, parser::PropertyAccess::Never)
+            || (!self.macro_private_access && matches!(accessor, parser::PropertyAccess::Null));
+        if forbidden {
+            return Err(LoweringError::SemanticError {
+                message: if write {
+                    "Field is not writable"
+                } else {
+                    "Field is not readable"
+                }
+                .to_string(),
+                location: expression.source_location,
+            });
+        }
+        Ok(())
+    }
+
+    fn macro_probe_method_value(
+        &self,
+        member: SymbolId,
+        expression: &TypedExpression,
+    ) -> LoweringResult<()> {
+        use crate::tast::symbols::SymbolFlags;
+        if self.lowering_callee {
+            return Ok(());
+        }
+        if self
+            .context
+            .symbol_table
+            .get_symbol(member)
+            .is_some_and(|symbol| {
+                symbol.flags.contains(SymbolFlags::INLINE)
+                    && (symbol.flags.contains(SymbolFlags::EXTERN)
+                        || (!symbol.is_static()
+                            && self.context.symbol_table.all_symbols().any(|owner| {
+                                owner.kind == SymbolKind::Class
+                                    && owner.scope_id == symbol.scope_id
+                                    && owner.flags.contains(SymbolFlags::EXTERN)
+                            })))
+            })
+        {
+            return Err(LoweringError::SemanticError {
+                message: "Cannot create a closure from an extern inline method".to_string(),
+                location: expression.source_location,
+            });
+        }
+        Ok(())
+    }
+
     fn macro_probe_member_access(
         &self,
         member: SymbolId,
@@ -680,6 +916,14 @@ impl AstLowering<'_> {
                     .iter()
                     .any(|(_, field, _)| *field == member)
                     .then_some(*owner)
+            })
+            .or_else(|| {
+                self.class_methods.iter().find_map(|(owner, methods)| {
+                    methods
+                        .iter()
+                        .any(|(_, method, _)| *method == member)
+                        .then_some(*owner)
+                })
             })
             .or_else(|| {
                 self.context

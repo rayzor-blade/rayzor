@@ -426,17 +426,40 @@ fn anon_field<'a>(full: &'a str, input: &'a str) -> PResult<'a, AnonField> {
                 name,
                 optional: has_optional_meta,
                 type_hint,
+                access: AnonFieldAccess::default(),
                 span: Span::new(start, end),
             },
         ));
     }
 
     // Optional var keyword (not required in typedef anonymous types)
-    let (input, _) = opt(keyword("var")).parse(input)?;
+    let (input, modifier) = opt(alt((keyword("var"), keyword("final")))).parse(input)?;
+    let is_final = modifier == Some("final");
 
     // Optional ? for optional field (can appear before or after var)
     let (input, optional) = opt(symbol("?")).parse(input)?;
     let (input, name) = identifier(input)?;
+    let (input, property) = opt(delimited(
+        symbol("("),
+        (
+            crate::haxe_parser_decls::property_access,
+            symbol(","),
+            crate::haxe_parser_decls::property_access,
+        ),
+        symbol(")"),
+    ))
+    .parse(input)?;
+    let access = property.map_or_else(
+        || AnonFieldAccess {
+            is_final,
+            ..Default::default()
+        },
+        |(getter, _, setter)| AnonFieldAccess {
+            is_final,
+            getter,
+            setter,
+        },
+    );
     let (input, _) = symbol(":").parse(input)?;
     let (input, type_hint) = type_expr(full, input)?;
     let end = position(full, input);
@@ -447,6 +470,7 @@ fn anon_field<'a>(full: &'a str, input: &'a str) -> PResult<'a, AnonField> {
             name,
             optional: optional.is_some() || has_optional_meta,
             type_hint,
+            access,
             span: Span::new(start, end),
         },
     ))

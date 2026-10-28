@@ -166,6 +166,9 @@ impl<'a> AstLowering<'a> {
 
         // Extract metadata flags from @:generic, @:final, @:native, etc.
         let mut symbol_flags = self.extract_metadata_flags(&class_decl.meta, class_symbol);
+        if class_decl.is_abstract {
+            symbol_flags = symbol_flags.union(crate::tast::symbols::SymbolFlags::ABSTRACT);
+        }
         // Also check for modifiers (final, extern, etc)
         for modifier in &class_decl.modifiers {
             match modifier {
@@ -352,6 +355,11 @@ impl<'a> AstLowering<'a> {
             .map(|t| self.lower_type(t))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Macro probes run while member bodies are still being lowered.
+        let mut hierarchy = crate::tast::class_builder::ClassHierarchyBuilder::new();
+        hierarchy.register_class(class_symbol, extends, implements.clone());
+        hierarchy.finalize(self.context.symbol_table);
+
         // PRE-REGISTER ALL METHODS before lowering any method bodies.
         // This is critical for intra-class method calls: when main() calls iterate(),
         // iterate must already be registered in the class scope, even if it's defined later.
@@ -424,6 +432,14 @@ impl<'a> AstLowering<'a> {
                 };
                 if let Some(symbol) = self.context.symbol_table.get_symbol_mut(method_symbol) {
                     symbol.visibility = visibility;
+                    for modifier in &field.modifiers {
+                        use crate::tast::symbols::SymbolFlags;
+                        symbol.flags = symbol.flags.union(match modifier {
+                            parser::Modifier::Inline => SymbolFlags::INLINE,
+                            parser::Modifier::Extern => SymbolFlags::EXTERN,
+                            _ => SymbolFlags::NONE,
+                        });
+                    }
                 }
                 // Pre-compute function type from AST signature for forward reference resolution
                 let generic = !func.type_params.is_empty();

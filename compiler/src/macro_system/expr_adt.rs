@@ -22,6 +22,26 @@ fn s(v: &str) -> MacroValue {
     MacroValue::String(Arc::from(v))
 }
 
+fn property_name(access: &parser::PropertyAccess) -> &str {
+    match access {
+        parser::PropertyAccess::Default => "default",
+        parser::PropertyAccess::Null => "null",
+        parser::PropertyAccess::Never => "never",
+        parser::PropertyAccess::Dynamic => "dynamic",
+        parser::PropertyAccess::Custom(name) => name,
+    }
+}
+
+fn property_access(name: &str) -> parser::PropertyAccess {
+    match name {
+        "default" => parser::PropertyAccess::Default,
+        "null" => parser::PropertyAccess::Null,
+        "never" => parser::PropertyAccess::Never,
+        "dynamic" => parser::PropertyAccess::Dynamic,
+        other => parser::PropertyAccess::Custom(other.to_string()),
+    }
+}
+
 fn arr(items: Vec<MacroValue>) -> MacroValue {
     MacroValue::Array(Arc::new(items))
 }
@@ -209,13 +229,35 @@ pub fn complex_type_of(t: &Type) -> MacroValue {
                         ("name", s(&f.name)),
                         (
                             "kind",
-                            en(
-                                "FieldType",
-                                "FVar",
-                                vec![complex_type_of(&f.type_hint), MacroValue::Null],
-                            ),
+                            if f.access.getter != parser::PropertyAccess::Default
+                                || f.access.setter != parser::PropertyAccess::Default
+                            {
+                                en(
+                                    "FieldType",
+                                    "FProp",
+                                    vec![
+                                        s(property_name(&f.access.getter)),
+                                        s(property_name(&f.access.setter)),
+                                        complex_type_of(&f.type_hint),
+                                        MacroValue::Null,
+                                    ],
+                                )
+                            } else {
+                                en(
+                                    "FieldType",
+                                    "FVar",
+                                    vec![complex_type_of(&f.type_hint), MacroValue::Null],
+                                )
+                            },
                         ),
-                        ("access", arr(Vec::new())),
+                        (
+                            "access",
+                            arr(if f.access.is_final {
+                                vec![en("Access", "AFinal", Vec::new())]
+                            } else {
+                                Vec::new()
+                            }),
+                        ),
                         ("meta", arr(meta)),
                         ("pos", MacroValue::Position(span_to_location(f.span))),
                     ])
@@ -357,6 +399,7 @@ pub fn type_of_value(v: &MacroValue, span: Span) -> Option<Type> {
                                 MacroValue::Enum(_, v, a) if &**v == "FVar" => {
                                     a.first().and_then(|t| type_of_value(t, span))
                                 }
+                                MacroValue::Enum(_, v, a) if &**v == "FProp" => a.get(2).and_then(|t| type_of_value(t, span)),
                                 _ => None,
                             }?;
                             let optional = list_of(field(f, "meta")).iter().any(|m| {
@@ -366,6 +409,11 @@ pub fn type_of_value(v: &MacroValue, span: Span) -> Option<Type> {
                                 name,
                                 optional,
                                 type_hint: hint,
+                                access: parser::AnonFieldAccess {
+                                    is_final: list_of(field(f, "access")).iter().any(|a| matches!(a, MacroValue::Enum(_, name, _) if &**name == "AFinal")),
+                                    getter: match kind { MacroValue::Enum(_, name, args) if &**name == "FProp" => property_access(&string_of(args.first()).unwrap_or_default()), _ => parser::PropertyAccess::Default },
+                                    setter: match kind { MacroValue::Enum(_, name, args) if &**name == "FProp" => property_access(&string_of(args.get(1)).unwrap_or_default()), _ => parser::PropertyAccess::Default },
+                                },
                                 span,
                             })
                         })
@@ -1639,6 +1687,31 @@ pub fn constant_of(e: &Expr) -> Option<MacroValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anonymous_access_survives_complex_type_round_trips() {
+        let file = parser::rd::rd_parse(
+            "typedef View = { final value:Int; var read(default, null):Int; };",
+            "View.hx",
+            false,
+            false,
+        )
+        .unwrap();
+        let parser::TypeDeclaration::Typedef(declaration) = &file.declarations[0] else {
+            panic!("typedef")
+        };
+        let encoded = complex_type_of(&declaration.type_def);
+        let decoded = type_of_value(&encoded, declaration.span).unwrap();
+        let (Type::Anonymous { fields: before, .. }, Type::Anonymous { fields: after, .. }) =
+            (&declaration.type_def, decoded)
+        else {
+            panic!("structure")
+        };
+        assert_eq!(
+            before.iter().map(|field| &field.access).collect::<Vec<_>>(),
+            after.iter().map(|field| &field.access).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn map_literals_survive_macro_round_trips() {

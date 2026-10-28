@@ -4,6 +4,44 @@
 use super::*;
 
 impl<'a> TypeCheckingPhase<'a> {
+    pub(super) fn has_declared_unary_operator(
+        &self,
+        ty: TypeId,
+        operator: super::node::UnaryOperator,
+    ) -> bool {
+        use super::node::UnaryOperator as U;
+        let op = match operator {
+            U::Neg => parser::UnaryOp::Neg,
+            U::Not => parser::UnaryOp::Not,
+            U::BitNot => parser::UnaryOp::BitNot,
+            U::PreInc => parser::UnaryOp::PreIncr,
+            U::PostInc => parser::UnaryOp::PostIncr,
+            U::PreDec => parser::UnaryOp::PreDecr,
+            U::PostDec => parser::UnaryOp::PostDecr,
+        };
+        let table = self.type_table.borrow();
+        let Some(TypeKind::Abstract { symbol_id, .. }) =
+            table.get(table.resolve_alias_type(ty)).map(|ty| &ty.kind)
+        else {
+            return false;
+        };
+        let Some(symbol) = self.symbol_table.get_symbol(*symbol_id) else {
+            return false;
+        };
+        let Some(name) = self
+            .string_interner
+            .get(symbol.qualified_name.unwrap_or(symbol.name))
+        else {
+            return false;
+        };
+        self.signature_index.as_ref().is_some_and(|index| {
+            !index
+                .borrow_mut()
+                .operator_methods(name, &format!("Unary{op:?}"))
+                .is_empty()
+        })
+    }
+
     /// Validate that a type can be used as an exception type in catch clauses
     pub(crate) fn validate_exception_type(
         &mut self,

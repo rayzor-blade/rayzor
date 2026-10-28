@@ -102,16 +102,13 @@ impl HaxeStdTypes {
 
 /// Type-specific suggestion generator for standard Haxe types
 pub struct TypeSpecificSuggestions<'a> {
-    type_table: &'a Rc<RefCell<TypeTable>>,
+    type_table: &'a RefCell<TypeTable>,
     string_interner: &'a StringInterner,
     std_types: HaxeStdTypes,
 }
 
 impl<'a> TypeSpecificSuggestions<'a> {
-    pub fn new(
-        type_table: &'a Rc<RefCell<TypeTable>>,
-        string_interner: &'a StringInterner,
-    ) -> Self {
+    pub fn new(type_table: &'a RefCell<TypeTable>, string_interner: &'a StringInterner) -> Self {
         Self {
             type_table,
             string_interner,
@@ -344,7 +341,7 @@ impl<'a> TypeSpecificSuggestions<'a> {
 
 /// Type diagnostic emitter that converts type errors to user-friendly diagnostics
 pub struct TypeDiagnosticEmitter<'a> {
-    type_table: &'a Rc<RefCell<TypeTable>>,
+    type_table: &'a RefCell<TypeTable>,
     symbol_table: &'a SymbolTable,
     string_interner: &'a StringInterner,
     source_map: &'a SourceMap,
@@ -354,7 +351,7 @@ pub struct TypeDiagnosticEmitter<'a> {
 impl<'a> TypeDiagnosticEmitter<'a> {
     /// Create a new type diagnostic emitter
     pub fn new(
-        type_table: &'a Rc<RefCell<TypeTable>>,
+        type_table: &'a RefCell<TypeTable>,
         symbol_table: &'a SymbolTable,
         string_interner: &'a StringInterner,
         source_map: &'a SourceMap,

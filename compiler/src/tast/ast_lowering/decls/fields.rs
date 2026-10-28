@@ -303,6 +303,25 @@ impl<'a> AstLowering<'a> {
         self.context
             .symbol_table
             .update_symbol_type(field_symbol, field_type);
+        if let Some(symbol) = self.context.symbol_table.get_symbol_mut(field_symbol) {
+            symbol.scope_id = self.context.current_scope;
+        }
+        let access = match &field.kind {
+            ClassFieldKind::Final { .. } => parser::AnonFieldAccess {
+                is_final: true,
+                ..Default::default()
+            },
+            ClassFieldKind::Property { getter, setter, .. } => parser::AnonFieldAccess {
+                is_final: false,
+                getter: getter.clone(),
+                setter: setter.clone(),
+            },
+            _ => parser::AnonFieldAccess::default(),
+        };
+        self.context
+            .type_table
+            .borrow_mut()
+            .set_field_access(field_symbol, access);
 
         let mut field_flags = self.extract_metadata_flags(&field.meta, field_symbol);
         for modifier in &field.modifiers {
@@ -448,9 +467,9 @@ impl<'a> AstLowering<'a> {
         let function_scope = self.context.enter_scope(ScopeKind::Function);
 
         // Type parameters, so a call binds them from its arguments.
-        let type_params = self.lower_type_parameters(&func.type_params)?;
         let type_param_map = self.function_type_parameter_map(&func.type_params)?;
         self.context.push_type_parameters(type_param_map);
+        let type_params = self.lower_type_parameters(&func.type_params)?;
 
         // Process parameters
         let mut parameters = Vec::new();
@@ -661,32 +680,9 @@ impl<'a> AstLowering<'a> {
         let function_scope = self.context.enter_scope(ScopeKind::Function);
 
         // Process type parameters
-        let type_params = self.lower_type_parameters(&func.type_params)?;
-        let mut type_param_map: BTreeMap<InternedString, TypeId> = BTreeMap::new();
-        for tp in &type_params {
-            let interned_name = tp.name;
-            // Convert constraints to ConstraintKind for symbol table
-            let constraint_kinds = tp
-                .constraints
-                .iter()
-                .map(|_| {
-                    crate::tast::type_checker::ConstraintKind::Implements {
-                        interface_type: TypeId::invalid(), // Placeholder, will be resolved later
-                    }
-                })
-                .collect();
-            let symbol_id = self
-                .context
-                .symbol_table
-                .create_type_parameter(interned_name, constraint_kinds);
-            let type_id = self.context.type_table.borrow_mut().create_type_parameter(
-                symbol_id,
-                tp.constraints.clone(),
-                tp.variance.into(),
-            );
-            type_param_map.insert(tp.name, type_id);
-        }
+        let type_param_map = self.function_type_parameter_map(&func.type_params)?;
         self.context.push_type_parameters(type_param_map);
+        let type_params = self.lower_type_parameters(&func.type_params)?;
 
         // Process parameters. An unannotated one takes the type recovered
         // when the class's signatures were registered, the way Haxe's own
@@ -872,32 +868,9 @@ impl<'a> AstLowering<'a> {
         let function_scope = self.context.enter_scope(ScopeKind::Function);
 
         // Process type parameters
-        let type_params = self.lower_type_parameters(&func.type_params)?;
-        let mut type_param_map: BTreeMap<InternedString, TypeId> = BTreeMap::new();
-        for tp in &type_params {
-            let interned_name = tp.name;
-            // Convert constraints to ConstraintKind for symbol table
-            let constraint_kinds = tp
-                .constraints
-                .iter()
-                .map(|_| {
-                    crate::tast::type_checker::ConstraintKind::Implements {
-                        interface_type: TypeId::invalid(), // Placeholder, will be resolved later
-                    }
-                })
-                .collect();
-            let symbol_id = self
-                .context
-                .symbol_table
-                .create_type_parameter(interned_name, constraint_kinds);
-            let type_id = self.context.type_table.borrow_mut().create_type_parameter(
-                symbol_id,
-                tp.constraints.clone(),
-                tp.variance.into(),
-            );
-            type_param_map.insert(tp.name, type_id);
-        }
+        let type_param_map = self.function_type_parameter_map(&func.type_params)?;
         self.context.push_type_parameters(type_param_map);
+        let type_params = self.lower_type_parameters(&func.type_params)?;
 
         // Process parameters
         let mut parameters = Vec::new();

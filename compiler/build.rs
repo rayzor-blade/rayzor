@@ -63,6 +63,7 @@ fn main() {
     println!("cargo:rerun-if-changed=haxe-std");
     println!("cargo:rerun-if-changed=../parser/src");
     println!("cargo:rerun-if-changed=../diagnostics/src");
+    println!("cargo:rerun-if-changed=bsym/src");
 }
 
 /// Extract the standard library's declarations into `OUT_DIR/stdlib.bsym`.
@@ -325,6 +326,7 @@ fn cache_build_id() -> String {
         PathBuf::from("../Cargo.lock"),
         PathBuf::from("../parser/Cargo.toml"),
         PathBuf::from("../diagnostics/Cargo.toml"),
+        PathBuf::from("bsym/Cargo.toml"),
     ] {
         hash_path(&path, &mut hash);
     }
@@ -334,6 +336,7 @@ fn cache_build_id() -> String {
         PathBuf::from("haxe-std"),
         PathBuf::from("../parser/src"),
         PathBuf::from("../diagnostics/src"),
+        PathBuf::from("bsym/src"),
     ] {
         hash_tree(&dir, &mut hash);
     }

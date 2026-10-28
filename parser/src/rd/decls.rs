@@ -654,7 +654,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         }
     }
 
-    fn parse_property_access(&mut self) -> Result<PropertyAccess, ParseError> {
+    pub(super) fn parse_property_access(&mut self) -> Result<PropertyAccess, ParseError> {
         let text = self.stream.current_text().to_string();
         self.stream.advance();
         match text.as_str() {
