@@ -954,7 +954,22 @@ impl StaticSigIndex {
             let parser::ClassFieldKind::Function(func) = &field.kind else {
                 // Data field: var/final/property. First declaration wins
                 // (mirrors the or_insert method tables).
-                if !is_static && fresh {
+                let stored = match &field.kind {
+                    parser::ClassFieldKind::Property { getter, setter, .. } => {
+                        matches!(
+                            getter,
+                            parser::PropertyAccess::Default | parser::PropertyAccess::Null
+                        ) || matches!(
+                            setter,
+                            parser::PropertyAccess::Default | parser::PropertyAccess::Null
+                        ) || field
+                            .meta
+                            .iter()
+                            .any(|meta| meta.name.trim_start_matches(':') == "isVar")
+                    }
+                    _ => true,
+                };
+                if !is_static && fresh && stored {
                     entry.instance_field_count += 1;
                 }
                 continue;
@@ -1207,6 +1222,7 @@ impl StaticSigIndex {
             if !seen.insert(name.clone()) {
                 break; // cyclic `extends` — stop rather than spin
             }
+            self.ensure_indexed_from_known_files(&name);
             let (own, parent, pkg) = self.resolve_class_entry(&name, resolve_file)?;
             total += own;
             next = parent.map(|p| self.qualify_parent(p, &pkg));

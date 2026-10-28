@@ -1,0 +1,6 @@
+[project]
+name = "imported-inheritance-layout"
+entry = "Main.hx"
+
+[build]
+class-paths = ["."]

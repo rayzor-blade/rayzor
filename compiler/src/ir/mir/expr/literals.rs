@@ -170,13 +170,13 @@ impl<'a> HirToMirContext<'a> {
         // The literal's own type is only its first element's, so every
         // element is read.
         let typed_homogeneous = {
-            let kind_tag = |ty: TypeId| -> Option<u8> {
+            let kind_tag = |ty: TypeId| -> Option<(u8, Option<SymbolId>)> {
                 match self.type_table.get(ty).map(|t| &t.kind) {
-                    Some(TypeKind::Int) => Some(1),
-                    Some(TypeKind::Float) => Some(2),
-                    Some(TypeKind::Bool) => Some(3),
-                    Some(TypeKind::String) => Some(4),
-                    Some(TypeKind::Class { symbol_id, .. }) => Some(5 + symbol_id.as_raw() as u8),
+                    Some(TypeKind::Int) => Some((1, None)),
+                    Some(TypeKind::Float) => Some((2, None)),
+                    Some(TypeKind::Bool) => Some((3, None)),
+                    Some(TypeKind::String) => Some((4, None)),
+                    Some(TypeKind::Class { symbol_id, .. }) => Some((5, Some(*symbol_id))),
                     _ => None,
                 }
             };

@@ -132,6 +132,7 @@ impl<'a> HirToMirContext<'a> {
             // Try direct lookup first
             if let Some(HirTypeDecl::Class(parent_class)) =
                 self.current_hir_types.get(&parent_type_id)
+                && parent_symbol_hint.is_none_or(|hint| parent_class.symbol_id == hint)
             {
                 self.add_parent_fields(parent_class, child_type, fields, field_index, walk);
             } else {
@@ -201,27 +202,47 @@ impl<'a> HirToMirContext<'a> {
                     for (field_sym, (class_ty, idx)) in &self.field_index_map {
                         let id_match = *class_ty == parent_type_id
                             || self.class_type_to_symbol.get(class_ty) == Some(&parent_sym);
-                        if !id_match {
-                            continue;
-                        }
                         // Both id tests above are raw-id coincidences across
                         // context-local spaces. Where the field records its
                         // declaring class, that NAME is the stable identity —
                         // use it to reject another class's fields, which would
                         // otherwise land in this object's layout and size.
-                        if let (Some(owner), Some(expected)) = (
+                        let matches = if let (Some(owner), Some(expected)) = (
                             self.field_class_names.get(field_sym),
                             parent_name.as_deref(),
                         ) {
-                            if !Self::class_names_match(owner, expected) {
-                                continue;
-                            }
+                            owner == expected
+                        } else {
+                            id_match
+                        };
+                        if !matches {
+                            continue;
                         }
                         parent_fields.push((*field_sym, *idx));
                     }
                     parent_fields.sort_by_key(|(_, idx)| *idx);
 
-                    for (field_sym, _orig_idx) in &parent_fields {
+                    let declared_count = parent_name.as_deref().and_then(|name| {
+                        let mut index = self.static_sig_index.as_ref()?.borrow_mut();
+                        index.ensure_indexed_from_known_files(name);
+                        index.instance_field_count(name, &|_| None)
+                    });
+                    let slots = parent_fields
+                        .iter()
+                        .map(|(_, index)| *index + 1)
+                        .max()
+                        .unwrap_or(1)
+                        .max(declared_count.map_or(1, |count| count as u32 + 1));
+                    while *field_index < slots {
+                        fields.push(IrField {
+                            name: format!("__inherited_{}", *field_index),
+                            ty: IrType::I64,
+                            offset: None,
+                            shape: Default::default(),
+                        });
+                        *field_index += 1;
+                    }
+                    for (field_sym, orig_idx) in &parent_fields {
                         let field_name = self
                             .symbol_table
                             .get_symbol(*field_sym)
@@ -236,16 +257,14 @@ impl<'a> HirToMirContext<'a> {
 
                         // Re-map this field to the child class with correct index
                         self.field_index_map
-                            .insert(*field_sym, (child_type, *field_index));
+                            .insert(*field_sym, (child_type, *orig_idx));
 
-                        fields.push(IrField {
+                        fields[*orig_idx as usize] = IrField {
                             name: field_name,
                             ty: field_ir_type,
                             offset: None,
                             shape: Default::default(),
-                        });
-
-                        *field_index += 1;
+                        };
                     }
                 }
             }

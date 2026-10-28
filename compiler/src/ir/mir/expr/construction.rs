@@ -771,6 +771,15 @@ impl<'a> HirToMirContext<'a> {
         // registered with an undersized `obj_size` when the parent's fields
         // weren't available, and inherited-field writes would then overflow.
         let obj_size = self.alloc_size_with_inheritance(*class_type, actual_symbol_id, obj_size);
+        // Imported layouts may precede their parents. The complete declaration
+        // supplies a lower bound even when a partial layout was registered.
+        let obj_size = class_qname
+            .and_then(|name| {
+                let mut index = self.static_sig_index.as_ref()?.borrow_mut();
+                index.ensure_indexed_from_known_files(name);
+                index.instance_field_count(name, &|_| None)
+            })
+            .map_or(obj_size, |count| obj_size.max((count as u64 + 1) * 8));
         // Object header: the runtime type_id occupies slot 0, so hand it to the
         // allocator rather than zeroing that slot and overwriting it.
         //
