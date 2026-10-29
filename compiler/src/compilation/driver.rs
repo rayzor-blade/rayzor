@@ -190,7 +190,8 @@ impl CompilationUnit {
 
         // Stage 1.5: Macro expansion (if enabled)
         let t_macro = profile_timer(self.config.profile_typecheck);
-        let macro_expansion_needed = self.config.pipeline_config.enable_macro_expansion
+        let macro_expansion_needed = (self.config.pipeline_config.enable_macro_expansion
+            || self.editor_preview && !retryable_import)
             && self.macro_expansion_may_apply(ast_file);
         // Typer-dependent macro calls parked by expansion; lowering re-expands
         // them at their sites. The expander must outlive `lowering` below.
@@ -201,6 +202,32 @@ impl CompilationUnit {
         > = None;
         let ast_file_owned;
         let ast_file = if macro_expansion_needed {
+            if self.editor_preview {
+                let modules: Vec<_> = self
+                    .loaded_import_haxe_files
+                    .iter()
+                    .filter_map(|file| {
+                        let module = Path::new(&file.filename).file_stem()?.to_str()?;
+                        Some(
+                            file.package
+                                .as_ref()
+                                .map(|package| {
+                                    package
+                                        .path
+                                        .iter()
+                                        .map(String::as_str)
+                                        .chain(std::iter::once(module))
+                                        .collect::<Vec<_>>()
+                                        .join(".")
+                                })
+                                .unwrap_or_else(|| module.to_string()),
+                        )
+                    })
+                    .collect();
+                for module in modules {
+                    let _ = self.load_initialization_macro_modules(&module);
+                }
+            }
             // Macros read user and import files as macro code sees them,
             // `#if macro` members included; the file being compiled keeps
             // its own parse.

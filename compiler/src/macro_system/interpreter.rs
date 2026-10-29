@@ -763,6 +763,7 @@ impl MacroInterpreter {
                                 MacroError::TimeBudgetExceeded { .. }
                                     | MacroError::NeedsTyper { .. }
                                     | MacroError::NeedsModule { .. }
+                                    | MacroError::PreviewPending { .. }
                             ) =>
                     {
                         let err_val = Self::caught_value(&e);
@@ -2904,6 +2905,7 @@ impl MacroInterpreter {
                     }
                 }
                 "saveContent" => {
+                    super::budget::require_effects(location)?;
                     let path = args.first().map(|v| value_to_string(v)).unwrap_or_default();
                     let content = args.get(1).map(|v| value_to_string(v)).unwrap_or_default();
                     std::fs::write(&path, &content).map_err(|e| MacroError::RuntimeError {
@@ -3471,7 +3473,9 @@ impl MacroInterpreter {
             return true;
         }
         match e {
-            MacroError::NeedsTyper { .. } | MacroError::NeedsModule { .. } => false,
+            MacroError::NeedsTyper { .. }
+            | MacroError::NeedsModule { .. }
+            | MacroError::PreviewPending { .. } => false,
             MacroError::Thrown { value, .. } => match short {
                 "String" => matches!(**value, MacroValue::String(_)),
                 "Int" => matches!(**value, MacroValue::Int(_)),

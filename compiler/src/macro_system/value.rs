@@ -151,13 +151,13 @@ pub(crate) struct ReferenceIndex {
 
 impl ReferenceIndex {
     fn summarize(&mut self, value: &MacroValue) -> (u64, u64) {
-        crate::cooperative::checkpoint();
         let Some(key) = value.reference_key() else {
             return (0, 0);
         };
         if let Some(summary) = self.values.get(&key) {
             return (summary.serial, summary.maximum);
         }
+        crate::cooperative::checkpoint();
         let owner = match value {
             MacroValue::Object(value) => ReferenceOwner::Object(Arc::downgrade(value)),
             MacroValue::Array(value) | MacroValue::Enum(_, _, value) => {
@@ -188,17 +188,20 @@ impl ReferenceIndex {
         let mut maximum = serial;
         match value {
             MacroValue::Object(values) => {
-                for value in values.values() {
+                for (i, value) in values.values().enumerate() {
+                    scan_checkpoint(i);
                     maximum = maximum.max(self.summarize(value).1);
                 }
             }
             MacroValue::Array(values) | MacroValue::Enum(_, _, values) => {
-                for value in values.iter() {
+                for (i, value) in values.iter().enumerate() {
+                    scan_checkpoint(i);
                     maximum = maximum.max(self.summarize(value).1);
                 }
             }
             MacroValue::Map(values) => {
-                for (key, value) in values.iter() {
+                for (i, (key, value)) in values.iter().enumerate() {
+                    scan_checkpoint(i);
                     maximum = maximum
                         .max(self.summarize(key).1)
                         .max(self.summarize(value).1);
@@ -215,12 +218,21 @@ impl ReferenceIndex {
     fn target(&mut self, old: &MacroValue) -> u64 {
         self.mutations += 1;
         if self.values.len() > 4096 && self.mutations.is_multiple_of(128) {
+            let mut visited = 0;
             self.values.retain(|_, summary| {
-                crate::cooperative::checkpoint();
+                scan_checkpoint(visited);
+                visited += 1;
                 summary.owner.alive()
             });
         }
         self.summarize(old).0
+    }
+}
+
+#[inline]
+fn scan_checkpoint(index: usize) {
+    if index.is_multiple_of(128) {
+        crate::cooperative::poll();
     }
 }
 
@@ -481,7 +493,6 @@ impl MacroValue {
         new: &Self,
         updates: &mut ReferenceUpdates<'_>,
     ) -> bool {
-        crate::cooperative::checkpoint();
         let same = self.same_reference(old);
         if same {
             *self = new.clone();
@@ -491,6 +502,7 @@ impl MacroValue {
             return false;
         }
         if let Self::Abstract(_, inner) = self {
+            crate::cooperative::checkpoint();
             let mut value = (**inner).clone();
             if value.replace_reference(old, new, updates) {
                 *inner = Arc::new(value);
@@ -499,7 +511,8 @@ impl MacroValue {
             return false;
         }
         if let Self::Function(function) = self {
-            for binding in function.captures.values() {
+            for (i, binding) in function.captures.values().enumerate() {
+                scan_checkpoint(i);
                 updates.replace_binding(binding, old, new);
             }
             return false;
@@ -511,6 +524,7 @@ impl MacroValue {
             Self::Map(value) => (3, Arc::as_ptr(value) as usize),
             _ => return false,
         };
+        crate::cooperative::checkpoint();
         if let Some((_, value, changed)) = updates.values.get(&key) {
             if *changed {
                 *self = value.clone();
@@ -524,7 +538,9 @@ impl MacroValue {
             Self::Object(fields) => {
                 let changes: Vec<_> = fields
                     .iter()
-                    .filter_map(|(key, value)| {
+                    .enumerate()
+                    .filter_map(|(i, (key, value))| {
+                        scan_checkpoint(i);
                         let mut value = value.clone();
                         value
                             .replace_reference(old, new, updates)
@@ -542,6 +558,7 @@ impl MacroValue {
                     .iter()
                     .enumerate()
                     .filter_map(|(i, value)| {
+                        scan_checkpoint(i);
                         let mut value = value.clone();
                         value
                             .replace_reference(old, new, updates)
@@ -557,7 +574,8 @@ impl MacroValue {
             Self::Map(entries) => {
                 let mut replacement = entries.as_ref().clone();
                 let mut changed = false;
-                for (key, value) in &mut replacement {
+                for (i, (key, value)) in replacement.iter_mut().enumerate() {
+                    scan_checkpoint(i);
                     changed |= key.replace_reference(old, new, updates);
                     changed |= value.replace_reference(old, new, updates);
                 }

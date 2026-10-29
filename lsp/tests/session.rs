@@ -89,11 +89,12 @@ impl Session {
         let id = RequestId::from(self.next_id);
         let r = Request::new(id.clone(), method.to_string(), params);
         self.client.sender.send(Message::Request(r)).unwrap();
+        let deadline = std::time::Instant::now() + self.timeout;
         loop {
             match self
                 .client
                 .receiver
-                .recv_timeout(self.timeout)
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
                 .expect("LSP response timeout")
             {
                 Message::Response(resp) if resp.id == id => {
@@ -401,6 +402,158 @@ fn slow_imports_report_their_module_and_yield_to_another_page() {
     );
     drop(release);
     assert!(s.wait_ready("Main.hx", 1).is_empty(), "{:?}", s.diagnostics);
+}
+
+#[test]
+fn parameters_and_inferred_locals_answer_before_import_macros_finish() {
+    let source = "class Main {\n function run(input:String) {\n  var count = 7;\n  var copy = input;\n  var items = Factory.wrap(count);\n  for (item in items) trace(item);\n  { var count = 'shadow'; trace(count); }\n  trace(count);\n  var callback = (value:Int) -> { trace(copy); return value + 1; };\n  var computed = callback(1);\n }\n}";
+    let mut s = Session::start(&[
+        ("Main.hx", source),
+        (
+            "Factory.hx",
+            "@:build(Gate.build()) class Factory { public static function wrap<T>(value:T):Array<T> return [value]; }",
+        ),
+        ("gate.txt", "closed"),
+        (".rayzor/entered", ""),
+        (
+            "Gate.hx",
+            r#"class Gate {
+ public static macro function build():Array<haxe.macro.Expr.Field> {
+  var gate = haxe.macro.Context.resolvePath("gate.txt");
+  sys.io.File.saveContent(haxe.macro.Context.resolvePath(".rayzor/entered"), "waiting");
+  while (sys.io.File.getContent(gate) != "open") {}
+  return haxe.macro.Context.getBuildFields();
+ }
+}"#,
+        ),
+    ]);
+    struct Release(PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, "open");
+        }
+    }
+    let release = Release(s.root.join("gate.txt"));
+    s.timeout = std::time::Duration::from_secs(10);
+    s.notify("textDocument/didOpen", json!({"textDocument":{"uri":s.uri("Main.hx"),"languageId":"haxe","version":1,"text":source}}));
+    let deadline = std::time::Instant::now() + s.timeout;
+    while std::fs::read_to_string(s.root.join(".rayzor/entered")).unwrap() != "waiting" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "full import macro did not start after preview"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    for (line, needle, expected) in [
+        (1, "input", ":String"),
+        (2, "count", ":Int"),
+        (3, "copy", ":String"),
+        (4, "items", ":Array<Int>"),
+        (5, "item in", ":Int"),
+        (6, "trace(count)", ":String"),
+        (7, "count", ":Int"),
+        (8, "callback", "-> Int"),
+        (8, "value", ":Int"),
+        (9, "computed", ":Int"),
+    ] {
+        let text = source.lines().nth(line).unwrap();
+        let column = text.find(needle).unwrap() + if needle.starts_with("trace(") { 6 } else { 0 };
+        let hover = hover_text(&s.request(
+            "textDocument/hover",
+            s.at("Main.hx", line as u32, column as u32 + 1),
+        ));
+        assert!(hover.contains(expected), "{needle}: {hover}");
+    }
+    assert!(
+        !s.activity
+            .iter()
+            .any(|note| note["uri"] == s.uri("Main.hx") && note["state"] == "ready")
+    );
+    assert!(
+        !s.diagnostics
+            .iter()
+            .any(|note| note["uri"] == s.uri("Main.hx"))
+    );
+    let changed = source
+        .replace("input:String", "input:Bool")
+        .replace("count = 7", "count = true");
+    s.notify("textDocument/didChange", json!({"textDocument":{"uri":s.uri("Main.hx"),"version":2},"contentChanges":[{"text":changed}]}));
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 2, 7)));
+    assert!(hover.contains("count:Bool"), "{hover}");
+    drop(release);
+    assert!(s.wait_ready("Main.hx", 2).is_empty(), "{:?}", s.diagnostics);
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 2, 7)));
+    assert!(
+        hover.contains("count:Bool") && !hover.contains("Provisional"),
+        "{hover}"
+    );
+}
+
+#[test]
+#[ignore = "requires the Pocket Studio demo workspace"]
+fn pocket_studio_task_inspector_has_early_local_types() {
+    let root = std::env::var_os("RAYZOR_POCKET_STUDIO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap())
+                .join(".rayde-session/demos/pocket-studio")
+        });
+    let file = "src/ui/TaskInspector.hx";
+    let source = std::fs::read_to_string(root.join(file)).unwrap();
+    let mut s = Session::connect(root, json!({"macroBudgetMs":0}), false);
+    s.timeout = std::time::Duration::from_secs(10);
+    s.notify(
+        "textDocument/didOpen",
+        json!({"textDocument":{"uri":s.uri(file),"languageId":"haxe","version":1,"text":source}}),
+    );
+    for (needle, expected) in [
+        ("description =", "Signal<String>"),
+        ("task=Computed", "Computed<Null<model.Task>>"),
+    ] {
+        let offset = source.find(needle).unwrap();
+        let before = &source[..offset];
+        let line = before.bytes().filter(|&byte| byte == b'\n').count() as u32;
+        let column = before.rsplit('\n').next().unwrap().encode_utf16().count() as u32 + 1;
+        let hover = hover_text(&s.request("textDocument/hover", s.at(file, line, column)));
+        assert!(hover.contains(expected), "{needle}: {hover}");
+    }
+    assert!(
+        !s.activity
+            .iter()
+            .any(|note| note["uri"] == s.uri(file) && note["state"] == "ready")
+    );
+}
+
+#[test]
+fn preview_expression_macros_defer_external_effects_without_catching_them() {
+    let source =
+        "class Main { static function main() { var value = Host.value(); trace(value); } }";
+    let mut s = Session::start(&[
+        ("Main.hx", source),
+        (".rayzor/count", "0"),
+        (
+            "Host.hx",
+            r#"class Host {
+ public static macro function value():haxe.macro.Expr {
+  var path = haxe.macro.Context.resolvePath(".rayzor/count");
+  try {
+   var count = Std.parseInt(sys.io.File.getContent(path));
+   sys.io.File.saveContent(path, Std.string(count + 1));
+  } catch (_:Dynamic) { return macro false; }
+  return macro 7;
+ }
+}"#,
+        ),
+    ]);
+    assert!(s.open("Main.hx").is_empty(), "{:?}", s.diagnostics);
+    assert_eq!(
+        std::fs::read_to_string(s.root.join(".rayzor/count")).unwrap(),
+        "1"
+    );
+    let column = source.find("value =").unwrap() as u32 + 1;
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 0, column)));
+    assert!(hover.contains("value:Int"), "{hover}");
+    assert!(!hover.contains("Provisional"), "{hover}");
 }
 
 #[test]

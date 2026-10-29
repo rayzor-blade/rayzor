@@ -15,6 +15,7 @@ mod diagnostics;
 mod documentation;
 mod editor_cache;
 mod indexing;
+mod local_preview;
 mod project;
 mod server;
 mod session_cache;

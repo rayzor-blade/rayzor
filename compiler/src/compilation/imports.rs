@@ -809,6 +809,13 @@ impl CompilationUnit {
                 Ok(mut ast) => {
                     crate::tast::ast_lowering::module_statics::desugar(&mut ast);
                     crate::tast::ast_lowering::coroutines::desugar(&mut ast);
+                    if self.editor_preview
+                        && !self.user_files.iter().any(|file| {
+                            source_file_identity(&file.filename) == source_file_identity(&filename)
+                        })
+                    {
+                        super::editor_preview::signatures(&mut ast);
+                    }
                     // Indexed here, before anything lowers: a base class needs
                     // to know which of its methods a later file overrides.
                     self.static_sig_index.borrow_mut().index_file(&ast);
@@ -1154,7 +1161,8 @@ impl CompilationUnit {
             }
             // No progress: the survivors are genuine failures; their errors
             // (pushed after first_pass_snapshot during this pass) are kept.
-            if next.len() == before {
+            if next.len() == before || self.editor_preview {
+                // Preview facts need not wait for every signature cycle to settle.
                 // Finish import inference before typing entry bodies. If an
                 // import needs an entry declaration, retry it after the entry.
                 if !deferred_entries.is_empty() {
@@ -1177,7 +1185,7 @@ impl CompilationUnit {
             &mut self.typecheck_timings.import_compile_ms,
             t_import_compile,
         );
-        for name in &final_failures {
+        for name in final_failures.iter().filter(|_| !self.editor_preview) {
             if let Some(errs) = self.last_import_errors.get(name) {
                 eprintln!(
                     "error[IMPORT]: imported module `{}` failed to compile ({} error(s)); \
@@ -1234,7 +1242,9 @@ impl CompilationUnit {
         // files containing macro definitions need to be kept around for the
         // expander's dependency scan.
         // Constant generic classes also need their bodies at each use site.
-        if source.contains("macro ") || source.contains("@:build") || source.contains("@:const") {
+        if source.contains("macro ")
+            || !self.editor_preview && (source.contains("@:build") || source.contains("@:const"))
+        {
             if let Ok(raw_ast) = self.parse_file(&filename, source) {
                 self.loaded_import_haxe_files.push(raw_ast);
             }
@@ -1318,12 +1328,29 @@ impl CompilationUnit {
         let t_compile_call = profile_timer(self.config.profile_typecheck);
         let mut requested = BTreeSet::new();
         let compile_outcome = loop {
-            let attempt = self.compile_file_with_shared_state_ex(
-                &filename,
-                source,
-                is_stdlib,
-                skip_stdlib_merge,
-            );
+            let attempt = if self.editor_preview && !is_user_file {
+                match self.parse_file(&filename, source) {
+                    Ok(mut file) => {
+                        super::editor_preview::signatures(&mut file);
+                        self.static_sig_index.borrow_mut().index_file(&file);
+                        self.compile_ast_with_shared_state(
+                            &filename,
+                            source,
+                            &file,
+                            is_stdlib,
+                            skip_stdlib_merge,
+                        )
+                    }
+                    Err(_) => break Err(Vec::new()),
+                }
+            } else {
+                self.compile_file_with_shared_state_ex(
+                    &filename,
+                    source,
+                    is_stdlib,
+                    skip_stdlib_merge,
+                )
+            };
             let Err(errors) = &attempt else {
                 break attempt;
             };

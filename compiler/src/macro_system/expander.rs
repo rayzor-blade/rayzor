@@ -280,18 +280,23 @@ impl MacroExpander {
         }
 
         // Phase 2: Identify and process @:build/@:autoBuild metadata
-        let build_macros = collect_build_macros(&file);
+        let build_macros = if super::budget::previewing() {
+            Vec::new()
+        } else {
+            collect_build_macros(&file)
+        };
         // `@:autoBuild` applies to the types below its own, which carry no
         // `@:build` of their own.
-        let has_auto_build = file.declarations.iter().any(|d| {
-            let meta = match d {
-                parser::TypeDeclaration::Class(c) => &c.meta,
-                parser::TypeDeclaration::Interface(i) => &i.meta,
-                _ => return false,
-            };
-            meta.iter()
-                .any(|m| m.name == "autoBuild" || m.name == ":autoBuild")
-        });
+        let has_auto_build = !super::budget::previewing()
+            && file.declarations.iter().any(|d| {
+                let meta = match d {
+                    parser::TypeDeclaration::Class(c) => &c.meta,
+                    parser::TypeDeclaration::Interface(i) => &i.meta,
+                    _ => return false,
+                };
+                meta.iter()
+                    .any(|m| m.name == "autoBuild" || m.name == ":autoBuild")
+            });
         if !build_macros.is_empty() || has_auto_build {
             for bm in &build_macros {
                 self.context.diagnostics.push(MacroDiagnostic::info(

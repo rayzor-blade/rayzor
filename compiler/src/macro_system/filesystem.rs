@@ -37,6 +37,7 @@ pub(super) fn call(
         "exists" => MacroValue::Bool(std::path::Path::new(path).exists()),
         "isDirectory" => MacroValue::Bool(std::path::Path::new(path).is_dir()),
         "createDirectory" => {
+            super::budget::require_effects(location)?;
             std::fs::create_dir_all(path).map_err(fail)?;
             MacroValue::Null
         }

@@ -335,6 +335,7 @@ pub struct CompilationUnit {
 
     /// Configuration
     pub config: CompilationConfig,
+    editor_preview: bool,
 
     /// Cache of types that failed to load on-demand (to avoid repeated attempts)
     pub failed_type_loads: BTreeSet<String>,
@@ -633,6 +634,7 @@ mod artifact_cache;
 mod config;
 mod crossmodule;
 mod driver;
+mod editor_preview;
 mod errors;
 mod externs;
 mod imports;
@@ -705,6 +707,7 @@ impl CompilationUnit {
             namespace_resolver,
             import_resolver,
             config,
+            editor_preview: false,
             failed_type_loads: BTreeSet::new(),
             static_sig_index: Rc::new(RefCell::new(
                 crate::tast::sig_index::StaticSigIndex::default(),

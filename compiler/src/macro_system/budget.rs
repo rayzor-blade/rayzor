@@ -9,6 +9,7 @@ thread_local! {
     static TICKS: Cell<u32> = const { Cell::new(0) };
     static ALLOWANCE: Cell<Option<Duration>> = const { Cell::new(None) };
     static IN_MACRO: Cell<bool> = const { Cell::new(false) };
+    static PREVIEW: Cell<bool> = const { Cell::new(false) };
 }
 
 /// A suspended compiler task's macro allowance; paused time is not execution.
@@ -18,6 +19,7 @@ pub struct State {
     allowance: Option<Duration>,
     active: bool,
     ticks: u32,
+    preview: bool,
 }
 
 /// Exchanges the current thread's budget with a task's saved state.
@@ -30,6 +32,38 @@ pub fn replace_state(state: State) -> State {
         allowance: ALLOWANCE.replace(state.allowance),
         active: IN_MACRO.replace(state.active),
         ticks: TICKS.replace(state.ticks),
+        preview: PREVIEW.replace(state.preview),
+    }
+}
+
+pub struct Preview {
+    _budget: Budget,
+    previous: bool,
+}
+
+impl Drop for Preview {
+    fn drop(&mut self) {
+        PREVIEW.set(self.previous);
+    }
+}
+
+/// Provisional inference defers long macros and external effects to full typing.
+pub fn preview() -> Preview {
+    Preview {
+        _budget: limit(Some(Duration::from_millis(100))),
+        previous: PREVIEW.replace(true),
+    }
+}
+
+pub fn previewing() -> bool {
+    PREVIEW.get()
+}
+
+pub fn require_effects(location: crate::tast::SourceLocation) -> Result<(), super::MacroError> {
+    if previewing() {
+        Err(super::MacroError::PreviewPending { location })
+    } else {
+        Ok(())
     }
 }
 
@@ -89,6 +123,21 @@ pub fn exhausted() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_policy_is_scoped_and_follows_its_suspended_task() {
+        assert!(!previewing());
+        {
+            let _preview = preview();
+            assert!(previewing());
+            let suspended = replace_state(State::default());
+            assert!(!previewing());
+            let _ = replace_state(suspended);
+            assert!(previewing());
+        }
+        assert!(!previewing());
+        assert!(ALLOWANCE.get().is_none());
+    }
 
     #[test]
     fn suspended_tasks_keep_separate_allowances_and_invocation_state() {

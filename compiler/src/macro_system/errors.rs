@@ -72,6 +72,9 @@ pub enum MacroError {
         location: SourceLocation,
     },
 
+    /// External macro effects run only during complete editor analysis.
+    PreviewPending { location: SourceLocation },
+
     /// Macro evaluation ran past the time budget set for it
     /// (`budget::limit`). Not catchable by the macro's own try/catch.
     TimeBudgetExceeded { location: SourceLocation },
@@ -149,6 +152,7 @@ impl MacroError {
             MacroError::ContextError { location, .. } => *location,
             MacroError::NeedsTyper { location } => *location,
             MacroError::NeedsModule { location, .. } => *location,
+            MacroError::PreviewPending { location } => *location,
             MacroError::TimeBudgetExceeded { location } => *location,
             MacroError::UndefinedVariable { location, .. } => *location,
             MacroError::UnsupportedOperation { location, .. } => *location,
@@ -197,6 +201,7 @@ impl MacroError {
             MacroError::ContextError { .. } => "E0709",
             MacroError::NeedsTyper { .. } => "E0709",
             MacroError::NeedsModule { .. } => "E0709",
+            MacroError::PreviewPending { .. } => "E0714",
             MacroError::TimeBudgetExceeded { .. } => "E0713",
             MacroError::UndefinedVariable { .. } => "E0710",
             MacroError::UnsupportedOperation { .. } => "E0711",
@@ -263,6 +268,9 @@ impl fmt::Display for MacroError {
             }
             MacroError::NeedsModule { name, .. } => {
                 write!(f, "needs module '{name}' before typing can continue")
+            }
+            MacroError::PreviewPending { .. } => {
+                write!(f, "macro effects are deferred to full editor analysis")
             }
             MacroError::TimeBudgetExceeded { .. } => {
                 write!(f, "macro ran past its time budget and was stopped")

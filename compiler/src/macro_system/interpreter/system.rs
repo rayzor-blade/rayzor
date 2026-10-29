@@ -9,6 +9,7 @@ impl MacroInterpreter {
         args: &[MacroValue],
         location: SourceLocation,
     ) -> Result<std::process::Output, MacroError> {
+        super::super::budget::require_effects(location)?;
         let error = |message: &str| MacroError::TypeError {
             message: format!("{operation}: {message}"),
             location,

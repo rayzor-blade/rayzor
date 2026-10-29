@@ -428,6 +428,18 @@ impl LspContext {
                 && session.can_extend(&filename)
         });
         let reused = reusable.is_some();
+        if reusable
+            .is_none_or(|index| !self.sessions[index].unit.borrow().has_typed_file(&filename))
+            && let Some(input_hash) = self.editor_cache.fingerprint(uri, &self.open_files)
+            && let Ok(Some(snapshot)) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::local_preview::infer(uri, source, config.clone(), &settings.class_paths)
+                }))
+        {
+            let completed = snapshot.names.len();
+            self.editor_cache.publish_partial(uri, input_hash, snapshot);
+            compiler::cooperative::progress("local-types", &filename, completed, None);
+        }
         let mut session = match reusable {
             Some(index) => self.sessions.remove(index).unwrap(),
             None => {
