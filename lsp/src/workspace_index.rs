@@ -246,10 +246,13 @@ impl WorkspaceIndex {
             };
             source
         };
-        self.state
-            .borrow_mut()
-            .files
-            .insert(path, collect(file, source));
+        // Cached or transformed AST spans can differ from the editor source.
+        let entries = declarations(
+            &path,
+            source,
+            profile_defines(&path, &self.defines, &self.profiles),
+        );
+        self.state.borrow_mut().files.insert(path, entries);
     }
 
     pub fn ensure_disk_file(&self, path: &Path) {
@@ -590,6 +593,35 @@ fn declaration_name(declaration: &TypeDeclaration) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_ast_spans_do_not_leak_bodies_into_type_headers() {
+        let mut file = parser::rd::rd_parse(
+            "extern class Box<T> { function new():Void; }",
+            "Box.hx",
+            false,
+            false,
+        )
+        .unwrap();
+        file.input = Some("extern class Box<T> {\n /** Stored value. */ public var value:T;\n public function new():Void;\n}".into());
+        let index = WorkspaceIndex::default();
+        index.ensure_parsed_file(&file);
+        let entry = index.declaration("Box").unwrap();
+        assert!(
+            entry.signature.ends_with("class Box<T>"),
+            "{}",
+            entry.signature
+        );
+        assert!(!entry.signature.contains('{'), "{}", entry.signature);
+        assert_eq!(
+            index
+                .declaration("Box.value")
+                .unwrap()
+                .documentation
+                .as_deref(),
+            Some("Stored value.")
+        );
+    }
 
     #[test]
     fn type_headers_preserve_structure_and_exclude_bodies() {
