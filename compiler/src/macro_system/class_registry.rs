@@ -169,36 +169,41 @@ impl ClassRegistry {
         let Some(view) = &class.source_view else {
             return Some(class);
         };
-        let declarations = view.get_or_init(|| {
-            let path = std::path::PathBuf::from(&class.source_file);
-            let path = path.canonicalize().unwrap_or(path);
-            let source = self
-                .source_overrides
-                .get(&path)
-                .cloned()
-                .or_else(|| std::fs::read_to_string(&path).ok())?;
-            self.dependencies.register_source(&path);
-            self.dependencies.register_content(&path, source.as_bytes());
-            let mut config = self
-                .reflection_config
-                .as_ref()
-                .map(|(_, stdlib, _)| stdlib.clone())
-                .unwrap_or_default();
-            config.defines.insert("macro".into());
-            let mut file = parser::haxe_parser::parse_haxe_file_with_config(
-                &path.to_string_lossy(),
-                &source,
-                true,
-                true,
-                &config,
-            )
-            .ok()?;
-            crate::tast::ast_lowering::module_statics::desugar(&mut file);
-            let mut declarations = ClassRegistry::new();
-            declarations.register_file(&file);
-            Some(Box::new(declarations))
-        });
-        declarations.as_ref()?.find_class(&class.qualified_name)
+        // Source loading can yield to another page requesting the same view.
+        // Publish the completed value without holding the initialization lock.
+        if view.get().is_none() {
+            let declarations = (|| {
+                let path = std::path::PathBuf::from(&class.source_file);
+                let path = path.canonicalize().unwrap_or(path);
+                let source = self
+                    .source_overrides
+                    .get(&path)
+                    .cloned()
+                    .or_else(|| std::fs::read_to_string(&path).ok())?;
+                self.dependencies.register_source(&path);
+                self.dependencies.register_content(&path, source.as_bytes());
+                let mut config = self
+                    .reflection_config
+                    .as_ref()
+                    .map(|(_, stdlib, _)| stdlib.clone())
+                    .unwrap_or_default();
+                config.defines.insert("macro".into());
+                let mut file = parser::haxe_parser::parse_haxe_file_with_config(
+                    &path.to_string_lossy(),
+                    &source,
+                    true,
+                    true,
+                    &config,
+                )
+                .ok()?;
+                crate::tast::ast_lowering::module_statics::desugar(&mut file);
+                let mut declarations = ClassRegistry::new();
+                declarations.register_file(&file);
+                Some(Box::new(declarations))
+            })();
+            let _ = view.set(declarations);
+        }
+        view.get()?.as_ref()?.find_class(&class.qualified_name)
     }
 
     pub(crate) fn find_loaded_class(&self, name: &str) -> Option<&ClassInfo> {
@@ -401,6 +406,7 @@ impl ClassRegistry {
 
     /// Register all classes from a single HaxeFile.
     pub fn register_file(&mut self, file: &HaxeFile) {
+        crate::cooperative::poll();
         self.runtime_short_names.take();
         let mut locations = None;
         let mut file_imports = super::interpreter::build_file_import_map(file);
@@ -449,6 +455,7 @@ impl ClassRegistry {
             .insert(format!("{package_prefix}{module_name}"), members);
         let file_imports = Arc::new(file_imports);
         for decl in &file.declarations {
+            crate::cooperative::checkpoint();
             let (name, access, metadata, fields, is_abstract, is_enum_abstract) = match decl {
                 TypeDeclaration::Class(c) => (
                     &c.name,
@@ -635,6 +642,7 @@ impl ClassRegistry {
         }
 
         for decl in &file.declarations {
+            crate::cooperative::checkpoint();
             if let TypeDeclaration::Typedef(alias) = decl {
                 self.aliases.insert(
                     format!("{package_prefix}{}", alias.name),
@@ -759,6 +767,7 @@ impl ClassRegistry {
                 };
 
                 for field in &class.fields {
+                    crate::cooperative::checkpoint();
                     let is_static = field.modifiers.contains(&Modifier::Static);
                     let is_macro = field.modifiers.contains(&Modifier::Macro);
 

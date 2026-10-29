@@ -7,6 +7,46 @@ thread_local! {
     static HOOK: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
     static TICKS: Cell<u32> = const { Cell::new(0) };
+    static PROGRESS: RefCell<Option<ProgressHook>> = const { RefCell::new(None) };
+}
+
+pub struct Progress<'a> {
+    pub phase: &'static str,
+    pub subject: &'a str,
+    pub completed: usize,
+    pub total: Option<usize>,
+}
+
+type ProgressHook = Rc<dyn Fn(&Progress<'_>)>;
+
+pub struct ProgressGuard(Option<ProgressHook>);
+
+impl Drop for ProgressGuard {
+    fn drop(&mut self) {
+        PROGRESS.with_borrow_mut(|hook| *hook = self.0.take());
+    }
+}
+
+/// Scopes progress to the current host task, including across fiber resumes.
+pub fn observe(hook: ProgressHook) -> ProgressGuard {
+    ProgressGuard(PROGRESS.with_borrow_mut(|current| current.replace(hook)))
+}
+
+/// Publishes one module boundary and gives the scheduler a chance to yield.
+pub fn progress(phase: &'static str, subject: &str, completed: usize, total: Option<usize>) {
+    if !ACTIVE.get() {
+        return;
+    }
+    let hook = PROGRESS.with_borrow(Clone::clone);
+    if let Some(hook) = hook {
+        hook(&Progress {
+            phase,
+            subject,
+            completed,
+            total,
+        });
+    }
+    poll();
 }
 
 pub struct Guard(Option<Rc<dyn Fn()>>);

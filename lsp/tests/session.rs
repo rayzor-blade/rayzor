@@ -335,6 +335,75 @@ fn a_fresh_page_finishes_while_another_pages_macro_is_running() {
 }
 
 #[test]
+fn slow_imports_report_their_module_and_yield_to_another_page() {
+    let main = "/** Available while imports are being typed. */\nclass Main { var dependency:Dependency; }";
+    let mut s = Session::start(&[
+        ("Main.hx", main),
+        ("Dependency.hx", "@:build(Gate.build()) class Dependency {}"),
+        (
+            "Fast.hx",
+            "class Fast { public static var answer:Int = 42; }",
+        ),
+        ("gate.txt", "closed"),
+        (".rayzor/entered", ""),
+        (
+            "Gate.hx",
+            r#"class Gate {
+ public static macro function build():Array<haxe.macro.Expr.Field> {
+  var gate = haxe.macro.Context.resolvePath("gate.txt");
+  sys.io.File.saveContent(haxe.macro.Context.resolvePath(".rayzor/entered"), "waiting");
+  while (sys.io.File.getContent(gate) != "open") {}
+  return haxe.macro.Context.getBuildFields();
+ }
+}"#,
+        ),
+    ]);
+    struct Release(PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, "open");
+        }
+    }
+    let release = Release(s.root.join("gate.txt"));
+    s.timeout = std::time::Duration::from_secs(10);
+    s.notify("textDocument/didOpen", json!({"textDocument":{"uri":s.uri("Main.hx"),"languageId":"haxe","version":1,"text":main}}));
+    let deadline = std::time::Instant::now() + s.timeout;
+    let mut progress = false;
+    while !progress || std::fs::read_to_string(s.root.join(".rayzor/entered")).unwrap() != "waiting"
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "import macro never started"
+        );
+        if let Ok(Message::Notification(note)) = s
+            .client
+            .receiver
+            .recv_timeout(std::time::Duration::from_millis(5))
+        {
+            if note.method == "rayzor/indexProgress"
+                && note.params["phase"] == "import-types"
+                && note.params["subject"] == "Dependency"
+            {
+                assert_eq!(note.params["uri"], s.uri("Main.hx"));
+                assert_eq!(note.params["version"], 1);
+                progress = true;
+            }
+            assert!(!(note.method == "rayzor/analysisStatus" && note.params["state"] == "ready"));
+        }
+    }
+    let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", 1, 7)));
+    assert!(hover.contains("Available while imports"), "{hover}");
+    assert!(s.open("Fast.hx").is_empty(), "{:?}", s.diagnostics);
+    assert!(
+        !s.activity
+            .iter()
+            .any(|note| note["uri"] == s.uri("Main.hx") && note["state"] == "ready")
+    );
+    drop(release);
+    assert!(s.wait_ready("Main.hx", 1).is_empty(), "{:?}", s.diagnostics);
+}
+
+#[test]
 fn a_waiting_request_can_be_cancelled_while_its_page_is_indexing() {
     let s = busy_page_session();
     start_busy_page(&s);

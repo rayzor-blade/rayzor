@@ -19,6 +19,7 @@ pub(crate) struct Task {
     budget: budget::State,
     result: Rc<RefCell<Option<LspContext>>>,
     messages: Connection,
+    progress: crossbeam_channel::Sender<Message>,
 }
 
 /// Unwinds a cancelled stack, releasing its compiler graph and guards.
@@ -29,6 +30,7 @@ impl Task {
         let version = context.document_versions.get(&uri).copied();
         let fingerprint = context.editor_cache.fingerprint(&uri, &context.open_files);
         let (messages, connection) = Connection::memory();
+        let progress = connection.sender.clone();
         let result = Rc::new(RefCell::new(None));
         let output = result.clone();
         let document = uri.clone();
@@ -46,10 +48,20 @@ impl Task {
             budget: Default::default(),
             result,
             messages,
+            progress,
         }
     }
 
     pub fn step(&mut self) -> FiberStep {
+        let sender = self.progress.clone();
+        let uri = self.uri.clone();
+        let version = self.version;
+        let _progress = compiler::cooperative::observe(Rc::new(move |activity| {
+            let _ = sender.send(Message::Notification(lsp_server::Notification::new(
+                "rayzor/indexProgress".into(),
+                serde_json::json!({"uri":uri,"version":version,"phase":activity.phase,"subject":activity.subject,"completed":activity.completed,"total":activity.total}),
+            )));
+        }));
         let started = Rc::new(Cell::new(Instant::now()));
         let clock = started.clone();
         let _hook = compiler::cooperative::install(Rc::new(move || {

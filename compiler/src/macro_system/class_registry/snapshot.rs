@@ -460,6 +460,45 @@ mod tests {
     }
 
     #[test]
+    fn a_yielding_source_view_can_be_loaded_by_another_page() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let directory =
+            std::env::temp_dir().join(format!("rayzor-source-view-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(directory.clone());
+        let path = directory.join("Shared.hx");
+        let source = "class Shared { public static function value():Int return 42; }";
+        std::fs::write(&path, source).unwrap();
+        let file = parser::parse_haxe_file(&path.to_string_lossy(), source, true).unwrap();
+        let mut classes = ClassRegistry::new();
+        classes.register_file(&file);
+        classes.classes.get_mut("Shared").unwrap().source_view = Some(Default::default());
+        let classes = Rc::new(classes);
+        let other = classes.clone();
+        let resumed = Rc::new(Cell::new(false));
+        let observed = resumed.clone();
+        let _hook = crate::cooperative::install(Rc::new(move || {
+            if !observed.replace(true) {
+                let _hook = crate::cooperative::install(Rc::new(|| {}));
+                assert!(other.find_executable_class("Shared").is_some());
+            }
+        }));
+        let first = classes.find_executable_class("Shared").unwrap() as *const ClassInfo;
+        assert!(resumed.get());
+        assert_eq!(
+            first,
+            classes.find_executable_class("Shared").unwrap() as *const ClassInfo
+        );
+    }
+
+    #[test]
     fn portable_types_keep_optional_fields_and_generic_constraints() {
         let file = parser::parse_haxe_file("Types.hx", "typedef Props = { ?label:String; required:Null<Int>; }; class Factory { public static function make<T:{length:Int}>(value:T):T return value; }", true).unwrap();
         let symbols = bsym::extract_type_info_from_ast(&file);

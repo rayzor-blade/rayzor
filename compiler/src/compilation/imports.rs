@@ -783,6 +783,12 @@ impl CompilationUnit {
             }
 
             // Read and parse to extract imports
+            crate::cooperative::progress(
+                "import-discovery",
+                &qualified_path,
+                all_files.len(),
+                None,
+            );
             let source = match self.read_source(&file_path) {
                 Ok(s) => s,
                 Err(_) => continue,
@@ -809,15 +815,27 @@ impl CompilationUnit {
                     self.discovery_indexed
                         .insert(source_file_identity(&filename));
                     // Type identities precede bodies that resolve module subtypes.
-                    let mut headers = ast.clone();
-                    headers.declarations.retain(|decl| {
-                        matches!(
-                            decl,
-                            parser::TypeDeclaration::Interface(_)
-                                | parser::TypeDeclaration::Enum(_)
-                        )
-                    });
-                    headers.module_fields.clear();
+                    let headers = parser::HaxeFile {
+                        declarations: ast
+                            .declarations
+                            .iter()
+                            .filter(|decl| {
+                                matches!(
+                                    decl,
+                                    parser::TypeDeclaration::Interface(_)
+                                        | parser::TypeDeclaration::Enum(_)
+                                )
+                            })
+                            .cloned()
+                            .collect(),
+                        module_fields: Vec::new(),
+                        filename: ast.filename.clone(),
+                        input: ast.input.clone(),
+                        package: ast.package.clone(),
+                        imports: ast.imports.clone(),
+                        using: ast.using.clone(),
+                        span: ast.span,
+                    };
                     if !headers.declarations.is_empty() {
                         self.pre_register_ast_file_types(&headers)?;
                         type_headers.push(headers);
@@ -880,6 +898,7 @@ impl CompilationUnit {
         // Method declarations supply the slot ABI to implementations that
         // compile before the interface's module in a circular import.
         for headers in &type_headers {
+            crate::cooperative::poll();
             self.predeclare_import_signatures(headers)?;
         }
 
@@ -1086,7 +1105,9 @@ impl CompilationUnit {
         let first_pass_snapshot = self.collected_diagnostics.len();
         let mut retry_queue: Vec<(String, PathBuf, String, Vec<String>, usize)> = Vec::new();
         let mut deferred_entries = Vec::new();
-        for name in compile_order {
+        let total = compile_order.len();
+        for (completed, name) in compile_order.into_iter().enumerate() {
+            crate::cooperative::progress("import-types", &name, completed, Some(total));
             if let Some((file_path, source, deps)) = all_files.remove(&name) {
                 if user_paths.contains(&source_file_identity(&file_path.to_string_lossy())) {
                     deferred_entries.push((name, file_path, source, deps));
@@ -1123,7 +1144,10 @@ impl CompilationUnit {
             self.collected_diagnostics.truncate(first_pass_snapshot);
             let before = pending.len();
             let mut next = Vec::new();
-            for (name, file_path, source, deps) in std::mem::take(&mut pending) {
+            for (completed, (name, file_path, source, deps)) in
+                std::mem::take(&mut pending).into_iter().enumerate()
+            {
+                crate::cooperative::progress("import-retry", &name, completed, Some(before));
                 if !self.try_compile_import(&name, &file_path, &source, deps.clone()) {
                     next.push((name, file_path, source, deps));
                 }
@@ -1187,6 +1211,7 @@ impl CompilationUnit {
         source: &str,
         deps: Vec<String>,
     ) -> bool {
+        crate::cooperative::poll();
         let filename = file_path.to_string_lossy().to_string();
 
         // Skip if already compiled

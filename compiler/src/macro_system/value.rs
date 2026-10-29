@@ -151,6 +151,7 @@ pub(crate) struct ReferenceIndex {
 
 impl ReferenceIndex {
     fn summarize(&mut self, value: &MacroValue) -> (u64, u64) {
+        crate::cooperative::checkpoint();
         let Some(key) = value.reference_key() else {
             return (0, 0);
         };
@@ -214,7 +215,10 @@ impl ReferenceIndex {
     fn target(&mut self, old: &MacroValue) -> u64 {
         self.mutations += 1;
         if self.values.len() > 4096 && self.mutations.is_multiple_of(128) {
-            self.values.retain(|_, summary| summary.owner.alive());
+            self.values.retain(|_, summary| {
+                crate::cooperative::checkpoint();
+                summary.owner.alive()
+            });
         }
         self.summarize(old).0
     }
@@ -477,6 +481,7 @@ impl MacroValue {
         new: &Self,
         updates: &mut ReferenceUpdates<'_>,
     ) -> bool {
+        crate::cooperative::checkpoint();
         let same = self.same_reference(old);
         if same {
             *self = new.clone();
@@ -947,5 +952,31 @@ mod reference_index_tests {
             index.target(&target);
         }
         assert!(index.values.len() < 4096 + 128);
+    }
+
+    #[test]
+    fn large_reference_scans_yield_without_changing_aliases() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let old = object(1);
+        let new = object(2);
+        let mut values: Vec<_> = (0..4096).map(MacroValue::Int).collect();
+        values.push(old.clone());
+        let mut parent = MacroValue::Array(Arc::new(values));
+        let polls = Rc::new(Cell::new(0));
+        let observed = polls.clone();
+        let _hook = crate::cooperative::install(Rc::new(move || {
+            observed.set(observed.get() + 1);
+        }));
+        let mut index = ReferenceIndex::default();
+        index.summarize(&parent);
+        assert!(polls.replace(0) > 0, "summarizing a large store must yield");
+        assert!(parent.replace_reference(&old, &new, &mut ReferenceUpdates::new()));
+        assert!(polls.get() > 0, "updating a large store must yield");
+        let MacroValue::Array(values) = parent else {
+            unreachable!()
+        };
+        assert!(values.last().unwrap().same_reference(&new));
+        assert_eq!(values[2048], MacroValue::Int(2048));
     }
 }
