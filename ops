@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1793299624,"nonce":"ZGI3X2zNLNwu+34m87F6Zzt8DBY=","message":"Committed as cdd1b35b. This closes the module-yield/progress scope. Provisional local and expression type inference before full import completion is being handled separately.","files":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":4,"timestamp":1793299627,"nonce":"BbBZI35Vkcfa31MgyMf45/8ESN8=","status":2}]}
