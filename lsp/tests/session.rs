@@ -532,10 +532,33 @@ fn pocket_studio_task_inspector_has_early_local_types() {
 }
 
 #[test]
+fn standard_library_type_names_have_hovers_in_packaged_modules() {
+    let source = "package demo;\nclass Main {\n var names:Array<String> = [];\n function make(value:String):Array<String> return new Array<String>();\n}";
+    let mut s = Session::start(&[("demo/Main.hx", source)]);
+    assert!(s.open("demo/Main.hx").is_empty(), "{:?}", s.diagnostics);
+    for name in ["Array", "String"] {
+        for (offset, _) in source.match_indices(name) {
+            let before = &source[..offset];
+            let line = before.bytes().filter(|&byte| byte == b'\n').count() as u32;
+            let column = before.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
+            let hover =
+                hover_text(&s.request("textDocument/hover", s.at("demo/Main.hx", line, column)));
+            assert!(
+                hover.contains(name) && hover.contains("```haxe"),
+                "{name} at {line}:{column}: {hover}"
+            );
+            if name == "String" {
+                assert!(hover.contains("The basic String class."), "{hover}");
+            }
+        }
+    }
+}
+
+#[test]
 fn referenced_api_types_and_members_hover_before_indexing_finishes() {
-    let source = "import api.Box;\nimport api.Model.Record;\nimport api.Model.View;\nimport api.Model.Scale;\nimport api.Model.Size;\nimport Slow;\nclass Main {\n var value:Record;\n function render(input:View):String {\n  var box = new Box<String>('value');\n  var text = box.get();\n  box.inferred();\n  var selected:Record = box.record();\n  var scale:Scale = Scale.Small;\n  return api.Tools.describe(selected, Size.Md);\n }\n}";
+    let source = "package demo;\nimport api.Box;\nimport api.Model.Record;\nimport api.Model.View;\nimport api.Model.Scale;\nimport api.Model.Size;\nimport Slow;\nclass Main {\n var names:Array<String> = [];\n var value:Record;\n function render(input:View):String {\n  var box = new Box<String>('value');\n  var text = box.get();\n  box.inferred();\n  var selected:Record = box.record();\n  var scale:Scale = Scale.Small;\n  return api.Tools.describe(selected, Size.Md);\n }\n}";
     let mut s = Session::start(&[
-        ("Main.hx", source),
+        ("demo/Main.hx", source),
         (
             "api/Box.hx",
             "package api;\n/** Stores a typed value. */\nclass Box<T> {\n /** Creates a typed box. */ public function new(value:T) {}\n /** Reads the stored value. */ public function get():T return cast null;\n /** Inferred result. */ public function inferred() return 1;\n /** Returns a record. */ public function record():Model.Record return {name:'value'};\n}",
@@ -571,7 +594,7 @@ fn referenced_api_types_and_members_hover_before_indexing_finishes() {
     }
     let release = Release(s.root.join("gate.txt"));
     s.timeout = std::time::Duration::from_secs(10);
-    s.notify("textDocument/didOpen", json!({"textDocument":{"uri":s.uri("Main.hx"),"languageId":"haxe","version":1,"text":source}}));
+    s.notify("textDocument/didOpen", json!({"textDocument":{"uri":s.uri("demo/Main.hx"),"languageId":"haxe","version":1,"text":source}}));
     let deadline = std::time::Instant::now() + s.timeout;
     while std::fs::read_to_string(s.root.join(".rayzor/entered")).unwrap() != "waiting" {
         assert!(
@@ -582,6 +605,8 @@ fn referenced_api_types_and_members_hover_before_indexing_finishes() {
     }
     for (needle, delta, expected) in [
         ("api.Box", 4, "Stores a typed value."),
+        ("Array<String>", 0, "class Array<T>"),
+        ("String>", 0, "The basic String class."),
         ("value:Record", 6, "Record details."),
         ("input:View", 6, "View contract."),
         ("new Box", 4, "new Box("),
@@ -598,7 +623,8 @@ fn referenced_api_types_and_members_hover_before_indexing_finishes() {
         let before = &source[..offset];
         let line = before.bytes().filter(|&byte| byte == b'\n').count() as u32;
         let column = before.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
-        let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", line, column)));
+        let hover =
+            hover_text(&s.request("textDocument/hover", s.at("demo/Main.hx", line, column)));
         assert!(hover.contains(expected), "{needle}: {hover}");
         assert!(
             !hover.contains("Dynamic") && !hover.contains("Unknown"),
@@ -608,10 +634,14 @@ fn referenced_api_types_and_members_hover_before_indexing_finishes() {
     assert!(
         !s.activity
             .iter()
-            .any(|note| note["uri"] == s.uri("Main.hx") && note["state"] == "ready")
+            .any(|note| note["uri"] == s.uri("demo/Main.hx") && note["state"] == "ready")
     );
     drop(release);
-    assert!(s.wait_ready("Main.hx", 1).is_empty(), "{:?}", s.diagnostics);
+    assert!(
+        s.wait_ready("demo/Main.hx", 1).is_empty(),
+        "{:?}",
+        s.diagnostics
+    );
 }
 
 #[test]

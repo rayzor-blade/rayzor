@@ -104,6 +104,10 @@ pub(crate) fn record(
             (!name.contains('.')).then(|| (name.to_string(), path.clone()))
         })
         .collect();
+    // Root types are implicitly visible; the current package takes precedence.
+    for path in types.keys().filter(|path| !path.contains('.')) {
+        visible.entry(path.clone()).or_insert_with(|| path.clone());
+    }
     for import in &file.imports {
         let path = import.path.join(".");
         match &import.mode {
