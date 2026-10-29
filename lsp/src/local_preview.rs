@@ -13,6 +13,7 @@ use serde_json::json;
 use std::{collections::HashSet, path::PathBuf};
 
 pub(crate) fn infer(
+    context: &crate::context::LspContext,
     uri: &str,
     source: &str,
     config: CompilationConfig,
@@ -21,6 +22,10 @@ pub(crate) fn infer(
     let started = std::time::Instant::now();
     let _preview = compiler::macro_system::budget::preview();
     let filename = crate::context::uri_to_path(uri);
+    let mut preprocessor = parser::preprocessor::PreprocessorConfig::default();
+    preprocessor.add_defines(config.user_defines.iter().chain(&config.extra_defines));
+    preprocessor.defines.insert("eval".into());
+    let text = parser::preprocessor::preprocess(source, &preprocessor);
     let mut unit = CompilationUnit::new_editor_preview(config);
     for path in paths {
         unit.add_source_path(path.clone());
@@ -36,6 +41,7 @@ pub(crate) fn infer(
             eprintln!("lsp-preview-error: {}", error.message);
         }
     }
+    context.record_editor_references(&filename, &text, &mut unit);
     let file_id = unit.file_id_of(&filename)?;
     let index = analysis::FileSymbolIndex::build(
         &unit.symbol_table,
@@ -50,14 +56,26 @@ pub(crate) fn infer(
         let Some(symbol) = unit.symbol_table.get_symbol(id) else {
             continue;
         };
-        if !matches!(
+        use compiler::tast::symbols::SymbolKind;
+        let contract = matches!(
             symbol.kind,
-            compiler::tast::symbols::SymbolKind::Variable
-                | compiler::tast::symbols::SymbolKind::Parameter
-                | compiler::tast::symbols::SymbolKind::Field
-                | compiler::tast::symbols::SymbolKind::Property
-                | compiler::tast::symbols::SymbolKind::EnumVariant
-        ) {
+            SymbolKind::Class
+                | SymbolKind::Interface
+                | SymbolKind::Abstract
+                | SymbolKind::Enum
+                | SymbolKind::TypeAlias
+                | SymbolKind::Function
+        );
+        if !contract
+            && !matches!(
+                symbol.kind,
+                compiler::tast::symbols::SymbolKind::Variable
+                    | compiler::tast::symbols::SymbolKind::Parameter
+                    | compiler::tast::symbols::SymbolKind::Field
+                    | compiler::tast::symbols::SymbolKind::Property
+                    | compiler::tast::symbols::SymbolKind::EnumVariant
+            )
+        {
             continue;
         }
         let offset = symbol.definition_location.byte_offset as usize;
@@ -68,7 +86,7 @@ pub(crate) fn infer(
             .and_then(|source| source.strip_prefix(name))
             .is_some_and(|after| after.trim_start().starts_with(':'));
         let type_id = index.type_at(line, column).unwrap_or(symbol.type_id);
-        let resolved = known(type_id, &unit, explicit, &mut HashSet::new());
+        let resolved = contract || known(type_id, &unit, explicit, &mut HashSet::new());
         if trace {
             eprintln!(
                 "lsp-preview-name: {line}:{column} {name}:{} resolved={resolved}",
@@ -83,15 +101,9 @@ pub(crate) fn infer(
         if !resolved {
             continue;
         }
-        let Some(symbol) = analysis::symbol_at_use(&unit, &index, source, line, column, id) else {
-            continue;
-        };
-        let Some(mut hover) = analysis::format_hover_symbol(
-            &symbol,
-            &unit.symbol_table,
-            &unit.type_table,
-            &unit.string_interner,
-        ) else {
+        let Some(mut hover) =
+            context.render_hover(&unit, &index, source, id, (line, column), contract)
+        else {
             continue;
         };
         hover.push_str("\n\n*Provisional while indexing.*");

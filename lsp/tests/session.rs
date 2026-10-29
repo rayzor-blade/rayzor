@@ -509,6 +509,13 @@ fn pocket_studio_task_inspector_has_early_local_types() {
     for (needle, expected) in [
         ("description =", "Signal<String>"),
         ("task=Computed", "Computed<Null<model.Task>>"),
+        ("Component;", "class Component"),
+        ("Signal;", "abstract Signal"),
+        ("Computed;", "abstract Computed"),
+        ("Computed.make", "abstract Computed"),
+        ("Signal.make", "abstract Signal"),
+        ("BoardStore;", "class BoardStore"),
+        ("current()", "current():Null<model.Task>"),
     ] {
         let offset = source.find(needle).unwrap();
         let before = &source[..offset];
@@ -522,6 +529,89 @@ fn pocket_studio_task_inspector_has_early_local_types() {
             .iter()
             .any(|note| note["uri"] == s.uri(file) && note["state"] == "ready")
     );
+}
+
+#[test]
+fn referenced_api_types_and_members_hover_before_indexing_finishes() {
+    let source = "import api.Box;\nimport api.Model.Record;\nimport api.Model.View;\nimport api.Model.Scale;\nimport api.Model.Size;\nimport Slow;\nclass Main {\n var value:Record;\n function render(input:View):String {\n  var box = new Box<String>('value');\n  var text = box.get();\n  box.inferred();\n  var selected:Record = box.record();\n  var scale:Scale = Scale.Small;\n  return api.Tools.describe(selected, Size.Md);\n }\n}";
+    let mut s = Session::start(&[
+        ("Main.hx", source),
+        (
+            "api/Box.hx",
+            "package api;\n/** Stores a typed value. */\nclass Box<T> {\n /** Creates a typed box. */ public function new(value:T) {}\n /** Reads the stored value. */ public function get():T return cast null;\n /** Inferred result. */ public function inferred() return 1;\n /** Returns a record. */ public function record():Model.Record return {name:'value'};\n}",
+        ),
+        (
+            "api/Model.hx",
+            "package api;\nclass Model {}\n/** Record details. */ typedef Record = {name:String};\n/** View contract. */ interface View {}\n/** Scale choices. */ enum abstract Scale(Int) from Int to Int { var Small = 1; }\n/** Size choices. */ enum Size { Md; Lg; }",
+        ),
+        (
+            "api/Tools.hx",
+            "package api;\nclass Tools { /** Describes a record. */ public static function describe(value:Model.Record, size:Model.Size):String return value.name; }",
+        ),
+        ("Slow.hx", "@:build(Gate.build()) class Slow {}"),
+        ("gate.txt", "closed"),
+        (".rayzor/entered", ""),
+        (
+            "Gate.hx",
+            r#"class Gate {
+ public static macro function build():Array<haxe.macro.Expr.Field> {
+  var gate = haxe.macro.Context.resolvePath("gate.txt");
+  sys.io.File.saveContent(haxe.macro.Context.resolvePath(".rayzor/entered"), "waiting");
+  while (sys.io.File.getContent(gate) != "open") {}
+  return haxe.macro.Context.getBuildFields();
+ }
+}"#,
+        ),
+    ]);
+    struct Release(PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, "open");
+        }
+    }
+    let release = Release(s.root.join("gate.txt"));
+    s.timeout = std::time::Duration::from_secs(10);
+    s.notify("textDocument/didOpen", json!({"textDocument":{"uri":s.uri("Main.hx"),"languageId":"haxe","version":1,"text":source}}));
+    let deadline = std::time::Instant::now() + s.timeout;
+    while std::fs::read_to_string(s.root.join(".rayzor/entered")).unwrap() != "waiting" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "full dependency did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    for (needle, delta, expected) in [
+        ("api.Box", 4, "Stores a typed value."),
+        ("value:Record", 6, "Record details."),
+        ("input:View", 6, "View contract."),
+        ("new Box", 4, "new Box("),
+        ("box.get", 4, "Reads the stored value."),
+        ("box.get", 4, "get():String"),
+        ("box.inferred", 4, "function inferred()"),
+        ("box.record", 4, "Returns a record."),
+        ("scale:Scale", 6, "Scale choices."),
+        ("api.Tools.describe", 4, "class Tools"),
+        ("api.Tools.describe", 10, "Describes a record."),
+        ("Size.Md", 0, "Size choices."),
+    ] {
+        let offset = source.find(needle).unwrap() + delta;
+        let before = &source[..offset];
+        let line = before.bytes().filter(|&byte| byte == b'\n').count() as u32;
+        let column = before.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
+        let hover = hover_text(&s.request("textDocument/hover", s.at("Main.hx", line, column)));
+        assert!(hover.contains(expected), "{needle}: {hover}");
+        assert!(
+            !hover.contains("Dynamic") && !hover.contains("Unknown"),
+            "{needle}: {hover}"
+        );
+    }
+    assert!(
+        !s.activity
+            .iter()
+            .any(|note| note["uri"] == s.uri("Main.hx") && note["state"] == "ready")
+    );
+    drop(release);
+    assert!(s.wait_ready("Main.hx", 1).is_empty(), "{:?}", s.diagnostics);
 }
 
 #[test]

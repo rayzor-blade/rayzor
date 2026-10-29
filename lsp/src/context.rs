@@ -433,7 +433,13 @@ impl LspContext {
             && let Some(input_hash) = self.editor_cache.fingerprint(uri, &self.open_files)
             && let Ok(Some(snapshot)) =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::local_preview::infer(uri, source, config.clone(), &settings.class_paths)
+                    crate::local_preview::infer(
+                        self,
+                        uri,
+                        source,
+                        config.clone(),
+                        &settings.class_paths,
+                    )
                 }))
         {
             let completed = snapshot.names.len();
@@ -685,47 +691,7 @@ impl LspContext {
         );
         preprocessor.defines.insert("eval".into());
         let text = parser::preprocessor::preprocess(source, &preprocessor);
-        if let Ok(file) = parser::rd::rd_parse(&text, &filename, false, false) {
-            FileSymbolIndex::record_source_declarations(&file, &text, file_id, &mut unit);
-            crate::structural_fields::record(&file, &text, file_id, &mut unit);
-            crate::type_references::record(&file, &text, file_id, &mut unit, &self.workspace_index);
-        }
-        crate::documentation::record(&mut unit);
-        for file in unit.stdlib_files.iter().chain(&unit.user_files) {
-            self.workspace_index.ensure_parsed_file(file);
-        }
-        // Imported placeholders may still carry a provisional class kind.
-        // Source declarations determine their editor presentation.
-        let source_types = self.workspace_index.type_identities();
-        let declaration_kinds: Vec<_> = unit
-            .symbol_table
-            .all_symbols()
-            .filter(|symbol| {
-                matches!(
-                    symbol.kind,
-                    compiler::tast::symbols::SymbolKind::Class
-                        | compiler::tast::symbols::SymbolKind::Interface
-                        | compiler::tast::symbols::SymbolKind::Abstract
-                        | compiler::tast::symbols::SymbolKind::Enum
-                        | compiler::tast::symbols::SymbolKind::TypeAlias
-                )
-            })
-            .filter_map(|symbol| {
-                let qualified = symbol.qualified_name.unwrap_or_else(|| {
-                    unit.symbol_table.build_qualified_name(
-                        symbol.id,
-                        &unit.scope_tree,
-                        &unit.string_interner,
-                    )
-                });
-                let name = unit.string_interner.get(qualified)?;
-                let kind = source_types.get(name)?.kind;
-                Some((symbol.id, kind))
-            })
-            .collect();
-        for (id, kind) in declaration_kinds {
-            unit.symbol_table.get_symbol_mut(id).unwrap().kind = kind;
-        }
+        self.record_editor_references(&filename, &text, &mut unit);
         let index = FileSymbolIndex::build(
             &unit.symbol_table,
             &unit.string_interner,
@@ -1052,22 +1018,92 @@ impl LspContext {
         Some((a, a.index.find_symbol_at(line, col)?))
     }
 
+    pub(crate) fn record_editor_references(
+        &self,
+        filename: &str,
+        text: &str,
+        unit: &mut CompilationUnit,
+    ) {
+        let file_id = unit.file_id_of(filename).unwrap_or(u32::MAX);
+        if let Ok(file) = parser::rd::rd_parse(text, filename, false, false) {
+            FileSymbolIndex::record_source_declarations(&file, text, file_id, unit);
+            crate::structural_fields::record(&file, text, file_id, unit);
+            crate::type_references::record(&file, text, file_id, unit, &self.workspace_index);
+        }
+        crate::documentation::record(unit);
+        for file in unit.stdlib_files.iter().chain(&unit.user_files) {
+            self.workspace_index.ensure_parsed_file(file);
+        }
+        // Imported placeholders may still carry a provisional class kind.
+        // Source declarations determine their editor presentation.
+        let source_types = self.workspace_index.type_identities();
+        let declaration_kinds: Vec<_> = unit
+            .symbol_table
+            .all_symbols()
+            .filter(|symbol| {
+                matches!(
+                    symbol.kind,
+                    compiler::tast::symbols::SymbolKind::Class
+                        | compiler::tast::symbols::SymbolKind::Interface
+                        | compiler::tast::symbols::SymbolKind::Abstract
+                        | compiler::tast::symbols::SymbolKind::Enum
+                        | compiler::tast::symbols::SymbolKind::TypeAlias
+                )
+            })
+            .filter_map(|symbol| {
+                let qualified = symbol.qualified_name.unwrap_or_else(|| {
+                    unit.symbol_table.build_qualified_name(
+                        symbol.id,
+                        &unit.scope_tree,
+                        &unit.string_interner,
+                    )
+                });
+                let name = unit.string_interner.get(qualified)?;
+                let kind = source_types.get(name)?.kind;
+                Some((symbol.id, kind))
+            })
+            .collect();
+        for (id, kind) in declaration_kinds {
+            unit.symbol_table.get_symbol_mut(id).unwrap().kind = kind;
+        }
+    }
+
     /// Look up type/doc info for a symbol at a given position.
     pub fn hover_info(&self, uri: &str, line: u32, col: u32) -> Option<String> {
         let (a, sym_id) = self.symbol_at(uri, line, col)?;
         let unit = a.unit.borrow();
-        let symbol = analysis::symbol_at_use(
+        self.render_hover(
             &unit,
             &a.index,
             self.open_files.get(uri)?,
-            line,
-            col,
             sym_id,
-        )?;
+            (line, col),
+            false,
+        )
+    }
+
+    pub(crate) fn render_hover(
+        &self,
+        unit: &CompilationUnit,
+        index: &FileSymbolIndex,
+        source: &str,
+        sym_id: SymbolId,
+        position: (u32, u32),
+        declared_signature: bool,
+    ) -> Option<String> {
+        let (line, col) = position;
+        let symbol = analysis::symbol_at_use(unit, index, source, line, col, sym_id)?;
+        let inferred_return = declared_signature && {
+            let types = unit.type_table.borrow();
+            types.get(symbol.type_id).is_some_and(|ty| {
+                matches!(&ty.kind, compiler::tast::TypeKind::Function { return_type, .. }
+                    if types.get(*return_type).is_some_and(|ty|
+                        matches!(ty.kind, compiler::tast::TypeKind::Dynamic)))
+            })
+        };
         let mut constructor_signature = None;
-        if let Some(source) = self.open_files.get(uri)
-            && analysis::is_constructor_name(source, line, col)
-            && let Some(constructor) = analysis::constructor_symbol(&unit, symbol.type_id)
+        if analysis::is_constructor_name(source, line, col)
+            && let Some(constructor) = analysis::constructor_symbol(unit, symbol.type_id)
                 .and_then(|id| unit.symbol_table.get_symbol(id))
         {
             let ty = unit.receiver_member_type(constructor.type_id, symbol.type_id);
@@ -1107,15 +1143,13 @@ impl LspContext {
             .get(qualified)
             .and_then(|name| self.workspace_index.declaration(name))
             .or_else(|| {
-                let text = self.open_files.get(uri)?;
-                let (rline, rcol, _) = analysis::receiver_before(text, line, col)?;
-                let receiver = a.index.find_symbol_at(rline, rcol)?;
-                let receiver_type = a
-                    .index
+                let (rline, rcol, _) = analysis::receiver_before(source, line, col)?;
+                let receiver = index.find_symbol_at(rline, rcol)?;
+                let receiver_type = index
                     .type_at(rline, rcol)
                     .unwrap_or(unit.symbol_table.get_symbol(receiver)?.type_id);
                 let owner =
-                    crate::structural_fields::alias_owner(receiver_type, &unit).or_else(|| {
+                    crate::structural_fields::alias_owner(receiver_type, unit).or_else(|| {
                         analysis::class_of_type(
                             receiver_type,
                             &unit.symbol_table,
@@ -1151,7 +1185,7 @@ impl LspContext {
             }
             if (declaration.type_kind.is_some()
                 || (symbol.kind == compiler::tast::symbols::SymbolKind::Function
-                    && hover.contains("*Signature not yet resolved.*")
+                    && (inferred_return || hover.contains("*Signature not yet resolved.*"))
                     && declaration.signature.contains("function ")))
                 && let Some(end) = hover.find("\n```")
             {
