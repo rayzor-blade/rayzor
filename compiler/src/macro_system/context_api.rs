@@ -42,6 +42,15 @@ pub trait MacroTyper {
     /// the module being lowered (private module types included).
     fn resolve_type_by_name(&mut self, name: &str) -> Result<TypeId, String>;
 
+    fn module_for_unresolved_type(&mut self, _name: &str) -> Option<String> {
+        None
+    }
+
+    /// Make a pending `Context.defineType` declaration visible to type queries.
+    fn resolve_defined_type(&mut self, definition: &DefinedType) -> Result<TypeId, String> {
+        self.resolve_type_by_name(&definition.qualified_name())
+    }
+
     /// `Context.makeMonomorph` — a fresh, unbound type variable. Each call
     /// must return a DISTINCT id; bindings are the context's to keep.
     fn fresh_monomorph(&mut self) -> TypeId;
@@ -348,6 +357,17 @@ pub struct DefinedType {
     pub type_params: Vec<parser::TypeParam>,
     /// Position where defineType was called
     pub pos: SourceLocation,
+}
+
+impl DefinedType {
+    pub(crate) fn qualified_name(&self) -> String {
+        self.pack
+            .iter()
+            .chain(std::iter::once(&self.name))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(".")
+    }
 }
 
 /// Kind of a compile-time defined type
@@ -760,12 +780,34 @@ impl MacroContext {
         };
         match typer.get().resolve_type_by_name(name) {
             Ok(id) => Ok(MacroValue::Type(id)),
-            Err(message) => Err(MacroError::ContextError {
-                method: "getType".to_string(),
+            Err(message) => match typer.get().module_for_unresolved_type(name) {
+                Some(name) => Err(MacroError::NeedsModule { name, location }),
+                None => Err(MacroError::ContextError {
+                    method: "getType".to_string(),
+                    message,
+                    location,
+                }),
+            },
+        }
+    }
+
+    pub(crate) fn get_defined_type(
+        &mut self,
+        definition: &DefinedType,
+        location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        let Some(typer) = self.typer.as_mut() else {
+            return Err(MacroError::NeedsTyper { location });
+        };
+        typer
+            .get()
+            .resolve_defined_type(definition)
+            .map(MacroValue::Type)
+            .map_err(|message| MacroError::ContextError {
+                method: "getType".into(),
                 message,
                 location,
-            }),
-        }
+            })
     }
 
     /// `Context.typeof(expr)` — Get the type of an expression.
@@ -1082,12 +1124,27 @@ impl MacroContext {
     /// `Context.getPosInfos(pos)` — Get position information
     pub fn get_pos_infos(&self, pos: &SourceLocation) -> MacroValue {
         let mut obj = BTreeMap::new();
-        let (file, max) = match named_file(pos.file_id) {
-            Some((name, _)) => (MacroValue::from_str(&name), pos.column),
-            None => (MacroValue::Int(pos.file_id as i64), pos.byte_offset),
+        let (file, min, max) = match named_file(pos.file_id) {
+            Some((name, _)) => {
+                let text = named_file_source(pos.file_id);
+                let offset = |byte| {
+                    text.as_deref()
+                        .map_or(byte, |text| character_offset(text, byte))
+                };
+                (
+                    MacroValue::from_str(&name),
+                    offset(pos.byte_offset),
+                    offset(pos.column),
+                )
+            }
+            None => (
+                MacroValue::Int(pos.file_id as i64),
+                pos.byte_offset,
+                pos.byte_offset,
+            ),
         };
         obj.insert("file".to_string(), file);
-        obj.insert("min".to_string(), MacroValue::Int(pos.byte_offset as i64));
+        obj.insert("min".to_string(), MacroValue::Int(min as i64));
         obj.insert("max".to_string(), MacroValue::Int(max as i64));
         MacroValue::Object(Arc::new(obj))
     }
@@ -1099,11 +1156,17 @@ impl MacroContext {
             let max = obj.get("max").and_then(|v| v.as_int()).unwrap_or(0) as u32;
             let file = obj.get("file").map(super::ast_bridge::unwrap_expr_value);
             if let Some(MacroValue::String(name)) = file {
+                let id = named_file_id(&name);
+                let text = named_file_source(id);
+                let offset = |character| {
+                    text.as_deref()
+                        .map_or(character, |text| byte_offset(text, character))
+                };
                 return Ok(MacroValue::Position(SourceLocation::new(
-                    named_file_id(&name),
+                    id,
                     0,
-                    max,
-                    min,
+                    offset(max),
+                    offset(min),
                 )));
             }
             let file_id = obj.get("file").and_then(|v| v.as_int()).unwrap_or(0) as u32;
@@ -1957,7 +2020,7 @@ pub(crate) fn source_position(file: &str, span: parser::Span) -> SourceLocation 
 }
 
 /// `Context.registerFileContents`: the text positions in `name` find lines in.
-fn register_file_contents(name: &str, contents: &str) {
+pub(crate) fn register_file_contents(name: &str, contents: &str) {
     let index = (named_file_id(name) - super::errors::NAMED_FILE_ID) as usize;
     NAMED_FILES.with_borrow_mut(|files| files[index].1 = Some(Arc::from(contents)));
 }
@@ -1968,19 +2031,52 @@ pub(crate) fn named_file(file_id: u32) -> Option<(String, Option<Arc<str>>)> {
     NAMED_FILES.with_borrow(|files| files.get(index).cloned())
 }
 
+fn named_file_source(file_id: u32) -> Option<Arc<str>> {
+    let (name, contents) = named_file(file_id)?;
+    if contents.is_some() {
+        return contents;
+    }
+    let text: Arc<str> = std::fs::read_to_string(name).ok()?.into();
+    let index = (file_id - super::errors::NAMED_FILE_ID) as usize;
+    NAMED_FILES.with_borrow_mut(|files| files[index].1 = Some(text.clone()));
+    Some(text)
+}
+
+// Macro API offsets count characters; parser and editor spans count UTF-8 bytes.
+fn character_offset(text: &str, byte: u32) -> u32 {
+    let within = (byte as usize).min(text.len());
+    (text
+        .char_indices()
+        .take_while(|(at, _)| *at < within)
+        .count()
+        + (byte as usize).saturating_sub(text.len())) as u32
+}
+
+fn byte_offset(text: &str, character: u32) -> u32 {
+    let mut count = 0;
+    for (byte, _) in text.char_indices() {
+        if count == character {
+            return byte as u32;
+        }
+        count += 1;
+    }
+    text.len() as u32 + character.saturating_sub(count)
+}
+
 /// `Std.string` of a named-file position, printed as Haxe prints one:
 /// `#pos(file:line: characters a-b)`, or `lines a-b` when it spans lines.
 pub(crate) fn named_position_string(pos: &SourceLocation) -> Option<String> {
-    let (name, contents) = named_file(pos.file_id)?;
-    let text = contents.as_deref().unwrap_or("").as_bytes();
-    let before = |at: u32| &text[..(at as usize).min(text.len())];
+    let (name, _) = named_file(pos.file_id)?;
+    let contents = named_file_source(pos.file_id);
+    let text = contents.as_deref().unwrap_or("");
+    let before = |at: u32| &text.as_bytes()[..(at as usize).min(text.len())];
     let line = |at| 1 + before(at).iter().filter(|b| **b == b'\n').count();
     let column = |at: u32| {
         let line_start = before(at)
             .iter()
             .rposition(|b| *b == b'\n')
             .map_or(0, |i| i + 1);
-        at as usize - line_start + 1
+        character_offset(text, at) - character_offset(text, line_start as u32) + 1
     };
     let (min, max) = (pos.byte_offset, pos.column);
     let (first, last) = (line(min), line(max));
@@ -2392,6 +2488,30 @@ mod tests {
         } else {
             panic!("expected object");
         }
+    }
+
+    #[test]
+    fn named_positions_round_trip_character_offsets_over_utf8_source() {
+        let file = "unicode-position-boundary.hx";
+        register_file_contents(file, "λ😀<widget/>");
+        let position = source_position(file, parser::Span::new(6, 15));
+        let context = MacroContext::new();
+        let info = context.get_pos_infos(&position);
+        let MacroValue::Object(fields) = &info else {
+            panic!("position info")
+        };
+        assert_eq!(fields.get("min"), Some(&MacroValue::Int(2)));
+        assert_eq!(fields.get("max"), Some(&MacroValue::Int(11)));
+        let MacroValue::Position(restored) = context.make_position(&info).unwrap() else {
+            panic!("position")
+        };
+        assert_eq!(restored, position);
+        assert_eq!(
+            named_position_string(&position).unwrap(),
+            "#pos(unicode-position-boundary.hx:1: characters 3-12)"
+        );
+        assert_eq!(character_offset("λ😀", 8), 4);
+        assert_eq!(byte_offset("λ😀", 4), 8);
     }
 
     #[test]

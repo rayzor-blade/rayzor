@@ -15,6 +15,7 @@ struct Session {
     logs: Vec<String>,
     activity: Vec<Value>,
     temporary: bool,
+    timeout: std::time::Duration,
 }
 
 impl Session {
@@ -60,6 +61,7 @@ impl Session {
             logs: Vec::new(),
             activity: Vec::new(),
             temporary,
+            timeout: std::time::Duration::from_secs(120),
         };
         let root_uri = session.uri("");
         let mut params = json!({"processId": null, "rootUri": root_uri, "capabilities": {}, "initializationOptions": options});
@@ -91,7 +93,7 @@ impl Session {
             match self
                 .client
                 .receiver
-                .recv_timeout(std::time::Duration::from_secs(120))
+                .recv_timeout(self.timeout)
                 .expect("LSP response timeout")
             {
                 Message::Response(resp) if resp.id == id => {
@@ -141,7 +143,7 @@ impl Session {
             if let Message::Notification(notification) = self
                 .client
                 .receiver
-                .recv_timeout(std::time::Duration::from_secs(120))
+                .recv_timeout(self.timeout)
                 .expect("analysis timeout")
             {
                 match notification.method.as_str() {
@@ -1654,7 +1656,7 @@ class Builder {
             case _: throw "expected a class";
         }
         var p = Context.getPosInfos(template.pos);
-        var tag = Context.makePosition({file:p.file, min:p.min + 1, max:p.min + 13});
+        var tag = Context.makePosition({file:p.file, min:p.min + 13, max:p.min + 14});
         return macro @:pos(tag) new widgets.ContextMenu();
     }
 }
@@ -1754,11 +1756,14 @@ fn generic_property_keys_bind_abstract_conversion_value_types() {
         for (value, valid) in [
             ("116", true),
             ("(116:Single)", true),
+            ("widgets.Computed.make((116:Single))", true),
+            ("new widgets.State<Single>((116:Single))", true),
+            ("widgets.Computed.make(\"wrong\")", false),
             ("widgets.Styles.Display.Flex", false),
             ("\"wrong\"", false),
         ] {
             let source = format!(
-                "import widgets.Prop; import widgets.Node; class Main {{ static function main() {{ var node = new Node(); node.set(Prop.Width, {value}); node.set(Prop.Display, widgets.Styles.Display.Flex); }} }}"
+                "import widgets.Prop; import widgets.Node; import widgets.Flex; import widgets.Other; class Main {{ static function main() {{ var node = new Node(); node.set(Prop.Width, {value}); node.set(Prop.Display, widgets.Styles.Display.Flex); node.set(Prop.Display, Flex); }} }}"
             );
             let mut s = Session::start(&[
                 ("Main.hx", &source),
@@ -1773,7 +1778,23 @@ fn generic_property_keys_bind_abstract_conversion_value_types() {
                 ),
                 (
                     "widgets/IntoReactive.hx",
-                    "package widgets; enum ReactiveValue<T> { Const(value:T); } abstract IntoReactive<T>(ReactiveValue<T>) from ReactiveValue<T> { @:from public static function fromConst<T>(value:T):IntoReactive<T> return Const(value); @:from public static function fromInt(value:Int):IntoReactive<Single> return Const((value:Single)); }",
+                    "package widgets; enum ReactiveValue<T> { Const(value:T); } abstract IntoReactive<T>(ReactiveValue<T>) from ReactiveValue<T> { @:from public static function fromConst<T>(value:T):IntoReactive<T> return Const(value); @:from public static function fromInt(value:Int):IntoReactive<Single> return Const((value:Single)); @:from public static function fromComputed<T>(value:Computed<T>):IntoReactive<T> return Const(cast value); @:from public static function fromState<T>(value:State<T>):IntoReactive<T> return Const(value.value); }",
+                ),
+                (
+                    "widgets/Computed.hx",
+                    "package widgets; abstract Computed<T>(T) { public static function make<T>(value:T):Computed<T> return cast value; }",
+                ),
+                (
+                    "widgets/State.hx",
+                    "package widgets; class State<T> { public var value:T; public function new(value:T) this.value = value; }",
+                ),
+                (
+                    "widgets/Flex.hx",
+                    "package widgets; class Flex { public function new() {} }",
+                ),
+                (
+                    "widgets/Other.hx",
+                    "package widgets; private enum abstract Display(Int) { var Flex = 7; } class Other {}",
                 ),
                 (
                     "widgets/Node.hx",
@@ -4767,4 +4788,264 @@ class Main {
         !diagnostics.is_empty(),
         "an incompatible task field must remain an error"
     );
+}
+
+#[test]
+fn macro_type_queries_load_unopened_sibling_components() {
+    let main = "package ui; import macros.Builder; class Main { public function new() {} public function render() { var panel = Builder.make(); return panel; } }";
+    let mut session = Session::start(&[
+        ("build.hxml", "-cp .\n--hl out.hl\n"),
+        ("ui/Main.hx", main),
+        (
+            "ui/One.hx",
+            "package ui; class One { public function new() {} }",
+        ),
+        (
+            "ui/Two.hx",
+            "package ui; class Two { public function new() {} }",
+        ),
+        (
+            "ui/Three.hx",
+            "package ui; class Three { public function new() {} }",
+        ),
+        (
+            "ui/Four.hx",
+            "package ui; class Four { public function new() {} }",
+        ),
+        (
+            "macros/Builder.hx",
+            r#"
+package macros;
+import haxe.macro.Context;
+import haxe.macro.Expr;
+using StringTools;
+class Builder {
+ static var attempts = 0;
+ public static macro function make():Expr {
+  if (++attempts != 1) throw "suspended macro leaked its statics";
+  if (StringTools.trim(" one ") != "one" || " two ".trim() != "two") throw "trim binding";
+  if ([" one ", " two "].map(StringTools.trim).join(",") != "one,two") throw "trim callback";
+  for (name in ["One", "Two", "Three", "Four"]) {
+   var found = try Context.getType(name) catch (_:Dynamic) Context.getType("MissingFallback");
+   switch found { case TInst(c, _): if (c.get().pack.join(".") != "ui") throw "wrong package"; case _: throw "not a class"; }
+  }
+  var missing = try { Context.getType("DefinitelyMissing"); false; } catch (_:Dynamic) true;
+  if (!missing) throw "unknown type must throw";
+  return macro new ui.Four();
+ }
+}
+"#,
+        ),
+    ]);
+    let diagnostics = session.open("ui/Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let at = session.at("ui/Main.hx", 0, main.rfind("panel").unwrap() as u32 + 1);
+    let hover = hover_text(&session.request("textDocument/hover", at));
+    assert!(hover.contains("ui.Four"), "{hover}");
+}
+
+#[test]
+#[ignore = "requires RAYZOR_TEST_COMPONENT_PROJECT pointing to an installed Ashui application"]
+fn configured_ashui_component_expands_and_has_element_hover() {
+    let root =
+        PathBuf::from(std::env::var_os("RAYZOR_TEST_COMPONENT_PROJECT").expect("project path"));
+    let file =
+        std::env::var("RAYZOR_TEST_COMPONENT_FILE").unwrap_or_else(|_| "src/ui/BoardApp.hx".into());
+    let source = std::fs::read_to_string(root.join(&file)).unwrap();
+    let mut session = Session::connect(root, json!({"macroBudgetMs":0}), false);
+    session.timeout = std::time::Duration::from_secs(900);
+    let diagnostics = session.open(&file);
+    eprintln!("diagnostics for {file}: {diagnostics:#?}");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let offset = source.find("<div").expect("div element") + 1;
+    let before = &source[..offset];
+    let at = session.at(
+        &file,
+        before.bytes().filter(|b| *b == b'\n').count() as u32,
+        before.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
+    );
+    let hover = hover_text(&session.request("textDocument/hover", at));
+    assert!(hover.contains("class Div"), "{hover}");
+}
+
+#[test]
+fn macros_can_query_and_call_a_type_defined_during_expansion() {
+    let main = "package pages; import Builder; class Main { static function main() { var result = Builder.make(); trace(result); } }";
+    let mut session = Session::start(&[
+        ("pages/Main.hx", main),
+        (
+            "Builder.hx",
+            r#"
+import haxe.macro.Context;
+import haxe.macro.Expr;
+class Builder {
+ public static macro function make():Expr {
+  Context.defineType(macro class Generated {
+   public static function value(x:Int):Int return x;
+   public static function constrained<T:{a:Int}>(v:T):T return v;
+  });
+  switch Context.getType("Generated") {
+   case TInst(c, _): if (c.get().name != "Generated") throw "wrong generated class";
+   case _: throw "generated type was not published";
+  }
+  var invalid = try { Context.typeExpr(macro Generated.value("bad")); false; } catch (_:Dynamic) true;
+  if (!invalid) throw "generated parameter types were lost";
+  var constrained = try { Context.typeExpr(macro Generated.constrained({b:""})); false; } catch (_:Dynamic) true;
+  if (!constrained) throw "generated generic constraints were lost";
+  return macro Generated.value(1);
+ }
+}
+"#,
+        ),
+    ]);
+    let diagnostics = session.open("pages/Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let at = session.at("pages/Main.hx", 0, main.find("result").unwrap() as u32 + 1);
+    let hover = hover_text(&session.request("textDocument/hover", at));
+    assert!(hover.contains("result:Int"), "{hover}");
+}
+
+#[test]
+fn generic_build_queries_publish_types_once_and_reject_later_duplicates() {
+    for duplicate in [false, true] {
+        let main = r#"
+import haxe.macro.Expr;
+class Main {
+ static function main() {
+  var first = new Box<Int>();
+  SECOND_USE
+ }
+}
+@:genericBuild(Builder.make()) class Box<T> {}
+@:genericBuild(Builder.make()) class OtherBox<T> {}
+class Builder {
+ public static macro function make():ComplexType {
+  haxe.macro.Context.defineType(macro class Generated { public function new() {} });
+  haxe.macro.Context.getType("Generated");
+  return macro : Generated;
+ }
+}
+"#
+        .replace(
+            "SECOND_USE",
+            if duplicate {
+                "var second = new OtherBox<String>();"
+            } else {
+                ""
+            },
+        );
+        let mut session = Session::start(&[("Main.hx", &main)]);
+        let diagnostics = session.open("Main.hx");
+        assert_eq!(
+            diagnostics.is_empty(),
+            !duplicate,
+            "{duplicate}: {diagnostics:#?}"
+        );
+        if duplicate {
+            assert!(
+                diagnostics.iter().any(|diagnostic| diagnostic["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("already defined")),
+                "{diagnostics:#?}"
+            );
+        } else {
+            let hover =
+                hover_text(&session.request("textDocument/hover", session.at("Main.hx", 4, 7)));
+            assert!(hover.contains("Generated"), "{hover}");
+        }
+    }
+}
+
+#[test]
+fn a_bad_child_does_not_narrow_other_children_to_the_first_component() {
+    let source = r#"
+class Main {
+ static function main() {
+  var children = ([new Title(), new Description(), 42] : Array<Element>);
+ }
+}
+class Element { public function new() {} }
+class Component<T> extends Element {}
+class Title extends Component<{title:String}> {}
+class Description extends Component<{description:String}> {}
+"#;
+    let mut session = Session::start(&[("Main.hx", source)]);
+    let diagnostics = session.open("Main.hx");
+    let errors: Vec<_> = diagnostics.iter().filter(|d| d["severity"] == 1).collect();
+    assert_eq!(errors.len(), 1, "{diagnostics:#?}");
+    let message = errors[0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("expected `Element`") && message.contains("found `Int`"),
+        "{message}"
+    );
+}
+
+#[test]
+fn deferred_expansions_load_newly_constructed_runtime_classes() {
+    let main = "import Builder; import widgets.Factory; class Main { static function main() { var item = Factory.create(); var direct = Builder.make(); var count = item.value() + direct.value(); } }";
+    let mut session = Session::start(&[
+        ("Main.hx", main),
+        (
+            "Builder.hx",
+            "import haxe.macro.Context; import haxe.macro.Expr; class Builder { public static macro function make():Expr { Context.typeof(macro 0); return macro new widgets.Item(); } }",
+        ),
+        (
+            "widgets/Factory.hx",
+            "package widgets; import Builder; class Factory { public static function create() return Builder.make(); }",
+        ),
+        (
+            "widgets/Item.hx",
+            "package widgets; import widgets.Base; import widgets.Values; class Item extends Base { public function new() { super(); } public function value() return Values.read(); }",
+        ),
+        (
+            "widgets/Base.hx",
+            "package widgets; class Base { public function new() {} }",
+        ),
+        (
+            "widgets/Values.hx",
+            "package widgets; class Values { public static function read() return 7; }",
+        ),
+    ]);
+    let diagnostics = session.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let hover = hover_text(&session.request(
+        "textDocument/hover",
+        session.at("Main.hx", 0, main.find("count").unwrap() as u32 + 1),
+    ));
+    assert!(hover.contains("count:Int"), "{hover}");
+}
+
+#[test]
+fn unicode_macro_positions_follow_the_current_document() {
+    let main = "import widgets.Widget; class Main { static function main() { var label = 'λ'; var view = Builder.make(<box>…<widget/></box>); } }";
+    let mut session = Session::start(&[
+        ("Main.hx", main),
+        (
+            "widgets/Widget.hx",
+            "package widgets; class Widget { public function new() {} }",
+        ),
+        (
+            "Builder.hx",
+            "import haxe.macro.Context; import haxe.macro.Expr; class Builder { public static macro function make(template:Expr):Expr { var p = Context.getPosInfos(template.pos); var tag = Context.makePosition({file:p.file, min:p.min + 7, max:p.min + 13}); return {expr: ENew({pack:['widgets'], name:'Widget'}, []), pos:tag}; } }",
+        ),
+    ]);
+    for (version, source) in [
+        main.to_string(),
+        main.replace('λ', "😀β01234567890123456789"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let diagnostics = if version == 0 {
+            session.open("Main.hx")
+        } else {
+            session.change("Main.hx", source)
+        };
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let offset = source.find("<widget").unwrap() + 1;
+        let at = session.at("Main.hx", 0, source[..offset].encode_utf16().count() as u32);
+        let hover = hover_text(&session.request("textDocument/hover", at));
+        assert!(hover.contains("class Widget"), "{hover}");
+    }
 }

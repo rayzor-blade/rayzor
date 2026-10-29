@@ -17,6 +17,8 @@ pub struct MacroFunction {
     pub captures: BTreeMap<String, super::environment::VariableBinding>,
     pub context: Option<MacroFunctionContext>,
     pub return_type: Option<parser::Type>,
+    /// A static method reference forwards the caller's actual argument list.
+    pub static_target: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -400,6 +402,7 @@ impl MacroValue {
                 captures: captures.clone(),
                 context: None,
                 return_type: None,
+                static_target: None,
             }))
         };
         Self::Object(Arc::new(BTreeMap::from([
@@ -901,6 +904,7 @@ mod reference_index_tests {
             captures: BTreeMap::from([("cell".into(), binding.clone())]),
             context: None,
             return_type: None,
+            static_target: None,
         };
         let mut parent =
             MacroValue::Array(Arc::new(vec![MacroValue::Function(Arc::new(function))]));

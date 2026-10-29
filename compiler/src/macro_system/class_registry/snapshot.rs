@@ -334,6 +334,7 @@ impl ClassRegistry {
     }
 
     fn insert_snapshot_definition(&mut self, definition: TypeDefinition) {
+        self.runtime_short_names.take();
         let alias = format!(
             "{}.{}",
             definition.module,

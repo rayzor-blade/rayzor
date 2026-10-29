@@ -43,7 +43,7 @@ fn constant_argument_spelling(value: &Expr) -> Option<String> {
 impl<'a> AstLowering<'a> {
     /// Imported paths `name` may refer to, from the current scope outwards to
     /// the root, where a file without a package keeps its imports.
-    fn import_candidates(
+    pub(crate) fn import_candidates(
         &mut self,
         name: InternedString,
     ) -> Vec<crate::tast::namespace::QualifiedPath> {

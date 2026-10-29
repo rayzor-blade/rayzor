@@ -533,10 +533,21 @@ impl NamespaceResolver {
     pub fn lookup_symbol(&self, path: &QualifiedPath) -> Option<SymbolId> {
         if let Some(&package_id) = self.package_paths.get(&path.package) {
             if let Some(package) = self.packages.get(&package_id) {
-                return package.symbols.get(&path.name).copied();
+                if let Some(symbol) = package.symbols.get(&path.name) {
+                    return Some(*symbol);
+                }
             }
         }
-        None
+        // Module subtypes share their module's package in the symbol table.
+        let (module, package) = path.package.split_last()?;
+        if !self.module_declares(package, *module, path.name) {
+            return None;
+        }
+        self.package_paths
+            .get(package)
+            .and_then(|id| self.packages.get(id))
+            .and_then(|package| package.symbols.get(&path.name))
+            .copied()
     }
 
     /// Debug: list all packages
@@ -753,5 +764,27 @@ mod tests {
         let path = QualifiedPath::new(vec![com, example], player);
         let found = resolver.lookup_symbol(&path);
         assert_eq!(found, Some(symbol_id));
+    }
+
+    #[test]
+    fn module_qualified_names_only_resolve_declared_subtypes() {
+        let mut interner = StringInterner::new();
+        let mut resolver = NamespaceResolver::new();
+        let widgets = interner.intern("widgets");
+        let styles = interner.intern("Styles");
+        let unrelated = interner.intern("Unrelated");
+        let align = interner.intern("Align");
+        let package = resolver.get_or_create_package(vec![widgets]);
+        let symbol = SymbolId::from_raw(42);
+        resolver.register_symbol(package, align, symbol);
+        resolver.record_module_types(vec![widgets], styles, [align]);
+        assert_eq!(
+            resolver.lookup_symbol(&QualifiedPath::new(vec![widgets, styles], align)),
+            Some(symbol)
+        );
+        assert_eq!(
+            resolver.lookup_symbol(&QualifiedPath::new(vec![widgets, unrelated], align)),
+            None
+        );
     }
 }

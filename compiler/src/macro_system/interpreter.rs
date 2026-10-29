@@ -363,6 +363,7 @@ impl MacroInterpreter {
                         captures: Default::default(),
                         context: None,
                         return_type: method.return_type.clone(),
+                        static_target: None,
                     })));
                 }
                 // A bare method of the running instance, as a value bound to it.
@@ -398,6 +399,7 @@ impl MacroInterpreter {
                         captures: self.env.capture_used(&this),
                         context: Some(self.function_context()),
                         return_type: None,
+                        static_target: None,
                     })));
                 }
                 // Bare enum-constructor identifiers from haxe.macro.Expr —
@@ -760,6 +762,7 @@ impl MacroInterpreter {
                                 e,
                                 MacroError::TimeBudgetExceeded { .. }
                                     | MacroError::NeedsTyper { .. }
+                                    | MacroError::NeedsModule { .. }
                             ) =>
                     {
                         let err_val = Self::caught_value(&e);
@@ -806,41 +809,35 @@ impl MacroInterpreter {
                 {
                     return Ok(value);
                 }
-                let names = ["__a0", "__a1"];
-                let arg = |n: &str| Expr {
-                    kind: ExprKind::Ident(n.to_string()),
-                    span: expr.span,
+                let ExprKind::Ident(class) = &base.kind else {
+                    unreachable!()
                 };
-                let body = Expr {
-                    kind: ExprKind::Call {
-                        expr: Box::new(Expr {
-                            kind: ExprKind::Field {
-                                expr: base.clone(),
-                                field: field.clone(),
-                                is_optional: false,
-                            },
-                            span: expr.span,
-                        }),
-                        args: names.iter().map(|n| arg(n)).collect(),
-                    },
-                    span: expr.span,
-                };
+                let owner = self.resolve_class_name(class);
+                let signature = self
+                    .class_registry
+                    .as_ref()
+                    .and_then(|registry| registry.method_signature(&owner, field));
                 Ok(MacroValue::Function(Arc::new(MacroFunction {
-                    name: field.clone(),
-                    params: names
-                        .iter()
-                        .map(|n| MacroParam {
-                            name: n.to_string(),
-                            optional: true,
-                            rest: false,
-                            default_value: None,
-                            type_hint: None,
+                    name: format!("{owner}.{field}"),
+                    params: signature
+                        .map(|signature| {
+                            signature
+                                .function
+                                .params
+                                .iter()
+                                .map(MacroParam::from_function_param)
+                                .collect()
                         })
-                        .collect(),
-                    body: Arc::new(body),
+                        .unwrap_or_default(),
+                    body: Arc::new(Expr {
+                        kind: ExprKind::Null,
+                        span: expr.span,
+                    }),
                     captures: BTreeMap::new(),
                     context: None,
-                    return_type: None,
+                    return_type: signature
+                        .and_then(|signature| signature.function.return_type.clone()),
+                    static_target: Some((owner, field.clone())),
                 })))
             }
             // `Binop.OpAdd`, `ExprDef.EBreak`: a qualified no-argument constructor.
@@ -974,6 +971,7 @@ impl MacroInterpreter {
                     captures: self.env.capture_used(&free_vars),
                     context: Some(self.function_context()),
                     return_type: func.return_type.clone(),
+                    static_target: None,
                 }));
                 // `function f() {...}` in a body declares `f`; calls resolve
                 // through the live scopes, so the function reaches itself.
@@ -1006,6 +1004,7 @@ impl MacroInterpreter {
                     captures: self.env.capture_used(&free_vars),
                     context: Some(self.function_context()),
                     return_type: None,
+                    static_target: None,
                 })))
             }
 
@@ -2025,6 +2024,14 @@ impl MacroInterpreter {
         if super::budget::exhausted() {
             return Err(MacroError::TimeBudgetExceeded { location });
         }
+        if let Some((owner, method)) = &func.static_target {
+            return self
+                .try_static_call(owner, method, &args, location)?
+                .ok_or_else(|| MacroError::TypeError {
+                    message: format!("Class {owner} has no static method '{method}'"),
+                    location,
+                });
+        }
         self.call_depth += 1;
         if self.call_depth > self.max_call_depth {
             self.call_depth -= 1;
@@ -2176,6 +2183,7 @@ impl MacroInterpreter {
             captures: std::collections::BTreeMap::new(),
             context: None,
             return_type: None,
+            static_target: None,
         };
         // Track the class that contains this macro so bare-identifier calls
         // in the body (e.g. `parseValue(...)` inside `tink.Json.parse`)
@@ -2544,13 +2552,12 @@ impl MacroInterpreter {
         // build macro's context names the class being built instead.
         if resolved == "haxe.macro.Context"
             && method == "getLocalClass"
-            && self
+            && let Some(view) = self
                 .macro_context
                 .as_ref()
-                .is_none_or(|ctx| ctx.build_class.is_none())
-            && let Some(view) = self
-                .local_class
-                .as_deref()
+                .and_then(|ctx| ctx.build_class.as_ref())
+                .map(|build| build.qualified_name.as_str())
+                .or(self.local_class.as_deref())
                 .and_then(|name| self.class_registry.as_ref()?.local_class_view(name))
         {
             return Ok(Some(view));
@@ -2630,7 +2637,18 @@ impl MacroInterpreter {
                     .map(|classes| classes.macro_context())
                     .unwrap_or_default();
                 let ctx = self.macro_context.as_mut().unwrap_or(&mut fresh);
-                let result = ctx.dispatch(method, args, location)?;
+                let pending = (method == "getType")
+                    .then(|| {
+                        let name = args.first()?.as_string()?;
+                        self.defined_types
+                            .iter()
+                            .find(|definition| definition.qualified_name() == name)
+                    })
+                    .flatten();
+                let result = match pending {
+                    Some(definition) => ctx.get_defined_type(definition, location),
+                    None => ctx.dispatch(method, args, location),
+                }?;
                 self.defined_types.extend(ctx.take_defined_types());
                 self.hooks.extend(ctx.take_hooks());
                 Ok(Some(result))
@@ -3453,7 +3471,7 @@ impl MacroInterpreter {
             return true;
         }
         match e {
-            MacroError::NeedsTyper { .. } => false,
+            MacroError::NeedsTyper { .. } | MacroError::NeedsModule { .. } => false,
             MacroError::Thrown { value, .. } => match short {
                 "String" => matches!(**value, MacroValue::String(_)),
                 "Int" => matches!(**value, MacroValue::Int(_)),
@@ -3483,6 +3501,12 @@ impl MacroInterpreter {
         args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        if let MacroValue::Object(object) = base
+            && object.contains_key("__meta__")
+            && matches!(method, "get" | "has" | "extract" | "add" | "remove")
+        {
+            return self.object_method(object, method, args, location);
+        }
         if let MacroValue::Abstract(owner, inner) = base {
             if self
                 .class_registry
@@ -4008,6 +4032,17 @@ impl MacroInterpreter {
         // class is modeled as an Object.
         // A `MetaAccess`: the entries behind `get()`, `has(name)`, `extract(name)`.
         if let Some(MacroValue::Array(entries)) = obj.get("__meta__") {
+            let owner = obj.get("__meta_owner__").and_then(MacroValue::as_string);
+            let entries = owner
+                .and_then(|owner| self.class_registry.as_ref()?.metadata_overlay(owner))
+                .and_then(|value| {
+                    if let MacroValue::Array(entries) = value {
+                        Some(entries)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| entries.clone());
             let wanted = _args.first().map(|n| n.to_display_string());
             let named = |e: &MacroValue| match (e, &wanted) {
                 (MacroValue::Object(o), Some(w)) => {
@@ -4022,6 +4057,54 @@ impl MacroInterpreter {
                     return Ok(MacroValue::Array(Arc::new(
                         entries.iter().filter(|e| named(e)).cloned().collect(),
                     )));
+                }
+                "add" | "remove" => {
+                    let name = _args
+                        .first()
+                        .and_then(MacroValue::as_string)
+                        .ok_or_else(|| MacroError::TypeError {
+                            message: format!("MetaAccess.{method} expects a name"),
+                            location,
+                        })?;
+                    let mut updated = entries.as_ref().clone();
+                    if method == "add" {
+                        let Some(params @ MacroValue::Array(_)) = _args.get(1) else {
+                            return Err(MacroError::TypeError {
+                                message: "MetaAccess.add expects metadata parameters".into(),
+                                location,
+                            });
+                        };
+                        let position = _args
+                            .get(2)
+                            .cloned()
+                            .unwrap_or(MacroValue::Position(location));
+                        updated.push(MacroValue::Object(Arc::new(BTreeMap::from([
+                            ("name".into(), MacroValue::from_str(name)),
+                            ("params".into(), params.clone()),
+                            ("pos".into(), position),
+                        ]))));
+                    } else {
+                        updated.retain(|entry| {
+                            entry
+                                .as_object()
+                                .and_then(|entry| entry.get("name"))
+                                .and_then(MacroValue::as_string)
+                                != Some(name)
+                        });
+                    }
+                    let entries = MacroValue::Array(Arc::new(updated));
+                    if let Some(owner) = owner
+                        && let Some(registry) = &self.class_registry
+                    {
+                        registry.set_metadata_overlay(owner, entries.clone());
+                    }
+                    let mut updated = obj.as_ref().clone();
+                    updated.insert("__meta__".into(), entries);
+                    self.replace_references(
+                        &MacroValue::Object(obj.clone()),
+                        &MacroValue::Object(Arc::new(updated)),
+                    );
+                    return Ok(MacroValue::Null);
                 }
                 _ => {}
             }
@@ -4374,6 +4457,7 @@ impl MacroInterpreter {
                 captures,
                 context: Some(self.function_context()),
                 return_type: None,
+                static_target: None,
             };
             let result = self.call_function(&constructor, args, _location);
             match result {
@@ -6164,6 +6248,43 @@ mod tests {
             }
         }
         Ok(MacroValue::Null)
+    }
+
+    #[test]
+    fn static_callbacks_preserve_actual_arguments() {
+        let file = parser::parse_haxe_file("callbacks.hx", r#"
+class StringTools {
+ public static function trim(s:String):String return s;
+ public static function replace(s:String, sub:String, by:String):String return s;
+ public static function zero():Int return 7;
+ public static function optional(first:String, ?second:String):String return second == null ? first : second;
+ public static function count(...values:Int):Int return values.length;
+}
+class Probe {
+ public static function check():Bool {
+  var trim = StringTools.trim, replace = StringTools.replace;
+  var zero = StringTools.zero, optional = StringTools.optional, count = StringTools.count;
+  var rejected = try { trim("x", "y"); false; } catch (_:Dynamic) true;
+  return [" one ", " two "].map(trim).join(",") == "one,two"
+   && replace("ax", "x", "b") == "ab" && zero() == 7
+   && optional("one") == "one" && optional("one", "two") == "two"
+   && count() == 0 && count(1, 2, 3) == 3 && rejected;
+ }
+}
+"#, false).unwrap();
+        let mut classes = ClassRegistry::new();
+        classes.register_file(&file);
+        let mut interpreter = MacroInterpreter::with_class_registry(
+            MacroRegistry::new(),
+            Default::default(),
+            Arc::new(classes),
+        );
+        assert_eq!(
+            interpreter
+                .try_static_call("Probe", "check", &[], SourceLocation::unknown())
+                .unwrap(),
+            Some(MacroValue::Bool(true))
+        );
     }
 
     #[test]

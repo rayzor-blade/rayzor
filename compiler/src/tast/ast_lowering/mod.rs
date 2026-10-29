@@ -1786,6 +1786,7 @@ pub struct AstLowering<'a> {
     generated_declarations: Vec<TypedDeclaration>,
     generated_type_names: std::collections::BTreeSet<String>,
     macro_probe_depth: usize,
+    deferred_expansion_depth: usize,
     macro_probe_write_target: Option<parser::Span>,
     /// Macro type resolution retains multiType abstractions until follow is requested.
     preserve_macro_multitype: bool,

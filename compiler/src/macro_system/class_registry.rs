@@ -100,6 +100,7 @@ pub struct ClassRegistry {
     /// short_name → qualified_name (for unambiguous lookups)
     short_name_index: BTreeMap<String, String>,
     type_definitions: BTreeMap<String, Arc<TypeDefinition>>,
+    runtime_short_names: std::sync::OnceLock<BTreeMap<String, Option<String>>>,
     reflected_definitions: std::sync::Mutex<BTreeMap<String, Option<Arc<TypeDefinition>>>>,
     enum_constants: BTreeMap<String, std::collections::BTreeSet<String>>,
     enum_constructors: BTreeMap<String, BTreeMap<String, usize>>,
@@ -128,6 +129,7 @@ impl ClassRegistry {
             using_members: BTreeMap::new(),
             short_name_index: BTreeMap::new(),
             type_definitions: BTreeMap::new(),
+            runtime_short_names: Default::default(),
             reflected_definitions: Default::default(),
             enum_constants: BTreeMap::new(),
             enum_constructors: BTreeMap::new(),
@@ -346,6 +348,44 @@ impl ClassRegistry {
         }
     }
 
+    fn class_metadata_key(&self, owner: &str) -> String {
+        let owner = self
+            .find_class(owner)
+            .map_or(owner, |class| class.qualified_name.as_str());
+        format!("<metadata>{owner}")
+    }
+
+    pub(crate) fn metadata_overlay(&self, owner: &str) -> Option<super::value::MacroValue> {
+        self.static_value(&self.class_metadata_key(owner))
+    }
+
+    pub(crate) fn set_metadata_overlay(&self, owner: &str, value: super::value::MacroValue) {
+        self.set_static(self.class_metadata_key(owner), value);
+    }
+
+    pub(crate) fn modified_class_metadata(
+        &self,
+        owner: &str,
+        span: parser::Span,
+    ) -> Option<Vec<Metadata>> {
+        let super::value::MacroValue::Array(entries) = self.metadata_overlay(owner)? else {
+            return None;
+        };
+        Some(
+            entries
+                .iter()
+                .map(|entry| {
+                    let at = entry
+                        .as_object()
+                        .and_then(|entry| entry.get("pos"))
+                        .and_then(super::context_api::position_span)
+                        .unwrap_or(span);
+                    super::expr_adt::metadata_of(entry, at)
+                })
+                .collect(),
+        )
+    }
+
     pub(crate) fn replace_static_references(
         &self,
         old: &super::value::MacroValue,
@@ -361,6 +401,7 @@ impl ClassRegistry {
 
     /// Register all classes from a single HaxeFile.
     pub fn register_file(&mut self, file: &HaxeFile) {
+        self.runtime_short_names.take();
         let mut locations = None;
         let mut file_imports = super::interpreter::build_file_import_map(file);
         let package_prefix = match &file.package {
@@ -933,7 +974,17 @@ impl ClassRegistry {
         if definition.is_enum_abstract {
             metadata.push(metadata_entry(":enum"));
         }
-        view.insert("meta".to_string(), metadata_access(metadata));
+        if let Some(V::Array(changed)) = self.metadata_overlay(&definition.qualified_name) {
+            metadata = changed.as_ref().clone();
+        }
+        let mut access = metadata_access(metadata);
+        if let V::Object(access) = &mut access {
+            Arc::make_mut(access).insert(
+                "__meta_owner__".into(),
+                V::from_str(&definition.qualified_name),
+            );
+        }
+        view.insert("meta".to_string(), access);
         let mut implementation_fields = Vec::new();
         for (key, is_static) in [("fields", false), ("statics", true)] {
             let typed_fields = match view.get(key) {
@@ -1141,13 +1192,25 @@ impl ClassRegistry {
         if let Some(info) = self.type_definitions.get(name).filter(|d| d.runtime_class) {
             return Some(&info.qualified_name);
         }
-        let mut names = self
-            .type_definitions
-            .values()
-            .filter(|d| d.runtime_class && d.qualified_name.rsplit('.').next() == Some(name))
-            .map(|d| d.qualified_name.as_str());
-        if let Some(first) = names.next() {
-            return names.all(|other| other == first).then_some(first);
+        if !name.contains('.') {
+            let names = self.runtime_short_names.get_or_init(|| {
+                let mut names = BTreeMap::new();
+                for definition in self.type_definitions.values().filter(|d| d.runtime_class) {
+                    let short = definition.qualified_name.rsplit('.').next().unwrap();
+                    names
+                        .entry(short.to_string())
+                        .and_modify(|current: &mut Option<String>| {
+                            if current.as_deref() != Some(definition.qualified_name.as_str()) {
+                                *current = None;
+                            }
+                        })
+                        .or_insert_with(|| Some(definition.qualified_name.clone()));
+                }
+                names
+            });
+            if let Some(qualified) = names.get(name) {
+                return qualified.as_deref();
+            }
         }
         let snapshot = self.snapshot.as_ref()?;
         if name.contains('.') {
@@ -1192,12 +1255,13 @@ impl ClassRegistry {
             .unwrap_or_default();
         let base = BTreeMap::from([
             ("name".to_string(), V::String(Arc::from(info.name.as_str()))),
-            ("pack".to_string(), V::Array(Arc::new(pack))),
+            ("pack".to_string(), V::Array(Arc::new(pack.clone()))),
         ]);
         let V::Object(mut view) = self.enrich_type_view(V::Object(Arc::new(base))) else {
             return None;
         };
         let view_mut = Arc::make_mut(&mut view);
+        view_mut.insert("pack".to_string(), V::Array(Arc::new(pack)));
         for (key, methods) in [
             ("statics", &info.static_methods),
             ("fields", &info.instance_methods),
@@ -1382,4 +1446,38 @@ fn metadata_access(entries: Vec<super::value::MacroValue>) -> super::value::Macr
         "__meta__".to_string(),
         V::Array(Arc::new(entries)),
     )])))
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_short_names_keep_module_aliases_and_ambiguity_after_registration() {
+        let mut registry = ClassRegistry::new();
+        let first =
+            parser::parse_haxe_file("alpha/Defs.hx", "package alpha; interface Choice {}", false)
+                .unwrap();
+        registry.register_file(&first);
+        assert_eq!(registry.runtime_class_name("Choice"), Some("alpha.Choice"));
+        assert_eq!(registry.runtime_class_name("Later"), None);
+        let second = parser::parse_haxe_file(
+            "beta/Defs.hx",
+            "package beta; interface Choice {} interface Later {}",
+            false,
+        )
+        .unwrap();
+        registry.register_file(&second);
+        assert_eq!(registry.runtime_class_name("Choice"), None);
+        assert_eq!(
+            registry.runtime_class_name("alpha.Choice"),
+            Some("alpha.Choice")
+        );
+        assert_eq!(
+            registry.runtime_class_name("beta.Choice"),
+            Some("beta.Choice")
+        );
+        assert_eq!(registry.runtime_class_name("Later"), Some("beta.Later"));
+        assert_eq!(registry.runtime_class_name("missing.Choice"), None);
+    }
 }

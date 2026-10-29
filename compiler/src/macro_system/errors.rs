@@ -66,6 +66,12 @@ pub enum MacroError {
     /// swallow it would expand the macro to a wrong constant instead.
     NeedsTyper { location: SourceLocation },
 
+    /// Suspend typing until an on-disk type's module has been loaded.
+    NeedsModule {
+        name: String,
+        location: SourceLocation,
+    },
+
     /// Macro evaluation ran past the time budget set for it
     /// (`budget::limit`). Not catchable by the macro's own try/catch.
     TimeBudgetExceeded { location: SourceLocation },
@@ -142,6 +148,7 @@ impl MacroError {
             MacroError::InvalidDefinition { location, .. } => *location,
             MacroError::ContextError { location, .. } => *location,
             MacroError::NeedsTyper { location } => *location,
+            MacroError::NeedsModule { location, .. } => *location,
             MacroError::TimeBudgetExceeded { location } => *location,
             MacroError::UndefinedVariable { location, .. } => *location,
             MacroError::UnsupportedOperation { location, .. } => *location,
@@ -189,6 +196,7 @@ impl MacroError {
             MacroError::InvalidDefinition { .. } => "E0708",
             MacroError::ContextError { .. } => "E0709",
             MacroError::NeedsTyper { .. } => "E0709",
+            MacroError::NeedsModule { .. } => "E0709",
             MacroError::TimeBudgetExceeded { .. } => "E0713",
             MacroError::UndefinedVariable { .. } => "E0710",
             MacroError::UnsupportedOperation { .. } => "E0711",
@@ -252,6 +260,9 @@ impl fmt::Display for MacroError {
             }
             MacroError::NeedsTyper { .. } => {
                 write!(f, "needs the live typer; deferred to lowering")
+            }
+            MacroError::NeedsModule { name, .. } => {
+                write!(f, "needs module '{name}' before typing can continue")
             }
             MacroError::TimeBudgetExceeded { .. } => {
                 write!(f, "macro ran past its time budget and was stopped")

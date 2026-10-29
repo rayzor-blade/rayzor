@@ -25,6 +25,7 @@ impl CompilationUnit {
         filename: &str,
         source: &str,
     ) -> Result<parser::HaxeFile, String> {
+        crate::macro_system::context_api::register_file_contents(filename, source);
         if self.config.typecheck_only && !filename.starts_with('<') {
             self.macro_dependencies.register_source(filename);
         }

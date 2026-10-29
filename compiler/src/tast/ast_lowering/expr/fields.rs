@@ -376,9 +376,12 @@ impl<'a> AstLowering<'a> {
                                     .iter()
                                     .map(|name| self.context.intern_string(name))
                                     .collect();
-                                self.context.namespace_resolver.lookup_symbol(
-                                    &crate::tast::namespace::QualifiedPath::new(package, name),
-                                )
+                                self.context
+                                    .namespace_resolver
+                                    .lookup_symbol(&crate::tast::namespace::QualifiedPath::new(
+                                        package, name,
+                                    ))
+                                    .or_else(|| self.resolve_class_like_symbol_by_name(name))
                             };
                             if owner.is_some_and(|owner| {
                                 self.class_fields.get(&owner).is_some_and(|fields| {

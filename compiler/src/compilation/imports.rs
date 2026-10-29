@@ -1291,8 +1291,44 @@ impl CompilationUnit {
         // source has placeholder method bodies that must be replaced by MIR wrappers.
         let skip_stdlib_merge = !is_stdlib;
         let t_compile_call = profile_timer(self.config.profile_typecheck);
-        let compile_outcome =
-            self.compile_file_with_shared_state_ex(&filename, source, is_stdlib, skip_stdlib_merge);
+        let mut requested = BTreeSet::new();
+        let compile_outcome = loop {
+            let attempt = self.compile_file_with_shared_state_ex(
+                &filename,
+                source,
+                is_stdlib,
+                skip_stdlib_merge,
+            );
+            let Err(errors) = &attempt else {
+                break attempt;
+            };
+            // Deferred expansions can name modules absent from source imports.
+            let introduced: Vec<_> = errors
+                .iter()
+                .filter_map(|error| Self::extract_unresolved_type_from_error(&error.message))
+                .filter(|name| {
+                    self.namespace_resolver
+                        .resolve_qualified_path_to_file_force(name)
+                        .is_some_and(|path| !self.namespace_resolver.is_file_loaded(&path))
+                        && requested.insert(name.clone())
+                })
+                .collect();
+            if introduced.is_empty() {
+                break attempt;
+            }
+            // Discovery may visit this importer before the new dependency.
+            for name in &introduced {
+                if let Some(path) = self
+                    .namespace_resolver
+                    .resolve_qualified_path_to_file_force(name)
+                {
+                    self.namespace_resolver.mark_file_loaded(path);
+                }
+            }
+            if self.load_imports_efficiently(&introduced).is_err() {
+                break attempt;
+            }
+        };
         add_profile_ms(
             &mut self.typecheck_timings.import_compile_call_ms,
             t_compile_call,

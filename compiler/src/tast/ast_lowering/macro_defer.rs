@@ -26,6 +26,36 @@ pub(crate) struct DeferredMacroTyper<'l, 'a> {
 }
 
 impl AstLowering<'_> {
+    pub(crate) fn lower_deferred_expansion(
+        &mut self,
+        expression: &parser::Expr,
+    ) -> super::LoweringResult<crate::tast::TypedExpression> {
+        self.deferred_expansion_depth += 1;
+        let result = self.lower_expression(expression);
+        self.deferred_expansion_depth -= 1;
+        result
+    }
+
+    pub(crate) fn deferred_macro_error(
+        &self,
+        name: &str,
+        error: crate::macro_system::errors::MacroError,
+        span: parser::Span,
+    ) -> super::LoweringError {
+        let location = self.context.create_location_from_span(span);
+        match error {
+            crate::macro_system::errors::MacroError::NeedsModule { name, .. } => {
+                super::LoweringError::UnresolvedType {
+                    type_name: name,
+                    location,
+                }
+            }
+            error => super::LoweringError::SemanticError {
+                message: format!("macro '{name}' failed during typing: {error}"),
+                location,
+            },
+        }
+    }
     /// Macro type queries retain declared aliases and abstracts before storage lowering.
     pub(crate) fn macro_source_type(
         &mut self,
@@ -570,6 +600,7 @@ impl AstLowering<'_> {
             .type_table
             .borrow_mut()
             .create_class_type(symbol, type_args);
+        let mut generated_before = self.generated_type_names.clone();
         let result = {
             let mut typer = DeferredMacroTyper {
                 lowering: self,
@@ -585,7 +616,11 @@ impl AstLowering<'_> {
             location: self.context.create_location_from_span(span),
         })?;
         for defined in result.defined_types {
-            self.lower_generated_type(&defined)?;
+            let name = defined.qualified_name();
+            if generated_before.contains(&name) || !self.generated_type_names.contains(&name) {
+                self.lower_generated_type(&defined)?;
+            }
+            generated_before.insert(name);
         }
         if (args.is_none() || !params.is_empty())
             && let Some(ty) = &result.type_hint
@@ -918,11 +953,8 @@ impl AstLowering<'_> {
             };
             typer.expand_deferred_call(&name, &macro_call)
         }
-        .map_err(|e| super::LoweringError::SemanticError {
-            message: format!("macro '{}' failed during typing: {}", name, e),
-            location: self.context.create_location_from_span(call.span),
-        })?;
-        self.lower_expression(&expanded).map(Some)
+        .map_err(|error| self.deferred_macro_error(&name, error, call.span))?;
+        self.lower_deferred_expansion(&expanded).map(Some)
     }
 
     /// `x.name` read through a macro `@:resolve`/`@:op(a.b)` of `x`'s
@@ -1017,11 +1049,8 @@ impl AstLowering<'_> {
             };
             typer.expand_deferred_call(&name, &macro_call)
         }
-        .map_err(|e| super::LoweringError::SemanticError {
-            message: format!("macro '{}' failed during typing: {}", name, e),
-            location: self.context.create_location_from_span(span),
-        })?;
-        self.lower_expression(&expanded).map(Some)
+        .map_err(|error| self.deferred_macro_error(&name, error, span))?;
+        self.lower_deferred_expansion(&expanded).map(Some)
     }
 
     /// `var v:A = e` where `e` does not unify with the abstract `A`, which
@@ -1144,15 +1173,14 @@ impl AstLowering<'_> {
             };
             typer.expand_deferred_call(&name, &macro_call)
         }
-        .map_err(|e| super::LoweringError::SemanticError {
-            message: format!("macro '{}' failed during typing: {}", name, e),
-            location: self.context.create_location_from_span(span),
-        })?;
+        .map_err(|error| self.deferred_macro_error(&name, error, span))?;
         let bindings: Vec<_> = inferred.into_iter().collect();
         let declared = self.substitute_type_bindings(declared, &bindings, false);
         self.expected_arg_type_stack.push(Some(declared));
         let previous_hint = self.context.expected_new_type_hint.replace(declared);
+        self.deferred_expansion_depth += 1;
         let lowered = self.lower_value_expression(&expanded);
+        self.deferred_expansion_depth -= 1;
         self.context.expected_new_type_hint = previous_hint;
         self.expected_arg_type_stack.pop();
         lowered.map(Some)
@@ -1859,10 +1887,76 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         self.lowering.collected_errors.truncate(before);
         self.lowering.context.errors.truncate(ctx_before);
         let id = resolved.map_err(|e| e.to_compilation_error().message)?;
+        if matches!(
+            self.lowering
+                .context
+                .type_table
+                .borrow()
+                .get(id)
+                .map(|ty| &ty.kind),
+            Some(
+                crate::tast::TypeKind::Placeholder { .. }
+                    | crate::tast::TypeKind::Unknown
+                    | crate::tast::TypeKind::Error
+            ) | None
+        ) {
+            return Err(format!("Type not found: {name}"));
+        }
         Ok(with_unknown_parameters(
             self.lowering.context.type_table,
             id,
         ))
+    }
+
+    fn module_for_unresolved_type(&mut self, name: &str) -> Option<String> {
+        if !name
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | '$'))
+        {
+            return None;
+        }
+        let mut candidates = Vec::new();
+        if !name.contains('.') {
+            let interned = self.lowering.context.intern_string(name);
+            candidates.extend(
+                self.lowering
+                    .import_candidates(interned)
+                    .iter()
+                    .map(|path| path.to_string(self.lowering.context.string_interner)),
+            );
+            if let Some(package) = self
+                .lowering
+                .context
+                .current_package
+                .and_then(|id| self.lowering.context.namespace_resolver.get_package(id))
+            {
+                let package = package.qualified_path(self.lowering.context.string_interner);
+                if !package.is_empty() {
+                    candidates.push(format!("{package}.{name}"));
+                }
+            }
+        }
+        candidates.push(name.to_owned());
+        candidates.into_iter().find(|candidate| {
+            self.lowering
+                .context
+                .namespace_resolver
+                .resolve_qualified_path_to_file_force(candidate)
+                .is_some()
+        })
+    }
+
+    fn resolve_defined_type(
+        &mut self,
+        definition: &crate::macro_system::context_api::DefinedType,
+    ) -> Result<TypeId, String> {
+        let name = definition.qualified_name();
+        if !self.lowering.generated_type_names.contains(&name) {
+            self.lowering
+                .lower_generated_type(definition)
+                .map_err(|error| error.to_compilation_error().message)?;
+        }
+        self.resolve_type_by_name(&name)
     }
 
     fn fresh_monomorph(&mut self) -> TypeId {

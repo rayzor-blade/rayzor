@@ -1056,12 +1056,13 @@ impl<'a> AstLowering<'a> {
             TypedExpressionKind::StaticFieldAccess { field_symbol, .. } => *field_symbol,
             _ => return None,
         };
-        let owner = self.enum_abstracts.iter().copied().find(|abs| {
-            self.class_fields.get(abs).is_some_and(|fields| {
+        let owner = self.class_fields.iter().find_map(|(owner, fields)| {
+            (self.context.symbol_table.is_enum_abstract(*owner) && {
                 fields
                     .iter()
                     .any(|(_, symbol, is_static)| *is_static && *symbol == field)
             })
+            .then_some(*owner)
         })?;
         let ty = self.context.symbol_table.get_symbol(owner)?.type_id;
         matches!(

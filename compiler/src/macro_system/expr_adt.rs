@@ -802,7 +802,7 @@ fn group_value(leader: &Expr, followers: &[&Expr]) -> MacroValue {
     ])
 }
 
-fn metadata_of(entry: &MacroValue, span: Span) -> Metadata {
+pub(crate) fn metadata_of(entry: &MacroValue, span: Span) -> Metadata {
     let raw = string_of(field(entry, "name")).unwrap_or_default();
     Metadata {
         name: raw.trim_start_matches(':').to_string(),

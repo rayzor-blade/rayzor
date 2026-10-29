@@ -387,7 +387,10 @@ impl<'a> AstLowering<'a> {
             },
             ExprKind::Ident(name) => {
                 let id_name = self.context.intern_string(name);
-                let prefer = self.expected_value_type();
+                let prefer = self.expected_value_type().map(|expected| {
+                    self.expected_implicit_constant_type(expected, id_name)
+                        .unwrap_or(expected)
+                });
                 let preferred_abstract_field = prefer.and_then(|expected_ty| {
                     let expected_abstract = {
                         let type_table = self.context.type_table.borrow();
@@ -1218,6 +1221,40 @@ impl<'a> AstLowering<'a> {
                 // `var m:Map<String,V>` annotation, base `Map` from
                 // `new Map()` call site).
                 let mut base_class_type_id = self.resolve_type_path(type_path)?;
+                let unresolved = matches!(
+                    self.context
+                        .type_table
+                        .borrow()
+                        .get(base_class_type_id)
+                        .map(|ty| &ty.kind),
+                    Some(TypeKind::Unknown | TypeKind::Placeholder { .. })
+                );
+                if unresolved && self.deferred_expansion_depth > 0 {
+                    let name = type_path
+                        .package
+                        .iter()
+                        .chain(std::iter::once(&type_path.name))
+                        .chain(type_path.sub.iter())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    let module =
+                        crate::macro_system::context_api::MacroTyper::module_for_unresolved_type(
+                            &mut super::macro_defer::DeferredMacroTyper {
+                                lowering: self,
+                                receiver: None,
+                                expected: None,
+                                inferred: None,
+                            },
+                            &name,
+                        );
+                    if let Some(type_name) = module {
+                        return Err(LoweringError::UnresolvedType {
+                            type_name,
+                            location: self.context.create_location_from_span(expression.span),
+                        });
+                    }
+                }
                 if let Some(concrete) = self.native_class_behind_extern(base_class_type_id) {
                     base_class_type_id = concrete;
                 }
@@ -4377,12 +4414,6 @@ impl<'a> AstLowering<'a> {
                         );
                         *slot = self.retype_literal_to(value, element);
                     }
-                    let mut checker = crate::tast::TypeChecker::new(
-                        self.context.type_table,
-                        self.context.symbol_table,
-                        self.context.scope_tree,
-                        self.context.string_interner,
-                    );
                     let dynamic_element = matches!(
                         self.context
                             .type_table
@@ -4391,12 +4422,9 @@ impl<'a> AstLowering<'a> {
                             .map(|ty| &ty.kind),
                         Some(crate::tast::TypeKind::Dynamic)
                     );
-                    if !dynamic_element
-                        && elements.iter().all(|value| {
-                            checker.check_compatibility(value.expr_type, element)
-                                != crate::tast::type_checker::TypeCompatibility::Incompatible
-                        })
-                    {
+                    // Keep the contextual element type even when one slot fails;
+                    // the array checker validates each slot against that type.
+                    if !dynamic_element {
                         expr.expr_type = target;
                     }
                 }

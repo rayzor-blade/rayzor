@@ -19,6 +19,34 @@ pub struct SymbolReference {
 /// How far into an expression a member's `.name` may sit: past its receiver.
 const MEMBER_WINDOW: usize = 512;
 
+fn opening_tag_name(source: &[u8], at: usize) -> Option<(usize, usize)> {
+    if at > source.len() {
+        return None;
+    }
+    let name_byte =
+        |byte: &u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':');
+    let mut start = at;
+    if source.get(start) == Some(&b'<') {
+        start += 1;
+    } else {
+        // Parsers may locate a constructor immediately after the tag name.
+        while start > 0 && source[start - 1].is_ascii_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && name_byte(&source[start - 1]) {
+            start -= 1;
+        }
+    }
+    if start == 0 || source.get(start - 1) != Some(&b'<') {
+        return None;
+    }
+    let len = source[start..]
+        .iter()
+        .take_while(|byte| name_byte(byte))
+        .count();
+    (len > 0).then_some((start, len))
+}
+
 /// The references written in `file`. A name the TAST implies but the source
 /// does not spell (an unqualified static's class, an implicit `this`) has none.
 pub fn collect_references(
@@ -79,29 +107,17 @@ impl SymbolSink for Collect<'_> {
             }
         }
         let Some(symbol) = symbol else { return };
-        let mut start = at.byte_offset as usize;
+        let offset = at.byte_offset as usize;
         if !self
             .markup
             .iter()
-            .any(|span| span.start <= start && start < span.end)
+            .any(|span| span.start <= offset && offset < span.end)
         {
             return;
         }
-        if self.source.get(start) == Some(&b'<') {
-            start += 1;
-        }
-        if start == 0 || self.source.get(start - 1) != Some(&b'<') {
+        let Some((start, len)) = opening_tag_name(self.source, offset) else {
             return;
-        }
-        let len = self.source[start..]
-            .iter()
-            .take_while(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
-            })
-            .count();
-        if len == 0 {
-            return;
-        }
+        };
         // The outer constructor owns the tag; generated helper constructors
         // can inherit its position too.
         if !self.constructed_tags.insert((at.file_id, start)) {
@@ -156,5 +172,20 @@ impl SymbolSink for Collect<'_> {
                 type_id,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::opening_tag_name;
+
+    #[test]
+    fn constructor_positions_after_tag_names_keep_the_opening_tag() {
+        let source = b"<context-menu  value={new Other()}></context-menu>";
+        for offset in [0, 1, 13, 14, 15] {
+            assert_eq!(opening_tag_name(source, offset), Some((1, 12)));
+        }
+        assert_eq!(opening_tag_name(source, 25), None);
+        assert_eq!(opening_tag_name(source, source.len() - 1), None);
     }
 }

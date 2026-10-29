@@ -1930,6 +1930,71 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// The enum-abstract constant an implicit input conversion can accept.
+    pub(crate) fn expected_implicit_constant_type(
+        &mut self,
+        expected: TypeId,
+        name: InternedString,
+    ) -> Option<TypeId> {
+        let owner = self.abstract_symbol_of(expected)?;
+        if !self.abstract_from_methods.contains_key(&owner) {
+            let methods = self.imported_from_methods(owner);
+            self.abstract_from_methods.insert(owner, methods);
+        }
+        let methods = self.abstract_from_methods.get(&owner)?.clone();
+        let mut found = None;
+        for (method, _) in methods {
+            let signature = {
+                let table = self.context.type_table.borrow();
+                let symbol = self.context.symbol_table.get_symbol(method)?;
+                match &table.get(symbol.type_id)?.kind {
+                    TypeKind::Function {
+                        params,
+                        return_type,
+                        ..
+                    } => params.first().map(|source| (*source, *return_type)),
+                    _ => None,
+                }
+            };
+            let Some((source, result)) = signature else {
+                continue;
+            };
+            let mut bindings = Vec::new();
+            self.unify_type_args(result, expected, 0, &mut bindings);
+            if !self.same_type(self.substitute_alias_args(result, &bindings), expected) {
+                continue;
+            }
+            let source = self.substitute_alias_args(source, &bindings);
+            let Some(abstract_owner) = self.abstract_symbol_of(source) else {
+                continue;
+            };
+            if !self.context.symbol_table.is_enum_abstract(abstract_owner) {
+                continue;
+            }
+            let has_constant = self
+                .class_fields
+                .get(&abstract_owner)
+                .is_some_and(|fields| {
+                    fields.iter().any(|(field, symbol, is_static)| {
+                        *field == name
+                            && *is_static
+                            && self
+                                .context
+                                .symbol_table
+                                .get_symbol(*symbol)
+                                .is_some_and(|symbol| symbol.kind != SymbolKind::Function)
+                    })
+                });
+            if has_constant {
+                if found.is_some_and(|previous| !self.same_type(previous, source)) {
+                    return None;
+                }
+                found = Some(source);
+            }
+        }
+        found
+    }
+
     pub(crate) fn coerce_arg_via_abstract_from(
         &mut self,
         arg: TypedExpression,
@@ -2075,6 +2140,27 @@ impl<'a> AstLowering<'a> {
                             return true;
                         }
                         (Some(TypeKind::Function { .. }), Some(TypeKind::Function { .. })) => {}
+                        (
+                            Some(
+                                TypeKind::Class { .. }
+                                | TypeKind::Interface { .. }
+                                | TypeKind::Enum { .. }
+                                | TypeKind::Abstract { .. }
+                                | TypeKind::GenericInstance { .. },
+                            ),
+                            Some(
+                                TypeKind::Class { .. }
+                                | TypeKind::Interface { .. }
+                                | TypeKind::Enum { .. }
+                                | TypeKind::Abstract { .. }
+                                | TypeKind::GenericInstance { .. },
+                            ),
+                        ) => {
+                            let mut bindings = Vec::new();
+                            self.unify_type_args(*param_ty, arg.expr_type, 0, &mut bindings);
+                            let source = self.substitute_alias_args(*param_ty, &bindings);
+                            return self.abstract_source_accepts(source, arg.expr_type, 0);
+                        }
                         // `fromArray<K>(a:Array<K>)`: K binds from the argument,
                         // and the elements must then agree exactly.
                         (Some(TypeKind::Array { .. }), Some(TypeKind::Array { .. })) => {
@@ -2664,12 +2750,12 @@ impl<'a> AstLowering<'a> {
                     typer.expand_deferred_call(&name, expression)
                 };
                 match expanded {
-                    Ok(result) => return self.lower_expression(&result),
+                    Ok(result) => return self.lower_deferred_expansion(&result),
                     Err(e) => {
-                        let error = LoweringError::SemanticError {
-                            message: format!("macro '{}' failed during typing: {}", name, e),
-                            location: self.context.create_location_from_span(expression.span),
-                        };
+                        let error = self.deferred_macro_error(&name, e, expression.span);
+                        if matches!(error, LoweringError::UnresolvedType { .. }) {
+                            return Err(error);
+                        }
                         if !self.recover_macro_errors {
                             return Err(error);
                         }
@@ -2697,12 +2783,12 @@ impl<'a> AstLowering<'a> {
                 typer.expand_deferred_call(&name, expression)
             };
             match expanded {
-                Ok(expanded) => return self.lower_expression(&expanded),
+                Ok(expanded) => return self.lower_deferred_expansion(&expanded),
                 Err(error) => {
-                    let error = LoweringError::SemanticError {
-                        message: format!("macro '{name}' failed during typing: {error}"),
-                        location: self.context.create_location_from_span(expression.span),
-                    };
+                    let error = self.deferred_macro_error(&name, error, expression.span);
+                    if matches!(error, LoweringError::UnresolvedType { .. }) {
+                        return Err(error);
+                    }
                     if !self.recover_macro_errors {
                         return Err(error);
                     }

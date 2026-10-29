@@ -1849,8 +1849,12 @@ impl MacroExpander {
         };
         // SAFETY: cleared before this function returns, on every path.
         unsafe { self.context.set_typer(typer) };
+        let statics = self.class_registry.statics_snapshot();
         let result = self.expand_macro_call(name, args, call);
         self.context.clear_typer();
+        if matches!(&result, Err(MacroError::NeedsModule { .. })) {
+            self.class_registry.restore_statics(statics);
+        }
         // Reentrant typing uses a fork while its parent's expander is borrowed.
         // Its completed expansions still belong to the calling source file.
         self.typing_origins

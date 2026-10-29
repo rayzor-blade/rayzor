@@ -657,6 +657,7 @@ impl MacroInterpreter {
             captures: Default::default(),
             context,
             return_type,
+            static_target: None,
         };
         self.env.push_scope();
         if let Some(value) = &this {

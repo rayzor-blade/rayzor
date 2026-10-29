@@ -90,6 +90,7 @@ impl CompilationUnit {
         skip_stdlib_merge: bool,
     ) -> Result<TypedFile, Vec<CompilationError>> {
         use crate::tast::ast_lowering::AstLowering;
+        crate::macro_system::context_api::register_file_contents(filename, source);
         if self.config.profile_typecheck {
             self.typecheck_timings.files_seen += 1;
         }
@@ -1408,107 +1409,40 @@ impl CompilationUnit {
         all_typed_files: &mut Vec<TypedFile>,
         all_errors: &mut Vec<CompilationError>,
     ) {
-        match self.compile_pre_parsed_file(ast_file) {
-            Ok(typed_file) => {
-                all_typed_files.push(typed_file);
+        let mut requested = BTreeSet::new();
+        loop {
+            let errors = match self.compile_pre_parsed_file(ast_file) {
+                Ok(file) => {
+                    all_typed_files.push(file);
+                    return;
+                }
+                Err(errors) => errors,
+            };
+            let mut modules = Vec::new();
+            for error in &errors {
+                if !(error.message.contains("Unresolved type")
+                    || error.message.contains("UnresolvedType")
+                    || error.message.contains("Cannot find type"))
+                {
+                    continue;
+                }
+                let Some(name) = self.extract_type_name_from_error(&error.message) else {
+                    continue;
+                };
+                if self.failed_type_loads.contains(&name) || !requested.insert(name.clone()) {
+                    continue;
+                }
+                modules.push(name);
             }
-            Err(errors) => {
-                // Check if any errors are unresolved types that we can try to load on-demand
-                let (loadable, other): (Vec<_>, Vec<_>) = errors.into_iter().partition(|e| {
-                    e.message.contains("Unresolved type")
-                        || e.message.contains("UnresolvedType")
-                        || e.message.contains("Cannot find type")
-                });
-
-                // Try to load unresolved types on-demand
-                let mut any_loaded = false;
-                for error in loadable {
-                    if let Some(type_name) = self.extract_type_name_from_error(&error.message) {
-                        // Skip if we already tried to load this type and it failed
-                        if self.failed_type_loads.contains(&type_name) {
-                            all_errors.push(error);
-                            continue;
-                        }
-                        if let Err(load_err) = self.load_import_file(&type_name) {
-                            debug!("On-demand load failed for {}: {}", type_name, load_err);
-                            self.failed_type_loads.insert(type_name.clone());
-                            all_errors.push(error);
-                        } else {
-                            // Successfully loaded! Mark that we should retry
-                            any_loaded = true;
-                        }
-                    } else {
-                        all_errors.push(error);
-                    }
-                }
-
-                // If we successfully loaded any dependencies, retry compiling this file
-                if any_loaded {
-                    debug!(
-                        "  Retrying {} after loading dependencies...",
-                        ast_file.filename
-                    );
-                    match self.compile_pre_parsed_file(ast_file) {
-                        Ok(typed_file) => {
-                            all_typed_files.push(typed_file);
-                        }
-                        Err(retry_errors) => {
-                            // Still failed after loading dependencies
-                            // Check if retry revealed NEW unresolved types that need loading
-                            let (retry_loadable, retry_other): (Vec<_>, Vec<_>) =
-                                retry_errors.into_iter().partition(|e| {
-                                    e.message.contains("Unresolved type")
-                                        || e.message.contains("UnresolvedType")
-                                        || e.message.contains("Cannot find type")
-                                });
-
-                            let mut retry_loaded = false;
-                            for error in retry_loadable {
-                                if let Some(type_name) =
-                                    self.extract_type_name_from_error(&error.message)
-                                {
-                                    if !self.failed_type_loads.contains(&type_name) {
-                                        if let Err(load_err) = self.load_import_file(&type_name) {
-                                            debug!(
-                                                "On-demand load failed for {}: {}",
-                                                type_name, load_err
-                                            );
-                                            self.failed_type_loads.insert(type_name.clone());
-                                            all_errors.push(error);
-                                        } else {
-                                            retry_loaded = true;
-                                        }
-                                    } else {
-                                        all_errors.push(error);
-                                    }
-                                } else {
-                                    all_errors.push(error);
-                                }
-                            }
-
-                            // If we loaded more dependencies on retry, try ONE more time
-                            if retry_loaded {
-                                debug!(
-                                    "  Second retry of {} after loading more dependencies...",
-                                    ast_file.filename
-                                );
-                                match self.compile_pre_parsed_file(ast_file) {
-                                    Ok(typed_file) => {
-                                        all_typed_files.push(typed_file);
-                                    }
-                                    Err(final_errors) => {
-                                        all_errors.extend(final_errors);
-                                    }
-                                }
-                            } else {
-                                all_errors.extend(retry_other);
-                            }
-                        }
-                    }
-                } else {
-                    // No dependencies loaded, keep original errors
-                    all_errors.extend(other);
-                }
+            if modules.is_empty() {
+                all_errors.extend(errors);
+                return;
+            }
+            if let Err(error) = self.load_imports_efficiently(&modules) {
+                debug!("On-demand module loading failed: {error}");
+                self.failed_type_loads.extend(modules);
+                all_errors.extend(errors);
+                return;
             }
         }
     }

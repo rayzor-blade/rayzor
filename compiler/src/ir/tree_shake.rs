@@ -144,25 +144,33 @@ fn find_registrations(
             }
             let mut sites = vec![(*block_id, idx)];
             let mut refs = Vec::new();
-            let mut values = Vec::new();
             let owned = args.iter().all(|arg| {
-                let Some(&(def_block, def_idx, def)) = defs.get(arg) else {
-                    return false;
-                };
-                if uses.get(arg) != Some(&1) {
-                    return false;
+                let mut value = *arg;
+                let mut visited = BTreeSet::new();
+                loop {
+                    let Some(&(def_block, def_idx, def)) = defs.get(&value) else {
+                        return false;
+                    };
+                    if uses.get(&value) != Some(&1) || !visited.insert(value) {
+                        return false;
+                    }
+                    sites.push((def_block, def_idx));
+                    match def {
+                        IrInstruction::FunctionRef { func_id, .. }
+                        | IrInstruction::Const {
+                            value: IrValue::Function(func_id),
+                            ..
+                        } => refs.push(*func_id),
+                        IrInstruction::Const { .. } => {}
+                        // Reflection thunks pass function pointers through ABI casts.
+                        IrInstruction::Cast { src, .. } | IrInstruction::BitCast { src, .. } => {
+                            value = *src;
+                            continue;
+                        }
+                        _ => return false,
+                    }
+                    return true;
                 }
-                match def {
-                    IrInstruction::FunctionRef { func_id, .. }
-                    | IrInstruction::Const {
-                        value: IrValue::Function(func_id),
-                        ..
-                    } => refs.push(*func_id),
-                    IrInstruction::Const { value, .. } => values.push(integer_bits(value)),
-                    _ => return false,
-                }
-                sites.push((def_block, def_idx));
-                true
             });
             if !owned {
                 continue;
@@ -625,6 +633,15 @@ mod tests {
 
     #[test]
     fn unused_icon_payloads_are_absent_from_serialized_bundles() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(check_unused_icon_payloads_are_absent_from_serialized_bundles)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn check_unused_icon_payloads_are_absent_from_serialized_bundles() {
         use crate::compilation::{CompilationConfig, CompilationUnit};
         use crate::ir::blade::RayzorBundle;
 
@@ -635,7 +652,13 @@ mod tests {
         unit.load_stdlib().unwrap();
         unit.add_file(
             r#"
-            @:dce class Icons {
+            class IconMetadata {
+                public static macro function build() {
+                    haxe.macro.Context.getLocalClass().get().meta.add(":dce", [], haxe.macro.Context.currentPos());
+                    return haxe.macro.Context.getBuildFields();
+                }
+            }
+            @:build(IconMetadata.build()) class Icons {
                 public static var USED(get,never):String;
                 public static var UNUSED(get,never):String;
                 static var used:String;
@@ -787,7 +810,7 @@ mod tests {
         }];
         let mut init = make_function(1, 2, "__vtable_init__");
         let mut body = Vec::new();
-        for (class, thunk, base) in [(0xABCD, 2, 0), (0x1234, 3, 3)] {
+        for (class, thunk, base) in [(0xABCD, 2, 0), (0x1234, 3, 4)] {
             let reg = |i: u32| IrId::new(base + i);
             body.push(IrInstruction::Const {
                 dest: reg(0),
@@ -801,10 +824,15 @@ mod tests {
                 dest: reg(2),
                 func_id: IrFunctionId(thunk),
             });
+            body.push(IrInstruction::BitCast {
+                dest: reg(3),
+                src: reg(2),
+                ty: IrType::I64,
+            });
             body.push(IrInstruction::CallDirect {
                 dest: None,
                 func_id: set_slot,
-                args: vec![reg(0), reg(1), reg(2)],
+                args: vec![reg(0), reg(1), reg(3)],
                 arg_ownership: Vec::new(),
                 type_args: Vec::new(),
                 is_tail_call: false,
@@ -826,7 +854,7 @@ mod tests {
         assert!(functions.contains_key(&IrFunctionId(2)));
         assert!(!functions.contains_key(&IrFunctionId(3)));
         let init = &functions[&IrFunctionId(1)].cfg.blocks[&IrBlockId::entry()];
-        assert_eq!(init.instructions.len(), 4);
+        assert_eq!(init.instructions.len(), 5);
     }
 
     #[test]

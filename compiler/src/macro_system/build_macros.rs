@@ -522,7 +522,7 @@ pub(crate) fn apply_build_macro(
         .join(".");
     context.set_build_class(BuildClassContext {
         class_name: class.name.clone(),
-        qualified_name,
+        qualified_name: qualified_name.clone(),
         symbol_id: None,
         fields: build_fields,
         pack: class_pack,
@@ -551,6 +551,7 @@ pub(crate) fn apply_build_macro(
         .get_macro(&macro_name)
         .or_else(|| registry.find_macro_by_name(&macro_name));
 
+    let metadata_registry = class_registry.clone();
     let mut emitted = Vec::new();
     let result = if let Some(def) = macro_def {
         // Macro is in the registry — execute it. Thread the ClassRegistry
@@ -612,6 +613,12 @@ pub(crate) fn apply_build_macro(
         class.fields = new_fields;
     }
     // If the macro returns null or non-array, fields remain unchanged
+
+    if let Some(metadata) = metadata_registry
+        .and_then(|registry| registry.modified_class_metadata(&qualified_name, class.span))
+    {
+        class.meta = metadata;
+    }
 
     Ok(emitted
         .into_iter()
@@ -1106,6 +1113,7 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
                 setter: access("set"),
                 expr: fields
                     .get("expr")
+                    .filter(|expr| !matches!(expr, MacroValue::Null))
                     .and_then(|e| super::expr_adt::try_expr_of(e, parser::Span::default())),
             }
         }
@@ -1366,6 +1374,49 @@ mod tests {
     }
 
     #[test]
+    fn build_macros_mutate_real_class_metadata() {
+        let file = parse(
+            r#"
+class Builder {
+ public static macro function build() {
+  if (haxe.macro.Context.getLocalClass().toString() != "_test.Target") throw "private class path lost";
+  var meta = haxe.macro.Context.getLocalClass().get().meta;
+  if (!meta.has(":discard")) throw "original metadata missing";
+  meta.add(":dce", [], haxe.macro.Context.currentPos());
+  meta.remove(":discard");
+  if (meta.has(":discard") || !haxe.macro.Context.getLocalClass().get().meta.has(":dce")) throw "metadata mutation lost";
+  return haxe.macro.Context.getBuildFields();
+ }
+}
+@:discard @:build(Builder.build()) private class Target {}
+"#,
+        );
+        let mut registry = MacroRegistry::new();
+        registry.scan_and_register(&file, "test.hx").unwrap();
+        let mut classes = super::super::class_registry::ClassRegistry::new();
+        classes.register_file(&file);
+        let result =
+            process_build_macros_with_class_registry(file, &registry, Some(Arc::new(classes)));
+        assert!(result.diagnostics.iter().all(|diagnostic| diagnostic.severity != super::super::errors::MacroSeverity::Error), "{:?}", result.diagnostics);
+        let target = result
+            .file
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                TypeDeclaration::Class(class) if class.name == "Target" => Some(class),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            target
+                .meta
+                .iter()
+                .any(|meta| meta.name == "dce" && meta.compile_time)
+        );
+        assert!(!target.meta.iter().any(|meta| meta.name == "discard"));
+    }
+
+    #[test]
     fn ordinary_build_macro_preserves_body_error_location() {
         let source = "class Builder { public static function build() { return missingHelper(); } }\n@:build(Builder.build()) class Target {}";
         let file = parse(source);
@@ -1544,6 +1595,41 @@ mod tests {
             ClassFieldKind::Var { name, .. } => assert_eq!(name, "myVar"),
             _ => panic!("expected Var field"),
         }
+    }
+
+    #[test]
+    fn property_round_trip_preserves_absent_and_explicit_null_initializers() {
+        let file = parse(
+            "class Fields { public var absent(get,never):String; public var explicit(get,never):String = null; }",
+        );
+        let TypeDeclaration::Class(class) = &file.declarations[0] else {
+            panic!("expected class");
+        };
+        let mut context = super::super::context_api::MacroContext::new();
+        context.set_build_class(BuildClassContext {
+            class_name: class.name.clone(),
+            qualified_name: class.name.clone(),
+            symbol_id: None,
+            fields: class_fields_to_build_fields(&class.fields),
+            pack: Vec::new(),
+        });
+        let MacroValue::Array(values) =
+            context.get_build_fields(SourceLocation::unknown()).unwrap()
+        else {
+            panic!("expected build fields");
+        };
+        let fields = values_to_class_fields(&values, class);
+        let ClassFieldKind::Property { expr: absent, .. } = &fields[0].kind else {
+            panic!("expected property");
+        };
+        let ClassFieldKind::Property { expr: explicit, .. } = &fields[1].kind else {
+            panic!("expected property");
+        };
+        assert!(absent.is_none());
+        assert!(matches!(
+            explicit.as_ref().map(|expr| &expr.kind),
+            Some(parser::ExprKind::Null)
+        ));
     }
 
     #[test]
