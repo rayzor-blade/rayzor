@@ -273,6 +273,17 @@ impl WorkspaceIndex {
         }
     }
 
+    pub fn primary_type(&self, path: &Path) -> Option<String> {
+        self.poll(false);
+        self.state
+            .borrow()
+            .files
+            .get(&canonical(path))?
+            .iter()
+            .find(|entry| entry.type_kind.is_some())
+            .map(|entry| entry.qualified.clone())
+    }
+
     pub fn declaration(&self, qualified: &str) -> Option<Declaration> {
         self.poll(false);
         let state = self.state.borrow();

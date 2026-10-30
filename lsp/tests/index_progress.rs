@@ -88,6 +88,7 @@ fn reports_workspace_modules_and_qualified_document_types() {
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut named_type = false;
+    let mut local_types = false;
     loop {
         let message = client
             .receiver
@@ -98,6 +99,7 @@ fn reports_workspace_modules_and_qualified_document_types() {
                 assert_eq!(note.params["subject"], "models.Thing");
                 assert_eq!(note.params["version"], 1);
                 named_type = true;
+                local_types |= note.params["phase"] == "local-types";
             }
             if note.method == "rayzor/analysisStatus" && note.params["state"] == "ready" {
                 break;
@@ -105,6 +107,10 @@ fn reports_workspace_modules_and_qualified_document_types() {
         }
     }
     assert!(named_type, "No qualified document type was reported");
+    assert!(
+        local_types,
+        "No provisional local-type progress was reported"
+    );
     client
         .sender
         .send(Message::Request(Request::new(

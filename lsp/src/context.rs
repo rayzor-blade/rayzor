@@ -444,7 +444,15 @@ impl LspContext {
         {
             let completed = snapshot.names.len();
             self.editor_cache.publish_partial(uri, input_hash, snapshot);
-            compiler::cooperative::progress("local-types", &filename, completed, None);
+            let subject = self
+                .workspace_index
+                .primary_type(std::path::Path::new(&filename));
+            compiler::cooperative::progress(
+                "local-types",
+                subject.as_deref().unwrap_or(&filename),
+                completed,
+                None,
+            );
         }
         let mut session = match reusable {
             Some(index) => self.sessions.remove(index).unwrap(),
