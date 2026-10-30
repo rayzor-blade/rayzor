@@ -75,7 +75,7 @@ pub struct DropPoints {
     /// Used by last-use analysis to prevent premature freeing
     pub escaping: BTreeSet<SymbolId>,
 
-    /// Variables captured by lambdas - these truly escape the function scope
+    /// Variables captured by closures - these truly escape the function scope
     /// and should NOT be freed at scope exit (the closure owns them)
     pub lambda_captures: BTreeSet<SymbolId>,
 }
@@ -123,7 +123,7 @@ pub struct DropPointAnalyzer {
     lambda_captures: BTreeSet<SymbolId>,
 }
 
-/// The captures of every lambda in `block`, nested ones included.
+/// Captures of lambdas and bound methods in `block`, including nested ones.
 fn collect_lambda_captures_block(block: &HirBlock, out: &mut BTreeSet<SymbolId>) {
     for stmt in &block.statements {
         collect_lambda_captures_stmt(stmt, out);
@@ -261,7 +261,11 @@ fn collect_lambda_captures_expr(expr: &HirExpr, out: &mut BTreeSet<SymbolId>) {
             else_expr,
         } => each(&[condition, then_expr, else_expr], out),
         HirExprKind::Block(block) => collect_lambda_captures_block(block, out),
-        HirExprKind::MethodReference { receiver, .. } => each(&[receiver], out),
+        HirExprKind::MethodReference { receiver, .. } => {
+            // Bound methods capture their receiver just like a lambda.
+            collect_retained_variables(receiver, out);
+            collect_lambda_captures_expr(receiver, out);
+        }
         HirExprKind::Map { entries } => {
             for (k, v) in entries {
                 each(&[k, v], out);
@@ -524,7 +528,10 @@ impl DropPointAnalyzer {
                 }
             }
 
-            HirExprKind::Field { object, .. } => {
+            HirExprKind::Field { object, .. }
+            | HirExprKind::MethodReference {
+                receiver: object, ..
+            } => {
                 self.analyze_expr(object);
             }
 
@@ -624,68 +631,63 @@ impl DropPointAnalyzer {
     }
 
     fn mark_escaping(&mut self, expr: &HirExpr) {
-        // Mark every variable that flows into this expression as
-        // potentially escaping. The previous implementation only
-        // matched bare `Variable` and silently no-op'd for composite
-        // expressions — so `f(obj.field)` would not mark `obj` as
-        // escaping, and `f(arr[i])` would not mark `arr` or `i`.
-        // That caused use-after-free on long loop bodies where the
-        // last *direct* use of a variable was a call earlier in the
-        // iteration, while a later call passed `var.field` (which
-        // didn't extend the variable's recorded lifetime through
-        // this path).
-        match &expr.kind {
-            HirExprKind::Variable { symbol, .. } => {
-                self.escaping.insert(*symbol);
-            }
-            HirExprKind::Field { object, .. } => {
-                self.mark_escaping(object);
-            }
-            HirExprKind::Index { object, index } => {
-                self.mark_escaping(object);
-                self.mark_escaping(index);
-            }
-            HirExprKind::Cast { expr: inner, .. } => {
-                self.mark_escaping(inner);
-            }
-            HirExprKind::Unary { operand, .. } => {
-                self.mark_escaping(operand);
-            }
-            HirExprKind::Binary { lhs, rhs, .. } => {
-                self.mark_escaping(lhs);
-                self.mark_escaping(rhs);
-            }
-            HirExprKind::Call { callee, args, .. } => {
-                // The callee receiver and every arg flow through:
-                // any variable in the sub-tree may be captured by
-                // the callee, so mark them all escaping. The
-                // ordinary `analyze_expr` recursion records last-use
-                // separately.
-                self.mark_escaping(callee);
-                for arg in args {
-                    self.mark_escaping(arg);
-                }
-            }
-            HirExprKind::New { args, .. } => {
-                for arg in args {
-                    self.mark_escaping(arg);
-                }
-            }
-            HirExprKind::Array { elements } => {
-                for elem in elements {
-                    self.mark_escaping(elem);
-                }
-            }
-            HirExprKind::If {
-                condition: _,
-                then_expr,
-                else_expr,
-            } => {
-                self.mark_escaping(then_expr);
-                self.mark_escaping(else_expr);
-            }
-            _ => {}
+        collect_retained_variables(expr, &mut self.escaping);
+    }
+}
+
+/// Variables whose storage may be retained by the value of an expression.
+fn collect_retained_variables(expr: &HirExpr, out: &mut BTreeSet<SymbolId>) {
+    match &expr.kind {
+        HirExprKind::Variable { symbol, .. } => {
+            out.insert(*symbol);
         }
+        HirExprKind::Field { object, .. } => {
+            collect_retained_variables(object, out);
+        }
+        HirExprKind::Index { object, index } => {
+            collect_retained_variables(object, out);
+            collect_retained_variables(index, out);
+        }
+        HirExprKind::Cast { expr: inner, .. } => {
+            collect_retained_variables(inner, out);
+        }
+        HirExprKind::Unary { operand, .. } => {
+            collect_retained_variables(operand, out);
+        }
+        HirExprKind::Binary { lhs, rhs, .. } => {
+            collect_retained_variables(lhs, out);
+            collect_retained_variables(rhs, out);
+        }
+        HirExprKind::Call { callee, args, .. } => {
+            // The callee receiver and every arg flow through:
+            // any variable in the sub-tree may be captured by
+            // the callee, so mark them all escaping. The
+            // ordinary `analyze_expr` recursion records last-use
+            // separately.
+            collect_retained_variables(callee, out);
+            for arg in args {
+                collect_retained_variables(arg, out);
+            }
+        }
+        HirExprKind::New { args, .. } => {
+            for arg in args {
+                collect_retained_variables(arg, out);
+            }
+        }
+        HirExprKind::Array { elements } => {
+            for elem in elements {
+                collect_retained_variables(elem, out);
+            }
+        }
+        HirExprKind::If {
+            condition: _,
+            then_expr,
+            else_expr,
+        } => {
+            collect_retained_variables(then_expr, out);
+            collect_retained_variables(else_expr, out);
+        }
+        _ => {}
     }
 }
 
@@ -732,5 +734,55 @@ pub fn should_drop_at_statement(
 mod tests {
     use super::*;
 
-    // Tests would go here
+    fn expr(kind: HirExprKind) -> HirExpr {
+        HirExpr::new(
+            kind,
+            crate::tast::TypeId::from_raw(1),
+            crate::tast::LifetimeId::from_raw(1),
+            crate::tast::SourceLocation::unknown(),
+        )
+    }
+
+    #[test]
+    fn bound_method_retains_receiver_storage_even_in_unvisited_branches() {
+        let receiver = SymbolId::from_raw(1);
+        let variable = || {
+            expr(HirExprKind::Variable {
+                symbol: receiver,
+                capture_mode: None,
+            })
+        };
+        for receiver_expr in [
+            variable(),
+            expr(HirExprKind::Cast {
+                expr: Box::new(variable()),
+                target: crate::tast::TypeId::from_raw(2),
+                is_safe: false,
+                is_checked: false,
+            }),
+            expr(HirExprKind::Field {
+                object: Box::new(variable()),
+                field: SymbolId::from_raw(2),
+            }),
+            expr(HirExprKind::Index {
+                object: Box::new(variable()),
+                index: Box::new(expr(HirExprKind::Literal(
+                    super::super::hir::HirLiteral::Int(0),
+                ))),
+            }),
+        ] {
+            let bound = expr(HirExprKind::MethodReference {
+                receiver: Box::new(receiver_expr),
+                method_symbol: SymbolId::from_raw(3),
+            });
+            let body = HirBlock::new(
+                vec![HirStatement::Throw(bound)],
+                crate::tast::ScopeId::from_raw(1),
+            );
+            let drops = DropPointAnalyzer::new().analyze_function(&body);
+            assert!(drops.escaping.contains(&receiver));
+            assert!(drops.lambda_captures.contains(&receiver));
+            assert!(!should_drop_at_statement(&drops, receiver, 0));
+        }
+    }
 }
