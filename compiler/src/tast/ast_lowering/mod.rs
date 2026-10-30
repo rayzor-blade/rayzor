@@ -1613,6 +1613,10 @@ pub struct AstLowering<'a> {
     pub(crate) incomplete_classes: std::collections::BTreeSet<SymbolId>,
     /// This file is compiled by the import loop, which retries a failed file.
     pub(crate) retryable_import: bool,
+    /// This file is one the unit compiles for its own sake, not an import:
+    /// a qualified type it cannot resolve is reported, so the driver loads
+    /// that module and retries.
+    pub(crate) user_file: bool,
     /// Bare names of the types the file being lowered declares: they take
     /// precedence over imports, default imports included.
     pub(crate) current_module_types: std::collections::BTreeSet<String>,

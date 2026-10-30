@@ -1053,10 +1053,13 @@ impl<'a> AstLowering<'a> {
                 // Still unresolved - only report errors for user-authored types.
                 // Internal/synthetic stdlib references (file_id = u32::MAX) are
                 // from lazy-loaded stdlib files whose transitive dependencies
-                // may not be loaded yet. These are not user errors.
+                // may not be loaded yet. These are not user errors. A qualified
+                // name in a user file, such as one a macro wrote, names a module
+                // the driver can load before it retries.
                 let is_internal = deferred_type.location.file_id == u32::MAX
                     && deferred_type.location.byte_offset == 0;
-                if !is_internal {
+                let loadable = self.user_file && deferred_type.type_name.contains('.');
+                if !is_internal || loadable {
                     self.context.errors.push(LoweringError::UnresolvedType {
                         type_name: deferred_type.type_name,
                         location: deferred_type.location,

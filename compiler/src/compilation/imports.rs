@@ -1339,6 +1339,7 @@ impl CompilationUnit {
                             &file,
                             is_stdlib,
                             skip_stdlib_merge,
+                            false,
                         )
                     }
                     Err(_) => break Err(Vec::new()),

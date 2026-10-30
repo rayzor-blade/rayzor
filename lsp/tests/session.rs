@@ -3008,19 +3008,28 @@ class Setup {
         return fields;
     }
     static function displayed(pos:Position, source:String):Expr {
+        // Typing a type defers the build until the typer runs, as Ashui's does.
+        Context.getType("Props");
         var at = Compiler.getDisplayPos();
         var inside = source.substring(1, at.pos - Context.getPosInfos(pos).min);
         var here = Context.makePosition({file: at.file, min: at.pos, max: at.pos});
         if (~/^[a-z]*$/.match(inside))
-            return {expr: EDisplay(macro @:pos(here) (null : Tags), DKDot), pos: here};
+            return {expr: EDisplay(macro @:pos(here) (null : ui.Tags), DKDot), pos: here};
         var literal:Expr = {expr: EDisplay({expr: EObjectDecl([]), pos: here}, DKStructure), pos: here};
         return {expr: ECheckType(literal, macro :Props), pos: here};
     }
+    public static function tags():Array<Field> {
+        return [for (name in ["card", "row"]) {name: name, access: [APublic], kind: FVar(macro :Bool), pos: Context.currentPos()}];
+    }
 }"#;
-    let main = "typedef Props = {title:String, ?wide:Bool};\nclass Tags {\n    public var card:Bool;\n    public var row:Bool;\n}\nclass Main {\n    static function view():Int return <card title=\"a\" ></card>;\n    static function tag():Int return <ca></ca>;\n    static function main() { view(); tag(); var x = 1 < 2; }\n}\n";
+    let main = "typedef Props = {title:String, ?wide:Bool};\nclass Main {\n    static function view():Int return <card title=\"a\" ></card>;\n    static function tag():Int return <ca></ca>;\n    static function main() { view(); tag(); var x = 1 < 2; }\n}\n";
     let mut s = Session::start(&[
         ("build.hxml", "--macro Setup.enable()\n"),
         ("Setup.hx", macros),
+        (
+            "ui/Tags.hx",
+            "package ui;\n\n/** Fields named after the tags. **/\n@:build(Setup.tags())\nclass Tags {}\n",
+        ),
         ("Main.hx", main),
     ]);
     s.open("Main.hx");

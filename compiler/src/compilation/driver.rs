@@ -78,9 +78,11 @@ impl CompilationUnit {
             &parse_result.file,
             skip_pre_registration,
             skip_stdlib_merge,
+            false,
         )
     }
 
+    /// `user_file`: the file is one of the unit's own, not an import.
     pub(crate) fn compile_ast_with_shared_state(
         &mut self,
         filename: &str,
@@ -88,6 +90,7 @@ impl CompilationUnit {
         ast_file: &parser::HaxeFile,
         skip_pre_registration: bool,
         skip_stdlib_merge: bool,
+        user_file: bool,
     ) -> Result<TypedFile, Vec<CompilationError>> {
         use crate::tast::ast_lowering::AstLowering;
         crate::macro_system::context_api::register_file_contents(filename, source);
@@ -585,6 +588,7 @@ impl CompilationUnit {
         lowering.incomplete_classes = self.incomplete_classes.clone();
         // Only the import loop passes skip_stdlib_merge, and it retries.
         lowering.retryable_import = retryable_import;
+        lowering.user_file = user_file;
 
         // CompilationUnit manages stdlib loading itself via load_stdlib() and the
         // later stdlib MIR merge. Re-loading the stdlib inside AstLowering causes
@@ -1391,7 +1395,7 @@ impl CompilationUnit {
         }
 
         let source = ast_file.input.as_deref().unwrap_or_default();
-        self.compile_ast_with_shared_state(&ast_file.filename, source, ast_file, false, false)
+        self.compile_ast_with_shared_state(&ast_file.filename, source, ast_file, false, false, true)
     }
 
     pub(crate) fn macro_expansion_may_apply(&self, ast_file: &parser::HaxeFile) -> bool {
