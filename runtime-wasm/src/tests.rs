@@ -120,3 +120,18 @@ fn closure_views_keep_environment_and_original_record() {
     }
     assert_eq!(record, [1234, 5678]);
 }
+
+#[test]
+fn char_code_at_indexes_long_strings_by_character() {
+    let ascii: Vec<u8> = (0..1000).map(|i| b'A' + (i % 4) as u8).collect();
+    let s = wasm_string_of(&ascii);
+    assert_eq!(haxe_string_char_code_at_ptr(s, 999), b'D' as i32);
+    assert_eq!(haxe_string_char_code_at_ptr(s, 1000), -1);
+    let mut wide = ascii.clone();
+    wide.splice(0..0, "é".bytes());
+    let w = wasm_string_of(&wide);
+    assert_eq!(haxe_string_char_code_at_ptr(w, 0), 'é' as i32);
+    assert_eq!(haxe_string_char_code_at_ptr(w, 1000), b'D' as i32);
+    haxe_string_free(w);
+    haxe_string_free(s);
+}

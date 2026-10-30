@@ -641,6 +641,7 @@ pub extern "C" fn haxe_string_free(s: i32) {
     unsafe {
         let (data_ptr, _, cap) = read_haxe_string(s);
         if data_ptr != 0 && cap > 0 {
+            reflect_strings::forget_char_count(data_ptr);
             let layout = Layout::from_size_align_unchecked(cap as usize, 1);
             dealloc(data_ptr as *mut u8, layout);
         }

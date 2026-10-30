@@ -536,18 +536,63 @@ pub extern "C" fn haxe_string_upper(s: i32) -> i32 {
     }
 }
 
+/// Character counts of long strings, keyed by data buffer: `(len, chars)`.
+/// The wasm string header has no field to cache the count in, as the native
+/// one does; `haxe_string_free` evicts an entry with its buffer.
+static CHAR_COUNTS: std::sync::Mutex<Option<std::collections::HashMap<u32, (u32, u32)>>> =
+    std::sync::Mutex::new(None);
+
+/// Strings shorter than this are counted on every call, not cached.
+const CACHE_CHARS_FROM: usize = 256;
+
+fn count_chars(b: &[u8]) -> u32 {
+    if b.is_ascii() {
+        return b.len() as u32;
+    }
+    b.iter().filter(|&&c| (c & 0xC0) != 0x80).count() as u32
+}
+
+/// Character count of the string whose buffer is `data`.
+fn char_count_of(data: u32, b: &[u8]) -> u32 {
+    if b.len() < CACHE_CHARS_FROM {
+        return count_chars(b);
+    }
+    let len = b.len() as u32;
+    let mut guard = CHAR_COUNTS.lock().unwrap();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if let Some(&(l, n)) = map.get(&data)
+        && l == len
+    {
+        return n;
+    }
+    let n = count_chars(b);
+    map.insert(data, (len, n));
+    n
+}
+
+pub(crate) fn forget_char_count(data: u32) {
+    if let Some(map) = CHAR_COUNTS.lock().unwrap().as_mut() {
+        map.remove(&data);
+    }
+}
+
 /// `charCodeAt` by code point: the code point, or -1 out of range.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_char_code_at_ptr(s: i32, index: i32) -> i32 {
     if s == 0 || index < 0 {
         return -1;
     }
+    let data = unsafe { read_haxe_string(s).0 };
     let bytes = unsafe { string_bytes(s as u32) };
+    let index = index as usize;
+    if char_count_of(data, bytes) as usize == bytes.len() {
+        return bytes.get(index).map_or(-1, |&c| c as i32);
+    }
     let text = match core::str::from_utf8(bytes) {
         Ok(text) => text,
         Err(e) => unsafe { core::str::from_utf8_unchecked(&bytes[..e.valid_up_to()]) },
     };
-    text.chars().nth(index as usize).map_or(-1, |c| c as i32)
+    text.chars().nth(index).map_or(-1, |c| c as i32)
 }
 
 /// `charCodeAt` as an unboxed `Null<Int>`: `NULL_INT` out of range.
