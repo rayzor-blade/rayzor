@@ -41,12 +41,99 @@ pub struct AotOutput {
     pub code_size: u64,
 }
 
+/// LLVM IR effort, independent of MIR and machine-code generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlvmOptimizationLevel {
+    O0,
+    O1,
+    O2,
+    O3,
+    Size,
+    MinSize,
+}
+
+impl LlvmOptimizationLevel {
+    pub fn default_mir_level(self) -> OptimizationLevel {
+        match self {
+            Self::O0 => OptimizationLevel::O0,
+            Self::O1 => OptimizationLevel::O1,
+            Self::O3 => OptimizationLevel::O3,
+            _ => OptimizationLevel::O2,
+        }
+    }
+
+    #[cfg(feature = "llvm-backend")]
+    pub(crate) fn pipeline(self) -> &'static str {
+        match self {
+            Self::O0 => "default<O0>",
+            Self::O1 => "default<O1>",
+            Self::O2 => "default<O2>",
+            Self::O3 => "default<O3>",
+            Self::Size => "default<Os>",
+            Self::MinSize => "default<Oz>",
+        }
+    }
+}
+
+impl From<OptimizationLevel> for LlvmOptimizationLevel {
+    fn from(level: OptimizationLevel) -> Self {
+        match level {
+            OptimizationLevel::O0 => Self::O0,
+            OptimizationLevel::O1 => Self::O1,
+            OptimizationLevel::O2 => Self::O2,
+            OptimizationLevel::O3 => Self::O3,
+        }
+    }
+}
+
+impl std::str::FromStr for LlvmOptimizationLevel {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "0" => Ok(Self::O0),
+            "1" => Ok(Self::O1),
+            "2" => Ok(Self::O2),
+            "3" => Ok(Self::O3),
+            "s" => Ok(Self::Size),
+            "z" => Ok(Self::MinSize),
+            _ => Err("optimization level must be 0, 1, 2, 3, s or z".into()),
+        }
+    }
+}
+
+impl std::fmt::Display for LlvmOptimizationLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::O0 => "0",
+            Self::O1 => "1",
+            Self::O2 => "2",
+            Self::O3 => "3",
+            Self::Size => "s",
+            Self::MinSize => "z",
+        })
+    }
+}
+
+#[cfg(feature = "llvm-backend")]
+fn llvm_level(level: OptimizationLevel) -> inkwell::OptimizationLevel {
+    match level {
+        OptimizationLevel::O0 => inkwell::OptimizationLevel::None,
+        OptimizationLevel::O1 => inkwell::OptimizationLevel::Less,
+        OptimizationLevel::O2 => inkwell::OptimizationLevel::Default,
+        OptimizationLevel::O3 => inkwell::OptimizationLevel::Aggressive,
+    }
+}
+
 /// AOT compiler configuration
 pub struct AotCompiler {
     /// Target triple (None = host)
     pub target_triple: Option<String>,
     /// MIR optimization level
     pub opt_level: OptimizationLevel,
+    /// LLVM IR effort; defaults to the MIR level.
+    pub llvm_opt_level: Option<LlvmOptimizationLevel>,
+    /// Machine-code effort; defaults to the LLVM level (O2 for size modes).
+    pub codegen_opt_level: Option<OptimizationLevel>,
     /// Output format
     pub output_format: OutputFormat,
     /// Whether to tree-shake unused code
@@ -76,6 +163,8 @@ impl Default for AotCompiler {
         Self {
             target_triple: None,
             opt_level: OptimizationLevel::O2,
+            llvm_opt_level: None,
+            codegen_opt_level: None,
             output_format: OutputFormat::Executable,
             strip: true,
             verbose: false,
@@ -131,12 +220,12 @@ impl AotCompiler {
 
         unit.finalize_mir_references();
 
-        let mir_modules = unit.get_mir_modules();
+        let mir_modules = unit.take_mir_modules();
         if mir_modules.is_empty() {
             return Err("No MIR modules generated".to_string());
         }
 
-        Ok(mir_modules.iter().map(|m| (**m).clone()).collect())
+        Ok(mir_modules)
     }
 
     /// Compile Haxe source files to native output.
@@ -162,6 +251,19 @@ impl AotCompiler {
         use std::time::Instant;
 
         let t0 = Instant::now();
+        // RAYZOR_AOT_PROFILE reports stage timings without changing compilation.
+        let profiling = std::env::var_os("RAYZOR_AOT_PROFILE").is_some();
+        let mut previous = t0;
+        let mut stage = |name: &str| {
+            let now = Instant::now();
+            if profiling {
+                eprintln!(
+                    "aot-profile: phase={name} ms={:.3}",
+                    now.duration_since(previous).as_secs_f64() * 1000.0
+                );
+            }
+            previous = now;
+        };
 
         // --- Phase 1: Parse and compile to MIR ---
         if self.verbose {
@@ -169,6 +271,7 @@ impl AotCompiler {
         }
 
         let mut modules = self.prepare_modules(source_files, plugins)?;
+        stage("frontend");
 
         // --- Phase 2: Find entry point ---
         let (entry_module_name, entry_function_name) = find_entry_point(&modules)?;
@@ -205,16 +308,18 @@ impl AotCompiler {
         }
 
         // --- Phase 4: MIR optimizations ---
-        if self.opt_level != OptimizationLevel::O0 {
-            if self.verbose {
-                println!("  Applying MIR optimizations ({:?})...", self.opt_level);
-            }
-            let mut pass_manager = PassManager::for_level(self.opt_level);
-            for module in &mut modules {
-                let _ = pass_manager.run(module);
+        if self.verbose {
+            println!("  Applying MIR optimizations ({:?})...", self.opt_level);
+        }
+        let mut pass_manager = PassManager::for_level(self.opt_level);
+        for module in &mut modules {
+            let _ = pass_manager.run(module);
+            if self.opt_level != OptimizationLevel::O0 {
                 let _ = strip_stack_trace_updates(module);
             }
         }
+
+        stage("mir");
 
         // --- Phase 5: LLVM compilation ---
         if std::env::var_os("RAYZOR_DUMP_MIR").is_some() {
@@ -228,18 +333,15 @@ impl AotCompiler {
 
         llvm_aot_backend::init_llvm_aot();
 
-        let llvm_opt = match self.opt_level {
-            OptimizationLevel::O0 => inkwell::OptimizationLevel::None,
-            OptimizationLevel::O1 => inkwell::OptimizationLevel::Less,
-            OptimizationLevel::O2 => inkwell::OptimizationLevel::Default,
-            OptimizationLevel::O3 => inkwell::OptimizationLevel::Aggressive,
-        };
+        let ir_opt = self.llvm_opt_level.unwrap_or_else(|| self.opt_level.into());
+        let llvm_opt = llvm_level(ir_opt.default_mir_level());
+        let codegen_opt = llvm_level(self.codegen_opt_level.unwrap_or(ir_opt.default_mir_level()));
 
         let target = llvm_aot_backend::AotTarget::new(self.target_triple.as_deref());
         let context = Context::create();
         let mut backend = LLVMJitBackend::with_aot_mode(&context, llvm_opt, &target)?;
 
-        // Two-pass: declare all, then compile all bodies
+        // Emit every body eagerly; JIT promotion budgets do not apply.
         backend.seed_indirect_targets(&modules);
         for module in &modules {
             backend.declare_module(module)?;
@@ -253,6 +355,7 @@ impl AotCompiler {
         // Find the LLVM function name for the entry point
         let entry_llvm_name = find_entry_llvm_name(&backend, &modules, &entry_function_name)?;
         let startup_llvm_names = find_startup_llvm_names(&backend, &modules);
+        stage("llvm-ir");
 
         // --- Phase 6: AOT-specific emit via llvm_aot_backend ---
         let module = backend.get_module();
@@ -270,7 +373,8 @@ impl AotCompiler {
                 println!("  Optimizing and emitting object file...");
             }
 
-            llvm_aot_backend::optimize_module(module, &target, llvm_opt)?;
+            llvm_aot_backend::optimize_module_with_level(module, &target, ir_opt)?;
+            stage("llvm-opt");
             // The main() wrapper is added after optimization, so the entry
             // is optimized in the same context as under the JIT.
             if self.output_format == OutputFormat::Executable {
@@ -285,8 +389,9 @@ impl AotCompiler {
                 &obj_path,
                 &target,
                 RelocMode::PIC,
-                llvm_opt,
+                codegen_opt,
             )?;
+            stage("codegen");
 
             if self.output_format == OutputFormat::Executable {
                 if self.verbose {
@@ -294,10 +399,12 @@ impl AotCompiler {
                 }
                 self.link_executable(&obj_path, output_path)?;
                 let _ = std::fs::remove_file(&obj_path);
+                stage("link");
             }
         } else {
             // For IR/bitcode/asm output, use inkwell directly
-            llvm_aot_backend::optimize_module(module, &target, llvm_opt)?;
+            llvm_aot_backend::optimize_module_with_level(module, &target, ir_opt)?;
+            stage("llvm-opt");
 
             if self.output_format == OutputFormat::Executable {
                 llvm_aot_backend::generate_main_wrapper(
@@ -324,10 +431,11 @@ impl AotCompiler {
                     if self.verbose {
                         println!("  Emitting assembly...");
                     }
-                    llvm_aot_backend::emit_assembly(module, output_path, &target, llvm_opt)?;
+                    llvm_aot_backend::emit_assembly(module, output_path, &target, codegen_opt)?;
                 }
                 _ => unreachable!(),
             }
+            stage("emit");
         }
 
         let elapsed = t0.elapsed();
@@ -657,10 +765,10 @@ impl AotCompiler {
         }
 
         // --- Phase 4: MIR optimizations ---
-        if self.opt_level != OptimizationLevel::O0 {
-            let mut pass_manager = PassManager::for_level(self.opt_level);
-            for module in &mut modules {
-                let _ = pass_manager.run(module);
+        let mut pass_manager = PassManager::for_level(self.opt_level);
+        for module in &mut modules {
+            let _ = pass_manager.run(module);
+            if self.opt_level != OptimizationLevel::O0 {
                 let _ = strip_stack_trace_updates(module);
             }
         }

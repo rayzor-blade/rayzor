@@ -70,6 +70,25 @@ rayzor aot main.hx -o app --strip --strip-symbols
 rayzor aot main.hx --emit obj -o app.o        # exe (default) | obj | asm
 ```
 
+AOT `-O0`/`-O1`/`-O2`/`-O3` selects LLVM IR effort and supplies matching MIR
+and machine-code defaults. `-Os` and `-Oz` use LLVM's size pipelines with MIR
+and machine-code defaults of 2. Override the stages independently:
+
+```bash
+rayzor aot main.hx -O3 --codegen-opt-level 0 -o app
+rayzor aot main.hx -O3 --mir-opt-level 1 --codegen-opt-level 2 -o app
+rayzor aot main.hx -Oz -o small-app
+```
+
+Lower machine-code effort can reduce build time while changing output size and
+runtime speed; measure the application before choosing it for distribution.
+The default remains O2 for all three stages. AOT emits all retained functions
+without consulting JIT promotion policy. These LLVM controls apply to native
+AOT; Rayzor's WASM backend directly emits WebAssembly and uses Binaryen instead.
+Set `RAYZOR_AOT_PROFILE=1` to report frontend, MIR, LLVM IR, LLVM optimization,
+code generation and link timings on stderr.
+
+
 `rayzor build` with no argument resolves an explicit `.hxml`, else `rayzor.toml`,
 else the manifest's `hxml = "build.hxml"` delegation. `--dry-run` prints the plan.
 

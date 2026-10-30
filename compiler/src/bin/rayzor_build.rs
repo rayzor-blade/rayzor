@@ -6,7 +6,7 @@
 //! Usage:
 //!   `rayzor-build [OPTIONS] <SOURCE_FILES...>`
 
-use compiler::codegen::aot_compiler::OutputFormat;
+use compiler::codegen::aot_compiler::{LlvmOptimizationLevel, OutputFormat};
 use compiler::ir::optimization::OptimizationLevel;
 use compiler::tools::aot_build::{self, AotConfig};
 use std::path::PathBuf;
@@ -17,6 +17,9 @@ fn main() {
     let mut target_triple: Option<String> = None;
     let mut output_format = OutputFormat::Executable;
     let mut opt_level = OptimizationLevel::O2;
+    let mut llvm_opt_level = None;
+    let mut mir_opt_level = None;
+    let mut codegen_opt_level = None;
     let mut strip = true; // tree-shake by default for AOT
     let mut strip_symbols = false;
     let mut verbose = false;
@@ -63,15 +66,40 @@ fn main() {
             "--optimize" | "-O" => {
                 i += 1;
                 if i < args.len() {
-                    opt_level = aot_build::parse_opt_level(&args[i]);
+                    let level: LlvmOptimizationLevel = args[i].parse().unwrap_or_else(|error| {
+                        eprintln!("{error}");
+                        std::process::exit(1)
+                    });
+                    opt_level = level.default_mir_level();
+                    llvm_opt_level = Some(level);
                 } else {
                     opt_level = OptimizationLevel::O2;
                 }
             }
-            "-O0" => opt_level = OptimizationLevel::O0,
-            "-O1" => opt_level = OptimizationLevel::O1,
-            "-O2" => opt_level = OptimizationLevel::O2,
-            "-O3" => opt_level = OptimizationLevel::O3,
+            "-O0" | "-O1" | "-O2" | "-O3" | "-Os" | "-Oz" => {
+                let level: LlvmOptimizationLevel = args[i][2..].parse().unwrap();
+                opt_level = level.default_mir_level();
+                llvm_opt_level = Some(level);
+            }
+            "--mir-opt-level" | "--codegen-opt-level" => {
+                let mir = args[i] == "--mir-opt-level";
+                i += 1;
+                let level = match args.get(i).map(String::as_str) {
+                    Some("0") => OptimizationLevel::O0,
+                    Some("1") => OptimizationLevel::O1,
+                    Some("2") => OptimizationLevel::O2,
+                    Some("3") => OptimizationLevel::O3,
+                    _ => {
+                        eprintln!("MIR/codegen optimization level must be 0, 1, 2 or 3");
+                        std::process::exit(1);
+                    }
+                };
+                if mir {
+                    mir_opt_level = Some(level);
+                } else {
+                    codegen_opt_level = Some(level);
+                }
+            }
             "--no-strip" => strip = false,
             "--strip" => strip_symbols = true,
             "--runtime-dir" => {
@@ -118,7 +146,9 @@ fn main() {
         output: output_path,
         target_triple,
         output_format,
-        opt_level,
+        opt_level: mir_opt_level.unwrap_or(opt_level),
+        llvm_opt_level: Some(llvm_opt_level.unwrap_or_else(|| opt_level.into())),
+        codegen_opt_level,
         strip,
         strip_symbols,
         verbose,
@@ -151,7 +181,9 @@ fn print_usage() {
     println!(
         "    --emit <FORMAT>           Output: exe, obj, llvm-ir, llvm-bc, asm (default: exe)"
     );
-    println!("    -O0, -O1, -O2, -O3       Optimization level (default: O2)");
+    println!("    -O0, -O1, -O2, -O3, -Os, -Oz  LLVM optimization level (default: O2)");
+    println!("    --mir-opt-level <0..3>         Override MIR optimization");
+    println!("    --codegen-opt-level <0..3>     Override machine-code effort");
     println!("    --no-strip                Disable dead-code stripping");
     println!("    --strip                   Strip debug symbols from binary");
     println!("    --runtime-dir <DIR>       Path to librayzor_runtime.a");

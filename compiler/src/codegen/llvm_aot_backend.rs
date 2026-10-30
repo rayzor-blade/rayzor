@@ -137,51 +137,89 @@ impl AotTarget {
 fn run_opt_passes(
     module: &Module,
     target_machine: &TargetMachine,
-    opt_level: OptimizationLevel,
+    level: crate::codegen::aot_compiler::LlvmOptimizationLevel,
 ) -> Result<(), String> {
-    if opt_level != OptimizationLevel::None {
-        let passes = match opt_level {
-            OptimizationLevel::None => "default<O0>",
-            OptimizationLevel::Less => "default<O1>",
-            OptimizationLevel::Default => "default<O2>",
-            OptimizationLevel::Aggressive => "default<O3>",
-        };
-        let pass_options = PassBuilderOptions::create();
-        module
-            .run_passes(passes, target_machine, pass_options)
-            .map_err(|e| format!("Failed to run optimization passes: {}", e))?;
-
-        // Debug: dump optimized IR if requested
-        if std::env::var("RAYZOR_DUMP_LLVM_IR").is_ok() {
-            let ir_str = module.print_to_string().to_string();
-            if std::fs::write("/tmp/rayzor_aot_opt.ll", &ir_str).is_ok() {
-                eprintln!(
-                    "=== AOT Optimized LLVM IR saved to /tmp/rayzor_aot_opt.ll ({} bytes) ===",
-                    ir_str.len()
+    use crate::codegen::aot_compiler::LlvmOptimizationLevel;
+    if matches!(
+        level,
+        LlvmOptimizationLevel::Size | LlvmOptimizationLevel::MinSize
+    ) {
+        use inkwell::attributes::{Attribute, AttributeLoc};
+        let context = module.get_context();
+        let optnone = Attribute::get_named_enum_kind_id("optnone");
+        for function in module.get_functions() {
+            if function.count_basic_blocks() == 0
+                || function
+                    .get_enum_attribute(AttributeLoc::Function, optnone)
+                    .is_some()
+            {
+                continue;
+            }
+            for name in ["optsize", "minsize"] {
+                if name == "minsize" && level != LlvmOptimizationLevel::MinSize {
+                    continue;
+                }
+                function.add_attribute(
+                    AttributeLoc::Function,
+                    context.create_enum_attribute(Attribute::get_named_enum_kind_id(name), 0),
                 );
             }
         }
     }
+    module
+        .run_passes(
+            level.pipeline(),
+            target_machine,
+            PassBuilderOptions::create(),
+        )
+        .map_err(|e| format!("Failed to run optimization passes: {}", e))?;
+    if std::env::var_os("RAYZOR_DUMP_LLVM_IR").is_some() {
+        let _ = std::fs::write(
+            "/tmp/rayzor_aot_opt.ll",
+            module.print_to_string().to_bytes(),
+        );
+    }
     Ok(())
 }
 
-/// Run LLVM optimization passes on the module.
-/// Call this BEFORE adding main() wrappers or other post-optimization transforms.
+/// Optimize IR once, independently of the later machine-code generation effort.
+#[cfg(feature = "llvm-backend")]
+pub fn optimize_module_with_level(
+    module: &Module,
+    target: &AotTarget,
+    level: crate::codegen::aot_compiler::LlvmOptimizationLevel,
+) -> Result<(), String> {
+    module
+        .verify()
+        .map_err(|e| format!("LLVM module verification failed: {e}"))?;
+    let opt = match level.default_mir_level() {
+        crate::ir::optimization::OptimizationLevel::O0 => OptimizationLevel::None,
+        crate::ir::optimization::OptimizationLevel::O1 => OptimizationLevel::Less,
+        crate::ir::optimization::OptimizationLevel::O2 => OptimizationLevel::Default,
+        crate::ir::optimization::OptimizationLevel::O3 => OptimizationLevel::Aggressive,
+    };
+    let machine = target.target_machine(RelocMode::Default, opt)?;
+    run_opt_passes(module, &machine, level)
+}
+
+/// Optimize using the historical four-level LLVM setting.
 #[cfg(feature = "llvm-backend")]
 pub fn optimize_module(
     module: &Module,
     target: &AotTarget,
-    opt_level: OptimizationLevel,
+    level: OptimizationLevel,
 ) -> Result<(), String> {
-    if let Err(msg) = module.verify() {
-        return Err(format!(
-            "LLVM module verification failed: {}",
-            msg.to_string()
-        ));
-    }
-    // RelocMode doesn't affect optimization, only codegen
-    let target_machine = target.target_machine(RelocMode::Default, opt_level)?;
-    run_opt_passes(module, &target_machine, opt_level)
+    use crate::codegen::aot_compiler::LlvmOptimizationLevel;
+    optimize_module_with_level(
+        module,
+        target,
+        match level {
+            OptimizationLevel::None => LlvmOptimizationLevel::O0,
+            OptimizationLevel::Less => LlvmOptimizationLevel::O1,
+            OptimizationLevel::Default => LlvmOptimizationLevel::O2,
+            OptimizationLevel::Aggressive => LlvmOptimizationLevel::O3,
+        },
+    )
 }
 
 /// Compile to object file with configurable target and relocation mode.

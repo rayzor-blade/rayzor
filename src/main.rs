@@ -316,9 +316,17 @@ enum Commands {
         #[arg(long, default_value = "exe")]
         emit: String,
 
-        /// Optimization level (0-3)
+        /// LLVM optimization level (0, 1, 2, 3, s, z); also supplies MIR/codegen defaults
         #[arg(short = 'O', long, default_value = "2")]
-        opt_level: u8,
+        opt_level: compiler::codegen::aot_compiler::LlvmOptimizationLevel,
+
+        /// Override MIR optimization independently of LLVM
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=3))]
+        mir_opt_level: Option<u8>,
+
+        /// Override machine-code generation effort independently of LLVM IR
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=3))]
+        codegen_opt_level: Option<u8>,
 
         /// Tree-shake unreachable code
         #[arg(long, default_value = "true")]
@@ -948,6 +956,8 @@ fn main() {
             target,
             emit,
             opt_level,
+            mir_opt_level,
+            codegen_opt_level,
             strip,
             strip_symbols,
             runtime_dir,
@@ -963,6 +973,8 @@ fn main() {
                 target,
                 emit,
                 opt_level,
+                mir_opt_level,
+                codegen_opt_level,
                 strip,
                 strip_symbols,
                 runtime_dir,
@@ -3390,7 +3402,9 @@ fn cmd_aot(
     mut output: Option<PathBuf>,
     target: Option<String>,
     emit: String,
-    opt_level: u8,
+    opt_level: compiler::codegen::aot_compiler::LlvmOptimizationLevel,
+    mir_opt_level: Option<u8>,
+    codegen_opt_level: Option<u8>,
     strip: bool,
     strip_symbols: bool,
     runtime_dir: Option<PathBuf>,
@@ -3400,6 +3414,20 @@ fn cmd_aot(
     _cache_dir: Option<PathBuf>,
     verbose: bool,
 ) -> Result<(), String> {
+    let mir_opt = mir_opt_level
+        .map(|n| match n {
+            0 => compiler::ir::optimization::OptimizationLevel::O0,
+            1 => compiler::ir::optimization::OptimizationLevel::O1,
+            2 => compiler::ir::optimization::OptimizationLevel::O2,
+            _ => compiler::ir::optimization::OptimizationLevel::O3,
+        })
+        .unwrap_or(opt_level.default_mir_level());
+    let codegen_opt = codegen_opt_level.map(|n| match n {
+        0 => compiler::ir::optimization::OptimizationLevel::O0,
+        1 => compiler::ir::optimization::OptimizationLevel::O1,
+        2 => compiler::ir::optimization::OptimizationLevel::O2,
+        _ => compiler::ir::optimization::OptimizationLevel::O3,
+    });
     // Resolve project config from the first file or current dir
     let mut manifest_project = None;
     if files.is_empty() {
@@ -3474,15 +3502,18 @@ fn cmd_aot(
 
     // C backend does not require LLVM
     if emit == "c" || emit == "gcc" {
+        if codegen_opt.is_some()
+            || matches!(
+                opt_level,
+                compiler::codegen::aot_compiler::LlvmOptimizationLevel::Size
+                    | compiler::codegen::aot_compiler::LlvmOptimizationLevel::MinSize
+            )
+        {
+            return Err("LLVM size/codegen options require an LLVM output format".into());
+        }
         use compiler::codegen::aot_compiler::{AotCompiler, OutputFormat};
-        use compiler::ir::optimization::OptimizationLevel;
 
-        let opt = match opt_level {
-            0 => OptimizationLevel::O0,
-            1 => OptimizationLevel::O1,
-            3 => OptimizationLevel::O3,
-            _ => OptimizationLevel::O2,
-        };
+        let opt = mir_opt;
         let source_files: Vec<String> = files
             .iter()
             .map(|f| f.to_string_lossy().to_string())
@@ -3504,6 +3535,8 @@ fn cmd_aot(
 
         let compiler = AotCompiler {
             opt_level: opt,
+            llvm_opt_level: None,
+            codegen_opt_level: None,
             output_format: if is_exe {
                 OutputFormat::Executable
             } else {
@@ -3548,6 +3581,8 @@ fn cmd_aot(
             strip,
             strip_symbols,
             &runtime_dir,
+            mir_opt_level,
+            codegen_opt_level,
             &linker,
             &sysroot,
             verbose,
@@ -3561,7 +3596,6 @@ fn cmd_aot(
     #[cfg(feature = "llvm-backend")]
     {
         use compiler::codegen::aot_compiler::OutputFormat;
-        use compiler::ir::optimization::OptimizationLevel;
         use compiler::tools::aot_build::{AotConfig, run_aot};
 
         let output_format = match emit.as_str() {
@@ -3579,12 +3613,7 @@ fn cmd_aot(
             }
         };
 
-        let opt = match opt_level {
-            0 => OptimizationLevel::O0,
-            1 => OptimizationLevel::O1,
-            3 => OptimizationLevel::O3,
-            _ => OptimizationLevel::O2,
-        };
+        let opt = mir_opt;
 
         let source_files: Vec<String> = files
             .iter()
@@ -3597,6 +3626,8 @@ fn cmd_aot(
             target_triple: target,
             output_format,
             opt_level: opt,
+            llvm_opt_level: Some(opt_level),
+            codegen_opt_level: codegen_opt,
             strip,
             strip_symbols,
             verbose,

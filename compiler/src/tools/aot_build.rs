@@ -5,7 +5,7 @@
 use crate::ir::optimization::OptimizationLevel;
 #[cfg(feature = "llvm-backend")]
 use crate::{
-    codegen::aot_compiler::{AotCompiler, OutputFormat},
+    codegen::aot_compiler::{AotCompiler, LlvmOptimizationLevel, OutputFormat},
     compiler_plugin::CompilerPlugin,
 };
 use std::path::PathBuf;
@@ -23,6 +23,10 @@ pub struct AotConfig {
     pub output_format: OutputFormat,
     /// MIR optimization level
     pub opt_level: OptimizationLevel,
+    /// LLVM IR effort, or the MIR level when omitted.
+    pub llvm_opt_level: Option<LlvmOptimizationLevel>,
+    /// Independent machine-code generation effort.
+    pub codegen_opt_level: Option<OptimizationLevel>,
     /// Tree-shake unreachable code
     pub strip: bool,
     /// Strip debug symbols from binary
@@ -58,6 +62,8 @@ pub fn run_aot(config: AotConfig, plugins: Vec<Box<dyn CompilerPlugin>>) -> Resu
     compiler.target_triple = config.target_triple;
     compiler.output_format = config.output_format;
     compiler.opt_level = config.opt_level;
+    compiler.llvm_opt_level = config.llvm_opt_level;
+    compiler.codegen_opt_level = config.codegen_opt_level;
     compiler.strip = config.strip;
     compiler.strip_symbols = config.strip_symbols;
     compiler.verbose = config.verbose;
@@ -109,7 +115,17 @@ pub fn run_aot(config: AotConfig, plugins: Vec<Box<dyn CompilerPlugin>>) -> Resu
             "  target   {}",
             compiler.target_triple.as_deref().unwrap_or("host")
         );
-        println!("  opt      {:?}", compiler.opt_level);
+        println!("  MIR      {:?}", compiler.opt_level);
+        let llvm = compiler
+            .llvm_opt_level
+            .unwrap_or_else(|| compiler.opt_level.into());
+        println!("  LLVM IR  {}", llvm);
+        println!(
+            "  codegen  {:?}",
+            compiler
+                .codegen_opt_level
+                .unwrap_or(llvm.default_mir_level())
+        );
     }
 
     // Check sources first (type-check pass, results cached as BLADE artifacts)
