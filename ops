@@ -1,1 +1,1 @@
-{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":5,"timestamp":1793387690,"nonce":"RyudVT2RDoXz4VmzriiW1r2oPkA=","added":["perf","area:lsp"],"removed":null}]}
+{"author":{"id":"8022379585b4ab99ca8775db3eb67d33fcb256817114c28e51ccc1e9f55cdec4"},"ops":[{"type":3,"timestamp":1793394156,"nonce":"xe+5M9mXTGcwr/GVgET1TSxLnkY=","message":"Real-Ashui timings with aab6705e on the NUC: attribute request 272 s, tag request 522 s, analysis of the same document 216 s.","files":null}]}
