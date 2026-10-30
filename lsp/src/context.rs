@@ -1995,7 +1995,7 @@ mod cache_tests {
                 assert!(hover.contains("Div"), "box hover: {hover}");
                 let at = source.find("<div/>").unwrap() as u32;
                 let hover = context.hover_info(&uri, 1, at + 2).unwrap_or_default();
-                assert!(hover.contains("class Div") && hover.contains("A box:"), "{hover}");
+                assert!(hover.contains("class Div") && hover.contains("A container for arranging"), "{hover}");
                 let definition = context.goto_definition(&uri, 1, at + 2).unwrap();
                 assert!(definition.0.ends_with("/ashui/ui/Div.hx"), "{definition:?}");
                 let expansion = context
