@@ -63,6 +63,7 @@ impl GenericBuildEngine {
             symbol_id: None,
             pack,
             fields: super::build_macros::class_fields_to_build_fields(&info.class.fields),
+            source_file: None,
         });
         context.current_class = Some(info.class.name.clone());
         context.current_module = Some(

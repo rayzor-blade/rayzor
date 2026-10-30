@@ -3350,6 +3350,26 @@ impl<'a> AstLowering<'a> {
                     initializer: Box::new(initializer),
                 }
             }
+            // `EDisplay` types as the expression it wraps; a structure takes
+            // the type it is expected to have, which is what it completes from.
+            ExprKind::Meta { meta, expr }
+                if crate::macro_system::display::Kind::from_meta_name(&meta.name).is_some() =>
+            {
+                use crate::macro_system::display;
+                let kind = display::Kind::from_meta_name(&meta.name).unwrap();
+                let expected = self.expected_arg_type_stack.last().copied().flatten();
+                let mut typed = self.lower_expression(expr)?;
+                if kind == display::Kind::Structure
+                    && let Some(expected) = expected
+                {
+                    typed.expr_type = expected;
+                }
+                display::record(display::Request {
+                    kind,
+                    type_id: typed.expr_type,
+                });
+                return Ok(typed);
+            }
             // A static local the type body did not hoist is an ordinary local.
             ExprKind::Meta { meta, expr } if meta.name == "staticLocal" => {
                 return self.lower_expression(expr);

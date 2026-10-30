@@ -731,6 +731,7 @@ fn symbol_kind_to_completion(kind: SymbolKind) -> CompletionKind {
     }
 }
 
+#[derive(Clone)]
 pub struct CompletionEntry {
     pub label: String,
     pub kind: CompletionKind,
@@ -1108,6 +1109,21 @@ fn position_of(text: &str, at: usize) -> (u32, u32) {
         .rposition(|&b| b == b'\n')
         .map_or(0, |p| p + 1);
     (line, text[line_start..at].encode_utf16().count() as u32 + 1)
+}
+
+/// The character offset of (line, col) when it lies inside inline markup,
+/// which only the macros reading it can complete.
+pub fn markup_cursor(text: &str, line: u32, col: u32) -> Option<u32> {
+    let at = offset_of(text, line, col)?;
+    let tokens = parser::lexer::Lexer::new(text).tokenize().ok()?;
+    tokens
+        .iter()
+        .any(|token| {
+            token.kind == parser::token::TokenKind::MarkupLit
+                && token.span.start < at
+                && at < token.span.end
+        })
+        .then(|| text[..at].chars().count() as u32)
 }
 
 /// When the cursor at (line, col) follows `receiver.` and part of a member
@@ -1500,10 +1516,7 @@ pub fn member_completions(
     receiver_type: TypeId,
     unit: &compiler::compilation::CompilationUnit,
 ) -> Vec<CompletionEntry> {
-    let (symbol_table, type_table, interner) =
-        (&unit.symbol_table, &unit.type_table, &unit.string_interner);
-    let tt = type_table.borrow();
-    let Some(sym) = symbol_table.get_symbol(receiver) else {
+    let Some(sym) = unit.symbol_table.get_symbol(receiver) else {
         return Vec::new();
     };
     let is_type = matches!(
@@ -1514,6 +1527,29 @@ pub fn member_completions(
             | SymbolKind::Enum
             | SymbolKind::TypeAlias
     );
+    let class = (is_type && sym.kind != SymbolKind::TypeAlias).then_some(sym.id);
+    members(is_type, class, receiver_type, unit)
+}
+
+/// The fields a value of `receiver_type` has: a structure's, or its class's
+/// instance members.
+pub fn value_member_completions(
+    receiver_type: TypeId,
+    unit: &compiler::compilation::CompilationUnit,
+) -> Vec<CompletionEntry> {
+    members(false, None, receiver_type, unit)
+}
+
+/// A type's statics (`is_type`, of `class`) or a value's members.
+fn members(
+    is_type: bool,
+    class: Option<SymbolId>,
+    receiver_type: TypeId,
+    unit: &compiler::compilation::CompilationUnit,
+) -> Vec<CompletionEntry> {
+    let (symbol_table, type_table, interner) =
+        (&unit.symbol_table, &unit.type_table, &unit.string_interner);
+    let tt = type_table.borrow();
     if !is_type {
         let mut structural = receiver_type;
         for _ in 0..64 {
@@ -1542,11 +1578,7 @@ pub fn member_completions(
                 .collect();
         }
     }
-    let mut class = if is_type && sym.kind != SymbolKind::TypeAlias {
-        Some(sym.id)
-    } else {
-        class_of_type(receiver_type, symbol_table, &tt, interner)
-    };
+    let mut class = class.or_else(|| class_of_type(receiver_type, symbol_table, &tt, interner));
     let mut entries: Vec<CompletionEntry> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     let mut visited_classes = std::collections::BTreeSet::new();

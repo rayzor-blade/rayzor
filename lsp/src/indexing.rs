@@ -1,7 +1,7 @@
 //! Document tasks retain their stacks while other pages make progress.
 
 use crate::context::LspContext;
-use compiler::macro_system::budget;
+use compiler::macro_system::{budget, display};
 use krio_fiber::{Fiber, FiberStep};
 use lsp_server::{Connection, Message};
 use std::cell::{Cell, RefCell};
@@ -11,13 +11,14 @@ use std::time::{Duration, Instant};
 const SLICE: Duration = Duration::from_millis(8);
 const STACK: usize = 256 << 20;
 
-pub(crate) struct Task {
+pub(crate) struct Task<R = LspContext> {
     pub uri: String,
     pub version: Option<i32>,
     pub fingerprint: Option<u64>,
     fiber: Fiber,
     budget: budget::State,
-    result: Rc<RefCell<Option<LspContext>>>,
+    display: display::State,
+    result: Rc<RefCell<Option<R>>>,
     messages: Connection,
     progress: crossbeam_channel::Sender<Message>,
 }
@@ -46,12 +47,57 @@ impl Task {
             fingerprint,
             fiber,
             budget: Default::default(),
+            display: Default::default(),
             result,
             messages,
             progress,
         }
     }
+}
 
+/// The completions a macro asks for at a cursor in inline markup.
+pub(crate) type Display = Option<Vec<crate::analysis::CompletionEntry>>;
+
+impl Task<Display> {
+    /// Compiles `uri` with its display position at `cursor`, a character
+    /// offset, leaving `context`'s analyses alone.
+    pub fn display(context: LspContext, uri: String, cursor: u32) -> Self {
+        let version = context.document_versions.get(&uri).copied();
+        let (messages, connection) = Connection::memory();
+        let progress = connection.sender.clone();
+        let result = Rc::new(RefCell::new(None));
+        let output = result.clone();
+        let document = uri.clone();
+        let fiber = Fiber::with_stack_size(STACK, move || {
+            if krio_fiber::is_cancelled() {
+                return;
+            }
+            let _budget = budget::limit(context.macro_budget);
+            let source = context.open_files.get(&document).cloned();
+            let answer = source.and_then(|source| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    context.display_completions(&document, &source, cursor)
+                }))
+                .ok()
+                .flatten()
+            });
+            *output.borrow_mut() = Some(answer);
+        });
+        Self {
+            uri,
+            version,
+            fingerprint: None,
+            fiber,
+            budget: Default::default(),
+            display: Default::default(),
+            result,
+            messages,
+            progress,
+        }
+    }
+}
+
+impl<R> Task<R> {
     pub fn step(&mut self) -> FiberStep {
         let sender = self.progress.clone();
         let uri = self.uri.clone();
@@ -77,7 +123,9 @@ impl Task {
             }
         }));
         let host = budget::replace_state(std::mem::take(&mut self.budget));
+        let shown = display::replace_state(std::mem::take(&mut self.display));
         let step = self.fiber.resume();
+        self.display = display::replace_state(shown);
         self.budget = budget::replace_state(host);
         step
     }
@@ -86,7 +134,7 @@ impl Task {
         self.messages.receiver.try_iter()
     }
 
-    pub fn take_result(&self) -> Option<LspContext> {
+    pub fn take_result(&self) -> Option<R> {
         self.result.borrow_mut().take()
     }
 
@@ -102,7 +150,7 @@ impl Task {
     }
 }
 
-impl Drop for Task {
+impl<R> Drop for Task<R> {
     fn drop(&mut self) {
         if matches!(
             self.fiber.state(),

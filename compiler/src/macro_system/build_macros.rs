@@ -63,11 +63,6 @@ pub fn process_build_macros_with_class_registry(
         .as_ref()
         .map(|p| p.path.clone())
         .unwrap_or_default();
-    let file_module = std::path::Path::new(&file.filename)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
     // Collect @:autoBuild interfaces first
     let auto_build_interfaces = collect_auto_build_interfaces(&file);
     // Which @:autoBuild types each class sits below, decided before the
@@ -116,7 +111,7 @@ pub fn process_build_macros_with_class_registry(
                         registry,
                         class_registry.clone(),
                         &file_pack,
-                        &file_module,
+                        &file.filename,
                         None,
                     ) {
                         Ok(emitted) => {
@@ -168,7 +163,7 @@ pub fn process_build_macros_with_class_registry(
                             registry,
                             class_registry.clone(),
                             &file_pack,
-                            &file_module,
+                            &file.filename,
                             None,
                         ) {
                             Ok(emitted) => {
@@ -486,10 +481,14 @@ pub(crate) fn apply_build_macro(
     registry: &MacroRegistry,
     class_registry: Option<Arc<super::class_registry::ClassRegistry>>,
     pack: &[String],
-    module: &str,
+    source_file: &str,
     typer: Option<(&mut dyn super::context_api::MacroTyper, crate::tast::TypeId)>,
 ) -> Result<Vec<MacroDiagnostic>, MacroError> {
     let _budget = super::budget::invocation();
+    let module = std::path::Path::new(source_file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
     let location = super::errors::span_to_location(meta.span);
 
     // Step 1: Extract macro function name
@@ -526,6 +525,7 @@ pub(crate) fn apply_build_macro(
         symbol_id: None,
         fields: build_fields,
         pack: class_pack,
+        source_file: Some(source_file.to_owned()),
     });
     context.current_class = Some(class.name.clone());
     context.current_module = Some(
@@ -1008,29 +1008,31 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
                     }
                 })
                 .and_then(|v| {
-                    if let MacroValue::Expr(e) = v {
-                        // Function bodies in Haxe AST are conventionally
-                        // `Block`s. A reified single-expression body like
-                        // `macro return $v{n}` lands here as a bare
-                        // `Return(...)`, and the downstream HIR/MIR pipeline
-                        // needs the surrounding Block to allocate a function
-                        // scope and emit a proper terminator. Without the
-                        // wrap, the generated method's MIR ends up as
-                        // `unreachable`, which then SIGILLs at runtime.
-                        let raw = (**e).clone();
-                        let wrapped = match &raw.kind {
-                            parser::ExprKind::Block(_) => raw,
-                            _ => parser::Expr {
-                                kind: parser::ExprKind::Block(vec![parser::BlockElement::Expr(
-                                    raw.clone(),
-                                )]),
-                                span: raw.span,
-                            },
-                        };
-                        Some(Box::new(wrapped))
-                    } else {
-                        None
-                    }
+                    // A body is opaque syntax, or an `{expr, pos}` object when
+                    // its fields carry source positions.
+                    let raw = match v {
+                        MacroValue::Expr(e) => (**e).clone(),
+                        MacroValue::Object(_) => super::expr_adt::try_expr_of(v, span)?,
+                        _ => return None,
+                    };
+                    // Function bodies in Haxe AST are conventionally
+                    // `Block`s. A reified single-expression body like
+                    // `macro return $v{n}` lands here as a bare
+                    // `Return(...)`, and the downstream HIR/MIR pipeline
+                    // needs the surrounding Block to allocate a function
+                    // scope and emit a proper terminator. Without the
+                    // wrap, the generated method's MIR ends up as
+                    // `unreachable`, which then SIGILLs at runtime.
+                    let wrapped = match &raw.kind {
+                        parser::ExprKind::Block(_) => raw,
+                        _ => parser::Expr {
+                            kind: parser::ExprKind::Block(vec![parser::BlockElement::Expr(
+                                raw.clone(),
+                            )]),
+                            span: raw.span,
+                        },
+                    };
+                    Some(Box::new(wrapped))
                 });
 
             // Best-effort return-type inference. The macro source declares
@@ -1127,13 +1129,9 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
                         None
                     }
                 })
-                .and_then(|v| {
-                    if let MacroValue::Expr(e) = v {
-                        Some(Box::new((**e).clone()))
-                    } else {
-                        None
-                    }
-                });
+                .filter(|expr| !matches!(expr, MacroValue::Null))
+                .and_then(|e| super::expr_adt::try_expr_of(e, parser::Span::default()))
+                .map(Box::new);
 
             ClassFieldKind::Var {
                 name: name.clone(),
@@ -1612,6 +1610,7 @@ class Builder {
             symbol_id: None,
             fields: class_fields_to_build_fields(&class.fields),
             pack: Vec::new(),
+            source_file: None,
         });
         let MacroValue::Array(values) =
             context.get_build_fields(SourceLocation::unknown()).unwrap()

@@ -43,6 +43,15 @@ pub struct LspContext {
     diagnostics: HashMap<String, Vec<LspDiagnostic>>,
     workspace_index: crate::workspace_index::WorkspaceIndex,
     pub(crate) index_progress: Option<crate::workspace_index::IndexProgress>,
+    /// The last display compile of each document, for completion in markup.
+    display_answers: HashMap<String, DisplayAnswer>,
+}
+
+/// What a display compile of one document version answered at a cursor.
+struct DisplayAnswer {
+    version: Option<i32>,
+    cursor: u32,
+    entries: Option<Vec<CompletionEntry>>,
 }
 
 /// A compiled document: the unit its symbols live in and its position index.
@@ -74,6 +83,15 @@ impl LspContext {
             self.analyses
                 .retain(|_, analysis| !Rc::ptr_eq(&analysis.unit, &oldest.unit));
         }
+        let mut task = self.fork_settings();
+        task.analysis_cache_capacity = 1;
+        task.analyses = std::mem::take(&mut self.analyses);
+        task.sessions = std::mem::take(&mut self.sessions);
+        task
+    }
+
+    /// The documents and configuration, without any compiler graph.
+    pub(crate) fn fork_settings(&self) -> Self {
         let mut task = Self::new(self.root.clone());
         task.editor_cache = self.editor_cache.clone();
         task.workspace_roots = self.workspace_roots.clone();
@@ -88,10 +106,7 @@ impl LspContext {
         task.requested_hxml = self.requested_hxml.clone();
         task.config_problems = self.config_problems.clone();
         task.macro_budget = self.macro_budget;
-        task.analysis_cache_capacity = 1;
         task.workspace_index = self.workspace_index.clone();
-        task.analyses = std::mem::take(&mut self.analyses);
-        task.sessions = std::mem::take(&mut self.sessions);
         task
     }
 
@@ -142,6 +157,7 @@ impl LspContext {
             diagnostics: HashMap::new(),
             workspace_index: Default::default(),
             index_progress: None,
+            display_answers: HashMap::new(),
         }
     }
 
@@ -333,45 +349,10 @@ impl LspContext {
         self.workspace_index
             .update(std::path::Path::new(&filename), Some(source));
 
-        let mut config = CompilationConfig {
-            load_stdlib: true,
-            profile_typecheck: profiling,
-            emit_safety_warnings: false,
-            record_references: true,
-            user_defines: settings.defines.clone(),
-            continue_after_macro_errors: true,
-            typecheck_only: true,
-            source_overrides: std::sync::Arc::new(
-                self.open_files
-                    .iter()
-                    .map(|(uri, source)| {
-                        let path = PathBuf::from(uri_to_path(uri));
-                        (path.canonicalize().unwrap_or(path), source.clone())
-                    })
-                    .collect(),
-            ),
-            ..Default::default()
+        let config = match self.analysis_config(&settings, profiling) {
+            Ok(config) => config,
+            Err(message) => return vec![LspDiagnostic::error(&filename, 0, 0, message)],
         };
-        config.stdlib_paths =
-            match crate::stdlib::discover_for_project(&settings.root, settings.options.rayzor) {
-                Ok(paths) => paths,
-                Err(message) => return vec![LspDiagnostic::error(&filename, 0, 0, message)],
-            };
-        // Cached Rayzor library symbols do not describe a system Haxe library.
-        config.enable_cache = settings.options.rayzor && settings.options.cache_enabled;
-        config.cache_dir = settings.options.cache_dir.clone();
-        config.extra_defines = settings.options.extra_defines.clone();
-        config.resources = std::sync::Arc::new(
-            settings
-                .options
-                .resources
-                .iter()
-                .filter_map(|(path, name)| {
-                    std::fs::read(path).ok().map(|bytes| (name.clone(), bytes))
-                })
-                .collect(),
-        );
-        config.pipeline_config = config.pipeline_config.skip_analysis();
 
         // A syntax error is reported as such, and the last analysis is kept:
         // compiling text the parser rejects yields a partial program and no
@@ -462,93 +443,13 @@ impl LspContext {
                     self.analyses
                         .retain(|_, analysis| !Rc::ptr_eq(&analysis.unit, &oldest.unit));
                 }
-                let mut unit = CompilationUnit::new(config);
-                for path in settings
-                    .options
-                    .configuration_files
-                    .iter()
-                    .chain(&settings.options.native_libs)
-                    .chain(&settings.options.packages)
-                    .chain(settings.options.resources.iter().map(|(path, _)| path))
-                {
-                    unit.macro_dependencies.register_read(path);
-                }
-                for cp in &settings.class_paths {
-                    unit.add_source_path(cp.clone());
-                }
-                let mut native_libraries = Vec::new();
-                for path in &settings.options.native_libs {
-                    if let Ok((library, plugin)) =
-                        compiler::native_libs::load_manifest_native_lib_for_analysis(path)
-                    {
-                        unit.register_compiler_plugin(Box::new(plugin));
-                        native_libraries.push(library);
-                    }
-                }
-                for path in &settings.options.packages {
-                    if let Ok(package) = compiler::rpkg::load_rpkg(path) {
-                        unit.register_compiler_plugin(Box::new(
-                            compiler::compiler_plugin::NativePlugin::from_method_entries(
-                                package
-                                    .plugin_name
-                                    .as_deref()
-                                    .unwrap_or(&package.package_name),
-                                package.methods,
-                            ),
-                        ));
-                    }
-                }
-                if let Err(error) = unit.load_stdlib() {
-                    return vec![LspDiagnostic::error(
-                        &filename,
-                        0,
-                        0,
-                        format!("Stdlib: {error}"),
-                    )];
-                }
-                let settings_file = settings.hxml.clone().unwrap_or_else(|| {
-                    settings.root.join(if settings.options.rayzor {
-                        "rayzor.toml"
-                    } else {
-                        "haxelib.json"
-                    })
-                });
-                let settings_source = std::fs::read_to_string(&settings_file).unwrap_or_default();
-                let configuration_file = if settings.options.rayzor {
-                    settings.root.join("rayzor.toml")
-                } else {
-                    settings_file.clone()
-                };
-                let mut initialization_errors: Vec<_> = settings
-                    .problems
-                    .iter()
-                    .map(|message| {
-                        LspDiagnostic::error(
-                            &configuration_file.to_string_lossy(),
-                            1,
-                            1,
-                            message.clone(),
-                        )
-                    })
-                    .collect();
-                for call in &settings.macros {
-                    let (line, column) = settings_source
-                        .find(call)
-                        .map(|offset| line_column(&settings_source, offset))
-                        .unwrap_or((1, 1));
-                    initialization_errors.extend(
-                        unit.run_initialization_macros(std::slice::from_ref(call))
-                            .into_iter()
-                            .map(|message| {
-                                LspDiagnostic::error(
-                                    &settings_file.to_string_lossy(),
-                                    line,
-                                    column,
-                                    message,
-                                )
-                            }),
-                    );
-                }
+                let (unit, initialization_errors, native_libraries) =
+                    match Self::fresh_unit(config, &settings) {
+                        Ok(fresh) => fresh,
+                        Err(error) => {
+                            return vec![LspDiagnostic::error(&filename, 0, 0, error)];
+                        }
+                    };
                 let mut session = crate::session_cache::SessionCache::new(
                     key,
                     inputs,
@@ -764,6 +665,174 @@ impl LspContext {
         result
     }
 
+    /// The configuration a document of `settings` is analysed with.
+    fn analysis_config(
+        &self,
+        settings: &crate::build_config::Settings,
+        profiling: bool,
+    ) -> Result<CompilationConfig, String> {
+        let mut config = CompilationConfig {
+            load_stdlib: true,
+            profile_typecheck: profiling,
+            emit_safety_warnings: false,
+            record_references: true,
+            user_defines: settings.defines.clone(),
+            continue_after_macro_errors: true,
+            typecheck_only: true,
+            source_overrides: std::sync::Arc::new(
+                self.open_files
+                    .iter()
+                    .map(|(uri, source)| {
+                        let path = PathBuf::from(uri_to_path(uri));
+                        (path.canonicalize().unwrap_or(path), source.clone())
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        config.stdlib_paths =
+            crate::stdlib::discover_for_project(&settings.root, settings.options.rayzor)?;
+        // Cached Rayzor library symbols do not describe a system Haxe library.
+        config.enable_cache = settings.options.rayzor && settings.options.cache_enabled;
+        config.cache_dir = settings.options.cache_dir.clone();
+        config.extra_defines = settings.options.extra_defines.clone();
+        config.resources = std::sync::Arc::new(
+            settings
+                .options
+                .resources
+                .iter()
+                .filter_map(|(path, name)| {
+                    std::fs::read(path).ok().map(|bytes| (name.clone(), bytes))
+                })
+                .collect(),
+        );
+        config.pipeline_config = config.pipeline_config.skip_analysis();
+        Ok(config)
+    }
+
+    /// A unit for `settings` with its standard library loaded and its
+    /// initialization macros run, the errors of both returned with it.
+    #[allow(clippy::type_complexity)]
+    fn fresh_unit(
+        config: CompilationConfig,
+        settings: &crate::build_config::Settings,
+    ) -> Result<
+        (
+            CompilationUnit,
+            Vec<LspDiagnostic>,
+            Vec<compiler::native_libs::Library>,
+        ),
+        String,
+    > {
+        let mut unit = CompilationUnit::new(config);
+        for path in settings
+            .options
+            .configuration_files
+            .iter()
+            .chain(&settings.options.native_libs)
+            .chain(&settings.options.packages)
+            .chain(settings.options.resources.iter().map(|(path, _)| path))
+        {
+            unit.macro_dependencies.register_read(path);
+        }
+        for cp in &settings.class_paths {
+            unit.add_source_path(cp.clone());
+        }
+        let mut native_libraries = Vec::new();
+        for path in &settings.options.native_libs {
+            if let Ok((library, plugin)) =
+                compiler::native_libs::load_manifest_native_lib_for_analysis(path)
+            {
+                unit.register_compiler_plugin(Box::new(plugin));
+                native_libraries.push(library);
+            }
+        }
+        for path in &settings.options.packages {
+            if let Ok(package) = compiler::rpkg::load_rpkg(path) {
+                unit.register_compiler_plugin(Box::new(
+                    compiler::compiler_plugin::NativePlugin::from_method_entries(
+                        package
+                            .plugin_name
+                            .as_deref()
+                            .unwrap_or(&package.package_name),
+                        package.methods,
+                    ),
+                ));
+            }
+        }
+        unit.load_stdlib()
+            .map_err(|error| format!("Stdlib: {error}"))?;
+        let settings_file = settings.hxml.clone().unwrap_or_else(|| {
+            settings.root.join(if settings.options.rayzor {
+                "rayzor.toml"
+            } else {
+                "haxelib.json"
+            })
+        });
+        let settings_source = std::fs::read_to_string(&settings_file).unwrap_or_default();
+        let configuration_file = if settings.options.rayzor {
+            settings.root.join("rayzor.toml")
+        } else {
+            settings_file.clone()
+        };
+        let mut initialization_errors: Vec<_> = settings
+            .problems
+            .iter()
+            .map(|message| {
+                LspDiagnostic::error(&configuration_file.to_string_lossy(), 1, 1, message.clone())
+            })
+            .collect();
+        for call in &settings.macros {
+            let (line, column) = settings_source
+                .find(call)
+                .map(|offset| line_column(&settings_source, offset))
+                .unwrap_or((1, 1));
+            initialization_errors.extend(
+                unit.run_initialization_macros(std::slice::from_ref(call))
+                    .into_iter()
+                    .map(|message| {
+                        LspDiagnostic::error(
+                            &settings_file.to_string_lossy(),
+                            line,
+                            column,
+                            message,
+                        )
+                    }),
+            );
+        }
+        Ok((unit, initialization_errors, native_libraries))
+    }
+
+    /// Completions a macro asks for at `cursor`, a character offset into
+    /// `source` inside inline markup: the document is compiled afresh with
+    /// the cursor as its display position, and the last `EDisplay` typing
+    /// reached is answered. None when no macro asked.
+    pub fn display_completions(
+        &self,
+        uri: &str,
+        source: &str,
+        cursor: u32,
+    ) -> Option<Vec<CompletionEntry>> {
+        use compiler::macro_system::display;
+        let filename = uri_to_path(uri);
+        let settings = self.settings_for_uri(uri);
+        let config = self.analysis_config(&settings, false).ok()?;
+        let (mut unit, _, _) = Self::fresh_unit(config, &settings).ok()?;
+        let display = display::at(display::Cursor {
+            file: filename.clone(),
+            offset: cursor,
+        });
+        unit.set_editor_entry(&filename);
+        unit.add_file(source, &filename).ok()?;
+        // Errors in a document being typed do not stop its display request.
+        let _ = unit.lower_to_tast();
+        let request = display.requests().pop()?;
+        if !matches!(request.kind, display::Kind::Dot | display::Kind::Structure) {
+            return None;
+        }
+        Some(analysis::value_member_completions(request.type_id, &unit))
+    }
+
     /// Publish errors on their own files, merging contributions from open documents.
     pub fn update_diagnostics(
         &mut self,
@@ -823,6 +892,7 @@ impl LspContext {
 
     /// Forget a closed document and its analysis.
     pub fn close(&mut self, uri: &str) {
+        self.display_answers.remove(uri);
         self.open_files.remove(uri);
         self.document_versions.remove(uri);
         self.analyses.remove(uri);
@@ -1278,7 +1348,50 @@ impl LspContext {
 
     /// Completions at (line, col), 1-based: the members of the receiver
     /// when the cursor follows `receiver.`, otherwise every visible name.
+    /// The markup cursor a completion request at (line, col), 1-based, asks
+    /// a display compile about.
+    pub(crate) fn display_cursor(&self, uri: &str, line: u32, col: u32) -> Option<u32> {
+        analysis::markup_cursor(self.open_files.get(uri)?, line, col)
+    }
+
+    /// Whether the current version of `uri` has been display-compiled at `cursor`.
+    pub(crate) fn has_display_answer(&self, uri: &str, cursor: u32) -> bool {
+        self.display_answers.get(uri).is_some_and(|answer| {
+            answer.cursor == cursor && answer.version == self.document_versions.get(uri).copied()
+        })
+    }
+
+    /// The completions a display compile of the current version found at `cursor`.
+    pub(crate) fn display_entries(&self, uri: &str, cursor: u32) -> Option<&Vec<CompletionEntry>> {
+        self.has_display_answer(uri, cursor)
+            .then(|| self.display_answers.get(uri)?.entries.as_ref())
+            .flatten()
+    }
+
+    pub(crate) fn store_display_answer(
+        &mut self,
+        uri: &str,
+        version: Option<i32>,
+        cursor: u32,
+        entries: Option<Vec<CompletionEntry>>,
+    ) {
+        self.display_answers.insert(
+            uri.to_string(),
+            DisplayAnswer {
+                version,
+                cursor,
+                entries,
+            },
+        );
+    }
+
     pub fn completions(&self, uri: &str, line: u32, col: u32) -> Completions {
+        if let Some(entries) = self
+            .display_cursor(uri, line, col)
+            .and_then(|cursor| self.display_entries(uri, cursor))
+        {
+            return Completions::Members(entries.clone());
+        }
         let Some(a) = self.analyses.get(uri) else {
             return Completions::Names(Vec::new());
         };

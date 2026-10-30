@@ -224,6 +224,12 @@ impl Snapshot {
             return Some(response);
         }
         if method == "textDocument/completion" {
+            // Markup completes from a display compile, which the cache does not hold.
+            if crate::server::markup_trigger(request)
+                || crate::analysis::markup_cursor(source, line + 1, column + 1).is_some()
+            {
+                return None;
+            }
             return if let Some((line, column, _)) =
                 crate::analysis::receiver_before(source, line + 1, column + 1)
             {

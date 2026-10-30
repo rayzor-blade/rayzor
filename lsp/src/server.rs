@@ -123,7 +123,8 @@ fn serve_worker(
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
-            trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
+            // `<`, `/` and a space complete in markup only.
+            trigger_characters: Some([".", ":", "<", "/", " "].map(String::from).to_vec()),
             ..Default::default()
         }),
         document_symbol_provider: Some(OneOf::Left(true)),
@@ -276,10 +277,13 @@ fn serve_worker(
 
     let mut pending = std::collections::VecDeque::new();
     let mut tasks = std::collections::VecDeque::<crate::indexing::Task>::new();
+    // Display compiles for completion in markup, with the cursor each asks at.
+    let mut displays =
+        std::collections::VecDeque::<(u32, crate::indexing::Task<crate::indexing::Display>)>::new();
     let mut deferred = Vec::new();
     loop {
         ctx.poll_workspace_index();
-        let first = if tasks.is_empty() && pending.is_empty() {
+        let first = if tasks.is_empty() && pending.is_empty() && displays.is_empty() {
             match connection
                 .receiver
                 .recv_timeout(std::time::Duration::from_millis(100))
@@ -350,6 +354,7 @@ fn serve_worker(
                     };
                     handle_notification(connection, &mut ctx, notification, &mut changed);
                     if invalidate {
+                        displays.clear();
                         let mut interrupted = Vec::new();
                         for mut task in tasks.drain(..) {
                             task.cancel();
@@ -472,9 +477,39 @@ fn serve_worker(
                 }
             }
         }
+        if let Some((cursor, mut task)) = displays.pop_front()
+            && ctx.document_versions.get(&task.uri).copied() == task.version
+        {
+            if task.step() == krio_fiber::FiberStep::Yielded {
+                displays.push_back((cursor, task));
+            } else {
+                let entries = task.take_result().flatten();
+                ctx.store_display_answer(&task.uri, task.version, cursor, entries);
+            }
+        }
         let mut waiting = Vec::new();
         for request in deferred.drain(..) {
-            if let Some(result) = ctx.editor_cache.answer(&request) {
+            let display = display_request(&ctx, &request);
+            if display.is_none() && markup_trigger(&request) {
+                send_response(connection, request.id, Some(Vec::<CompletionItem>::new()));
+            } else if let Some((uri, cursor)) = display.clone()
+                && !ctx.has_display_answer(&uri, cursor)
+            {
+                if !displays
+                    .iter()
+                    .any(|(asked, task)| *asked == cursor && task.uri == uri)
+                {
+                    let task = crate::indexing::Task::display(ctx.fork_settings(), uri, cursor);
+                    displays.push_back((cursor, task));
+                }
+                waiting.push(request);
+            } else if display
+                .is_some_and(|(uri, cursor)| ctx.display_entries(&uri, cursor).is_some())
+            {
+                if answer_request(connection, &ctx, request)? {
+                    return Ok(());
+                }
+            } else if let Some(result) = ctx.editor_cache.answer(&request) {
                 send_response(connection, request.id, Some(result));
             } else if request.params["textDocument"]["uri"]
                 .as_str()
@@ -491,6 +526,29 @@ fn serve_worker(
         deferred = waiting;
     }
     Ok(())
+}
+
+/// Whether a completion request was triggered by a character that completes
+/// in markup only.
+pub(crate) fn markup_trigger(request: &Request) -> bool {
+    request.method == "textDocument/completion"
+        && matches!(
+            request.params["context"]["triggerCharacter"].as_str(),
+            Some("<" | "/" | " ")
+        )
+}
+
+/// The document and markup cursor of a completion request a display
+/// compile answers.
+fn display_request(ctx: &LspContext, request: &Request) -> Option<(String, u32)> {
+    if request.method != "textDocument/completion" {
+        return None;
+    }
+    let uri = request.params["textDocument"]["uri"].as_str()?;
+    let line = request.params["position"]["line"].as_u64()? as u32;
+    let column = request.params["position"]["character"].as_u64()? as u32;
+    ctx.display_cursor(uri, line + 1, column + 1)
+        .map(|cursor| (uri.to_string(), cursor))
 }
 
 fn enqueue_document(

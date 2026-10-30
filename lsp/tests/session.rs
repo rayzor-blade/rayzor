@@ -2973,6 +2973,82 @@ class Setup {
     );
 }
 
+/// A markup macro answering display requests as Haxe macros do: after `<` a
+/// field access on a type listing the tags, among attributes a structure
+/// literal checked against the props.
+#[test]
+fn markup_macros_answer_display_requests_for_tags_and_attributes() {
+    let macros = r#"#if macro
+import haxe.macro.Compiler;
+import haxe.macro.Context;
+import haxe.macro.Expr;
+#end
+class Setup {
+    public static function enable() {
+        Compiler.addGlobalMetadata("Main", "@:build(Setup.build())");
+    }
+    public static function build():Array<Field> {
+        var fields = Context.getBuildFields();
+        function lower(e:Expr):Expr {
+            return switch e.expr {
+                case EMeta({name: ":markup"}, {expr: EConst(CString(source, _))}) if (Context.containsDisplayPosition(e.pos)):
+                    var focus = displayed(e.pos, source);
+                    macro {
+                        $focus;
+                        0;
+                    };
+                case EMeta({name: ":markup"}, _): macro 0;
+                case _: haxe.macro.ExprTools.map(e, lower);
+            };
+        }
+        for (field in fields) switch field.kind {
+            case FFun(fn) if (fn.expr != null): fn.expr = lower(fn.expr);
+            case _:
+        }
+        return fields;
+    }
+    static function displayed(pos:Position, source:String):Expr {
+        var at = Compiler.getDisplayPos();
+        var inside = source.substring(1, at.pos - Context.getPosInfos(pos).min);
+        var here = Context.makePosition({file: at.file, min: at.pos, max: at.pos});
+        if (~/^[a-z]*$/.match(inside))
+            return {expr: EDisplay(macro @:pos(here) (null : Tags), DKDot), pos: here};
+        var literal:Expr = {expr: EDisplay({expr: EObjectDecl([]), pos: here}, DKStructure), pos: here};
+        return {expr: ECheckType(literal, macro :Props), pos: here};
+    }
+}"#;
+    let main = "typedef Props = {title:String, ?wide:Bool};\nclass Tags {\n    public var card:Bool;\n    public var row:Bool;\n}\nclass Main {\n    static function view():Int return <card title=\"a\" ></card>;\n    static function tag():Int return <ca></ca>;\n    static function main() { view(); tag(); var x = 1 < 2; }\n}\n";
+    let mut s = Session::start(&[
+        ("build.hxml", "--macro Setup.enable()\n"),
+        ("Setup.hx", macros),
+        ("Main.hx", main),
+    ]);
+    s.open("Main.hx");
+    let at = |needle: &str| {
+        let line = main.lines().position(|l| l.contains(needle)).unwrap();
+        let column = main.lines().nth(line).unwrap().find(needle).unwrap() + needle.len();
+        (line as u32, column as u32)
+    };
+    let mut complete = |(line, column): (u32, u32), trigger: Option<&str>| {
+        let mut params = s.at("Main.hx", line, column);
+        if let Some(trigger) = trigger {
+            params["context"] = json!({"triggerKind": 2, "triggerCharacter": trigger});
+        }
+        let items = s.request("textDocument/completion", params);
+        let mut labels: Vec<String> = items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["label"].as_str().unwrap().to_string())
+            .collect();
+        labels.sort();
+        labels
+    };
+    assert_eq!(complete(at("title=\"a\" "), Some(" ")), ["title", "wide"]);
+    assert_eq!(complete(at("<ca"), None), ["card", "row"]);
+    assert!(complete(at("1 <"), Some("<")).is_empty());
+}
+
 #[test]
 fn global_build_without_changes_has_no_expansion_preview() {
     let macros = r#"import haxe.macro.Context;

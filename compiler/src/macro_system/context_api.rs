@@ -270,6 +270,8 @@ pub struct BuildClassContext {
     /// The class's path as haxe names it: its package, plus `_Module` for a
     /// private type.
     pub pack: Vec<String>,
+    /// The file the class is declared in, which its fields' positions name.
+    pub source_file: Option<String>,
 }
 
 /// A field representation for build macros
@@ -1070,7 +1072,14 @@ impl MacroContext {
             })?;
 
         // Convert build fields to an array of objects
-        let source = named_file(self.call_position.file_id).map(|(file, _)| file);
+        // A display request positions the fields in their file, so a macro
+        // can place the cursor; other compiles keep the spans editors index.
+        let source = self
+            .build_class
+            .as_ref()
+            .and_then(|build| build.source_file.clone())
+            .filter(|_| super::display::cursor().is_some())
+            .or_else(|| named_file(self.call_position.file_id).map(|(file, _)| file));
         let field_values: Vec<MacroValue> = fields
             .iter()
             .map(build_field_to_value)
@@ -1259,8 +1268,18 @@ impl MacroContext {
                 Ok(MacroValue::Null)
             }
             "currentPos" => Ok(self.current_pos()),
-            // Whole-document analysis has no active display cursor.
-            "containsDisplayPosition" => Ok(MacroValue::Bool(false)),
+            "containsDisplayPosition" => Ok(MacroValue::Bool(
+                args.first().is_some_and(contains_display_position),
+            )),
+            "getDisplayMode" => Ok(MacroValue::Enum(
+                Arc::from("DisplayMode"),
+                Arc::from(if super::display::cursor().is_some() {
+                    "Default"
+                } else {
+                    "None"
+                }),
+                Arc::new(Vec::new()),
+            )),
             "getLocalClass" => Ok(self.get_local_class()),
             "getLocalType" => Ok(self
                 .local_type
@@ -2025,6 +2044,37 @@ pub(crate) fn register_file_contents(name: &str, contents: &str) {
     NAMED_FILES.with_borrow_mut(|files| files[index].1 = Some(Arc::from(contents)));
 }
 
+/// `Context.containsDisplayPosition`: whether the display cursor lies within
+/// `pos`, ends included.
+fn contains_display_position(pos: &MacroValue) -> bool {
+    let MacroValue::Position(pos) = pos.underlying() else {
+        return false;
+    };
+    let Some(cursor) = super::display::cursor() else {
+        return false;
+    };
+    let Some((name, _)) = named_file(pos.file_id) else {
+        return false;
+    };
+    if name != cursor.file {
+        return false;
+    }
+    let at = named_file_source(pos.file_id)
+        .map_or(cursor.offset, |text| byte_offset(&text, cursor.offset));
+    pos.byte_offset <= at && at <= pos.column
+}
+
+/// `Compiler.getDisplayPos`: the display cursor's file and character offset.
+pub(crate) fn display_pos_value() -> MacroValue {
+    match super::display::cursor() {
+        Some(cursor) => MacroValue::Object(Arc::new(BTreeMap::from([
+            ("file".to_string(), MacroValue::from_str(&cursor.file)),
+            ("pos".to_string(), MacroValue::Int(cursor.offset as i64)),
+        ]))),
+        None => MacroValue::Null,
+    }
+}
+
 /// The name and registered contents of a named-file position's file.
 pub(crate) fn named_file(file_id: u32) -> Option<(String, Option<Arc<str>>)> {
     let index = file_id.checked_sub(super::errors::NAMED_FILE_ID)? as usize;
@@ -2378,6 +2428,7 @@ mod tests {
                 meta: Vec::new(),
             }],
             pack: vec!["com".to_string()],
+            source_file: None,
         });
 
         let result = ctx.get_build_fields(SourceLocation::unknown());

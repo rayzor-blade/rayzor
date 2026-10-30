@@ -188,11 +188,7 @@ impl AstLowering<'_> {
                     .collect()
             })
             .unwrap_or_default();
-        let module = std::path::Path::new(&self.pos_file_name)
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("")
-            .to_owned();
+        let source_file = self.pos_file_name.clone();
         let arguments = self
             .class_type_params
             .get(&symbol)
@@ -221,7 +217,7 @@ impl AstLowering<'_> {
                     &engine.registry,
                     Some(engine.class_registry.clone()),
                     &pack,
-                    &module,
+                    &source_file,
                     Some((&mut typer, local_type)),
                 )
             };

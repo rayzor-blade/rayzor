@@ -1188,9 +1188,22 @@ pub fn def_of(kind: &ExprKind, span: Span) -> Option<MacroValue> {
             "ECheckType",
             vec![sub(expr), complex_type_of(type_hint)],
         ),
-        ExprKind::Meta { meta, expr } => {
-            en("ExprDef", "EMeta", vec![metadata_value(meta), sub(expr)])
-        }
+        ExprKind::Meta { meta, expr } => match super::display::Kind::from_meta_name(&meta.name) {
+            Some(kind) => {
+                let kind_args = match kind {
+                    super::display::Kind::Pattern { outermost } => {
+                        vec![MacroValue::Bool(outermost)]
+                    }
+                    _ => Vec::new(),
+                };
+                en(
+                    "ExprDef",
+                    "EDisplay",
+                    vec![sub(expr), en("DisplayKind", kind.variant(), kind_args)],
+                )
+            }
+            None => en("ExprDef", "EMeta", vec![metadata_value(meta), sub(expr)]),
+        },
         _ => return None,
     })
 }
@@ -1715,7 +1728,22 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                     meta: metadata_of(a(0)?, span),
                     expr: bx(1),
                 },
-                "EDisplay" => return try_expr_of(a(0)?, span),
+                "EDisplay" => {
+                    let MacroValue::Enum(_, kind, kind_args) = a(1)?.underlying() else {
+                        return None;
+                    };
+                    let outermost = matches!(kind_args.first(), Some(MacroValue::Bool(true)));
+                    let kind = super::display::Kind::from_variant(kind, outermost)?;
+                    ExprKind::Meta {
+                        meta: Metadata {
+                            name: kind.meta_name(),
+                            params: Vec::new(),
+                            span,
+                            compile_time: true,
+                        },
+                        expr: bx(0),
+                    }
+                }
                 _ => return None,
             }))
         }

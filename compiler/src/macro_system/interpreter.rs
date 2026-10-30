@@ -2589,6 +2589,7 @@ impl MacroInterpreter {
                     }
                     Ok(Some(MacroValue::Null))
                 }
+                "getDisplayPos" => Ok(Some(super::context_api::display_pos_value())),
                 _ => Err(MacroError::ContextError {
                     method: format!("Compiler.{method}"),
                     message: format!("unsupported Compiler method: {method}"),
