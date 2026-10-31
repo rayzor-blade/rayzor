@@ -3102,6 +3102,24 @@ class Setup {
         "{:#?}",
         s.activity
     );
+    // A new server answers from the saved index, even when its first request
+    // arrives straight after the handshake.
+    std::fs::write(s.root.join("data.txt"), "changed again").unwrap();
+    let mut next = Session::connect(s.root.clone(), json!({}), false);
+    next.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {"uri": next.uri("Main.hx"), "languageId": "haxe", "version": 1, "text": main}}),
+    );
+    let at = next.at("Main.hx", 1, 34);
+    assert!(hover_text(&next.request("textDocument/hover", at)).contains("count"));
+    assert!(
+        !next
+            .activity
+            .iter()
+            .any(|activity| activity["state"] == "checking"),
+        "{:#?}",
+        next.activity
+    );
 }
 
 #[test]

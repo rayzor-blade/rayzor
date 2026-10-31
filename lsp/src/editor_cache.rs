@@ -364,6 +364,9 @@ struct Retained {
 #[derive(Default)]
 struct State {
     configs: Vec<Config>,
+    /// The worker has configured the projects once; before that no snapshot
+    /// can be found.
+    configured: bool,
     documents: HashMap<String, String>,
     signatures: HashMap<PathBuf, (u64, Instant)>,
     retained: VecDeque<Retained>,
@@ -373,6 +376,14 @@ struct State {
 pub(crate) struct EditorCache(Arc<Mutex<State>>);
 
 impl EditorCache {
+    pub fn finish_configuration(&self) {
+        self.0.lock().unwrap().configured = true;
+    }
+
+    pub fn is_configured(&self) -> bool {
+        self.0.lock().unwrap().configured
+    }
+
     pub fn reset_projects(&self) {
         let mut state = self.0.lock().unwrap();
         state.configs.clear();

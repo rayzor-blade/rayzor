@@ -321,6 +321,7 @@ impl LspContext {
                 );
             }
         }
+        self.editor_cache.finish_configuration();
     }
 
     pub(crate) fn configuration_warnings(&self) -> Vec<LspDiagnostic> {

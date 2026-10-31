@@ -75,30 +75,89 @@ pub fn serve(connection: &Connection) -> Result<(), String> {
         .stack_size(SESSION_STACK)
         .spawn(move || serve_worker(&worker_connection, worker_cache))
         .map_err(|error| error.to_string())?;
+    // After the handshake, messages wait in order until the worker has
+    // configured the projects, so requests a snapshot answers are not sent to
+    // a worker that may be compiling for minutes.
+    let mut held = std::collections::VecDeque::new();
+    let mut initialized_at = None;
     loop {
+        let configured = cache.is_configured()
+            || initialized_at
+                .is_some_and(|at: std::time::Instant| at.elapsed() >= CONFIGURATION_WAIT);
+        if configured {
+            while let Some(message) = held.pop_front() {
+                if !relay(message, &cache, connection, &front) {
+                    return finish(front, worker);
+                }
+            }
+        }
         crossbeam_channel::select! {
             recv(connection.receiver) -> message => {
                 let Ok(message) = message else { break };
-                if let Message::Notification(notification) = &message { cache.track(notification); }
-                if let Message::Request(request) = &message
-                    && let Some((result, stale)) = cache.answer_while_revalidating(request)
-                {
-                    let _ = connection.sender.send(Message::Response(Response::new_ok(request.id.clone(), result)));
-                    if stale {
-                        let uri = request.params["textDocument"]["uri"].clone();
-                        let _ = front.sender.send(Message::Notification(Notification::new(REVALIDATE.into(), serde_json::json!({"uri": uri}))));
-                    }
+                if initialized_at.is_some() && !configured {
+                    held.push_back(message);
                     continue;
                 }
-                let exit = matches!(&message, Message::Notification(notification) if notification.method == "exit");
-                if front.sender.send(message).is_err() || exit { break; }
+                // The worker configures once the handshake ends with `initialized`.
+                let handshake_ends = matches!(&message, Message::Notification(note) if note.method == "initialized");
+                if !relay(message, &cache, connection, &front) { break; }
+                if handshake_ends {
+                    initialized_at = Some(std::time::Instant::now());
+                }
             }
             recv(front.receiver) -> message => {
                 let Ok(message) = message else { break };
                 if connection.sender.send(message).is_err() { break; }
             }
+            default(if initialized_at.is_some() && !configured {
+                std::time::Duration::from_millis(10)
+            } else {
+                std::time::Duration::from_secs(3600)
+            }) => {}
         }
     }
+    finish(front, worker)
+}
+
+/// How long messages wait for the worker to configure the projects.
+const CONFIGURATION_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Answers `message` from a snapshot or forwards it to the worker; false once
+/// the session ends.
+fn relay(
+    message: Message,
+    cache: &crate::editor_cache::EditorCache,
+    connection: &Connection,
+    front: &Connection,
+) -> bool {
+    if let Message::Notification(notification) = &message {
+        cache.track(notification);
+    }
+    if let Message::Request(request) = &message
+        && let Some((result, stale)) = cache.answer_while_revalidating(request)
+    {
+        let _ = connection.sender.send(Message::Response(Response::new_ok(
+            request.id.clone(),
+            result,
+        )));
+        if stale {
+            let uri = request.params["textDocument"]["uri"].clone();
+            let _ = front.sender.send(Message::Notification(Notification::new(
+                REVALIDATE.into(),
+                serde_json::json!({"uri": uri}),
+            )));
+        }
+        return true;
+    }
+    let exit =
+        matches!(&message, Message::Notification(notification) if notification.method == "exit");
+    front.sender.send(message).is_ok() && !exit
+}
+
+fn finish(
+    front: Connection,
+    worker: std::thread::JoinHandle<Result<(), String>>,
+) -> Result<(), String> {
     drop(front);
     worker
         .join()
@@ -517,7 +576,8 @@ fn serve_worker(
                 if answer_request(connection, &ctx, request)? {
                     return Ok(());
                 }
-            } else if let Some(result) = ctx.editor_cache.answer(&request) {
+            } else if let Some((result, _)) = ctx.editor_cache.answer_while_revalidating(&request) {
+                // A stale snapshot's document is already queued for analysis.
                 send_response(connection, request.id, Some(result));
             } else if request.params["textDocument"]["uri"]
                 .as_str()
