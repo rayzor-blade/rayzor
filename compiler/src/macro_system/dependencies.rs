@@ -12,6 +12,9 @@ pub struct Dependency {
     pub path: PathBuf,
     stamp: Option<(u64, u128)>,
     content_digest: Option<[u8; 16]>,
+    /// A Haxe source the unit parsed, rather than a file a macro read.
+    #[serde(default)]
+    source: bool,
 }
 
 impl Dependency {
@@ -28,7 +31,12 @@ impl Dependency {
             path: path.into(),
             stamp,
             content_digest: None,
+            source: false,
         }
+    }
+
+    pub fn is_source(&self) -> bool {
+        self.source
     }
 
     pub fn is_current(&self) -> bool {
@@ -111,7 +119,10 @@ impl Dependencies {
             .entry(group.into())
             .or_default()
             .entry(path.clone())
-            .or_insert_with(|| Dependency::capture(&path));
+            .or_insert_with(|| Dependency {
+                source: group == SOURCE_INPUTS,
+                ..Dependency::capture(&path)
+            });
     }
 
     /// A macro's own output must not invalidate the graph it just produced.

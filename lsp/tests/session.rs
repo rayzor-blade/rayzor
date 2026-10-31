@@ -3058,6 +3058,52 @@ class Setup {
     assert!(complete(at("1 <"), Some("<")).is_empty());
 }
 
+/// A file a macro read changes after analysis, as a library's shared cache
+/// can: requests are answered from the last analysis while a new one runs.
+#[test]
+fn changed_macro_inputs_are_revalidated_without_holding_requests() {
+    let macros = r#"import haxe.macro.Context;
+class Setup {
+    public static function enable() {
+        haxe.macro.Compiler.addGlobalMetadata("Main", "@:build(Setup.build())");
+    }
+    public static function build() {
+        var fields = Context.getBuildFields();
+        var text = sys.io.File.getContent(Context.resolvePath("data.txt"));
+        fields.push({name: "generated", access: [APublic, AStatic], kind: FVar(macro :Int, macro $v{text.length}), pos: Context.currentPos()});
+        return fields;
+    }
+}"#;
+    let main = "class Main {\n    static function main() { var count = Main.generated; }\n}\n";
+    let mut s = Session::start(&[
+        ("build.hxml", "--macro Setup.enable()\n"),
+        ("Setup.hx", macros),
+        ("data.txt", "first"),
+        ("Main.hx", main),
+    ]);
+    assert!(s.open("Main.hx").is_empty());
+    let at = s.at("Main.hx", 1, 34);
+    assert!(hover_text(&s.request("textDocument/hover", at.clone())).contains("count"));
+    std::fs::write(s.root.join("data.txt"), "changed").unwrap();
+    s.activity.clear();
+    assert!(hover_text(&s.request("textDocument/hover", at)).contains("count"));
+    assert!(
+        !s.activity
+            .iter()
+            .any(|activity| activity["state"] == "checking"),
+        "{:#?}",
+        s.activity
+    );
+    s.wait_ready("Main.hx", 1);
+    assert!(
+        s.activity
+            .iter()
+            .any(|activity| activity["state"] == "checking"),
+        "{:#?}",
+        s.activity
+    );
+}
+
 #[test]
 fn global_build_without_changes_has_no_expansion_preview() {
     let macros = r#"import haxe.macro.Context;

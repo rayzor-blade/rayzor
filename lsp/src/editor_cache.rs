@@ -13,6 +13,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// What has changed since a snapshot was taken.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Freshness {
+    Current,
+    MacroInputsChanged,
+    SourcesChanged,
+}
+
 fn hash(value: &impl Hash) -> u64 {
     let mut hash = DefaultHasher::new();
     value.hash(&mut hash);
@@ -446,8 +454,28 @@ impl EditorCache {
     }
 
     pub fn lookup(&self, uri: &str) -> Option<Arc<Snapshot>> {
+        self.find(uri)
+            .filter(|(_, freshness)| *freshness == Freshness::Current)
+            .map(|(snapshot, _)| snapshot)
+    }
+
+    /// The snapshot of `uri`'s current text, build and configuration, and
+    /// which of the files it read have changed since.
+    fn find(&self, uri: &str) -> Option<(Arc<Snapshot>, Freshness)> {
         let mut state = self.0.lock().unwrap();
         let (input_hash, path, build_id, persist) = state.identity(uri)?;
+        let current = |snapshot: &Snapshot| {
+            let mut freshness = Freshness::Current;
+            for dependency in &snapshot.dependencies {
+                if !dependency.is_current() {
+                    if dependency.is_source() {
+                        return Freshness::SourcesChanged;
+                    }
+                    freshness = Freshness::MacroInputsChanged;
+                }
+            }
+            freshness
+        };
         if let Some(index) = state
             .retained
             .iter()
@@ -455,31 +483,19 @@ impl EditorCache {
         {
             let entry = state.retained.remove(index)?;
             let result = entry.snapshot.clone();
-            if !result
-                .dependencies
-                .iter()
-                .all(|dependency| dependency.is_current())
-            {
-                return None;
-            }
             state.retained.push_back(entry);
-            return Some(result);
+            let fresh = current(&result);
+            return Some((result, fresh));
         }
         if !persist {
             return None;
         }
         let bytes = compiler::ir::blade::load_editor_index(path, &build_id, input_hash).ok()??;
         let snapshot = Arc::new(decode_snapshot(&bytes)?);
-        if !snapshot
-            .dependencies
-            .iter()
-            .all(|dependency| dependency.is_current())
-        {
-            return None;
-        }
         let heap_bytes = snapshot.heap_bytes();
         state.retain(uri, input_hash, snapshot.clone(), heap_bytes);
-        Some(snapshot)
+        let fresh = current(&snapshot);
+        Some((snapshot, fresh))
     }
 
     pub fn answer(&self, request: &Request) -> Option<Value> {
@@ -487,6 +503,21 @@ impl EditorCache {
         let snapshot = self.lookup(uri)?;
         let state = self.0.lock().unwrap();
         snapshot.answer(request, state.documents.get(uri)?)
+    }
+
+    /// As `answer`, also from a snapshot only files its macros read have
+    /// changed since, such as a library's shared cache: its sources are the
+    /// same, so its answers stand until an analysis replaces them. The flag
+    /// says the snapshot needs that analysis.
+    pub fn answer_while_revalidating(&self, request: &Request) -> Option<(Value, bool)> {
+        let uri = request.params["textDocument"]["uri"].as_str()?;
+        let (snapshot, freshness) = self.find(uri)?;
+        if freshness == Freshness::SourcesChanged {
+            return None;
+        }
+        let state = self.0.lock().unwrap();
+        let answer = snapshot.answer(request, state.documents.get(uri)?)?;
+        Some((answer, freshness == Freshness::MacroInputsChanged))
     }
 
     pub fn fingerprint(&self, uri: &str, documents: &HashMap<String, String>) -> Option<u64> {

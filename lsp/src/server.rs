@@ -61,6 +61,10 @@ pub fn spawn_session(
         .spawn(move || serve(&connection))
 }
 
+/// Sent by the front to the worker after answering from a snapshot whose
+/// inputs changed: the document is analysed again in the background.
+const REVALIDATE: &str = "rayzor/revalidate";
+
 /// Serve one session on `connection`, from `initialize` to `shutdown`.
 pub fn serve(connection: &Connection) -> Result<(), String> {
     let cache = crate::editor_cache::EditorCache::default();
@@ -77,9 +81,13 @@ pub fn serve(connection: &Connection) -> Result<(), String> {
                 let Ok(message) = message else { break };
                 if let Message::Notification(notification) = &message { cache.track(notification); }
                 if let Message::Request(request) = &message
-                    && let Some(result) = cache.answer(request)
+                    && let Some((result, stale)) = cache.answer_while_revalidating(request)
                 {
                     let _ = connection.sender.send(Message::Response(Response::new_ok(request.id.clone(), result)));
+                    if stale {
+                        let uri = request.params["textDocument"]["uri"].clone();
+                        let _ = front.sender.send(Message::Notification(Notification::new(REVALIDATE.into(), serde_json::json!({"uri": uri}))));
+                    }
                     continue;
                 }
                 let exit = matches!(&message, Message::Notification(notification) if notification.method == "exit");
@@ -684,7 +692,14 @@ fn handle_notification(
             changed.push(uri.to_string());
         }
     };
-    if let Some(params) = cast_notification::<DidOpenTextDocument>(&not) {
+    if not.method == REVALIDATE {
+        if let Some(uri) = not.params["uri"].as_str()
+            && ctx.open_files.contains_key(uri)
+            && !ctx.has_current_analysis(uri)
+        {
+            mark(uri);
+        }
+    } else if let Some(params) = cast_notification::<DidOpenTextDocument>(&not) {
         let uri = params.text_document.uri.as_str().to_string();
         ctx.document_versions
             .insert(uri.clone(), params.text_document.version);
