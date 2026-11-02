@@ -70,6 +70,9 @@ inkwell = { version = "0.7.1", features = ["llvm21-1"], optional = true}
 llvm-sys = { version = "211", optional = true }
 regex = "1.12.3"
 md-5 = { version = "=0.10.6", default-features = false }
+sha1 = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+base64 = "0.22"
 
 
 [build-dependencies]

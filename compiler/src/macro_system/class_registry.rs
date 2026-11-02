@@ -72,6 +72,15 @@ struct TypeDefinition {
     is_abstract: bool,
     is_enum_abstract: bool,
     constructors: BTreeMap<String, (usize, usize)>,
+    /// Enum constructor names in declaration order.
+    constructor_order: Vec<String>,
+}
+
+impl TypeDefinition {
+    /// Classes, interfaces and enums are values (`Class<T>`, `Enum<T>`) at macro time.
+    fn has_runtime_value(&self) -> bool {
+        self.runtime_class || !self.constructor_order.is_empty()
+    }
 }
 
 struct FieldDefinition {
@@ -378,12 +387,14 @@ impl ClassRegistry {
         };
         Some(
             entries
+                .read()
                 .iter()
                 .map(|entry| {
                     let at = entry
                         .as_object()
-                        .and_then(|entry| entry.get("pos"))
-                        .and_then(super::context_api::position_span)
+                        .and_then(|entry| {
+                            entry.get("pos").and_then(super::context_api::position_span)
+                        })
                         .unwrap_or(span);
                     super::expr_adt::metadata_of(entry, at)
                 })
@@ -395,7 +406,7 @@ impl ClassRegistry {
         &self,
         old: &super::value::MacroValue,
         new: &super::value::MacroValue,
-        updates: &mut super::value::ReferenceUpdates<'_>,
+        updates: &mut super::value::ReferenceUpdates,
     ) {
         if let Ok(mut statics) = self.statics.lock() {
             for value in statics.values_mut() {
@@ -554,6 +565,14 @@ impl ClassRegistry {
                         })
                         .collect(),
                     _ => BTreeMap::new(),
+                },
+                constructor_order: match decl {
+                    TypeDeclaration::Enum(declaration) => declaration
+                        .constructors
+                        .iter()
+                        .map(|constructor| constructor.name.clone())
+                        .collect(),
+                    _ => Vec::new(),
                 },
                 fields: fields
                     .iter()
@@ -933,29 +952,35 @@ impl ClassRegistry {
         declared_type: Option<crate::tast::TypeId>,
     ) -> super::value::MacroValue {
         use super::value::MacroValue as V;
-        let V::Object(mut view) = view else {
+        let V::Object(shared) = &view else {
             return view;
         };
-        let Some(name) = view.get("name").and_then(V::as_string) else {
-            return V::Object(view);
+        let fields = shared.read();
+        let Some(name) = fields.get("name").and_then(V::as_string) else {
+            return view;
         };
-        let mut path = match view.get("pack") {
-            Some(V::Array(pack)) => pack.iter().map(V::to_display_string).collect::<Vec<_>>(),
+        let mut path = match fields.get("pack") {
+            Some(V::Array(pack)) => pack
+                .read()
+                .iter()
+                .map(V::to_display_string)
+                .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
         path.push(name.to_string());
-        let module = view.get("module").and_then(V::as_string).unwrap_or("");
+        let module = fields.get("module").and_then(V::as_string).unwrap_or("");
         let Some(definition) = self.reflected_definition(&path.join("."), module) else {
-            return V::Object(view);
+            return view;
         };
-        let view = Arc::make_mut(&mut view);
+        // The enriched view is a new object; the reflected one is left as it is.
+        let mut view = fields.as_ref().clone();
         view.insert(
             "module".to_string(),
             V::String(Arc::from(definition.module.as_str())),
         );
         view.insert(
             "pack".to_string(),
-            V::Array(Arc::new(
+            V::array(
                 definition
                     .module
                     .rsplit_once('.')
@@ -964,18 +989,18 @@ impl ClassRegistry {
                     .filter(|part| !part.is_empty())
                     .map(V::from_str)
                     .collect(),
-            )),
+            ),
         );
         let mut metadata = metadata_entries(&definition.metadata);
         if let Some(V::Object(meta)) = view.get("meta")
-            && let Some(V::Array(entries)) = meta.get("__meta__")
+            && let Some(V::Array(entries)) = meta.read().get("__meta__")
         {
-            for entry in entries.iter() {
+            for entry in entries.read().iter() {
                 let name = match entry {
-                    V::Object(entry) => entry.get("name"),
+                    V::Object(entry) => entry.read().get("name").cloned(),
                     _ => None,
                 };
-                if !metadata.iter().any(|candidate| matches!(candidate, V::Object(candidate) if candidate.get("name") == name)) {
+                if !metadata.iter().any(|candidate| matches!(candidate, V::Object(candidate) if candidate.read().get("name") == name.as_ref())) {
                     metadata.push(entry.clone());
                 }
             }
@@ -984,21 +1009,23 @@ impl ClassRegistry {
             metadata.push(metadata_entry(":enum"));
         }
         if let Some(V::Array(changed)) = self.metadata_overlay(&definition.qualified_name) {
-            metadata = changed.as_ref().clone();
+            metadata = changed.read().as_ref().clone();
         }
-        let mut access = metadata_access(metadata);
-        if let V::Object(access) = &mut access {
-            Arc::make_mut(access).insert(
-                "__meta_owner__".into(),
-                V::from_str(&definition.qualified_name),
-            );
+        let access = metadata_access(metadata);
+        if let V::Object(access) = &access {
+            access.write(|access| {
+                access.insert(
+                    "__meta_owner__".into(),
+                    V::from_str(&definition.qualified_name),
+                )
+            });
         }
         view.insert("meta".to_string(), access);
         let mut implementation_fields = Vec::new();
         for (key, is_static) in [("fields", false), ("statics", true)] {
             let typed_fields = match view.get(key) {
-                Some(V::Object(reference)) => match reference.get("__ref__") {
-                    Some(V::Array(fields)) => fields.as_ref().clone(),
+                Some(V::Object(reference)) => match reference.read().get("__ref__") {
+                    Some(V::Array(fields)) => fields.read().as_ref().clone(),
                     _ => Vec::new(),
                 },
                 _ => Vec::new(),
@@ -1013,9 +1040,9 @@ impl ClassRegistry {
                     .iter()
                     .find_map(|v| match v {
                         V::Object(o)
-                            if o.get("name").and_then(V::as_string) == Some(&field.name) =>
+                            if o.read().get("name").and_then(V::as_string) == Some(&field.name) =>
                         {
-                            Some(o.as_ref().clone())
+                            Some(o.read().as_ref().clone())
                         }
                         _ => None,
                     })
@@ -1053,7 +1080,7 @@ impl ClassRegistry {
                     metadata.push(metadata_entry(":enum"));
                 }
                 entry.insert("meta".to_string(), metadata_access(metadata));
-                let entry = V::Object(Arc::new(entry));
+                let entry = V::object(entry);
                 if definition.is_abstract {
                     implementation_fields.push(entry.clone());
                 }
@@ -1061,13 +1088,17 @@ impl ClassRegistry {
             }
             for entry in typed_fields {
                 let name = match &entry {
-                    V::Object(entry) => entry.get("name").and_then(V::as_string),
+                    V::Object(entry) => entry
+                        .read()
+                        .get("name")
+                        .and_then(V::as_string)
+                        .map(str::to_string),
                     _ => None,
                 };
                 if !definition
                     .fields
                     .iter()
-                    .any(|f| f.is_static == is_static && Some(f.name.as_str()) == name)
+                    .any(|f| f.is_static == is_static && Some(f.name.as_str()) == name.as_deref())
                 {
                     if definition.is_abstract {
                         implementation_fields.push(entry.clone());
@@ -1075,24 +1106,18 @@ impl ClassRegistry {
                     fields.push(entry);
                 }
             }
-            view.insert(key.to_string(), reference(V::Array(Arc::new(fields))));
+            view.insert(key.to_string(), reference(V::array(fields)));
         }
         if definition.is_abstract {
             let mut implementation = view.clone();
             implementation.insert(
                 "statics".to_string(),
-                reference(V::Array(Arc::new(implementation_fields))),
+                reference(V::array(implementation_fields)),
             );
-            implementation.insert(
-                "fields".to_string(),
-                reference(V::Array(Arc::new(Vec::new()))),
-            );
-            view.insert(
-                "impl".to_string(),
-                reference(V::Object(Arc::new(implementation))),
-            );
+            implementation.insert("fields".to_string(), reference(V::array(Vec::new())));
+            view.insert("impl".to_string(), reference(V::object(implementation)));
         }
-        V::Object(Arc::new(view.clone()))
+        V::object(view.clone())
     }
 
     /// Register all classes from multiple HaxeFiles.
@@ -1109,6 +1134,13 @@ impl ClassRegistry {
         (owners.len() == 1)
             .then(|| owners.first().cloned())
             .flatten()
+    }
+
+    /// An enum's constructor names in declaration order.
+    pub(crate) fn enum_constructor_names(&self, owner: &str) -> Option<&[String]> {
+        self.definition(owner)
+            .map(|definition| definition.constructor_order.as_slice())
+            .filter(|names| !names.is_empty())
     }
 
     pub(crate) fn enum_constructor_required(&self, owner: &str, name: &str) -> Option<usize> {
@@ -1198,13 +1230,21 @@ impl ClassRegistry {
         if let Some(info) = self.find_class(name) {
             return Some(&info.qualified_name);
         }
-        if let Some(info) = self.type_definitions.get(name).filter(|d| d.runtime_class) {
+        if let Some(info) = self
+            .type_definitions
+            .get(name)
+            .filter(|d| d.has_runtime_value())
+        {
             return Some(&info.qualified_name);
         }
         if !name.contains('.') {
             let names = self.runtime_short_names.get_or_init(|| {
                 let mut names = BTreeMap::new();
-                for definition in self.type_definitions.values().filter(|d| d.runtime_class) {
+                for definition in self
+                    .type_definitions
+                    .values()
+                    .filter(|d| d.has_runtime_value())
+                {
                     let short = definition.qualified_name.rsplit('.').next().unwrap();
                     names
                         .entry(short.to_string())
@@ -1264,30 +1304,44 @@ impl ClassRegistry {
             .unwrap_or_default();
         let base = BTreeMap::from([
             ("name".to_string(), V::String(Arc::from(info.name.as_str()))),
-            ("pack".to_string(), V::Array(Arc::new(pack.clone()))),
+            ("pack".to_string(), V::array(pack.clone())),
         ]);
-        let V::Object(mut view) = self.enrich_type_view(V::Object(Arc::new(base))) else {
+        let V::Object(view) = self.enrich_type_view(V::object(base)) else {
             return None;
         };
-        let view_mut = Arc::make_mut(&mut view);
-        view_mut.insert("pack".to_string(), V::Array(Arc::new(pack)));
+        view.write(|view| view.insert("pack".to_string(), V::array(pack)));
         for (key, methods) in [
             ("statics", &info.static_methods),
             ("fields", &info.instance_methods),
         ] {
-            let Some(V::Object(reference)) = view_mut.get_mut(key) else {
+            let Some(V::Object(reference)) = view.read().get(key).cloned() else {
                 continue;
             };
-            let Some(V::Array(fields)) = Arc::make_mut(reference).get_mut("__ref__") else {
+            let Some(V::Array(fields)) = reference.read().get("__ref__").cloned() else {
                 continue;
             };
-            for field in Arc::make_mut(fields).iter_mut() {
-                let V::Object(field) = field else { continue };
-                let name = field.get("name").map(V::to_display_string);
-                if let Some(method) = name.and_then(|n| methods.get(&n)) {
-                    Arc::make_mut(field).insert("__expr__".to_string(), typed_function(method));
-                }
-            }
+            // Typed copies: the reflected field views are left as they are.
+            let fields: Vec<V> = fields
+                .read()
+                .iter()
+                .map(|value| {
+                    let V::Object(field) = value else {
+                        return value.clone();
+                    };
+                    let name = field.read().get("name").map(V::to_display_string);
+                    let Some(method) = name.and_then(|n| methods.get(&n)) else {
+                        return value.clone();
+                    };
+                    let field = field.copy();
+                    field.write(|field| {
+                        field.insert("__expr__".to_string(), typed_function(method))
+                    });
+                    V::Object(field)
+                })
+                .collect();
+            let reference = reference.copy();
+            reference.write(|reference| reference.insert("__ref__".to_string(), V::array(fields)));
+            view.write(|view| view.insert(key.to_string(), V::Object(reference)));
         }
         Some(V::Object(view))
     }
@@ -1361,15 +1415,15 @@ impl ClassRegistry {
 }
 
 fn reference(value: super::value::MacroValue) -> super::value::MacroValue {
-    super::value::MacroValue::Object(Arc::new(BTreeMap::from([("__ref__".to_string(), value)])))
+    super::value::MacroValue::object(BTreeMap::from([("__ref__".to_string(), value)]))
 }
 
 fn metadata_entry(name: &str) -> super::value::MacroValue {
     use super::value::MacroValue as V;
-    V::Object(Arc::new(BTreeMap::from([
+    V::object(BTreeMap::from([
         ("name".to_string(), V::String(Arc::from(name))),
-        ("params".to_string(), V::Array(Arc::new(Vec::new()))),
-    ])))
+        ("params".to_string(), V::array(Vec::new())),
+    ]))
 }
 
 fn metadata_entries(metadata: &[Metadata]) -> Vec<super::value::MacroValue> {
@@ -1382,22 +1436,22 @@ fn metadata_entries(metadata: &[Metadata]) -> Vec<super::value::MacroValue> {
             } else {
                 m.name.clone()
             };
-            V::Object(Arc::new(BTreeMap::from([
+            V::object(BTreeMap::from([
                 ("name".to_string(), V::String(Arc::from(name))),
                 (
                     "params".to_string(),
-                    V::Array(Arc::new(
+                    V::array(
                         m.params
                             .iter()
                             .map(|p| V::Expr(Arc::new(p.clone())))
                             .collect(),
-                    )),
+                    ),
                 ),
                 (
                     "pos".to_string(),
                     V::Position(super::ast_bridge::span_to_location(m.span)),
                 ),
-            ])))
+            ]))
         })
         .collect()
 }
@@ -1407,12 +1461,12 @@ fn metadata_entries(metadata: &[Metadata]) -> Vec<super::value::MacroValue> {
 fn typed_function(method: &MethodInfo) -> super::value::MacroValue {
     use super::value::MacroValue as V;
     let object = |entries: Vec<(&str, V)>| {
-        V::Object(Arc::new(
+        V::object(
             entries
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
                 .collect(),
-        ))
+        )
     };
     let args = method
         .params
@@ -1431,7 +1485,7 @@ fn typed_function(method: &MethodInfo) -> super::value::MacroValue {
         })
         .collect();
     let function = object(vec![
-        ("args", V::Array(Arc::new(args))),
+        ("args", V::array(args)),
         ("t", V::Null),
         ("expr", V::Null),
     ]);
@@ -1451,10 +1505,10 @@ fn typed_function(method: &MethodInfo) -> super::value::MacroValue {
 
 fn metadata_access(entries: Vec<super::value::MacroValue>) -> super::value::MacroValue {
     use super::value::MacroValue as V;
-    V::Object(Arc::new(BTreeMap::from([(
+    V::object(BTreeMap::from([(
         "__meta__".to_string(),
-        V::Array(Arc::new(entries)),
-    )])))
+        V::array(entries),
+    )]))
 }
 
 #[cfg(test)]

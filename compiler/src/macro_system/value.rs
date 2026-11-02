@@ -2,7 +2,7 @@ use crate::tast::{SourceLocation, TypeId};
 use parser::{Expr, FunctionParam};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// A callable function in the macro interpreter
 #[derive(Debug, Clone)]
@@ -54,14 +54,83 @@ impl MacroParam {
     }
 }
 
+/// Storage shared by every alias of a Haxe object, array or map.
+///
+/// Reads take a snapshot of the current contents; a write changes the
+/// contents in place, so every alias observes it. A write copies the contents
+/// only while a snapshot of them is still held.
+pub struct Shared<T>(Arc<Mutex<Arc<T>>>);
+
+impl<T> Shared<T> {
+    pub fn new(value: T) -> Self {
+        Self(Arc::new(Mutex::new(Arc::new(value))))
+    }
+
+    fn cell(&self) -> std::sync::MutexGuard<'_, Arc<T>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The contents at this moment.
+    pub fn read(&self) -> Arc<T> {
+        self.cell().clone()
+    }
+
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub(crate) fn address(&self) -> usize {
+        Arc::as_ptr(&self.0) as *const () as usize
+    }
+}
+
+impl<T: Clone> Shared<T> {
+    /// Change the contents in place. `change` must not read this container.
+    pub fn write<R>(&self, change: impl FnOnce(&mut T) -> R) -> R {
+        change(Arc::make_mut(&mut self.cell()))
+    }
+
+    /// Replace the contents.
+    pub fn set(&self, value: T) {
+        *self.cell() = Arc::new(value);
+    }
+
+    /// A new container holding the same contents.
+    pub fn copy(&self) -> Self {
+        Self(Arc::new(Mutex::new(self.read())))
+    }
+}
+
+impl<T> Clone for Shared<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for Shared<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.read().fmt(f)
+    }
+}
+
+impl<T: PartialEq> PartialEq for Shared<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr_eq(other) || *self.read() == *other.read()
+    }
+}
+
+pub type ObjectFields = BTreeMap<String, MacroValue>;
+pub type MapEntries = Vec<(MacroValue, MacroValue)>;
+
 /// Runtime values used during macro interpretation.
 ///
 /// These represent all the value types that can exist during
 /// compile-time macro evaluation.
 ///
-/// Performance: String, Array, Object, Expr, and Function use Arc<> for
-/// O(1) clone via reference counting. Only mutating operations (array push,
-/// object field set) trigger COW copies via Arc::make_mut().
+/// Objects, arrays and maps are shared mutable storage, as in Haxe. The other
+/// composites are immutable and use Arc for O(1) clone.
 #[derive(Debug, Clone)]
 pub enum MacroValue {
     /// Null value
@@ -82,19 +151,19 @@ pub enum MacroValue {
     /// String value (Arc for O(1) clone)
     String(Arc<str>),
 
-    /// Array of values (Arc for O(1) clone, COW on mutation)
-    Array(Arc<Vec<MacroValue>>),
+    /// Array of values
+    Array(Shared<Vec<MacroValue>>),
 
     /// Map entries retain typed keys, including object identity.
-    Map(Arc<Vec<(MacroValue, MacroValue)>>),
+    Map(Shared<MapEntries>),
 
-    /// Anonymous object / struct (Arc for O(1) clone, COW on mutation)
-    Object(Arc<BTreeMap<String, MacroValue>>),
+    /// Anonymous object / struct
+    Object(Shared<ObjectFields>),
 
     /// Enum value: (enum_name, variant_name, args)
     Enum(Arc<str>, Arc<str>, Arc<Vec<MacroValue>>),
 
-    /// A reified AST expression node (Arc for O(1) clone)
+    /// A reified AST expression node, copied on write
     Expr(Arc<Expr>),
 
     /// A reference to a resolved type in the compiler
@@ -110,158 +179,19 @@ pub enum MacroValue {
     Position(SourceLocation),
 }
 
-enum ReferenceOwner {
-    Object(std::sync::Weak<BTreeMap<String, MacroValue>>),
-    Values(std::sync::Weak<Vec<MacroValue>>),
-    Map(std::sync::Weak<Vec<(MacroValue, MacroValue)>>),
-    Expr(std::sync::Weak<Expr>),
-    Function(std::sync::Weak<MacroFunction>),
-    Abstract(std::sync::Weak<MacroValue>),
-}
-
-impl ReferenceOwner {
-    fn alive(&self) -> bool {
-        match self {
-            Self::Object(value) => value.strong_count() != 0,
-            Self::Values(value) => value.strong_count() != 0,
-            Self::Map(value) => value.strong_count() != 0,
-            Self::Expr(value) => value.strong_count() != 0,
-            Self::Function(value) => value.strong_count() != 0,
-            Self::Abstract(value) => value.strong_count() != 0,
-        }
-    }
-}
-
-struct ReferenceSummary {
-    owner: ReferenceOwner,
-    serial: u64,
-    maximum: u64,
-}
-
-/// Closed backing stores cache the greatest identity they contain. Captured
-/// variable cells remain unbounded because they can acquire later values.
+/// Repoints aliases of an expression whose field was written: expressions are
+/// copied on write, so the containers and variables holding the old copy are
+/// updated to the new one. Each container and variable is visited once.
 #[derive(Default)]
-pub(crate) struct ReferenceIndex {
-    values: std::collections::HashMap<(u8, usize), ReferenceSummary>,
-    serial: u64,
-    mutations: u64,
-    #[cfg(test)]
-    summarized: usize,
+pub(crate) struct ReferenceUpdates {
+    visited: std::collections::HashSet<usize>,
+    // Holds every visited container so its address is not reused mid-walk.
+    retained: Vec<MacroValue>,
 }
 
-impl ReferenceIndex {
-    fn summarize(&mut self, value: &MacroValue) -> (u64, u64) {
-        let Some(key) = value.reference_key() else {
-            return (0, 0);
-        };
-        if let Some(summary) = self.values.get(&key) {
-            return (summary.serial, summary.maximum);
-        }
-        crate::cooperative::checkpoint();
-        let owner = match value {
-            MacroValue::Object(value) => ReferenceOwner::Object(Arc::downgrade(value)),
-            MacroValue::Array(value) | MacroValue::Enum(_, _, value) => {
-                ReferenceOwner::Values(Arc::downgrade(value))
-            }
-            MacroValue::Map(value) => ReferenceOwner::Map(Arc::downgrade(value)),
-            MacroValue::Expr(value) => ReferenceOwner::Expr(Arc::downgrade(value)),
-            MacroValue::Function(value) => ReferenceOwner::Function(Arc::downgrade(value)),
-            MacroValue::Abstract(_, value) => ReferenceOwner::Abstract(Arc::downgrade(value)),
-            _ => unreachable!("reference identity"),
-        };
-        self.serial = self.serial.saturating_add(1);
-        let serial = self.serial;
-        // Weak ownership prevents address reuse and makes a cached store's next
-        // COW write acquire a new identity, even with one strong owner.
-        self.values.insert(
-            key,
-            ReferenceSummary {
-                owner,
-                serial,
-                maximum: u64::MAX,
-            },
-        );
-        #[cfg(test)]
-        {
-            self.summarized += 1;
-        }
-        let mut maximum = serial;
-        match value {
-            MacroValue::Object(values) => {
-                for (i, value) in values.values().enumerate() {
-                    scan_checkpoint(i);
-                    maximum = maximum.max(self.summarize(value).1);
-                }
-            }
-            MacroValue::Array(values) | MacroValue::Enum(_, _, values) => {
-                for (i, value) in values.iter().enumerate() {
-                    scan_checkpoint(i);
-                    maximum = maximum.max(self.summarize(value).1);
-                }
-            }
-            MacroValue::Map(values) => {
-                for (i, (key, value)) in values.iter().enumerate() {
-                    scan_checkpoint(i);
-                    maximum = maximum
-                        .max(self.summarize(key).1)
-                        .max(self.summarize(value).1);
-                }
-            }
-            MacroValue::Abstract(_, value) => maximum = maximum.max(self.summarize(value).1),
-            MacroValue::Function(function) if !function.captures.is_empty() => maximum = u64::MAX,
-            _ => {}
-        }
-        self.values.get_mut(&key).unwrap().maximum = maximum;
-        (serial, maximum)
-    }
-
-    fn target(&mut self, old: &MacroValue) -> u64 {
-        self.mutations += 1;
-        if self.values.len() > 4096 && self.mutations.is_multiple_of(128) {
-            let mut visited = 0;
-            self.values.retain(|_, summary| {
-                scan_checkpoint(visited);
-                visited += 1;
-                summary.owner.alive()
-            });
-        }
-        self.summarize(old).0
-    }
-}
-
-#[inline]
-fn scan_checkpoint(index: usize) {
-    if index.is_multiple_of(128) {
-        crate::cooperative::poll();
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct ReferenceUpdates<'a> {
-    values: BTreeMap<(u8, usize), (MacroValue, MacroValue, bool)>,
-    bindings: std::collections::BTreeSet<usize>,
-    index: Option<&'a mut ReferenceIndex>,
-    target: u64,
-}
-
-impl<'a> ReferenceUpdates<'a> {
+impl ReferenceUpdates {
     pub(crate) fn new() -> Self {
         Self::default()
-    }
-
-    pub(crate) fn indexed(old: &MacroValue, index: &'a mut ReferenceIndex) -> Self {
-        let target = index.target(old);
-        Self {
-            index: Some(index),
-            target,
-            ..Default::default()
-        }
-    }
-
-    fn excludes(&mut self, value: &MacroValue) -> bool {
-        self.index
-            .as_deref_mut()
-            .is_some_and(|index| index.summarize(value).1 < self.target)
     }
 
     pub(crate) fn replace_binding(
@@ -270,7 +200,10 @@ impl<'a> ReferenceUpdates<'a> {
         old: &MacroValue,
         new: &MacroValue,
     ) {
-        if !self.bindings.insert(Arc::as_ptr(binding) as usize) {
+        if !self
+            .visited
+            .insert(Arc::as_ptr(binding) as *const () as usize)
+        {
             return;
         }
         // Captures can refer back to their own function's binding.
@@ -284,7 +217,47 @@ impl<'a> ReferenceUpdates<'a> {
     }
 }
 
+#[inline]
+fn scan_checkpoint(index: usize) {
+    if index.is_multiple_of(128) {
+        crate::cooperative::poll();
+    }
+}
+
 impl MacroValue {
+    /// Whether this value is, or carries inside an enum or abstract, a container
+    /// that other references can see changes to.
+    /// Haxe `==`: arrays, maps and objects by identity, everything else by value.
+    pub fn haxe_equals(&self, other: &Self) -> bool {
+        match (self.underlying(), other.underlying()) {
+            (MacroValue::Array(a), MacroValue::Array(b)) => a.ptr_eq(b),
+            (MacroValue::Map(a), MacroValue::Map(b)) => a.ptr_eq(b),
+            (MacroValue::Object(a), MacroValue::Object(b)) => a.ptr_eq(b),
+            (left, right) => left == right,
+        }
+    }
+
+    pub fn holds_shared(&self) -> bool {
+        match self {
+            MacroValue::Array(_) | MacroValue::Map(_) | MacroValue::Object(_) => true,
+            MacroValue::Enum(_, _, arguments) => arguments.iter().any(MacroValue::holds_shared),
+            MacroValue::Abstract(_, inner) => inner.holds_shared(),
+            _ => false,
+        }
+    }
+
+    pub fn array(values: Vec<MacroValue>) -> Self {
+        Self::Array(Shared::new(values))
+    }
+
+    pub fn object(fields: ObjectFields) -> Self {
+        Self::Object(Shared::new(fields))
+    }
+
+    pub fn map(entries: MapEntries) -> Self {
+        Self::Map(Shared::new(entries))
+    }
+
     pub(crate) fn underlying(&self) -> &Self {
         let mut value = self;
         while let Self::Abstract(_, inner) = value {
@@ -293,24 +266,11 @@ impl MacroValue {
         value
     }
 
-    pub(crate) fn reference_key(&self) -> Option<(u8, usize)> {
-        Some(match self {
-            Self::Object(value) => (0, Arc::as_ptr(value) as usize),
-            Self::Array(value) => (1, Arc::as_ptr(value) as usize),
-            Self::Enum(_, _, value) => (2, Arc::as_ptr(value) as usize),
-            Self::Map(value) => (3, Arc::as_ptr(value) as usize),
-            Self::Expr(value) => (4, Arc::as_ptr(value) as usize),
-            Self::Function(value) => (5, Arc::as_ptr(value) as usize),
-            Self::Abstract(_, value) => (6, Arc::as_ptr(value) as usize),
-            _ => return None,
-        })
-    }
-
     pub(crate) fn same_reference(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Object(a), Self::Object(b)) => Arc::ptr_eq(a, b),
-            (Self::Array(a), Self::Array(b)) => Arc::ptr_eq(a, b),
-            (Self::Map(a), Self::Map(b)) => Arc::ptr_eq(a, b),
+            (Self::Object(a), Self::Object(b)) => a.ptr_eq(b),
+            (Self::Array(a), Self::Array(b)) => a.ptr_eq(b),
+            (Self::Map(a), Self::Map(b)) => a.ptr_eq(b),
             (Self::Expr(a), Self::Expr(b)) => Arc::ptr_eq(a, b),
             (Self::Function(a), Self::Function(b)) => Arc::ptr_eq(a, b),
             (Self::Abstract(owner, a), Self::Abstract(other, b)) => {
@@ -339,7 +299,7 @@ impl MacroValue {
             }
     }
 
-    pub(crate) fn insert_map_entry(entries: &mut Vec<(Self, Self)>, key: Self, value: Self) {
+    pub(crate) fn insert_map_entry(entries: &mut MapEntries, key: Self, value: Self) {
         if let Some((_, stored)) = entries
             .iter_mut()
             .find(|(stored, _)| stored.map_key_eq(&key))
@@ -359,56 +319,52 @@ impl MacroValue {
     }
 
     pub(crate) fn map_method(&self, method: &str, args: &[Self]) -> Option<Self> {
-        let Self::Map(entries) = self else {
+        let Self::Map(map) = self else {
             return None;
         };
+        let entries = map.read();
         Some(match method {
-            "get" => Self::map_get(entries, args.first()?),
+            "get" => Self::map_get(&entries, args.first()?),
             "exists" => Self::Bool(
                 entries
                     .iter()
                     .any(|(key, _)| key.map_key_eq(args.first().unwrap_or(&Self::Null))),
             ),
-            "keys" => Self::array_iterator(Arc::new(
+            "keys" => Self::array_iterator(Self::array(
                 entries.iter().map(|(key, _)| key.clone()).collect(),
             )),
-            "iterator" => Self::array_iterator(Arc::new(
+            "iterator" => Self::array_iterator(Self::array(
                 entries.iter().map(|(_, value)| value.clone()).collect(),
             )),
-            "keyValueIterator" => Self::array_iterator(Arc::new(
+            "keyValueIterator" => Self::array_iterator(Self::array(
                 entries
                     .iter()
                     .map(|(key, value)| {
-                        Self::Object(Arc::new(BTreeMap::from([
+                        Self::object(BTreeMap::from([
                             ("key".to_string(), key.clone()),
                             ("value".to_string(), value.clone()),
-                        ])))
+                        ]))
                     })
                     .collect(),
             )),
-            "copy" => Self::Map(Arc::new(entries.as_ref().clone())),
+            "copy" => Self::Map(map.copy()),
             "toString" => Self::from_string(self.to_display_string()),
             _ => return None,
         })
     }
 
-    pub(crate) fn array_iterator(values: Arc<Vec<Self>>) -> Self {
+    /// An iterator over `array`, which it reads as it advances.
+    pub(crate) fn array_iterator(array: Self) -> Self {
         use parser::{BinaryOp, ExprKind, Span, UnaryOp};
         let expression = |kind| Expr {
             kind,
             span: Span::default(),
         };
-        let array = || expression(ExprKind::Ident("array".to_string()));
+        let array_ident = || expression(ExprKind::Ident("array".to_string()));
         let current = || expression(ExprKind::Ident("current".to_string()));
         let captures = BTreeMap::from([
-            (
-                "array".to_string(),
-                Arc::new(std::sync::Mutex::new(Self::Array(values))),
-            ),
-            (
-                "current".to_string(),
-                Arc::new(std::sync::Mutex::new(Self::Int(0))),
-            ),
+            ("array".to_string(), Arc::new(Mutex::new(array))),
+            ("current".to_string(), Arc::new(Mutex::new(Self::Int(0)))),
         ]);
         let method = |name: &str, body| {
             Self::Function(Arc::new(MacroFunction {
@@ -421,7 +377,7 @@ impl MacroValue {
                 static_target: None,
             }))
         };
-        Self::Object(Arc::new(BTreeMap::from([
+        Self::object(BTreeMap::from([
             (
                 "__type__".to_string(),
                 Self::from_str("haxe.iterators.ArrayIterator"),
@@ -434,7 +390,7 @@ impl MacroValue {
                         left: Box::new(current()),
                         op: BinaryOp::Lt,
                         right: Box::new(expression(ExprKind::Field {
-                            expr: Box::new(array()),
+                            expr: Box::new(array_ident()),
                             field: "length".to_string(),
                             is_optional: false,
                         })),
@@ -446,7 +402,7 @@ impl MacroValue {
                 method(
                     "next",
                     ExprKind::Index {
-                        expr: Box::new(array()),
+                        expr: Box::new(array_ident()),
                         index: Box::new(expression(ExprKind::Unary {
                             op: UnaryOp::PostIncr,
                             expr: Box::new(current()),
@@ -454,149 +410,149 @@ impl MacroValue {
                     },
                 ),
             ),
-        ])))
+        ]))
     }
 
-    /// Mutate a map and return the Haxe method's result separately from its storage.
-    pub(crate) fn mutate_map(&mut self, method: &str, args: &[Self]) -> Option<Self> {
+    /// Mutate a map in place and return the Haxe method's result.
+    pub(crate) fn mutate_map(&self, method: &str, args: &[Self]) -> Option<Self> {
         let Self::Map(entries) = self else {
             return None;
         };
         Some(match method {
             "set" => {
-                let (key, value) = (args.first()?, args.get(1)?);
-                Self::insert_map_entry(Arc::make_mut(entries), key.clone(), value.clone());
+                let (key, value) = (args.first()?.clone(), args.get(1)?.clone());
+                entries.write(|entries| Self::insert_map_entry(entries, key, value));
                 Self::Null
             }
             "remove" => {
                 let key = args.first()?;
-                let index = entries
-                    .iter()
-                    .position(|(stored, _)| stored.map_key_eq(key));
-                if let Some(index) = index {
-                    Arc::make_mut(entries).remove(index);
-                }
-                Self::Bool(index.is_some())
+                Self::Bool(entries.write(|entries| {
+                    let index = entries
+                        .iter()
+                        .position(|(stored, _)| stored.map_key_eq(key));
+                    index.map(|index| entries.remove(index)).is_some()
+                }))
             }
             "clear" => {
-                Arc::make_mut(entries).clear();
+                entries.write(|entries| entries.clear());
                 Self::Null
             }
             _ => return None,
         })
     }
 
-    /// Preserve shared value identity when a COW mutation replaces its storage.
+    /// Repoint aliases of the expression `old` at `new`. Containers are updated
+    /// in place; returns whether `self` itself must be replaced.
     pub(crate) fn replace_reference(
         &mut self,
         old: &Self,
         new: &Self,
-        updates: &mut ReferenceUpdates<'_>,
+        updates: &mut ReferenceUpdates,
     ) -> bool {
-        let same = self.same_reference(old);
-        if same {
+        if self.same_reference(old) {
             *self = new.clone();
             return true;
         }
-        if updates.excludes(self) {
-            return false;
-        }
-        if let Self::Abstract(_, inner) = self {
-            crate::cooperative::checkpoint();
-            let mut value = (**inner).clone();
-            if value.replace_reference(old, new, updates) {
-                *inner = Arc::new(value);
-                return true;
-            }
-            return false;
-        }
-        if let Self::Function(function) = self {
-            for (i, binding) in function.captures.values().enumerate() {
-                scan_checkpoint(i);
-                updates.replace_binding(binding, old, new);
-            }
-            return false;
-        }
-        let key = match self {
-            Self::Object(value) => (0, Arc::as_ptr(value) as usize),
-            Self::Array(value) => (1, Arc::as_ptr(value) as usize),
-            Self::Enum(_, _, value) => (2, Arc::as_ptr(value) as usize),
-            Self::Map(value) => (3, Arc::as_ptr(value) as usize),
-            _ => return false,
-        };
-        crate::cooperative::checkpoint();
-        if let Some((_, value, changed)) = updates.values.get(&key) {
-            if *changed {
-                *self = value.clone();
-            }
-            return *changed;
-        }
-        // Retain the original allocation so its address cannot be reused while
-        // the memo is shared across bindings. Parents retain their aliases too.
-        let original = self.clone();
-        let changed = match self {
-            Self::Object(fields) => {
-                let changes: Vec<_> = fields
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, (key, value))| {
-                        scan_checkpoint(i);
-                        let mut value = value.clone();
-                        value
-                            .replace_reference(old, new, updates)
-                            .then(|| (key.clone(), value))
-                    })
-                    .collect();
-                let changed = !changes.is_empty();
-                if changed {
-                    Arc::make_mut(fields).extend(changes);
+        match self {
+            Self::Abstract(_, inner) => {
+                let mut value = (**inner).clone();
+                if value.replace_reference(old, new, updates) {
+                    *inner = Arc::new(value);
+                    return true;
                 }
-                changed
+                false
             }
-            Self::Array(values) | Self::Enum(_, _, values) => {
-                let changes: Vec<_> = values
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, value)| {
-                        scan_checkpoint(i);
-                        let mut value = value.clone();
-                        value
-                            .replace_reference(old, new, updates)
-                            .then_some((i, value))
-                    })
-                    .collect();
-                let changed = !changes.is_empty();
-                for (i, value) in changes {
-                    Arc::make_mut(values)[i] = value;
-                }
-                changed
-            }
-            Self::Map(entries) => {
-                let mut replacement = entries.as_ref().clone();
-                let mut changed = false;
-                for (i, (key, value)) in replacement.iter_mut().enumerate() {
+            Self::Function(function) => {
+                for (i, binding) in function.captures.values().enumerate() {
                     scan_checkpoint(i);
-                    changed |= key.replace_reference(old, new, updates);
+                    updates.replace_binding(binding, old, new);
+                }
+                false
+            }
+            Self::Enum(_, _, values) => {
+                let mut changed = false;
+                let mut replacement = values.as_ref().clone();
+                for (i, value) in replacement.iter_mut().enumerate() {
+                    scan_checkpoint(i);
                     changed |= value.replace_reference(old, new, updates);
                 }
                 if changed {
-                    *entries = Arc::new(replacement);
+                    *values = Arc::new(replacement);
                 }
                 changed
             }
+            Self::Object(fields) => {
+                if updates.visited.insert(fields.address()) {
+                    updates.retained.push(Self::Object(fields.clone()));
+                    let changes: Vec<_> = fields
+                        .read()
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, (key, value))| {
+                            scan_checkpoint(i);
+                            let mut value = value.clone();
+                            value
+                                .replace_reference(old, new, updates)
+                                .then(|| (key.clone(), value))
+                        })
+                        .collect();
+                    if !changes.is_empty() {
+                        fields.write(|fields| fields.extend(changes));
+                    }
+                }
+                false
+            }
+            Self::Array(values) => {
+                if updates.visited.insert(values.address()) {
+                    updates.retained.push(Self::Array(values.clone()));
+                    let changes: Vec<_> = values
+                        .read()
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, value)| {
+                            scan_checkpoint(i);
+                            let mut value = value.clone();
+                            value
+                                .replace_reference(old, new, updates)
+                                .then_some((i, value))
+                        })
+                        .collect();
+                    if !changes.is_empty() {
+                        values.write(|values| {
+                            for (i, value) in changes {
+                                values[i] = value;
+                            }
+                        });
+                    }
+                }
+                false
+            }
+            Self::Map(entries) => {
+                if updates.visited.insert(entries.address()) {
+                    updates.retained.push(Self::Map(entries.clone()));
+                    let mut replacement = entries.read().as_ref().clone();
+                    let mut changed = false;
+                    for (i, (key, value)) in replacement.iter_mut().enumerate() {
+                        scan_checkpoint(i);
+                        changed |= key.replace_reference(old, new, updates);
+                        changed |= value.replace_reference(old, new, updates);
+                    }
+                    if changed {
+                        entries.set(replacement);
+                    }
+                }
+                false
+            }
             _ => false,
-        };
-        updates
-            .values
-            .insert(key, (original, self.clone(), changed));
-        changed
+        }
     }
 
-    /// Mutate the fields presented by objects and reified expressions.
+    /// Write a field of an object, in place, or of a reified expression, which
+    /// yields a new expression the caller propagates.
     pub(crate) fn set_field(&mut self, field: &str, value: Self) -> bool {
         match self {
             Self::Object(fields) => {
-                Arc::make_mut(fields).insert(field.to_owned(), value);
+                fields.write(|fields| fields.insert(field.to_owned(), value));
                 true
             }
             Self::Expr(expression) => match (field, value) {
@@ -653,7 +609,7 @@ impl MacroValue {
             MacroValue::Int(i) => *i != 0,
             MacroValue::Float(f) => *f != 0.0,
             MacroValue::String(s) => !s.is_empty(),
-            MacroValue::Array(a) => !a.is_empty(),
+            MacroValue::Array(a) => !a.read().is_empty(),
             MacroValue::Map(_) => true,
             MacroValue::Object(_) => true,
             MacroValue::Enum(_, _, _) => true,
@@ -732,36 +688,20 @@ impl MacroValue {
         }
     }
 
-    /// Try to get as an array reference
-    pub fn as_array(&self) -> Option<&Vec<MacroValue>> {
+    /// The array's contents at this moment.
+    pub fn as_array(&self) -> Option<Arc<Vec<MacroValue>>> {
         match self {
             MacroValue::Abstract(_, inner) => inner.as_array(),
-            MacroValue::Array(a) => Some(a),
+            MacroValue::Array(a) => Some(a.read()),
             _ => None,
         }
     }
 
-    /// Try to get as a mutable array reference (COW via Arc::make_mut)
-    pub fn as_array_mut(&mut self) -> Option<&mut Vec<MacroValue>> {
-        match self {
-            MacroValue::Array(a) => Some(Arc::make_mut(a)),
-            _ => None,
-        }
-    }
-
-    /// Try to get as an object reference
-    pub fn as_object(&self) -> Option<&BTreeMap<String, MacroValue>> {
+    /// The object's fields at this moment.
+    pub fn as_object(&self) -> Option<Arc<ObjectFields>> {
         match self {
             MacroValue::Abstract(_, inner) => inner.as_object(),
-            MacroValue::Object(o) => Some(o),
-            _ => None,
-        }
-    }
-
-    /// Try to get as a mutable object reference (COW via Arc::make_mut)
-    pub fn as_object_mut(&mut self) -> Option<&mut BTreeMap<String, MacroValue>> {
-        match self {
-            MacroValue::Object(o) => Some(Arc::make_mut(o)),
+            MacroValue::Object(o) => Some(o.read()),
             _ => None,
         }
     }
@@ -790,11 +730,13 @@ impl MacroValue {
             }
             MacroValue::String(s) => s.to_string(),
             MacroValue::Array(items) => {
-                let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
+                let parts: Vec<String> =
+                    items.read().iter().map(|v| v.to_display_string()).collect();
                 format!("[{}]", parts.join(","))
             }
             MacroValue::Map(entries) => {
                 let parts: Vec<_> = entries
+                    .read()
                     .iter()
                     .map(|(key, value)| {
                         format!(
@@ -806,15 +748,26 @@ impl MacroValue {
                     .collect();
                 format!("[{}]", parts.join(", "))
             }
+            MacroValue::Object(fields) if matches!(fields.read().get("__type__"), Some(MacroValue::String(t)) if &**t == "Date") => {
+                super::interpreter::host_std::date_string(
+                    fields
+                        .read()
+                        .get("__time__")
+                        .and_then(MacroValue::as_float)
+                        .unwrap_or(0.0),
+                )
+            }
             // A caught compiler error prints as its message, as haxe.macro.Error does.
-            MacroValue::Object(fields) if matches!(fields.get("__type__"), Some(MacroValue::String(t)) if &**t == "haxe.macro.Error") => {
+            MacroValue::Object(fields) if matches!(fields.read().get("__type__"), Some(MacroValue::String(t)) if &**t == "haxe.macro.Error") => {
                 fields
+                    .read()
                     .get("message")
                     .map(|m| m.to_display_string())
                     .unwrap_or_default()
             }
             MacroValue::Object(fields) => {
                 let parts: Vec<String> = fields
+                    .read()
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
                     .collect();
@@ -878,123 +831,12 @@ impl PartialEq for MacroValue {
             (MacroValue::Int(a), MacroValue::Float(b)) => (*a as f64) == *b,
             (MacroValue::Float(a), MacroValue::Int(b)) => *a == (*b as f64),
             (MacroValue::Array(a), MacroValue::Array(b)) => a == b,
+            (MacroValue::Map(a), MacroValue::Map(b)) => a == b,
+            (MacroValue::Object(a), MacroValue::Object(b)) => a == b,
             (MacroValue::Enum(n1, v1, a1), MacroValue::Enum(n2, v2, a2)) => {
                 n1 == n2 && v1 == v2 && a1 == a2
             }
             _ => false,
         }
-    }
-}
-
-#[cfg(test)]
-mod reference_index_tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    fn object(value: i64) -> MacroValue {
-        MacroValue::Object(Arc::new(BTreeMap::from([(
-            "value".into(),
-            MacroValue::Int(value),
-        )])))
-    }
-
-    #[test]
-    fn unrelated_catalogue_is_not_walked_again_for_local_mutations() {
-        let mut catalogue = MacroValue::Array(Arc::new((0..1000).map(object).collect()));
-        let mut index = ReferenceIndex::default();
-        index.summarize(&catalogue);
-        let initial = index.summarized;
-        for value in 0..40 {
-            let old = object(value);
-            let new = object(value + 1);
-            let mut updates = ReferenceUpdates::indexed(&old, &mut index);
-            assert!(!catalogue.replace_reference(&old, &new, &mut updates));
-            assert!(updates.values.is_empty());
-        }
-        assert_eq!(index.summarized, initial + 40);
-    }
-
-    #[test]
-    fn captured_cells_can_acquire_references_after_a_summary() {
-        let binding = Arc::new(Mutex::new(MacroValue::Null));
-        let function = MacroFunction {
-            name: "capture".into(),
-            params: Vec::new(),
-            body: Arc::new(Expr {
-                kind: parser::ExprKind::Null,
-                span: parser::Span::new(0, 0),
-            }),
-            captures: BTreeMap::from([("cell".into(), binding.clone())]),
-            context: None,
-            return_type: None,
-            static_target: None,
-        };
-        let mut parent =
-            MacroValue::Array(Arc::new(vec![MacroValue::Function(Arc::new(function))]));
-        let mut index = ReferenceIndex::default();
-        index.summarize(&parent);
-        let old = object(1);
-        let new = object(2);
-        *binding.lock().unwrap() = old.clone();
-        parent.replace_reference(&old, &new, &mut ReferenceUpdates::indexed(&old, &mut index));
-        assert!(binding.lock().unwrap().same_reference(&new));
-    }
-
-    #[test]
-    fn a_cow_write_invalidates_a_cached_closed_store() {
-        let mut parent = MacroValue::Array(Arc::new(vec![MacroValue::Int(0)]));
-        let mut index = ReferenceIndex::default();
-        index.summarize(&parent);
-        let old = object(1);
-        let new = object(2);
-        let MacroValue::Array(values) = &mut parent else {
-            unreachable!()
-        };
-        Arc::make_mut(values).push(old.clone());
-        assert!(parent.replace_reference(
-            &old,
-            &new,
-            &mut ReferenceUpdates::indexed(&old, &mut index)
-        ));
-        let MacroValue::Array(values) = parent else {
-            unreachable!()
-        };
-        assert!(values[1].same_reference(&new));
-    }
-
-    #[test]
-    fn dead_stores_do_not_accumulate_in_the_index() {
-        let mut index = ReferenceIndex::default();
-        for value in 0..10_000 {
-            let target = object(value);
-            index.target(&target);
-        }
-        assert!(index.values.len() < 4096 + 128);
-    }
-
-    #[test]
-    fn large_reference_scans_yield_without_changing_aliases() {
-        use std::cell::Cell;
-        use std::rc::Rc;
-        let old = object(1);
-        let new = object(2);
-        let mut values: Vec<_> = (0..4096).map(MacroValue::Int).collect();
-        values.push(old.clone());
-        let mut parent = MacroValue::Array(Arc::new(values));
-        let polls = Rc::new(Cell::new(0));
-        let observed = polls.clone();
-        let _hook = crate::cooperative::install(Rc::new(move || {
-            observed.set(observed.get() + 1);
-        }));
-        let mut index = ReferenceIndex::default();
-        index.summarize(&parent);
-        assert!(polls.replace(0) > 0, "summarizing a large store must yield");
-        assert!(parent.replace_reference(&old, &new, &mut ReferenceUpdates::new()));
-        assert!(polls.get() > 0, "updating a large store must yield");
-        let MacroValue::Array(values) = parent else {
-            unreachable!()
-        };
-        assert!(values.last().unwrap().same_reference(&new));
-        assert_eq!(values[2048], MacroValue::Int(2048));
     }
 }

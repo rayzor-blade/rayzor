@@ -21,7 +21,7 @@ impl MacroInterpreter {
         let mut process = match args.get(1) {
             Some(MacroValue::Array(arguments)) => {
                 let mut process = std::process::Command::new(command);
-                for argument in arguments.iter() {
+                for argument in arguments.read().iter() {
                     process.arg(
                         argument
                             .as_string()
@@ -48,6 +48,7 @@ impl MacroInterpreter {
             }
             _ => return Err(error("expected an optional array of arguments")),
         };
+        super::host_std::apply_environment(&mut process);
         process.output().map_err(|error| MacroError::RuntimeError {
             message: format!("{operation}('{command}') failed: {error}"),
             location,
@@ -76,18 +77,6 @@ impl MacroInterpreter {
                         .unwrap_or_else(|| "null".into()),
                 );
                 MacroValue::Null
-            }
-            "getEnv" => {
-                let name = args
-                    .first()
-                    .and_then(MacroValue::as_string)
-                    .ok_or_else(|| MacroError::TypeError {
-                        message: "Sys.getEnv expects a string".into(),
-                        location,
-                    })?;
-                std::env::var_os(name)
-                    .map(|value| MacroValue::from_str(&value.to_string_lossy()))
-                    .unwrap_or(MacroValue::Null)
             }
             "getCwd" => MacroValue::from_string(
                 std::env::current_dir()

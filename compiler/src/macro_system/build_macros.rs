@@ -405,9 +405,10 @@ fn matching_shell(
             true
         }
         (MacroValue::Array(a), MacroValue::Array(b)) => {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b.iter())
+            a.read().len() == b.read().len()
+                && a.read()
+                    .iter()
+                    .zip(b.read().iter())
                     .all(|(a, b)| matching_shell(a, b, children))
         }
         (MacroValue::Enum(a, av, aa), MacroValue::Enum(b, bv, ba)) => {
@@ -420,9 +421,12 @@ fn matching_shell(
                     .all(|(a, b)| matching_shell(a, b, children))
         }
         (MacroValue::Object(a), MacroValue::Object(b)) => {
-            a.len() == b.len()
-                && a.iter()
-                    .all(|(k, a)| b.get(k).is_some_and(|b| matching_shell(a, b, children)))
+            a.read().len() == b.read().len()
+                && a.read().iter().all(|(k, a)| {
+                    b.read()
+                        .get(k)
+                        .is_some_and(|b| matching_shell(a, b, children))
+                })
         }
         (MacroValue::Position(_), MacroValue::Position(_)) => true,
         _ => before == after,
@@ -609,7 +613,7 @@ pub(crate) fn apply_build_macro(
     // Step 5: Apply returned fields
     // The macro should return an Array of Field objects
     if let MacroValue::Array(field_values) = result {
-        let new_fields = values_to_class_fields(&field_values, class);
+        let new_fields = values_to_class_fields(&field_values.read(), class);
         class.fields = new_fields;
     }
     // If the macro returns null or non-array, fields remain unchanged
@@ -933,7 +937,8 @@ pub(crate) fn is_macro_field_value(value: &MacroValue) -> bool {
     let MacroValue::Object(obj) = value else {
         return false;
     };
-    obj.get("access")
+    obj.read()
+        .get("access")
         .and_then(|v| v.as_array())
         .is_some_and(|access| {
             access
@@ -945,7 +950,7 @@ pub(crate) fn is_macro_field_value(value: &MacroValue) -> bool {
 /// Convert a single MacroValue (Object) back to a ClassField
 pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
     let obj = match value {
-        MacroValue::Object(o) => o,
+        MacroValue::Object(o) => o.read(),
         _ => return None,
     };
 
@@ -956,7 +961,10 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
     let kind_str = kind_obj
         .and_then(|k| {
             if let MacroValue::Object(ko) = k {
-                ko.get("kind").and_then(|v| v.as_string()).map(String::from)
+                ko.read()
+                    .get("kind")
+                    .and_then(|v| v.as_string())
+                    .map(String::from)
             } else {
                 k.as_string().map(String::from)
             }
@@ -968,12 +976,13 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
             // `{args, ret}` of the FFun payload, as `macro class` and
             // hand-built fields carry them.
             let kind_field = |name: &str| match kind_obj {
-                Some(MacroValue::Object(ko)) => ko.get(name).cloned(),
+                Some(MacroValue::Object(ko)) => ko.read().get(name).cloned(),
                 _ => None,
             };
             let span = parser::Span::new(0, 0);
             let params: Vec<parser::FunctionParam> = match kind_field("args") {
                 Some(MacroValue::Array(args)) => args
+                    .read()
                     .iter()
                     .filter_map(|a| {
                         let MacroValue::Object(a) = a else {
@@ -981,13 +990,15 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
                         };
                         Some(parser::FunctionParam {
                             meta: Vec::new(),
-                            name: a.get("name")?.as_string()?.to_string(),
+                            name: a.read().get("name")?.as_string()?.to_string(),
                             type_hint: a
+                                .read()
                                 .get("type")
                                 .and_then(|t| super::expr_adt::type_of_value(t, span)),
-                            optional: matches!(a.get("opt"), Some(MacroValue::Bool(true))),
+                            optional: matches!(a.read().get("opt"), Some(MacroValue::Bool(true))),
                             rest: false,
                             default_value: a
+                                .read()
                                 .get("value")
                                 .and_then(|v| super::expr_adt::try_expr_of(v, span))
                                 .map(Box::new),
@@ -999,41 +1010,33 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
             };
             let declared_ret =
                 kind_field("ret").and_then(|t| super::expr_adt::type_of_value(&t, span));
-            let body = kind_obj
-                .and_then(|k| {
-                    if let MacroValue::Object(ko) = k {
-                        ko.get("expr")
-                    } else {
-                        None
-                    }
-                })
-                .and_then(|v| {
-                    // A body is opaque syntax, or an `{expr, pos}` object when
-                    // its fields carry source positions.
-                    let raw = match v {
-                        MacroValue::Expr(e) => (**e).clone(),
-                        MacroValue::Object(_) => super::expr_adt::try_expr_of(v, span)?,
-                        _ => return None,
-                    };
-                    // Function bodies in Haxe AST are conventionally
-                    // `Block`s. A reified single-expression body like
-                    // `macro return $v{n}` lands here as a bare
-                    // `Return(...)`, and the downstream HIR/MIR pipeline
-                    // needs the surrounding Block to allocate a function
-                    // scope and emit a proper terminator. Without the
-                    // wrap, the generated method's MIR ends up as
-                    // `unreachable`, which then SIGILLs at runtime.
-                    let wrapped = match &raw.kind {
-                        parser::ExprKind::Block(_) => raw,
-                        _ => parser::Expr {
-                            kind: parser::ExprKind::Block(vec![parser::BlockElement::Expr(
-                                raw.clone(),
-                            )]),
-                            span: raw.span,
-                        },
-                    };
-                    Some(Box::new(wrapped))
-                });
+            let body = kind_field("expr").and_then(|v| {
+                // A body is opaque syntax, or an `{expr, pos}` object when
+                // its fields carry source positions.
+                let raw = match &v {
+                    MacroValue::Expr(e) => (**e).clone(),
+                    MacroValue::Object(_) => super::expr_adt::try_expr_of(&v, span)?,
+                    _ => return None,
+                };
+                // Function bodies in Haxe AST are conventionally
+                // `Block`s. A reified single-expression body like
+                // `macro return $v{n}` lands here as a bare
+                // `Return(...)`, and the downstream HIR/MIR pipeline
+                // needs the surrounding Block to allocate a function
+                // scope and emit a proper terminator. Without the
+                // wrap, the generated method's MIR ends up as
+                // `unreachable`, which then SIGILLs at runtime.
+                let wrapped = match &raw.kind {
+                    parser::ExprKind::Block(_) => raw,
+                    _ => parser::Expr {
+                        kind: parser::ExprKind::Block(vec![parser::BlockElement::Expr(
+                            raw.clone(),
+                        )]),
+                        span: raw.span,
+                    },
+                };
+                Some(Box::new(wrapped))
+            });
 
             // Best-effort return-type inference. The macro source declares
             // the return type via `ret: macro :Int`, but reification turns
@@ -1096,6 +1099,7 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
                 return None;
             };
             let access = |key| match fields
+                .read()
                 .get(key)
                 .and_then(MacroValue::as_string)
                 .unwrap_or("default")
@@ -1109,11 +1113,13 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
             ClassFieldKind::Property {
                 name: name.clone(),
                 type_hint: fields
+                    .read()
                     .get("type")
                     .and_then(|t| super::expr_adt::type_of_value(t, parser::Span::default())),
                 getter: access("get"),
                 setter: access("set"),
                 expr: fields
+                    .read()
                     .get("expr")
                     .filter(|expr| !matches!(expr, MacroValue::Null))
                     .and_then(|e| super::expr_adt::try_expr_of(e, parser::Span::default())),
@@ -1122,21 +1128,19 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
         _ => {
             // Default to Var
             let expr = kind_obj
-                .and_then(|k| {
-                    if let MacroValue::Object(ko) = k {
-                        ko.get("expr")
-                    } else {
-                        None
-                    }
+                .and_then(|k| match k {
+                    MacroValue::Object(ko) => ko.read().get("expr").cloned(),
+                    _ => None,
                 })
                 .filter(|expr| !matches!(expr, MacroValue::Null))
-                .and_then(|e| super::expr_adt::try_expr_of(e, parser::Span::default()))
+                .and_then(|e| super::expr_adt::try_expr_of(&e, parser::Span::default()))
                 .map(Box::new);
 
             ClassFieldKind::Var {
                 name: name.clone(),
                 type_hint: kind_obj.and_then(|kind| match kind {
                     MacroValue::Object(fields) => fields
+                        .read()
                         .get("type")
                         .and_then(|ty| super::expr_adt::type_of_value(ty, parser::Span::default())),
                     _ => None,
@@ -1152,7 +1156,7 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
     let mut access_val = None;
 
     if let Some(arr) = access_arr {
-        for a in arr {
+        for a in arr.iter() {
             let name = match a {
                 MacroValue::String(name) => Some(name.as_ref()),
                 MacroValue::Enum(_, name, args) if args.is_empty() => {
@@ -1586,7 +1590,7 @@ class Builder {
     fn test_value_to_class_field_simple() {
         let mut obj = std::collections::BTreeMap::new();
         obj.insert("name".to_string(), MacroValue::from_str("myVar"));
-        let field = value_to_class_field(&MacroValue::Object(Arc::new(obj)));
+        let field = value_to_class_field(&MacroValue::object(obj));
         assert!(field.is_some());
         let field = field.unwrap();
         match &field.kind {
@@ -1617,7 +1621,7 @@ class Builder {
         else {
             panic!("expected build fields");
         };
-        let fields = values_to_class_fields(&values, class);
+        let fields = values_to_class_fields(&values.read(), class);
         let ClassFieldKind::Property { expr: absent, .. } = &fields[0].kind else {
             panic!("expected property");
         };
@@ -1637,12 +1641,12 @@ class Builder {
         obj.insert("name".to_string(), MacroValue::from_str("test"));
         obj.insert(
             "access".to_string(),
-            MacroValue::Array(Arc::new(vec![
+            MacroValue::array(vec![
                 MacroValue::from_str("Public"),
                 MacroValue::from_str("Static"),
-            ])),
+            ]),
         );
-        let field = value_to_class_field(&MacroValue::Object(Arc::new(obj)));
+        let field = value_to_class_field(&MacroValue::object(obj));
         assert!(field.is_some());
         let field = field.unwrap();
         assert_eq!(field.access, Some(parser::Access::Public));
@@ -1658,13 +1662,13 @@ class Builder {
                 Arc::new(Vec::new()),
             )
         };
-        let value = MacroValue::Object(Arc::new(std::collections::BTreeMap::from([
+        let value = MacroValue::object(std::collections::BTreeMap::from([
             ("name".into(), MacroValue::from_str("generated")),
             (
                 "access".into(),
-                MacroValue::Array(Arc::new(vec![access("APublic"), access("AStatic")])),
+                MacroValue::array(vec![access("APublic"), access("AStatic")]),
             ),
-        ])));
+        ]));
         let field = value_to_class_field(&value).unwrap();
         assert_eq!(field.access, Some(parser::Access::Public));
         assert!(field.modifiers.contains(&Modifier::Static));

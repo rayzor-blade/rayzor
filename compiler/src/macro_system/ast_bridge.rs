@@ -30,7 +30,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
             for elem in elements {
                 values.push(expr_to_value(elem)?);
             }
-            Ok(MacroValue::Array(Arc::new(values)))
+            Ok(MacroValue::array(values))
         }
 
         ExprKind::Object(fields) => {
@@ -39,7 +39,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
                 let value = expr_to_value(&field.expr)?;
                 map.insert(field.name.clone(), value);
             }
-            Ok(MacroValue::Object(Arc::new(map)))
+            Ok(MacroValue::object(map))
         }
 
         ExprKind::Map(entries) => {
@@ -47,7 +47,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
             for (key, value) in entries {
                 MacroValue::insert_map_entry(&mut map, expr_to_value(key)?, expr_to_value(value)?);
             }
-            Ok(MacroValue::Map(Arc::new(map)))
+            Ok(MacroValue::map(map))
         }
 
         // Unary negation of a literal
@@ -125,7 +125,7 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
             span,
         },
         MacroValue::Array(items) => {
-            let exprs: Vec<Expr> = items.iter().map(|v| value_to_expr(v)).collect();
+            let exprs: Vec<Expr> = items.read().iter().map(|v| value_to_expr(v)).collect();
             Expr {
                 kind: ExprKind::Array(exprs),
                 span,
@@ -134,6 +134,7 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
         MacroValue::Map(entries) => Expr {
             kind: ExprKind::Map(
                 entries
+                    .read()
                     .iter()
                     .map(|(key, value)| (value_to_expr(key), value_to_expr(value)))
                     .collect(),
@@ -145,8 +146,8 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
         // this it became an object LITERAL in the expansion, so the macro's
         // result was a struct rather than the expression it denotes.
         MacroValue::Object(fields)
-            if fields.len() <= 3
-                && matches!(fields.get("expr"), Some(MacroValue::Enum(e, _, _)) if &**e == "ExprDef") =>
+            if fields.read().len() <= 3
+                && matches!(fields.read().get("expr"), Some(MacroValue::Enum(e, _, _)) if &**e == "ExprDef") =>
         {
             match super::expr_adt::try_expr_of(value, span) {
                 Some(expr) => expr,
@@ -167,6 +168,7 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
         }
         MacroValue::Object(fields) => {
             let obj_fields: Vec<parser::ObjectField> = fields
+                .read()
                 .iter()
                 .map(|(name, value)| parser::ObjectField {
                     name: name.clone(),
@@ -286,7 +288,9 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
 pub fn unwrap_expr_value(val: &MacroValue) -> MacroValue {
     match val {
         MacroValue::Abstract(_, inner) => unwrap_expr_value(inner),
-        MacroValue::Object(object) if object.contains_key("expr") && object.contains_key("pos") => {
+        MacroValue::Object(object)
+            if object.read().contains_key("expr") && object.read().contains_key("pos") =>
+        {
             super::expr_adt::try_expr_of(val, Span::default())
                 .and_then(|expr| super::expr_adt::constant_of(&expr))
                 .unwrap_or_else(|| val.clone())
@@ -384,11 +388,11 @@ pub fn apply_binary_op(
                 message: "interval end must be Int".to_string(),
                 location,
             })?;
-            Ok(MacroValue::Object(Arc::new(BTreeMap::from([
+            Ok(MacroValue::object(BTreeMap::from([
                 ("__type__".into(), MacroValue::from_str("IntIterator")),
                 ("min".into(), MacroValue::Int(start)),
                 ("max".into(), MacroValue::Int(end)),
-            ]))))
+            ])))
         }
 
         // Arrow (for function types, not typically used in macro values)
@@ -436,9 +440,9 @@ fn apply_add(
         (MacroValue::Float(a), MacroValue::Int(b)) => Ok(MacroValue::Float(a + *b as f64)),
         // Array concatenation
         (MacroValue::Array(a), MacroValue::Array(b)) => {
-            let mut result = a.as_ref().clone();
-            result.extend(b.iter().cloned());
-            Ok(MacroValue::Array(Arc::new(result)))
+            let mut result = a.read().as_ref().clone();
+            result.extend(b.read().iter().cloned());
+            Ok(MacroValue::array(result))
         }
         _ => Err(MacroError::TypeError {
             message: format!("cannot add {} and {}", left.type_name(), right.type_name()),
@@ -495,7 +499,7 @@ fn apply_int_op(
 }
 
 fn values_equal(left: &MacroValue, right: &MacroValue) -> bool {
-    left == right
+    left.haxe_equals(right)
 }
 
 fn compare_values(
@@ -548,20 +552,21 @@ pub(crate) fn with_source_positions(value: &MacroValue, file: &str) -> MacroValu
             let Some(definition) = super::expr_adt::def_of(&expr.kind, expr.span) else {
                 return value.clone();
             };
-            MacroValue::Object(Arc::new(BTreeMap::from([
+            MacroValue::object(BTreeMap::from([
                 ("expr".into(), with_source_positions(&definition, file)),
                 (
                     "pos".into(),
                     MacroValue::Position(super::context_api::source_position(file, expr.span)),
                 ),
-            ])))
+            ]))
         }
-        MacroValue::Array(values) => MacroValue::Array(Arc::new(
+        MacroValue::Array(values) => MacroValue::array(
             values
+                .read()
                 .iter()
                 .map(|value| with_source_positions(value, file))
                 .collect(),
-        )),
+        ),
         MacroValue::Enum(owner, variant, args) => MacroValue::Enum(
             owner.clone(),
             variant.clone(),
@@ -571,12 +576,13 @@ pub(crate) fn with_source_positions(value: &MacroValue, file: &str) -> MacroValu
                     .collect(),
             ),
         ),
-        MacroValue::Object(fields) => MacroValue::Object(Arc::new(
+        MacroValue::Object(fields) => MacroValue::object(
             fields
+                .read()
                 .iter()
                 .map(|(key, value)| (key.clone(), with_source_positions(value, file)))
                 .collect(),
-        )),
+        ),
         MacroValue::Position(position) if position.file_id < super::errors::NAMED_FILE_ID => {
             MacroValue::Position(super::context_api::source_position(
                 file,
@@ -668,6 +674,7 @@ mod tests {
         let val = expr_to_value(&expr).unwrap();
         match &val {
             MacroValue::Array(items) => {
+                let items = items.read();
                 assert_eq!(items.len(), 3);
                 assert_eq!(items[0], MacroValue::Int(1));
                 assert_eq!(items[1], MacroValue::Int(2));

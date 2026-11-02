@@ -86,9 +86,9 @@ fn test_macro_value_type_names() {
     assert_eq!(MacroValue::Int(42).type_name(), "Int");
     assert_eq!(MacroValue::Float(1.23).type_name(), "Float");
     assert_eq!(MacroValue::from_str("hi").type_name(), "String");
-    assert_eq!(MacroValue::Array(Arc::new(vec![])).type_name(), "Array");
+    assert_eq!(MacroValue::array(vec![]).type_name(), "Array");
     assert_eq!(
-        MacroValue::Object(Arc::new(std::collections::BTreeMap::new())).type_name(),
+        MacroValue::object(std::collections::BTreeMap::new()).type_name(),
         "Object"
     );
 }
@@ -101,7 +101,7 @@ fn test_macro_value_truthiness() {
     assert!(!MacroValue::Int(0).is_truthy());
     assert!(!MacroValue::Float(0.0).is_truthy());
     assert!(!MacroValue::from_str("").is_truthy());
-    assert!(!MacroValue::Array(Arc::new(vec![])).is_truthy());
+    assert!(!MacroValue::array(vec![]).is_truthy());
 
     // Truthy values
     assert!(MacroValue::Bool(true).is_truthy());
@@ -109,8 +109,8 @@ fn test_macro_value_truthiness() {
     assert!(MacroValue::Int(-1).is_truthy());
     assert!(MacroValue::Float(0.1).is_truthy());
     assert!(MacroValue::from_str("x").is_truthy());
-    assert!(MacroValue::Array(Arc::new(vec![MacroValue::Null])).is_truthy());
-    assert!(MacroValue::Object(Arc::new(std::collections::BTreeMap::new())).is_truthy());
+    assert!(MacroValue::array(vec![MacroValue::Null]).is_truthy());
+    assert!(MacroValue::object(std::collections::BTreeMap::new()).is_truthy());
 }
 
 #[test]
@@ -144,7 +144,7 @@ fn test_macro_value_display_string() {
     assert_eq!(MacroValue::Int(42).to_display_string(), "42");
     assert_eq!(MacroValue::from_str("hi").to_display_string(), "hi");
 
-    let arr = MacroValue::Array(Arc::new(vec![MacroValue::Int(1), MacroValue::Int(2)]));
+    let arr = MacroValue::array(vec![MacroValue::Int(1), MacroValue::Int(2)]);
     assert_eq!(arr.to_display_string(), "[1,2]");
 
     // Std.string spells an enum value by its constructor alone.
@@ -175,12 +175,12 @@ fn test_macro_value_equality() {
 
     // Array equality
     assert_eq!(
-        MacroValue::Array(Arc::new(vec![MacroValue::Int(1)])),
-        MacroValue::Array(Arc::new(vec![MacroValue::Int(1)]))
+        MacroValue::array(vec![MacroValue::Int(1)]),
+        MacroValue::array(vec![MacroValue::Int(1)])
     );
     assert_ne!(
-        MacroValue::Array(Arc::new(vec![MacroValue::Int(1)])),
-        MacroValue::Array(Arc::new(vec![MacroValue::Int(2)]))
+        MacroValue::array(vec![MacroValue::Int(1)]),
+        MacroValue::array(vec![MacroValue::Int(2)])
     );
 }
 
@@ -400,7 +400,7 @@ fn test_ast_bridge_array_round_trip() {
         span: default_span(),
     };
     let val = expr_to_value(&arr).unwrap();
-    assert!(matches!(&val, MacroValue::Array(items) if items.len() == 3));
+    assert!(matches!(&val, MacroValue::Array(items) if items.read().len() == 3));
 
     let back = value_to_expr(&val);
     assert!(matches!(&back.kind, ExprKind::Array(items) if items.len() == 3));
@@ -813,11 +813,11 @@ fn test_interpreter_array_construction() {
     let result = interp.eval_expr(&expr).unwrap();
     assert_eq!(
         result,
-        MacroValue::Array(Arc::new(vec![
+        MacroValue::array(vec![
             MacroValue::Int(10),
             MacroValue::Int(20),
             MacroValue::Int(30)
-        ]))
+        ])
     );
 }
 
@@ -2092,6 +2092,163 @@ class Main {{ static function main() return Builder.make(); }}
             .and_then(|origin| origin.expanded_text.as_deref()),
         Some("true")
     );
+}
+
+#[test]
+fn macro_filesystem_places_files_atomically() {
+    let root = std::env::temp_dir().join(format!("rayzor-macro-place-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let dir = serde_json::to_string(root.to_str().unwrap()).unwrap();
+    let file = parse(&format!(
+        r#"
+class Builder {{ public static macro function make() {{
+    var dir = {dir};
+    var target = dir + "/out.css";
+    var tmp = target + "." + Std.random(1 << 30) + Std.int(Sys.time() * 1000) % 1000000 + ".tmp";
+    sys.io.File.saveContent(tmp, "abc");
+    sys.FileSystem.rename(tmp, target);
+    if (sys.FileSystem.exists(tmp) || sys.io.File.getContent(target) != "abc") throw "rename";
+    var stat = sys.FileSystem.stat(target);
+    if (stat.size != 3 || stat.mtime.getTime() <= 0) throw "stat";
+    if (haxe.crypto.Md5.make(sys.io.File.getBytes(target)).toHex() != "900150983cd24fb0d6963f7d28e17f72") throw "MD5";
+    sys.FileSystem.deleteFile(target);
+    if (sys.FileSystem.exists(target)) throw "deleteFile";
+    var failed = false;
+    try sys.FileSystem.deleteFile(target) catch (_:Dynamic) failed = true;
+    if (!failed) throw "missing file was deleted";
+    var r = Std.random(10);
+    if (r < 0 || r >= 10) throw "random";
+    return macro true;
+}} }}
+class Main {{ static function main() return Builder.make(); }}
+"#
+    ));
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result
+            .expansion_origins
+            .last()
+            .and_then(|origin| origin.expanded_text.as_deref()),
+        Some("true")
+    );
+}
+
+fn expand_checks(source: &str) {
+    let file = parse(source);
+    let mut classes = class_registry::ClassRegistry::new();
+    classes.register_file(&file);
+    let result = MacroExpander::with_class_registry(classes).expand_file(file);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result
+            .expansion_origins
+            .last()
+            .and_then(|origin| origin.expanded_text.as_deref()),
+        Some("true")
+    );
+}
+
+#[test]
+fn macro_host_supplies_dates_json_bytes_and_digests() {
+    expand_checks(
+        r#"
+class Builder { public static macro function make() {
+    var d = Date.fromString("2024-03-05 06:07:08");
+    if (d.getFullYear() != 2024 || d.getMonth() != 2 || d.getDate() != 5 || d.getDay() != 2) throw "date fields";
+    if (d.getHours() != 6 || d.getMinutes() != 7 || d.getSeconds() != 8) throw "time fields";
+    if (d.toString() != "2024-03-05 06:07:08" || Std.string(d) != d.toString()) throw "date string";
+    if (new Date(2024, 2, 5, 6, 7, 8).getTime() != d.getTime()) throw "new Date";
+    if (Date.fromTime(0).getUTCFullYear() != 1970 || Date.now().getTime() <= 0) throw "epoch";
+
+    if (haxe.Json.stringify({a: 1, b: [true, null, "x\n"], c: 1.5}) != '{"a":1,"b":[true,null,"x\\n"],"c":1.5}') throw "json";
+    if (haxe.Json.stringify({a: [1]}, null, "  ") != '{\n  "a": [\n    1\n  ]\n}') throw "pretty json";
+    if (haxe.Json.stringify({a: 1, b: 1}, function(k, v) return k == "a" ? 2 : v) != '{"a":2,"b":1}') throw "replacer";
+    if (haxe.Json.stringify({}) != "{}") throw "empty object json: " + haxe.Json.stringify({});
+    if (haxe.Json.stringify([]) != "[]") throw "empty array json: " + haxe.Json.stringify([]);
+
+    var b = haxe.io.Bytes.alloc(4);
+    b.set(1, 255);
+    b.setInt32(0, 0x01020304);
+    if (b.get(0) != 4 || b.getInt32(0) != 0x01020304 || b.toHex() != "04030201") throw "bytes ints";
+    var text = haxe.io.Bytes.ofString("hello world");
+    if (text.sub(6, 5).toString() != "world" || text.getString(0, 5) != "hello") throw "bytes sub";
+    b.blit(0, text, 0, 4);
+    b.fill(3, 1, 33);
+    if (b.toString() != "hel!") throw "blit/fill";
+    if (haxe.io.Bytes.ofHex("6869").toString() != "hi" || text.compare(haxe.io.Bytes.ofString("hello")) <= 0) throw "ofHex/compare";
+
+    if (haxe.crypto.Sha1.encode("abc") != "a9993e364706816aba3e25717850c26c9cd0d89d") throw "sha1";
+    if (haxe.crypto.Sha224.encode("abc") != "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7") throw "sha224";
+    if (haxe.crypto.Sha256.make(haxe.io.Bytes.ofString("abc")).toHex() != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") throw "sha256";
+    var hello = haxe.io.Bytes.ofString("hello");
+    if (haxe.crypto.Base64.encode(hello) != "aGVsbG8=" || haxe.crypto.Base64.encode(hello, false) != "aGVsbG8") throw "base64";
+    if (haxe.crypto.Base64.decode("aGVsbG8").toString() != "hello" || haxe.crypto.Base64.decode("aGVsbG8=").toString() != "hello") throw "base64 decode";
+    var abc = haxe.io.Bytes.ofString("abc");
+    if (haxe.crypto.Crc32.make(abc) != 891568578 || haxe.crypto.Adler32.make(abc) != 38600999) throw "checksums";
+    var r = Math.random();
+    if (r < 0 || r >= 1 || Std.random(1) != 0) throw "random";
+    return macro true;
+} }
+class Main { static function main() return Builder.make(); }
+"#,
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn macro_host_supplies_system_streams_and_reflection() {
+    let root = std::env::temp_dir().join(format!("rayzor-macro-streams-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let dir = serde_json::to_string(root.to_str().unwrap()).unwrap();
+    expand_checks(&format!(
+        r#"
+enum Color {{ Red; Green; Rgb(r:Int, g:Int, b:Int); }}
+class Point {{ public var x:Int; public function new(x:Int) this.x = x; public function norm() return x; }}
+class Builder {{ public static macro function make() {{
+    var path = {dir} + "/lines.txt";
+    var out = sys.io.File.write(path);
+    out.writeString("one\r\ntwo\n");
+    out.close();
+    var more = sys.io.File.append(path);
+    more.writeString("three");
+    more.close();
+    var input = sys.io.File.read(path);
+    var lines = [];
+    try while (true) lines.push(input.readLine()) catch (e:haxe.io.Eof) {{}}
+    input.close();
+    if (lines.join(",") != "one,two,three") throw "lines: " + lines.join(",");
+    sys.io.File.copy(path, path + ".copy");
+    sys.io.File.saveBytes(path + ".bin", haxe.io.Bytes.ofHex("0102"));
+    if (sys.io.File.getContent(path + ".copy") != "one\r\ntwo\nthree" || sys.io.File.getBytes(path + ".bin").length != 2) throw "copy/saveBytes";
+
+    Sys.putEnv("RAYZOR_MACRO_PROBE", "on");
+    if (Sys.getEnv("RAYZOR_MACRO_PROBE") != "on" || Sys.environment().get("RAYZOR_MACRO_PROBE") != "on") throw "putEnv";
+    if (Sys.command("test \"$RAYZOR_MACRO_PROBE\" = on") != 0) throw "child environment";
+    if (Sys.cpuTime() < 0 || Sys.cpuArch() == "" || Sys.args().length != 0) throw "sys facts";
+    Sys.stderr().writeString("");
+
+    if (Type.getEnumConstructs(Color).join(",") != "Red,Green,Rgb") throw "constructs";
+    if (Type.enumIndex(Type.createEnum(Color, "Rgb", [1, 2, 3])) != 2 || Type.allEnums(Color).length != 2) throw "enum reflection";
+    if (Type.enumIndex(Type.createEnumIndex(Color, 1)) != 1) throw "createEnumIndex";
+    var p = Type.createInstance(Point, [5]);
+    if (p.x != 5 || Type.getClassName(Type.getClass(p)) != "Point" || Type.resolveClass("Point") == null) throw "class reflection";
+    if (Type.getInstanceFields(Point).indexOf("norm") < 0) throw "fields: " + Type.getInstanceFields(Point);
+    if (Std.downcast(p, Point) != p) throw "downcast";
+    var same = [p];
+    if (p != p || same.indexOf(p) != 0 || [1] == [1] || {{}} == {{}}) throw "identity equality";
+    if (Std.string(Type.typeof(1)) != "TInt" || haxe.Json.stringify(Color.Green) != "1") throw "typeof/enum json";
+    return macro true;
+}} }}
+class Main {{ static function main() return Builder.make(); }}
+"#
+    ));
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

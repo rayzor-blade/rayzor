@@ -79,7 +79,7 @@ impl MacroInterpreter {
                                 || self
                                     .class_registry
                                     .as_ref()
-                                    .is_some_and(|registry| registry.is_subclass(owner, &name))
+                                    .is_some_and(|registry| registry.is_subclass(&owner, &name))
                             {
                                 return true;
                             }
@@ -89,13 +89,14 @@ impl MacroInterpreter {
                                 return true;
                             }
                         }
-                        if let Some(MacroValue::String(owner)) =
-                            value.as_object().and_then(|object| object.get("__type__"))
+                        if let Some(MacroValue::String(owner)) = value
+                            .as_object()
+                            .and_then(|object| object.get("__type__").cloned())
                         {
                             if self
                                 .class_registry
                                 .as_ref()
-                                .is_some_and(|registry| registry.is_subclass(owner, &name))
+                                .is_some_and(|registry| registry.is_subclass(&owner, &name))
                             {
                                 return true;
                             }
@@ -160,7 +161,7 @@ impl MacroInterpreter {
                 };
                 let mut updates = Vec::new();
                 for field in fields {
-                    if let Some(original) = original.get(&field.name) {
+                    if let Some(original) = original.read().get(&field.name) {
                         let converted = self.coerce_type(
                             original.clone(),
                             &field.type_hint,
@@ -175,11 +176,8 @@ impl MacroInterpreter {
                 if updates.is_empty() {
                     return Ok(value);
                 }
-                let mut fields = (**original).clone();
-                fields.extend(updates);
-                let converted = MacroValue::Object(Arc::new(fields));
-                self.replace_references(&value, &converted);
-                Ok(converted)
+                original.write(|fields| fields.extend(updates));
+                Ok(value)
             }
             Type::Path { path, params, .. } => {
                 let name = self.type_name_path(path);
@@ -552,9 +550,11 @@ impl MacroInterpreter {
             }
             let actual = match value {
                 MacroValue::Expr(expr) => ast_bridge::expr_kind_to_value(&expr.kind, expr.span),
-                MacroValue::Object(object) => {
-                    object.get("expr").cloned().unwrap_or(MacroValue::Null)
-                }
+                MacroValue::Object(object) => object
+                    .read()
+                    .get("expr")
+                    .cloned()
+                    .unwrap_or(MacroValue::Null),
                 _ => return Ok(false),
             };
             let pattern = ast_bridge::expr_kind_to_value(&expr.kind, expr.span);
@@ -572,9 +572,9 @@ impl MacroInterpreter {
                 Ok(true)
             }
             (MacroValue::Array(values), MacroValue::Array(patterns))
-                if values.len() == patterns.len() =>
+                if values.read().len() == patterns.read().len() =>
             {
-                for (value, pattern) in values.iter().zip(patterns.iter()) {
+                for (value, pattern) in values.read().iter().zip(patterns.read().iter()) {
                     if !self.match_quoted_value(value, pattern)? {
                         return Ok(false);
                     }
@@ -582,9 +582,13 @@ impl MacroInterpreter {
                 Ok(true)
             }
             (MacroValue::Object(values), MacroValue::Object(patterns)) => {
-                for (name, pattern) in patterns.iter().filter(|(name, _)| name.as_str() != "pos") {
+                for (name, pattern) in patterns
+                    .read()
+                    .iter()
+                    .filter(|(name, _)| name.as_str() != "pos")
+                {
                     if !self.match_quoted_value(
-                        values.get(name).unwrap_or(&MacroValue::Null),
+                        values.read().get(name).unwrap_or(&MacroValue::Null),
                         pattern,
                     )? {
                         return Ok(false);

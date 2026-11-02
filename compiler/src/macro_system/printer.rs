@@ -23,16 +23,16 @@ fn is_null(v: Option<&MacroValue>) -> bool {
     matches!(v, None | Some(MacroValue::Null))
 }
 
-fn field<'v>(v: &'v MacroValue, name: &str) -> Option<&'v MacroValue> {
+fn field(v: &MacroValue, name: &str) -> Option<MacroValue> {
     match v {
-        MacroValue::Object(m) => m.get(name),
+        MacroValue::Object(m) => m.read().get(name).cloned(),
         _ => None,
     }
 }
 
 fn list(v: Option<&MacroValue>) -> Vec<MacroValue> {
     match v {
-        Some(MacroValue::Array(a)) => a.as_ref().clone(),
+        Some(MacroValue::Array(a)) => a.read().as_ref().clone(),
         _ => Vec::new(),
     }
 }
@@ -48,7 +48,7 @@ fn variant(v: &MacroValue) -> Option<(&str, &[MacroValue])> {
 fn def_of(v: &MacroValue) -> Option<MacroValue> {
     match v {
         MacroValue::Expr(e) => Some(expr_kind_to_value(&e.kind, e.span)),
-        MacroValue::Object(m) => m.get("expr").cloned(),
+        MacroValue::Object(m) => m.read().get("expr").cloned(),
         MacroValue::Enum(e, _, _) if &**e == "ExprDef" => Some(v.clone()),
         _ => None,
     }
@@ -169,7 +169,7 @@ impl Printer {
     }
 
     fn print_type_path(&mut self, tp: &MacroValue) -> String {
-        let pack: Vec<String> = list(field(tp, "pack"))
+        let pack: Vec<String> = list(field(tp, "pack").as_ref())
             .iter()
             .map(|p| text(Some(p)))
             .collect();
@@ -178,12 +178,12 @@ impl Printer {
         } else {
             format!("{}.", pack.join("."))
         };
-        s.push_str(&text(field(tp, "name")));
-        if !is_null(field(tp, "sub")) {
+        s.push_str(&text(field(tp, "name").as_ref()));
+        if !is_null(field(tp, "sub").as_ref()) {
             s.push('.');
-            s.push_str(&text(field(tp, "sub")));
+            s.push_str(&text(field(tp, "sub").as_ref()));
         }
-        let params = list(field(tp, "params"));
+        let params = list(field(tp, "params").as_ref());
         if !params.is_empty() {
             let rendered: Vec<String> = params.iter().map(|p| self.print_type_param(p)).collect();
             s.push_str(&format!("<{}>", rendered.join(", ")));
@@ -237,18 +237,18 @@ impl Printer {
     }
 
     pub fn print_metadata(&mut self, meta: &MacroValue) -> String {
-        let params = list(field(meta, "params"));
+        let params = list(field(meta, "params").as_ref());
         let args = if params.is_empty() {
             String::new()
         } else {
             format!("({})", self.print_exprs(&params, ", "))
         };
-        format!("@{}{}", text(field(meta, "name")), args)
+        format!("@{}{}", text(field(meta, "name").as_ref()), args)
     }
 
     fn print_field(&mut self, f: &MacroValue) -> String {
-        let name = text(field(f, "name"));
-        match field(f, "kind").and_then(variant) {
+        let name = text(field(f, "name").as_ref());
+        match field(f, "kind").as_ref().and_then(variant) {
             Some(("FVar", args)) => format!(
                 "var {}{}{}",
                 name,
@@ -271,15 +271,15 @@ impl Printer {
     }
 
     fn print_type_param_decl(&mut self, tpd: &MacroValue) -> String {
-        let meta = list(field(tpd, "meta"));
+        let meta = list(field(tpd, "meta").as_ref());
         let mut s = if meta.is_empty() {
             String::new()
         } else {
             let m: Vec<String> = meta.iter().map(|m| self.print_metadata(m)).collect();
             format!("{} ", m.join(" "))
         };
-        s.push_str(&text(field(tpd, "name")));
-        let params = list(field(tpd, "params"));
+        s.push_str(&text(field(tpd, "name").as_ref()));
+        let params = list(field(tpd, "params").as_ref());
         if !params.is_empty() {
             let p: Vec<String> = params
                 .iter()
@@ -287,7 +287,7 @@ impl Printer {
                 .collect();
             s.push_str(&format!("<{}>", p.join(", ")));
         }
-        let constraints = list(field(tpd, "constraints"));
+        let constraints = list(field(tpd, "constraints").as_ref());
         if !constraints.is_empty() {
             let c: Vec<String> = constraints
                 .iter()
@@ -295,8 +295,8 @@ impl Printer {
                 .collect();
             s.push_str(&format!(":({})", c.join(", ")));
         }
-        if !is_null(field(tpd, "defaultType")) {
-            let d = self.print_complex_type(field(tpd, "defaultType").unwrap());
+        if !is_null(field(tpd, "defaultType").as_ref()) {
+            let d = self.print_complex_type(field(tpd, "defaultType").as_ref().unwrap());
             s.push_str(&format!("={d}"));
         }
         s
@@ -305,22 +305,22 @@ impl Printer {
     fn print_function_arg(&mut self, arg: &MacroValue) -> String {
         format!(
             "{}{}{}{}",
-            if matches!(field(arg, "opt"), Some(MacroValue::Bool(true))) {
+            if matches!(field(arg, "opt").as_ref(), Some(MacroValue::Bool(true))) {
                 "?"
             } else {
                 ""
             },
-            text(field(arg, "name")),
-            self.opt(field(arg, "type"), ":", Self::print_complex_type),
-            self.opt(field(arg, "value"), " = ", Self::print_expr)
+            text(field(arg, "name").as_ref()),
+            self.opt(field(arg, "type").as_ref(), ":", Self::print_complex_type),
+            self.opt(field(arg, "value").as_ref(), " = ", Self::print_expr)
         )
     }
 
     fn print_function(&mut self, func: &MacroValue, kind: Option<&MacroValue>) -> String {
         let arrow = matches!(kind.and_then(variant), Some(("FArrow", _)));
-        let args = list(field(func, "args"));
-        let skip_parens = arrow && args.len() == 1 && is_null(field(&args[0], "type"));
-        let params = list(field(func, "params"));
+        let args = list(field(func, "args").as_ref());
+        let skip_parens = arrow && args.len() == 1 && is_null(field(&args[0], "type").as_ref());
+        let params = list(field(func, "params").as_ref());
         let mut s = String::new();
         if !params.is_empty() {
             let p: Vec<String> = params
@@ -340,19 +340,19 @@ impl Printer {
         if arrow {
             s.push_str(" ->");
         }
-        s.push_str(&self.opt(field(func, "ret"), ":", Self::print_complex_type));
-        s.push_str(&self.opt(field(func, "expr"), " ", Self::print_expr));
+        s.push_str(&self.opt(field(func, "ret").as_ref(), ":", Self::print_complex_type));
+        s.push_str(&self.opt(field(func, "expr").as_ref(), " ", Self::print_expr));
         s
     }
 
     fn print_var(&mut self, v: &MacroValue) -> String {
         let s = format!(
             "{}{}{}",
-            text(field(v, "name")),
-            self.opt(field(v, "type"), ":", Self::print_complex_type),
-            self.opt(field(v, "expr"), " = ", Self::print_expr)
+            text(field(v, "name").as_ref()),
+            self.opt(field(v, "type").as_ref(), ":", Self::print_complex_type),
+            self.opt(field(v, "expr").as_ref(), " = ", Self::print_expr)
         );
-        let meta = list(field(v, "meta"));
+        let meta = list(field(v, "meta").as_ref());
         if meta.is_empty() {
             s
         } else {
@@ -402,14 +402,16 @@ impl Printer {
                 let fields: Vec<String> = list(args.first())
                     .iter()
                     .map(|f| {
-                        let quoted =
-                            matches!(field(f, "quotes").and_then(variant), Some(("Quoted", _)));
-                        let key = text(field(f, "field"));
+                        let quoted = matches!(
+                            field(f, "quotes").as_ref().and_then(variant),
+                            Some(("Quoted", _))
+                        );
+                        let key = text(field(f, "field").as_ref());
                         let key = if quoted { format!("\"{key}\"") } else { key };
                         format!(
                             "{} : {}",
                             key,
-                            self.print_expr(field(f, "expr").unwrap_or(&MacroValue::Null))
+                            self.print_expr(field(f, "expr").as_ref().unwrap_or(&MacroValue::Null))
                         )
                     })
                     .collect();
@@ -464,12 +466,18 @@ impl Printer {
                 let first = &vars[0];
                 let head = format!(
                     "{}{}",
-                    if matches!(field(first, "isStatic"), Some(MacroValue::Bool(true))) {
+                    if matches!(
+                        field(first, "isStatic").as_ref(),
+                        Some(MacroValue::Bool(true))
+                    ) {
                         "static "
                     } else {
                         ""
                     },
-                    if matches!(field(first, "isFinal"), Some(MacroValue::Bool(true))) {
+                    if matches!(
+                        field(first, "isFinal").as_ref(),
+                        Some(MacroValue::Bool(true))
+                    ) {
                         "final "
                     } else {
                         "var "
@@ -513,12 +521,12 @@ impl Printer {
                 let cases: Vec<String> = list(args.get(1))
                     .iter()
                     .map(|c| {
-                        let values = self.print_exprs(&list(field(c, "values")), ", ");
-                        let guard = match field(c, "guard") {
+                        let values = self.print_exprs(&list(field(c, "values").as_ref()), ", ");
+                        let guard = match field(c, "guard").as_ref() {
                             None | Some(MacroValue::Null) => ":".to_string(),
                             Some(g) => format!(" if ({}):", self.print_expr(g)),
                         };
-                        let body = match field(c, "expr") {
+                        let body = match field(c, "expr").as_ref() {
                             None | Some(MacroValue::Null) => String::new(),
                             Some(b) => format!("{};", self.print_expr(b)),
                         };
@@ -546,15 +554,15 @@ impl Printer {
             "ETry" => {
                 let mut s = format!("try {}", p(self, 0));
                 for c in list(args.get(1)) {
-                    let ty = match field(&c, "type") {
+                    let ty = match field(&c, "type").as_ref() {
                         None | Some(MacroValue::Null) => String::new(),
                         Some(t) => format!(":{}", self.print_complex_type(t)),
                     };
                     s.push_str(&format!(
                         " catch({}{}) {}",
-                        text(field(&c, "name")),
+                        text(field(&c, "name").as_ref()),
                         ty,
-                        self.print_expr(field(&c, "expr").unwrap_or(&MacroValue::Null))
+                        self.print_expr(field(&c, "expr").as_ref().unwrap_or(&MacroValue::Null))
                     ));
                 }
                 s
@@ -585,7 +593,7 @@ impl Printer {
             "EMeta" => {
                 let meta = args.first().unwrap_or(&MacroValue::Null);
                 let inner = args.get(1).unwrap_or(&MacroValue::Null);
-                if text(field(meta, "name")) == ":implicitReturn" {
+                if text(field(meta, "name").as_ref()) == ":implicitReturn" {
                     if let Some(("EReturn", [ret])) = def_of(inner).as_ref().and_then(variant) {
                         return self.print_expr(ret);
                     }

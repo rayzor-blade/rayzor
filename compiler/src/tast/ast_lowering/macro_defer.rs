@@ -1275,14 +1275,14 @@ impl DeferredMacroTyper<'_, '_> {
             let t = param.type_hint.as_ref().map_or(dynamic, |hint| {
                 self.lowering.lower_type(hint).unwrap_or(dynamic)
             });
-            args.push(V::Object(Arc::new(BTreeMap::from([
+            args.push(V::object(BTreeMap::from([
                 (
                     "name".to_string(),
                     V::String(Arc::from(param.name.as_str())),
                 ),
                 ("opt".to_string(), V::Bool(param.optional)),
                 ("t".to_string(), V::Type(t)),
-            ]))));
+            ])));
         }
         let ret = func.return_type.as_ref().map_or(void, |hint| {
             self.lowering.lower_type(hint).unwrap_or(dynamic)
@@ -1292,19 +1292,19 @@ impl DeferredMacroTyper<'_, '_> {
         let fun = V::Enum(
             Arc::from("Type"),
             Arc::from("TFun"),
-            Arc::new(vec![V::Array(Arc::new(args)), V::Type(ret)]),
+            Arc::new(vec![V::array(args), V::Type(ret)]),
         );
-        V::Object(Arc::new(BTreeMap::from([
+        V::object(BTreeMap::from([
             ("name".to_string(), V::String(Arc::from(name))),
             ("type".to_string(), fun),
             (
                 "meta".to_string(),
-                V::Object(Arc::new(BTreeMap::from([(
+                V::object(BTreeMap::from([(
                     "__meta__".to_string(),
-                    V::Array(Arc::new(Vec::new())),
-                )]))),
+                    V::array(Vec::new()),
+                )])),
             ),
-        ])))
+        ]))
     }
 
     fn definition_target(&self, symbol: crate::tast::SymbolId) -> Option<TypeId> {
@@ -1671,12 +1671,12 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         let name = self.lowering.context.string_interner.get(field.name)?;
         Some((
             enum_type,
-            V::Object(Arc::new(BTreeMap::from([
+            V::object(BTreeMap::from([
                 ("name".to_string(), V::String(Arc::from(name))),
                 ("index".to_string(), V::Int(index as i64)),
                 ("type".to_string(), V::Type(typed.expr_type)),
-                ("params".to_string(), V::Array(Arc::new(Vec::new()))),
-            ]))),
+                ("params".to_string(), V::array(Vec::new())),
+            ])),
         ))
     }
 
@@ -2048,11 +2048,8 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         // The def payload slot carries the type's OWN id as the handle; a
         // reconstruction reads its symbol back out. Primitives present as the
         // abstracts haxe models them as.
-        let args_of = |args: &[TypeId]| {
-            V::Array(std::sync::Arc::new(
-                args.iter().map(|&a| V::Type(a)).collect::<Vec<_>>(),
-            ))
-        };
+        let args_of =
+            |args: &[TypeId]| V::array(args.iter().map(|&a| V::Type(a)).collect::<Vec<_>>());
         Some(match kind {
             TypeKind::TypeAlias { type_args, .. } => {
                 ("TType".to_string(), vec![V::Type(id), args_of(&type_args)])
@@ -2110,7 +2107,7 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
             } => (
                 "TFun".to_string(),
                 vec![
-                    V::Array(Arc::new(
+                    V::array(
                         params
                             .iter()
                             .enumerate()
@@ -2122,14 +2119,14 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                                         self.lowering.context.string_interner.get(name)
                                     })
                                     .unwrap_or("");
-                                V::Object(Arc::new(std::collections::BTreeMap::from([
+                                V::object(std::collections::BTreeMap::from([
                                     ("name".to_string(), V::String(Arc::from(name))),
                                     ("opt".to_string(), V::Bool(label.optional)),
                                     ("t".to_string(), V::Type(ty)),
-                                ])))
+                                ]))
                             })
                             .collect(),
-                    )),
+                    ),
                     V::Type(return_type),
                 ],
             ),
@@ -2201,8 +2198,8 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
             _ => return None,
         };
         let string = |s: &str| V::String(Arc::from(s));
-        let array = |values: Vec<V>| V::Array(Arc::new(values));
-        let object = |fields: BTreeMap<String, V>| V::Object(Arc::new(fields));
+        let array = |values: Vec<V>| V::array(values);
+        let object = |fields: BTreeMap<String, V>| V::object(fields);
         let reference = |value: V| object(BTreeMap::from([("__ref__".to_string(), value)]));
         let qualified = symbol
             .and_then(|s| self.lowering.context.symbol_table.get_symbol(s))

@@ -487,44 +487,50 @@ impl MacroContext {
         if let Some(&bound) = self.mono_bindings.get(&id) {
             return Some(MacroValue::Type(bound));
         }
-        let mut view = self.typer.as_mut()?.get().type_ref_view(id)?;
+        // A copy: the typer's view of the type is left as it is.
+        let mut view = match self.typer.as_mut()?.get().type_ref_view(id)? {
+            MacroValue::Object(fields) => MacroValue::Object(fields.copy()),
+            view => view,
+        };
         if let (Some(extends), MacroValue::Object(fields)) = (self.anon_extends.get(&id), &mut view)
         {
             let types = extends.iter().map(|&t| MacroValue::Type(t)).collect();
-            let reference =
-                BTreeMap::from([("__ref__".to_string(), MacroValue::Array(Arc::new(types)))]);
-            Arc::make_mut(fields).insert(
-                "status".to_string(),
-                MacroValue::Enum(
-                    Arc::from("AnonStatus"),
-                    Arc::from("AExtend"),
-                    Arc::new(vec![MacroValue::Object(Arc::new(reference))]),
-                ),
-            );
+            let reference = BTreeMap::from([("__ref__".to_string(), MacroValue::array(types))]);
+            fields.write(|fields| {
+                fields.insert(
+                    "status".to_string(),
+                    MacroValue::Enum(
+                        Arc::from("AnonStatus"),
+                        Arc::from("AExtend"),
+                        Arc::new(vec![MacroValue::object(reference)]),
+                    ),
+                )
+            });
         }
         if self.local_type == Some(id)
             && let Some(class) = &self.build_class
-            && let MacroValue::Object(fields) = &mut view
+            && let MacroValue::Object(fields) = &view
         {
-            let fields = Arc::make_mut(fields);
-            fields.insert(
-                "pack".to_string(),
-                MacroValue::Array(Arc::new(
-                    class
-                        .pack
-                        .iter()
-                        .map(|p| MacroValue::String(Arc::from(p.as_str())))
-                        .collect(),
-                )),
-            );
-            fields.insert(
-                "module".to_string(),
-                self.current_module
-                    .as_deref()
-                    .map(|m| MacroValue::String(Arc::from(m)))
-                    .unwrap_or(MacroValue::Null),
-            );
-            fields.insert("pos".to_string(), MacroValue::Position(self.call_position));
+            let module = self
+                .current_module
+                .as_deref()
+                .map(|m| MacroValue::String(Arc::from(m)))
+                .unwrap_or(MacroValue::Null);
+            let position = MacroValue::Position(self.call_position);
+            fields.write(|fields| {
+                fields.insert(
+                    "pack".to_string(),
+                    MacroValue::array(
+                        class
+                            .pack
+                            .iter()
+                            .map(|p| MacroValue::String(Arc::from(p.as_str())))
+                            .collect(),
+                    ),
+                );
+                fields.insert("module".to_string(), module);
+                fields.insert("pos".to_string(), position);
+            });
         }
         Some(view)
     }
@@ -550,15 +556,17 @@ impl MacroContext {
                         return None;
                     };
                     let arguments = parameters
+                        .read()
                         .iter()
                         .map(|parameter| match parameter {
                             MacroValue::Object(fields) => Some((
                                 fields
+                                    .read()
                                     .get("name")
                                     .map(MacroValue::to_display_string)
                                     .unwrap_or_default(),
-                                matches!(fields.get("opt"), Some(MacroValue::Bool(true))),
-                                self.coerce_type_value(fields.get("t")?)?,
+                                matches!(fields.read().get("opt"), Some(MacroValue::Bool(true))),
+                                self.coerce_type_value(fields.read().get("t")?)?,
                             )),
                             value => Some((String::new(), false, self.coerce_type_value(value)?)),
                         })
@@ -577,6 +585,7 @@ impl MacroContext {
                 if &**variant == "TType" {
                     if let Some(MacroValue::Array(items)) = payload.get(1) {
                         let args: Option<Vec<TypeId>> = items
+                            .read()
                             .iter()
                             .map(|v| match v {
                                 MacroValue::Type(id) => Some(*id),
@@ -712,20 +721,20 @@ impl MacroContext {
                 if let Some(build) = &self.build_class {
                     obj.insert(
                         "pack".to_string(),
-                        MacroValue::Array(Arc::new(
+                        MacroValue::array(
                             build
                                 .pack
                                 .iter()
                                 .map(|p| MacroValue::String(Arc::from(p.as_str())))
                                 .collect(),
-                        )),
+                        ),
                     );
                     obj.insert(
                         "module".to_string(),
                         MacroValue::String(Arc::from(build.qualified_name.as_str())),
                     );
                 }
-                MacroValue::Object(Arc::new(obj))
+                MacroValue::object(obj)
             }
             None => MacroValue::Null,
         }
@@ -766,7 +775,7 @@ impl MacroContext {
         for (k, v) in &self.defines {
             obj.insert(k.clone(), MacroValue::String(Arc::from(v.as_str())));
         }
-        MacroValue::Object(Arc::new(obj))
+        MacroValue::object(obj)
     }
 
     /// `Context.getType(name)` — Resolve a type by its qualified name
@@ -868,7 +877,7 @@ impl MacroContext {
             None => self.typed_binop(expr, location).unwrap_or(source),
         };
         obj.insert("expr".to_string(), typed_def);
-        Ok(MacroValue::Object(Arc::new(obj)))
+        Ok(MacroValue::object(obj))
     }
 
     fn typed_literal(
@@ -948,7 +957,7 @@ impl MacroContext {
                 Arc::from("TEnumDecl"),
                 Arc::new(vec![reference.clone()]),
             );
-            let receiver = MacroValue::Object(Arc::new(BTreeMap::from([
+            let receiver = MacroValue::object(BTreeMap::from([
                 ("t".to_string(), reference.clone()),
                 (
                     "expr".to_string(),
@@ -958,7 +967,7 @@ impl MacroContext {
                         Arc::new(vec![module]),
                     ),
                 ),
-            ])));
+            ]));
             return Some(MacroValue::Enum(
                 Arc::from("TypedExprDef"),
                 Arc::from("TField"),
@@ -988,20 +997,16 @@ impl MacroContext {
             "name".to_string(),
             MacroValue::String(Arc::from(field.as_str())),
         );
-        let cf = MacroValue::Object(Arc::new(field_info));
+        let cf = MacroValue::object(field_info);
         let class_ref = MacroValue::Type(receiver_ty);
-        let no_params = MacroValue::Array(Arc::new(Vec::new()));
+        let no_params = MacroValue::array(Vec::new());
         let access = match (on_class, is_method) {
             (true, false) => enum_value("FieldAccess", "FInstance", vec![class_ref, no_params, cf]),
             (true, true) => {
                 let mut co = BTreeMap::new();
                 co.insert("c".to_string(), class_ref);
                 co.insert("params".to_string(), no_params);
-                enum_value(
-                    "FieldAccess",
-                    "FClosure",
-                    vec![MacroValue::Object(Arc::new(co)), cf],
-                )
+                enum_value("FieldAccess", "FClosure", vec![MacroValue::object(co), cf])
             }
             (false, true) => enum_value("FieldAccess", "FClosure", vec![MacroValue::Null, cf]),
             (false, false) => enum_value("FieldAccess", "FAnon", vec![cf]),
@@ -1015,7 +1020,7 @@ impl MacroContext {
         Some(enum_value(
             "TypedExprDef",
             "TField",
-            vec![MacroValue::Object(Arc::new(typed_receiver)), access],
+            vec![MacroValue::object(typed_receiver), access],
         ))
     }
 
@@ -1091,7 +1096,7 @@ impl MacroContext {
             })
             .collect();
 
-        Ok(MacroValue::Array(Arc::new(field_values)))
+        Ok(MacroValue::array(field_values))
     }
 
     /// `Context.defineType(typeDefinition)` — Define a new type at compile time
@@ -1155,15 +1160,18 @@ impl MacroContext {
         obj.insert("file".to_string(), file);
         obj.insert("min".to_string(), MacroValue::Int(min as i64));
         obj.insert("max".to_string(), MacroValue::Int(max as i64));
-        MacroValue::Object(Arc::new(obj))
+        MacroValue::object(obj)
     }
 
     /// `Context.makePosition(inf)` — Build a position from info object
     pub fn make_position(&self, info: &MacroValue) -> Result<MacroValue, MacroError> {
         if let MacroValue::Object(obj) = info {
-            let min = obj.get("min").and_then(|v| v.as_int()).unwrap_or(0) as u32;
-            let max = obj.get("max").and_then(|v| v.as_int()).unwrap_or(0) as u32;
-            let file = obj.get("file").map(super::ast_bridge::unwrap_expr_value);
+            let min = obj.read().get("min").and_then(|v| v.as_int()).unwrap_or(0) as u32;
+            let max = obj.read().get("max").and_then(|v| v.as_int()).unwrap_or(0) as u32;
+            let file = obj
+                .read()
+                .get("file")
+                .map(super::ast_bridge::unwrap_expr_value);
             if let Some(MacroValue::String(name)) = file {
                 let id = named_file_id(&name);
                 let text = named_file_source(id);
@@ -1178,7 +1186,7 @@ impl MacroContext {
                     offset(min),
                 )));
             }
-            let file_id = obj.get("file").and_then(|v| v.as_int()).unwrap_or(0) as u32;
+            let file_id = obj.read().get("file").and_then(|v| v.as_int()).unwrap_or(0) as u32;
 
             Ok(MacroValue::Position(SourceLocation::new(
                 file_id, 0, 0, min,
@@ -1226,7 +1234,7 @@ impl MacroContext {
                     .insert(name.to_owned(), bytes);
                 Ok(MacroValue::Null)
             }
-            "getResources" => Ok(MacroValue::Map(Arc::new(
+            "getResources" => Ok(MacroValue::map(
                 self.resources
                     .lock()
                     .unwrap()
@@ -1238,7 +1246,7 @@ impl MacroContext {
                         )
                     })
                     .collect(),
-            ))),
+            )),
             "error" => {
                 let msg = arg_as_string(args, 0, "error", location)?;
                 let pos = arg_as_position(args, 1).unwrap_or(location);
@@ -1289,12 +1297,12 @@ impl MacroContext {
                 .call_arguments
                 .as_ref()
                 .map(|args| {
-                    MacroValue::Array(Arc::new(
+                    MacroValue::array(
                         args.iter()
                             .cloned()
                             .map(|e| MacroValue::Expr(Arc::new(e)))
                             .collect(),
-                    ))
+                    )
                 })
                 .unwrap_or(MacroValue::Null)),
             "getLocalModule" => Ok(self.get_local_module()),
@@ -1308,7 +1316,7 @@ impl MacroContext {
                 Ok(self.defined_value(&key))
             }
             "getDefines" => Ok(self.get_defines()),
-            "getClassPath" => Ok(MacroValue::Array(Arc::new(
+            "getClassPath" => Ok(MacroValue::array(
                 self.class_paths
                     .iter()
                     .map(|path| {
@@ -1319,7 +1327,7 @@ impl MacroContext {
                         MacroValue::String(Arc::from(path))
                     })
                     .collect(),
-            ))),
+            )),
             "registerModuleDependency" => {
                 let module = arg_as_string(args, 0, method, location)?;
                 let file = arg_as_string(args, 1, method, location)?;
@@ -1413,17 +1421,21 @@ impl MacroContext {
                     });
                 };
                 let params: Option<Vec<TypeId>> = params
+                    .read()
                     .iter()
                     .map(|param| {
                         let value = match param {
-                            MacroValue::Object(fields) => fields.get("t")?,
-                            other => other,
+                            MacroValue::Object(fields) => fields.read().get("t")?.clone(),
+                            other => other.clone(),
                         };
-                        self.coerce_type_value(value)
+                        self.coerce_type_value(&value)
                     })
                     .collect();
-                let types: Option<Vec<TypeId>> =
-                    types.iter().map(|t| self.coerce_type_value(t)).collect();
+                let types: Option<Vec<TypeId>> = types
+                    .read()
+                    .iter()
+                    .map(|t| self.coerce_type_value(t))
+                    .collect();
                 let (Some(params), Some(types)) = (params, types) else {
                     return Err(MacroError::ContextError {
                         method: method.to_string(),
@@ -1488,7 +1500,7 @@ impl MacroContext {
             // re-expanding the source expression is the same thing to every
             // caller that does not inspect the result.
             "storeTypedExpr" | "getTypedExpr" => match args.first() {
-                Some(MacroValue::Object(fields)) => match fields.get("__source__") {
+                Some(MacroValue::Object(fields)) => match fields.read().get("__source__") {
                     Some(expr @ MacroValue::Expr(_)) => Ok(expr.clone()),
                     _ => Err(MacroError::ContextError {
                         method: "storeTypedExpr".to_string(),
@@ -1655,10 +1667,11 @@ impl MacroContext {
                 let path = arg_as_string(args, 0, "defineModule", location)?;
                 let mut pack: Vec<String> = path.split('.').map(str::to_string).collect();
                 let module = pack.pop().unwrap_or_default();
-                let types: &[MacroValue] = match args.get(1) {
-                    Some(MacroValue::Array(types)) => types.as_slice(),
-                    _ => &[],
+                let types = match args.get(1) {
+                    Some(MacroValue::Array(types)) => types.read(),
+                    _ => Default::default(),
                 };
+                let types = types.as_slice();
                 let mut statics = Vec::new();
                 let mut module_type = false;
                 for value in types {
@@ -1787,7 +1800,7 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
         .iter()
         .map(|a| MacroValue::String(Arc::from(format!("{:?}", a).as_str())))
         .collect();
-    obj.insert("access".to_string(), MacroValue::Array(Arc::new(access)));
+    obj.insert("access".to_string(), MacroValue::array(access));
 
     // Kind
     let kind_value = match &field.kind {
@@ -1810,9 +1823,9 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
             // `haxe.macro.Expr.FieldType.FVar(t:ComplexType, e:Expr)`.
             kind_obj.insert(
                 "__args__".to_string(),
-                MacroValue::Array(Arc::new(vec![type_val, expr_val])),
+                MacroValue::array(vec![type_val, expr_val]),
             );
-            MacroValue::Object(Arc::new(kind_obj))
+            MacroValue::object(kind_obj)
         }
         BuildFieldKind::Function {
             params,
@@ -1823,9 +1836,7 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
             kind_obj.insert("kind".to_string(), MacroValue::String(Arc::from("FFun")));
             kind_obj.insert(
                 "args".to_string(),
-                MacroValue::Array(Arc::new(
-                    params.iter().map(super::expr_adt::arg_value).collect(),
-                )),
+                MacroValue::array(params.iter().map(super::expr_adt::arg_value).collect()),
             );
             if let Some(rt) = return_type {
                 kind_obj.insert("ret".to_string(), super::expr_adt::complex_type_of(rt));
@@ -1836,7 +1847,7 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
                     MacroValue::Expr(Arc::from(b.as_ref().clone())),
                 );
             }
-            MacroValue::Object(Arc::new(kind_obj))
+            MacroValue::object(kind_obj)
         }
         BuildFieldKind::Property {
             get,
@@ -1864,7 +1875,7 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
             kind_obj.insert("expr".into(), expr.clone());
             kind_obj.insert(
                 "__args__".into(),
-                MacroValue::Array(Arc::new(vec![
+                MacroValue::array(vec![
                     MacroValue::from_string(get.clone()),
                     MacroValue::from_string(set.clone()),
                     type_hint
@@ -1872,9 +1883,9 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
                         .map(super::expr_adt::complex_type_of)
                         .unwrap_or(MacroValue::Null),
                     expr,
-                ])),
+                ]),
             );
-            MacroValue::Object(Arc::new(kind_obj))
+            MacroValue::object(kind_obj)
         }
     };
     obj.insert("kind".to_string(), kind_value);
@@ -1897,17 +1908,14 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
                 "name".to_string(),
                 MacroValue::String(Arc::from(m.name.as_str())),
             );
-            meta_obj.insert(
-                "params".to_string(),
-                MacroValue::Array(Arc::new(m.params.clone())),
-            );
+            meta_obj.insert("params".to_string(), MacroValue::array(m.params.clone()));
             meta_obj.insert("pos".to_string(), MacroValue::Position(m.pos));
-            MacroValue::Object(Arc::new(meta_obj))
+            MacroValue::object(meta_obj)
         })
         .collect();
-    obj.insert("meta".to_string(), MacroValue::Array(Arc::new(meta)));
+    obj.insert("meta".to_string(), MacroValue::array(meta));
 
-    MacroValue::Object(Arc::new(obj))
+    MacroValue::object(obj)
 }
 
 /// The types `StdTypes.hx` declares. Their module is not named after them.
@@ -2067,10 +2075,10 @@ fn contains_display_position(pos: &MacroValue) -> bool {
 /// `Compiler.getDisplayPos`: the display cursor's file and character offset.
 pub(crate) fn display_pos_value() -> MacroValue {
     match super::display::cursor() {
-        Some(cursor) => MacroValue::Object(Arc::new(BTreeMap::from([
+        Some(cursor) => MacroValue::object(BTreeMap::from([
             ("file".to_string(), MacroValue::from_str(&cursor.file)),
             ("pos".to_string(), MacroValue::Int(cursor.offset as i64)),
-        ]))),
+        ])),
         None => MacroValue::Null,
     }
 }
@@ -2146,7 +2154,7 @@ pub(crate) fn named_position_string(pos: &SourceLocation) -> Option<String> {
 /// Whether a type definition value is a module-level field (`TDField`).
 fn is_module_field(value: &MacroValue) -> bool {
     matches!(value, MacroValue::Object(obj)
-        if matches!(obj.get("kind"), Some(MacroValue::Enum(_, variant, _)) if &**variant == "TDField"))
+        if matches!(obj.read().get("kind"), Some(MacroValue::Enum(_, variant, _)) if &**variant == "TDField"))
 }
 
 /// Convert a MacroValue (Object) to a DefinedType
@@ -2155,7 +2163,7 @@ fn value_to_defined_type(
     location: SourceLocation,
 ) -> Result<DefinedType, MacroError> {
     let obj = match value {
-        Some(MacroValue::Object(o)) => o,
+        Some(MacroValue::Object(o)) => o.read(),
         _ => {
             return Err(MacroError::ContextError {
                 method: "defineType".to_string(),
@@ -2173,6 +2181,7 @@ fn value_to_defined_type(
 
     let pack = match obj.get("pack") {
         Some(MacroValue::Array(arr)) => arr
+            .read()
             .iter()
             .filter_map(|v| v.as_string().map(String::from))
             .collect(),
@@ -2215,7 +2224,7 @@ fn value_to_defined_type(
                 MacroValue::from_str("Static"),
             ];
             if let Some(MacroValue::Array(extra)) = payload.get(1) {
-                access.extend(extra.iter().cloned());
+                access.extend(extra.read().iter().cloned());
             }
             let mut field = BTreeMap::new();
             field.insert("name".to_string(), MacroValue::from_str(&name));
@@ -2223,13 +2232,13 @@ fn value_to_defined_type(
                 "kind".to_string(),
                 payload.first().cloned().unwrap_or(MacroValue::Null),
             );
-            field.insert("access".to_string(), MacroValue::Array(Arc::new(access)));
-            field.insert("meta".to_string(), MacroValue::Array(Arc::new(Vec::new())));
+            field.insert("access".to_string(), MacroValue::array(access));
+            field.insert("meta".to_string(), MacroValue::array(Vec::new()));
             field.insert("doc".to_string(), MacroValue::Null);
-            vec![MacroValue::Object(Arc::new(field))]
+            vec![MacroValue::object(field)]
         }
         _ => match obj.get("fields") {
-            Some(MacroValue::Array(arr)) => arr.iter().cloned().collect(),
+            Some(MacroValue::Array(arr)) => arr.read().iter().cloned().collect(),
             _ => Vec::new(),
         },
     };
@@ -2240,13 +2249,15 @@ fn value_to_defined_type(
 
     let type_params = match obj.get("params") {
         Some(MacroValue::Array(params)) => params
+            .read()
             .iter()
             .filter_map(|param| {
                 let MacroValue::Object(param) = param else {
                     return None;
                 };
-                let constraints = match param.get("constraints") {
+                let constraints = match param.read().get("constraints") {
                     Some(MacroValue::Array(types)) => types
+                        .read()
                         .iter()
                         .filter_map(|ty| {
                             super::expr_adt::type_of_value(ty, parser::Span::default())
@@ -2255,11 +2266,12 @@ fn value_to_defined_type(
                     _ => Vec::new(),
                 };
                 Some(parser::TypeParam {
-                    name: param.get("name")?.as_string()?.to_string(),
+                    name: param.read().get("name")?.as_string()?.to_string(),
                     constraints,
                     variance: parser::Variance::Invariant,
                     meta: Vec::new(),
                     default_type: param
+                        .read()
                         .get("defaultType")
                         .and_then(|ty| super::expr_adt::type_of_value(ty, parser::Span::default())),
                     span: parser::Span::default(),
@@ -2286,19 +2298,24 @@ fn value_to_build_field(value: &MacroValue) -> Option<BuildField> {
         _ => return None,
     };
 
-    let name = obj.get("name")?.as_string()?.to_string();
+    let name = obj.read().get("name")?.as_string()?.to_string();
 
     Some(BuildField {
         name,
         kind: BuildFieldKind::Var {
             type_hint: obj
+                .read()
                 .get("type")
                 .and_then(|v| super::expr_adt::type_of_value(v, parser::Span::default())),
             expr: None,
         },
         access: Vec::new(),
         pos: SourceLocation::unknown(),
-        doc: obj.get("doc").and_then(|v| v.as_string()).map(String::from),
+        doc: obj
+            .read()
+            .get("doc")
+            .and_then(|v| v.as_string())
+            .map(String::from),
         meta: Vec::new(),
     })
 }
@@ -2355,7 +2372,7 @@ mod tests {
         match cls {
             MacroValue::Object(obj) => {
                 assert_eq!(
-                    obj.get("name"),
+                    obj.read().get("name"),
                     Some(&MacroValue::String(Arc::from("MyClass")))
                 );
             }
@@ -2434,7 +2451,7 @@ mod tests {
         let result = ctx.get_build_fields(SourceLocation::unknown());
         assert!(result.is_ok());
         if let MacroValue::Array(fields) = result.unwrap() {
-            assert_eq!(fields.len(), 1);
+            assert_eq!(fields.read().len(), 1);
         } else {
             panic!("expected array");
         }
@@ -2534,8 +2551,8 @@ mod tests {
         let pos = SourceLocation::new(5, 10, 3, 42);
         let result = ctx.get_pos_infos(&pos);
         if let MacroValue::Object(obj) = result {
-            assert_eq!(obj.get("file"), Some(&MacroValue::Int(5)));
-            assert_eq!(obj.get("min"), Some(&MacroValue::Int(42)));
+            assert_eq!(obj.read().get("file"), Some(&MacroValue::Int(5)));
+            assert_eq!(obj.read().get("min"), Some(&MacroValue::Int(42)));
         } else {
             panic!("expected object");
         }
@@ -2551,8 +2568,8 @@ mod tests {
         let MacroValue::Object(fields) = &info else {
             panic!("position info")
         };
-        assert_eq!(fields.get("min"), Some(&MacroValue::Int(2)));
-        assert_eq!(fields.get("max"), Some(&MacroValue::Int(11)));
+        assert_eq!(fields.read().get("min"), Some(&MacroValue::Int(2)));
+        assert_eq!(fields.read().get("max"), Some(&MacroValue::Int(11)));
         let MacroValue::Position(restored) = context.make_position(&info).unwrap() else {
             panic!("position")
         };
@@ -2572,7 +2589,7 @@ mod tests {
         info.insert("file".to_string(), MacroValue::Int(3));
         info.insert("min".to_string(), MacroValue::Int(100));
         info.insert("max".to_string(), MacroValue::Int(200));
-        let result = ctx.make_position(&MacroValue::Object(Arc::new(info)));
+        let result = ctx.make_position(&MacroValue::object(info));
         assert!(result.is_ok());
         if let MacroValue::Position(pos) = result.unwrap() {
             assert_eq!(pos.file_id, 3);

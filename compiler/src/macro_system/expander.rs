@@ -1408,7 +1408,7 @@ impl MacroExpander {
         for (i, param) in macro_def.params.iter().enumerate() {
             let value = if param.rest {
                 // Rest parameter: collect remaining args into an array
-                MacroValue::Array(Arc::new(arg_values.get(i..).unwrap_or_default().to_vec()))
+                MacroValue::array(arg_values.get(i..).unwrap_or_default().to_vec())
             } else if let Some(val) = arg_values.get(i) {
                 macro_def.bind_argument(i, val.clone())
             } else if param.optional {
@@ -1523,7 +1523,7 @@ pub fn run_generation_hooks(
     class_registry: ClassRegistry,
 ) -> Result<Vec<MacroDiagnostic>, MacroError> {
     let context = class_registry.macro_context();
-    let types = MacroValue::Array(Arc::new(files.iter().flat_map(module_types).collect()));
+    let types = MacroValue::array(files.iter().flat_map(module_types).collect());
     let mut interp = MacroInterpreter::with_class_registry(
         MacroRegistry::new(),
         BTreeMap::new(),
@@ -1589,36 +1589,33 @@ fn module_types(file: &HaxeFile) -> Vec<MacroValue> {
                     entry.insert("name".to_string(), string(&name));
                     entry.insert(
                         "params".to_string(),
-                        MacroValue::Array(Arc::new(
+                        MacroValue::array(
                             m.params
                                 .iter()
                                 .map(|p| MacroValue::Expr(Arc::new(p.clone())))
                                 .collect(),
-                        )),
+                        ),
                     );
-                    MacroValue::Object(Arc::new(entry))
+                    MacroValue::object(entry)
                 })
                 .collect();
             let mut meta_access = BTreeMap::new();
-            meta_access.insert("__meta__".to_string(), MacroValue::Array(Arc::new(entries)));
+            meta_access.insert("__meta__".to_string(), MacroValue::array(entries));
             let mut module = pack.clone();
             module.push(name.clone());
             let mut ty = BTreeMap::new();
             ty.insert("name".to_string(), string(name));
             ty.insert(
                 "pack".to_string(),
-                MacroValue::Array(Arc::new(pack.iter().map(|p| string(p)).collect())),
+                MacroValue::array(pack.iter().map(|p| string(p)).collect()),
             );
             ty.insert("module".to_string(), string(&module.join(".")));
-            ty.insert(
-                "meta".to_string(),
-                MacroValue::Object(Arc::new(meta_access)),
-            );
+            ty.insert("meta".to_string(), MacroValue::object(meta_access));
             ty.insert("isInterface".to_string(), MacroValue::Bool(is_interface));
             Some(MacroValue::Enum(
                 Arc::from("ModuleType"),
                 Arc::from(ctor),
-                Arc::new(vec![MacroValue::Object(Arc::new(ty))]),
+                Arc::new(vec![MacroValue::object(ty)]),
             ))
         })
         .collect()

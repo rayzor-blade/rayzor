@@ -8,20 +8,22 @@ impl MacroInterpreter {
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
         compile(pattern, flags, location)?;
-        Ok(MacroValue::Object(Arc::new(BTreeMap::from([
+        Ok(MacroValue::object(BTreeMap::from([
             ("__type__".into(), MacroValue::from_str("EReg")),
             ("pattern".into(), MacroValue::from_str(pattern)),
             ("flags".into(), MacroValue::from_str(flags)),
-        ]))))
+        ])))
     }
 
     pub(super) fn regexp_method(
         &mut self,
-        object: &Arc<BTreeMap<String, MacroValue>>,
+        object: &super::super::value::Shared<BTreeMap<String, MacroValue>>,
         method: &str,
         args: &[MacroValue],
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        let shared = object;
+        let object = shared.read();
         let pattern = object
             .get("pattern")
             .and_then(MacroValue::as_string)
@@ -60,7 +62,7 @@ impl MacroInterpreter {
                     .get(offset..end)
                     .and_then(|input| regex.captures(input));
                 let found = matched.is_some();
-                let mut updated = (**object).clone();
+                let mut updated = object.as_ref().clone();
                 updated.remove("groups");
                 updated.remove("left");
                 updated.remove("right");
@@ -69,7 +71,7 @@ impl MacroInterpreter {
                     let whole = captures.get(0).unwrap();
                     updated.insert(
                         "groups".into(),
-                        MacroValue::Array(Arc::new(
+                        MacroValue::array(
                             captures
                                 .iter()
                                 .map(|capture| {
@@ -78,7 +80,7 @@ impl MacroInterpreter {
                                     })
                                 })
                                 .collect(),
-                        )),
+                        ),
                     );
                     updated.insert(
                         "left".into(),
@@ -90,28 +92,26 @@ impl MacroInterpreter {
                     );
                     updated.insert(
                         "position".into(),
-                        MacroValue::Object(Arc::new(BTreeMap::from([
+                        MacroValue::object(BTreeMap::from([
                             (
                                 "pos".into(),
                                 MacroValue::Int((offset + whole.start()) as i64),
                             ),
                             ("len".into(), MacroValue::Int(whole.len() as i64)),
-                        ]))),
+                        ])),
                     );
                 }
-                self.replace_references(
-                    &MacroValue::Object(object.clone()),
-                    &MacroValue::Object(Arc::new(updated)),
-                );
+                shared.set(updated);
                 Ok(MacroValue::Bool(found))
             }
             "matched" => object
                 .get("groups")
                 .and_then(MacroValue::as_array)
                 .and_then(|groups| {
-                    groups.get(args.first().and_then(MacroValue::as_int).unwrap_or(0) as usize)
+                    groups
+                        .get(args.first().and_then(MacroValue::as_int).unwrap_or(0) as usize)
+                        .cloned()
                 })
-                .cloned()
                 .ok_or_else(|| MacroError::TypeError {
                     message: "regular expression has no such group".into(),
                     location,
@@ -134,9 +134,9 @@ impl MacroInterpreter {
                 };
                 Ok(MacroValue::from_str(&result))
             }
-            "split" => Ok(MacroValue::Array(Arc::new(
+            "split" => Ok(MacroValue::array(
                 regex.split(input).map(MacroValue::from_str).collect(),
-            ))),
+            )),
             _ => Err(MacroError::UnsupportedOperation {
                 operation: format!("EReg.{method}"),
                 location,

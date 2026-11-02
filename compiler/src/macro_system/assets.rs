@@ -65,32 +65,38 @@ impl std::ops::Deref for ResourceStore {
 }
 
 pub(crate) fn bytes_value(bytes: Vec<u8>) -> MacroValue {
-    MacroValue::Object(Arc::new(BTreeMap::from([
+    MacroValue::object(BTreeMap::from([
         ("__type__".into(), MacroValue::from_str("haxe.io.Bytes")),
         ("length".into(), MacroValue::Int(bytes.len() as i64)),
         (
             "__bytes__".into(),
-            MacroValue::Array(Arc::new(
+            MacroValue::array(
                 bytes
                     .into_iter()
                     .map(|byte| MacroValue::Int(byte.into()))
                     .collect(),
-            )),
+            ),
         ),
-    ])))
+    ]))
 }
 
 pub(crate) fn bytes_data(value: &MacroValue) -> Option<Vec<u8>> {
     let MacroValue::Object(fields) = value else {
         return None;
     };
-    if fields.get("__type__").and_then(MacroValue::as_string) != Some("haxe.io.Bytes") {
+    if fields
+        .read()
+        .get("__type__")
+        .and_then(MacroValue::as_string)
+        != Some("haxe.io.Bytes")
+    {
         return None;
     }
-    let MacroValue::Array(bytes) = fields.get("__bytes__")? else {
+    let MacroValue::Array(bytes) = fields.read().get("__bytes__").cloned()? else {
         return None;
     };
     bytes
+        .read()
         .iter()
         .map(|byte| u8::try_from(byte.as_int()?).ok())
         .collect()
@@ -113,15 +119,13 @@ pub(crate) fn json_value(value: serde_json::Value) -> MacroValue {
                 None => MacroValue::Float(value.as_f64().unwrap()),
             }
         }
-        Value::Array(values) => {
-            MacroValue::Array(Arc::new(values.into_iter().map(json_value).collect()))
-        }
-        Value::Object(fields) => MacroValue::Object(Arc::new(
+        Value::Array(values) => MacroValue::array(values.into_iter().map(json_value).collect()),
+        Value::Object(fields) => MacroValue::object(
             fields
                 .into_iter()
                 .map(|(name, value)| (name, json_value(value)))
                 .collect(),
-        )),
+        ),
     }
 }
 

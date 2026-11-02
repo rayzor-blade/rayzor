@@ -113,16 +113,16 @@ fn property_access(name: &str) -> parser::PropertyAccess {
 }
 
 fn arr(items: Vec<MacroValue>) -> MacroValue {
-    MacroValue::Array(Arc::new(items))
+    MacroValue::array(items)
 }
 
 fn obj(fields: Vec<(&str, MacroValue)>) -> MacroValue {
-    MacroValue::Object(Arc::new(
+    MacroValue::object(
         fields
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
             .collect(),
-    ))
+    )
 }
 
 fn sub(e: &Expr) -> MacroValue {
@@ -373,9 +373,9 @@ pub fn complex_type_of(t: &Type) -> MacroValue {
     }
 }
 
-fn field<'v>(v: &'v MacroValue, name: &str) -> Option<&'v MacroValue> {
+fn field(v: &MacroValue, name: &str) -> Option<MacroValue> {
     match v {
-        MacroValue::Object(m) => m.get(name),
+        MacroValue::Object(m) => m.read().get(name).cloned(),
         _ => None,
     }
 }
@@ -389,19 +389,19 @@ fn string_of(v: Option<&MacroValue>) -> Option<String> {
 
 fn list_of(v: Option<&MacroValue>) -> Vec<MacroValue> {
     match v {
-        Some(MacroValue::Array(a)) => a.as_ref().clone(),
+        Some(MacroValue::Array(a)) => a.read().as_ref().clone(),
         _ => Vec::new(),
     }
 }
 
 pub(crate) fn type_path_of(v: &MacroValue, span: Span) -> Option<(TypePath, Vec<Type>)> {
     let mut path = TypePath {
-        package: list_of(field(v, "pack"))
+        package: list_of(field(v, "pack").as_ref())
             .iter()
             .filter_map(|p| string_of(Some(p)))
             .collect(),
-        name: string_of(field(v, "name"))?,
-        sub: string_of(field(v, "sub")),
+        name: string_of(field(v, "name").as_ref())?,
+        sub: string_of(field(v, "sub").as_ref()),
     };
     // `StdTypes.Int` is the builtin `Int`; the module itself names no type.
     if path.package.is_empty()
@@ -410,7 +410,7 @@ pub(crate) fn type_path_of(v: &MacroValue, span: Span) -> Option<(TypePath, Vec<
     {
         path.name = sub;
     }
-    let params = list_of(field(v, "params"))
+    let params = list_of(field(v, "params").as_ref())
         .iter()
         .filter_map(|p| match p {
             MacroValue::Enum(_, variant, args) if &**variant == "TPType" => {
@@ -463,26 +463,26 @@ pub fn type_of_value(v: &MacroValue, span: Span) -> Option<Type> {
                     fields: list_of(Some(fields))
                         .iter()
                         .filter_map(|f| {
-                            let name = string_of(field(f, "name"))?;
+                            let name = string_of(field(f, "name").as_ref())?;
                             let kind = field(f, "kind")?;
-                            let hint = match kind {
+                            let hint = match &kind {
                                 MacroValue::Enum(_, v, a) if &**v == "FVar" => {
                                     a.first().and_then(|t| type_of_value(t, span))
                                 }
                                 MacroValue::Enum(_, v, a) if &**v == "FProp" => a.get(2).and_then(|t| type_of_value(t, span)),
                                 _ => None,
                             }?;
-                            let optional = list_of(field(f, "meta")).iter().any(|m| {
-                                string_of(field(m, "name")).as_deref() == Some(":optional")
+                            let optional = list_of(field(f, "meta").as_ref()).iter().any(|m| {
+                                string_of(field(m, "name").as_ref()).as_deref() == Some(":optional")
                             });
                             Some(parser::AnonField {
                                 name,
                                 optional,
                                 type_hint: hint,
                                 access: parser::AnonFieldAccess {
-                                    is_final: list_of(field(f, "access")).iter().any(|a| matches!(a, MacroValue::Enum(_, name, _) if &**name == "AFinal")),
-                                    getter: match kind { MacroValue::Enum(_, name, args) if &**name == "FProp" => property_access(&string_of(args.first()).unwrap_or_default()), _ => parser::PropertyAccess::Default },
-                                    setter: match kind { MacroValue::Enum(_, name, args) if &**name == "FProp" => property_access(&string_of(args.get(1)).unwrap_or_default()), _ => parser::PropertyAccess::Default },
+                                    is_final: list_of(field(f, "access").as_ref()).iter().any(|a| matches!(a, MacroValue::Enum(_, name, _) if &**name == "AFinal")),
+                                    getter: match &kind { MacroValue::Enum(_, name, args) if &**name == "FProp" => property_access(&string_of(args.first()).unwrap_or_default()), _ => parser::PropertyAccess::Default },
+                                    setter: match &kind { MacroValue::Enum(_, name, args) if &**name == "FProp" => property_access(&string_of(args.get(1)).unwrap_or_default()), _ => parser::PropertyAccess::Default },
                                 },
                                 span,
                             })
@@ -496,6 +496,7 @@ pub fn type_of_value(v: &MacroValue, span: Span) -> Option<Type> {
         // The object form a constructor call builds: `{kind, <payload fields>}`
         // for one object argument, `{kind, args}` otherwise.
         MacroValue::Object(m) => {
+            let m = m.read();
             let Some(MacroValue::String(kind)) = m.get("kind") else {
                 return None;
             };
@@ -803,10 +804,10 @@ fn group_value(leader: &Expr, followers: &[&Expr]) -> MacroValue {
 }
 
 pub(crate) fn metadata_of(entry: &MacroValue, span: Span) -> Metadata {
-    let raw = string_of(field(entry, "name")).unwrap_or_default();
+    let raw = string_of(field(entry, "name").as_ref()).unwrap_or_default();
     Metadata {
         name: raw.trim_start_matches(':').to_string(),
-        params: exprs_of(field(entry, "params"), span),
+        params: exprs_of(field(entry, "params").as_ref(), span),
         span,
         compile_time: raw.starts_with(':'),
     }
@@ -1263,11 +1264,11 @@ fn type_of_is_operand(e: &Expr) -> Option<Type> {
 /// An `EVars` value naming more than one local.
 fn declares_several(v: &MacroValue) -> bool {
     let def = match v {
-        MacroValue::Object(m) => m.get("expr"),
-        MacroValue::Enum(..) => Some(v),
+        MacroValue::Object(m) => m.read().get("expr").cloned(),
+        MacroValue::Enum(..) => Some(v.clone()),
         _ => None,
     };
-    matches!(def, Some(MacroValue::Enum(e, k, args))
+    matches!(&def, Some(MacroValue::Enum(e, k, args))
         if &**e == "ExprDef" && &**k == "EVars" && list_of(args.first()).len() > 1)
 }
 
@@ -1286,20 +1287,24 @@ fn function_of(f: &MacroValue, name: String, span: Span) -> Function {
     Function {
         name,
         type_params: Vec::new(),
-        params: list_of(field(f, "args"))
+        params: list_of(field(f, "args").as_ref())
             .iter()
             .map(|a| FunctionParam {
                 meta: Vec::new(),
-                name: string_of(field(a, "name")).unwrap_or_default(),
-                type_hint: field(a, "type").and_then(|t| type_of_value(t, span)),
-                optional: matches!(field(a, "opt"), Some(MacroValue::Bool(true))),
+                name: string_of(field(a, "name").as_ref()).unwrap_or_default(),
+                type_hint: field(a, "type")
+                    .as_ref()
+                    .and_then(|t| type_of_value(t, span)),
+                optional: matches!(field(a, "opt").as_ref(), Some(MacroValue::Bool(true))),
                 rest: false,
-                default_value: opt_expr_of(field(a, "value"), span),
+                default_value: opt_expr_of(field(a, "value").as_ref(), span),
                 span,
             })
             .collect(),
-        return_type: field(f, "ret").and_then(|t| type_of_value(t, span)),
-        body: opt_expr_of(field(f, "expr"), span),
+        return_type: field(f, "ret")
+            .as_ref()
+            .and_then(|t| type_of_value(t, span)),
+        body: opt_expr_of(field(f, "expr").as_ref(), span),
         span,
     }
 }
@@ -1310,13 +1315,14 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
     let mk = |kind| Expr { kind, span };
     match v {
         MacroValue::Expr(e) => Some((**e).clone()),
-        MacroValue::Object(m) if matches!(m.get("expr"), Some(MacroValue::Enum(e, _, _)) if &**e == "ExprDef") =>
+        MacroValue::Object(m) if matches!(m.read().get("expr"), Some(MacroValue::Enum(e, _, _)) if &**e == "ExprDef") =>
         {
             let span = m
+                .read()
                 .get("pos")
                 .and_then(super::context_api::position_span)
                 .unwrap_or(span);
-            try_expr_of(m.get("expr")?, span)
+            try_expr_of(m.read().get("expr")?, span)
         }
         MacroValue::Enum(e, variant, args) if &**e == "Constant" => {
             let text = match args.first() {
@@ -1407,11 +1413,14 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                     list_of(a(0))
                         .iter()
                         .map(|f| ObjectField {
-                            name: string_of(field(f, "field")).unwrap_or_default(),
-                            expr: expr_of(field(f, "expr").unwrap_or(&MacroValue::Null), span),
+                            name: string_of(field(f, "field").as_ref()).unwrap_or_default(),
+                            expr: expr_of(
+                                field(f, "expr").as_ref().unwrap_or(&MacroValue::Null),
+                                span,
+                            ),
                             span,
                             quoted: matches!(
-                                field(f, "quotes"),
+                                field(f, "quotes").as_ref(),
                                 Some(MacroValue::Enum(_, q, _)) if &**q == "Quoted"
                             ),
                         })
@@ -1512,18 +1521,23 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                         .iter()
                         .enumerate()
                         .map(|(i, v)| {
-                            let name = string_of(field(v, "name")).unwrap_or_default();
-                            let type_hint = field(v, "type").and_then(|t| type_of_value(t, span));
-                            let expr = opt_expr_of(field(v, "expr"), span);
+                            let name = string_of(field(v, "name").as_ref()).unwrap_or_default();
+                            let type_hint = field(v, "type")
+                                .as_ref()
+                                .and_then(|t| type_of_value(t, span));
+                            let expr = opt_expr_of(field(v, "expr").as_ref(), span);
                             let attrs = VarAttrs {
-                                meta: list_of(field(v, "meta"))
+                                meta: list_of(field(v, "meta").as_ref())
                                     .iter()
                                     .map(|m| metadata_of(m, span))
                                     .collect(),
                                 grouped: i > 0,
                             };
                             let decl = mk(
-                                if matches!(field(v, "isFinal"), Some(MacroValue::Bool(true))) {
+                                if matches!(
+                                    field(v, "isFinal").as_ref(),
+                                    Some(MacroValue::Bool(true))
+                                ) {
                                     ExprKind::Final {
                                         name,
                                         type_hint,
@@ -1539,7 +1553,10 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                                     }
                                 },
                             );
-                            if !matches!(field(v, "isStatic"), Some(MacroValue::Bool(true))) {
+                            if !matches!(
+                                field(v, "isStatic").as_ref(),
+                                Some(MacroValue::Bool(true))
+                            ) {
                                 return decl;
                             }
                             mk(ExprKind::Meta {
@@ -1671,12 +1688,12 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                     cases: list_of(a(1))
                         .iter()
                         .map(|c| Case {
-                            patterns: exprs_of(field(c, "values"), span)
+                            patterns: exprs_of(field(c, "values").as_ref(), span)
                                 .iter()
                                 .map(expr_to_pattern)
                                 .collect(),
-                            guard: opt_expr_of(field(c, "guard"), span).map(|g| *g),
-                            body: opt_expr_of(field(c, "expr"), span)
+                            guard: opt_expr_of(field(c, "guard").as_ref(), span).map(|g| *g),
+                            body: opt_expr_of(field(c, "expr").as_ref(), span)
                                 .map(|b| *b)
                                 .unwrap_or_else(|| mk(ExprKind::Block(Vec::new()))),
                             span,
@@ -1689,10 +1706,15 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                     catches: list_of(a(1))
                         .iter()
                         .map(|c| Catch {
-                            var: string_of(field(c, "name")).unwrap_or_default(),
-                            type_hint: field(c, "type").and_then(|t| type_of_value(t, span)),
+                            var: string_of(field(c, "name").as_ref()).unwrap_or_default(),
+                            type_hint: field(c, "type")
+                                .as_ref()
+                                .and_then(|t| type_of_value(t, span)),
                             filter: None,
-                            body: expr_of(field(c, "expr").unwrap_or(&MacroValue::Null), span),
+                            body: expr_of(
+                                field(c, "expr").as_ref().unwrap_or(&MacroValue::Null),
+                                span,
+                            ),
                             span,
                         })
                         .collect(),
@@ -1802,12 +1824,12 @@ pub fn constant_of(e: &Expr) -> Option<MacroValue> {
         },
         ExprKind::Paren(inner) => constant_of(inner)?,
         ExprKind::Array(items) => arr(items.iter().map(constant_of).collect::<Option<_>>()?),
-        ExprKind::Object(fields) => MacroValue::Object(Arc::new(
+        ExprKind::Object(fields) => MacroValue::object(
             fields
                 .iter()
                 .map(|f| Some((f.name.clone(), constant_of(&f.expr)?)))
                 .collect::<Option<_>>()?,
-        )),
+        ),
         _ => return None,
     })
 }

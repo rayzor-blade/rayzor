@@ -591,6 +591,7 @@ dependencies = [
 name = "compiler"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "beadie",
  "bsym",
  "cc",
@@ -625,6 +626,8 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha1",
+ "sha2",
  "smallvec",
  "source_map",
  "toml 0.8.23",
@@ -3436,6 +3439,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
 ]
 
 [[package]]

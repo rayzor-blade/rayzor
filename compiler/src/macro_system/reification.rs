@@ -129,7 +129,7 @@ impl ReificationEngine {
                 if name == "a" {
                     match Self::eval_simple_expr(arg, env, e.span)? {
                         MacroValue::Array(items) => {
-                            for item in items.iter() {
+                            for item in items.read().iter() {
                                 out.push(match item {
                                     MacroValue::Expr(inner) => (**inner).clone(),
                                     other => ast_bridge::value_to_expr(other),
@@ -681,7 +681,7 @@ impl ReificationEngine {
                 let base_val = Self::eval_simple_expr(base, env, span)?;
                 match &base_val {
                     MacroValue::Object(map) => {
-                        Ok(map.get(field).cloned().unwrap_or(MacroValue::Null))
+                        Ok(map.read().get(field).cloned().unwrap_or(MacroValue::Null))
                     }
                     MacroValue::String(s) => match field.as_str() {
                         "length" => Ok(MacroValue::Int(s.chars().count() as i64)),
@@ -691,7 +691,7 @@ impl ReificationEngine {
                         }),
                     },
                     MacroValue::Array(arr) => match field.as_str() {
-                        "length" => Ok(MacroValue::Int(arr.len() as i64)),
+                        "length" => Ok(MacroValue::Int(arr.read().len() as i64)),
                         _ => Err(MacroError::ReificationError {
                             message: format!("Array has no field '{}'", field),
                             location,
@@ -761,6 +761,7 @@ impl ReificationEngine {
             "a" => match value {
                 MacroValue::Array(items) => {
                     let exprs: Result<Vec<Expr>, MacroError> = items
+                        .read()
                         .iter()
                         .map(|item| match item {
                             MacroValue::Expr(e) => Ok((**e).clone()),
@@ -815,6 +816,7 @@ impl ReificationEngine {
             "b" => match value {
                 MacroValue::Array(items) => {
                     let elements: Result<Vec<parser::BlockElement>, MacroError> = items
+                        .read()
                         .iter()
                         .map(|item| match item {
                             MacroValue::Expr(e) => Ok(parser::BlockElement::Expr((**e).clone())),
@@ -991,7 +993,7 @@ mod tests {
                 span: Span::default(),
             })),
         ];
-        env.define("xs", MacroValue::Array(Arc::new(items)));
+        env.define("xs", MacroValue::array(items));
 
         // `macro [$a{xs}]` — Array containing one DollarIdent("a", xs).
         let outer = Expr {
@@ -1040,12 +1042,9 @@ mod tests {
                 span: Span::default(),
             })),
         ];
-        let result = ReificationEngine::splice_value(
-            "a",
-            MacroValue::Array(Arc::new(items)),
-            Span::default(),
-        )
-        .unwrap();
+        let result =
+            ReificationEngine::splice_value("a", MacroValue::array(items), Span::default())
+                .unwrap();
         match &result.kind {
             ExprKind::Array(elems) => {
                 assert_eq!(elems.len(), 2);
@@ -1065,12 +1064,9 @@ mod tests {
             }))),
             span: Span::default(),
         }))];
-        let result = ReificationEngine::splice_value(
-            "b",
-            MacroValue::Array(Arc::new(items)),
-            Span::default(),
-        )
-        .unwrap();
+        let result =
+            ReificationEngine::splice_value("b", MacroValue::array(items), Span::default())
+                .unwrap();
         match &result.kind {
             ExprKind::Block(elements) => {
                 assert_eq!(elements.len(), 1);

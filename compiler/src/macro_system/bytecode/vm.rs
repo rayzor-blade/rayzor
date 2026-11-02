@@ -73,8 +73,6 @@ pub struct MacroVm {
     pub trace_output: Vec<String>,
     /// Compiled class data for constructor/method dispatch.
     class_chunks: BTreeMap<String, CompiledClassInfo>,
-    reference_updates: Vec<(MacroValue, MacroValue)>,
-    reference_index: super::super::value::ReferenceIndex,
 }
 
 impl MacroVm {
@@ -84,8 +82,6 @@ impl MacroVm {
             frames: Vec::with_capacity(16),
             trace_output: Vec::new(),
             class_chunks: BTreeMap::new(),
-            reference_updates: Vec::new(),
-            reference_index: Default::default(),
         }
     }
 
@@ -104,7 +100,6 @@ impl MacroVm {
         self.stack.clear();
         self.frames.clear();
         self.trace_output.clear();
-        self.reference_updates.clear();
 
         let bp = 0;
 
@@ -211,8 +206,8 @@ impl MacroVm {
                 Op::Mul => self.binary_op(|a, b| vm_mul(a, b))?,
                 Op::Div => self.binary_op(|a, b| vm_div(a, b))?,
                 Op::Mod => self.binary_op(|a, b| vm_mod(a, b))?,
-                Op::Eq => self.binary_op(|a, b| Ok(MacroValue::Bool(a == b)))?,
-                Op::NotEq => self.binary_op(|a, b| Ok(MacroValue::Bool(a != b)))?,
+                Op::Eq => self.binary_op(|a, b| Ok(MacroValue::Bool(a.haxe_equals(&b))))?,
+                Op::NotEq => self.binary_op(|a, b| Ok(MacroValue::Bool(!a.haxe_equals(&b))))?,
                 Op::Lt => self.binary_op(|a, b| vm_compare(a, b, |o| o.is_lt()))?,
                 Op::Le => self.binary_op(|a, b| vm_compare(a, b, |o| o.is_le()))?,
                 Op::Gt => self.binary_op(|a, b| vm_compare(a, b, |o| o.is_gt()))?,
@@ -360,7 +355,8 @@ impl MacroVm {
                     let method_name = self.get_string_constant(frame_idx, name_idx)?;
 
                     if let MacroValue::Object(obj) = &base
-                        && obj.get("__type__").and_then(MacroValue::as_string) == Some("StringBuf")
+                        && obj.read().get("__type__").and_then(MacroValue::as_string)
+                            == Some("StringBuf")
                     {
                         return Err(
                             self.error(frame_idx, "StringBuf requires the macro host".into())
@@ -369,7 +365,7 @@ impl MacroVm {
 
                     // Check for compiled class instance methods
                     let class_method = if let MacroValue::Object(ref obj) = base {
-                        if let Some(MacroValue::String(type_name)) = obj.get("__type__") {
+                        if let Some(MacroValue::String(type_name)) = obj.read().get("__type__") {
                             self.class_chunks
                                 .get(type_name.as_ref())
                                 .and_then(|ci| ci.instance_methods.get(&method_name))
@@ -521,9 +517,9 @@ impl MacroVm {
                 Op::SetField => {
                     let name_idx = self.read_u16(frame_idx);
                     let val = self.pop()?;
-                    let mut base = self.pop()?;
+                    let base = self.pop()?;
                     let field_name = self.get_string_constant(frame_idx, name_idx)?;
-                    self.set_field(&mut base, &field_name, val.clone())?;
+                    self.set_field(&base, &field_name, val.clone())?;
                     self.stack.push(val);
                 }
                 Op::SetFieldLocal => {
@@ -535,8 +531,8 @@ impl MacroVm {
                     let idx = bp + slot as usize;
                     let is_object = matches!(&self.stack[idx], MacroValue::Object(_));
                     if is_object {
-                        if let MacroValue::Object(obj) = &mut self.stack[idx] {
-                            Arc::make_mut(obj).insert(field_name, val.clone());
+                        if let MacroValue::Object(obj) = &self.stack[idx] {
+                            obj.write(|fields| fields.insert(field_name, val.clone()));
                         }
                     } else {
                         let type_name = self.stack[idx].type_name().to_string();
@@ -566,10 +562,8 @@ impl MacroVm {
                 Op::SetIndex => {
                     let val = self.pop()?;
                     let index = self.pop()?;
-                    let mut base = self.pop()?;
-                    let old = base.clone();
-                    self.set_index(&mut base, index, val.clone())?;
-                    self.replace_references(&old, &base);
+                    let base = self.pop()?;
+                    self.set_index(&base, index, val.clone())?;
                     self.stack.push(val);
                 }
 
@@ -578,7 +572,7 @@ impl MacroVm {
                     let count = self.read_u16(frame_idx);
                     let start = self.stack.len() - count as usize;
                     let items: Vec<MacroValue> = self.stack.drain(start..).collect();
-                    self.stack.push(MacroValue::Array(Arc::new(items)));
+                    self.stack.push(MacroValue::array(items));
                 }
                 Op::MakeObject => {
                     let count = self.read_u16(frame_idx);
@@ -591,7 +585,7 @@ impl MacroVm {
                             map.insert(name.to_string(), pair[1].clone());
                         }
                     }
-                    self.stack.push(MacroValue::Object(Arc::new(map)));
+                    self.stack.push(MacroValue::object(map));
                 }
                 Op::MakeMap => {
                     let count = self.read_u16(frame_idx);
@@ -601,7 +595,7 @@ impl MacroVm {
                     for pair in items.chunks(2) {
                         MacroValue::insert_map_entry(&mut map, pair[0].clone(), pair[1].clone());
                     }
-                    self.stack.push(MacroValue::Map(Arc::new(map)));
+                    self.stack.push(MacroValue::map(map));
                 }
                 Op::MakeClosure => {
                     return Err(
@@ -633,7 +627,7 @@ impl MacroVm {
                             | "haxe.ds.ObjectMap"
                             | "haxe.ds.EnumValueMap"
                     ) {
-                        self.stack.push(MacroValue::Map(Arc::new(Vec::new())));
+                        self.stack.push(MacroValue::map(Vec::new()));
                         continue;
                     }
                     // Check if we have compiled class data
@@ -647,7 +641,7 @@ impl MacroVm {
                         for (name, default_val) in &class_info.instance_vars {
                             map.insert(name.clone(), default_val.clone());
                         }
-                        let obj = MacroValue::Object(Arc::new(map));
+                        let obj = MacroValue::object(map);
 
                         if let Some(ctor_chunk) = class_info.constructor.clone() {
                             // Execute constructor: push frame with this=obj at slot 0
@@ -689,7 +683,7 @@ impl MacroVm {
                         for (i, arg) in args.into_iter().enumerate() {
                             map.insert(format!("_{}", i), arg);
                         }
-                        self.stack.push(MacroValue::Object(Arc::new(map)));
+                        self.stack.push(MacroValue::object(map));
                     }
                 }
 
@@ -802,15 +796,17 @@ impl MacroVm {
         match &base {
             MacroValue::Object(obj)
                 if matches!(
-                    obj.get("__type__").and_then(MacroValue::as_string),
+                    obj.read().get("__type__").and_then(MacroValue::as_string),
                     Some("StringBuf" | "haxe.iterators.ArrayIterator" | "haxe.io.Bytes")
                 ) =>
             {
                 Err(VmError::new("native object requires the macro host"))
             }
-            MacroValue::Object(obj) => Ok(obj.get(name).cloned().unwrap_or(MacroValue::Null)),
+            MacroValue::Object(obj) => {
+                Ok(obj.read().get(name).cloned().unwrap_or(MacroValue::Null))
+            }
             MacroValue::Array(arr) => match name {
-                "length" => Ok(MacroValue::Int(arr.len() as i64)),
+                "length" => Ok(MacroValue::Int(arr.read().len() as i64)),
                 _ => Ok(MacroValue::Null),
             },
             MacroValue::String(s) => match name {
@@ -825,13 +821,13 @@ impl MacroVm {
     /// Set a field on a value.
     fn set_field(
         &mut self,
-        base: &mut MacroValue,
+        base: &MacroValue,
         name: &str,
         value: MacroValue,
     ) -> Result<(), VmError> {
         match base {
             MacroValue::Object(obj) => {
-                Arc::make_mut(obj).insert(name.to_string(), value);
+                obj.write(|fields| fields.insert(name.to_string(), value));
                 Ok(())
             }
             _ => Err(VmError::new(format!(
@@ -846,12 +842,14 @@ impl MacroVm {
         match (&base, &index) {
             (MacroValue::Array(arr), MacroValue::Int(i)) => {
                 let idx = *i as usize;
-                Ok(arr.get(idx).cloned().unwrap_or(MacroValue::Null))
+                Ok(arr.read().get(idx).cloned().unwrap_or(MacroValue::Null))
             }
-            (MacroValue::Object(obj), MacroValue::String(key)) => {
-                Ok(obj.get(key.as_ref()).cloned().unwrap_or(MacroValue::Null))
-            }
-            (MacroValue::Map(entries), key) => Ok(MacroValue::map_get(entries, key)),
+            (MacroValue::Object(obj), MacroValue::String(key)) => Ok(obj
+                .read()
+                .get(key.as_ref())
+                .cloned()
+                .unwrap_or(MacroValue::Null)),
+            (MacroValue::Map(entries), key) => Ok(MacroValue::map_get(&entries.read(), key)),
             (MacroValue::String(s), MacroValue::Int(i)) => {
                 let idx = *i as usize;
                 Ok(s.chars()
@@ -870,26 +868,28 @@ impl MacroVm {
     /// Set an element by index.
     fn set_index(
         &mut self,
-        base: &mut MacroValue,
+        base: &MacroValue,
         index: MacroValue,
         value: MacroValue,
     ) -> Result<(), VmError> {
         match (base, &index) {
             (MacroValue::Array(arr), MacroValue::Int(i)) => {
                 let idx = *i as usize;
-                let arr = Arc::make_mut(arr);
-                while arr.len() <= idx {
-                    arr.push(MacroValue::Null);
-                }
-                arr[idx] = value;
+                arr.write(|arr| {
+                    if arr.len() <= idx {
+                        arr.resize(idx + 1, MacroValue::Null);
+                    }
+                    arr[idx] = value;
+                });
                 Ok(())
             }
             (MacroValue::Object(obj), MacroValue::String(key)) => {
-                Arc::make_mut(obj).insert(key.to_string(), value);
+                obj.write(|fields| fields.insert(key.to_string(), value));
                 Ok(())
             }
             (MacroValue::Map(entries), key) => {
-                MacroValue::insert_map_entry(Arc::make_mut(entries), key.clone(), value);
+                let key = key.clone();
+                entries.write(|entries| MacroValue::insert_map_entry(entries, key, value));
                 Ok(())
             }
             (base_val, _) => Err(VmError::new(format!(
@@ -910,22 +910,6 @@ impl MacroVm {
         ))
     }
 
-    pub(crate) fn take_reference_updates(&mut self) -> Vec<(MacroValue, MacroValue)> {
-        std::mem::take(&mut self.reference_updates)
-    }
-
-    fn replace_references(&mut self, old: &MacroValue, new: &MacroValue) {
-        if old.reference_key().is_none() || old.same_reference(new) {
-            return;
-        }
-        self.reference_updates.push((old.clone(), new.clone()));
-        let mut updates =
-            super::super::value::ReferenceUpdates::indexed(old, &mut self.reference_index);
-        for value in &mut self.stack {
-            value.replace_reference(old, new, &mut updates);
-        }
-    }
-
     /// Call a method on a value.
     fn call_method(
         &mut self,
@@ -933,9 +917,7 @@ impl MacroVm {
         method: &str,
         args: Vec<MacroValue>,
     ) -> Result<MacroValue, VmError> {
-        let mut updated = base.clone();
-        if let Some(result) = updated.mutate_map(method, &args) {
-            self.replace_references(&base, &updated);
+        if let Some(result) = base.mutate_map(method, &args) {
             return Ok(result);
         }
         match &base {
@@ -945,13 +927,13 @@ impl MacroVm {
                 .ok_or_else(|| VmError::new(format!("unsupported Map method: {method}"))),
             MacroValue::String(s) => self.call_string_method(s, method, args),
             MacroValue::Object(obj) => {
-                if obj.get("__type__").and_then(MacroValue::as_string)
+                if obj.read().get("__type__").and_then(MacroValue::as_string)
                     == Some("haxe.iterators.ArrayIterator")
                 {
                     return Err(VmError::new("iterator protocol requires the macro host"));
                 }
                 // Check if the object has a function field with this name
-                if let Some(MacroValue::Function(func)) = obj.get(method) {
+                if let Some(MacroValue::Function(func)) = obj.read().get(method) {
                     return self.call_function(func, args);
                 }
                 Ok(MacroValue::Null)
@@ -1073,7 +1055,9 @@ impl MacroVm {
                     self.trace_output.push(msg);
                     return Ok(MacroValue::Null);
                 }
-                Ok(MacroValue::Null)
+                Err(VmError::new(format!(
+                    "{class}.{method} requires the macro host"
+                )))
             }
         }
     }
@@ -1081,22 +1065,19 @@ impl MacroVm {
     /// Call an array method.
     fn call_array_method(
         &self,
-        arr: &Arc<Vec<MacroValue>>,
+        array: &super::super::value::Shared<Vec<MacroValue>>,
         method: &str,
         args: Vec<MacroValue>,
     ) -> Result<MacroValue, VmError> {
+        let arr = array.read();
         match method {
-            "push" => {
-                let mut new_arr = (**arr).clone();
-                for arg in args {
-                    new_arr.push(arg);
-                }
-                Ok(MacroValue::Array(Arc::new(new_arr)))
-            }
+            "push" => Ok(MacroValue::Int(array.write(|values| {
+                values.extend(args);
+                values.len() as i64
+            }))),
             "pop" => {
-                let mut new_arr = (**arr).clone();
-                let val = new_arr.pop().unwrap_or(MacroValue::Null);
-                Ok(val)
+                drop(arr);
+                Ok(array.write(Vec::pop).unwrap_or(MacroValue::Null))
             }
             "length" => Ok(MacroValue::Int(arr.len() as i64)),
             "join" => {
@@ -1107,15 +1088,13 @@ impl MacroVm {
                 let result: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
                 Ok(MacroValue::from_string(result.join(&sep)))
             }
-            "map" => {
-                // map with a function — returns the array for now
-                Ok(MacroValue::Array(arr.clone()))
-            }
-            "filter" => Ok(MacroValue::Array(arr.clone())),
+            "map" | "filter" => Err(VmError::new(format!(
+                "Array.{method} requires the macro interpreter"
+            ))),
             "indexOf" => {
                 if let Some(target) = args.first() {
                     for (i, item) in arr.iter().enumerate() {
-                        if item == target {
+                        if item.haxe_equals(target) {
                             return Ok(MacroValue::Int(i as i64));
                         }
                     }
@@ -1126,7 +1105,9 @@ impl MacroVm {
             }
             "contains" => {
                 if let Some(target) = args.first() {
-                    Ok(MacroValue::Bool(arr.iter().any(|item| item == target)))
+                    Ok(MacroValue::Bool(
+                        arr.iter().any(|item| item.haxe_equals(target)),
+                    ))
                 } else {
                     Ok(MacroValue::Bool(false))
                 }
@@ -1140,21 +1121,21 @@ impl MacroVm {
                     .unwrap_or(arr.len());
                 let sliced: Vec<MacroValue> =
                     arr[start.min(arr.len())..end.min(arr.len())].to_vec();
-                Ok(MacroValue::Array(Arc::new(sliced)))
+                Ok(MacroValue::array(sliced))
             }
             "concat" => {
-                let mut new_arr = (**arr).clone();
+                let mut new_arr = arr.to_vec();
                 if let Some(MacroValue::Array(other)) = args.first() {
-                    new_arr.extend(other.iter().cloned());
+                    new_arr.extend(other.read().iter().cloned());
                 }
-                Ok(MacroValue::Array(Arc::new(new_arr)))
+                Ok(MacroValue::array(new_arr))
             }
             "reverse" => {
-                let mut new_arr = (**arr).clone();
-                new_arr.reverse();
-                Ok(MacroValue::Array(Arc::new(new_arr)))
+                drop(arr);
+                array.write(|values| values.reverse());
+                Ok(MacroValue::Null)
             }
-            "iterator" => Ok(MacroValue::array_iterator(arr.clone())),
+            "iterator" => Ok(MacroValue::array_iterator(MacroValue::Array(array.clone()))),
             _ => Ok(MacroValue::Null),
         }
     }
@@ -1207,11 +1188,9 @@ impl MacroVm {
                 if let Some(MacroValue::String(sep)) = args.first() {
                     let parts: Vec<MacroValue> =
                         s.split(sep.as_ref()).map(MacroValue::from_str).collect();
-                    Ok(MacroValue::Array(Arc::new(parts)))
+                    Ok(MacroValue::array(parts))
                 } else {
-                    Ok(MacroValue::Array(Arc::new(vec![MacroValue::String(
-                        s.clone(),
-                    )])))
+                    Ok(MacroValue::array(vec![MacroValue::String(s.clone())]))
                 }
             }
             "trim" => Ok(MacroValue::from_string(s.trim().to_string())),
@@ -1388,7 +1367,7 @@ mod tests {
     #[test]
     fn iterator_protocol_requests_the_macro_host() {
         let mut vm = MacroVm::new();
-        let iterator = MacroValue::array_iterator(Arc::new(vec![MacroValue::Int(1)]));
+        let iterator = MacroValue::array_iterator(MacroValue::array(vec![MacroValue::Int(1)]));
         assert!(vm.get_field(iterator.clone(), "length").is_err());
         assert!(vm.call_method(iterator, "hasNext", vec![]).is_err());
     }
@@ -1688,6 +1667,7 @@ mod tests {
         let result = compile_and_run(&expr).unwrap();
         match result {
             MacroValue::Array(arr) => {
+                let arr = arr.read();
                 assert_eq!(arr.len(), 3);
                 assert_eq!(arr[0], MacroValue::Int(1));
                 assert_eq!(arr[1], MacroValue::Int(2));
@@ -1756,6 +1736,7 @@ mod tests {
         let MacroValue::Map(entries) = compile_and_run(&expr).unwrap() else {
             panic!("expected Map");
         };
+        let entries = entries.read();
         assert_eq!(entries.len(), 2);
         assert_eq!(
             MacroValue::map_get(&entries, &entries[0].0),

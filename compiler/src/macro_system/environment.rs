@@ -62,7 +62,8 @@ impl Environment {
         false
     }
 
-    /// Mutate a field and propagate the new storage through aliases.
+    /// Write a field of a variable's value; a reified expression's new copy
+    /// replaces the old one in every alias.
     /// Returns whether the variable and field support mutation.
     pub fn mutate_object_field(&mut self, var_name: &str, field: &str, value: MacroValue) -> bool {
         let Some(old) = self.get(var_name) else {
@@ -72,20 +73,17 @@ impl Environment {
         if !new.set_field(field, value) {
             return false;
         }
-        self.replace_references(&old, &new);
+        if !old.same_reference(&new) {
+            self.replace_references_with(&old, &new, &mut super::value::ReferenceUpdates::new());
+        }
         true
-    }
-
-    /// Pattern and loop bindings retain the identity of objects inside field arrays.
-    pub(crate) fn replace_references(&mut self, old: &MacroValue, new: &MacroValue) {
-        self.replace_references_with(old, new, &mut super::value::ReferenceUpdates::new());
     }
 
     pub(crate) fn replace_references_with(
         &mut self,
         old: &MacroValue,
         new: &MacroValue,
-        updates: &mut super::value::ReferenceUpdates<'_>,
+        updates: &mut super::value::ReferenceUpdates,
     ) {
         for scope in &mut self.scopes {
             for binding in scope.values() {
@@ -195,39 +193,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nested_mutations_preserve_parent_aliases() {
+    fn field_writes_are_seen_through_every_alias() {
         let mut env = Environment::new();
-        let child = MacroValue::Object(Arc::new(BTreeMap::from([(
-            "value".into(),
-            MacroValue::Int(1),
-        )])));
-        let parent =
-            MacroValue::Object(Arc::new(BTreeMap::from([("child".into(), child.clone())])));
-        let unrelated = MacroValue::Object(Arc::new(BTreeMap::from([(
-            "value".into(),
-            MacroValue::Int(1),
-        )])));
+        let child = MacroValue::object(BTreeMap::from([("value".into(), MacroValue::Int(1))]));
+        let parent = MacroValue::object(BTreeMap::from([("child".into(), child.clone())]));
         env.define("child", child);
         env.define("parent", parent.clone());
-        env.define("fields", MacroValue::Array(Arc::new(vec![parent])));
-        env.define("unrelated", unrelated.clone());
+        env.define("fields", MacroValue::array(vec![parent]));
         assert!(env.mutate_object_field("child", "value", MacroValue::Int(2)));
         assert!(env.mutate_object_field(
             "parent",
             "name",
             MacroValue::from_string("updated".into())
         ));
-        let MacroValue::Array(fields) = env.get("fields").unwrap() else {
-            panic!()
-        };
-        let parent = env.get("parent").unwrap();
-        assert!(fields[0].map_key_eq(&parent));
-        assert!(env.get("unrelated").unwrap().map_key_eq(&unrelated));
-        let MacroValue::Object(parent) = parent else {
-            panic!()
-        };
-        assert!(parent["child"].map_key_eq(&env.get("child").unwrap()));
+        let fields = env.get("fields").unwrap().as_array().unwrap();
+        let parent = fields[0].as_object().unwrap();
         assert_eq!(parent["name"], MacroValue::from_string("updated".into()));
+        assert_eq!(
+            parent["child"].as_object().unwrap()["value"],
+            MacroValue::Int(2)
+        );
+    }
+
+    #[test]
+    fn expression_writes_repoint_aliases() {
+        let mut env = Environment::new();
+        let expr = |kind| {
+            MacroValue::Expr(std::sync::Arc::new(parser::Expr {
+                kind,
+                span: parser::Span::new(0, 0),
+            }))
+        };
+        let e = expr(parser::ExprKind::Null);
+        env.define("e", e.clone());
+        env.define("holder", MacroValue::array(vec![e]));
+        let replacement =
+            super::super::expr_adt::def_of(&parser::ExprKind::Bool(true), parser::Span::new(0, 0))
+                .unwrap();
+        assert!(env.mutate_object_field("e", "expr", replacement));
+        let current = env.get("e").unwrap();
+        let held = env.get("holder").unwrap().as_array().unwrap()[0].clone();
+        assert!(held.same_reference(&current));
+        assert!(matches!(
+            current.as_expr().map(|e| &e.kind),
+            Some(parser::ExprKind::Bool(true))
+        ));
     }
 
     #[test]
