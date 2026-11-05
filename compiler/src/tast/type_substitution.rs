@@ -306,6 +306,13 @@ impl TypeSubstitutions<'_> {
                     type_args: args,
                 }
             }
+            Some(TypeKind::Intersection { types }) => {
+                let operands = sub(&types);
+                if operands == types {
+                    return ty;
+                }
+                TypeKind::Intersection { types: operands }
+            }
             Some(TypeKind::Array { element_type }) => {
                 let elem = self.substitute_type_bindings(element_type, bindings, expand_bindings);
                 if elem == element_type {
@@ -436,6 +443,7 @@ impl TypeSubstitutions<'_> {
                 .chain(std::iter::once(return_type))
                 .collect(),
             Some(TypeKind::Anonymous { fields }) => fields.iter().map(|f| f.type_id).collect(),
+            Some(TypeKind::Intersection { types }) => types,
             Some(TypeKind::Class { type_args, .. })
             | Some(TypeKind::Interface { type_args, .. })
             | Some(TypeKind::Enum { type_args, .. })

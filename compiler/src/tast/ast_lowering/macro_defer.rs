@@ -1307,6 +1307,119 @@ impl DeferredMacroTyper<'_, '_> {
         ]))
     }
 
+    fn structural_fields(
+        &mut self,
+        id: TypeId,
+        visiting: &mut std::collections::BTreeSet<TypeId>,
+    ) -> Option<Vec<crate::tast::core::AnonymousField>> {
+        use crate::tast::TypeKind;
+        if visiting.len() >= 128 || !visiting.insert(id) {
+            return None;
+        }
+        let result = (|| {
+            let kind = self
+                .lowering
+                .context
+                .type_table
+                .borrow()
+                .get(id)?
+                .kind
+                .clone();
+            let (symbol, target, args) = match kind {
+                TypeKind::Anonymous { fields } => return Some(fields),
+                TypeKind::Intersection { types } => {
+                    let mut fields: Vec<crate::tast::core::AnonymousField> = Vec::new();
+                    for operand in types {
+                        for field in self.structural_fields(operand, visiting)? {
+                            match fields
+                                .iter_mut()
+                                .find(|existing| existing.name == field.name)
+                            {
+                                Some(existing) => *existing = field,
+                                None => fields.push(field),
+                            }
+                        }
+                    }
+                    return Some(fields);
+                }
+                TypeKind::TypeAlias {
+                    symbol_id,
+                    target_type,
+                    type_args,
+                } => (
+                    symbol_id,
+                    self.definition_target(symbol_id).unwrap_or(target_type),
+                    type_args,
+                ),
+                TypeKind::Class {
+                    symbol_id,
+                    type_args,
+                } => (
+                    symbol_id,
+                    self.structural_alias_target(symbol_id)?,
+                    type_args,
+                ),
+                TypeKind::GenericInstance {
+                    base_type,
+                    type_args,
+                    ..
+                } => {
+                    let symbol = self
+                        .lowering
+                        .context
+                        .type_table
+                        .borrow()
+                        .get_type_symbol(base_type)?;
+                    (symbol, self.structural_alias_target(symbol)?, type_args)
+                }
+                _ => return None,
+            };
+            let params = self.definition_parameters(symbol);
+            let target = self.apply_type_parameters(target, &params, &args);
+            self.structural_fields(target, visiting)
+        })();
+        visiting.remove(&id);
+        result
+    }
+
+    fn structural_alias_target(&self, symbol: crate::tast::SymbolId) -> Option<TypeId> {
+        let declaration = self.lowering.context.symbol_table.get_symbol(symbol)?;
+        let table = self.lowering.context.type_table.borrow();
+        if declaration.kind != crate::tast::SymbolKind::TypeAlias
+            && !matches!(
+                table.get(declaration.type_id).map(|ty| &ty.kind),
+                Some(crate::tast::TypeKind::TypeAlias { .. })
+            )
+        {
+            return None;
+        }
+        drop(table);
+        self.definition_target(symbol)
+    }
+
+    /// Structural extensions have one anonymous field set in the macro API.
+    fn macro_intersection(&mut self, id: TypeId) -> TypeId {
+        if !matches!(
+            self.lowering
+                .context
+                .type_table
+                .borrow()
+                .get(id)
+                .map(|ty| &ty.kind),
+            Some(crate::tast::TypeKind::Intersection { .. })
+        ) {
+            return id;
+        }
+        let Some(fields) = self.structural_fields(id, &mut Default::default()) else {
+            return id;
+        };
+        self.lowering
+            .context
+            .type_table
+            .borrow_mut()
+            .create_type(crate::tast::TypeKind::Anonymous { fields })
+    }
+
     fn definition_target(&self, symbol: crate::tast::SymbolId) -> Option<TypeId> {
         let table = self.lowering.context.type_table.borrow();
         let sym = self.lowering.context.symbol_table.get_symbol(symbol)?;
@@ -2041,6 +2154,7 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         use crate::macro_system::value::MacroValue as V;
         use crate::tast::core::TypeKind;
         use std::sync::Arc;
+        let id = self.macro_intersection(id);
         let kind = self
             .lowering
             .context
@@ -2165,6 +2279,7 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         use std::collections::BTreeMap;
         use std::sync::Arc;
 
+        let id = self.macro_intersection(id);
         let kind = self
             .lowering
             .context
@@ -2451,7 +2566,7 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         use crate::tast::core::TypeKind;
         let mut current = id;
         let mut seen = std::collections::BTreeSet::new();
-        while seen.insert(current) {
+        while seen.len() < 128 && seen.insert(current) {
             let kind = self
                 .lowering
                 .context
@@ -2505,21 +2620,32 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                     symbol_id,
                     type_args,
                 }) => {
-                    let next = self
+                    let next = self.structural_alias_target(symbol_id).or_else(|| {
+                        let symbol = self.lowering.context.symbol_table.get_symbol(symbol_id)?;
+                        (abstracts && symbol.kind == crate::tast::symbols::SymbolKind::Abstract)
+                            .then(|| self.definition_target(symbol_id))
+                            .flatten()
+                    });
+                    (next, Some((symbol_id, type_args)))
+                }
+                Some(TypeKind::GenericInstance {
+                    base_type,
+                    type_args,
+                    ..
+                }) => {
+                    let symbol = self
                         .lowering
                         .context
-                        .symbol_table
-                        .get_symbol(symbol_id)
-                        .and_then(|s| match s.kind {
-                            crate::tast::symbols::SymbolKind::TypeAlias => {
-                                self.definition_target(symbol_id)
-                            }
-                            crate::tast::symbols::SymbolKind::Abstract if abstracts => {
-                                self.definition_target(symbol_id)
-                            }
-                            _ => None,
-                        });
-                    (next, Some((symbol_id, type_args)))
+                        .type_table
+                        .borrow()
+                        .get_type_symbol(base_type);
+                    match symbol {
+                        Some(symbol) => (
+                            self.structural_alias_target(symbol),
+                            Some((symbol, type_args)),
+                        ),
+                        None => (None, None),
+                    }
                 }
                 Some(TypeKind::Abstract {
                     underlying,
@@ -2549,7 +2675,7 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 break;
             }
         }
-        current
+        self.macro_intersection(current)
     }
 
     fn extension_types(&mut self, id: TypeId) -> Option<Vec<TypeId>> {

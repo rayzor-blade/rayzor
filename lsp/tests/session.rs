@@ -5796,3 +5796,70 @@ class Probe {
     let diagnostics = session.open("Main.hx");
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
+
+#[test]
+fn hxx_props_include_forward_structural_bases_and_generic_fields() {
+    for generic in [false, true] {
+        let source = if generic {
+            "class Component<P> { public function new() {} } typedef Extended<T> = {>Later<T>, own:T}; class Input extends Component<Extended<String>> { public function new() super(); } typedef Later<T> = {inherited:T, ?optional:Bool}; class Main { static function main() Inspect.check(); }"
+        } else {
+            "class Component<P> { public function new() {} } typedef Extended = {>Later, own:String}; class Input extends Component<Extended> { public function new() super(); } typedef Later = {inherited:String, ?optional:Bool}; class Main { static function main() Inspect.check(); }"
+        };
+        let mut session = Session::start(&[
+            ("Main.hx", source),
+            (
+                "Inspect.hx",
+                r#"
+import haxe.macro.Context;
+import haxe.macro.Expr;
+import haxe.macro.TypeTools;
+class Inspect {
+ public static macro function check():Expr {
+  var c = switch Context.getType("Input") { case TInst(c, _): c; case _: throw "not class"; }
+  var props = c.get().superClass.params[0];
+  switch Context.follow(props) {
+   case TAnonymous(a):
+    var names = [for (field in a.get().fields) field.name];
+    for (name in ["inherited", "own", "optional"]) if (names.indexOf(name) < 0) throw "missing " + name;
+    for (field in a.get().fields) if (field.name != "optional" && TypeTools.toString(field.type) != "String") throw "lost generic field type";
+   case _: throw "props are not structural";
+  }
+  return macro 1;
+ }
+}
+"#,
+            ),
+        ]);
+        let diagnostics = session.open("Main.hx");
+        assert!(
+            diagnostics.is_empty(),
+            "generic={generic}: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn hxx_props_do_not_treat_primitive_parameters_as_structures() {
+    let mut session = Session::start(&[
+        (
+            "Main.hx",
+            "class Component<P> { public function new() {} } class Input extends Component<Int> { public function new() super(); } class Main { static function main() Inspect.check(); }",
+        ),
+        (
+            "Inspect.hx",
+            r#"
+import haxe.macro.Context;
+import haxe.macro.Expr;
+class Inspect {
+ public static macro function check():Expr {
+  var c = switch Context.getType("Input") { case TInst(c, _): c; case _: throw "not class"; }
+  switch Context.follow(c.get().superClass.params[0]) { case TAnonymous(_): throw "primitive props became structural"; case _: }
+  return macro 1;
+ }
+}
+"#,
+        ),
+    ]);
+    let diagnostics = session.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
