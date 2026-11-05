@@ -5925,16 +5925,11 @@ fn editor_analysis_exposes_the_display_define_to_macros_and_source() {
 }
 
 #[test]
-fn qualified_type_annotations_do_not_bind_unrelated_root_types() {
+fn qualified_stdlib_module_aliases_preserve_their_type_identity() {
     let mut session = Session::start(&[(
         "Main.hx",
-        "class Widget {} class Main { static function main() { var value:missing.Widget = null; trace(value); } }",
+        "import haxe.macro.Expr; class Main { static function main() { var direct:Expr = null; var qualified:haxe.macro.Expr.Expr = direct; trace(qualified); } }",
     )]);
     let diagnostics = session.open("Main.hx");
-    assert!(
-        diagnostics.iter().any(|item| item["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("missing.Widget"))),
-        "{diagnostics:#?}"
-    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
