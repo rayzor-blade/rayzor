@@ -180,6 +180,21 @@ impl MacroInterpreter {
                 Ok(value)
             }
             Type::Path { path, params, .. } => {
+                if path.package.is_empty()
+                    && path.sub.is_none()
+                    && !self.import_map.contains_key(&path.name)
+                    && matches!(
+                        (path.name.as_str(), &value),
+                        ("String", MacroValue::String(_))
+                            | ("Int", MacroValue::Int(_))
+                            | ("Float", MacroValue::Float(_) | MacroValue::Int(_))
+                            | ("Bool", MacroValue::Bool(_))
+                            | ("Array", MacroValue::Array(_))
+                            | ("Dynamic", _)
+                    )
+                {
+                    return Ok(value);
+                }
                 let name = self.type_name_path(path);
                 if path.name == "Null" {
                     return match params.first() {
@@ -193,7 +208,7 @@ impl MacroInterpreter {
                     .and_then(|registry| registry.find_alias(&name))
                     .cloned()
                 {
-                    let previous = std::mem::replace(&mut self.import_map, (*imports).clone());
+                    let previous = std::mem::replace(&mut self.import_map, imports.clone());
                     let result = self.coerce_type(value, &target, location, depth + 1);
                     self.import_map = previous;
                     return result;
@@ -274,7 +289,7 @@ impl MacroInterpreter {
                 {
                     return Ok(value);
                 }
-                let previous = std::mem::replace(&mut self.import_map, (*imports).clone());
+                let previous = std::mem::replace(&mut self.import_map, imports.clone());
                 let accepted = decl
                     .from
                     .iter()
@@ -404,7 +419,7 @@ impl MacroInterpreter {
                 let Some(candidate) = class.static_methods.get(method) else {
                     continue;
                 };
-                let previous = std::mem::replace(&mut self.import_map, (*class.imports).clone());
+                let previous = std::mem::replace(&mut self.import_map, class.imports.clone());
                 let accepts = candidate.params.first().is_some_and(|param| {
                     param
                         .type_hint
@@ -477,7 +492,7 @@ impl MacroInterpreter {
                     candidates.push(method);
                 }
             }
-            let previous = std::mem::replace(&mut self.import_map, (*class.imports).clone());
+            let previous = std::mem::replace(&mut self.import_map, class.imports.clone());
             let method = candidates
                 .iter()
                 .find(|method| {
@@ -650,7 +665,7 @@ impl MacroInterpreter {
             .as_ref()
             .and_then(|registry| registry.find_executable_class(owner))
             .map(|class| MacroFunctionContext {
-                imports: (*class.imports).clone(),
+                imports: class.imports.clone(),
                 source_file: Some(class.source_file.clone()),
                 owner: Some(class.qualified_name.clone()),
             });

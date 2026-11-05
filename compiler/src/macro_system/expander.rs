@@ -1435,7 +1435,7 @@ impl MacroExpander {
         // own module; using the call site's imports made a macro's meaning
         // depend on who invoked it.
         let caller_imports = interp.take_import_map();
-        interp.set_import_map((*macro_def.imports).clone());
+        interp.set_import_map(macro_def.imports.clone());
         interp.source_file = Some(macro_def.source_file.clone());
         let result = interp.eval_expr(&macro_def.body);
         if result.as_ref().is_err_and(|e| !e.is_control_flow()) {

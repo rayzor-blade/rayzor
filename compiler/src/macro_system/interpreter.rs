@@ -19,6 +19,7 @@ use super::reification::ReificationEngine;
 use super::value::{MacroFunction, MacroParam, MacroValue, Shared};
 use crate::tast::SourceLocation;
 mod abstract_runtime;
+mod host_path;
 pub(crate) mod host_std;
 mod regular_expressions;
 mod system;
@@ -77,7 +78,7 @@ pub struct MacroInterpreter {
     pub(crate) source_file: Option<String>,
     /// Import map: short class name → fully qualified name
     /// e.g., "Context" → "haxe.macro.Context"
-    import_map: BTreeMap<String, String>,
+    import_map: Arc<BTreeMap<String, String>>,
     /// The calling module's own imports, as written: `Context.getLocalImports`.
     pub local_imports: Vec<parser::Import>,
     /// Qualified name of the class the macro call sits in: `Context.getLocalClass`.
@@ -155,7 +156,7 @@ impl MacroInterpreter {
             global_metadata: Vec::new(),
             compiler_defines: BTreeMap::new(),
             source_file: None,
-            import_map: BTreeMap::new(),
+            import_map: Arc::default(),
             class_registry: None,
             class_data_cache: BTreeMap::new(),
             local_imports: Vec::new(),
@@ -183,7 +184,7 @@ impl MacroInterpreter {
             global_metadata: Vec::new(),
             compiler_defines: BTreeMap::new(),
             source_file: None,
-            import_map,
+            import_map: Arc::new(import_map),
             class_registry: None,
             class_data_cache: BTreeMap::new(),
             local_imports: Vec::new(),
@@ -217,7 +218,7 @@ impl MacroInterpreter {
             global_metadata: Vec::new(),
             compiler_defines: BTreeMap::new(),
             source_file: None,
-            import_map,
+            import_map: Arc::new(import_map),
             class_registry: Some(class_registry),
             class_data_cache: BTreeMap::new(),
             local_imports: Vec::new(),
@@ -1537,6 +1538,16 @@ impl MacroInterpreter {
             } => {
                 // Check for static class calls: Class.method(...) or qualified.path.Class.method(...)
                 if let ExprKind::Ident(class_name) = &base.kind {
+                    if let Some(receiver) = self
+                        .env
+                        .get(class_name)
+                        .or_else(|| self.env.get("this")?.as_object()?.get(class_name).cloned())
+                    {
+                        if let Some(result) = receiver.mutate_map(field, &arg_vals) {
+                            return Ok(result);
+                        }
+                        return self.method_call(&receiver, field, arg_vals, location);
+                    }
                     // Simple: Context.parse(...)
                     if let Some(result) =
                         self.try_static_call(class_name, field, &arg_vals, location)?
@@ -1906,7 +1917,7 @@ impl MacroInterpreter {
                 let info = registry.find_class(class)?;
                 Some(super::value::MacroFunctionContext {
                     owner: Some(class.to_string()),
-                    imports: (*info.imports).clone(),
+                    imports: info.imports.clone(),
                     source_file: Some(info.source_file.clone()),
                 })
             })
@@ -2049,7 +2060,7 @@ impl MacroInterpreter {
         }
         let caller_source = self.source_file.replace(def.source_file.clone());
         let caller_imports = self.take_import_map();
-        self.set_import_map((*def.imports).clone());
+        self.set_import_map(def.imports.clone());
         let result = self.call_function(&func, args, location);
         self.source_file = caller_source;
         self.set_import_map(caller_imports);
@@ -2129,13 +2140,13 @@ impl MacroInterpreter {
     }
 
     /// Take the current import map out, leaving an empty one.
-    pub fn take_import_map(&mut self) -> BTreeMap<String, String> {
+    pub fn take_import_map(&mut self) -> Arc<BTreeMap<String, String>> {
         std::mem::take(&mut self.import_map)
     }
 
     /// Install an import map for the duration of a macro body.
-    pub fn set_import_map(&mut self, map: BTreeMap<String, String>) {
-        self.import_map = map;
+    pub fn set_import_map(&mut self, map: impl Into<Arc<BTreeMap<String, String>>>) {
+        self.import_map = map.into();
     }
 
     /// Resolve declaration-local imports and typedef aliases before dispatch.
@@ -2422,6 +2433,11 @@ impl MacroInterpreter {
                 .and_then(|name| self.class_registry.as_ref()?.local_class_view(name))
         {
             return Ok(Some(view));
+        }
+        if resolved == "haxe.io.Path"
+            && let Some(value) = host_path::call(method, args)
+        {
+            return Ok(Some(value));
         }
         if let Some(value) = self.host_std_static(&resolved, method, args, location)? {
             return Ok(Some(value));
@@ -3198,7 +3214,7 @@ impl MacroInterpreter {
             .map(|class| (class.imports.clone(), class.source_file.clone()));
         let caller_imports = owner
             .as_ref()
-            .map(|(imports, _)| std::mem::replace(&mut self.import_map, (**imports).clone()));
+            .map(|(imports, _)| std::mem::replace(&mut self.import_map, Arc::clone(imports)));
         let caller_source = owner.map(|(_, source)| self.source_file.replace(source));
         let hint = registry
             .find_executable_class(&qualified)
@@ -3463,6 +3479,15 @@ impl MacroInterpreter {
                 });
         }
         if let MacroValue::String(s) = base {
+            if matches!(method, "fastCodeAt" | "unsafeCodeAt") && args.len() == 1 {
+                let index = args.first().and_then(MacroValue::as_int).unwrap_or(0);
+                let code = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| self.characters.at(s, index));
+                return Ok(MacroValue::Int(
+                    code.map_or(-1, |character| character as i64),
+                ));
+            }
             let mut args = args;
             if matches!(
                 method,
@@ -4427,7 +4452,7 @@ impl MacroInterpreter {
             .map(|class| (class.imports.clone(), class.source_file.clone()));
         let previous = context.map(|(imports, source)| {
             (
-                std::mem::replace(&mut self.import_map, (*imports).clone()),
+                std::mem::replace(&mut self.import_map, imports.clone()),
                 self.source_file.replace(source),
             )
         });
@@ -6296,6 +6321,63 @@ mod tests {
             }
         }
         Ok(MacroValue::Null)
+    }
+
+    #[test]
+    fn local_receivers_shadow_static_classes() {
+        let value = eval(
+            r#"
+            var Std = { string: function(value:Int):String return "local:" + value; };
+            var text = "abc";
+            return Std.string(text.charCodeAt(1));
+        "#,
+        )
+        .unwrap();
+        assert_eq!(value.as_string(), Some("local:98"));
+        assert_eq!(
+            eval("return \"abc\".fastCodeAt(1);").unwrap(),
+            MacroValue::Int(98)
+        );
+        assert_eq!(
+            eval("return \"abc\".fastCodeAt(4);").unwrap(),
+            MacroValue::Int(-1)
+        );
+    }
+
+    #[test]
+    fn closures_retain_declaration_imports_across_callers() {
+        let mut classes = ClassRegistry::new();
+        for (path, source) in [
+            (
+                "a/Value.hx",
+                "package a; class Value { public static function label():String return \"a\"; }",
+            ),
+            (
+                "b/Value.hx",
+                "package b; class Value { public static function label():String return \"b\"; }",
+            ),
+            (
+                "First.hx",
+                "import a.Value; class First { public static function callback():Void->String return function() return Value.label(); }",
+            ),
+            (
+                "Second.hx",
+                "import b.Value; class Second { public static function check():String { var callback = First.callback(); return Value.label() + callback() + Value.label(); } }",
+            ),
+        ] {
+            let file = parser::parse_haxe_file(path, source, false).unwrap();
+            classes.register_file(&file);
+        }
+        let mut interpreter = MacroInterpreter::with_class_registry(
+            MacroRegistry::new(),
+            Default::default(),
+            Arc::new(classes),
+        );
+        let value = interpreter
+            .try_static_call("Second", "check", &[], SourceLocation::unknown())
+            .unwrap()
+            .unwrap();
+        assert_eq!(value.as_string(), Some("bab"));
     }
 
     #[test]

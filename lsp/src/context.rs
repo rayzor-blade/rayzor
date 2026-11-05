@@ -600,6 +600,7 @@ impl LspContext {
                 .chain(&settings.options.extra_defines),
         );
         preprocessor.defines.insert("eval".into());
+        preprocessor.defines.insert("display".into());
         let text = parser::preprocessor::preprocess(source, &preprocessor);
         self.record_editor_references(&filename, &text, &mut unit);
         let index = FileSymbolIndex::build(
@@ -697,6 +698,7 @@ impl LspContext {
         config.enable_cache = settings.options.rayzor && settings.options.cache_enabled;
         config.cache_dir = settings.options.cache_dir.clone();
         config.extra_defines = settings.options.extra_defines.clone();
+        config.extra_defines.push("display".into());
         config.resources = std::sync::Arc::new(
             settings
                 .options
@@ -1031,6 +1033,7 @@ impl LspContext {
     ) -> Vec<LspDiagnostic> {
         let mut config = parser::preprocessor::PreprocessorConfig::default();
         config.defines.insert("eval".to_string());
+        config.defines.insert("display".into());
         config.add_defines(defines.iter());
         let text = parser::preprocessor::preprocess(source, &config);
         let import_file = filename.ends_with("import.hx");

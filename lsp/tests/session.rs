@@ -5839,6 +5839,50 @@ class Inspect {
 }
 
 #[test]
+fn hxx_props_extend_same_named_typedefs_from_another_module() {
+    let mut session = Session::start(&[
+        (
+            "Main.hx",
+            "import components.Input; class Main { static function main() Inspect.check(); }",
+        ),
+        (
+            "Component.hx",
+            "class Component<P> { public function new() {} }",
+        ),
+        (
+            "core/Input.hx",
+            "package core; typedef InputProps = {value:String}; class Input {}",
+        ),
+        (
+            "components/Input.hx",
+            "package components; typedef InputProps = {>core.Input.InputProps, own:Int}; class Input extends Component<InputProps> { public function new() super(); }",
+        ),
+        (
+            "Inspect.hx",
+            r#"
+import haxe.macro.Context;
+import haxe.macro.Expr;
+class Inspect {
+ public static macro function check():Expr {
+  var c = switch Context.getType("components.Input") { case TInst(c, _): c; case _: throw "not class"; }
+  var props = c.get().superClass.params[0];
+  switch Context.follow(props) {
+   case TAnonymous(a):
+    var names = [for (field in a.get().fields) field.name];
+    for (name in ["value", "own"]) if (names.indexOf(name) < 0) throw "missing " + name;
+   case _: throw "props are not structural";
+  }
+  return macro 1;
+ }
+}
+"#,
+        ),
+    ]);
+    let diagnostics = session.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
 fn hxx_props_do_not_treat_primitive_parameters_as_structures() {
     let mut session = Session::start(&[
         (
@@ -5862,4 +5906,35 @@ class Inspect {
     ]);
     let diagnostics = session.open("Main.hx");
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn editor_analysis_exposes_the_display_define_to_macros_and_source() {
+    let mut session = Session::start(&[
+        (
+            "Main.hx",
+            "#if display class Main { static function main() Probe.check(); } #else invalid source #end",
+        ),
+        (
+            "Probe.hx",
+            "import haxe.macro.Context; import haxe.macro.Expr; class Probe { public static macro function check():Expr { if (!Context.defined(\"display\")) Context.error(\"missing display define\", Context.currentPos()); return macro 1; } }",
+        ),
+    ]);
+    let diagnostics = session.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn qualified_type_annotations_do_not_bind_unrelated_root_types() {
+    let mut session = Session::start(&[(
+        "Main.hx",
+        "class Widget {} class Main { static function main() { var value:missing.Widget = null; trace(value); } }",
+    )]);
+    let diagnostics = session.open("Main.hx");
+    assert!(
+        diagnostics.iter().any(|item| item["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("missing.Widget"))),
+        "{diagnostics:#?}"
+    );
 }

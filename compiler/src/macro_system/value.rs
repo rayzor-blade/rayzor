@@ -23,7 +23,7 @@ pub struct MacroFunction {
 
 #[derive(Debug, Clone)]
 pub struct MacroFunctionContext {
-    pub imports: BTreeMap<String, String>,
+    pub imports: Arc<BTreeMap<String, String>>,
     pub source_file: Option<String>,
     pub owner: Option<String>,
 }

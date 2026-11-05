@@ -77,10 +77,13 @@ impl CompilationUnit {
                         extract_type_deps(&field.type_hint, deps);
                     }
                 }
-                // A lone function-type argument is parenthesised.
-                Type::Parenthesis { inner, .. } | Type::Named { inner, .. } => {
-                    extract_type_deps(inner, deps)
+                Type::Intersection { left, right, .. } => {
+                    extract_type_deps(left, deps);
+                    extract_type_deps(right, deps);
                 }
+                Type::Optional { inner, .. }
+                | Type::Parenthesis { inner, .. }
+                | Type::Named { inner, .. } => extract_type_deps(inner, deps),
                 _ => {}
             }
         }

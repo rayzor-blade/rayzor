@@ -108,7 +108,7 @@ impl GenericBuildEngine {
                     .collect(),
                 _ => Vec::new(),
             };
-            interp.set_import_map((*def.imports).clone());
+            interp.set_import_map(def.imports.clone());
             interp.call_macro_def(def, args, location)
         } else {
             interp.eval_expr(call)

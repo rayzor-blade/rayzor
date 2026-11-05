@@ -232,6 +232,32 @@ impl<'a> AstLowering<'a> {
                                     .map(|p| self.context.intern_string(p))
                                     .collect();
                                 let class_interned = self.context.intern_string(class_name);
+                                if path.package.first().is_some_and(|part| {
+                                    part.chars().next().is_some_and(char::is_uppercase)
+                                }) {
+                                    let relative = self
+                                        .context
+                                        .current_package
+                                        .and_then(|id| {
+                                            self.context.namespace_resolver.get_package(id)
+                                        })
+                                        .map(|package| {
+                                            let mut prefix = package.full_path.clone();
+                                            prefix.extend(package_parts.iter().copied());
+                                            crate::tast::namespace::QualifiedPath::new(
+                                                prefix,
+                                                class_interned,
+                                            )
+                                        });
+                                    if let Some(symbol) = relative
+                                        .and_then(|path| {
+                                            self.context.namespace_resolver.lookup_symbol(&path)
+                                        })
+                                        .and_then(|id| self.context.symbol_table.get_symbol(id))
+                                    {
+                                        return Some((symbol.id, symbol.kind));
+                                    }
+                                }
                                 let qp = crate::tast::namespace::QualifiedPath::new(
                                     package_parts,
                                     class_interned,
@@ -284,9 +310,9 @@ impl<'a> AstLowering<'a> {
                                             }
                                         }
                                     }
-                                    // If no qualified name set, accept it as a match
-                                    // (extern classes may not have qualified names set)
-                                    return Some((sym.id, sym.kind.clone()));
+                                    if sym.qualified_name.is_none() {
+                                        return Some((sym.id, sym.kind));
+                                    }
                                 }
                             }
                             None
