@@ -50,6 +50,14 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
+    fn has_macro_timeout(&self) -> bool {
+        self.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("macro ran past its time budget and was stopped")
+        })
+    }
+
     /// Partial facts only accumulate within one fingerprint. Typed facts
     /// supersede syntax facts; record offsets are local to each incoming block.
     fn join_partial(&mut self, other: &Self) {
@@ -493,6 +501,9 @@ impl EditorCache {
             .position(|entry| entry.uri == uri && entry.inputs == input_hash)
         {
             let entry = state.retained.remove(index)?;
+            if entry.snapshot.has_macro_timeout() {
+                return None;
+            }
             let result = entry.snapshot.clone();
             state.retained.push_back(entry);
             let fresh = current(&result);
@@ -501,8 +512,12 @@ impl EditorCache {
         if !persist {
             return None;
         }
-        let bytes = compiler::ir::blade::load_editor_index(path, &build_id, input_hash).ok()??;
+        let bytes = compiler::ir::blade::load_editor_index(&path, &build_id, input_hash).ok()??;
         let snapshot = Arc::new(decode_snapshot(&bytes)?);
+        if snapshot.has_macro_timeout() {
+            let _ = std::fs::remove_file(path);
+            return None;
+        }
         let heap_bytes = snapshot.heap_bytes();
         state.retain(uri, input_hash, snapshot.clone(), heap_bytes);
         let fresh = current(&snapshot);
@@ -550,7 +565,9 @@ impl EditorCache {
     }
 
     pub fn save(&self, uri: &str, input_hash: u64, snapshot: Snapshot) {
+        // Budget failures must be retried when execution conditions change.
         if !snapshot.complete
+            || snapshot.has_macro_timeout()
             || !snapshot
                 .dependencies
                 .iter()
@@ -881,6 +898,81 @@ mod tests {
         assert_eq!(retained.names.len(), 1);
         assert_eq!(retained.names[0].line, 4);
         assert!(!retained.complete);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn macro_timeouts_are_not_reused_from_memory_or_disk() {
+        let root =
+            std::env::temp_dir().join(format!("rayzor-editor-timeout-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = "class Main {}";
+        std::fs::write(root.join("Main.hx"), source).unwrap();
+        let uri = crate::context::file_uri(root.join("Main.hx").to_str().unwrap());
+        let key = SessionKey {
+            class_paths: vec![root.clone()],
+            stdlib_paths: vec![],
+            defines: vec![],
+            macros: vec![],
+            macro_budget: Some(Duration::from_secs(5)),
+            options: Default::default(),
+        };
+        let open = Notification::new(
+            "textDocument/didOpen".into(),
+            json!({"textDocument":{"uri":uri,"text":source}}),
+        );
+        let cache = EditorCache::default();
+        cache.configure(key.clone(), &root);
+        cache.track(&open);
+        let inputs = cache
+            .fingerprint(&uri, &HashMap::from([(uri.clone(), source.into())]))
+            .unwrap();
+        let timeout = Snapshot {
+            complete: true,
+            diagnostics: vec![crate::context::LspDiagnostic::error(
+                "Main.hx",
+                0,
+                0,
+                "@:build macro failed on 'Icons': macro ran past its time budget and was stopped"
+                    .into(),
+            )],
+            ..Default::default()
+        };
+        cache.save(&uri, inputs, timeout.clone());
+        assert!(cache.lookup(&uri).is_none());
+        let (_, path, build_id, _) = cache.0.lock().unwrap().identity(&uri).unwrap();
+        assert!(!path.exists());
+        compiler::ir::blade::save_editor_index(
+            &path,
+            &build_id,
+            inputs,
+            encode_snapshot(&timeout).unwrap(),
+        )
+        .unwrap();
+        assert!(path.exists());
+        let restored = EditorCache::default();
+        restored.configure(key.clone(), &root);
+        restored.track(&open);
+        assert!(restored.lookup(&uri).is_none());
+        assert!(!path.exists());
+        let real_error = Snapshot {
+            complete: true,
+            diagnostics: vec![crate::context::LspDiagnostic::error(
+                "Main.hx",
+                0,
+                0,
+                "real type error".into(),
+            )],
+            ..Default::default()
+        };
+        restored.save(&uri, inputs, real_error);
+        let reopened = EditorCache::default();
+        reopened.configure(key, &root);
+        reopened.track(&open);
+        assert_eq!(
+            reopened.lookup(&uri).unwrap().diagnostics[0].message,
+            "real type error"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
