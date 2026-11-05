@@ -140,11 +140,12 @@ impl Session {
     // notifications directly and query while the worker is still running.
     fn wait_ready(&mut self, name: &str, version: i32) -> Vec<Value> {
         let mut diagnostics = Vec::new();
+        let deadline = std::time::Instant::now() + self.timeout;
         loop {
             if let Message::Notification(notification) = self
                 .client
                 .receiver
-                .recv_timeout(self.timeout)
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
                 .expect("analysis timeout")
             {
                 match notification.method.as_str() {
@@ -5343,11 +5344,19 @@ fn configured_ashui_component_expands_and_has_element_hover() {
     let file =
         std::env::var("RAYZOR_TEST_COMPONENT_FILE").unwrap_or_else(|_| "src/ui/BoardApp.hx".into());
     let source = std::fs::read_to_string(root.join(&file)).unwrap();
-    let mut session = Session::connect(root, json!({"macroBudgetMs":0}), false);
-    session.timeout = std::time::Duration::from_secs(900);
-    let diagnostics = session.open(&file);
-    eprintln!("diagnostics for {file}: {diagnostics:#?}");
-    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let mut session = Session::connect(root, json!({"macroBudgetMs":5000}), false);
+    session.timeout = std::time::Duration::from_secs(180);
+    session.open(&file);
+    let failures: Vec<_> = session
+        .diagnostics
+        .iter()
+        .filter(|group| {
+            group["diagnostics"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        })
+        .collect();
+    assert!(failures.is_empty(), "{failures:#?}");
     let offset = source.find("<div").expect("div element") + 1;
     let before = &source[..offset];
     let at = session.at(
@@ -5597,6 +5606,19 @@ fn hxx_macro_queries_keep_enclosing_generic_constraints() {
     let mut session = Session::start(&[("Main.hx", source), ("Query.hx", HXX_QUERY)]);
     let diagnostics = session.open("Main.hx");
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn hxx_macro_queries_reject_unrelated_generic_constraints() {
+    let source = "class Main { static function main() {} } class Machine<S:String> { public function new() {} public function name(value:S):String return Query.read(() -> Type.enumConstructor(value)); }";
+    let mut session = Session::start(&[("Main.hx", source), ("Query.hx", HXX_QUERY)]);
+    let diagnostics = session.open("Main.hx");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("EnumValue"))),
+        "{diagnostics:#?}"
+    );
 }
 
 #[test]
