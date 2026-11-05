@@ -1489,7 +1489,10 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         let ctx_before = self.lowering.context.errors.len();
 
         self.lowering.macro_probe_depth += 1;
+        let recover_macro_errors =
+            std::mem::replace(&mut self.lowering.recover_macro_errors, false);
         let result = self.lowering.lower_expression(expr);
+        self.lowering.recover_macro_errors = recover_macro_errors;
         self.lowering.macro_probe_depth -= 1;
 
         let mut probe_errors: Vec<String> = self

@@ -111,6 +111,14 @@ impl CompilationUnit {
         let mut file_mir_ms = 0.0;
         let mut file_merge_ms = 0.0;
         let identity = source_file_identity(filename);
+        if self.file_macro_diagnostics.remove(&identity).is_some() {
+            self.macro_diagnostics = self
+                .file_macro_diagnostics
+                .values()
+                .flatten()
+                .cloned()
+                .collect();
+        }
         let retryable_import = skip_stdlib_merge
             && !self
                 .user_files
@@ -412,8 +420,14 @@ impl CompilationUnit {
                     );
                 }
             }
-            self.macro_diagnostics
-                .extend(expansion.diagnostics.iter().cloned());
+            if !expansion.diagnostics.is_empty() {
+                self.file_macro_diagnostics
+                    .entry(identity.clone())
+                    .or_default()
+                    .extend(expansion.diagnostics.iter().cloned());
+                self.macro_diagnostics
+                    .extend(expansion.diagnostics.iter().cloned());
+            }
             let mut macro_diagnostics: Vec<diagnostics::Diagnostic> = Vec::new();
             // The expander re-walks a dirty declaration once per iteration and
             // records the same failure each time, so the batch repeats itself.
@@ -639,8 +653,14 @@ impl CompilationUnit {
         let t_ast_lower = profile_timer(self.config.profile_typecheck);
         let lowered = lowering.lower_file(ast_file);
         let partial = lowering.partial_typed_file.take();
-        self.macro_diagnostics
-            .append(&mut lowering.editor_macro_diagnostics);
+        if !lowering.editor_macro_diagnostics.is_empty() {
+            self.file_macro_diagnostics
+                .entry(identity.clone())
+                .or_default()
+                .extend(lowering.editor_macro_diagnostics.iter().cloned());
+            self.macro_diagnostics
+                .append(&mut lowering.editor_macro_diagnostics);
+        }
         file_ast_ms = finish_profile_ms(&mut self.typecheck_timings.ast_lower_ms, t_ast_lower);
 
         // Export class_fields for subsequent compilations. A failed attempt

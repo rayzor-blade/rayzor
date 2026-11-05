@@ -286,6 +286,8 @@ pub struct CompilationUnit {
 
     /// Macro expansion origins (for IDE hints showing expanded results)
     pub macro_diagnostics: Vec<crate::macro_system::MacroDiagnostic>,
+    /// Latest macro diagnostics from each source's lowering attempt.
+    file_macro_diagnostics: BTreeMap<PathBuf, Vec<crate::macro_system::MacroDiagnostic>>,
     pub macro_expansions: Vec<crate::macro_system::expander::ExpansionOrigin>,
     /// Where each resolved name in a compiled file sits, and what it names.
     pub symbol_references: Vec<crate::tast::references::SymbolReference>,
@@ -687,6 +689,7 @@ impl CompilationUnit {
             manifest_types_by_short_name: BTreeMap::new(),
             manifest_type_params: BTreeMap::new(),
             macro_diagnostics: Vec::new(),
+            file_macro_diagnostics: BTreeMap::new(),
             macro_expansions: Vec::new(),
             symbol_references: Vec::new(),
             deferred_errors: Vec::new(),

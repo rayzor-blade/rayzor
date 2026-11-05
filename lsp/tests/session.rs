@@ -5682,3 +5682,117 @@ fn hxx_computed_conversions_keep_the_expected_inner_type() {
     let diagnostics = session.open("Main.hx");
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
+
+fn hxx_lazy_runtime_project(imported: bool, invalid: bool) -> Session {
+    let body = format!(
+        "var fraction = Query.read(() -> 0.5); var fill = Query.read(() -> fraction.get() + 1.0); trace(fill.get()); {}",
+        if invalid { "Query.reject();" } else { "" }
+    );
+    let main = if imported {
+        "import widgets.Panel; class Main { static function main() Panel.run(); }".to_string()
+    } else {
+        format!("class Main {{ static function main() {{ {body} }} }}")
+    };
+    let panel =
+        format!("package widgets; class Panel {{ public static function run() {{ {body} }} }}");
+    Session::start(&[
+        ("build.hxml", "-cp .\n-cp lib\n-main Main\n-hl out.hl\n"),
+        ("Main.hx", &main),
+        ("widgets/Panel.hx", &panel),
+        (
+            "Query.hx",
+            r#"
+import haxe.macro.Context;
+import haxe.macro.Expr;
+class Query {
+ public static macro function read(compute:Expr):Expr {
+  var ct = Context.toComplexType(Context.typeof(macro $compute()));
+  var path:TypePath = {pack:["storage"], name:"Holder", params:[TPType(ct)]};
+  return macro new $path($compute);
+ }
+ public static macro function reject():Expr {
+  throw "retained final macro failure";
+ }
+}
+"#,
+        ),
+        (
+            "lib/storage/Holder.hx",
+            "package storage; class Holder<T> { var compute:Void->T; public function new(compute:Void->T) this.compute=compute; public function get():T return compute(); }",
+        ),
+    ])
+}
+
+#[test]
+fn hxx_runtime_dependency_retries_replace_macro_diagnostics() {
+    for imported in [false, true] {
+        let mut session = hxx_lazy_runtime_project(imported, false);
+        session.open("Main.hx");
+        let errors: Vec<_> = session
+            .diagnostics
+            .iter()
+            .filter(|group| {
+                group["diagnostics"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+            })
+            .collect();
+        assert!(errors.is_empty(), "imported={imported}: {errors:#?}");
+    }
+}
+
+#[test]
+fn hxx_runtime_dependency_retries_keep_final_macro_errors() {
+    for imported in [false, true] {
+        let mut session = hxx_lazy_runtime_project(imported, true);
+        session.open("Main.hx");
+        let errors: Vec<_> = session
+            .diagnostics
+            .iter()
+            .flat_map(|group| group["diagnostics"].as_array().into_iter().flatten())
+            .filter_map(|item| item["message"].as_str())
+            .collect();
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("retained final macro failure")),
+            "imported={imported}: {errors:#?}"
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|message| message.contains("Cannot find name 'fraction'")),
+            "imported={imported}: {errors:#?}"
+        );
+    }
+}
+
+#[test]
+fn hxx_type_queries_propagate_nested_macro_errors_without_publishing_them() {
+    let mut session = Session::start(&[
+        (
+            "Main.hx",
+            "class Main { static function main() { var value = Probe.check(); trace(value); } }",
+        ),
+        (
+            "Bad.hx",
+            "import haxe.macro.Expr; class Bad { public static macro function fail():Expr { throw \"expected nested failure\"; } }",
+        ),
+        (
+            "Probe.hx",
+            r#"
+import haxe.macro.Context;
+import haxe.macro.Expr;
+class Probe {
+ public static macro function check():Expr {
+  var caught = try { Context.typeof(macro Bad.fail()); false; } catch (_:Dynamic) true;
+  if (!caught) Context.error("type query did not propagate nested failure", Context.currentPos());
+  return macro 1;
+ }
+}
+"#,
+        ),
+    ]);
+    let diagnostics = session.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
