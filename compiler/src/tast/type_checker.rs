@@ -1150,6 +1150,23 @@ impl<'a> TypeChecker<'a> {
             None => return TypeCompatibility::Incompatible,
         };
 
+        // A constrained parameter can be read through any of its bounds.
+        if !self.invariant
+            && let TypeKind::TypeParameter { constraints, .. } = &source_type
+            && !constraints.is_empty()
+        {
+            if !self.checking_conversions.insert((source, target)) {
+                return TypeCompatibility::Incompatible;
+            }
+            let bounded = constraints.iter().any(|bound| {
+                self.check_compatibility(*bound, target) != TypeCompatibility::Incompatible
+            });
+            self.checking_conversions.remove(&(source, target));
+            if bounded {
+                return TypeCompatibility::Assignable;
+            }
+        }
+
         let result = self.check_compatibility_impl(&source_type, &target_type, source, target);
         if result != TypeCompatibility::Incompatible
             || !self.checking_conversions.insert((source, target))

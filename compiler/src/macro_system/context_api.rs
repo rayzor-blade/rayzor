@@ -1648,8 +1648,8 @@ impl MacroContext {
                 }
             }
             "getBuildFields" => self.get_build_fields(location),
-            // Run once, after every module is typed, by the compile driver.
-            "onAfterTyping" | "onGenerate" => {
+            // Register by compiler phase; output callbacks do not run during analysis.
+            "onAfterTyping" | "onGenerate" | "onAfterGenerate" => {
                 if let Some(callback) = args.first() {
                     self.hooks.push((method.to_string(), callback.clone()));
                 }

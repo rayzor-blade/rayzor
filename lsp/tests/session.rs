@@ -5540,3 +5540,123 @@ fn unicode_macro_positions_follow_the_current_document() {
         assert!(hover.contains("class Widget"), "{hover}");
     }
 }
+
+#[test]
+fn hxx_after_generate_hooks_are_deferred_during_analysis() {
+    let mut session = Session::start(&[
+        ("build.hxml", "--hl out.hl\n--macro Setup.install()\n"),
+        ("Main.hx", "class Main { static function main() {} }"),
+        (
+            "Setup.hx",
+            r#"
+import haxe.macro.Context;
+class Setup {
+ public static function install() {
+  Context.onAfterGenerate(() -> Context.error("generation ran during analysis", Context.currentPos()));
+ }
+}
+"#,
+        ),
+    ]);
+    let diagnostics = session.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let errors: Vec<_> = session
+        .diagnostics
+        .iter()
+        .filter(|group| {
+            group["diagnostics"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|d| d["severity"] == 1))
+        })
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+}
+
+const HXX_QUERY: &str = r#"
+import haxe.macro.Context;
+import haxe.macro.Expr;
+class Query {
+ public static macro function read(compute:Expr):Expr {
+  Context.typeof(macro $compute());
+  return macro $compute();
+ }
+}
+"#;
+
+#[test]
+fn hxx_macro_queries_keep_sequential_locals() {
+    let source = "class Main { static function main() { var fraction = Query.read(() -> 0.5); var fill = Query.read(() -> fraction + 1.0); var rest = Query.read(() -> 1.0 - fraction); trace(fill + rest); } }";
+    let mut session = Session::start(&[("Main.hx", source), ("Query.hx", HXX_QUERY)]);
+    let diagnostics = session.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn hxx_macro_queries_keep_enclosing_generic_constraints() {
+    let source = "class Main { static function main() {} } class Machine<S:EnumValue> { public function new() {} public function name(value:S):String return Query.read(() -> Type.enumConstructor(value)); }";
+    let mut session = Session::start(&[("Main.hx", source), ("Query.hx", HXX_QUERY)]);
+    let diagnostics = session.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn hxx_superclass_props_keep_module_typedefs() {
+    let mut session = Session::start(&[
+        (
+            "Main.hx",
+            "import widgets.Input; class Main { static function main() { var valid = Inspect.props(); } }",
+        ),
+        (
+            "widgets/Component.hx",
+            "package widgets; class Component<P> { public function new() {} }",
+        ),
+        (
+            "widgets/Input.hx",
+            "package widgets; typedef BaseProps = {?enabled:Bool}; typedef InputProps = {>BaseProps, ?value:Int}; class Input extends Component<InputProps> { public function new() super(); }",
+        ),
+        (
+            "Inspect.hx",
+            r#"
+import haxe.macro.Context;
+import haxe.macro.Expr;
+class Inspect {
+ public static macro function props():Expr {
+  var props = switch Context.getType("widgets.Input") {
+   case TInst(c, _): c.get().superClass.params[0];
+   case _: throw "input is not a class";
+  }
+  switch Context.follow(props) {
+   case TAnonymous(a):
+    var names = [for (field in a.get().fields) field.name];
+    if (names.indexOf("value") < 0 || names.indexOf("enabled") < 0) throw "props fields were lost";
+   case _: throw "props are not a structure";
+  }
+  return macro true;
+ }
+}
+"#,
+        ),
+    ]);
+    let diagnostics = session.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn hxx_computed_conversions_keep_the_expected_inner_type() {
+    let mut session = Session::start(&[
+        (
+            "Main.hx",
+            "import reactive.IntoReactive; import reactive.Computed; class Brush { public function new() {} } class Main { static function set<T>(fallback:T, value:IntoReactive<T>):Void {} static function main() { var paint:IntoReactive<Brush> = Computed.make(new Brush()); set(new Brush(), Computed.make(new Brush())); } }",
+        ),
+        (
+            "reactive/Computed.hx",
+            "package reactive; abstract Computed<T>(T) { public static function make<T>(value:T):Computed<T> return cast value; }",
+        ),
+        (
+            "reactive/IntoReactive.hx",
+            "package reactive; enum ReactiveType<T> { Const(value:T); Derived(value:Computed<T>); } abstract IntoReactive<T>(ReactiveType<T>) from ReactiveType<T> { @:from public static inline function fromConst<T>(value:T):IntoReactive<T> return Const(value); @:from public static inline function fromComputed<T>(value:Computed<T>):IntoReactive<T> return Derived(value); }",
+        ),
+    ]);
+    let diagnostics = session.open("Main.hx");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
