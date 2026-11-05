@@ -2005,20 +2005,27 @@ fn extract_body_expr(file: &HaxeFile) -> Option<parser::Expr> {
 /// What `Context.parse` wraps its code in; the code starts right after it.
 const PARSE_PREFIX: &str = "class __MacroParse__ { static function __parse__() { ";
 
+#[derive(Default)]
+struct NamedFiles {
+    entries: Vec<(String, Option<Arc<str>>)>,
+    indices: std::collections::HashMap<String, usize>,
+}
+
 thread_local! {
-    /// Files named by macro positions, with any contents registered for them.
-    static NAMED_FILES: RefCell<Vec<(String, Option<Arc<str>>)>> =
-        const { RefCell::new(Vec::new()) };
+    /// Stable source IDs and any contents registered by macros.
+    static NAMED_FILES: RefCell<NamedFiles> = RefCell::new(NamedFiles::default());
 }
 
 /// The `file_id` of a position in the file `name`, adding it when new.
 fn named_file_id(name: &str) -> u32 {
     NAMED_FILES.with_borrow_mut(|files| {
-        let index = match files.iter().position(|(n, _)| n == name) {
+        let index = match files.indices.get(name).copied() {
             Some(index) => index,
             None => {
-                files.push((name.to_string(), None));
-                files.len() - 1
+                let index = files.entries.len();
+                files.entries.push((name.to_string(), None));
+                files.indices.insert(name.to_string(), index);
+                index
             }
         };
         super::errors::NAMED_FILE_ID + index as u32
@@ -2049,7 +2056,7 @@ pub(crate) fn source_position(file: &str, span: parser::Span) -> SourceLocation 
 /// `Context.registerFileContents`: the text positions in `name` find lines in.
 pub(crate) fn register_file_contents(name: &str, contents: &str) {
     let index = (named_file_id(name) - super::errors::NAMED_FILE_ID) as usize;
-    NAMED_FILES.with_borrow_mut(|files| files[index].1 = Some(Arc::from(contents)));
+    NAMED_FILES.with_borrow_mut(|files| files.entries[index].1 = Some(Arc::from(contents)));
 }
 
 /// `Context.containsDisplayPosition`: whether the display cursor lies within
@@ -2086,7 +2093,7 @@ pub(crate) fn display_pos_value() -> MacroValue {
 /// The name and registered contents of a named-file position's file.
 pub(crate) fn named_file(file_id: u32) -> Option<(String, Option<Arc<str>>)> {
     let index = file_id.checked_sub(super::errors::NAMED_FILE_ID)? as usize;
-    NAMED_FILES.with_borrow(|files| files.get(index).cloned())
+    NAMED_FILES.with_borrow(|files| files.entries.get(index).cloned())
 }
 
 fn named_file_source(file_id: u32) -> Option<Arc<str>> {
@@ -2096,7 +2103,7 @@ fn named_file_source(file_id: u32) -> Option<Arc<str>> {
     }
     let text: Arc<str> = std::fs::read_to_string(name).ok()?.into();
     let index = (file_id - super::errors::NAMED_FILE_ID) as usize;
-    NAMED_FILES.with_borrow_mut(|files| files[index].1 = Some(text.clone()));
+    NAMED_FILES.with_borrow_mut(|files| files.entries[index].1 = Some(text.clone()));
     Some(text)
 }
 
