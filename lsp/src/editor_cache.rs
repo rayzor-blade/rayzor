@@ -486,11 +486,30 @@ impl EditorCache {
     /// which of the files it read have changed since.
     fn find(&self, uri: &str) -> Option<(Arc<Snapshot>, Freshness)> {
         let mut state = self.0.lock().unwrap();
-        let (input_hash, path, build_id, persist) = state.identity(uri)?;
+        let profiling = std::env::var_os("RAYZOR_LSP_PROFILE").is_some();
+        let Some((input_hash, path, build_id, persist)) = state.identity(uri) else {
+            if profiling {
+                eprintln!(
+                    "lsp-index: {uri}: no identity (the inputs are not reusable or no configuration)"
+                );
+            }
+            return None;
+        };
         let current = |snapshot: &Snapshot| {
             let mut freshness = Freshness::Current;
             for dependency in &snapshot.dependencies {
                 if !dependency.is_current() {
+                    if profiling {
+                        eprintln!(
+                            "lsp-index: {uri}: saved index stale, changed {} {}",
+                            if dependency.is_source() {
+                                "source"
+                            } else {
+                                "macro input"
+                            },
+                            dependency.path.display()
+                        );
+                    }
                     if dependency.is_source() {
                         return Freshness::SourcesChanged;
                     }
@@ -516,8 +535,18 @@ impl EditorCache {
         if !persist {
             return None;
         }
-        let bytes = compiler::ir::blade::load_editor_index(&path, &build_id, input_hash).ok()??;
-        let snapshot = Arc::new(decode_snapshot(&bytes)?);
+        let loaded = compiler::ir::blade::load_editor_index(&path, &build_id, input_hash);
+        let Some(bytes) = loaded.as_ref().ok().and_then(Option::as_ref) else {
+            if profiling {
+                eprintln!(
+                    "lsp-index: {uri}: no saved index for this build and inputs ({}, file exists: {})",
+                    path.display(),
+                    path.exists()
+                );
+            }
+            return None;
+        };
+        let snapshot = Arc::new(decode_snapshot(bytes)?);
         if snapshot.has_macro_timeout() {
             let _ = std::fs::remove_file(path);
             return None;

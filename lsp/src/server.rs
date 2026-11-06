@@ -462,6 +462,12 @@ fn serve_worker(
                     ctx.document_versions.get(&uri).copied(),
                     "ready",
                 );
+                warm_display(
+                    &ctx,
+                    &uri,
+                    ctx.document_versions.get(&uri).copied(),
+                    &mut displays,
+                );
                 continue;
             }
             enqueue_document(connection, &ctx, &mut pending, &mut tasks, uri, true);
@@ -540,20 +546,7 @@ fn serve_worker(
                         task.version.map(|version| (task.uri.as_str(), version)),
                     );
                     analysis_status(connection, &task.uri, task.version, "ready");
-                    // The first completion in markup types the display graph's imports; do it
-                    // now, between requests, so that completion does not wait for them.
-                    if ctx.document_versions.get(&task.uri).copied() == task.version
-                        && !ctx.display_graph_ready()
-                        && !displays.iter().any(|(_, display)| display.uri == task.uri)
-                        && let Some(cursor) = ctx.first_markup_cursor(&task.uri)
-                    {
-                        let warm = crate::indexing::Task::display(
-                            ctx.fork_settings(),
-                            task.uri.clone(),
-                            cursor,
-                        );
-                        displays.push_back((cursor, warm));
-                    }
+                    warm_display(&ctx, &task.uri, task.version, &mut displays);
                 }
             }
         }
@@ -575,10 +568,9 @@ fn serve_worker(
             } else if let Some((uri, cursor)) = display.clone()
                 && !ctx.has_display_answer(&uri, cursor)
             {
-                if !displays
-                    .iter()
-                    .any(|(asked, task)| *asked == cursor && task.uri == uri)
-                {
+                // Display compiles share one graph, so they run one at a time; this request
+                // stays queued until the one in front of it, such as a warm-up, is done.
+                if displays.is_empty() {
                     let task = crate::indexing::Task::display(ctx.fork_settings(), uri, cursor);
                     displays.push_back((cursor, task));
                 }
@@ -607,6 +599,28 @@ fn serve_worker(
         deferred = waiting;
     }
     Ok(())
+}
+
+/// The first completion in markup types the display graph's imports. Called when a document is
+/// ready, from an analysis or from a saved index, this does that between requests so the
+/// completion does not wait for them.
+fn warm_display(
+    ctx: &LspContext,
+    uri: &str,
+    version: Option<i32>,
+    displays: &mut std::collections::VecDeque<(
+        u32,
+        crate::indexing::Task<crate::indexing::Display>,
+    )>,
+) {
+    if ctx.document_versions.get(uri).copied() == version
+        && !ctx.display_graph_ready()
+        && !displays.iter().any(|(_, display)| display.uri == uri)
+        && let Some(cursor) = ctx.first_markup_cursor(uri)
+    {
+        let warm = crate::indexing::Task::display(ctx.fork_settings(), uri.to_string(), cursor);
+        displays.push_back((cursor, warm));
+    }
 }
 
 /// Whether a completion request was triggered by a character that completes
@@ -1592,5 +1606,39 @@ where
         serde_json::from_value(not.params.clone()).ok()
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn displays()
+    -> std::collections::VecDeque<(u32, crate::indexing::Task<crate::indexing::Display>)> {
+        std::collections::VecDeque::new()
+    }
+
+    #[test]
+    fn a_ready_markup_document_queues_one_display_graph_warm_up() {
+        let root = std::env::temp_dir().join(format!("rayzor-warm-{}", std::process::id()));
+        let mut ctx = LspContext::new(root);
+        let markup = "file:///w/Markup.hx".to_string();
+        let plain = "file:///w/Plain.hx".to_string();
+        ctx.open_files
+            .insert(markup.clone(), "class A { var m = <div/>; }".into());
+        ctx.open_files
+            .insert(plain.clone(), "class B { var x = 1; }".into());
+        ctx.document_versions.insert(markup.clone(), 3);
+        ctx.document_versions.insert(plain.clone(), 1);
+        let mut queue = displays();
+        // No markup, or a version that has moved on, warms nothing.
+        warm_display(&ctx, &plain, Some(1), &mut queue);
+        warm_display(&ctx, &markup, Some(2), &mut queue);
+        assert!(queue.is_empty());
+        // A ready markup document asks once, inside its markup.
+        warm_display(&ctx, &markup, Some(3), &mut queue);
+        warm_display(&ctx, &markup, Some(3), &mut queue);
+        assert_eq!(queue.len(), 1);
+        assert!(queue[0].0 > 0);
     }
 }

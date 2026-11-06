@@ -74,15 +74,15 @@ impl Inputs {
                 inputs.files.insert(path.clone());
             }
             if metadata.is_dir() {
-                match std::fs::read_dir(path) {
+                match std::fs::read_dir(&path) {
                     Ok(entries) => {
                         for entry in entries {
                             let Ok(entry) = entry else {
-                                inputs.reusable = false;
+                                inputs.unreusable(&path);
                                 continue;
                             };
                             let Ok(kind) = entry.file_type() else {
-                                inputs.reusable = false;
+                                inputs.unreusable(&path);
                                 continue;
                             };
                             let name = entry.file_name();
@@ -112,7 +112,7 @@ impl Inputs {
                             }
                         }
                     }
-                    Err(_) => inputs.reusable = false,
+                    Err(_) => inputs.unreusable(&path),
                 }
             }
         }
@@ -120,6 +120,17 @@ impl Inputs {
             inputs.set_source(&crate::context::uri_to_path(uri), source);
         }
         inputs
+    }
+
+    /// A directory that cannot be read leaves what a graph or index depends on unknown.
+    fn unreusable(&mut self, path: &Path) {
+        if std::env::var_os("RAYZOR_LSP_PROFILE").is_some() {
+            eprintln!(
+                "lsp-index: inputs not reusable, cannot read {}",
+                path.display()
+            );
+        }
+        self.reusable = false;
     }
 
     pub fn set_source(&mut self, filename: &str, source: &str) {
