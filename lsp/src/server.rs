@@ -1312,6 +1312,7 @@ fn handle_references(ctx: &LspContext, params: ReferenceParams) -> Option<Vec<Lo
         pos.line + 1,
         pos.character + 1,
         params.context.include_declaration,
+        true,
     );
     let locations: Vec<Location> = found
         .into_iter()
@@ -1334,7 +1335,7 @@ fn handle_document_highlight(
     let path = uri_to_file_path(uri)?;
     let pos = doc.position;
     let highlights: Vec<DocumentHighlight> = ctx
-        .references(uri, pos.line + 1, pos.character + 1, true)
+        .references(uri, pos.line + 1, pos.character + 1, true, false)
         .into_iter()
         .filter(|(file, ..)| std::path::Path::new(file) == path)
         .map(|(_, line, column, len)| DocumentHighlight {
@@ -1372,6 +1373,9 @@ fn handle_completion(ctx: &LspContext, params: CompletionParams) -> Option<Compl
         }
         item
     };
+    if ctx.in_string_text(uri, pos.line + 1, pos.character + 1) {
+        return Some(CompletionResponse::Array(Vec::new()));
+    }
     let items = match ctx.completions(uri, pos.line + 1, pos.character + 1) {
         Completions::Members(members) => members.into_iter().map(to_item).collect(),
         Completions::Names(names) => parser::HAXE_KEYWORDS

@@ -1317,13 +1317,15 @@ impl LspContext {
     }
 
     /// Every place the symbol at a position is named across the compiled files:
-    /// (path, line, column, length), 1-based. Nothing when a use may be unrecorded.
+    /// (path, line, column, length), 1-based. Nothing when a use may be unrecorded:
+    /// a name written in markup, in this document or, with `across_files`, in any open one.
     pub fn references(
         &self,
         uri: &str,
         line: u32,
         col: u32,
         include_declaration: bool,
+        across_files: bool,
     ) -> Vec<(String, u32, u32, u32)> {
         let Some((a, sym_id)) = self.symbol_at(uri, line, col) else {
             return Vec::new();
@@ -1338,11 +1340,13 @@ impl LspContext {
         let Some(name) = name else {
             return Vec::new();
         };
-        if self
-            .open_files
-            .values()
-            .any(|text| analysis::named_in_markup(text, name))
-        {
+        let in_markup = |text: &String| analysis::named_in_markup(text, name);
+        let unrecorded = if across_files {
+            self.open_files.values().any(in_markup)
+        } else {
+            self.open_files.get(uri).is_some_and(in_markup)
+        };
+        if unrecorded {
             return Vec::new();
         }
         let mut out = Vec::new();
@@ -1412,14 +1416,15 @@ impl LspContext {
         );
     }
 
-    pub fn completions(&self, uri: &str, line: u32, col: u32) -> Completions {
-        if self
-            .open_files
+    /// Whether (line, col), 1-based, is where no name completes: inside a string's text or a
+    /// markup attribute value.
+    pub fn in_string_text(&self, uri: &str, line: u32, col: u32) -> bool {
+        self.open_files
             .get(uri)
             .is_some_and(|text| analysis::in_string_text(text, line, col))
-        {
-            return Completions::Names(Vec::new());
-        }
+    }
+
+    pub fn completions(&self, uri: &str, line: u32, col: u32) -> Completions {
         if let Some(entries) = self
             .display_cursor(uri, line, col)
             .and_then(|cursor| self.display_entries(uri, cursor))

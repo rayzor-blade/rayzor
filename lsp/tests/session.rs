@@ -2568,6 +2568,16 @@ fn navigation_crosses_files_in_the_workspace() {
     );
 }
 
+/// A string's text and a markup attribute value take no names: no keyword list either.
+#[test]
+fn nothing_completes_inside_string_text() {
+    let source = "class Main {\n static function main() {\n  var text = \"abc\";\n  var other = text;\n }\n}";
+    let mut s = Session::start(&[("Main.hx", source)]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+    assert!(s.labels("Main.hx", 2, 15).is_empty());
+    assert!(s.labels("Main.hx", 3, 17).contains(&"text".into()));
+}
+
 #[test]
 fn outline_tokens_and_completion_see_the_file() {
     let mut s = Session::start(&[("Main.hx", MAIN)]);

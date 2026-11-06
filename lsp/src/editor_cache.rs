@@ -240,6 +240,10 @@ impl Snapshot {
             return Some(response);
         }
         if method == "textDocument/completion" {
+            // A string's text takes no names.
+            if crate::analysis::in_string_text(source, line + 1, column + 1) {
+                return Some(Value::Array(Vec::new()));
+            }
             // Markup completes from a display compile, which the cache does not hold.
             if crate::server::markup_trigger(request)
                 || crate::analysis::markup_cursor(source, line + 1, column + 1).is_some()
