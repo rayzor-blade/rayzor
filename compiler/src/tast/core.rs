@@ -490,6 +490,12 @@ pub struct TypeTable {
     pub(crate) abstract_to_conversions: BTreeMap<SymbolId, Vec<AbstractConversion>>,
     pub(crate) field_access: BTreeMap<SymbolId, FieldAccessInfo>,
 
+    /// Forward references (`Placeholder` types) whose type has since been declared:
+    /// reading one gives that type.
+    placeholder_targets: BTreeMap<TypeId, TypeId>,
+    /// Qualified forward references still waiting for their declaration, by name.
+    pending_placeholders: Vec<(String, TypeId)>,
+
     /// Generic instances cache for performance
     generic_cache: BTreeMap<(TypeId, Vec<TypeId>), TypeId>,
 
@@ -632,6 +638,8 @@ impl TypeTable {
             abstract_from_conversions: BTreeMap::new(),
             abstract_to_conversions: BTreeMap::new(),
             field_access: BTreeMap::new(),
+            placeholder_targets: BTreeMap::new(),
+            pending_placeholders: Vec::new(),
             usage_stats,
             string_interner: StringInterner::new(),
             type_cache: Rc::new(TypeCache::new()),
@@ -683,6 +691,8 @@ impl TypeTable {
             abstract_from_conversions: BTreeMap::new(),
             abstract_to_conversions: BTreeMap::new(),
             field_access: BTreeMap::new(),
+            placeholder_targets: BTreeMap::new(),
+            pending_placeholders: Vec::new(),
             usage_stats,
             string_interner: StringInterner::new(),
             type_cache: Rc::new(TypeCache::new()),
@@ -719,7 +729,41 @@ impl TypeTable {
             return None;
         }
 
-        self.types.get(id.as_raw() as usize).copied()
+        let ty = self.types.get(id.as_raw() as usize).copied()?;
+        if matches!(ty.kind, TypeKind::Placeholder { .. })
+            && let Some(target) = self.placeholder_targets.get(&id)
+        {
+            return self.types.get(target.as_raw() as usize).copied();
+        }
+        Some(ty)
+    }
+
+    /// `placeholder`, a forward reference, names the declared type `target`.
+    pub(crate) fn resolve_placeholder(&mut self, placeholder: TypeId, target: TypeId) {
+        if placeholder != target {
+            self.placeholder_targets.insert(placeholder, target);
+        }
+    }
+
+    /// Keeps a qualified forward reference until a later file declares it.
+    pub(crate) fn defer_placeholder(&mut self, name: String, placeholder: TypeId) {
+        if !self.placeholder_targets.contains_key(&placeholder)
+            && !self
+                .pending_placeholders
+                .iter()
+                .any(|(_, id)| *id == placeholder)
+        {
+            self.pending_placeholders.push((name, placeholder));
+        }
+    }
+
+    pub(crate) fn take_pending_placeholders(&mut self) -> Vec<(String, TypeId)> {
+        std::mem::take(&mut self.pending_placeholders)
+    }
+
+    pub(crate) fn restore_pending_placeholders(&mut self, mut pending: Vec<(String, TypeId)>) {
+        pending.append(&mut self.pending_placeholders);
+        self.pending_placeholders = pending;
     }
 
     /// Iterate over all types in the table
@@ -1702,6 +1746,29 @@ mod tests {
         let int_type = table.get(table.int_type()).unwrap();
         assert!(matches!(int_type.kind, TypeKind::Int));
         assert!(int_type.is_primitive());
+    }
+
+    #[test]
+    fn a_resolved_forward_reference_reads_as_its_declaration() {
+        let mut table = TypeTable::new();
+        let name = table.intern_string("pkg.Declared");
+        let placeholder = table.create_type(TypeKind::Placeholder { name });
+        assert!(matches!(
+            table.get(placeholder).unwrap().kind,
+            TypeKind::Placeholder { .. }
+        ));
+        table.defer_placeholder("pkg.Declared".to_string(), placeholder);
+        assert_eq!(table.take_pending_placeholders().len(), 1);
+
+        let declared = table.string_type();
+        table.resolve_placeholder(placeholder, declared);
+        assert!(matches!(
+            table.get(placeholder).unwrap().kind,
+            TypeKind::String
+        ));
+        // A reference already resolved is not kept waiting.
+        table.defer_placeholder("pkg.Declared".to_string(), placeholder);
+        assert!(table.take_pending_placeholders().is_empty());
     }
 
     #[test]

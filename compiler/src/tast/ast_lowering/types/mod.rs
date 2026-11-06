@@ -956,99 +956,120 @@ impl<'a> AstLowering<'a> {
         Ok(placeholder_type)
     }
 
+    /// The symbol a forward-referenced type name names, once it is declared.
+    fn deferred_type_symbol(&mut self, type_name: &str) -> Option<crate::tast::SymbolId> {
+        let parts: Vec<&str> = type_name.split('.').collect();
+        if parts.len() > 1 {
+            // Qualified name like "haxe.iterators.ArrayIterator"
+            let (package_parts, name) = parts.split_at(parts.len() - 1);
+            let package: Vec<InternedString> = package_parts
+                .iter()
+                .map(|s| self.context.intern_string(s))
+                .collect();
+            let name = self.context.intern_string(name[0]);
+            let qualified_path = crate::tast::namespace::QualifiedPath::new(package, name);
+            // First try namespace resolver for qualified path lookup
+            if let Some(symbol_id) = self
+                .context
+                .namespace_resolver
+                .lookup_symbol(&qualified_path)
+            {
+                return self
+                    .context
+                    .symbol_table
+                    .get_symbol(symbol_id)
+                    .map(|symbol| symbol.id);
+            }
+        }
+        // Namespace lookup failed (or a simple name): the root scope.
+        let interned_name = self.context.intern_string(type_name);
+        self.context
+            .symbol_table
+            .lookup_symbol(ScopeId::first(), interned_name)
+            .map(|symbol| symbol.id)
+    }
+
+    /// The type a forward reference to `symbol` stands for, when `symbol` is a type.
+    fn deferred_symbol_type(&mut self, symbol_id: crate::tast::SymbolId) -> Option<TypeId> {
+        let symbol = self.context.symbol_table.get_symbol(symbol_id)?;
+        let (kind, declared) = (symbol.kind.clone(), symbol.type_id);
+        let mut types = self.context.type_table.borrow_mut();
+        Some(match kind {
+            crate::tast::SymbolKind::Class => types.create_class_type(symbol_id, Vec::new()),
+            crate::tast::SymbolKind::Interface => {
+                types.create_interface_type(symbol_id, Vec::new())
+            }
+            crate::tast::SymbolKind::Enum => types.create_enum_type(symbol_id, Vec::new()),
+            crate::tast::SymbolKind::Abstract => {
+                types.create_type(crate::tast::core::TypeKind::Abstract {
+                    symbol_id,
+                    underlying: None,
+                    type_args: Vec::new(),
+                })
+            }
+            // A typedef's own type carries its target.
+            crate::tast::SymbolKind::TypeAlias if declared.is_valid() => declared,
+            crate::tast::SymbolKind::TypeAlias => {
+                let target_type = types.dynamic_type();
+                types.create_type(crate::tast::core::TypeKind::TypeAlias {
+                    symbol_id,
+                    target_type,
+                    type_args: Vec::new(),
+                })
+            }
+            _ => return None,
+        })
+    }
+
     /// Resolve deferred type references (second pass)
     pub(crate) fn resolve_deferred_types(&mut self) -> LoweringResult<()> {
+        // A forward reference an earlier file left open may be declared by now.
+        let pending = self
+            .context
+            .type_table
+            .borrow_mut()
+            .take_pending_placeholders();
+        let mut still_pending = Vec::new();
+        for (name, placeholder) in pending {
+            match self
+                .deferred_type_symbol(&name)
+                .and_then(|symbol| self.deferred_symbol_type(symbol))
+            {
+                Some(target) => self
+                    .context
+                    .type_table
+                    .borrow_mut()
+                    .resolve_placeholder(placeholder, target),
+                None => still_pending.push((name, placeholder)),
+            }
+        }
+        self.context
+            .type_table
+            .borrow_mut()
+            .restore_pending_placeholders(still_pending);
+
         let deferred = std::mem::take(&mut self.resolution_state.deferred_resolutions);
 
         for deferred_type in deferred {
             // Try to resolve the type now that all declarations have been processed
-            // Parse the qualified type name into package path and simple name
-            let parts: Vec<&str> = deferred_type.type_name.split('.').collect();
-
-            let symbol = if parts.len() > 1 {
-                // Qualified name like "haxe.iterators.ArrayIterator"
-                let (package_parts, name) = parts.split_at(parts.len() - 1);
-                let package: Vec<InternedString> = package_parts
-                    .iter()
-                    .map(|s| self.context.intern_string(s))
-                    .collect();
-                let name = self.context.intern_string(name[0]);
-
-                let qualified_path =
-                    crate::tast::namespace::QualifiedPath::new(package.clone(), name);
-
-                // First try namespace resolver for qualified path lookup
-                if let Some(symbol_id) = self
-                    .context
-                    .namespace_resolver
-                    .lookup_symbol(&qualified_path)
-                {
-                    self.context.symbol_table.get_symbol(symbol_id)
-                } else {
-                    // Namespace lookup failed, try root scope lookup for backward compatibility
-                    let interned_name = self.context.intern_string(&deferred_type.type_name);
-                    self.context
-                        .symbol_table
-                        .lookup_symbol(ScopeId::first(), interned_name)
-                }
-            } else {
-                // Simple name - look up in symbol table root scope
-                let interned_name = self.context.intern_string(&deferred_type.type_name);
-                self.context
-                    .symbol_table
-                    .lookup_symbol(ScopeId::first(), interned_name)
-            };
-
+            let symbol = self.deferred_type_symbol(&deferred_type.type_name);
             if let Some(symbol) = symbol {
-                // Create the actual type based on the symbol kind
-                let resolved_type = match symbol.kind {
-                    crate::tast::SymbolKind::Class => self
-                        .context
-                        .type_table
-                        .borrow_mut()
-                        .create_class_type(symbol.id, Vec::new()),
-                    crate::tast::SymbolKind::Interface => self
-                        .context
-                        .type_table
-                        .borrow_mut()
-                        .create_interface_type(symbol.id, Vec::new()),
-                    crate::tast::SymbolKind::Enum => self
-                        .context
-                        .type_table
-                        .borrow_mut()
-                        .create_enum_type(symbol.id, Vec::new()),
-                    crate::tast::SymbolKind::Abstract => {
-                        self.context.type_table.borrow_mut().create_type(
-                            crate::tast::core::TypeKind::Abstract {
-                                symbol_id: symbol.id,
-                                underlying: None,
-                                type_args: Vec::new(),
-                            },
-                        )
-                    }
-                    crate::tast::SymbolKind::TypeAlias => {
-                        let target_type = self.context.type_table.borrow().dynamic_type();
-                        self.context.type_table.borrow_mut().create_type(
-                            crate::tast::core::TypeKind::TypeAlias {
-                                symbol_id: symbol.id,
-                                target_type,
-                                type_args: Vec::new(),
-                            },
-                        )
-                    }
-                    _ => {
-                        // For other symbol kinds, keep as placeholder
-                        continue;
-                    }
+                // A name that is not a type stays as it was.
+                let Some(resolved_type) = self.deferred_symbol_type(symbol) else {
+                    continue;
                 };
-
                 // Record the mapping from placeholder to resolved type
                 self.resolution_state
                     .placeholder_to_real
                     .insert(deferred_type.target_type_id, resolved_type);
-
-                // TODO: Update all references to the placeholder type
-                // For now, we've recorded the mapping which can be used later
+                // A reference to a generic type names an instantiation the
+                // placeholder does not carry, so only plain names are redirected.
+                if deferred_type.type_params.is_empty() {
+                    self.context
+                        .type_table
+                        .borrow_mut()
+                        .resolve_placeholder(deferred_type.target_type_id, resolved_type);
+                }
             } else {
                 // Still unresolved - only report errors for user-authored types.
                 // Internal/synthetic stdlib references (file_id = u32::MAX) are
@@ -1059,6 +1080,13 @@ impl<'a> AstLowering<'a> {
                 let is_internal = deferred_type.location.file_id == u32::MAX
                     && deferred_type.location.byte_offset == 0;
                 let loadable = self.user_file && deferred_type.type_name.contains('.');
+                // A qualified name another module declares later is resolved then.
+                if deferred_type.type_name.contains('.') && deferred_type.type_params.is_empty() {
+                    self.context.type_table.borrow_mut().defer_placeholder(
+                        deferred_type.type_name.clone(),
+                        deferred_type.target_type_id,
+                    );
+                }
                 if !is_internal || loadable {
                     self.context.errors.push(LoweringError::UnresolvedType {
                         type_name: deferred_type.type_name,

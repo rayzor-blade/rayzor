@@ -2113,10 +2113,96 @@ impl<'a> AstLowering<'a> {
             })
     }
 
+    /// Whether two types are the same type: named types by declaration and
+    /// (recursively) arguments, so equal arguments held under different type
+    /// ids, such as a forward reference and the type it names, still match.
     pub(crate) fn same_type(&self, a: TypeId, b: TypeId) -> bool {
+        self.same_type_at(a, b, 0)
+    }
+
+    fn same_type_at(&self, a: TypeId, b: TypeId, depth: usize) -> bool {
         let (a, b) = (self.unalias(a), self.unalias(b));
+        if a == b {
+            return true;
+        }
         let tt = self.context.type_table.borrow();
-        a == b || tt.get(a).map(|t| &t.kind) == tt.get(b).map(|t| &t.kind)
+        let (Some(left), Some(right)) = (tt.get(a).map(|t| &t.kind), tt.get(b).map(|t| &t.kind))
+        else {
+            return false;
+        };
+        if left == right {
+            return true;
+        }
+        if depth > 16 {
+            return false;
+        }
+        let arguments = |x: &[TypeId], y: &[TypeId]| {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y)
+                    .all(|(x, y)| self.same_type_at(*x, *y, depth + 1))
+        };
+        match (left, right) {
+            (
+                TypeKind::Class {
+                    symbol_id: x,
+                    type_args: p,
+                },
+                TypeKind::Class {
+                    symbol_id: y,
+                    type_args: q,
+                },
+            )
+            | (
+                TypeKind::Interface {
+                    symbol_id: x,
+                    type_args: p,
+                },
+                TypeKind::Interface {
+                    symbol_id: y,
+                    type_args: q,
+                },
+            )
+            | (
+                TypeKind::Enum {
+                    symbol_id: x,
+                    type_args: p,
+                },
+                TypeKind::Enum {
+                    symbol_id: y,
+                    type_args: q,
+                },
+            )
+            | (
+                TypeKind::Abstract {
+                    symbol_id: x,
+                    type_args: p,
+                    ..
+                },
+                TypeKind::Abstract {
+                    symbol_id: y,
+                    type_args: q,
+                    ..
+                },
+            ) => x == y && arguments(p, q),
+            (
+                TypeKind::GenericInstance {
+                    base_type: x,
+                    type_args: p,
+                    ..
+                },
+                TypeKind::GenericInstance {
+                    base_type: y,
+                    type_args: q,
+                    ..
+                },
+            ) => self.same_type_at(*x, *y, depth + 1) && arguments(p, q),
+            (TypeKind::Array { element_type: x }, TypeKind::Array { element_type: y })
+            | (TypeKind::Optional { inner_type: x }, TypeKind::Optional { inner_type: y }) => {
+                self.same_type_at(*x, *y, depth + 1)
+            }
+            _ => false,
+        }
     }
 
     /// `a ?? b` as Haxe types it: the operands' `unify_min`, out of `Null`
