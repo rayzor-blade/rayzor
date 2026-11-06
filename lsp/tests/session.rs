@@ -3145,6 +3145,9 @@ class Setup {
     assert_eq!(complete(at("title=\"a\" "), Some(" ")), ["title", "wide"]);
     assert_eq!(complete(at("<ca"), None), ["card", "row"]);
     assert!(complete(at("1 <"), Some("<")).is_empty());
+    // Display compiles share a graph: asking again, in any order, answers the same.
+    assert_eq!(complete(at("<ca"), None), ["card", "row"]);
+    assert_eq!(complete(at("title=\"a\" "), Some(" ")), ["title", "wide"]);
 }
 
 /// A file a macro read changes after analysis, as a library's shared cache

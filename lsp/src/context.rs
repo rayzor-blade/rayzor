@@ -45,6 +45,8 @@ pub struct LspContext {
     pub(crate) index_progress: Option<crate::workspace_index::IndexProgress>,
     /// The last display compile of each document, for completion in markup.
     display_answers: HashMap<String, DisplayAnswer>,
+    /// The graph display compiles share, with its imports typed once. Tasks hold the same one.
+    display_session: Rc<RefCell<Option<crate::session_cache::SessionCache>>>,
 }
 
 /// What a display compile of one document version answered at a cursor.
@@ -107,6 +109,7 @@ impl LspContext {
         task.config_problems = self.config_problems.clone();
         task.macro_budget = self.macro_budget;
         task.workspace_index = self.workspace_index.clone();
+        task.display_session = self.display_session.clone();
         task
     }
 
@@ -158,6 +161,7 @@ impl LspContext {
             workspace_index: Default::default(),
             index_progress: None,
             display_answers: HashMap::new(),
+            display_session: Default::default(),
         }
     }
 
@@ -373,14 +377,7 @@ impl LspContext {
             return syntax;
         }
 
-        let key = crate::session_cache::SessionKey {
-            class_paths: settings.class_paths.clone(),
-            stdlib_paths: config.stdlib_paths.clone(),
-            defines: settings.defines.clone(),
-            macros: settings.macros.clone(),
-            macro_budget: self.macro_budget,
-            options: settings.options.clone(),
-        };
+        let key = self.session_key(&settings, &config);
         let mut inputs = crate::session_cache::Inputs::capture(&key, &self.open_files);
         inputs.set_source(&filename, source);
         // Old document indices cannot answer against an outdated dependency
@@ -667,6 +664,21 @@ impl LspContext {
         result
     }
 
+    fn session_key(
+        &self,
+        settings: &crate::build_config::Settings,
+        config: &CompilationConfig,
+    ) -> crate::session_cache::SessionKey {
+        crate::session_cache::SessionKey {
+            class_paths: settings.class_paths.clone(),
+            stdlib_paths: config.stdlib_paths.clone(),
+            defines: settings.defines.clone(),
+            macros: settings.macros.clone(),
+            macro_budget: self.macro_budget,
+            options: settings.options.clone(),
+        }
+    }
+
     /// The configuration a document of `settings` is analysed with.
     fn analysis_config(
         &self,
@@ -807,28 +819,83 @@ impl LspContext {
     }
 
     /// Completions a macro asks for at `cursor`, a character offset into
-    /// `source` inside inline markup: the document is compiled afresh with
-    /// the cursor as its display position, and the last `EDisplay` typing
-    /// reached is answered. None when no macro asked.
+    /// `source` inside inline markup: the document is compiled with the cursor
+    /// as its display position, and the last `EDisplay` typing reached is
+    /// answered. None when no macro asked.
+    ///
+    /// Display compiles share one graph, so the imports are typed by the first and each
+    /// later one types the document alone. The graph is keyed on every other open document
+    /// but not on this one, whose own text is typed per request.
     pub fn display_completions(
         &self,
         uri: &str,
         source: &str,
         cursor: u32,
     ) -> Option<Vec<CompletionEntry>> {
+        /// A graph accumulates a symbol set per pass over the document; start over past this.
+        const PASSES: usize = 40;
         use compiler::macro_system::display;
         let filename = uri_to_path(uri);
         let settings = self.settings_for_uri(uri);
         let config = self.analysis_config(&settings, false).ok()?;
-        let (mut unit, _, _) = Self::fresh_unit(config, &settings).ok()?;
+        let key = self.session_key(&settings, &config);
+        let others: HashMap<String, String> = self
+            .open_files
+            .iter()
+            .filter(|(open, _)| open.as_str() != uri)
+            .map(|(open, text)| (open.clone(), text.clone()))
+            .collect();
+        let inputs = crate::session_cache::Inputs::capture(&key, &others);
+        // A display compile suspended mid-pass holds the shared graph; this one waits for it,
+        // so two passes do not each type the imports, and types alone only if it never frees.
+        let mut shared = self.display_session.try_borrow_mut().ok();
+        let waiting = std::time::Instant::now();
+        while shared.is_none() && waiting.elapsed() < std::time::Duration::from_secs(300) {
+            compiler::cooperative::poll();
+            shared = self.display_session.try_borrow_mut().ok();
+        }
+        let reusable = shared.as_ref().is_some_and(|held| {
+            held.as_ref().is_some_and(|session| {
+                inputs.reusable
+                    && !session.interrupted
+                    && session.passes < PASSES
+                    && session.key == key
+                    && session.inputs == inputs
+                    && session.can_extend(&filename)
+            })
+        });
+        let mut alone = None;
+        if !reusable {
+            let (unit, errors, _) = Self::fresh_unit(config, &settings).ok()?;
+            let session = crate::session_cache::SessionCache::new(key, inputs, unit, errors);
+            match shared.as_mut() {
+                Some(held) => **held = Some(session),
+                None => alone = Some(session),
+            }
+        }
+        let session = match shared.as_mut() {
+            Some(held) => held.as_mut()?,
+            None => alone.as_mut()?,
+        };
+        session.passes += 1;
+        session.interrupted = true;
+        let graph = session.unit.clone();
+        let mut unit = graph.borrow_mut();
         let display = display::at(display::Cursor {
             file: filename.clone(),
             offset: cursor,
         });
-        unit.set_editor_entry(&filename);
-        unit.add_file(source, &filename).ok()?;
-        // Errors in a document being typed do not stop its display request.
-        let _ = unit.lower_to_tast();
+        if unit.has_typed_file(&filename) {
+            // Errors in a document being typed do not stop its display request.
+            let _ = unit.relower_editor_entry(&filename, source);
+        } else {
+            unit.set_editor_entry(&filename);
+            if !unit.user_files.iter().any(|file| file.filename == filename) {
+                unit.add_file(source, &filename).ok()?;
+            }
+            let _ = unit.lower_to_tast();
+        }
+        session.interrupted = false;
         let request = display.requests().pop()?;
         if !matches!(request.kind, display::Kind::Dot | display::Kind::Structure) {
             return None;
@@ -1416,6 +1483,20 @@ impl LspContext {
         );
     }
 
+    /// Whether a display graph is built or being built, so a first completion in markup
+    /// would not pay for the imports.
+    pub(crate) fn display_graph_ready(&self) -> bool {
+        self.display_session.try_borrow().map_or(true, |held| {
+            held.as_ref().is_some_and(|session| !session.interrupted)
+        })
+    }
+
+    /// Where a display compile can be started ahead of a request: inside `uri`'s first
+    /// inline markup, when it has any.
+    pub(crate) fn first_markup_cursor(&self, uri: &str) -> Option<u32> {
+        analysis::first_markup_cursor(self.open_files.get(uri)?)
+    }
+
     /// Whether (line, col), 1-based, is where no name completes: inside a string's text or a
     /// markup attribute value.
     pub fn in_string_text(&self, uri: &str, line: u32, col: u32) -> bool {
@@ -1830,6 +1911,53 @@ mod cache_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn display_compiles_share_one_graph_and_type_the_document_alone() {
+        let workspace = Workspace::new(&[
+            (
+                "Helper.hx",
+                "class Helper { public static function f():Int return 1; }",
+            ),
+            (
+                "Main.hx",
+                "class Main { static function main() { Helper.f(); } }",
+            ),
+        ]);
+        let mut context = workspace.context();
+        let uri = workspace.compile(&mut context, "Main.hx", None);
+        let source = context.open_files[&uri].clone();
+        assert!(context.display_completions(&uri, &source, 0).is_none());
+        let graph = context
+            .display_session
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .unit
+            .clone();
+        // A later cursor and an edited document are typed in the same graph.
+        assert!(context.display_completions(&uri, &source, 5).is_none());
+        let edited = source.replace("Helper.f();", "Helper.f(); Helper.f();");
+        assert!(context.display_completions(&uri, &edited, 5).is_none());
+        {
+            let held = context.display_session.borrow();
+            let session = held.as_ref().unwrap();
+            assert!(Rc::ptr_eq(&graph, &session.unit));
+            assert_eq!(session.passes, 3);
+            assert!(!session.interrupted);
+        }
+        // What another open document holds is an input of the graph.
+        let helper = file_uri(workspace.0.join("Helper.hx").to_str().unwrap());
+        context.open_files.insert(
+            helper,
+            "class Helper { public static function f():Int return 2; }".into(),
+        );
+        assert!(context.display_completions(&uri, &edited, 5).is_none());
+        let held = context.display_session.borrow();
+        let session = held.as_ref().unwrap();
+        assert!(!Rc::ptr_eq(&graph, &session.unit));
+        assert_eq!(session.passes, 1);
     }
 
     #[test]

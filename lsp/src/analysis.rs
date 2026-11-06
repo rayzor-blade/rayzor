@@ -1032,6 +1032,15 @@ pub fn markup_cursor(text: &str, line: u32, col: u32) -> Option<u32> {
         .then(|| text[..at].chars().count() as u32)
 }
 
+/// The character offset just inside the first inline markup literal of `text`.
+pub fn first_markup_cursor(text: &str) -> Option<u32> {
+    let tokens = parser::lexer::Lexer::new(text).tokenize().ok()?;
+    let token = tokens
+        .iter()
+        .find(|token| token.kind == parser::token::TokenKind::MarkupLit)?;
+    Some(text[..token.span.start].chars().count() as u32 + 1)
+}
+
 /// Whether `name` is written as a word inside an inline markup literal of `text`.
 pub fn named_in_markup(text: &str, name: &str) -> bool {
     let Ok(tokens) = parser::lexer::Lexer::new(text).tokenize() else {
@@ -1740,6 +1749,17 @@ mod tests {
         assert!(in_string_text(text, 5, value));
         assert!(!in_string_text(text, 5, 15));
         assert!(!in_string_text(text, 5, 38));
+    }
+
+    #[test]
+    fn the_first_markup_cursor_is_inside_the_literal() {
+        let text = "class A {\n  var é = 1;\n  var m = <div/>;\n}\n";
+        let cursor = first_markup_cursor(text).unwrap() as usize;
+        assert_eq!(
+            text.chars().skip(cursor - 1).take(2).collect::<String>(),
+            "<d"
+        );
+        assert_eq!(first_markup_cursor("class A { var x = 1; }"), None);
     }
 
     #[test]

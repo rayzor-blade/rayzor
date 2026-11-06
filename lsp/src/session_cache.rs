@@ -138,6 +138,10 @@ pub(crate) struct SessionCache {
     pub diagnostics: Vec<LspDiagnostic>,
     pub native_libraries: Vec<compiler::native_libs::Library>,
     pub indexes: HashMap<String, crate::analysis::FileSymbolIndex>,
+    /// Passes a display compile has made over its document in this graph.
+    pub passes: usize,
+    /// A display pass began and did not finish, which leaves the graph half-typed.
+    pub interrupted: bool,
 }
 
 impl SessionCache {
@@ -155,6 +159,8 @@ impl SessionCache {
             diagnostics: Vec::new(),
             native_libraries: Vec::new(),
             indexes: HashMap::new(),
+            passes: 0,
+            interrupted: false,
         }
     }
 

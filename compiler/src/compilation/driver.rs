@@ -34,6 +34,45 @@ impl CompilationUnit {
         self.editor_entry = Some(identity);
     }
 
+    /// Lowers an entry file this editor graph has already typed once more, from `source`, keeping
+    /// the graph's typed imports: a request that needs another pass over the file, such as a
+    /// display compile at a new cursor or after an edit, pays for that file alone. The new pass
+    /// types over the symbols the last one declared, as a retried file does.
+    pub fn relower_editor_entry(
+        &mut self,
+        filename: &str,
+        source: &str,
+    ) -> Result<Vec<TypedFile>, Vec<CompilationError>> {
+        let identity = source_file_identity(filename);
+        let parsed = self.parse_file(filename, source).map_err(|error| {
+            vec![CompilationError {
+                message: format!("Parse error: {error}"),
+                location: SourceLocation::unknown(),
+                category: ErrorCategory::ParseError,
+                suggestion: None,
+                related_errors: Vec::new(),
+            }]
+        })?;
+        self.compiled_files.remove(&identity);
+        match self
+            .user_files
+            .iter_mut()
+            .find(|file| source_file_identity(&file.filename) == identity)
+        {
+            Some(slot) => *slot = parsed,
+            None => self.user_files.push(parsed),
+        }
+        self.file_source_by_filename
+            .insert(filename.to_string(), source.to_string());
+        let retried = self.failed_attempts.insert(filename.to_string());
+        self.set_editor_entry(filename);
+        let result = self.lower_to_tast();
+        if retried {
+            self.failed_attempts.remove(filename);
+        }
+        result
+    }
+
     /// Compile a single file using shared state (string interner, symbol table, namespace resolver, etc.)
     /// This ensures symbols from different files can see each other
     ///

@@ -540,6 +540,20 @@ fn serve_worker(
                         task.version.map(|version| (task.uri.as_str(), version)),
                     );
                     analysis_status(connection, &task.uri, task.version, "ready");
+                    // The first completion in markup types the display graph's imports; do it
+                    // now, between requests, so that completion does not wait for them.
+                    if ctx.document_versions.get(&task.uri).copied() == task.version
+                        && !ctx.display_graph_ready()
+                        && !displays.iter().any(|(_, display)| display.uri == task.uri)
+                        && let Some(cursor) = ctx.first_markup_cursor(&task.uri)
+                    {
+                        let warm = crate::indexing::Task::display(
+                            ctx.fork_settings(),
+                            task.uri.clone(),
+                            cursor,
+                        );
+                        displays.push_back((cursor, warm));
+                    }
                 }
             }
         }
