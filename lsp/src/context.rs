@@ -1316,8 +1316,8 @@ impl LspContext {
         Some((file, range.start.line + 1, range.start.character + 1))
     }
 
-    /// Every place the symbol at a position is named, across the compiled
-    /// files: (path, line, column, length), 1-based.
+    /// Every place the symbol at a position is named across the compiled files:
+    /// (path, line, column, length), 1-based. Nothing when a use may be unrecorded.
     pub fn references(
         &self,
         uri: &str,
@@ -1329,6 +1329,22 @@ impl LspContext {
             return Vec::new();
         };
         let unit = a.unit.borrow();
+        // Uses inside inline markup expressions are not recorded, so a name written in any open
+        // document's markup has uses the list would miss.
+        let name = unit
+            .symbol_table
+            .get_symbol(sym_id)
+            .and_then(|sym| unit.string_interner.get(sym.name));
+        let Some(name) = name else {
+            return Vec::new();
+        };
+        if self
+            .open_files
+            .values()
+            .any(|text| analysis::named_in_markup(text, name))
+        {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         let place = |at: compiler::tast::SourceLocation, len: u32| {
             unit.file_path_of(at.file_id)
@@ -1347,6 +1363,9 @@ impl LspContext {
         for r in unit.symbol_references.iter().filter(|r| r.symbol == sym_id) {
             out.extend(place(r.at, r.len));
         }
+        // Retried and overlapping analyses record a use more than once.
+        let mut seen = std::collections::BTreeSet::new();
+        out.retain(|found| seen.insert(found.clone()));
         out
     }
 
@@ -1355,7 +1374,11 @@ impl LspContext {
     /// The markup cursor a completion request at (line, col), 1-based, asks
     /// a display compile about.
     pub(crate) fn display_cursor(&self, uri: &str, line: u32, col: u32) -> Option<u32> {
-        analysis::markup_cursor(self.open_files.get(uri)?, line, col)
+        let text = self.open_files.get(uri)?;
+        if analysis::in_string_text(text, line, col) {
+            return None;
+        }
+        analysis::markup_cursor(text, line, col)
     }
 
     /// Whether the current version of `uri` has been display-compiled at `cursor`.
@@ -1390,6 +1413,13 @@ impl LspContext {
     }
 
     pub fn completions(&self, uri: &str, line: u32, col: u32) -> Completions {
+        if self
+            .open_files
+            .get(uri)
+            .is_some_and(|text| analysis::in_string_text(text, line, col))
+        {
+            return Completions::Names(Vec::new());
+        }
         if let Some(entries) = self
             .display_cursor(uri, line, col)
             .and_then(|cursor| self.display_entries(uri, cursor))
@@ -1463,16 +1493,17 @@ impl LspContext {
         ))
     }
 
-    /// Build document symbols for the outline panel.
-    pub fn document_symbols(&self, uri: &str) -> Option<Vec<analysis::DocumentSymbolEntry>> {
-        let a = self.analyses.get(uri)?;
-        let unit = a.unit.borrow();
-        Some(analysis::build_document_symbols(
-            &unit.symbol_table,
-            &unit.type_table,
-            &unit.string_interner,
-            a.index.file_id,
-        ))
+    /// The outline of an open document: its types and their members.
+    pub fn document_symbols(&self, uri: &str) -> Option<Vec<lsp_types::DocumentSymbol>> {
+        let source = self.open_files.get(uri)?;
+        let settings = self.settings_for_uri(uri);
+        let defines: Vec<_> = settings
+            .defines
+            .iter()
+            .chain(&settings.options.extra_defines)
+            .cloned()
+            .collect();
+        crate::outline::document_symbols(source, &uri_to_path(uri), &defines)
     }
 
     /// The signature of the call whose argument list holds (line, col),
@@ -1699,21 +1730,11 @@ fn line_column(text: &str, offset: usize) -> (u32, u32) {
 }
 
 pub(crate) fn uri_to_path(uri: &str) -> String {
-    if let Some(path) = uri.strip_prefix("file://") {
-        path.replace("%20", " ")
-    } else {
-        uri.to_string()
-    }
+    crate::uri::path_of(uri).unwrap_or_else(|| uri.to_string())
 }
 
 pub(crate) fn file_uri(path: &str) -> String {
-    format!(
-        "file://{}",
-        path.replace('%', "%25")
-            .replace(' ', "%20")
-            .replace('#', "%23")
-            .replace('?', "%3F")
-    )
+    crate::uri::uri_of(path)
 }
 
 #[cfg(test)]

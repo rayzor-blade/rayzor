@@ -73,10 +73,26 @@ impl Session {
         session
     }
 
+    /// The `file:` URI of `name`, percent-encoded as editors send it.
     fn uri(&self, name: &str) -> String {
-        format!("file://{}/{}", self.root.display(), name)
-            .trim_end_matches('/')
-            .to_string()
+        let encode = |path: &str| {
+            path.bytes()
+                .map(|byte| {
+                    if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+                        (byte as char).to_string()
+                    } else {
+                        format!("%{byte:02X}")
+                    }
+                })
+                .collect::<String>()
+        };
+        format!(
+            "file://{}/{}",
+            encode(&self.root.display().to_string()),
+            encode(name)
+        )
+        .trim_end_matches('/')
+        .to_string()
     }
 
     fn notify(&self, method: &str, params: Value) {
@@ -1026,6 +1042,52 @@ fn imported_type_docs_and_named_signatures_survive_across_modules() {
     assert!(
         hover.contains("Updated box documentation.") && !hover.contains("A reusable box."),
         "{hover}"
+    );
+}
+
+/// A type another module declares later is named by a forward reference. Once declared, the
+/// reference is that type, whichever order the modules were lowered in, so the conversion that
+/// binds the generic argument from the source is the one chosen.
+#[test]
+fn forward_referenced_types_in_generic_conversions_resolve_to_their_declaration() {
+    let prop = "package ui;\nabstract Prop<T>(Int) {\n public static inline var Background:Prop<ui.Zbrush> = cast 1;\n public function new(id:Int) this = id;\n}";
+    let computed = "package ui;\nclass Computed<T> { public var value:T; public function new(value:T) this.value = value; }";
+    let reactive = "package ui;\nabstract Reactive<T>(Array<T>) {\n @:from public static function fromConst<T>(value:T):Reactive<T> return cast [value];\n @:from public static function fromComputed<T>(source:Computed<T>):Reactive<T> return cast [source.value];\n}";
+    let node = "package ui;\nclass Node {\n public function new() {}\n public function put<T>(prop:Prop<T>, value:Reactive<T>):Void {}\n}";
+    let brush =
+        "package ui;\nclass Zbrush {\n public var slot:Prop<Zbrush>;\n public function new() {}\n}";
+    let main = "import ui.Node;\nimport ui.Prop;\nimport ui.Zbrush;\nimport ui.Computed;\nclass Main {\n static function main() {\n  var node = new Node();\n  node.put(Prop.Background, new Computed(new Zbrush()));\n }\n}";
+    let mut s = Session::start(&[
+        ("Main.hx", main),
+        ("ui/Prop.hx", prop),
+        ("ui/Computed.hx", computed),
+        ("ui/Reactive.hx", reactive),
+        ("ui/Node.hx", node),
+        ("ui/Zbrush.hx", brush),
+    ]);
+    assert!(s.open("Main.hx").is_empty(), "{:#?}", s.diagnostics);
+}
+
+#[test]
+fn workspace_paths_with_reserved_characters_load_the_project() {
+    let main = "class Main {\n static function main() {\n  var total:Int = \"text\";\n }\n}";
+    let root =
+        std::env::temp_dir().join(format!("rayzor lsp #1 (é) 100%+&-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("Main.hx"), main).unwrap();
+    let mut s = Session::connect(root, json!({}), true);
+    // A project that did not load would report nothing for the mistake.
+    s.open("Main.hx");
+    assert!(
+        s.diagnostics
+            .iter()
+            .flat_map(|published| published["diagnostics"].as_array().into_iter().flatten())
+            .any(|d| d["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("found `String`")),
+        "{:#?}",
+        s.diagnostics
     );
 }
 
@@ -2522,9 +2584,25 @@ fn outline_tokens_and_completion_see_the_file() {
         .iter()
         .map(|s| s["name"].as_str().unwrap())
         .collect();
-    for name in ["Main", "add", "main"] {
-        assert!(names.contains(&name), "{names:?}");
+    assert!(names.contains(&"Main"), "{names:?}");
+    // Members sit under their type, not beside it, and locals are not listed.
+    let main = symbols
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "Main")
+        .unwrap();
+    let members: Vec<_> = main["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    for name in ["add", "main"] {
+        assert!(members.contains(&name), "{members:?}");
+        assert!(!names.contains(&name), "{names:?}");
     }
+    assert!(main["range"]["end"]["line"].as_u64() > main["range"]["start"]["line"].as_u64());
 
     let tokens = s.request(
         "textDocument/semanticTokens/full",

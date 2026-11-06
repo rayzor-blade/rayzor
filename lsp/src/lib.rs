@@ -16,6 +16,7 @@ mod documentation;
 mod editor_cache;
 mod indexing;
 mod local_preview;
+mod outline;
 mod project;
 mod server;
 mod session_cache;
@@ -23,6 +24,7 @@ mod stdlib;
 mod structural_fields;
 mod transport;
 mod type_references;
+mod uri;
 mod workspace_index;
 
 pub use server::{run_lsp, serve, spawn_session};

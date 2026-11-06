@@ -534,6 +534,7 @@ impl CompilationUnit {
                 );
             }
             self.macro_expansions.extend(expansion.expansion_origins);
+            self.dedupe_macro_expansions();
             self.macro_hooks.extend(expansion.hooks);
             // A type named only in a macro's output (`new $tPath(...)`) was
             // never seen by the import scan; its module loads before lowering.
@@ -715,6 +716,7 @@ impl CompilationUnit {
         // warnings these are not gated by `emit_safety_warnings`. (Last use of
         // `lowering` so its &mut borrow ends before the diagnostics push.)
         let array_warnings = lowering.take_empty_array_warnings();
+        self.dedupe_macro_expansions();
         if let Some(partial) = &partial {
             self.record_source_symbols(partial, filename, source);
         }
@@ -1432,6 +1434,20 @@ impl CompilationUnit {
                 .any(haxe_file_source_has_macro_hook)
     }
 
+    /// Retrying a file expands the same calls again; each expansion is kept once.
+    fn dedupe_macro_expansions(&mut self) {
+        let mut seen = std::collections::BTreeSet::new();
+        self.macro_expansions.retain(|origin| {
+            seen.insert((
+                origin.macro_name.clone(),
+                origin.call_site.file_id,
+                origin.call_span.start,
+                origin.call_span.end,
+                origin.expanded_text.clone(),
+            ))
+        });
+    }
+
     fn record_source_symbols(&mut self, typed_file: &TypedFile, filename: &str, source: &str) {
         crate::tast::definition_locations::record_definition_locations(
             typed_file,
@@ -1450,6 +1466,11 @@ impl CompilationUnit {
                 &self.string_interner,
                 &self.type_table.borrow(),
             );
+            // A retry of the file records its references again: they replace the earlier attempt's.
+            let files: std::collections::BTreeSet<u32> =
+                references.iter().map(|r| r.at.file_id).collect();
+            self.symbol_references
+                .retain(|r| !files.contains(&r.at.file_id));
             self.symbol_references.extend(references);
         }
     }

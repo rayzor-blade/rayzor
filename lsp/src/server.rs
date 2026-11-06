@@ -18,16 +18,15 @@ use lsp_types::request::{
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemTag, CompletionOptions, CompletionParams,
     CompletionResponse, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
-    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams,
-    Location, MarkupContent, MarkupKind, OneOf, ParameterInformation, ParameterLabel, Position,
-    PublishDiagnosticsParams, Range, ReferenceParams, SemanticToken, SemanticTokenModifier,
-    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
-    SignatureHelpParams, SignatureInformation, TextDocumentSyncCapability, TextDocumentSyncKind,
-    Uri,
+    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
+    Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
+    OneOf, ParameterInformation, ParameterLabel, Position, PublishDiagnosticsParams, Range,
+    ReferenceParams, SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp,
+    SignatureHelpOptions, SignatureHelpParams, SignatureInformation, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Uri,
 };
 use std::path::PathBuf;
 
@@ -1123,7 +1122,7 @@ fn declaration_snapshot(
         .find(|entry| entry.type_kind.is_some())
         .map(|entry| entry.qualified.clone());
     let mut completions = Vec::new();
-    let mut outline = Vec::new();
+    let outline = crate::outline::document_symbols(source, &filename, &defines);
     for declaration in declarations {
         let mut hover = format!("```haxe\n{}\n```", declaration.signature);
         if let Some(doc) = &declaration.documentation {
@@ -1151,7 +1150,6 @@ fn declaration_snapshot(
             _ => CompletionItemKind::FIELD,
         };
         completions.push(json!({"label":declaration.name,"kind":kind,"detail":declaration.signature,"documentation":declaration.documentation.map(|doc| json!({"kind":"markdown","value":doc}))}));
-        outline.push(json!({"name":declaration.name,"detail":declaration.signature,"kind":declaration.kind,"range":declaration.range,"selectionRange":declaration.range}));
         snapshot.names.push(crate::editor_cache::Name {
             line: declaration.range.start.line,
             column: declaration.range.start.character,
@@ -1168,9 +1166,11 @@ fn declaration_snapshot(
         "textDocument/completion",
         json!({"isIncomplete":true,"items":completions}),
     );
-    snapshot
-        .document
-        .insert("textDocument/documentSymbol", json!(outline));
+    if let Some(outline) = outline {
+        snapshot
+            .document
+            .insert("textDocument/documentSymbol", json!(outline));
+    }
     snapshot.document.mark_syntax();
     (snapshot, subject)
 }
@@ -1317,7 +1317,7 @@ fn handle_references(ctx: &LspContext, params: ReferenceParams) -> Option<Vec<Lo
         .into_iter()
         .filter_map(|(file, line, column, len)| {
             Some(Location {
-                uri: format!("file://{}", file).parse().ok()?,
+                uri: crate::uri::uri_of(&file).parse().ok()?,
                 range: name_range(line, column, len),
             })
         })
@@ -1439,38 +1439,7 @@ fn handle_document_symbols(
     params: DocumentSymbolParams,
 ) -> Option<DocumentSymbolResponse> {
     let uri = params.text_document.uri.as_str();
-    let entries = ctx.document_symbols(uri)?;
-
-    let symbols: Vec<DocumentSymbol> = entries.into_iter().map(doc_entry_to_lsp).collect();
-
-    Some(DocumentSymbolResponse::Nested(symbols))
-}
-
-#[allow(deprecated)] // DocumentSymbol::deprecated field
-fn doc_entry_to_lsp(entry: analysis::DocumentSymbolEntry) -> DocumentSymbol {
-    let range = Range::new(
-        Position::new(entry.line.saturating_sub(1), entry.col.saturating_sub(1)),
-        Position::new(
-            entry.end_line.saturating_sub(1),
-            entry.end_col.saturating_sub(1),
-        ),
-    );
-    let children = if entry.children.is_empty() {
-        None
-    } else {
-        Some(entry.children.into_iter().map(doc_entry_to_lsp).collect())
-    };
-
-    DocumentSymbol {
-        name: entry.name,
-        detail: Some(entry.detail),
-        kind: entry.kind,
-        tags: None,
-        deprecated: None,
-        range,
-        selection_range: range,
-        children,
-    }
+    Some(DocumentSymbolResponse::Nested(ctx.document_symbols(uri)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,8 +1549,7 @@ fn handle_inlay_hints(ctx: &LspContext, params: InlayHintParams) -> Option<Vec<I
 // ---------------------------------------------------------------------------
 
 fn uri_to_file_path(uri: &str) -> Option<PathBuf> {
-    uri.strip_prefix("file://")
-        .map(|p| PathBuf::from(p.replace("%20", " ")))
+    crate::uri::path_of(uri).map(PathBuf::from)
 }
 
 fn cast_request<R>(req: &Request) -> Option<(RequestId, R::Params)>

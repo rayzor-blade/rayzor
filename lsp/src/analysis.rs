@@ -889,100 +889,6 @@ pub fn build_semantic_tokens(
 // Document symbols — outline view
 // ---------------------------------------------------------------------------
 
-/// A symbol for the document outline (breadcrumbs, symbol tree).
-pub struct DocumentSymbolEntry {
-    pub name: String,
-    pub detail: String,
-    pub kind: lsp_types::SymbolKind,
-    pub line: u32,
-    pub col: u32,
-    pub end_line: u32,
-    pub end_col: u32,
-    pub children: Vec<DocumentSymbolEntry>,
-}
-
-/// Build document symbols for the outline panel.
-pub fn build_document_symbols(
-    symbol_table: &SymbolTable,
-    type_table: &Rc<RefCell<TypeTable>>,
-    interner: &StringInterner,
-    file_id: u32,
-) -> Vec<DocumentSymbolEntry> {
-    let tt = type_table.borrow();
-
-    // Collect top-level declarations (classes, enums, functions, typedefs)
-    // TODO: nest methods/fields under their parent class using scope_tree
-    let mut top_level = Vec::new();
-
-    for sym in symbol_table.all_symbols() {
-        if sym.definition_location.file_id != file_id || !sym.definition_location.is_valid() {
-            continue;
-        }
-        if sym.flags.contains(SymbolFlags::COMPILER_GENERATED) {
-            continue;
-        }
-
-        let name = match interner.get(sym.name) {
-            Some(n) if !n.is_empty() && !n.starts_with("__") => n.to_string(),
-            _ => continue,
-        };
-        let detail = format_type_name(sym.type_id, &tt, interner, symbol_table);
-        let loc = sym.definition_location;
-
-        let entry = DocumentSymbolEntry {
-            name,
-            detail,
-            kind: symbol_kind_to_lsp_symbol(sym.kind),
-            line: loc.line,
-            col: loc.column,
-            end_line: loc.line,
-            end_col: loc.column + interner.get(sym.name).map(|n| n.len() as u32).unwrap_or(1),
-            children: Vec::new(),
-        };
-
-        match sym.kind {
-            SymbolKind::Class
-            | SymbolKind::Interface
-            | SymbolKind::Enum
-            | SymbolKind::Abstract
-            | SymbolKind::TypeAlias
-            | SymbolKind::Module => {
-                top_level.push((sym.id, entry));
-            }
-            SymbolKind::Function
-            | SymbolKind::Field
-            | SymbolKind::Property
-            | SymbolKind::EnumVariant
-            | SymbolKind::Variable => {
-                // Try to find parent class
-                // For now, add as top-level (proper nesting needs scope_tree)
-                top_level.push((sym.id, entry));
-            }
-            _ => {}
-        }
-    }
-
-    top_level.into_iter().map(|(_, e)| e).collect()
-}
-
-fn symbol_kind_to_lsp_symbol(kind: SymbolKind) -> lsp_types::SymbolKind {
-    match kind {
-        SymbolKind::Class => lsp_types::SymbolKind::CLASS,
-        SymbolKind::Interface => lsp_types::SymbolKind::INTERFACE,
-        SymbolKind::Enum => lsp_types::SymbolKind::ENUM,
-        SymbolKind::EnumVariant => lsp_types::SymbolKind::ENUM_MEMBER,
-        SymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
-        SymbolKind::Variable | SymbolKind::Parameter => lsp_types::SymbolKind::VARIABLE,
-        SymbolKind::Field => lsp_types::SymbolKind::FIELD,
-        SymbolKind::Property => lsp_types::SymbolKind::PROPERTY,
-        SymbolKind::TypeAlias | SymbolKind::Abstract => lsp_types::SymbolKind::STRUCT,
-        SymbolKind::TypeParameter => lsp_types::SymbolKind::TYPE_PARAMETER,
-        SymbolKind::Module => lsp_types::SymbolKind::NAMESPACE,
-        SymbolKind::Macro => lsp_types::SymbolKind::FUNCTION,
-        _ => lsp_types::SymbolKind::VARIABLE,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Signature help — function parameter info
 // ---------------------------------------------------------------------------
@@ -1124,6 +1030,54 @@ pub fn markup_cursor(text: &str, line: u32, col: u32) -> Option<u32> {
                 && at < token.span.end
         })
         .then(|| text[..at].chars().count() as u32)
+}
+
+/// Whether `name` is written as a word inside an inline markup literal of `text`.
+pub fn named_in_markup(text: &str, name: &str) -> bool {
+    let Ok(tokens) = parser::lexer::Lexer::new(text).tokenize() else {
+        return true;
+    };
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    tokens
+        .iter()
+        .filter(|token| token.kind == parser::token::TokenKind::MarkupLit)
+        .filter_map(|token| text.get(token.span.start..token.span.end))
+        .any(|markup| {
+            markup.match_indices(name).any(|(at, _)| {
+                let before = markup[..at].bytes().next_back();
+                let after = markup.as_bytes().get(at + name.len()).copied();
+                !before.is_some_and(word) && !after.is_some_and(word)
+            })
+        })
+}
+
+/// Whether the cursor at (line, col) is inside a string literal's text, or inside a
+/// double-quoted attribute value of inline markup. Neither takes names: a string is text
+/// and a markup attribute is read by the macros that own it.
+pub fn in_string_text(text: &str, line: u32, col: u32) -> bool {
+    let Some(at) = offset_of(text, line, col) else {
+        return false;
+    };
+    let Ok(tokens) = parser::lexer::Lexer::new(text).tokenize() else {
+        return false;
+    };
+    let Some(token) = tokens
+        .iter()
+        .find(|token| token.span.start < at && at < token.span.end)
+    else {
+        return false;
+    };
+    match token.kind {
+        // A single-quoted string interpolates: `'$name'` and `'${expr}'` take names.
+        parser::token::TokenKind::StringLit => text[token.span.start..].starts_with('"'),
+        parser::token::TokenKind::MarkupLit => {
+            // An odd number of quotes before the cursor on its line: inside an attribute value.
+            let line_start = text[..at].rfind('\n').map_or(0, |newline| newline + 1);
+            let line_start = line_start.max(token.span.start);
+            text[line_start..at].matches('"').count() % 2 == 1
+        }
+        _ => false,
+    }
 }
 
 /// When the cursor at (line, col) follows `receiver.` and part of a member
@@ -1770,6 +1724,33 @@ pub fn enclosing_call(text: &str, line: u32, col: u32) -> Option<CallAtCursor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strings_and_markup_attribute_values_take_no_names() {
+        let text = "class A {\n  function f() {\n    var s = \"ab\";\n    var t = 'x$y';\n    var m = <div class=\"a b\" id={s}>x</div>;\n  }\n}\n";
+        // Inside "ab": between a and b, and after b; not before the quote or after it.
+        assert!(in_string_text(text, 3, 15));
+        assert!(in_string_text(text, 3, 16));
+        assert!(!in_string_text(text, 3, 13));
+        assert!(!in_string_text(text, 3, 17));
+        // A single-quoted string interpolates, so it still takes names.
+        assert!(!in_string_text(text, 4, 16));
+        // Inside the attribute value, but not in the tag name or an attribute expression.
+        let value = text.lines().nth(4).unwrap().find("a b").unwrap() as u32 + 2;
+        assert!(in_string_text(text, 5, value));
+        assert!(!in_string_text(text, 5, 15));
+        assert!(!in_string_text(text, 5, 38));
+    }
+
+    #[test]
+    fn a_name_in_markup_is_found_as_a_whole_word() {
+        let text = "class A {\n  function f(drag:Int, dragon:Int) {\n    return <div left={drag} top={dragon.x}/>;\n  }\n}\n";
+        assert!(named_in_markup(text, "drag"));
+        assert!(named_in_markup(text, "dragon"));
+        assert!(!named_in_markup(text, "drago"));
+        assert!(!named_in_markup(text, "left2"));
+        assert!(!named_in_markup("class A { var drag:Int; }", "drag"));
+    }
 
     #[test]
     fn offset_only_locations_are_not_editor_coordinates() {
