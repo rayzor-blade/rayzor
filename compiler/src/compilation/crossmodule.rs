@@ -64,7 +64,7 @@ impl CompilationUnit {
             std::collections::BTreeMap::new();
         for module in &self.import_mir_modules {
             for global in module.globals.values() {
-                if !is_forward_global(global) {
+                if !global.is_forward_stub() {
                     defined.entry(global.name.clone()).or_insert(global.id);
                 }
             }
@@ -73,7 +73,7 @@ impl CompilationUnit {
             let redirects: std::collections::BTreeMap<IrGlobalId, IrGlobalId> = module
                 .globals
                 .values()
-                .filter(|global| is_forward_global(global))
+                .filter(|global| global.is_forward_stub())
                 .filter_map(|global| match defined.get(&global.name) {
                     Some(&real) => Some((global.id, real)),
                     None => {
@@ -849,7 +849,7 @@ impl CompilationUnit {
         }
         for global in import_mir.globals.values() {
             // A forward global stands in for a static its owner defines later.
-            if is_forward_global(global) {
+            if global.is_forward_stub() {
                 continue;
             }
             self.import_external_globals
@@ -880,11 +880,6 @@ impl CompilationUnit {
 
         self.import_mir_modules.push(import_mir);
     }
-}
-
-/// A global declared in place of a static another module defines.
-fn is_forward_global(global: &crate::ir::IrGlobal) -> bool {
-    global.linkage == crate::ir::Linkage::External && global.initializer.is_none()
 }
 
 #[cfg(test)]

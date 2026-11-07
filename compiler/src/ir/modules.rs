@@ -105,6 +105,13 @@ pub struct IrGlobal {
     pub source_location: IrSourceLocation,
 }
 
+impl IrGlobal {
+    /// A global declared in place of a static another module defines.
+    pub fn is_forward_stub(&self) -> bool {
+        self.linkage == Linkage::External && self.initializer.is_none()
+    }
+}
+
 /// Type definition (for structs, enums, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IrTypeDef {

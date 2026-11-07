@@ -50,8 +50,8 @@ impl<'a> HirToMirContext<'a> {
             eprintln!("[globals] __init__ will initialise: {:?}", dyn_syms);
         }
         // `__init__` materialises globals into backend storage: reset every
-        // global to its declared initializer/default, then evaluate dynamic
-        // initializers in source order. It runs at every module load so statics
+        // global to its declared initializer/default (a forward global belongs to
+        // its owner, which resets it), then evaluate dynamic initializers in source order. It runs at every module load so statics
         // behave like standard Haxe and never retain stale values.
         let init_sig = FunctionSignatureBuilder::new()
             .returns(IrType::Void)
@@ -80,6 +80,7 @@ impl<'a> HirToMirContext<'a> {
             .module
             .globals
             .values()
+            .filter(|global| !global.is_forward_stub())
             .map(|global| {
                 (
                     global.id,
