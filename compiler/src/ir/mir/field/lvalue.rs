@@ -132,6 +132,13 @@ impl<'a> HirToMirContext<'a> {
                         }
                         None
                     });
+                let global_id = global_id.or_else(|| {
+                    if is_local {
+                        None
+                    } else {
+                        self.forward_static_global(*symbol)
+                    }
+                });
                 if let Some(global_id) = global_id {
                     self.builder.build_store_global(global_id, value);
                     // Untrack from drop system — value escapes to global storage
@@ -983,6 +990,7 @@ impl<'a> HirToMirContext<'a> {
                     .find(|g| g.name.ends_with(&format!(".{}", field_name_str)))
                     .map(|g| g.id)
             });
+            let global_lookup = global_lookup.or_else(|| self.forward_static_global(*field));
             if let Some(global_id) = global_lookup {
                 self.builder.build_store_global(global_id, value);
                 return Some(value);

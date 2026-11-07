@@ -52,6 +52,60 @@ impl CompilationUnit {
             .map(str::to_owned)
     }
 
+    /// Post-load fixup: point each forward global at the definition of the static it stands for.
+    ///
+    /// A module that read a static its owner had not lowered yet (modules waiting on each
+    /// other's statics) read an external global named as the owner names it. Every import is
+    /// loaded now, so the owner's global is found by name and the loads and stores are redirected
+    /// to it; the forward global is dropped. One whose owner never lowered is kept, and said so.
+    pub(crate) fn fixup_forward_globals(&mut self) {
+        use crate::ir::{IrGlobalId, IrInstruction};
+        let mut defined: std::collections::BTreeMap<String, IrGlobalId> =
+            std::collections::BTreeMap::new();
+        for module in &self.import_mir_modules {
+            for global in module.globals.values() {
+                if !is_forward_global(global) {
+                    defined.entry(global.name.clone()).or_insert(global.id);
+                }
+            }
+        }
+        for module in &mut self.import_mir_modules {
+            let redirects: std::collections::BTreeMap<IrGlobalId, IrGlobalId> = module
+                .globals
+                .values()
+                .filter(|global| is_forward_global(global))
+                .filter_map(|global| match defined.get(&global.name) {
+                    Some(&real) => Some((global.id, real)),
+                    None => {
+                        eprintln!(
+                            "warning: static `{}` is read by `{}` but no module defines it",
+                            global.name, module.name
+                        );
+                        None
+                    }
+                })
+                .collect();
+            if redirects.is_empty() {
+                continue;
+            }
+            for function in module.functions.values_mut() {
+                for block in function.cfg.blocks.values_mut() {
+                    for instruction in &mut block.instructions {
+                        if let IrInstruction::LoadGlobal { global_id, .. }
+                        | IrInstruction::StoreGlobal { global_id, .. } = instruction
+                            && let Some(&real) = redirects.get(global_id)
+                        {
+                            *global_id = real;
+                        }
+                    }
+                }
+            }
+            for forward in redirects.keys() {
+                module.globals.remove(forward);
+            }
+        }
+    }
+
     /// Post-load fixup: resolve stale cross-module function references in all import modules.
     /// During renumbering, some refs couldn't be resolved because the target module hadn't
     /// been loaded yet. Now all modules are loaded and stdlib_function_name_map is complete.
@@ -794,6 +848,10 @@ impl CompilationUnit {
             }
         }
         for global in import_mir.globals.values() {
+            // A forward global stands in for a static its owner defines later.
+            if is_forward_global(global) {
+                continue;
+            }
             self.import_external_globals
                 .entry(global.name.clone())
                 .or_insert((global.id, global.ty.clone()));
@@ -822,6 +880,11 @@ impl CompilationUnit {
 
         self.import_mir_modules.push(import_mir);
     }
+}
+
+/// A global declared in place of a static another module defines.
+fn is_forward_global(global: &crate::ir::IrGlobal) -> bool {
+    global.linkage == crate::ir::Linkage::External && global.initializer.is_none()
 }
 
 #[cfg(test)]

@@ -1073,6 +1073,7 @@ impl CompilationUnit {
             &self.import_param_defaults,
             // Only the import loop passes skip_stdlib_merge, and it retries.
             retryable_import,
+            self.forward_statics,
         ) {
             Ok(result) => result,
             Err(errors) => {

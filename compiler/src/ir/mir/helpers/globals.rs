@@ -105,6 +105,50 @@ impl<'a> HirToMirContext<'a> {
             .or_else(|| self.external_globals.get(qn).map(|(gid, _)| *gid))
     }
 
+    /// A forward declaration of the static field `symbol` of a module not lowered yet: an external
+    /// global named as its owner will name it, which the import loop points at the owner's
+    /// definition once every import is loaded. None outside that pass or for anything but a
+    /// static field.
+    pub(crate) fn forward_static_global(&mut self, symbol: SymbolId) -> Option<IrGlobalId> {
+        if !self.forward_statics {
+            return None;
+        }
+        let sym = self.symbol_table.get_symbol(symbol)?;
+        let is_static_field = sym.kind == crate::tast::SymbolKind::Field
+            || (sym.kind == crate::tast::SymbolKind::Variable
+                && sym
+                    .flags
+                    .contains(crate::tast::symbols::SymbolFlags::STATIC));
+        if !is_static_field {
+            return None;
+        }
+        let name = self.string_interner.get(sym.qualified_name?)?.to_owned();
+        let type_id = sym.type_id;
+        if let Some(existing) = self
+            .builder
+            .module
+            .globals
+            .values()
+            .find(|global| global.name == name)
+        {
+            return Some(existing.id);
+        }
+        let ty = self.convert_type(type_id);
+        let id = self.builder.module.alloc_global_id();
+        self.builder.module.add_global(IrGlobal {
+            id,
+            name,
+            symbol_id: symbol,
+            ty,
+            initializer: None,
+            mutable: true,
+            linkage: Linkage::External,
+            alignment: None,
+            source_location: IrSourceLocation::unknown(),
+        });
+        Some(id)
+    }
+
     /// The type of a global by id: this module's, or one another module
     /// owns that a static field of this module aliases.
     pub(crate) fn global_type_of(&self, gid: IrGlobalId) -> IrType {

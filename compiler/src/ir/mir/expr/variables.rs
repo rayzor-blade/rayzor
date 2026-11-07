@@ -589,6 +589,12 @@ impl<'a> HirToMirContext<'a> {
             if is_static_field
                 && (self.retryable_module || self.builder.module.source_file.contains("haxe-std"))
             {
+                // Modules that wait on each other's statics cannot be ordered: the last pass reads
+                // the owner's through a forward global.
+                if let Some(global_id) = self.forward_static_global(*symbol) {
+                    let global_type = self.global_type_of(global_id);
+                    return self.builder.build_load_global(global_id, global_type);
+                }
                 self.errors.push(LoweringError {
                     message: format!(
                         "static `{}` is not available to this module",

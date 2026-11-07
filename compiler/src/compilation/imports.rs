@@ -1150,10 +1150,16 @@ impl CompilationUnit {
             .into_iter()
             .map(|(n, p, s, d, _snap)| (n, p, s, d))
             .collect();
+        // Modules that read each other's statics cannot be ordered: when a pass resolves
+        // nothing and a survivor waits on a static, one more pass reads the statics of modules
+        // not lowered yet through forward globals, which `fixup_forward_globals` resolves.
+        let outer_forward = self.forward_statics;
+        let mut forward_pass = false;
         let final_failures: Vec<String> = loop {
             self.collected_diagnostics.truncate(first_pass_snapshot);
             let before = pending.len();
             let mut next = Vec::new();
+            self.forward_statics = outer_forward || forward_pass;
             for (completed, (name, file_path, source, deps)) in
                 std::mem::take(&mut pending).into_iter().enumerate()
             {
@@ -1161,6 +1167,25 @@ impl CompilationUnit {
                 if !self.try_compile_import(&name, &file_path, &source, deps.clone()) {
                     next.push((name, file_path, source, deps));
                 }
+            }
+            self.forward_statics = outer_forward;
+            if next.len() == before
+                && !forward_pass
+                && !self.editor_preview
+                && next.iter().any(|(name, ..)| {
+                    self.last_import_errors.get(name).is_some_and(|errors| {
+                        errors
+                            .iter()
+                            .any(|error| error.contains("is not available to this module"))
+                    })
+                })
+            {
+                forward_pass = true;
+                pending = next;
+                continue;
+            }
+            if next.len() < before {
+                forward_pass = false;
             }
             // No progress: the survivors are genuine failures; their errors
             // (pushed after first_pass_snapshot during this pass) are kept.
@@ -1206,6 +1231,7 @@ impl CompilationUnit {
         // renumbering because the target module hadn't been loaded yet (ordering issue
         // with blade cache). Now that ALL modules are loaded, stdlib_function_name_map
         // is complete and we can resolve any remaining stale refs.
+        self.fixup_forward_globals();
         self.fixup_stale_cross_module_refs();
         self.fixup_stale_constructor_ids();
         self.fixup_stale_method_ids();

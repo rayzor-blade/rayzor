@@ -1,0 +1,5 @@
+[project]
+name = "cyclic-static-reads"
+entry = "./CyclicStaticReads.hx"
+[build]
+class-paths = ["."]

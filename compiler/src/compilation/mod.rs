@@ -484,6 +484,10 @@ pub struct CompilationUnit {
     /// Accumulated imported globals keyed by qualified name.
     import_external_globals: BTreeMap<String, (crate::ir::IrGlobalId, crate::ir::IrType)>,
 
+    /// The import loop's last pass over modules waiting on each other's statics: a static of a
+    /// module not lowered yet is read through a forward global (see `fixup_forward_globals`).
+    pub(crate) forward_statics: bool,
+
     /// Accumulated class allocation sizes from imported files (SymbolId -> byte size).
     /// Keyed by the class declaration's SymbolId — stable across module contexts,
     /// unlike TypeIds. Passed to user file's MIR lowering so it knows how much
@@ -746,6 +750,7 @@ impl CompilationUnit {
             import_constructor_param_counts: BTreeMap::new(),
             import_function_param_types: BTreeMap::new(),
             import_external_globals: BTreeMap::new(),
+            forward_statics: false,
             import_class_alloc_sizes: BTreeMap::new(),
             import_class_alloc_sizes_by_name: BTreeMap::new(),
             import_class_type_to_symbol: BTreeMap::new(),
