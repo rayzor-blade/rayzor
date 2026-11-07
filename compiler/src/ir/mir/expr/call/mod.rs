@@ -148,7 +148,10 @@ impl<'a> HirToMirContext<'a> {
 
     pub(crate) fn lower_call(&mut self, expr: &HirExpr) -> Option<IrId> {
         let result = self.lower_call_inner(expr)?;
-        let HirExprKind::Call { callee, .. } = &expr.kind else {
+        let HirExprKind::Call {
+            callee, is_method, ..
+        } = &expr.kind
+        else {
             return Some(result);
         };
         let symbol = match callee.kind {
@@ -156,6 +159,26 @@ impl<'a> HirToMirContext<'a> {
             HirExprKind::Field { field, .. } => field,
             _ => return Some(result),
         };
+        // A generic function returning `Null<T>` hands back a box; a caller
+        // that binds T to a reference type reads the pointer inside it.
+        if !*is_method && self.callee_returns_nullable_type_param(symbol) {
+            let reference = match self.type_table.get(expr.ty).map(|ty| &ty.kind) {
+                Some(TypeKind::Optional { inner_type }) => matches!(
+                    self.type_table.get(*inner_type).map(|ty| &ty.kind),
+                    Some(
+                        TypeKind::Class { .. }
+                            | TypeKind::Interface { .. }
+                            | TypeKind::Array { .. }
+                            | TypeKind::Anonymous { .. }
+                            | TypeKind::String
+                    )
+                ),
+                _ => false,
+            };
+            if reference {
+                return self.unbox_erased_generic_return(result, None, expr.ty, expr.ty);
+            }
+        }
         if self.callee_returns_type_param(symbol)
             && matches!(
                 self.type_table

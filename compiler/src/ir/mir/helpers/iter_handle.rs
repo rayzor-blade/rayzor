@@ -680,6 +680,23 @@ impl<'a> HirToMirContext<'a> {
     /// static type carries nothing. `a.iterator()` is typed `Dynamic`, and its
     /// hint is the only record of which iterator it produced.
     fn iter_source_for(&mut self, value_reg: IrId, source_ty: TypeId) -> Option<IterSource> {
+        // A nullable reference is the reference itself.
+        let source_ty = match self.type_table.get(source_ty).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type })
+                if matches!(
+                    self.type_table.get(*inner_type).map(|t| &t.kind),
+                    Some(
+                        TypeKind::Array { .. }
+                            | TypeKind::Class { .. }
+                            | TypeKind::Interface { .. }
+                            | TypeKind::Map { .. }
+                    )
+                ) =>
+            {
+                *inner_type
+            }
+            _ => source_ty,
+        };
         if let Some(src) = self.iter_source_of(source_ty) {
             return Some(src);
         }

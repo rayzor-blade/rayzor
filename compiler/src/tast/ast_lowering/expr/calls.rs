@@ -6268,6 +6268,17 @@ impl<'a> AstLowering<'a> {
             };
             (d.kind.clone(), a.kind.clone())
         };
+        // A `Null<C>` argument meets a structured formal through `C`; a bare
+        // parameter still binds the nullable type itself.
+        if let TypeKind::Optional { inner_type } = &a
+            && !matches!(
+                d,
+                TypeKind::TypeParameter { .. } | TypeKind::Optional { .. }
+            )
+        {
+            self.unify_type_args_inner(declared, *inner_type, depth + 1, out, bind_parameters);
+            return;
+        }
         // A protocol over Array<Dynamic> binds its element to Dynamic, not an
         // unconstrained parameter: iteration returns the array's boxed slots.
         if let (

@@ -1600,6 +1600,32 @@ impl<'a> HirToMirContext<'a> {
         false
     }
 
+    /// Whether the callee's declared return is `Null<T>` over a type parameter.
+    pub(crate) fn callee_returns_nullable_type_param(&self, callee: SymbolId) -> bool {
+        use crate::tast::TypeKind;
+        let Some(fn_ty) = self.symbol_table.get_symbol(callee).map(|s| s.type_id) else {
+            return false;
+        };
+        let tt = self.type_table;
+        let Some(TypeKind::Function { return_type, .. }) = tt.get(fn_ty).map(|i| &i.kind) else {
+            return false;
+        };
+        let mut cur = *return_type;
+        for _ in 0..4 {
+            match tt.get(cur).map(|i| &i.kind) {
+                Some(TypeKind::Optional { inner_type }) => {
+                    return matches!(
+                        tt.get(*inner_type).map(|i| &i.kind),
+                        Some(TypeKind::TypeParameter { .. })
+                    );
+                }
+                Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     /// Convert a condition to Bool, opening nullable boxes and abstract casts.
     pub(crate) fn truth_of(&mut self, reg: IrId, hir_ty: TypeId) -> Option<IrId> {
         use crate::tast::TypeKind;
