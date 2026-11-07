@@ -22,24 +22,30 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
-    /// The IEEE value behind `Math.NaN`, `Math.POSITIVE_INFINITY` and
-    /// `Math.NEGATIVE_INFINITY`.
+    /// The value behind `Math.NaN`, `Math.POSITIVE_INFINITY`, `Math.NEGATIVE_INFINITY` and
+    /// `Math.PI`, which Math.hx declares with no initializer.
     ///
-    /// Matched on the name alone: these three are reserved in Haxe's `Math`,
-    /// and a user static sharing a name would still have its own initializer
-    /// and its own global, which is consulted first by every other read path.
+    /// The first three are matched on the name alone: they are reserved in Haxe's `Math`, and a
+    /// user static sharing a name would still have its own initializer and its own global,
+    /// which is consulted first by every other read path. `PI` is a common name for a local or a
+    /// user static, so it is matched on its qualified name.
     fn math_float_constant(&self, symbol: SymbolId) -> Option<IrValue> {
         if self.global_symbol_map.contains_key(&symbol) {
             return None;
         }
-        let name = self
-            .symbol_table
-            .get_symbol(symbol)
-            .and_then(|sy| self.string_interner.get(sy.name))?;
+        let symbol = self.symbol_table.get_symbol(symbol)?;
+        let name = self.string_interner.get(symbol.name)?;
         match name {
             "NaN" => Some(IrValue::F64(f64::NAN)),
             "POSITIVE_INFINITY" => Some(IrValue::F64(f64::INFINITY)),
             "NEGATIVE_INFINITY" => Some(IrValue::F64(f64::NEG_INFINITY)),
+            "PI" if symbol
+                .qualified_name
+                .and_then(|qualified| self.string_interner.get(qualified))
+                == Some("Math.PI") =>
+            {
+                Some(IrValue::F64(std::f64::consts::PI))
+            }
             _ => None,
         }
     }

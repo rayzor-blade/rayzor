@@ -1,0 +1,5 @@
+[project]
+name = "math-pi-in-imported-module"
+entry = "./ImportedMathPi.hx"
+[build]
+class-paths = ["."]
