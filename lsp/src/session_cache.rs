@@ -25,7 +25,9 @@ pub(crate) struct Inputs {
     // Contents of loaded sources and macro resources have individual stamps.
     files: BTreeSet<PathBuf>,
     overlays: BTreeMap<PathBuf, String>,
-    configuration: BTreeMap<PathBuf, Option<(u64, std::time::SystemTime)>>,
+    /// Size and modification time in whole seconds, which an image export or archive unpack
+    /// keeps where it truncates the nanoseconds.
+    configuration: BTreeMap<PathBuf, Option<(u64, u64)>>,
     pub reusable: bool,
 }
 
@@ -44,9 +46,14 @@ impl Inputs {
                 .map(|path| {
                     (
                         path.clone(),
-                        std::fs::metadata(path)
-                            .ok()
-                            .and_then(|metadata| Some((metadata.len(), metadata.modified().ok()?))),
+                        std::fs::metadata(path).ok().and_then(|metadata| {
+                            let modified = metadata
+                                .modified()
+                                .ok()?
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .ok()?;
+                            Some((metadata.len(), modified.as_secs()))
+                        }),
                     )
                 })
                 .collect(),
@@ -190,4 +197,43 @@ impl SessionCache {
 
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configuration_stamps_ignore_the_nanoseconds_of_a_timestamp() {
+        let path =
+            std::env::temp_dir().join(format!("rayzor-inputs-seconds-{}", std::process::id()));
+        std::fs::write(&path, "config").unwrap();
+        let set = |time: std::time::SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(time)
+                .unwrap()
+        };
+        let key = SessionKey {
+            class_paths: Vec::new(),
+            stdlib_paths: Vec::new(),
+            defines: Vec::new(),
+            macros: Vec::new(),
+            macro_budget: None,
+            options: crate::build_config::Options {
+                configuration_files: vec![path.clone()],
+                ..Default::default()
+            },
+        };
+        let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        set(base + std::time::Duration::from_nanos(123_456_789));
+        let built = Inputs::capture(&key, &HashMap::new());
+        set(base);
+        assert!(built == Inputs::capture(&key, &HashMap::new()));
+        set(base + std::time::Duration::from_secs(1));
+        assert!(built != Inputs::capture(&key, &HashMap::new()));
+        std::fs::remove_file(path).unwrap();
+    }
 }

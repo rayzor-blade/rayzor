@@ -25,7 +25,9 @@ impl Dependency {
                 .ok()?
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()?;
-            Some((metadata.len(), modified.as_nanos()))
+            // Whole seconds: an image export or archive unpack truncates the nanoseconds a
+            // build wrote, and the same file must still match its stamp.
+            Some((metadata.len(), u128::from(modified.as_secs())))
         });
         Self {
             path: path.into(),
@@ -175,6 +177,31 @@ fn dependency_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stamp_survives_the_truncation_of_a_timestamp_to_whole_seconds() {
+        let path =
+            std::env::temp_dir().join(format!("rayzor-dependency-seconds-{}", std::process::id()));
+        std::fs::write(&path, b"content").unwrap();
+        let set = |time: std::time::SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(time)
+                .unwrap()
+        };
+        let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        set(base + std::time::Duration::from_nanos(519_655_373));
+        let dependencies = Dependencies::default();
+        dependencies.register_read(&path);
+        set(base);
+        assert!(dependencies.is_current());
+        // A second later is a change.
+        set(base + std::time::Duration::from_secs(1));
+        assert!(!dependencies.is_current());
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn generated_file_rewrites_keep_identical_content_current() {
