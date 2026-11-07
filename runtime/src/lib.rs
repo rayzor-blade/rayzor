@@ -421,14 +421,15 @@ use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 // slot that moved would leave compiled code pointing at freed memory.
 //
 // Chunks are allocated on demand and leaked. The read path takes no lock:
-// global ids are small and sequential, so the chunk table is a fixed array of
-// pointers and a miss is resolved once, by whichever thread gets there first.
+// the chunk table is a fixed array of pointers and a miss is resolved once, by
+// whichever thread gets there first.
 
-/// Slots per chunk. Global ids are dense from zero, so one chunk covers most
-/// programs outright.
+/// Slots per chunk.
 const GLOBAL_CHUNK_SLOTS: usize = 1024;
-/// Chunks addressable, and so the ceiling on how many statics a program has.
-const GLOBAL_MAX_CHUNKS: usize = 4096;
+/// Chunks addressable. Ids are sparse -- each linked module numbers its globals
+/// from its own base -- so the table is sized by the id space, not by how many
+/// statics exist; an untouched chunk costs only its table entry.
+const GLOBAL_MAX_CHUNKS: usize = 1 << 16;
 
 static GLOBAL_CHUNKS: [AtomicPtr<AtomicU64>; GLOBAL_MAX_CHUNKS] =
     [const { AtomicPtr::new(std::ptr::null_mut()) }; GLOBAL_MAX_CHUNKS];
@@ -522,6 +523,14 @@ pub unsafe extern "C" fn rayzor_global_slot(global_id: i64) -> *mut u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_slot_addresses_a_sparse_module_id() {
+        unsafe {
+            rayzor_global_store(4_210_000, 7);
+            assert_eq!(rayzor_global_load(4_210_000), 7);
+        }
+    }
 
     #[test]
     fn test_malloc_free() {
