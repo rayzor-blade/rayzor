@@ -503,7 +503,15 @@ fn serve_worker(
                 tasks.push_back(crate::indexing::Task::new(context, uri, allow_index));
             }
         }
-        if let Some(mut task) = tasks.pop_front() {
+        // A completion waiting on a display compile gets the thread before background analysis.
+        let interactive = !displays.is_empty()
+            || deferred.iter().any(|request| {
+                display_request(&ctx, request)
+                    .is_some_and(|(uri, cursor)| !ctx.has_display_answer(&uri, cursor))
+            });
+        if interactive {
+            // Analysis resumes once the display work is done.
+        } else if let Some(mut task) = tasks.pop_front() {
             if !ctx.open_files.contains_key(&task.uri)
                 || ctx.document_versions.get(&task.uri).copied() != task.version
             {
@@ -590,6 +598,12 @@ fn serve_worker(
                 && !pending.iter().any(|(document, _)| *document == uri)
             {
                 // The display compile found nothing; the document's own analysis answers.
+                if std::env::var_os("RAYZOR_LSP_PROFILE").is_some() {
+                    eprintln!(
+                        "lsp-display: no completions at {:?}, analysing {uri}",
+                        display.as_ref().map(|(_, cursor)| cursor)
+                    );
+                }
                 enqueue_document(connection, &ctx, &mut pending, &mut tasks, uri, false);
                 waiting.push(request);
             } else if let Some((result, _)) = ctx.editor_cache.answer_while_revalidating(&request) {

@@ -56,7 +56,7 @@ impl Task {
 }
 
 /// The completions a macro asks for at a cursor in inline markup.
-pub(crate) type Display = Option<Vec<crate::analysis::CompletionEntry>>;
+pub(crate) type Display = Option<crate::context::DisplayEntries>;
 
 impl Task<Display> {
     /// Compiles `uri` with its display position at `cursor`, a character

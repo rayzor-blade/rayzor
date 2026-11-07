@@ -53,7 +53,15 @@ pub struct LspContext {
 struct DisplayAnswer {
     version: Option<i32>,
     cursor: u32,
-    entries: Option<Vec<CompletionEntry>>,
+    entries: Option<DisplayEntries>,
+}
+
+/// The completions a display compile found. `names` marks the names in scope offered where
+/// no macro asked for anything, which complete as the document's own analysis completes.
+#[derive(Clone)]
+pub(crate) struct DisplayEntries {
+    pub entries: Vec<CompletionEntry>,
+    pub names: bool,
 }
 
 /// A compiled document: the unit its symbols live in and its position index.
@@ -831,10 +839,11 @@ impl LspContext {
         uri: &str,
         source: &str,
         cursor: u32,
-    ) -> Option<Vec<CompletionEntry>> {
+    ) -> Option<DisplayEntries> {
         /// A graph accumulates a symbol set per pass over the document; start over past this.
         const PASSES: usize = 40;
         use compiler::macro_system::display;
+        let started = std::time::Instant::now();
         let filename = uri_to_path(uri);
         let settings = self.settings_for_uri(uri);
         let config = self.analysis_config(&settings, false).ok()?;
@@ -864,6 +873,24 @@ impl LspContext {
                     && session.can_extend(&filename)
             })
         });
+        let profiling = std::env::var_os("RAYZOR_LSP_PROFILE").is_some();
+        if profiling {
+            let verdict = shared.as_ref().map(|held| {
+                held.as_ref().map(|session| {
+                    (
+                        inputs.reusable,
+                        session.interrupted,
+                        session.passes,
+                        session.key == key,
+                        session.inputs == inputs,
+                        session.can_extend(&filename),
+                    )
+                })
+            });
+            eprintln!(
+                "lsp-display: reusable={reusable} (inputs reusable, interrupted, passes, same key, same inputs, can extend) = {verdict:?} file={filename}"
+            );
+        }
         let mut alone = None;
         if !reusable {
             let (unit, errors, _) = Self::fresh_unit(config, &settings).ok()?;
@@ -872,6 +899,13 @@ impl LspContext {
                 Some(held) => **held = Some(session),
                 None => alone = Some(session),
             }
+        }
+        if profiling {
+            eprintln!(
+                "lsp-display: ready to type after {:.0} ms (waited {:.0} ms for the graph)",
+                started.elapsed().as_secs_f64() * 1000.0,
+                waiting.elapsed().as_secs_f64() * 1000.0
+            );
         }
         let session = match shared.as_mut() {
             Some(held) => held.as_mut()?,
@@ -896,11 +930,40 @@ impl LspContext {
             let _ = unit.lower_to_tast();
         }
         session.interrupted = false;
-        let request = display.requests().pop()?;
-        if !matches!(request.kind, display::Kind::Dot | display::Kind::Structure) {
-            return None;
+        if profiling {
+            eprintln!(
+                "lsp-display: typed in {:.0} ms, requests={:?}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                display
+                    .requests()
+                    .iter()
+                    .map(|request| request.kind)
+                    .collect::<Vec<_>>()
+            );
         }
-        Some(analysis::value_member_completions(request.type_id, &unit))
+        let members = display.requests().pop().filter(|request| {
+            matches!(request.kind, display::Kind::Dot | display::Kind::Structure)
+        });
+        let Some(request) = members else {
+            // No macro asked for a member list here, as in a markup attribute name. The
+            // names in scope are what the document's analysis would offer, without building
+            // that graph.
+            let file_id = unit.file_id_of(&filename)?;
+            return Some(DisplayEntries {
+                entries: analysis::collect_completions(
+                    &unit.symbol_table,
+                    &unit.type_table,
+                    &unit.string_interner,
+                    file_id,
+                    &unit.symbol_references,
+                ),
+                names: true,
+            });
+        };
+        Some(DisplayEntries {
+            entries: analysis::value_member_completions(request.type_id, &unit),
+            names: false,
+        })
     }
 
     /// Publish errors on their own files, merging contributions from open documents.
@@ -1465,7 +1528,7 @@ impl LspContext {
     }
 
     /// The completions a display compile of the current version found at `cursor`.
-    pub(crate) fn display_entries(&self, uri: &str, cursor: u32) -> Option<&Vec<CompletionEntry>> {
+    pub(crate) fn display_entries(&self, uri: &str, cursor: u32) -> Option<&DisplayEntries> {
         self.has_display_answer(uri, cursor)
             .then(|| self.display_answers.get(uri)?.entries.as_ref())
             .flatten()
@@ -1476,7 +1539,7 @@ impl LspContext {
         uri: &str,
         version: Option<i32>,
         cursor: u32,
-        entries: Option<Vec<CompletionEntry>>,
+        entries: Option<DisplayEntries>,
     ) {
         self.display_answers.insert(
             uri.to_string(),
@@ -1515,7 +1578,13 @@ impl LspContext {
             .display_cursor(uri, line, col)
             .and_then(|cursor| self.display_entries(uri, cursor))
         {
-            return Completions::Members(entries.clone());
+            if !entries.names {
+                return Completions::Members(entries.entries.clone());
+            }
+            // Names in scope come from the document's own analysis when it has one.
+            if !self.has_current_analysis(uri) {
+                return Completions::Names(entries.entries.clone());
+            }
         }
         let Some(a) = self.analyses.get(uri) else {
             return Completions::Names(Vec::new());
@@ -1933,7 +2002,11 @@ mod cache_tests {
         let mut context = workspace.context();
         let uri = workspace.compile(&mut context, "Main.hx", None);
         let source = context.open_files[&uri].clone();
-        assert!(context.display_completions(&uri, &source, 0).is_none());
+        assert!(
+            context
+                .display_completions(&uri, &source, 0)
+                .is_some_and(|found| found.names)
+        );
         let graph = context
             .display_session
             .borrow()
@@ -1942,9 +2015,17 @@ mod cache_tests {
             .unit
             .clone();
         // A later cursor and an edited document are typed in the same graph.
-        assert!(context.display_completions(&uri, &source, 5).is_none());
+        assert!(
+            context
+                .display_completions(&uri, &source, 5)
+                .is_some_and(|found| found.names)
+        );
         let edited = source.replace("Helper.f();", "Helper.f(); Helper.f();");
-        assert!(context.display_completions(&uri, &edited, 5).is_none());
+        assert!(
+            context
+                .display_completions(&uri, &edited, 5)
+                .is_some_and(|found| found.names)
+        );
         {
             let held = context.display_session.borrow();
             let session = held.as_ref().unwrap();
@@ -1958,7 +2039,11 @@ mod cache_tests {
             helper,
             "class Helper { public static function f():Int return 2; }".into(),
         );
-        assert!(context.display_completions(&uri, &edited, 5).is_none());
+        assert!(
+            context
+                .display_completions(&uri, &edited, 5)
+                .is_some_and(|found| found.names)
+        );
         let held = context.display_session.borrow();
         let session = held.as_ref().unwrap();
         assert!(!Rc::ptr_eq(&graph, &session.unit));
