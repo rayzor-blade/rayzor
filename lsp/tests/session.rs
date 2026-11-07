@@ -572,6 +572,31 @@ fn standard_library_type_names_have_hovers_in_packaged_modules() {
 }
 
 #[test]
+fn standard_library_methods_hover_with_their_declared_signature() {
+    let source = "package demo;\nclass Main {\n function run(text:String, items:Array<Int>, box:Box) {\n  var a = text.toLowerCase();\n  var b = box.get().toLowerCase();\n  var c = (text + \"x\").toLowerCase();\n  items.push(1);\n  return a + b + c;\n }\n}\nclass Box {\n public function new() {}\n public function get():String return \"\";\n}";
+    let mut s = Session::start(&[("demo/Main.hx", source)]);
+    assert!(s.open("demo/Main.hx").is_empty(), "{:?}", s.diagnostics);
+    for (needle, expected) in [
+        ("text.toLowerCase", "function toLowerCase():String"),
+        ("box.get().toLowerCase", "function toLowerCase():String"),
+        (
+            "(text + \"x\").toLowerCase",
+            "function toLowerCase():String",
+        ),
+        ("items.push", "function push("),
+    ] {
+        let offset = source.find(needle).unwrap() + needle.rfind('.').unwrap() + 1;
+        let before = &source[..offset];
+        let line = before.bytes().filter(|&byte| byte == b'\n').count() as u32;
+        let column = before.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
+        let hover =
+            hover_text(&s.request("textDocument/hover", s.at("demo/Main.hx", line, column)));
+        assert!(hover.contains(expected), "{needle}: {hover}");
+        assert!(!hover.contains("not yet resolved"), "{needle}: {hover}");
+    }
+}
+
+#[test]
 fn referenced_api_types_and_members_hover_before_indexing_finishes() {
     let source = "package demo;\nimport api.Box;\nimport api.Model.Record;\nimport api.Model.View;\nimport api.Model.Scale;\nimport api.Model.Size;\nimport Slow;\nclass Main {\n var names:Array<String> = [];\n var value:Record;\n function render(input:View):String {\n  var box = new Box<String>('value');\n  var text = box.get();\n  box.inferred();\n  var selected:Record = box.record();\n  var scale:Scale = Scale.Small;\n  return api.Tools.describe(selected, Size.Md);\n }\n}";
     let mut s = Session::start(&[

@@ -487,6 +487,8 @@ fn serve_worker(
                 && ctx.open_files.contains_key(&uri)
                 && ctx.needs_analysis(&uri)
                 && ctx.editor_cache.answer(&request).is_none()
+                // A display compile answers markup completion without the document's own graph.
+                && display_request(&ctx, &request).is_none()
             {
                 enqueue_document(connection, &ctx, &mut pending, &mut tasks, uri, false);
             }
@@ -576,11 +578,20 @@ fn serve_worker(
                 }
                 waiting.push(request);
             } else if display
-                .is_some_and(|(uri, cursor)| ctx.display_entries(&uri, cursor).is_some())
+                .as_ref()
+                .is_some_and(|(uri, cursor)| ctx.display_entries(uri, *cursor).is_some())
             {
                 if answer_request(connection, &ctx, request)? {
                     return Ok(());
                 }
+            } else if let Some((uri, _)) = display.clone()
+                && ctx.needs_analysis(&uri)
+                && !tasks.iter().any(|task| task.uri == uri)
+                && !pending.iter().any(|(document, _)| *document == uri)
+            {
+                // The display compile found nothing; the document's own analysis answers.
+                enqueue_document(connection, &ctx, &mut pending, &mut tasks, uri, false);
+                waiting.push(request);
             } else if let Some((result, _)) = ctx.editor_cache.answer_while_revalidating(&request) {
                 // A stale snapshot's document is already queued for analysis.
                 send_response(connection, request.id, Some(result));

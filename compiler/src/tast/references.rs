@@ -14,6 +14,8 @@ pub struct SymbolReference {
     pub len: u32,
     /// The instantiated type at this use; invalid for a type-only reference.
     pub type_id: TypeId,
+    /// For a member written after a receiver, the receiver's type; invalid otherwise.
+    pub receiver: TypeId,
 }
 
 /// How far into an expression a member's `.name` may sit: past its receiver.
@@ -136,6 +138,7 @@ impl SymbolSink for Collect<'_> {
             at: SourceLocation::new(at.file_id, row, column as u32, start as u32),
             len: len as u32,
             type_id,
+            receiver: TypeId::invalid(),
         });
     }
 
@@ -149,6 +152,29 @@ impl SymbolSink for Collect<'_> {
         at: SourceLocation,
         member: bool,
         type_id: TypeId,
+    ) {
+        self.refer(symbol, at, member, type_id, TypeId::invalid());
+    }
+
+    fn refers_member(
+        &mut self,
+        symbol: SymbolId,
+        at: SourceLocation,
+        ty: TypeId,
+        receiver: TypeId,
+    ) {
+        self.refer(symbol, at, true, ty, receiver);
+    }
+}
+
+impl Collect<'_> {
+    fn refer(
+        &mut self,
+        symbol: SymbolId,
+        at: SourceLocation,
+        member: bool,
+        type_id: TypeId,
+        receiver: TypeId,
     ) {
         if !at.is_valid() {
             return;
@@ -170,6 +196,7 @@ impl SymbolSink for Collect<'_> {
                 at,
                 len: name.len() as u32,
                 type_id,
+                receiver,
             });
         }
     }

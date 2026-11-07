@@ -200,6 +200,7 @@ pub(crate) fn record(
             at: SourceLocation::new(file_id, line, column, token.span.start as u32),
             len: name.encode_utf16().count() as u32,
             type_id: compiler::tast::TypeId::invalid(),
+            receiver: compiler::tast::TypeId::invalid(),
         });
     }
 }

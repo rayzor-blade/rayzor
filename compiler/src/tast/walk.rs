@@ -18,6 +18,21 @@ pub trait SymbolSink {
     fn refers_typed(&mut self, symbol: SymbolId, at: SourceLocation, member: bool, _ty: TypeId) {
         self.refers(symbol, at, member);
     }
+    /// A member written after a receiver of type `receiver`; `ty` is the member's own type
+    /// at the use, invalid when the walk has none.
+    fn refers_member(
+        &mut self,
+        symbol: SymbolId,
+        at: SourceLocation,
+        ty: TypeId,
+        _receiver: TypeId,
+    ) {
+        if ty == TypeId::invalid() {
+            self.refers(symbol, at, true);
+        } else {
+            self.refers_typed(symbol, at, true, ty);
+        }
+    }
 }
 
 pub fn walk_file(file: &TypedFile, sink: &mut impl SymbolSink) {
@@ -256,7 +271,7 @@ pub fn walk_expression(e: &TypedExpression, sink: &mut impl SymbolSink) {
             ..
         } => {
             walk_expression(object, sink);
-            sink.refers_typed(*field_symbol, at, true, e.expr_type);
+            sink.refers_member(*field_symbol, at, e.expr_type, object.expr_type);
         }
         K::StaticFieldAccess {
             class_symbol,
@@ -286,7 +301,7 @@ pub fn walk_expression(e: &TypedExpression, sink: &mut impl SymbolSink) {
             ..
         } => {
             walk_expression(receiver, sink);
-            sink.refers(*method_symbol, at, true);
+            sink.refers_member(*method_symbol, at, TypeId::invalid(), receiver.expr_type);
             for a in arguments {
                 walk_expression(a, sink);
             }
@@ -296,7 +311,7 @@ pub fn walk_expression(e: &TypedExpression, sink: &mut impl SymbolSink) {
             method_symbol,
         } => {
             walk_expression(receiver, sink);
-            sink.refers_typed(*method_symbol, at, true, e.expr_type);
+            sink.refers_member(*method_symbol, at, e.expr_type, receiver.expr_type);
         }
         K::StaticMethodCall {
             class_symbol,

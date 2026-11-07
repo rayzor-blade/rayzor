@@ -1292,11 +1292,16 @@ impl LspContext {
             .get(qualified)
             .and_then(|name| self.workspace_index.declaration(name))
             .or_else(|| {
-                let (rline, rcol, _) = analysis::receiver_before(source, line, col)?;
-                let receiver = index.find_symbol_at(rline, rcol)?;
-                let receiver_type = index
-                    .type_at(rline, rcol)
-                    .unwrap_or(unit.symbol_table.get_symbol(receiver)?.type_id);
+                let receiver_type = match index.receiver_type_at(line, col) {
+                    Some(receiver_type) => receiver_type,
+                    None => {
+                        let (rline, rcol, _) = analysis::receiver_before(source, line, col)?;
+                        let receiver = index.find_symbol_at(rline, rcol)?;
+                        index
+                            .type_at(rline, rcol)
+                            .unwrap_or(unit.symbol_table.get_symbol(receiver)?.type_id)
+                    }
+                };
                 let owner =
                     crate::structural_fields::alias_owner(receiver_type, unit).or_else(|| {
                         analysis::class_of_type(

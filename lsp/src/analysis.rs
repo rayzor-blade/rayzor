@@ -23,6 +23,8 @@ pub struct FileSymbolIndex {
     /// (line, start column) → (length, symbol), both 1-based.
     pub names: BTreeMap<(u32, u32), (u32, SymbolId)>,
     types: BTreeMap<(u32, u32), TypeId>,
+    /// Member name position → the type of the expression it follows.
+    receivers: BTreeMap<(u32, u32), TypeId>,
 }
 
 impl FileSymbolIndex {
@@ -150,6 +152,7 @@ impl FileSymbolIndex {
     ) -> Self {
         let mut names = BTreeMap::new();
         let mut types = BTreeMap::new();
+        let mut receivers = BTreeMap::new();
         let line_starts: Vec<_> = std::iter::once(0)
             .chain(source.match_indices('\n').map(|(at, _)| at + 1))
             .collect();
@@ -171,6 +174,9 @@ impl FileSymbolIndex {
             names.insert(position, (len, r.symbol));
             if r.type_id != TypeId::invalid() {
                 types.insert(position, r.type_id);
+            }
+            if r.receiver != TypeId::invalid() {
+                receivers.insert(position, r.receiver);
             }
         }
         for sym in symbol_table.all_symbols() {
@@ -195,7 +201,16 @@ impl FileSymbolIndex {
             file_id,
             names,
             types,
+            receivers,
         }
+    }
+
+    /// The type of the expression before the `.` of the member name at (line, col).
+    pub(crate) fn receiver_type_at(&self, line: u32, col: u32) -> Option<TypeId> {
+        let (&key, &(len, _)) = self.names.range(..=(line, col)).next_back()?;
+        (key.0 == line && col < key.1 + len)
+            .then(|| self.receivers.get(&key).copied())
+            .flatten()
     }
 
     /// The symbol whose name covers (line, col), both 1-based.
