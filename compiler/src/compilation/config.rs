@@ -55,6 +55,10 @@ impl CompilationConfig {
     /// 2. Relative to the rayzor binary (../haxe-std, ../compiler/haxe-std)
     /// 3. Relative to cwd (compiler/haxe-std, ./haxe-std, ../haxe-std)
     ///
+    /// A candidate must carry the `rayzor` package, which no other Haxe
+    /// standard library has: an upstream `haxe-std` that happens to sit in an
+    /// ancestor directory is skipped.
+    ///
     /// NOTE: System Haxe installations (/usr/local/lib/haxe/std etc.) are NOT
     /// searched. Rayzor uses its own stdlib with rayzor-specific extensions.
     /// Mixing system Haxe stdlib causes subtle compilation errors.
@@ -88,7 +92,7 @@ impl CompilationConfig {
                 for _ in 0..5 {
                     for name in &["haxe-std", "compiler/haxe-std"] {
                         let candidate = dir.join(name);
-                        if candidate.is_dir() && !paths.contains(&candidate) {
+                        if is_rayzor_stdlib(&candidate) && !paths.contains(&candidate) {
                             paths.push(candidate);
                         }
                     }
@@ -104,7 +108,7 @@ impl CompilationConfig {
             for _ in 0..5 {
                 for name in &["haxe-std", "compiler/haxe-std"] {
                     let candidate = dir.join(name);
-                    if candidate.is_dir() {
+                    if is_rayzor_stdlib(&candidate) {
                         // Deduplicate by canonical path
                         let dominated = paths.iter().any(|p| {
                             matches!(
@@ -286,5 +290,28 @@ impl CompilationConfig {
             lazy_stdlib: false,
             ..Default::default()
         }
+    }
+}
+
+/// Whether `dir` is rayzor's standard library: it carries the `rayzor` package.
+fn is_rayzor_stdlib(dir: &std::path::Path) -> bool {
+    dir.join("rayzor").is_dir()
+}
+
+#[cfg(test)]
+mod stdlib_discovery_tests {
+    use super::is_rayzor_stdlib;
+
+    #[test]
+    fn only_a_directory_with_the_rayzor_package_is_rayzors_stdlib() {
+        let root = std::env::temp_dir().join(format!("rz-std-{}", std::process::id()));
+        let upstream = root.join("upstream");
+        let ours = root.join("ours");
+        std::fs::create_dir_all(upstream.join("haxe")).unwrap();
+        std::fs::create_dir_all(ours.join("rayzor")).unwrap();
+        assert!(!is_rayzor_stdlib(&upstream));
+        assert!(is_rayzor_stdlib(&ours));
+        assert!(!is_rayzor_stdlib(&root.join("missing")));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
