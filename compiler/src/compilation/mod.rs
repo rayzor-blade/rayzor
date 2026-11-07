@@ -301,6 +301,9 @@ pub struct CompilationUnit {
     pub(crate) macro_statics: crate::macro_system::class_registry::MacroStatics,
     pub macro_dependencies: crate::macro_system::dependencies::Dependencies,
     pub(crate) macro_resources: crate::macro_system::assets::Resources,
+    /// The resource set a compile ended with when a macro added resources
+    /// after the table was embedded; see `defer_stale_resource_error`.
+    stale_macro_resources: Option<Vec<(String, Vec<u8>)>>,
     /// `onAfterTyping`/`onGenerate` callbacks registered by expanded macros.
     pub(crate) macro_hooks: Vec<(String, crate::macro_system::MacroValue)>,
     pub(crate) global_metadata: Vec<crate::macro_system::compiler_api::GlobalMetadata>,
@@ -353,6 +356,8 @@ pub struct CompilationUnit {
 
     /// Cached modules decoded ahead of use, by source path.
     prefetched_blades: RefCell<BTreeMap<String, artifact_cache::DecodedBlade>>,
+    /// Artifacts this unit wrote, so a compile that is repeated can drop them.
+    saved_blades: RefCell<Vec<PathBuf>>,
 
     /// Cache of files that have been successfully compiled (to avoid redundant recompilation)
     /// Maps filename to the TypedFile result
@@ -634,6 +639,11 @@ pub struct CompilationConfig {
     /// Embedded resources (`--resource file@name`) as (name, bytes), listed
     /// by `haxe.Resource`.
     pub resources: std::sync::Arc<Vec<(String, Vec<u8>)>>,
+
+    /// Withhold the "resources changed after the table was compiled" error
+    /// and record the final resource set instead, so the caller can compile
+    /// again with it configured. A caller that does not retry leaves this off.
+    pub defer_stale_resource_error: bool,
 }
 
 mod artifact_cache;
@@ -703,6 +713,7 @@ impl CompilationUnit {
             macro_resources: crate::macro_system::assets::ResourceStore::configured(
                 config.resources.clone(),
             ),
+            stale_macro_resources: None,
             macro_hooks: Vec::new(),
             global_metadata: Vec::new(),
             initialization_macro_files: Vec::new(),
@@ -721,6 +732,7 @@ impl CompilationUnit {
             )),
             discovery_indexed: BTreeSet::new(),
             prefetched_blades: RefCell::new(BTreeMap::new()),
+            saved_blades: RefCell::new(Vec::new()),
             compiled_files: BTreeMap::new(),
             editor_entry: None,
             settled_editor_imports: BTreeSet::new(),

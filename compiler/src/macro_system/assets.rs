@@ -11,6 +11,8 @@ pub(crate) struct ResourceStore {
     configured: Arc<Vec<(String, Vec<u8>)>>,
     added: BTreeMap<String, Vec<u8>>,
     revision: u64,
+    /// Every `insert`, including one that changed nothing.
+    inserts: u64,
     embedded: std::collections::BTreeSet<u64>,
 }
 
@@ -23,6 +25,7 @@ impl ResourceStore {
     }
 
     pub(crate) fn insert(&mut self, name: String, bytes: Vec<u8>) {
+        self.inserts += 1;
         if self.get(&name) != Some(&bytes) {
             self.added.insert(name, bytes);
             self.revision += 1;
@@ -44,6 +47,18 @@ impl ResourceStore {
             .filter(|(name, _)| !self.added.contains_key(name))
             .map(|(name, bytes)| (name, bytes))
             .chain(self.added.iter())
+    }
+
+    /// Every resource, configured and macro-added, with macro bytes winning.
+    pub(crate) fn snapshot(&self) -> Vec<(String, Vec<u8>)> {
+        self.entries()
+            .map(|(name, bytes)| (name.clone(), bytes.clone()))
+            .collect()
+    }
+
+    /// How many resources macros have offered so far.
+    pub(crate) fn inserts(&self) -> u64 {
+        self.inserts
     }
 
     pub(crate) fn mark_embedded(&mut self) {

@@ -1355,6 +1355,7 @@ impl CompilationUnit {
         // source has placeholder method bodies that must be replaced by MIR wrappers.
         let skip_stdlib_merge = !is_stdlib;
         let t_compile_call = profile_timer(self.config.profile_typecheck);
+        let resource_offers = self.macro_resources.lock().unwrap().inserts();
         let mut requested = BTreeSet::new();
         let compile_outcome = loop {
             let attempt = if self.editor_preview && !is_user_file {
@@ -1441,9 +1442,12 @@ impl CompilationUnit {
                 self.loaded_stdlib_typed_files.push(typed_file);
 
                 // Move the MIR from mir_modules to import_mir_modules.
+                // A module whose expansion offered a resource must run its
+                // macros again next time, so it is not cached.
+                let cacheable = self.macro_resources.lock().unwrap().inserts() == resource_offers;
                 if let Some(mir_arc) = self.mir_modules.pop() {
                     // Save to BLADE cache before renumbering
-                    if self.config.enable_cache {
+                    if self.config.enable_cache && cacheable {
                         let type_info = self.last_compiled_type_info.take();
                         let mut cached_maps = self.last_compiled_cached_maps.take();
                         // Append inline vars to cached maps for cache persistence
@@ -1481,7 +1485,7 @@ impl CompilationUnit {
                     }
 
                     self.renumber_and_push_import_mir((*mir_arc).clone());
-                } else if self.config.enable_cache {
+                } else if self.config.enable_cache && cacheable {
                     let type_info = self.last_compiled_type_info.take();
                     let _ = self.last_compiled_cached_maps.take();
                     if let Some(type_info) = type_info {

@@ -1,0 +1,7 @@
+[project]
+name = "macro-resources-late"
+version = "0.1.0"
+entry = "src/Main.hx"
+
+[build]
+class-paths = ["src"]

@@ -455,6 +455,7 @@ impl CompilationUnit {
                     source_path,
                     blade_path.display()
                 );
+                self.saved_blades.borrow_mut().push(blade_path);
             }
             Err(e) => {
                 trace!("[BLADE] Failed to cache {}: {}", source_path, e);

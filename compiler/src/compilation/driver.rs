@@ -1769,7 +1769,17 @@ impl CompilationUnit {
         add_profile_ms(&mut self.typecheck_timings.user_files_ms, t_user_files);
 
         // Step 5: Report all errors if any were found
-        if !self.config.typecheck_only && self.macro_resources.lock().unwrap().has_stale_table() {
+        let stale_resources =
+            !self.config.typecheck_only && self.macro_resources.lock().unwrap().has_stale_table();
+        if stale_resources && self.config.defer_stale_resource_error {
+            self.stale_macro_resources = Some(self.macro_resources.lock().unwrap().snapshot());
+            // A compile that is repeated must not leave its artifacts for the
+            // repeat to restore: they were lowered before the table was whole.
+            for path in self.saved_blades.borrow_mut().drain(..) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        if stale_resources {
             all_errors.push(CompilationError {
                 message: "Macro resources changed after an embedded resource table was compiled".into(),
                 location: SourceLocation::unknown(),
@@ -1781,7 +1791,10 @@ impl CompilationUnit {
         let deferred = std::mem::take(&mut self.deferred_errors);
         all_errors.splice(0..0, deferred);
         if !all_errors.is_empty() {
-            self.print_compilation_errors(&all_errors);
+            // Under a retry the next compile reports whatever remains.
+            if self.stale_macro_resources.is_none() {
+                self.print_compilation_errors(&all_errors);
+            }
             return Err(all_errors);
         }
 
