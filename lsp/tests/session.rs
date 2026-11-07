@@ -3175,6 +3175,93 @@ class Setup {
     assert_eq!(complete(at("title=\"a\" "), Some(" ")), ["title", "wide"]);
 }
 
+/// A component tag names a class of the document's own package that nothing imports; the macro
+/// finds its props through `Context.getType`, which loads that module.
+#[test]
+fn markup_attribute_completion_resolves_a_sibling_component_without_an_import() {
+    let macros = r#"#if macro
+import haxe.macro.Compiler;
+import haxe.macro.Context;
+import haxe.macro.Expr;
+#end
+class Setup {
+    public static function enable() {
+        Compiler.addGlobalMetadata("ui.Main", "@:build(Setup.build())");
+    }
+    public static function build():Array<Field> {
+        var fields = Context.getBuildFields();
+        function lower(e:Expr):Expr {
+            return switch e.expr {
+                case EMeta({name: ":markup"}, {expr: EConst(CString(source, _))}) if (Context.containsDisplayPosition(e.pos)):
+                    var focus = displayed(e.pos, source);
+                    macro {
+                        $focus;
+                        0;
+                    };
+                case EMeta({name: ":markup"}, _): macro 0;
+                case _: haxe.macro.ExprTools.map(e, lower);
+            };
+        }
+        for (field in fields) switch field.kind {
+            case FFun(fn) if (fn.expr != null): fn.expr = lower(fn.expr);
+            case _:
+        }
+        return fields;
+    }
+    static function displayed(pos:Position, source:String):Expr {
+        var at = Compiler.getDisplayPos();
+        var inside = source.substring(1, at.pos - Context.getPosInfos(pos).min);
+        var here = Context.makePosition({file: at.file, min: at.pos, max: at.pos});
+        var tag = ~/^([a-z]+(-[a-z]+)*) /;
+        if (!tag.match(inside))
+            return macro 0;
+        // A tag names a class of the module's own package, as a component tag does.
+        var name = [for (word in tag.matched(1).split("-")) word.charAt(0).toUpperCase() + word.substr(1)].join("");
+        var props = switch Context.getType(name) {
+            case TInst(c, _): c.get().superClass.params[0];
+            case _: return macro 0;
+        };
+        var literal:Expr = {expr: EDisplay({expr: EObjectDecl([]), pos: here}, DKStructure), pos: here};
+        return {expr: ECheckType(literal, Context.toComplexType(props)), pos: here};
+    }
+}"#;
+    let main = "package ui;\n\nclass Main {\n    static function view():Int return <board-stats ></board-stats>;\n    static function other():Int return <board-stats compact=\"1\" ></board-stats>;\n    static function main() { view(); other(); }\n}\n";
+    let mut s = Session::start(&[
+        ("build.hxml", "-cp src\n--macro Setup.enable()\n"),
+        ("Setup.hx", macros),
+        (
+            "src/ui/BoardStats.hx",
+            "package ui;\n\ntypedef BoardStatsProps = {store:Int, ?compact:Bool};\n\nclass Base<P> {}\n\nclass BoardStats extends Base<BoardStatsProps> {}\n",
+        ),
+        ("src/ui/Main.hx", main),
+        (
+            "src/App.hx",
+            "class App { static function main() { ui.Main.main(); } }",
+        ),
+    ]);
+    // The document is also reached as another module's import.
+    s.open("src/App.hx");
+    s.open("src/ui/Main.hx");
+    let complete = |s: &mut Session, tag: &str| {
+        let line = main.lines().position(|l| l.contains(tag)).unwrap();
+        let column = main.lines().nth(line).unwrap().find(tag).unwrap() + tag.len();
+        let mut params = s.at("src/ui/Main.hx", line as u32, column as u32);
+        params["context"] = json!({"triggerKind": 2, "triggerCharacter": " "});
+        let items = s.request("textDocument/completion", params);
+        let mut labels: Vec<String> = items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["label"].as_str().unwrap().to_string())
+            .collect();
+        labels.sort();
+        labels
+    };
+    // The first display compile loads the sibling module; a later one types the document alone.
+    assert_eq!(complete(&mut s, "<board-stats "), ["compact", "store"]);
+    assert_eq!(complete(&mut s, "compact=\"1\" "), ["compact", "store"]);
+}
+
 /// A file a macro read changes after analysis, as a library's shared cache
 /// can: requests are answered from the last analysis while a new one runs.
 #[test]

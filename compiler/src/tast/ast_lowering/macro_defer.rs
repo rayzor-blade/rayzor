@@ -221,9 +221,18 @@ impl AstLowering<'_> {
                     Some((&mut typer, local_type)),
                 )
             };
-            result.map_err(|error| super::LoweringError::SemanticError {
-                message: format!("build macro for '{}' failed: {error}", declaration.name),
-                location: self.context.create_location_from_span(meta.span),
+            result.map_err(|error| match error {
+                // A module the macro needs is loaded and the class built again.
+                crate::macro_system::errors::MacroError::NeedsModule { name, .. } => {
+                    super::LoweringError::UnresolvedType {
+                        type_name: name,
+                        location: self.context.create_location_from_span(meta.span),
+                    }
+                }
+                error => super::LoweringError::SemanticError {
+                    message: format!("build macro for '{}' failed: {error}", declaration.name),
+                    location: self.context.create_location_from_span(meta.span),
+                },
             })?;
         }
         Ok(Some(built))

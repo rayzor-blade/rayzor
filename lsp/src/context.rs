@@ -919,15 +919,25 @@ impl LspContext {
             file: filename.clone(),
             offset: cursor,
         });
-        if unit.has_typed_file(&filename) {
-            // Errors in a document being typed do not stop its display request.
-            let _ = unit.relower_editor_entry(&filename, source);
+        // Errors in a document being typed do not stop its display request.
+        let lowered = if unit.has_typed_file(&filename) {
+            unit.relower_editor_entry(&filename, source).map(|_| ())
         } else {
             unit.set_editor_entry(&filename);
             if !unit.user_files.iter().any(|file| file.filename == filename) {
                 unit.add_file(source, &filename).ok()?;
             }
-            let _ = unit.lower_to_tast();
+            unit.lower_to_tast().map(|_| ())
+        };
+        if profiling {
+            if let Err(errors) = &lowered {
+                for error in errors.iter().take(3) {
+                    eprintln!("lsp-display: error: {}", error.message);
+                }
+            }
+            for diagnostic in unit.macro_diagnostics.iter().rev().take(3) {
+                eprintln!("lsp-display: macro: {}", diagnostic.message);
+            }
         }
         session.interrupted = false;
         if profiling {

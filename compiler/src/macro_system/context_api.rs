@@ -2071,7 +2071,7 @@ fn contains_display_position(pos: &MacroValue) -> bool {
     let Some((name, _)) = named_file(pos.file_id) else {
         return false;
     };
-    if name != cursor.file {
+    if !cursor.is_in(&name) {
         return false;
     }
     let at = named_file_source(pos.file_id)

@@ -14,6 +14,18 @@ pub struct Cursor {
     pub offset: u32,
 }
 
+impl Cursor {
+    /// Whether `name` spells the cursor's file: a module reached through a relative class
+    /// path names the same file as the editor's absolute path.
+    pub fn is_in(&self, name: &str) -> bool {
+        let (a, b) = (self.file.replace('\\', "/"), name.replace('\\', "/"));
+        let (a, b) = (a.trim_start_matches("./"), b.trim_start_matches("./"));
+        let (long, short) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+        long == short
+            || (long.ends_with(short) && long.as_bytes()[long.len() - short.len() - 1] == b'/')
+    }
+}
+
 /// What an `EDisplay` asks of the expression it wraps (`haxe.macro.DisplayKind`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -146,6 +158,21 @@ mod tests {
             assert_eq!(Kind::from_meta_name(&kind.meta_name()), Some(kind));
         }
         assert_eq!(Kind::from_meta_name(":display"), None);
+    }
+
+    #[test]
+    fn a_relative_spelling_of_the_cursor_file_is_the_same_file() {
+        let cursor = Cursor {
+            file: "/work/ws/src/ui/BoardApp.hx".into(),
+            offset: 0,
+        };
+        assert!(cursor.is_in("/work/ws/src/ui/BoardApp.hx"));
+        assert!(cursor.is_in("src/ui/BoardApp.hx"));
+        assert!(cursor.is_in("./src/ui/BoardApp.hx"));
+        assert!(!cursor.is_in("src/ui/BoardApp2.hx"));
+        assert!(!cursor.is_in("ui/BoardApp.hx.bak"));
+        assert!(!cursor.is_in("other/ui/BoardApp.hx"));
+        assert!(!cursor.is_in("App.hx"));
     }
 
     #[test]
