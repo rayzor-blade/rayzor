@@ -674,16 +674,31 @@ impl<'a> HirToMirContext<'a> {
                                 // The access-site field symbol may have unresolved type.
                                 // Try the definition-site symbol from property_access_map
                                 // which was populated from the defining module.
-                                let def_sym_type =
-                                    self.property_access_map.iter().find_map(|(def_sym, _)| {
-                                        let sym = self.symbol_table.get_symbol(*def_sym)?;
-                                        let name = self.symbol_table.get_symbol(field)?.name;
-                                        if sym.name == name && sym.type_id.as_raw() != u32::MAX {
-                                            Some(sym.type_id)
-                                        } else {
-                                            None
-                                        }
-                                    });
+                                // The access-site type wins when it resolved; the
+                                // by-name scan can land on any same-named property.
+                                let site_resolved = field_ty != TypeId::invalid()
+                                    && !matches!(
+                                        self.type_table.get(field_ty).map(|t| &t.kind),
+                                        Some(
+                                            TypeKind::Unknown
+                                                | TypeKind::Error
+                                                | TypeKind::Placeholder { .. }
+                                        )
+                                    );
+                                let def_sym_type = (!site_resolved)
+                                    .then(|| {
+                                        self.property_access_map.iter().find_map(|(def_sym, _)| {
+                                            let sym = self.symbol_table.get_symbol(*def_sym)?;
+                                            let name = self.symbol_table.get_symbol(field)?.name;
+                                            if sym.name == name && sym.type_id.as_raw() != u32::MAX
+                                            {
+                                                Some(sym.type_id)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                    })
+                                    .flatten();
                                 let ty = def_sym_type.unwrap_or(field_ty);
                                 self.convert_type(ty)
                             });
