@@ -2054,6 +2054,24 @@ impl<'a> TastToHirContext<'a> {
                 class_symbol,
                 field_symbol,
             } => {
+                // Math.hx declares PI with no initializer. The class and field are
+                // matched by name because a symbol restored from the standard
+                // library snapshot carries no qualified name.
+                let named = |symbol: &SymbolId| {
+                    self.symbol_table
+                        .get_symbol(*symbol)
+                        .and_then(|sy| self.string_interner.get(sy.name))
+                };
+                if named(class_symbol) == Some("Math") && named(field_symbol) == Some("PI") {
+                    return HirExpr {
+                        bypass_accessors: false,
+                        kind: HirExprKind::Literal(HirLiteral::Float(std::f64::consts::PI)),
+                        ty: expr.expr_type,
+                        lifetime: LifetimeId::from_raw(1),
+                        source_location: expr.source_location,
+                    };
+                }
+
                 // First check pre-evaluated inline values (handles enum abstract fields and
                 // static inline vars that were pre-computed by evaluate_inline_static_vars)
                 let inline_literal =
