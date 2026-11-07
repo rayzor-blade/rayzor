@@ -302,7 +302,7 @@ fn desugar_constructors(
                 }
                 f.name = mangled(&format!("new_{owner}"), &sig_text(&f.params));
                 if let Some(body) = &mut f.body {
-                    route_super_calls(body);
+                    route_super_calls(std::sync::Arc::make_mut(body));
                 }
                 group.push(Member {
                     base: "new".to_string(),
@@ -396,7 +396,7 @@ fn empty_constructor(span: Span, call_super: bool) -> ClassField {
             type_params: Vec::new(),
             params: Vec::new(),
             return_type: None,
-            body: Some(Box::new(at(ExprKind::Block(body)))),
+            body: Some(std::sync::Arc::new(at(ExprKind::Block(body)))),
             span,
         }),
         span,

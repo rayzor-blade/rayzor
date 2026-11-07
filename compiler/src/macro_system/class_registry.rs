@@ -798,7 +798,7 @@ impl ClassRegistry {
                             }
 
                             let body = match &func.body {
-                                Some(body) => Arc::new((**body).clone()),
+                                Some(body) => Arc::clone(body),
                                 None => continue, // No body = extern/abstract, skip
                             };
 

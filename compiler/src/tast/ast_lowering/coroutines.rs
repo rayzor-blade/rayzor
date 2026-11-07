@@ -331,7 +331,7 @@ impl Pass {
         let Some(body) = f.body.take() else {
             return;
         };
-        let mut body = *body;
+        let mut body = parser::unshare(body);
         let mut statements = match body.kind {
             ExprKind::Block(elements) => elements,
             _ => vec![BlockElement::Expr(body)],
@@ -363,7 +363,7 @@ impl Pass {
                         type_params: Vec::new(),
                         params: Vec::new(),
                         return_type: Some(result),
-                        body: Some(Box::new(at(ExprKind::Block(statements), span))),
+                        body: Some(std::sync::Arc::new(at(ExprKind::Block(statements), span))),
                         span,
                     }),
                     span,
@@ -382,7 +382,7 @@ impl Pass {
             },
             span,
         );
-        f.body = Some(Box::new(at(
+        f.body = Some(std::sync::Arc::new(at(
             ExprKind::Block(vec![BlockElement::Expr(at(
                 ExprKind::Return(Some(Box::new(start))),
                 span,
@@ -402,7 +402,7 @@ impl Pass {
             self.ty(ty);
         }
         if let Some(body) = &mut f.body {
-            self.expr(body);
+            self.expr(std::sync::Arc::make_mut(body));
         }
     }
 
@@ -672,7 +672,7 @@ fn for_each_child_mut(expr: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
                 }
             }
             if let Some(body) = &mut function.body {
-                f(body);
+                f(std::sync::Arc::make_mut(body));
             }
         }
         ExprKind::Arrow { expr, .. } => f(expr),

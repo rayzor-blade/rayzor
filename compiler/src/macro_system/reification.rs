@@ -328,7 +328,7 @@ impl ReificationEngine {
                 func.body = func
                     .body
                     .as_ref()
-                    .map(|body| Self::process_expr(body, env).map(Box::new))
+                    .map(|body| Self::process_expr(body, env).map(std::sync::Arc::new))
                     .transpose()?;
                 for param in &mut func.params {
                     param.name = Self::process_name(&param.name, env, param.span)?;

@@ -507,10 +507,10 @@ impl MacroExpander {
                 if let Some(body) = func.body.take() {
                     let backup = body.clone();
                     let names = func.params.iter().map(|param| param.name.clone());
-                    match self.with_bindings(names, |this| this.walk_expr(*body)) {
+                    match self.with_bindings(names, |this| this.walk_expr(parser::unshare(body))) {
                         Ok((expanded, did_change)) => {
                             changed = did_change;
-                            func.body = Some(Box::new(expanded));
+                            func.body = Some(std::sync::Arc::new(expanded));
                         }
                         Err(e) => {
                             if !e.is_control_flow() {
@@ -929,9 +929,10 @@ impl MacroExpander {
                         .iter()
                         .map(|param| param.name.clone())
                         .chain((!function.name.is_empty()).then(|| function.name.clone()));
-                    let (expanded, c) = self.with_bindings(names, |this| this.walk_expr(*body))?;
+                    let (expanded, c) =
+                        self.with_bindings(names, |this| this.walk_expr(parser::unshare(body)))?;
                     changed |= c;
-                    function.body = Some(Box::new(expanded));
+                    function.body = Some(std::sync::Arc::new(expanded));
                 }
                 ExprKind::Function(function)
             }

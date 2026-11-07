@@ -699,7 +699,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
             // same way the expression-body branch below treats it. Left in place it
             // reaches the class-body loop, which reads it as the start of a field.
             self.stream.eat(TokenKind::Semicolon);
-            Some(Box::new(expr))
+            Some(std::sync::Arc::new(expr))
         } else if self.stream.at(TokenKind::Semicolon) {
             self.stream.advance();
             None
@@ -713,7 +713,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
             // returns an empty file).
             let expr = self.parse_expression()?;
             self.stream.eat(TokenKind::Semicolon);
-            Some(Box::new(expr))
+            Some(std::sync::Arc::new(expr))
         };
 
         Ok(Function {
@@ -899,8 +899,8 @@ fn hoist_static_locals(fields: &mut Vec<ClassField>) {
         let ClassFieldKind::Function(func) = &mut field.kind else {
             continue;
         };
-        if let Some(body) = func.body.as_deref_mut() {
-            take_static_locals(body, &mut taken, &mut hoisted);
+        if let Some(body) = func.body.as_mut() {
+            take_static_locals(std::sync::Arc::make_mut(body), &mut taken, &mut hoisted);
         }
     }
     fields.extend(hoisted);

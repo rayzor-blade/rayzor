@@ -5127,7 +5127,9 @@ impl MacroInterpreter {
                 ExprKind::Function(mut func) => {
                     func.body = func
                         .body
-                        .map(|body| walk(interp, *body, counter).map(Box::new))
+                        .map(|body| {
+                            walk(interp, parser::unshare(body), counter).map(std::sync::Arc::new)
+                        })
                         .transpose()?;
                     for param in &mut func.params {
                         param.default_value = param

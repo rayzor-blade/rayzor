@@ -145,7 +145,7 @@ fn desugar_fields(
             .map_or_else(|| has_value_return(body), |t| !is_void(t));
         let mut forward = field.clone();
         if let ClassFieldKind::Function(f) = &mut forward.kind {
-            f.body = Some(Box::new(forwarding_body(
+            f.body = Some(std::sync::Arc::new(forwarding_body(
                 func,
                 is_static,
                 returns_value,

@@ -1066,7 +1066,7 @@ pub fn def_of(kind: &ExprKind, span: Span) -> Option<MacroValue> {
                     })
                     .collect(),
                 return_type: None,
-                body: Some(Box::new(body)),
+                body: Some(std::sync::Arc::new(body)),
                 span,
             };
             function_value(&func, en("FunctionKind", "FArrow", Vec::new()))
@@ -1304,7 +1304,7 @@ fn function_of(f: &MacroValue, name: String, span: Span) -> Function {
         return_type: field(f, "ret")
             .as_ref()
             .and_then(|t| type_of_value(t, span)),
-        body: opt_expr_of(field(f, "expr").as_ref(), span),
+        body: opt_expr_of(field(f, "expr").as_ref(), span).map(|body| std::sync::Arc::new(*body)),
         span,
     }
 }

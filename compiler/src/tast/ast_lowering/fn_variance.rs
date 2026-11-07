@@ -125,7 +125,7 @@ impl<'a> AstLowering<'a> {
                 })
                 .collect(),
             return_type: (*return_type == dynamic).then(dynamic_hint),
-            body: Some(Box::new(body)),
+            body: Some(std::sync::Arc::new(body)),
             span,
         })))
     }

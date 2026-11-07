@@ -312,8 +312,9 @@ fn field_expr(field: &ClassField) -> Option<Expr> {
                 && !matches!(body.kind, ExprKind::Block(_))
             {
                 let span = body.span;
-                **body = Expr {
-                    kind: ExprKind::Block(vec![parser::BlockElement::Expr((**body).clone())]),
+                let body = std::sync::Arc::make_mut(body);
+                *body = Expr {
+                    kind: ExprKind::Block(vec![parser::BlockElement::Expr(body.clone())]),
                     span,
                 };
             }
@@ -789,7 +790,7 @@ fn class_field_to_build_field(field: &ClassField) -> BuildField {
             let kind = BuildFieldKind::Function {
                 params: func.params.clone(),
                 return_type: func.return_type.clone(),
-                body: func.body.clone(),
+                body: func.body.as_ref().map(|body| Box::new((**body).clone())),
             };
             (func.name.clone(), kind)
         }
@@ -1090,7 +1091,7 @@ pub(crate) fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
                 type_params: Vec::new(),
                 params,
                 return_type,
-                body,
+                body: body.map(|body| std::sync::Arc::new(*body)),
                 span: parser::Span::new(0, 0),
             })
         }

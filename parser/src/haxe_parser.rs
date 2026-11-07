@@ -775,7 +775,7 @@ fn module_field_function<'a>(full: &'a str, input: &'a str) -> PResult<'a, Modul
             type_params,
             params,
             return_type,
-            body: body.map(Box::new),
+            body: body.map(std::sync::Arc::new),
             span: Span::new(0, 0), // Will be set by the caller
         }),
     ))

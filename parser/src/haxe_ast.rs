@@ -527,6 +527,11 @@ pub enum PropertyAccess {
     Custom(String),
 }
 
+/// A function body taken out of its share: moved when nothing else holds it, copied otherwise.
+pub fn unshare(body: std::sync::Arc<Expr>) -> Expr {
+    std::sync::Arc::try_unwrap(body).unwrap_or_else(|shared| (*shared).clone())
+}
+
 /// Function declaration
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
@@ -534,7 +539,8 @@ pub struct Function {
     pub type_params: Vec<TypeParam>,
     pub params: Vec<FunctionParam>,
     pub return_type: Option<Type>,
-    pub body: Option<Box<Expr>>,
+    /// Shared: copies of a file and the macro class registry hold the same body.
+    pub body: Option<std::sync::Arc<Expr>>,
     pub span: Span,
 }
 

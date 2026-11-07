@@ -3763,7 +3763,7 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Analyze if function body can throw exceptions
-    pub(crate) fn analyze_can_throw(&self, body: &Option<Box<parser::Expr>>) -> bool {
+    pub(crate) fn analyze_can_throw(&self, body: &Option<std::sync::Arc<parser::Expr>>) -> bool {
         if let Some(body_expr) = body {
             self.expr_can_throw(body_expr)
         } else {
@@ -3816,7 +3816,7 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Analyze if function is pure (no side effects)
-    pub(crate) fn analyze_is_pure(&self, body: &Option<Box<parser::Expr>>) -> bool {
+    pub(crate) fn analyze_is_pure(&self, body: &Option<std::sync::Arc<parser::Expr>>) -> bool {
         if let Some(body_expr) = body {
             self.expr_is_pure(body_expr)
         } else {
@@ -3866,7 +3866,7 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Calculate cyclomatic complexity of function body
-    pub(crate) fn calculate_complexity(&self, body: &Option<Box<parser::Expr>>) -> u32 {
+    pub(crate) fn calculate_complexity(&self, body: &Option<std::sync::Arc<parser::Expr>>) -> u32 {
         if let Some(body_expr) = body {
             1 + self.expr_complexity(body_expr)
         } else {
@@ -4190,10 +4190,10 @@ impl<'a> AstLowering<'a> {
                 ExprKind::Block(inner) => elements.extend(inner.iter().cloned()),
                 _ => elements.push(parser::BlockElement::Expr(match &body.kind {
                     ExprKind::Return(_) => (**body).clone(),
-                    _ => mk(ExprKind::Return(Some(body.clone()))),
+                    _ => mk(ExprKind::Return(Some(Box::new((**body).clone())))),
                 })),
             }
-            Box::new(mk(ExprKind::Block(elements)))
+            std::sync::Arc::new(mk(ExprKind::Block(elements)))
         });
         Some(parser::Function {
             params,

@@ -1322,7 +1322,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                         type_params: Vec::new(),
                         params,
                         return_type: None,
-                        body: Some(Box::new(body)),
+                        body: Some(std::sync::Arc::new(body)),
                         span,
                     }),
                     span,

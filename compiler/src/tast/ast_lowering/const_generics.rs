@@ -349,7 +349,7 @@ impl Substitution {
             self.ty(ty);
         }
         if let Some(body) = &mut function.body {
-            self.expr(body);
+            self.expr(std::sync::Arc::make_mut(body));
         }
         self.shadowed = shadowed;
         self.type_shadowed = type_shadowed;

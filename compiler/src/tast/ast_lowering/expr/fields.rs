@@ -1273,7 +1273,7 @@ impl<'a> AstLowering<'a> {
                 })
                 .collect(),
             return_type: None,
-            body: Some(Box::new(body)),
+            body: Some(std::sync::Arc::new(body)),
             span,
         }));
         let block = at(ExprKind::Block(vec![
@@ -1561,7 +1561,7 @@ impl<'a> AstLowering<'a> {
                 })
                 .collect(),
             return_type: declared.as_ref().and_then(|d| d.return_type.clone()),
-            body: Some(Box::new(body)),
+            body: Some(std::sync::Arc::new(body)),
             span,
         }));
         let block = match receiver {
@@ -1704,7 +1704,9 @@ impl<'a> AstLowering<'a> {
                 })
                 .collect(),
             return_type: None,
-            body: Some(Box::new(at(ExprKind::Return(Some(Box::new(construct)))))),
+            body: Some(std::sync::Arc::new(at(ExprKind::Return(Some(Box::new(
+                construct,
+            )))))),
             span,
         }));
         self.expected_lambda_params_stack.push(Some(param_types));
