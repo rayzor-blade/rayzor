@@ -1383,11 +1383,19 @@ impl<'a> AstLowering<'a> {
                 // A constructor's callback slots provide the same contextual
                 // parameter types as ordinary calls. Unbound class parameters
                 // are inferred from the argument instead.
+                let ctor_optional = self.constructor_optional_flags(constructor_target);
+                let formal_of = ctor_params
+                    .as_deref()
+                    .filter(|_| !constructor_has_unbound_params)
+                    .and_then(|formals| {
+                        self.skipped_optional_formals_for(&ctor_optional, args, formals)
+                    });
                 let mut arg_exprs = Vec::with_capacity(args.len());
                 for (index, arg) in args.iter().enumerate() {
+                    let formal = formal_of.as_ref().map_or(index, |map| map[index]);
                     let expected = ctor_params
                         .as_ref()
-                        .and_then(|ps| ps.get(index))
+                        .and_then(|ps| ps.get(formal))
                         .copied()
                         .filter(|_| !constructor_has_unbound_params)
                         .filter(|ty| {
@@ -1416,6 +1424,25 @@ impl<'a> AstLowering<'a> {
                     self.expected_lambda_params_stack.pop();
                     self.expected_arg_type_stack.pop();
                     arg_exprs.push(lowered?);
+                }
+                // Skipped optional formals travel as null.
+                if let Some(map) = &formal_of {
+                    let location = self.context.create_location_from_span(expression.span);
+                    let mut placed = Vec::with_capacity(map.last().map_or(0, |l| l + 1));
+                    for (arg, &f) in arg_exprs.into_iter().zip(map) {
+                        while placed.len() < f {
+                            placed.push(TypedExpression {
+                                kind: TypedExpressionKind::Null,
+                                expr_type: self.context.type_table.borrow().dynamic_type(),
+                                usage: VariableUsage::Copy,
+                                lifetime_id: crate::tast::LifetimeId::first(),
+                                source_location: location.clone(),
+                                metadata: ExpressionMetadata::default(),
+                            });
+                        }
+                        placed.push(arg);
+                    }
+                    arg_exprs = placed;
                 }
                 let arg_exprs =
                     self.append_pos_infos(arg_exprs, ctor_params.as_deref(), expression);

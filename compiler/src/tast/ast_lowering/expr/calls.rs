@@ -6766,6 +6766,17 @@ impl<'a> AstLowering<'a> {
         args: &[Expr],
         formals: &[TypeId],
     ) -> Option<Vec<usize>> {
+        let declared = self.callee_optional_params(callee).unwrap_or_default();
+        self.skipped_optional_formals_for(&declared, args, formals)
+    }
+
+    /// `skipped_optional_formals` with the callee's optional flags given.
+    pub(crate) fn skipped_optional_formals_for(
+        &mut self,
+        declared: &[bool],
+        args: &[Expr],
+        formals: &[TypeId],
+    ) -> Option<Vec<usize>> {
         if args.len() >= formals.len()
             || formals
                 .last()
@@ -6773,17 +6784,30 @@ impl<'a> AstLowering<'a> {
         {
             return None;
         }
-        let declared = self.callee_optional_params(callee).unwrap_or_default();
         let mut map = Vec::with_capacity(args.len());
         let mut f = 0;
+        let optional_at = |slf: &Self, g: usize| {
+            declared.get(g) == Some(&true) || slf.is_optional_formal(formals[g])
+        };
         for (i, arg) in args.iter().enumerate() {
-            while f + 1 < formals.len()
+            // The first later formal the argument can be, when every formal
+            // before it is optional and enough formals remain for the rest.
+            if f + 1 < formals.len()
                 && formals.len() - f > args.len() - i
-                && (declared.get(f) == Some(&true) || self.is_optional_formal(formals[f]))
+                && optional_at(self, f)
                 && self.literal_cannot_be(arg, formals[f])
-                && !self.literal_cannot_be(arg, formals[f + 1])
             {
-                f += 1;
+                let mut g = f + 1;
+                while g < formals.len() && formals.len() - g >= args.len() - i {
+                    if !self.literal_cannot_be(arg, formals[g]) {
+                        f = g;
+                        break;
+                    }
+                    if !optional_at(self, g) {
+                        break;
+                    }
+                    g += 1;
+                }
             }
             if f >= formals.len() {
                 return None;
@@ -6897,11 +6921,98 @@ impl<'a> AstLowering<'a> {
             return scalar || matches!(kind, TypeKind::Anonymous { .. } | TypeKind::Array { .. });
         }
         match &arg.kind {
+            ExprKind::Ident(_) => match self.identifier_value_type(arg) {
+                Some(value) => self.value_type_cannot_be(value, ty),
+                None => false,
+            },
             ExprKind::Object(_) => scalar || matches!(kind, TypeKind::Function { .. }),
             ExprKind::String(_) => matches!(
                 kind,
                 TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Function { .. }
             ),
+            _ => false,
+        }
+    }
+
+    /// The declared type of a local or parameter named by `arg`.
+    fn identifier_value_type(&self, arg: &Expr) -> Option<TypeId> {
+        let ExprKind::Ident(name) = &arg.kind else {
+            return None;
+        };
+        let id = self.context.string_interner.intern(name);
+        let symbol = self
+            .resolve_symbol_in_scope_hierarchy(id)
+            .and_then(|s| self.context.symbol_table.get_symbol(s))?;
+        matches!(
+            symbol.kind,
+            crate::tast::symbols::SymbolKind::Variable
+                | crate::tast::symbols::SymbolKind::Parameter
+        )
+        .then_some(symbol.type_id)
+    }
+
+    /// Whether a value of type `value` can never be passed for `formal`
+    /// (already stripped of optionality and aliases). Only clear category
+    /// mismatches count; anything uncertain is "can be".
+    fn value_type_cannot_be(&self, value: TypeId, formal: TypeId) -> bool {
+        let tt = self.context.type_table.borrow();
+        let strip = |mut ty: TypeId| {
+            for _ in 0..4 {
+                match tt.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            ty
+        };
+        let (value, formal) = (strip(value), strip(formal));
+        let (Some(v), Some(f)) = (
+            tt.get(value).map(|t| &t.kind),
+            tt.get(formal).map(|t| &t.kind),
+        ) else {
+            return false;
+        };
+        let scalar = |k: &TypeKind| {
+            matches!(
+                k,
+                TypeKind::String | TypeKind::Int | TypeKind::Float | TypeKind::Bool
+            )
+        };
+        let object =
+            |k: &TypeKind| matches!(k, TypeKind::Class { .. } | TypeKind::Interface { .. });
+        match f {
+            TypeKind::Array { .. } => {
+                scalar(v) || object(v) || matches!(v, TypeKind::Function { .. })
+            }
+            f if scalar(f) => {
+                object(v) || matches!(v, TypeKind::Array { .. } | TypeKind::Function { .. })
+            }
+            TypeKind::Function { .. } => {
+                scalar(v) || object(v) || matches!(v, TypeKind::Array { .. })
+            }
+            TypeKind::Anonymous { .. } => {
+                scalar(v) || matches!(v, TypeKind::Array { .. } | TypeKind::Function { .. })
+            }
+            TypeKind::Class {
+                symbol_id: want, ..
+            } => match v {
+                TypeKind::Class {
+                    symbol_id: have, ..
+                } if have == want => false,
+                TypeKind::Class { .. } => {
+                    drop(tt);
+                    let mut checker = crate::tast::TypeChecker::new(
+                        self.context.type_table,
+                        self.context.symbol_table,
+                        self.context.scope_tree,
+                        self.context.string_interner,
+                    );
+                    checker.check_compatibility(value, formal)
+                        == crate::tast::type_checker::TypeCompatibility::Incompatible
+                }
+                v => scalar(v) || matches!(v, TypeKind::Array { .. } | TypeKind::Function { .. }),
+            },
             _ => false,
         }
     }
@@ -7598,6 +7709,38 @@ impl<'a> AstLowering<'a> {
                 .map(|param| self.substitute_receiver_type(param, class_type))
                 .collect(),
         )
+    }
+
+    /// Which parameters a constructor declares optional (`?x`, or with a default).
+    pub(crate) fn constructor_optional_flags(&mut self, class_type: TypeId) -> Vec<bool> {
+        let Some(class_symbol) = self.resolve_type_to_class_symbol(class_type) else {
+            return Vec::new();
+        };
+        let ctor = self
+            .class_constructor_symbols
+            .get(&class_symbol)
+            .copied()
+            .or_else(|| {
+                self.context
+                    .symbol_table
+                    .get_class_constructor(class_symbol)
+            });
+        if let Some(ctor) = ctor {
+            let Some(symbol) = self.context.symbol_table.get_symbol(ctor) else {
+                return Vec::new();
+            };
+            let table = self.context.type_table.borrow();
+            return match table.get(symbol.type_id).map(|t| &t.kind) {
+                Some(TypeKind::Function { labels, .. }) => {
+                    labels.iter().map(|label| label.optional).collect()
+                }
+                _ => Vec::new(),
+            };
+        }
+        let new = self.context.intern_string("new");
+        self.resolve_declared_method_sig(class_symbol, new, false)
+            .map(|sig| sig.optional)
+            .unwrap_or_default()
     }
 
     pub(crate) fn function_param_types_from_symbol(&self, sym_id: SymbolId) -> Option<Vec<TypeId>> {
