@@ -1112,13 +1112,23 @@ impl<'a> AstLowering<'a> {
             return None;
         }
         let interned = self.context.intern_string(name);
-        let symbol = self.resolve_symbol_in_scope_hierarchy(interned)?;
-        let symbol = self.context.symbol_table.get_symbol(symbol)?;
-        let constant = symbol.kind != crate::tast::SymbolKind::Function
-            && symbol.is_static()
-            && (symbol.is_final()
-                || symbol.is_inline()
-                || symbol.mutability == crate::tast::Mutability::Immutable);
+        let symbol_id = self.resolve_symbol_in_scope_hierarchy(interned)?;
+        let symbol = self.context.symbol_table.get_symbol(symbol_id)?;
+        // A value of the enum abstract being defined is a constant too.
+        let abstract_value = symbol.is_static()
+            && symbol.kind == crate::tast::SymbolKind::Field
+            && self.class_fields.iter().any(|(owner, fields)| {
+                self.context.symbol_table.is_enum_abstract(*owner)
+                    && fields
+                        .iter()
+                        .any(|(_, field, is_static)| *is_static && *field == symbol_id)
+            });
+        let constant = abstract_value
+            || symbol.kind != crate::tast::SymbolKind::Function
+                && symbol.is_static()
+                && (symbol.is_final()
+                    || symbol.is_inline()
+                    || symbol.mutability == crate::tast::Mutability::Immutable);
         constant.then(|| {
             parser::Pattern::Const(parser::Expr {
                 kind: parser::ExprKind::Ident(name.clone()),
