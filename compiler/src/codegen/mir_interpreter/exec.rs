@@ -1129,7 +1129,11 @@ fn cold(m: &Machine, fr: &mut Frame, op: &Op) -> Result<(), InterpError> {
             unsafe { std::ptr::copy_nonoverlapping(s as *const u8, p as *mut u8, 64) };
             r[*dest as usize] = p;
         }
-        Op::Free { ptr } => unsafe { libc::free(r[*ptr as usize] as *mut libc::c_void) },
+        // The pool's release, as compiled code uses: it accepts memory from
+        // either allocator, and native tiers allocate from the pool.
+        Op::Free { ptr } => {
+            rayzor_runtime::object_pool::rayzor_object_free(r[*ptr as usize] as *mut u8)
+        }
         Op::MemCopy {
             dest,
             src,

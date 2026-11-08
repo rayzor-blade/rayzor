@@ -304,6 +304,7 @@ impl OptimizationPass for InsertFreePass {
                     &ids,
                     &fresh_fns,
                     &fresh_string_fns,
+                    &fresh_object_fns,
                     &param_retention,
                     &retention_kinds,
                 );
@@ -525,6 +526,7 @@ fn insert_free_for_function(
     ids: &AllocFuncIds,
     fresh_fns: &BTreeSet<IrFunctionId>,
     fresh_string_fns: &BTreeSet<IrFunctionId>,
+    fresh_object_fns: &BTreeSet<IrFunctionId>,
     param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
     retention_kinds: &RetentionInfo,
 ) -> usize {
@@ -571,6 +573,15 @@ fn insert_free_for_function(
                 } if fresh_fns.contains(func_id) => {
                     alloc_ids.push(*dest);
                     received_array_ids.insert(*dest);
+                }
+                // A received fresh class instance is released like one built
+                // here; the deep form reads its type at run time.
+                IrInstruction::CallDirect {
+                    dest: Some(dest),
+                    func_id,
+                    ..
+                } if fresh_object_fns.contains(func_id) => {
+                    alloc_ids.push(*dest);
                 }
                 IrInstruction::CallDirect {
                     dest: Some(dest),
@@ -640,7 +651,7 @@ fn insert_free_for_function(
         } else {
             &empty
         };
-        if !pointer_escapes(
+        let escapes = pointer_escapes(
             alloc_id,
             &derived,
             function,
@@ -648,7 +659,8 @@ fn insert_free_for_function(
             &ids.anon_setter_ids,
             &ids.copy_only_ids,
             param_retention,
-        ) {
+        );
+        if !escapes {
             allocs_needing_free.push(alloc_id);
         } else {
             escaped_candidates.push(alloc_id);
@@ -793,6 +805,7 @@ fn insert_free_for_function(
                 if ids.malloc_ids.contains(func_id)
                     || ids.anon_new_ids.contains(func_id)
                     || fresh_fns.contains(func_id)
+                    || fresh_object_fns.contains(func_id)
                     || ids.ext_fresh_string_ids.contains(func_id)
                     || fresh_string_fns.contains(func_id)
                 {
@@ -939,6 +952,20 @@ fn insert_free_for_function(
         };
         let derived = &derived_sets[&alloc_id];
         if !array_confined_to_block(derived, def_block, function) {
+            let plain_instance = !is_string
+                && !array_alloc_ids.contains(&alloc_id)
+                && !anon_alloc_ids.contains(&alloc_id);
+            if plain_instance {
+                let nulls = null_consts(function);
+                if let Some((merge_block, value)) =
+                    merge_release(derived, def_block, function, &nulls)
+                {
+                    if let Some(block) = function.cfg.blocks.get_mut(&merge_block) {
+                        block.instructions.push(IrInstruction::Free { ptr: value });
+                        inserted += 1;
+                    }
+                }
+            }
             continue;
         }
         if dbg_arr {
@@ -1910,6 +1937,126 @@ fn first_escaping_use(
     None
 }
 
+/// Where to release an object that reaches a merge block only through a phi
+/// whose other arms are null (an inlined `if (c) return null; return new T()`).
+///
+/// The object is not confined to its defining block, but its whole life is: it
+/// is defined once, used on the way to the merge block `M`, and the phi there
+/// holds it or null. Releasing the phi value at the end of `M` is dominated by
+/// its definition and is a no-op on the null arm. Returns `(M, phi value)`.
+///
+/// Every use of the derived values must sit in `M` or in a block the defining
+/// block dominates, and none of those blocks may be reachable again from `M`
+/// without passing through the defining block (a later use of a released value).
+fn merge_release(
+    derived: &BTreeSet<IrId>,
+    def_block: IrBlockId,
+    function: &IrFunction,
+    nulls: &BTreeSet<IrId>,
+) -> Option<(IrBlockId, IrId)> {
+    let mut merge: Option<(IrBlockId, IrId)> = None;
+    for (&bid, block) in &function.cfg.blocks {
+        for phi in &block.phi_nodes {
+            if !derived.contains(&phi.dest) {
+                continue;
+            }
+            if merge.is_some() {
+                return None;
+            }
+            if !phi
+                .incoming
+                .iter()
+                .all(|(_, v)| derived.contains(v) || nulls.contains(v))
+            {
+                return None;
+            }
+            merge = Some((bid, phi.dest));
+        }
+    }
+    let (merge_block, phi_value) = merge?;
+
+    let domtree = crate::ir::loop_analysis::DominatorTree::compute(function);
+    let mut use_blocks: BTreeSet<IrBlockId> = BTreeSet::new();
+    for (&bid, block) in &function.cfg.blocks {
+        let mut used = block
+            .instructions
+            .iter()
+            .any(|inst| inst.uses().iter().any(|u| derived.contains(u)));
+        used |= match &block.terminator {
+            IrTerminator::CondBranch { condition, .. } => derived.contains(condition),
+            IrTerminator::Switch { value, .. } => derived.contains(value),
+            IrTerminator::Return { value: Some(v) } => derived.contains(v),
+            IrTerminator::NoReturn { call } => derived.contains(call),
+            _ => false,
+        };
+        if used {
+            use_blocks.insert(bid);
+        }
+    }
+    // The merge phi itself is the only phi allowed to read the object.
+    for (&bid, block) in &function.cfg.blocks {
+        if bid == merge_block {
+            continue;
+        }
+        if block
+            .phi_nodes
+            .iter()
+            .any(|phi| phi.incoming.iter().any(|(_, v)| derived.contains(v)))
+        {
+            return None;
+        }
+    }
+    if !use_blocks
+        .iter()
+        .all(|&b| b == merge_block || domtree.dominates(def_block, b))
+    {
+        return None;
+    }
+
+    // Nothing that uses the object may run again after the release unless the
+    // object is rebuilt first.
+    // Reaching `M` again is fine when the edge brings null: the phi then holds
+    // no object.
+    let phi = function.cfg.blocks[&merge_block]
+        .phi_nodes
+        .iter()
+        .find(|phi| phi.dest == phi_value)?;
+    let mut seen: BTreeSet<IrBlockId> = BTreeSet::new();
+    let mut work: Vec<(IrBlockId, IrBlockId)> = function.cfg.blocks[&merge_block]
+        .successors()
+        .into_iter()
+        .map(|to| (merge_block, to))
+        .collect();
+    while let Some((from, b)) = work.pop() {
+        if b == def_block {
+            continue;
+        }
+        if b == merge_block {
+            let brings_null = phi
+                .incoming
+                .iter()
+                .any(|(pred, v)| *pred == from && nulls.contains(v));
+            if !brings_null {
+                return None;
+            }
+            continue;
+        }
+        if !seen.insert(b) {
+            continue;
+        }
+        if use_blocks.contains(&b) {
+            return None;
+        }
+        work.extend(
+            function.cfg.blocks[&b]
+                .successors()
+                .into_iter()
+                .map(|to| (b, to)),
+        );
+    }
+    Some((merge_block, phi_value))
+}
+
 /// True iff every use of the alloc (and its derived set) sits in the
 /// instructions of `def_block` — no other block reads it, no terminator
 /// anywhere consumes it (including `def_block`'s own, so it is dead at the
@@ -2586,6 +2733,25 @@ fn dbg_holder(value: IrId, reason: &str) {
     }
 }
 
+/// Registers defined as the null pointer constant. A function returning one on
+/// some path still returns a fresh value on the others: every release the pass
+/// emits is a no-op on null.
+fn null_consts(function: &IrFunction) -> BTreeSet<IrId> {
+    let mut out = BTreeSet::new();
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            if let IrInstruction::Const {
+                dest,
+                value: IrValue::Null,
+            } = inst
+            {
+                out.insert(*dest);
+            }
+        }
+    }
+    out
+}
+
 /// Functions whose returned value is a freshly built class instance the caller
 /// owns. The object analogue of `compute_returns_fresh_arrays`: without it a
 /// tree returned from a builder is not an allocation the pass can even see, so
@@ -2667,7 +2833,11 @@ fn returns_fresh_object(
     let mut dealloc_ids: BTreeSet<_> = ids.free_ids.union(&ids.anon_drop_ids).cloned().collect();
     dealloc_ids.extend(ids.array_free_ids.iter().cloned());
 
+    let nulls = null_consts(function);
     'ret: for v in &ret_vals {
+        if nulls.contains(v) {
+            continue;
+        }
         for &src in &sources {
             let derived = build_derived_set(src, function);
             if !derived.contains(v) {
@@ -3209,10 +3379,11 @@ fn pointer_escapes_ex(
             if !touches {
                 continue;
             }
-            let all_internal = phi
-                .incoming
-                .iter()
-                .all(|(_, v)| *v == alloc_id || derived.contains(v) || *v == phi.dest);
+            // A null arm publishes nothing, and every release is a no-op on it.
+            let nulls = null_consts(function);
+            let all_internal = phi.incoming.iter().all(|(_, v)| {
+                *v == alloc_id || derived.contains(v) || *v == phi.dest || nulls.contains(v)
+            });
             if !all_internal {
                 return true;
             }
@@ -3862,7 +4033,11 @@ fn returns_fresh_string(
 
     let empty = BTreeSet::new();
     let mut derived_memo: BTreeMap<IrId, BTreeSet<IrId>> = BTreeMap::new();
+    let nulls = null_consts(function);
     'ret: for v in &ret_vals {
+        if nulls.contains(v) {
+            continue;
+        }
         for &src in &sources {
             let derived = derived_memo
                 .entry(src)
@@ -3952,7 +4127,11 @@ fn returns_fresh_array(
     dealloc_ids.extend(ids.array_free_ids.iter().cloned());
 
     let mut derived_memo: BTreeMap<IrId, BTreeSet<IrId>> = BTreeMap::new();
+    let nulls = null_consts(function);
     'ret: for v in &ret_vals {
+        if nulls.contains(v) {
+            continue;
+        }
         for &(src, is_fresh_call) in &sources {
             let derived = derived_memo
                 .entry(src)

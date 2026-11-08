@@ -823,7 +823,9 @@ impl Externs<'_> {
         match name {
             "malloc" => return Some(libc::malloc as *const () as usize),
             "realloc" => return Some(libc::realloc as *const () as usize),
-            "free" => return Some(libc::free as *const () as usize),
+            "free" => {
+                return Some(rayzor_runtime::object_pool::rayzor_object_free as *const () as usize);
+            }
             _ => {}
         }
         self.program.symbol(name)
