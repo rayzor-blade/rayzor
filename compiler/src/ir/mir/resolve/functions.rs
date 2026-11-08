@@ -351,13 +351,20 @@ impl<'a> HirToMirContext<'a> {
             return_type = correct_return;
         }
 
-        // An existing MIR wrapper (same name, non-empty blocks) wins over a new extern.
+        // An existing MIR wrapper (same name, non-empty blocks) wins over a new
+        // extern. A class method that shares the bare name is not a wrapper: it
+        // carries a qualified name of its own, and binding the extern to it makes
+        // a method that calls its same-named extern call itself.
         let existing_mir_wrapper: Option<IrFunctionId> = self
             .builder
             .module
             .functions
             .iter()
-            .find(|(_, f)| f.name == name && !f.cfg.blocks.is_empty())
+            .find(|(_, f)| {
+                f.name == name
+                    && !f.cfg.blocks.is_empty()
+                    && f.qualified_name.as_deref().is_none_or(|q| q == f.name)
+            })
             .map(|(id, _)| *id);
 
         if let Some(func_id) = existing_mir_wrapper {
