@@ -374,7 +374,12 @@ mod tests {
     }
 
     fn declarations() -> Arc<ClassRegistry> {
-        let mut unit = crate::compilation::CompilationUnit::new(Default::default());
+        // The carried manifest is what editor type-checking starts from.
+        let mut unit =
+            crate::compilation::CompilationUnit::new(crate::compilation::CompilationConfig {
+                typecheck_only: true,
+                ..Default::default()
+            });
         unit.load_stdlib().unwrap();
         assert!(unit.stdlib_files.is_empty());
         Arc::new(unit.macro_class_registry())
