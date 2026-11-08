@@ -1062,6 +1062,24 @@ impl<'a> AstLowering<'a> {
                 };
                 let then_null = matches!(then_expr.kind, TypedExpressionKind::Null);
                 let else_null = matches!(else_e.kind, TypedExpressionKind::Null);
+                // A null branch next to a reference branch takes that branch's
+                // type: null is a value of it.
+                let reference = |kind: &Option<TypeKind>| {
+                    matches!(
+                        kind,
+                        Some(
+                            TypeKind::String
+                                | TypeKind::Array { .. }
+                                | TypeKind::Map { .. }
+                                | TypeKind::Function { .. }
+                                | TypeKind::Class { .. }
+                                | TypeKind::Interface { .. }
+                        )
+                    )
+                };
+                if then_null && !else_null && reference(&else_kind) {
+                    return Ok(else_t);
+                }
                 let nullable = match (then_null, else_null) {
                     (true, false) if scalar(&else_kind) => Some(else_t),
                     (false, true) if scalar(&then_kind) => Some(then_t),
