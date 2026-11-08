@@ -1,0 +1,7 @@
+[project]
+name = "imported-abstract-constructor"
+version = "0.1.0"
+entry = "Main.hx"
+
+[build]
+class-paths = ["."]

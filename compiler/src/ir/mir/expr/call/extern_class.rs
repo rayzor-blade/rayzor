@@ -41,6 +41,17 @@ impl<'a> HirToMirContext<'a> {
             *fell_through = true;
             return None;
         };
+        // A call to a constructor is an abstract's, whose receiver is a zero of
+        // the underlying type; that class's methods are not what it calls.
+        if self
+            .symbol_table
+            .get_symbol(*symbol)
+            .and_then(|s| self.string_interner.get(s.name))
+            == Some("new")
+        {
+            *fell_through = true;
+            return None;
+        }
         if *is_method && !args.is_empty() {
             let receiver = &args[0];
             // Resolve TypeAlias to get the actual receiver type
