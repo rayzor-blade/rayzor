@@ -936,7 +936,14 @@ impl CompilationUnit {
     /// by another compiler, does not lower the library again.
     fn blade_sources(&self, source_path: &str) -> Vec<BladeSource> {
         let mut sources = Vec::new();
-        if let Some(path) = self.blade_cache_path(source_path).filter(|p| p.exists()) {
+        // A module restored from this project's own artifact comes back with
+        // class and type information that differs from lowering it from
+        // source, so restoring one is opt-in (RAYZOR_RESTORE_ARTIFACTS, unsafe:
+        // results can differ from a source build) until
+        // REGRESSIONS_WARM=1 check-regressions.py passes.
+        if std::env::var_os("RAYZOR_RESTORE_ARTIFACTS").is_some()
+            && let Some(path) = self.blade_cache_path(source_path).filter(|p| p.exists())
+        {
             sources.push(BladeSource::Artifact(path));
         }
         if let Some(bytes) = self.embedded_snapshot_entry(source_path) {
