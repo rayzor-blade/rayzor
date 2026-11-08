@@ -1,0 +1,7 @@
+[project]
+name = "private-type-shadowing"
+version = "0.1.0"
+entry = "Main.hx"
+
+[build]
+class-paths = ["."]

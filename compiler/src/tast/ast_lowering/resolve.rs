@@ -353,6 +353,14 @@ impl<'a> AstLowering<'a> {
                     {
                         return lookup_type(&import.package_path).unwrap_or(found);
                     }
+                    // `import pkg.Module` brings in every type the module declares.
+                    if !import.is_wildcard && import.alias.is_none() {
+                        let mut package = import.package_path.package.clone();
+                        package.push(import.package_path.name);
+                        if let Some(own) = lookup_type(&QualifiedPath { package, name }) {
+                            return own;
+                        }
+                    }
                 }
                 scope = self
                     .context
