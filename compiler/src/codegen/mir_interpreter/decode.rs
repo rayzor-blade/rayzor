@@ -784,6 +784,10 @@ fn haxe_arg_coercion(from: Mt, to: Mt) -> Option<Conv> {
         (I64, I32) => Some(Conv::Reduce(I32)),
         (I32 | I64, F64 | F32) => Some(Conv::SToF(from, to)),
         (F64, I64 | I32) => Some(Conv::FToS(F64, to)),
+        // A Float literal bound for a Single parameter reaches the call as a
+        // double; native code converts it at the call, so this must too.
+        (F64, F32) => Some(Conv::FDemote),
+        (F32, F64) => Some(Conv::FPromote),
         _ => None,
     }
 }

@@ -1,0 +1,7 @@
+[project]
+name = "single-parameters"
+version = "0.1.0"
+entry = "Main.hx"
+
+[build]
+class-paths = ["."]
