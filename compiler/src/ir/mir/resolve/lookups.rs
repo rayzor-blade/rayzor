@@ -1819,6 +1819,15 @@ impl<'a> HirToMirContext<'a> {
         // candidates with DIFFERENT indexes are a bare-name guess across
         // unrelated classes — Ambiguous, never first-match (the pick would
         // silently read the wrong slot).
+        // The receiver's class is known and published its layout when its class was
+        // registered, which precedes lowering any body: a module that later failed,
+        // or that is still waiting on this one, has still contributed it.
+        if let Some(start) = recv_symbol_for_walk {
+            if let Some(idx) = self.registered_field_slot(start, &target_name_str) {
+                return FieldIndexResolution::Unique(receiver_ty, idx);
+            }
+        }
+
         let mut distinct_indexes: Vec<u32> = all_matches.iter().map(|&(_, idx)| idx).collect();
         distinct_indexes.sort_unstable();
         distinct_indexes.dedup();
@@ -1834,6 +1843,31 @@ impl<'a> HirToMirContext<'a> {
 
         let (class_ty, idx) = all_matches[0];
         FieldIndexResolution::Unique(class_ty, idx)
+    }
+
+    /// Slot of `field_name` in `class` or the nearest ancestor declaring it, from the
+    /// layouts published at class registration.
+    fn registered_field_slot(&self, class: SymbolId, field_name: &str) -> Option<u32> {
+        let mut walk = class;
+        for _ in 0..16 {
+            let sym = self.symbol_table.get_symbol(walk)?;
+            let qualified = sym.qualified_name.and_then(|q| self.string_interner.get(q));
+            let bare = self.string_interner.get(sym.name);
+            if let Some(idx) = qualified
+                .and_then(|qn| lookup_class_field_gep(qn, field_name))
+                .or_else(|| bare.and_then(|cn| lookup_class_field_gep(cn, field_name)))
+            {
+                return Some(idx);
+            }
+            walk = self.class_parent_map.get(&walk).copied().or_else(|| {
+                self.symbol_table
+                    .class_hierarchies
+                    .get(&walk)
+                    .and_then(|h| h.superclass)
+                    .and_then(|ty| self.symbol_table.get_symbol_from_type(ty))
+            })?;
+        }
+        None
     }
 
     /// A class symbol standing for a stdlib typedef of a runtime class, as an

@@ -952,13 +952,14 @@ fn class_name_alias() -> &'static std::sync::Mutex<std::collections::HashMap<Str
 
 /// Record one field's index under its class's canonical name. Called from the
 /// same loop that populates `field_index_map`, which runs for every registered
-/// class. Idempotent: re-registration writes the same layout.
+/// class. A re-registration replaces the slot, so an edited class does not keep its old layout.
 fn record_class_field(qualified: Option<&str>, bare: &str, field_name: &str, idx: u32) {
     let canonical = qualified.unwrap_or(bare);
     if let Ok(mut m) = class_field_layouts().lock() {
         let v = m.entry(canonical.to_string()).or_default();
-        if !v.iter().any(|(n, _)| n == field_name) {
-            v.push((field_name.to_string(), idx));
+        match v.iter_mut().find(|(n, _)| n == field_name) {
+            Some(entry) => entry.1 = idx,
+            None => v.push((field_name.to_string(), idx)),
         }
     }
     if let Ok(mut a) = class_name_alias().lock() {
