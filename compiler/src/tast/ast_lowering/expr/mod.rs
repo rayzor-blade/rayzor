@@ -1344,8 +1344,7 @@ impl<'a> AstLowering<'a> {
                         })
                         .unwrap_or(base_class_type_id)
                 } else {
-                    self.context
-                        .expected_new_type_hint
+                    self.new_type_hint()
                         .filter(|hint| {
                             self.resolve_type_to_class_symbol(*hint)
                                 == self.resolve_type_to_class_symbol(base_class_type_id)
@@ -1486,7 +1485,7 @@ impl<'a> AstLowering<'a> {
                 //       loses that name and the construction would fall
                 //       through to a generic allocator.
                 if type_args.is_empty() {
-                    if let Some(hint_ty) = self.context.expected_new_type_hint {
+                    if let Some(hint_ty) = self.new_type_hint() {
                         let tt = self.context.type_table.borrow();
                         fn extract_sym_and_args(
                             tt: &crate::tast::core::TypeTable,

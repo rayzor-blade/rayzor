@@ -7711,6 +7711,17 @@ impl<'a> AstLowering<'a> {
         )
     }
 
+    /// The type an enclosing declaration or assignment expects a `new` to
+    /// build. A nullable class value is built as the class itself.
+    pub(crate) fn new_type_hint(&self) -> Option<TypeId> {
+        let hint = self.context.expected_new_type_hint?;
+        let table = self.context.type_table.borrow();
+        match table.get(hint).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => Some(*inner_type),
+            _ => Some(hint),
+        }
+    }
+
     /// Which parameters a constructor declares optional (`?x`, or with a default).
     pub(crate) fn constructor_optional_flags(&mut self, class_type: TypeId) -> Vec<bool> {
         let Some(class_symbol) = self.resolve_type_to_class_symbol(class_type) else {
