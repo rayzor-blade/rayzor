@@ -109,7 +109,14 @@ impl CompilationUnit {
 
         // Load pre-compiled symbols from BLADE manifest if caching is enabled
         // Skip if lazy_stdlib is enabled (for faster cold start)
-        let bsym_loaded = if self.config.enable_cache && !self.config.lazy_stdlib {
+        // The carried symbol manifest restores the library's symbols without
+        // the declarations a compile lowers against, so a program compiled
+        // from it diverges from one compiled from source. Only editor
+        // type-checking, which lowers nothing, uses it; RAYZOR_STDLIB_MANIFEST
+        // opts a compile in (unsafe: results can differ from a source build).
+        let use_manifest =
+            self.config.typecheck_only || std::env::var_os("RAYZOR_STDLIB_MANIFEST").is_some();
+        let bsym_loaded = if self.config.enable_cache && !self.config.lazy_stdlib && use_manifest {
             if self.load_stdlib_symbols() {
                 debug!("BLADE symbols loaded, stdlib configured for cached resolution");
                 true

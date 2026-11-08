@@ -1582,6 +1582,11 @@ impl CompilationUnit {
     /// Returns true if cache hit (MIR loaded + symbols registered), false if miss.
     pub(crate) fn try_load_import_from_cache(&mut self, filename: &str, source: &str) -> bool {
         crate::cooperative::poll();
+        // RAYZOR_IGNORE_BLADE_ARTIFACTS compiles every import from source while
+        // still writing artifacts; safe to run with, only slower.
+        if std::env::var_os("RAYZOR_IGNORE_BLADE_ARTIFACTS").is_some() {
+            return false;
+        }
         // Resource literals must observe this compile's registration order.
         if !self.config.typecheck_only && source.contains("__resources__") {
             return false;
