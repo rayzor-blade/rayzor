@@ -106,12 +106,14 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
+                // A symbol no longer in owned_heap_values has moved into a field,
+                // a static or a constructor argument; its new owner releases it.
+                let Some(&current_ir) = self.owned_heap_values.get(symbol) else {
+                    continue;
+                };
                 if self.reassigned_in_scope.contains(symbol) {
-                    // For reassigned variables, free the CURRENT value from owned_heap_values
-                    // (the old value was already freed at reassignment time)
-                    if let Some(&current_ir) = self.owned_heap_values.get(symbol) {
-                        to_free.push((*symbol, current_ir));
-                    }
+                    // The old value was already freed at reassignment time.
+                    to_free.push((*symbol, current_ir));
                 } else {
                     to_free.push((*symbol, *ir_id));
                 }
@@ -149,12 +151,13 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
-                // Get the current IrId (may differ from scope entry if reassigned)
+                // Not owned any more: moved into a field, static or constructor argument.
+                let Some(owned_ir) = self.owned_heap_values.get(symbol).copied() else {
+                    continue;
+                };
+                // The scope entry's IrId is stale once the variable was reassigned.
                 let current_ir = if self.reassigned_in_scope.contains(symbol) {
-                    match self.owned_heap_values.get(symbol).copied() {
-                        Some(ir) => ir,
-                        None => continue,
-                    }
+                    owned_ir
                 } else {
                     *ir_id
                 };
@@ -231,12 +234,13 @@ impl<'a> HirToMirContext<'a> {
     /// sibling arm; a free emitted there would name a register that never
     /// materialized and alias an unrelated live object. Skipping the free trades
     /// a bounded leak for correctness.
-    pub(crate) fn emit_tracked_free(&mut self, ir: IrId, with_drop_call: bool) {
+    /// Returns whether a free was emitted.
+    pub(crate) fn emit_tracked_free(&mut self, ir: IrId, with_drop_call: bool) -> bool {
         if self.is_terminated() {
-            return;
+            return false;
         }
         let Some(cur) = self.builder.current_block else {
-            return;
+            return false;
         };
         match self.def_block_of(ir) {
             Some(def_bb) if self.block_dominates(def_bb, cur) => {
@@ -244,8 +248,9 @@ impl<'a> HirToMirContext<'a> {
                     self.maybe_emit_drop_call(ir);
                 }
                 self.builder.build_free(ir);
+                true
             }
-            _ => {}
+            _ => false,
         }
     }
 
@@ -269,8 +274,10 @@ impl<'a> HirToMirContext<'a> {
         }
 
         for (symbol, ir_id) in to_drop {
-            self.emit_tracked_free(ir_id, false);
-            self.owned_heap_values.remove(&symbol);
+            // A value not freed here stays owned, so scope exit still releases it.
+            if self.emit_tracked_free(ir_id, true) {
+                self.owned_heap_values.remove(&symbol);
+            }
         }
     }
 }

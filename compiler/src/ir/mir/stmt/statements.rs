@@ -1071,11 +1071,11 @@ impl<'a> HirToMirContext<'a> {
                         let rhs_is_owned_allocation =
                             rhs_was_copied || matches!(&rhs.kind, HirExprKind::New { .. });
 
-                        // Assigning into a Field/Index lvalue escapes the value into another
-                        // object, so a tracked RHS variable stops being tracked — its pointer
+                        // Assigning into a Field/Index lvalue or a global escapes the value into
+                        // another owner, so a tracked RHS variable stops being tracked — its pointer
                         // now lives inside that object and must survive scope exit.
-                        let lhs_is_field =
-                            matches!(lhs, HirLValue::Field { .. } | HirLValue::Index { .. });
+                        let lhs_is_field = lhs_is_global
+                            || matches!(lhs, HirLValue::Field { .. } | HirLValue::Index { .. });
                         if lhs_is_field {
                             if let HirExprKind::Variable {
                                 symbol: rhs_sym, ..

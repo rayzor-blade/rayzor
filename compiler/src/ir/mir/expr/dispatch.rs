@@ -123,6 +123,37 @@ impl<'a> HirToMirContext<'a> {
             );
         }
 
+        // The same rule for an `@:derive(Drop)` value, which needs no `@:move`: the
+        // callee owns what it is given, so this scope stops dropping it. Whether
+        // the callee keeps or releases it is its business; the compiler never frees
+        // what it cannot prove dead, and a miss here is a leak, not corruption.
+        let takes_ownership = |i: usize| match i.checked_sub(param_shift) {
+            None => true,
+            Some(p) => ownership
+                .as_ref()
+                .and_then(|o| o.get(p))
+                .map(|o| *o != crate::tast::ParamOwnership::Borrowed)
+                .unwrap_or(true),
+        };
+        let drop_moved: Vec<(SymbolId, SourceLocation)> = args
+            .iter()
+            .skip(skip)
+            .enumerate()
+            .filter(|(i, _)| takes_ownership(*i))
+            .filter_map(|(_, arg)| match &arg.kind {
+                HirExprKind::Variable { symbol, .. } => {
+                    let ir = self.owned_heap_values.get(symbol).copied()?;
+                    self.get_drop_class_for_ir(ir)?;
+                    Some((*symbol, arg.source_location))
+                }
+                _ => None,
+            })
+            .collect();
+        for (symbol, location) in drop_moved {
+            self.owned_heap_values.remove(&symbol);
+            self.warn_drop_value_handed_over(symbol, location);
+        }
+
         // Same positions, for a field rather than a binding. A borrowed
         // parameter is exempt: borrowing out of a field takes nothing away.
         let fields: Vec<HirExpr> = args
@@ -142,6 +173,35 @@ impl<'a> HirToMirContext<'a> {
         for arg in fields {
             self.check_move_out_of_field(&arg, "passed by value");
         }
+    }
+
+    /// W0510: a `@:derive(Drop)` value was passed to a parameter that takes ownership.
+    fn warn_drop_value_handed_over(&mut self, symbol: SymbolId, location: SourceLocation) {
+        let name = self
+            .symbol_table
+            .get_symbol(symbol)
+            .and_then(|s| self.string_interner.get(s.name))
+            .unwrap_or("<unknown>")
+            .to_string();
+        let span = Self::source_location_to_span(&location);
+        let diag = diagnostics::DiagnosticBuilder::warning(
+            format!("`{}` is handed over and no longer dropped here", name),
+            span.clone(),
+        )
+        .code("W0510")
+        .label(span, "passed to a parameter that takes ownership")
+        .note(
+            "An unannotated by-value parameter owns what it is given. The compiler cannot \
+             prove the callee releases it, so `drop()` is not run at the end of this scope; \
+             the value is leaked unless the callee or its new owner drops it.",
+        )
+        .help(format!(
+            "Mark the parameter `@:borrow` if the callee only reads it, or pass a copy \
+             (`{}.clone()`) and keep `{}` to be dropped here.",
+            name, name
+        ))
+        .build();
+        self.diagnostics.push(diag);
     }
 
     /// Capturing a binding in a closure observes it, so capturing one that has
