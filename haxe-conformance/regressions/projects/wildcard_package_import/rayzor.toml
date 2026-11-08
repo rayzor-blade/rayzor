@@ -1,0 +1,5 @@
+[project]
+name = "wildcard-package-import"
+entry = "./WildcardPackageImport.hx"
+[build]
+class-paths = ["."]

@@ -649,18 +649,33 @@ impl CompilationUnit {
         deps.retain(|d| !imported_names.contains(d) || explicit_dependencies.contains(d));
 
         // A leading type name is package-relative, including module subtypes
-        // such as `Helpers.Worker`; lowercase package paths are absolute.
-        if let Some(package) = &ast.package {
-            if !package.path.is_empty() {
-                let package_prefix = package.path.join(".");
-                let qualified: Vec<String> = deps
-                    .iter()
-                    .filter(|d| d.chars().next().is_some_and(char::is_uppercase))
-                    .map(|d| format!("{}.{}", package_prefix, d))
-                    .collect();
-                for q in qualified {
-                    deps.insert(q);
-                }
+        // such as `Helpers.Worker`; lowercase package paths are absolute. A
+        // package wildcard (`import a.b.*`) is searched the same way; candidates
+        // that name no file are dropped by the loader.
+        let mut prefixes: Vec<String> = ast
+            .package
+            .iter()
+            .filter(|p| !p.path.is_empty())
+            .map(|p| p.path.join("."))
+            .collect();
+        prefixes.extend(ast.imports.iter().filter_map(|import| {
+            let is_package = matches!(
+                import.mode,
+                parser::ImportMode::Wildcard | parser::ImportMode::WildcardWithExclusions(_)
+            ) && import
+                .path
+                .last()
+                .is_some_and(|p| !p.chars().next().is_some_and(char::is_uppercase));
+            is_package.then(|| import.path.join("."))
+        }));
+        let bare_types: Vec<String> = deps
+            .iter()
+            .filter(|d| d.chars().next().is_some_and(char::is_uppercase))
+            .cloned()
+            .collect();
+        for prefix in &prefixes {
+            for d in &bare_types {
+                deps.insert(format!("{prefix}.{d}"));
             }
         }
 
