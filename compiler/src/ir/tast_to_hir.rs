@@ -358,38 +358,38 @@ impl<'a> TastToHirContext<'a> {
         let symbol_table = &self.symbol_table;
         let string_interner = &self.string_interner;
 
+        // The value for each field name: the first key in order that names it.
+        let mut by_field: BTreeMap<&str, HirLiteral> = BTreeMap::new();
         for (key, value) in global_vars {
             // key is "ClassName.fieldName" or "package.ClassName.fieldName"
             let dot_pos = key.rfind('.').unwrap_or(0);
             let field_name = &key[dot_pos + 1..];
-
             let literal = match value {
                 crate::ir::blade::BladeInlineValue::Int(v) => HirLiteral::Int(*v),
                 crate::ir::blade::BladeInlineValue::Float(v) => HirLiteral::Float(*v),
                 crate::ir::blade::BladeInlineValue::Bool(v) => HirLiteral::Bool(*v),
                 crate::ir::blade::BladeInlineValue::String(_) => continue,
             };
+            by_field.entry(field_name).or_insert(literal);
+        }
+        if by_field.is_empty() {
+            return;
+        }
 
-            for i in 0..symbol_table.len() {
-                let sym_id = crate::tast::SymbolId::from_raw(i as u32);
-                if let Some(sym) = symbol_table.get_symbol(sym_id) {
-                    if !matches!(sym.kind, crate::tast::SymbolKind::Variable) {
-                        continue;
-                    }
-                    let sym_name = string_interner.get(sym.name).unwrap_or("");
-                    if sym_name != field_name {
-                        continue;
-                    }
-                    let qualified = sym
-                        .qualified_name
-                        .and_then(|n| string_interner.get(n))
-                        .unwrap_or("");
-                    if qualified == key || sym_name == field_name {
-                        if !self.inline_var_values.contains_key(&sym_id) {
-                            self.inline_var_values.insert(sym_id, literal.clone());
-                        }
-                    }
-                }
+        // One pass over the symbols, not one per entry.
+        for i in 0..symbol_table.len() {
+            let sym_id = crate::tast::SymbolId::from_raw(i as u32);
+            let Some(sym) = symbol_table.get_symbol(sym_id) else {
+                continue;
+            };
+            if !matches!(sym.kind, crate::tast::SymbolKind::Variable) {
+                continue;
+            }
+            let sym_name = string_interner.get(sym.name).unwrap_or("");
+            if let Some(literal) = by_field.get(sym_name) {
+                self.inline_var_values
+                    .entry(sym_id)
+                    .or_insert_with(|| literal.clone());
             }
         }
     }
