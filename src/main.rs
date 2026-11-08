@@ -1987,21 +1987,9 @@ fn run_file(
             h.set_functions(mir_module.functions.len());
         }
 
-        // TODO(blade-coherence F4): gate this write on
-        // `compile_diagnostics` containing no Error-severity entries, so
-        // an erroring compile can never poison later all-cached runs.
-        // The abstract-member pre-pass cut the silently-stored errors
-        // from ~19 to 8; the guard stays off until the remaining three
-        // classes are fixed (else the warm path turns off entirely):
-        //   1. "Int32: Invalid assignment target" x4 — abstract
-        //      op-assign lowering.
-        //   2. "BytesBuffer: Cannot access field 'high'/'low'" — the
-        //      surviving Int64 receiver-property edge (second E0100
-        //      emitter near hir_to_mir.rs:26514, not the instrumented
-        //      one).
-        //   3. "FPHelper: POSITIVE/NEGATIVE_INFINITY" — extern stdlib
-        //      statics (Math constants) not registered as globals.
-        // Diagnose with RAYZOR_DUMP_STORED_DIAGS=1.
+        // A compile that produced errors is not cached: its diagnostics are not
+        // replayed, so a later run would execute it and say nothing.
+        // RAYZOR_DUMP_STORED_DIAGS=1 prints the errors that stopped a write.
         if cache_enabled && std::env::var_os("RAYZOR_DUMP_STORED_DIAGS").is_some() {
             for d in compile_diagnostics
                 .iter()
@@ -2011,8 +1999,11 @@ fn run_file(
                 eprintln!("[stored-error] {}", d.message);
             }
         }
+        let compiled_clean = !compile_diagnostics
+            .iter()
+            .any(|d| d.severity == diagnostics::DiagnosticSeverity::Error);
         // Save MIR cache with pre-rendered diagnostic strings
-        if cache_enabled {
+        if cache_enabled && compiled_clean {
             // Render diagnostics to strings for cache replay
             let diag_strings: Vec<String> = if !compile_diagnostics.is_empty() {
                 let mut source_map = diagnostics::SourceMap::new();
