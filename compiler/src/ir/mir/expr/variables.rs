@@ -22,6 +22,23 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// The class, interface or enum a type names, through aliases.
+    fn nominal_symbol_of_type(&self, type_id: TypeId) -> Option<SymbolId> {
+        let mut cur = type_id;
+        for _ in 0..4 {
+            match self.type_table.get(cur).map(|t| &t.kind) {
+                Some(
+                    TypeKind::Class { symbol_id, .. }
+                    | TypeKind::Interface { symbol_id, .. }
+                    | TypeKind::Enum { symbol_id, .. },
+                ) => return Some(*symbol_id),
+                Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
+                _ => return None,
+            }
+        }
+        None
+    }
+
     /// The value behind `Math.NaN`, `Math.POSITIVE_INFINITY`, `Math.NEGATIVE_INFINITY` and
     /// `Math.PI`, which Math.hx declares with no initializer.
     ///
@@ -99,7 +116,21 @@ impl<'a> HirToMirContext<'a> {
 
         // Check if this is a class/enum used as a value (e.g., Type.getClassName(Animal))
         // Must be before function reference check since class symbols may also map to constructors
-        if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
+        // A typedef read as a value is the value of the type it names. The
+        // typedef's own symbol is the one whose type is the alias it declares;
+        // a variable of that type is not.
+        let value_symbol = self
+            .symbol_table
+            .get_symbol(*symbol)
+            .filter(|s| {
+                matches!(
+                    self.type_table.get(s.type_id).map(|t| &t.kind),
+                    Some(TypeKind::TypeAlias { symbol_id, .. }) if *symbol_id == s.id
+                )
+            })
+            .and_then(|s| self.nominal_symbol_of_type(s.type_id))
+            .unwrap_or(*symbol);
+        if let Some(sym) = self.symbol_table.get_symbol(value_symbol) {
             use crate::tast::SymbolKind;
             let meta_type_id = match self.string_interner.get(sym.name) {
                 Some("Dynamic") => Some(rayzor_runtime::type_system::TYPE_DYNAMIC_TOKEN.0),

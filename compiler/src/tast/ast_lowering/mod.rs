@@ -972,7 +972,6 @@ pub(crate) const TOPLEVEL_STDLIB_CLASSES: &[&str] = &[
     "FileSystem",
     "Json",
     "Timer",
-    "Bytes",
     "Int32",
     "Int64",
 ];
