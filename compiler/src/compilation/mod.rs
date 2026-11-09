@@ -37,7 +37,24 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 fn source_file_identity(filename: &str) -> PathBuf {
     let path = PathBuf::from(filename);
-    path.canonicalize().unwrap_or(path)
+    canonical_path(&path).unwrap_or(path)
+}
+
+/// `path.canonicalize()`, remembered for the process. Only a path that
+/// resolved is remembered, so a file created later is still found.
+pub(crate) fn canonical_path(path: &Path) -> Option<PathBuf> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static RESOLVED: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+    let resolved = RESOLVED.get_or_init(Default::default);
+    if let Some(hit) = resolved.lock().ok()?.get(path) {
+        return Some(hit.clone());
+    }
+    let canonical = path.canonicalize().ok()?;
+    if let Ok(mut map) = resolved.lock() {
+        map.insert(path.to_path_buf(), canonical.clone());
+    }
+    Some(canonical)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -301,9 +318,6 @@ pub struct CompilationUnit {
     pub(crate) macro_statics: crate::macro_system::class_registry::MacroStatics,
     pub macro_dependencies: crate::macro_system::dependencies::Dependencies,
     pub(crate) macro_resources: crate::macro_system::assets::Resources,
-    /// The resource set a compile ended with when a macro added resources
-    /// after the table was embedded; see `defer_stale_resource_error`.
-    stale_macro_resources: Option<Vec<(String, Vec<u8>)>>,
     /// `onAfterTyping`/`onGenerate` callbacks registered by expanded macros.
     pub(crate) macro_hooks: Vec<(String, crate::macro_system::MacroValue)>,
     pub(crate) global_metadata: Vec<crate::macro_system::compiler_api::GlobalMetadata>,
@@ -639,11 +653,6 @@ pub struct CompilationConfig {
     /// Embedded resources (`--resource file@name`) as (name, bytes), listed
     /// by `haxe.Resource`.
     pub resources: std::sync::Arc<Vec<(String, Vec<u8>)>>,
-
-    /// Withhold the "resources changed after the table was compiled" error
-    /// and record the final resource set instead, so the caller can compile
-    /// again with it configured. A caller that does not retry leaves this off.
-    pub defer_stale_resource_error: bool,
 }
 
 mod artifact_cache;
@@ -713,7 +722,6 @@ impl CompilationUnit {
             macro_resources: crate::macro_system::assets::ResourceStore::configured(
                 config.resources.clone(),
             ),
-            stale_macro_resources: None,
             macro_hooks: Vec::new(),
             global_metadata: Vec::new(),
             initialization_macro_files: Vec::new(),

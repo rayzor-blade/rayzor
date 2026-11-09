@@ -40,7 +40,6 @@ impl Default for CompilationConfig {
             extra_defines: Vec::new(),
             profile_typecheck: false,
             resources: Default::default(),
-            defer_stale_resource_error: false,
         }
     }
 }

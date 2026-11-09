@@ -137,39 +137,6 @@ fn typecheck_detail_report(timings: compiler::compilation::TypecheckStageTimings
     }
 }
 
-/// The file holding the resources a re-run compiles with.
-const RESOURCE_FILE_ENV: &str = "RAYZOR_MACRO_RESOURCES";
-/// Which compile pass this process is (1 for the first).
-const RESOURCE_PASS_ENV: &str = "RAYZOR_RESOURCE_PASS";
-/// Passes before a still-changing resource set is reported as an error.
-const RESOURCE_PASSES: u32 = 4;
-
-/// Runs this command again in a new process with `resources` configured, and
-/// exits with its status. The caller's compile is abandoned.
-fn rerun_with_resources(resources: &[(String, Vec<u8>)], pass: u32) -> ! {
-    let fail = |message: String| -> ! {
-        eprintln!("Error: {message}");
-        std::process::exit(1)
-    };
-    let bytes = postcard::to_allocvec(resources)
-        .unwrap_or_else(|e| fail(format!("Failed to encode macro resources: {e}")));
-    let file = std::env::temp_dir().join(format!("rayzor-resources-{}.bin", std::process::id()));
-    std::fs::write(&file, bytes)
-        .unwrap_or_else(|e| fail(format!("Failed to write macro resources: {e}")));
-    let exe = std::env::current_exe()
-        .unwrap_or_else(|e| fail(format!("Failed to locate the compiler: {e}")));
-    let status = std::process::Command::new(exe)
-        .args(std::env::args_os().skip(1))
-        .env(RESOURCE_FILE_ENV, &file)
-        .env(RESOURCE_PASS_ENV, (pass + 1).to_string())
-        .status();
-    let _ = std::fs::remove_file(&file);
-    match status {
-        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
-        Err(e) => fail(format!("Failed to restart the compiler: {e}")),
-    }
-}
-
 // Each argument is a distinct compilation input (source, plugins, source dirs,
 // defines, cache settings); bundling them into a struct would only move the
 // same list behind one more name.
@@ -214,23 +181,6 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
         );
     }
 
-    // Resources a macro added after the table was embedded are handed to a
-    // fresh process, which compiles with them configured. A later pass in
-    // this process would inherit the first pass's cache and global state.
-    let pass: u32 = std::env::var(RESOURCE_PASS_ENV)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(1);
-    if let Some(path) = std::env::var_os(RESOURCE_FILE_ENV) {
-        let seeded: Vec<(String, Vec<u8>)> = std::fs::read(&path)
-            .map_err(|e| format!("Failed to read macro resources: {}", e))
-            .and_then(|bytes| {
-                postcard::from_bytes(&bytes)
-                    .map_err(|e| format!("Failed to decode macro resources: {}", e))
-            })?;
-        config.resources = std::sync::Arc::new(seeded);
-    }
-    config.defer_stale_resource_error = pass < RESOURCE_PASSES;
     let mut unit = CompilationUnit::new(config);
 
     for plugin in plugins {
@@ -258,9 +208,6 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
 
     let t_tast = profile_compile.then(std::time::Instant::now);
     if let Err(errors) = unit.lower_to_tast() {
-        if let Some(resources) = unit.take_stale_macro_resources() {
-            rerun_with_resources(&resources, pass);
-        }
         unit.print_compilation_errors(&errors);
         return Err(format!("Check failed with {} error(s)", errors.len()));
     }

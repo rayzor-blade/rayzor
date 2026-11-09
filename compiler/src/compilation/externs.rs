@@ -325,12 +325,6 @@ impl CompilationUnit {
         self.compiler_plugin_registry.register(plugin);
     }
 
-    /// The resources a compile ended with when macros added some after the
-    /// table was embedded. Set only under `defer_stale_resource_error`.
-    pub fn take_stale_macro_resources(&mut self) -> Option<Vec<(String, Vec<u8>)>> {
-        self.stale_macro_resources.take()
-    }
-
     /// Add external runtime symbols for JIT linking.
     ///
     /// These are merged with HDLL symbols and made available to the JIT backend.

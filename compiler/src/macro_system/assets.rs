@@ -6,14 +6,17 @@ use std::sync::{Arc, Mutex};
 
 pub(crate) type Resources = Arc<Mutex<ResourceStore>>;
 
+/// The std class `untyped __resources__()` reads its table from. The compiler
+/// registers every resource at the start of `haxe.Resource.__init__` once
+/// typing is done, so macros may add resources at any point before that.
+pub(crate) const RESOURCE_TABLE_CLASS: &str = "rayzor.runtime.Resources";
+
 #[derive(Default)]
 pub(crate) struct ResourceStore {
     configured: Arc<Vec<(String, Vec<u8>)>>,
     added: BTreeMap<String, Vec<u8>>,
-    revision: u64,
     /// Every `insert`, including one that changed nothing.
     inserts: u64,
-    embedded: std::collections::BTreeSet<u64>,
 }
 
 impl ResourceStore {
@@ -28,7 +31,6 @@ impl ResourceStore {
         self.inserts += 1;
         if self.get(&name) != Some(&bytes) {
             self.added.insert(name, bytes);
-            self.revision += 1;
         }
     }
 
@@ -59,16 +61,6 @@ impl ResourceStore {
     /// How many resources macros have offered so far.
     pub(crate) fn inserts(&self) -> u64 {
         self.inserts
-    }
-
-    pub(crate) fn mark_embedded(&mut self) {
-        self.embedded.insert(self.revision);
-    }
-
-    pub(crate) fn has_stale_table(&self) -> bool {
-        self.embedded
-            .iter()
-            .any(|revision| *revision != self.revision)
     }
 }
 
@@ -144,21 +136,52 @@ pub(crate) fn json_value(value: serde_json::Value) -> MacroValue {
     }
 }
 
+/// Standard Base64 with padding, the form `haxe.crypto.Base64.decode` reads.
+pub(crate) fn base64(bytes: &[u8]) -> String {
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(CHARS[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn resource_tables_detect_late_changes_and_keep_configured_bytes() {
+    fn macro_bytes_replace_configured_bytes() {
         let resources = ResourceStore::configured(Arc::new(vec![("first".into(), vec![1])]));
         let mut resources = resources.lock().unwrap();
-        resources.mark_embedded();
         resources.insert("first".into(), vec![1]);
-        assert!(!resources.has_stale_table());
         assert_eq!(resources.entries().count(), 1);
         resources.insert("first".into(), vec![2]);
-        assert!(resources.has_stale_table());
         assert_eq!(resources.get("first"), Some(&vec![2]));
         assert_eq!(resources.entries().count(), 1);
+    }
+
+    #[test]
+    fn base64_pads_partial_groups() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(
+            base64("H\u{e9}llo World !".as_bytes()),
+            "SMOpbGxvIFdvcmxkICE="
+        );
     }
 }

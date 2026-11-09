@@ -132,6 +132,9 @@ impl CompilationUnit {
                 ExprKind::Regex { .. } => {
                     deps.insert("EReg".to_owned());
                 }
+                ExprKind::Ident(name) if name == "__resources__" => {
+                    deps.insert(crate::macro_system::assets::RESOURCE_TABLE_CLASS.to_owned());
+                }
                 ExprKind::Ident(name)
                     if name
                         .chars()

@@ -654,8 +654,6 @@ impl CompilationUnit {
         // Declared-static-signature index: lets call sites type statics whose
         // declaring file lowers later (no untyped-placeholder decay).
         lowering.set_static_sig_index(Rc::clone(&self.static_sig_index));
-        lowering.set_resources(std::sync::Arc::clone(&self.config.resources));
-        lowering.macro_resources = self.macro_resources.clone();
         lowering.seed_const_generics(
             self.user_files
                 .iter()
@@ -1769,32 +1767,10 @@ impl CompilationUnit {
         add_profile_ms(&mut self.typecheck_timings.user_files_ms, t_user_files);
 
         // Step 5: Report all errors if any were found
-        let stale_resources =
-            !self.config.typecheck_only && self.macro_resources.lock().unwrap().has_stale_table();
-        if stale_resources && self.config.defer_stale_resource_error {
-            self.stale_macro_resources = Some(self.macro_resources.lock().unwrap().snapshot());
-            // A compile that is repeated must not leave its artifacts for the
-            // repeat to restore: they were lowered before the table was whole.
-            for path in self.saved_blades.borrow_mut().drain(..) {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-        if stale_resources {
-            all_errors.push(CompilationError {
-                message: "Macro resources changed after an embedded resource table was compiled".into(),
-                location: SourceLocation::unknown(),
-                category: ErrorCategory::MacroExpansionError,
-                suggestion: Some("Register resources in an initialization macro before runtime modules are compiled".into()),
-                related_errors: Vec::new(),
-            });
-        }
         let deferred = std::mem::take(&mut self.deferred_errors);
         all_errors.splice(0..0, deferred);
         if !all_errors.is_empty() {
-            // Under a retry the next compile reports whatever remains.
-            if self.stale_macro_resources.is_none() {
-                self.print_compilation_errors(&all_errors);
-            }
+            self.print_compilation_errors(&all_errors);
             return Err(all_errors);
         }
 
@@ -1813,9 +1789,80 @@ impl CompilationUnit {
         self.maybe_dump_file_table();
 
         self.run_macro_hooks()?;
+        self.register_resources()?;
         self.append_entry_point_run();
 
         Ok(all_typed_files)
+    }
+
+    /// Prepends one `Resources.add(name, base64)` per resource to
+    /// `haxe.Resource.__init__`, which then reads the table. Runs after every
+    /// macro, so it sees the resources they added.
+    fn register_resources(&mut self) -> Result<(), Vec<CompilationError>> {
+        use crate::ir::{IrInstruction, IrType, IrValue};
+        let Some(module) = self.mir_modules.last_mut() else {
+            return Ok(());
+        };
+        let find = |name: &str| {
+            module
+                .functions
+                .values()
+                .find(|f| !f.cfg.blocks.is_empty() && f.qualified_name.as_deref() == Some(name))
+                .map(|f| f.id)
+        };
+        let Some(init) = find("haxe.Resource.__init__") else {
+            return Ok(());
+        };
+        let add_name = format!("{}.add", crate::macro_system::assets::RESOURCE_TABLE_CLASS);
+        let Some(add) = find(&add_name) else {
+            return Err(vec![CompilationError {
+                message: format!("haxe.Resource is used but `{add_name}` was not compiled"),
+                location: SourceLocation::unknown(),
+                category: ErrorCategory::TypeError,
+                suggestion: None,
+                related_errors: Vec::new(),
+            }]);
+        };
+        let resources: BTreeMap<String, String> = self
+            .macro_resources
+            .lock()
+            .unwrap()
+            .entries()
+            .map(|(name, bytes)| (name.clone(), crate::macro_system::assets::base64(bytes)))
+            .collect();
+        if resources.is_empty() {
+            return Ok(());
+        }
+        let module = std::sync::Arc::make_mut(module);
+        let Some(init) = module.functions.get_mut(&init) else {
+            return Ok(());
+        };
+        let mut calls = Vec::with_capacity(resources.len() * 3);
+        for (name, data) in resources {
+            let mut constant = |value: String| {
+                let dest = init.alloc_reg();
+                init.register_types.insert(dest, IrType::String);
+                calls.push(IrInstruction::Const {
+                    dest,
+                    value: IrValue::String(value),
+                });
+                dest
+            };
+            let args = vec![constant(name), constant(data)];
+            calls.push(IrInstruction::CallDirect {
+                dest: None,
+                func_id: add,
+                args,
+                arg_ownership: Vec::new(),
+                type_args: Vec::new(),
+                is_tail_call: false,
+            });
+        }
+        let entry = init.cfg.entry_block;
+        if let Some(block) = init.cfg.blocks.get_mut(&entry) {
+            block.instructions.splice(0..0, calls);
+        }
+        Ok(())
     }
 
     /// Haxe ends the program's `main` with `haxe.EntryPoint.run()` when

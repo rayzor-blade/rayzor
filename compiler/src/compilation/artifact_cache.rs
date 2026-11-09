@@ -250,15 +250,15 @@ impl CompilationUnit {
     /// Whether a source file belongs to the standard library.
     pub(crate) fn is_stdlib_source(&self, source_path: &str) -> bool {
         let path = Path::new(source_path);
-        let canonical = path.canonicalize();
+        let canonical = super::canonical_path(path);
         let candidate = canonical.as_deref().unwrap_or(path);
         self.config
             .stdlib_paths
             .iter()
-            .any(|root| match root.canonicalize() {
+            .any(|root| match super::canonical_path(root) {
                 // A root that does not exist cannot contain the file.
-                Ok(root) => candidate.starts_with(&root),
-                Err(_) => false,
+                Some(root) => candidate.starts_with(&root),
+                None => false,
             })
     }
 
