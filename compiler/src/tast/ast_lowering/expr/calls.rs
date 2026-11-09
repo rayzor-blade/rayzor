@@ -2322,8 +2322,10 @@ impl<'a> AstLowering<'a> {
                     return false;
                 }
             }
+            // The header's parameters bind even to a type parameter, such as
+            // the one a generic `@:from` body returns `RR<T>` at.
             let mut bindings = Vec::new();
-            self.unify_type_args(from, actual, 0, &mut bindings);
+            self.unify_type_args_inner(from, actual, 0, &mut bindings, true);
             let source = self.substitute_alias_args(from, &bindings);
             self.abstract_source_accepts(source, actual, 0)
         })
