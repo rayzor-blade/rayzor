@@ -223,8 +223,15 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or(arg_reg);
                 arg_reg = self.maybe_unbox_value(arg_reg, arg.ty, *target_ty)?;
                 let source_ir = self.builder.get_register_type(arg_reg)?;
-                if *target_ir == IrType::F64 && source_ir.is_integer() {
-                    arg_reg = self.builder.build_cast(arg_reg, source_ir, IrType::F64)?;
+                let converts = match target_ir {
+                    IrType::F64 => source_ir.is_integer(),
+                    IrType::F32 => source_ir.is_integer() || source_ir == IrType::F64,
+                    _ => false,
+                };
+                if converts {
+                    arg_reg = self
+                        .builder
+                        .build_cast(arg_reg, source_ir, target_ir.clone())?;
                 }
             }
             let parameter_ty = field_types.get(i).map_or(arg.ty, |(_, ty)| *ty);

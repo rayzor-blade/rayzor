@@ -887,6 +887,25 @@ impl IrBuilder {
     /// Build a bitcast instruction (reinterpret bits without conversion)
     /// Used for type-punning like f64 -> u64 (same bits, different interpretation)
     pub fn build_bitcast(&mut self, src: IrId, to_ty: IrType) -> Option<IrId> {
+        // An 8-byte slot holds a Single as its Float bits, so a reinterpret
+        // between the two goes through F64.
+        let slot = |ty: &IrType| {
+            matches!(
+                ty,
+                IrType::I64 | IrType::U64 | IrType::Ptr(_) | IrType::Any | IrType::TypeVar(_)
+            )
+        };
+        match self.get_register_type(src) {
+            Some(IrType::F32) if slot(&to_ty) => {
+                let wide = self.build_cast(src, IrType::F32, IrType::F64)?;
+                return self.build_bitcast(wide, to_ty);
+            }
+            Some(from) if to_ty == IrType::F32 && slot(&from) => {
+                let wide = self.build_bitcast(src, IrType::F64)?;
+                return self.build_cast(wide, IrType::F64, IrType::F32);
+            }
+            _ => {}
+        }
         let dest = self.alloc_reg()?;
         self.add_instruction(IrInstruction::BitCast {
             dest,

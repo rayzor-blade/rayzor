@@ -1,0 +1,5 @@
+[project]
+name = "single-cross-module"
+entry = "./SingleCrossModule.hx"
+[build]
+class-paths = ["."]

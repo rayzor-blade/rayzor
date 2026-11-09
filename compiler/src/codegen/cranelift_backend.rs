@@ -4779,6 +4779,17 @@ impl CraneliftBackend {
                             .ins()
                             .bitcast(types::F32, MemFlagsData::new(), src_val)
                     }
+                    // An 8-byte slot holds a Single as its Float bits.
+                    (types::I64, types::F32) => {
+                        let wide = builder
+                            .ins()
+                            .bitcast(types::F64, MemFlagsData::new(), src_val);
+                        builder.ins().fdemote(types::F32, wide)
+                    }
+                    (types::F32, types::I64) => {
+                        let wide = builder.ins().fpromote(types::F64, src_val);
+                        builder.ins().bitcast(types::I64, MemFlagsData::new(), wide)
+                    }
 
                     // Int width conversions (sign-extend or truncate)
                     (types::I32, types::I64) => builder.ins().sextend(types::I64, src_val),

@@ -682,13 +682,19 @@ impl<'a> HirToMirContext<'a> {
                     continue;
                 }
                 let actual_ty = self.builder.get_register_type(*arg_reg);
-                // Cast I32/I64 → F64 when callee expects Float
-                if matches!(expected_ty, IrType::F64)
-                    && matches!(actual_ty, Some(IrType::I32) | Some(IrType::I64))
-                {
+                // An Int, Float or Single bound for a Float or Single formal
+                // converts by value, as `build_call_direct` does in-module.
+                if let Some(actual) = actual_ty.as_ref().filter(|actual| {
+                    matches!(
+                        (actual, expected_ty),
+                        (IrType::I32 | IrType::I64, IrType::F64 | IrType::F32)
+                            | (IrType::F64, IrType::F32)
+                            | (IrType::F32, IrType::F64)
+                    )
+                }) {
                     if let Some(cast_reg) =
                         self.builder
-                            .build_cast(*arg_reg, actual_ty.unwrap().clone(), IrType::F64)
+                            .build_cast(*arg_reg, actual.clone(), expected_ty.clone())
                     {
                         *arg_reg = cast_reg;
                     }

@@ -984,6 +984,12 @@ impl<'a> HirToMirContext<'a> {
                                             .and_then(|reg| self.builder.get_register_type(*reg))
                                     })
                                 }
+                                // A field takes the float conversions only: its
+                                // erased slots carry raw bits.
+                                HirLValue::Field { field, .. } => self
+                                    .declared_symbol_type(*field)
+                                    .map(|t| self.convert_type(t))
+                                    .filter(|t| matches!(t, IrType::F32 | IrType::F64)),
                                 _ => None,
                             };
                             if let Some(converted) = tgt_ir_opt
@@ -1023,8 +1029,10 @@ impl<'a> HirToMirContext<'a> {
                                             | IrType::U16
                                             | IrType::U32
                                             | IrType::U64,
-                                    )
-                                );
+                                    ) | (IrType::F32, IrType::F64)
+                                        | (IrType::F64, IrType::F32)
+                                ) && (matches!(lhs, HirLValue::Variable(_))
+                                    || matches!(val_ir, IrType::I32 | IrType::F32 | IrType::F64));
                                 if needs_coerce {
                                     self.builder
                                         .build_cast(value, val_ir, tgt_ir)

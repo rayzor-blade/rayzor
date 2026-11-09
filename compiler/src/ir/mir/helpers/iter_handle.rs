@@ -1262,7 +1262,6 @@ impl<'a> HirToMirContext<'a> {
             | IrType::U32
             | IrType::Bool => self.builder.build_cast(value, IrType::I64, target.clone()),
             IrType::F64 => self.builder.build_bitcast(value, IrType::F64),
-            IrType::F32 => Some(value),
             _ => self.builder.build_bitcast(value, target.clone()),
         }
     }

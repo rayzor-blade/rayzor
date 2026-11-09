@@ -3095,6 +3095,13 @@ impl<'a> TastToHirContext<'a> {
                 if let Some(converted) = self.conversion_with_pos_infos(expression, *target_type) {
                     return self.lower_expression(&converted);
                 }
+                // `cast` of a class instance to an interface it implements is the
+                // implicit upcast: the destination wraps it and takes ownership.
+                if matches!(cast_kind, CastKind::Unsafe)
+                    && self.class_implements_interface(expression.expr_type, *target_type)
+                {
+                    return self.lower_expression(expression);
+                }
                 HirExprKind::Cast {
                     expr: Box::new(self.lower_expression(expression)),
                     target: *target_type,
@@ -3370,7 +3377,25 @@ impl<'a> TastToHirContext<'a> {
                     let init_expr = {
                         use crate::tast::core::TypeKind;
                         let type_table = self.type_table.borrow();
+                        let is_single = |kind: &TypeKind| match kind {
+                            TypeKind::Abstract { symbol_id, .. } => {
+                                self.symbol_table.get_symbol(*symbol_id).is_some_and(|s| {
+                                    crate::tast::core::is_haxe_std_type(
+                                        s,
+                                        self.string_interner,
+                                        &["Single"],
+                                    )
+                                })
+                            }
+                            _ => false,
+                        };
                         match type_table.get(result_type).map(|t| &t.kind) {
+                            Some(kind) if is_single(kind) => HirExpr::new(
+                                HirExprKind::Literal(HirLiteral::Float(0.0)),
+                                result_type,
+                                self.current_lifetime,
+                                SourceLocation::unknown(),
+                            ),
                             Some(TypeKind::Int) => HirExpr::new(
                                 HirExprKind::Literal(HirLiteral::Int(0)),
                                 result_type,
@@ -4880,6 +4905,26 @@ impl<'a> TastToHirContext<'a> {
         };
 
         self.coerce_parameter_argument(arg, target_iface_type, source_location, false)
+    }
+
+    /// `source` is a class type whose hierarchy includes the interface `target`.
+    fn class_implements_interface(&self, source: TypeId, target: TypeId) -> bool {
+        let type_table = self.type_table.borrow();
+        let (
+            Some(TypeKind::Class {
+                symbol_id: class, ..
+            }),
+            Some(TypeKind::Interface {
+                symbol_id: iface, ..
+            }),
+        ) = (
+            type_table.get(source).map(|t| &t.kind),
+            type_table.get(target).map(|t| &t.kind),
+        )
+        else {
+            return false;
+        };
+        self.symbol_table.implements_interface(*class, *iface)
     }
 
     /// Preserve representation changes when a formal parameter is substituted.

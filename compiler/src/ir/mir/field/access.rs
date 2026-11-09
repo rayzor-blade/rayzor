@@ -1469,6 +1469,9 @@ impl<'a> HirToMirContext<'a> {
         // (Int→I32, Bool). A `Null<Int>` slot holds the `NullInt` itself.
         let (load_type, target_type) = if self.is_null_int_type(ty) {
             (IrType::NullInt, IrType::NullInt)
+        } else if self.convert_type(ty) == IrType::F32 {
+            // A Single slot holds its Float bits.
+            (IrType::F64, IrType::F32)
         } else {
             let type_table = self.type_table;
             match type_table.get(ty).map(|ti| &ti.kind) {
@@ -2099,8 +2102,8 @@ impl<'a> HirToMirContext<'a> {
             return self.builder.build_bitcast(reg, want.clone());
         }
         match (&have, want) {
-            (IrType::F64, IrType::I64 | IrType::Ptr(_))
-            | (IrType::I64 | IrType::Ptr(_), IrType::F64) => {
+            (IrType::F64 | IrType::F32, IrType::I64 | IrType::Ptr(_))
+            | (IrType::I64 | IrType::Ptr(_), IrType::F64 | IrType::F32) => {
                 self.builder.build_bitcast(reg, want.clone())
             }
             (IrType::Ptr(_), IrType::Ptr(_)) | (IrType::Ptr(_), IrType::I64) => {
@@ -2278,7 +2281,7 @@ impl<'a> HirToMirContext<'a> {
         }
         let value_ir_type = self.convert_type(value_type_id);
         match &value_ir_type {
-            IrType::Ptr(_) | IrType::F64 => self
+            IrType::Ptr(_) | IrType::F64 | IrType::F32 => self
                 .builder
                 .build_bitcast(raw_value, value_ir_type)
                 .or(Some(raw_value)),

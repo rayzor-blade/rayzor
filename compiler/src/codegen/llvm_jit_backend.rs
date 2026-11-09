@@ -4581,6 +4581,26 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         };
                         let src_bits = src_int.get_type().get_bit_width() as u64;
                         match target_bits {
+                            // An 8-byte slot holds a Single as its Float bits.
+                            Some(32) if src_bits == 64 => {
+                                let wide = self
+                                    .builder
+                                    .build_bit_cast(
+                                        src_int,
+                                        self.context.f64_type(),
+                                        &format!("bitcast_slot_{}", dest.as_u32()),
+                                    )
+                                    .map_err(|e| e.to_string())?
+                                    .into_float_value();
+                                self.builder
+                                    .build_float_trunc(
+                                        wide,
+                                        target_float_ty,
+                                        &format!("bitcast_{}", dest.as_u32()),
+                                    )
+                                    .map(|v| v.into())
+                                    .map_err(|e| e.to_string())
+                            }
                             Some(bits) if bits == src_bits => self
                                 .builder
                                 .build_bit_cast(
@@ -4644,6 +4664,20 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         } else {
                             return Err("Failed to get source float size for bitcast".to_string());
                         };
+                        let (src_float, src_bits) =
+                            if src_bits == 32 && target_int_ty.get_bit_width() == 64 {
+                                let wide = self
+                                    .builder
+                                    .build_float_ext(
+                                        src_float,
+                                        self.context.f64_type(),
+                                        &format!("bitcast_slot_{}", dest.as_u32()),
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                                (wide, 64)
+                            } else {
+                                (src_float, src_bits)
+                            };
                         let raw_int_ty = self.context.custom_width_int_type(src_bits as u32);
                         let raw = self
                             .builder

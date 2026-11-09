@@ -1462,6 +1462,9 @@ impl Decoder<'_> {
                 use Mt::*;
                 let conv = match (from, to) {
                     (F64, I64) | (F32, I32) | (I64, F64) | (I32, F32) => Some(Conv::Bits(to)),
+                    // An 8-byte slot holds a Single as its Float bits.
+                    (I64, F32) => Some(Conv::FDemote),
+                    (F32, I64) => Some(Conv::FPromote),
                     (I32, I64) => Some(Conv::Sext(I32, I64)),
                     (I64, I32) => Some(Conv::Reduce(I32)),
                     (a, b) if a.is_int() && b.is_int() && b.bits() > a.bits() => {

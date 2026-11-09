@@ -1213,6 +1213,26 @@ impl<'a> HirToMirContext<'a> {
             let target_ir = self.convert_type(target_ty);
             return self.null_int_to_ir(value, &target_ir);
         }
+        // Single is a core type with no underlying scalar to dispatch on
+        // below: a `Null<Single>` or Dynamic box opens as its Float.
+        if self.convert_type(target_ty) == IrType::F32
+            && matches!(self.builder.get_register_type(value), Some(IrType::Ptr(_)))
+            && matches!(
+                self.type_table.get(value_ty).map(|t| &t.kind),
+                Some(TypeKind::Optional { .. } | TypeKind::Dynamic)
+            )
+        {
+            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+            let unbox = self.get_or_register_extern_function(
+                "haxe_unbox_float_ptr",
+                vec![ptr_u8],
+                IrType::F64,
+            );
+            let wide = self
+                .builder
+                .build_call_direct(unbox, vec![value], IrType::F64)?;
+            return self.builder.build_cast(wide, IrType::F64, IrType::F32);
+        }
 
         let storage = self.resolve_storage_type(value_ty);
         let value_ty = if storage != value_ty
@@ -2259,8 +2279,9 @@ impl<'a> HirToMirContext<'a> {
     /// is handled separately upstream, so it is not boxable here.
     pub(crate) fn optional_inner_is_boxable_primitive(&self, inner_type: TypeId) -> bool {
         use crate::tast::TypeKind;
-        // Int64 is the native i64, and null is not an i64 value.
-        if self.is_int64_type(inner_type) {
+        // Int64 is the native i64, and null is not an i64 value; Single is a
+        // core type with no underlying type to resolve through.
+        if self.is_int64_type(inner_type) || self.convert_type(inner_type) == IrType::F32 {
             return true;
         }
         let mut ty = inner_type;
