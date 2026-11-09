@@ -393,19 +393,26 @@ impl CompilationUnit {
             }) {
                 return Some(real_id);
             }
-            // Fall back to a UNIQUE bare-name + signature match.
-            let mut matches = candidates
-                .iter()
-                .filter_map(|(candidate_id, candidate_sig, _)| {
-                    if Some(*candidate_id) == skip_id {
-                        return None;
-                    }
-                    if signatures_match(candidate_sig, sig) {
-                        Some(*candidate_id)
-                    } else {
-                        None
-                    }
-                });
+            // Fall back to a UNIQUE bare-name + signature match. A bare name is
+            // a runtime symbol or an unqualified stdlib wrapper, never a class
+            // method: `Wrap.f() return Native.f()` must keep calling the native.
+            let wanted_is_bare = !name.contains('.');
+            let mut matches =
+                candidates
+                    .iter()
+                    .filter_map(|(candidate_id, candidate_sig, candidate_qname)| {
+                        if Some(*candidate_id) == skip_id {
+                            return None;
+                        }
+                        if wanted_is_bare && candidate_qname.contains('.') {
+                            return None;
+                        }
+                        if signatures_match(candidate_sig, sig) {
+                            Some(*candidate_id)
+                        } else {
+                            None
+                        }
+                    });
             let real_id = matches.next()?;
             if matches.next().is_none() {
                 Some(real_id)
