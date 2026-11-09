@@ -2058,7 +2058,7 @@ impl<'a> AstLowering<'a> {
                 }
             }
         };
-        if arg_is_same_abstract {
+        if arg_is_same_abstract || self.header_from_accepts(abstract_symbol, arg.expr_type) {
             return arg;
         }
         if !self.abstract_from_methods.contains_key(&abstract_symbol) {
@@ -2290,6 +2290,42 @@ impl<'a> AstLowering<'a> {
             source_location: location,
             metadata: crate::tast::node::ExpressionMetadata::default(),
         }
+    }
+
+    /// Whether a compound type in the abstract's header `from` list takes
+    /// `actual` as it is. Haxe tries those before any `@:from` method.
+    fn header_from_accepts(&mut self, abstract_symbol: SymbolId, actual: TypeId) -> bool {
+        use crate::tast::core::TypeKind;
+        let Some((from_types, _)) = self.abstract_casts.get(&abstract_symbol).cloned() else {
+            return false;
+        };
+        let compound = |kind: Option<&TypeKind>| {
+            matches!(
+                kind,
+                Some(
+                    TypeKind::Class { .. }
+                        | TypeKind::Interface { .. }
+                        | TypeKind::Enum { .. }
+                        | TypeKind::GenericInstance { .. }
+                )
+            )
+        };
+        from_types.into_iter().any(|from| {
+            {
+                let table = self.context.type_table.borrow();
+                let source = Self::resolve_alias_chain(&table, from);
+                let value = Self::resolve_alias_chain(&table, actual);
+                if !compound(table.get(source).map(|t| &t.kind))
+                    || !compound(table.get(value).map(|t| &t.kind))
+                {
+                    return false;
+                }
+            }
+            let mut bindings = Vec::new();
+            self.unify_type_args(from, actual, 0, &mut bindings);
+            let source = self.substitute_alias_args(from, &bindings);
+            self.abstract_source_accepts(source, actual, 0)
+        })
     }
 
     /// The abstract a type is, through generic instantiation.
