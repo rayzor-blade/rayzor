@@ -32,16 +32,7 @@ impl CompilationUnit {
         }
         let symbol_id = match &type_table.get(ty)?.kind {
             TypeKind::Class { symbol_id, .. } | TypeKind::Interface { symbol_id, .. } => *symbol_id,
-            // A constrained parameter keeps its interface's wrapping convention
-            // after the importing context has erased the parameter constraints.
-            TypeKind::TypeParameter { constraints, .. } => {
-                constraints
-                    .iter()
-                    .find_map(|ty| match &type_table.get(*ty)?.kind {
-                        TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
-                        _ => None,
-                    })?
-            }
+            // A type parameter, bounded or not, holds the object itself.
             _ => return None,
         };
         let symbol = self.symbol_table.get_symbol(symbol_id)?;

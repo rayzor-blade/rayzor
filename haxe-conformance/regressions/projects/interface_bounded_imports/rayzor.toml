@@ -1,0 +1,5 @@
+[project]
+name = "interface-bounded-imports"
+entry = "./InterfaceBoundedImports.hx"
+[build]
+class-paths = ["."]
