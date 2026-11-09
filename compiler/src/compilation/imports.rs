@@ -1493,7 +1493,13 @@ impl CompilationUnit {
                     if is_user_package {
                         let import_base: u32 =
                             100_000 + (self.import_mir_modules.len() as u32 * 10_000);
-                        for old_id in &own_ids {
+                        // The function map also holds other modules' already
+                        // renumbered ids; offset, they would protect unrelated
+                        // functions of later modules. Only ids defined here count.
+                        for old_id in own_ids
+                            .iter()
+                            .filter(|id| mir_arc.functions.contains_key(id))
+                        {
                             let new_id = crate::ir::IrFunctionId(old_id.0 + import_base);
                             self.import_own_func_ids.insert(new_id);
                         }
@@ -1711,6 +1717,12 @@ impl CompilationUnit {
         if is_user_package {
             let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
             for entry in &cached_maps.functions {
+                if !mir
+                    .functions
+                    .contains_key(&crate::ir::IrFunctionId(entry.func_id))
+                {
+                    continue;
+                }
                 let new_id = crate::ir::IrFunctionId(entry.func_id + import_base);
                 self.import_own_func_ids.insert(new_id);
             }
