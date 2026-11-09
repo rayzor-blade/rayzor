@@ -199,6 +199,7 @@ impl<'a> HirToMirContext<'a> {
         ) {
             let ptr_ty = IrType::Ptr(Box::new(IrType::U8));
             let obj = self.coerce_reg_to(obj, &ptr_ty)?;
+            let obj = self.interface_bounded_object(obj, receiver_ty)?;
             let value = self.raw_anon_reflect_field_read(obj, field, field_ty)?;
             if matches!(
                 self.type_table.get(field_ty).map(|t| &t.kind),

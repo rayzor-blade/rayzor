@@ -462,6 +462,7 @@ impl<'a> HirToMirContext<'a> {
             Some(IrType::Ptr(_)) | None => receiver,
             Some(_) => self.builder.build_bitcast(receiver, ptr_u8.clone())?,
         };
+        let object = self.interface_bounded_object(object, receiver_ty)?;
         let member = if dynamic {
             self.dynamic_reflect_field_read(object, method, dynamic_ty)?
         } else {
@@ -529,13 +530,27 @@ impl<'a> HirToMirContext<'a> {
         Some(phi)
     }
 
-    /// The methods a type parameter's structural constraints declare, less
-    /// the iterator protocol, which keeps its static binding.
+    /// The methods a type parameter's structural and interface constraints
+    /// declare, less the iterator protocol, which keeps its static binding.
     fn constraint_methods(&self, constraints: &[TypeId]) -> Vec<String> {
         let type_table = self.type_table;
         let mut names = Vec::new();
         for &constraint in constraints {
             let constraint = self.resolve_through_aliases(constraint);
+            if let Some(TypeKind::Interface { symbol_id, .. }) =
+                type_table.get(constraint).map(|t| &t.kind)
+            {
+                let methods = self.resolve_interface_method_names(*symbol_id);
+                names.extend(
+                    methods
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|m| self.string_interner.get(m))
+                        .filter(|m| !ITERATOR_MEMBERS.contains(m))
+                        .map(str::to_string),
+                );
+                continue;
+            }
             let Some(TypeKind::Anonymous { fields }) = type_table.get(constraint).map(|t| &t.kind)
             else {
                 continue;

@@ -7505,10 +7505,23 @@ impl<'a> AstLowering<'a> {
                             _ => Vec::new(),
                         };
                         if let Some(ret) = constraints
-                            .into_iter()
-                            .find_map(|c| self.structural_method_return_type(c, mn))
+                            .iter()
+                            .find_map(|&c| self.structural_method_return_type(c, mn))
                         {
                             return Ok(ret);
+                        }
+                        // `v.twice()` with `T:IV`: the interface declares it.
+                        for &constraint in &constraints {
+                            let iface = self.resolve_type_to_class_symbol(constraint).filter(|s| {
+                                self.context.symbol_table.get_symbol(*s).is_some_and(|sym| {
+                                    sym.kind == crate::tast::symbols::SymbolKind::Interface
+                                })
+                            });
+                            if let Some(method) =
+                                iface.and_then(|i| self.resolve_class_method_symbol(i, mn))
+                            {
+                                return self.infer_method_call_return_type(method, constraint);
+                            }
                         }
                     }
 

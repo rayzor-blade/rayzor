@@ -544,6 +544,44 @@ impl<'a> HirToMirContext<'a> {
             };
         }
 
+        // A type parameter's value is an object whose class is known only at
+        // run time; the runtime builds its vtable for the interface.
+        if matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(value_type))
+                .map(|t| &t.kind),
+            Some(TypeKind::TypeParameter { .. })
+        ) && !self.interface_wrapped_args.contains(&value_reg)
+        {
+            let ptr = IrType::Ptr(Box::new(IrType::U8));
+            let wrapped = (|| {
+                let value = self.coerce_reg_to(value_reg, &ptr)?;
+                let identity = self.get_or_register_extern_function(
+                    "haxe_iface_identity",
+                    vec![ptr.clone()],
+                    ptr.clone(),
+                );
+                let object = self
+                    .builder
+                    .build_call_direct(identity, vec![value], ptr.clone())?;
+                let iface_tid = self
+                    .deterministic_iface_or_enum_type_id(iface_sym, "iface")
+                    .unwrap_or(iface_sym.as_raw()) as i32;
+                let iface_tid = self.builder.build_const(IrValue::I32(iface_tid))?;
+                let build = self.get_or_register_extern_function(
+                    "haxe_iface_fat_ptr_build",
+                    vec![ptr.clone(), IrType::I32],
+                    ptr.clone(),
+                );
+                self.builder
+                    .build_call_direct(build, vec![object, iface_tid], ptr.clone())
+            })();
+            return match wrapped {
+                Some(w) => (w, true),
+                None => (value_reg, false),
+            };
+        }
+
         // `Null<Class>`: a null stays null, anything else is wrapped.
         let nullable_class = match self.type_table.get(value_type).map(|t| &t.kind) {
             Some(TypeKind::Optional { inner_type }) => {
@@ -676,6 +714,32 @@ impl<'a> HirToMirContext<'a> {
             self.builder.build_store(slot_ptr, fn_ref);
         }
         Some(fat_ptr)
+    }
+
+    /// The object a value of an interface-bounded type parameter stands for.
+    /// Bound to an interface, the parameter holds that interface's fat pointers.
+    pub(crate) fn interface_bounded_object(&mut self, value: IrId, ty: TypeId) -> Option<IrId> {
+        let bounded = match self
+            .type_table
+            .get(self.resolve_through_aliases(ty))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::TypeParameter { constraints, .. }) => {
+                self.has_interface_constraint(constraints)
+            }
+            _ => false,
+        };
+        if !bounded {
+            return Some(value);
+        }
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let value = self.coerce_reg_to(value, &ptr)?;
+        let identity = self.get_or_register_extern_function(
+            "haxe_iface_identity",
+            vec![ptr.clone()],
+            ptr.clone(),
+        );
+        self.builder.build_call_direct(identity, vec![value], ptr)
     }
 
     /// Check if a list of constraint TypeIds contains at least one interface constraint

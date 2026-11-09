@@ -297,8 +297,6 @@ impl<'a> HirToMirContext<'a> {
         self.stdlib_mapping.get_function_signature(name)
     }
 
-    /// Check if a type is an interface type and return its SymbolId.
-    /// Also handles TypeParameters with interface constraints (T:Printable).
     /// A value of interface type, `Null<I>` included: held as a fat pointer.
     pub(crate) fn is_interface_value_type(&self, type_id: TypeId) -> bool {
         // A pre-registered interface type can be a `Class` over an interface
@@ -330,6 +328,8 @@ impl<'a> HirToMirContext<'a> {
                 if self.is_interface_value_type(inner.ty))
     }
 
+    /// The interface a type names. A type parameter bounded by an interface is
+    /// not one: its values are the objects themselves, as for any other bound.
     pub(crate) fn get_interface_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
         let type_id = self.resolve_storage_type(type_id);
         let type_table = self.type_table;
@@ -343,16 +343,6 @@ impl<'a> HirToMirContext<'a> {
                     .is_some_and(|s| s.kind == crate::tast::SymbolKind::Interface) =>
             {
                 Some(*symbol_id)
-            }
-            TypeKind::TypeParameter { constraints, .. } => {
-                for constraint_id in constraints {
-                    if let Some(constraint_type) = type_table.get(*constraint_id) {
-                        if let TypeKind::Interface { symbol_id, .. } = &constraint_type.kind {
-                            return Some(*symbol_id);
-                        }
-                    }
-                }
-                None
             }
             // Cross-file `Array<I>` can land as a Placeholder during this file's
             // TAST lowering; recovering the Interface SymbolId by name keeps the
