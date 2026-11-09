@@ -233,6 +233,11 @@ impl<'a> HirToMirContext<'a> {
                         .builder
                         .build_cast(arg_reg, source_ir, target_ir.clone())?;
                 }
+                // A class instance in an interface field is stored as its
+                // interface value, as a call argument is.
+                if self.get_interface_symbol(arg.ty).is_none() {
+                    arg_reg = self.maybe_wrap_for_interface(arg_reg, arg.ty, *target_ty).0;
+                }
             }
             let parameter_ty = field_types.get(i).map_or(arg.ty, |(_, ty)| *ty);
             let unbound_parameter = self

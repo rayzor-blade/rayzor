@@ -34,6 +34,7 @@ impl<'a> AstLowering<'a> {
             if self
                 .resolve_declared_method_sig(symbol, method, false)
                 .is_some()
+                || self.lookup_data_field(symbol, method).is_some()
             {
                 return (current != receiver).then_some(current);
             }

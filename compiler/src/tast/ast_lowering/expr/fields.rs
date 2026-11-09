@@ -892,6 +892,22 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        // A field the abstract forwards is read on its storage, as a forwarded
+        // method is called on it.
+        if !matches!(obj_expr.kind, TypedExpressionKind::This { .. })
+            && let Some(storage) = self.forwarded_method_receiver(obj_expr.expr_type, field_name)
+        {
+            obj_expr = TypedExpression {
+                expr_type: storage,
+                kind: TypedExpressionKind::Cast {
+                    expression: Box::new(obj_expr.clone()),
+                    target_type: storage,
+                    cast_kind: CastKind::Unsafe,
+                },
+                ..obj_expr
+            };
+        }
+
         // For field access, we need to look up the field symbol from the object's type
         // Create type parameter with deferred constraint resolution
         // But we can try to resolve it if the object is 'this'
