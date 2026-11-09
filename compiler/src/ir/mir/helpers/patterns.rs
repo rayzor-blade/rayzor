@@ -132,7 +132,10 @@ impl<'a> HirToMirContext<'a> {
                 // concrete generic args; otherwise use the pattern's enum_type.
                 let effective_type = scrutinee_type
                     .filter(|t| *t != TypeId::invalid())
-                    .filter(|t| self.resolve_enum_symbol(*t).is_some())
+                    .filter(|t| {
+                        self.resolve_enum_symbol(*t).is_some()
+                            || self.abstract_enum_instance(*t).is_some()
+                    })
                     .unwrap_or(*enum_type);
                 let field_types = self.get_enum_variant_field_types(effective_type, *variant);
 

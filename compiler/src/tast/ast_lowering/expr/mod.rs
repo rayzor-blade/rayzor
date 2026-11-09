@@ -3073,19 +3073,9 @@ impl<'a> AstLowering<'a> {
                         None => result,
                     };
                     let result = self.coerce_arg_via_abstract_to(result, declared_type);
-                    let convertible = {
-                        let table = self.context.type_table.borrow();
-                        let ty = Self::resolve_alias_chain(&table, result.expr_type);
-                        matches!(
-                            table.get(ty).map(|ty| &ty.kind),
-                            Some(TypeKind::Function { .. } | TypeKind::Anonymous { .. })
-                        )
-                    };
-                    let result = if convertible {
-                        self.coerce_arg_via_abstract_from(result, declared_type)
-                    } else {
-                        result
-                    };
+                    // An initializer converts to its declared type as an argument
+                    // does to its formal.
+                    let result = self.coerce_arg_via_abstract_from(result, declared_type);
                     match declared_type {
                         Some(dt) => self.retype_literal_to(result, dt),
                         None => result,

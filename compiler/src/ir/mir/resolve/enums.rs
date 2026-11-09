@@ -95,6 +95,54 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
+    /// The enum an abstract instance wraps, with the abstract's type arguments
+    /// substituted into the enum's.
+    pub(crate) fn abstract_enum_instance(&self, ty: TypeId) -> Option<(TypeId, Vec<TypeId>)> {
+        let ty = self.resolve_through_aliases(ty);
+        let Some(TypeKind::Abstract {
+            symbol_id,
+            type_args: actual,
+            ..
+        }) = self.type_table.get(ty).map(|t| &t.kind)
+        else {
+            return None;
+        };
+        let declared = self.symbol_table.get_symbol(*symbol_id)?.type_id;
+        let Some(TypeKind::Abstract {
+            underlying: Some(underlying),
+            ..
+        }) = self.type_table.get(declared).map(|t| &t.kind)
+        else {
+            return None;
+        };
+        let params = self.symbol_table.get_class_type_params(*symbol_id)?;
+        let mut bindings = BTreeMap::new();
+        for (&param, &arg) in params.iter().zip(actual) {
+            self.bind_type_parameters(param, arg, &mut bindings, 0);
+        }
+        let underlying = self.resolve_through_aliases(*underlying);
+        let args = match self.type_table.get(underlying).map(|t| &t.kind) {
+            Some(TypeKind::Enum { type_args, .. }) => type_args,
+            Some(TypeKind::GenericInstance {
+                base_type,
+                type_args,
+                ..
+            }) if matches!(
+                self.type_table.get(*base_type).map(|t| &t.kind),
+                Some(TypeKind::Enum { .. })
+            ) =>
+            {
+                type_args
+            }
+            _ => return None,
+        };
+        let args = args
+            .iter()
+            .map(|&arg| self.resolve_payload_type_id(arg, &bindings, 0))
+            .collect();
+        Some((underlying, args))
+    }
+
     /// Resolve the concrete IrTypes and TypeIds for an enum variant's fields.
     /// Handles generic type parameter substitution (e.g., Result<Int,String>.Ok → [(I32, IntTypeId)]).
     pub(crate) fn get_enum_variant_field_types(
@@ -102,6 +150,10 @@ impl<'a> HirToMirContext<'a> {
         enum_type: TypeId,
         variant_name: InternedString,
     ) -> Vec<(IrType, TypeId)> {
+        // An abstract over a generic enum matches as that enum, its own type
+        // arguments substituted into the underlying type.
+        let abstract_enum = self.abstract_enum_instance(enum_type);
+        let enum_type = abstract_enum.as_ref().map_or(enum_type, |(ty, _)| *ty);
         // Step 1: Resolve enum_type to base enum SymbolId and optional generic type_args
         let (enum_symbol, generic_type_args) = {
             let type_table = self.type_table;
@@ -158,6 +210,10 @@ impl<'a> HirToMirContext<'a> {
         let enum_sym = match enum_symbol {
             Some(s) => s,
             None => return vec![],
+        };
+        let generic_type_args = match abstract_enum {
+            Some((base, arguments)) if !arguments.is_empty() => Some((base, arguments)),
+            _ => generic_type_args,
         };
 
         // Constructor parameters can differ from the enum's parameters and order.

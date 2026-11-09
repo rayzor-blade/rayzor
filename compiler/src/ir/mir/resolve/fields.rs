@@ -148,7 +148,7 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    fn resolve_payload_type_id(
+    pub(crate) fn resolve_payload_type_id(
         &self,
         field_type_id: TypeId,
         bindings: &BTreeMap<SymbolId, TypeId>,
