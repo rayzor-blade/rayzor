@@ -78,6 +78,8 @@ pub struct TastToHirContext<'a> {
     /// Inline variable values (for static inline vars that need constant evaluation)
     /// Maps symbol ID to the evaluated literal value (preserving type)
     inline_var_values: BTreeMap<SymbolId, HirLiteral>,
+    /// The keys of `inline_var_values` by symbol name, in SymbolId order.
+    inline_vars_by_name: BTreeMap<InternedString, std::collections::BTreeSet<SymbolId>>,
 
     /// Cross-file index of `@:op`-tagged methods on classes/abstracts.
     /// Key: `(class_or_abstract_symbol, operator_name)` where operator_name is
@@ -211,6 +213,7 @@ impl<'a> TastToHirContext<'a> {
             imported_abstracts: BTreeMap::new(),
             stdlib_mapping: StdlibMapping::builtin(),
             inline_var_values: BTreeMap::new(),
+            inline_vars_by_name: BTreeMap::new(),
             class_operator_methods: BTreeMap::new(),
             commutative_operator_methods: std::collections::BTreeSet::new(),
             native_abstract_operators: std::collections::BTreeSet::new(),
@@ -376,22 +379,47 @@ impl<'a> TastToHirContext<'a> {
             return;
         }
 
-        // One pass over the symbols, not one per entry.
-        for i in 0..symbol_table.len() {
-            let sym_id = crate::tast::SymbolId::from_raw(i as u32);
-            let Some(sym) = symbol_table.get_symbol(sym_id) else {
+        // Only the symbols carrying one of those names.
+        let mut seeded = Vec::new();
+        for (field_name, literal) in &by_field {
+            let Some(name) = string_interner.get_id(field_name) else {
                 continue;
             };
-            if !matches!(sym.kind, crate::tast::SymbolKind::Variable) {
-                continue;
-            }
-            let sym_name = string_interner.get(sym.name).unwrap_or("");
-            if let Some(literal) = by_field.get(sym_name) {
-                self.inline_var_values
-                    .entry(sym_id)
-                    .or_insert_with(|| literal.clone());
+            for sym in symbol_table.find_symbols_named(name, |sym| {
+                matches!(sym.kind, crate::tast::SymbolKind::Variable)
+            }) {
+                seeded.push((sym.id, literal.clone()));
             }
         }
+        for (sym_id, literal) in seeded {
+            if !self.inline_var_values.contains_key(&sym_id) {
+                self.insert_inline_value(sym_id, literal);
+            }
+        }
+    }
+
+    fn insert_inline_value(&mut self, symbol: SymbolId, literal: HirLiteral) {
+        if let Some(sym) = self.symbol_table.get_symbol(symbol) {
+            self.inline_vars_by_name
+                .entry(sym.name)
+                .or_default()
+                .insert(symbol);
+        }
+        self.inline_var_values.insert(symbol, literal);
+    }
+
+    /// The first inline value, in SymbolId order, held by a symbol named
+    /// `name` and accepted by `accept`.
+    fn inline_value_named(
+        &self,
+        name: InternedString,
+        accept: impl Fn(&crate::tast::Symbol) -> bool,
+    ) -> Option<HirLiteral> {
+        self.inline_vars_by_name
+            .get(&name)?
+            .iter()
+            .find(|id| self.symbol_table.get_symbol(**id).is_some_and(&accept))
+            .and_then(|id| self.inline_var_values.get(id).cloned())
     }
 
     /// Helper methods to get builtin types from type table
@@ -464,8 +492,8 @@ impl<'a> TastToHirContext<'a> {
 
             for (symbol_id, init_expr) in &static_fields {
                 if !self.inline_var_values.contains_key(symbol_id) {
-                    if let Some(literal) = self.try_evaluate_const_expr(&init_expr) {
-                        self.inline_var_values.insert(*symbol_id, literal);
+                    if let Some(literal) = self.try_evaluate_const_expr(init_expr) {
+                        self.insert_inline_value(*symbol_id, literal);
                     }
                 }
             }
@@ -1851,38 +1879,22 @@ impl<'a> TastToHirContext<'a> {
                     ) {
                         return None;
                     }
-                    let want_name = self.string_interner.get(want.name)?.to_string();
-                    if want_name.is_empty() {
+                    if self
+                        .string_interner
+                        .get(want.name)
+                        .is_none_or(str::is_empty)
+                    {
                         return None;
                     }
-                    let want_qname = self
-                        .symbol_table
-                        .get_symbol(*symbol_id)
-                        .and_then(|s| s.qualified_name)
-                        .and_then(|n| self.string_interner.get(n))
-                        .map(|s| s.to_string());
-                    for (sym_id, lit) in &self.inline_var_values {
-                        let sym = self.symbol_table.get_symbol(*sym_id)?;
-                        let cand_name = self.string_interner.get(sym.name)?;
-                        if cand_name != want_name {
-                            continue;
+                    // Prefer a matching qualified name; a candidate without one
+                    // cannot be told apart, and constants rarely collide.
+                    let want_qname = want.qualified_name;
+                    self.inline_value_named(want.name, |sym| {
+                        match (want_qname, sym.qualified_name) {
+                            (Some(want), Some(cand)) => want == cand,
+                            _ => true,
                         }
-                        // Prefer matching qualified name when available; otherwise
-                        // any same-name candidate is acceptable (no qualified info
-                        // means we can't disambiguate, and ambiguity here is rare
-                        // for static-inline-var constants).
-                        let cand_qname = sym
-                            .qualified_name
-                            .and_then(|n| self.string_interner.get(n))
-                            .map(|s| s.to_string());
-                        if let (Some(want), Some(cand)) = (&want_qname, &cand_qname) {
-                            if want != cand {
-                                continue;
-                            }
-                        }
-                        return Some(lit.clone());
-                    }
-                    None
+                    })
                 });
                 if let Some(literal) = inline_lookup {
                     return HirExpr {
@@ -2088,17 +2100,7 @@ impl<'a> TastToHirContext<'a> {
                             ) {
                                 return None;
                             }
-                            let field_name_str = self.string_interner.get(field.name)?.to_string();
-                            for (sym_id, lit) in &self.inline_var_values {
-                                if let Some(sym) = self.symbol_table.get_symbol(*sym_id) {
-                                    if let Some(name_str) = self.string_interner.get(sym.name) {
-                                        if name_str == field_name_str {
-                                            return Some(lit.clone());
-                                        }
-                                    }
-                                }
-                            }
-                            None
+                            self.inline_value_named(field.name, |_| true)
                         });
                 if let Some(literal) = inline_literal {
                     if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
