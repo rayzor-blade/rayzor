@@ -3095,9 +3095,10 @@ impl<'a> TastToHirContext<'a> {
                 if let Some(converted) = self.conversion_with_pos_infos(expression, *target_type) {
                     return self.lower_expression(&converted);
                 }
-                // `cast` of a class instance to an interface it implements, or to
-                // an abstract over one, is the implicit upcast to that interface.
-                if matches!(cast_kind, CastKind::Unsafe) {
+                // `cast` or `(e : T)` of a class instance to an interface it
+                // implements, or to an abstract over one, is the implicit upcast
+                // to that interface.
+                if matches!(cast_kind, CastKind::Unsafe | CastKind::Checked) {
                     if let Some(iface) =
                         self.interface_upcast_target(expression.expr_type, *target_type)
                     {
