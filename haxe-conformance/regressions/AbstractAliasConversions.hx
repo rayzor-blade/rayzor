@@ -19,12 +19,14 @@ class AbstractAliasConversions {
 
     static function main() {
         var local:Label = "local";
+        var direct:Label = Label.ofString("direct");
         var boolean:Cell<Bool> = true;
         var unwrapped:Bool = boolean;
         if (raw(number()) != 7) throw "generic typedef conversions";
         if (!unwrapped) throw "generic local conversions";
         if (text(label()) != "[return]!") throw "return conversion methods";
         if (text(local) != "[local]!") throw "initializer conversion method";
+        if (text(direct) != "[direct]!") throw "explicit conversion initializer";
         Sys.println("CONFORMANCE_OK");
     }
 }

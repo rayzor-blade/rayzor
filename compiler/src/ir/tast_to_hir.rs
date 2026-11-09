@@ -3095,12 +3095,25 @@ impl<'a> TastToHirContext<'a> {
                 if let Some(converted) = self.conversion_with_pos_infos(expression, *target_type) {
                     return self.lower_expression(&converted);
                 }
-                // `cast` of a class instance to an interface it implements is the
-                // implicit upcast: the destination wraps it and takes ownership.
-                if matches!(cast_kind, CastKind::Unsafe)
-                    && self.class_implements_interface(expression.expr_type, *target_type)
-                {
-                    return self.lower_expression(expression);
+                // `cast` of a class instance to an interface it implements, or to
+                // an abstract over one, is the implicit upcast to that interface.
+                if matches!(cast_kind, CastKind::Unsafe) {
+                    if let Some(iface) =
+                        self.interface_upcast_target(expression.expr_type, *target_type)
+                    {
+                        let value = self.lower_expression(expression);
+                        return HirExpr::new(
+                            HirExprKind::Cast {
+                                expr: Box::new(value),
+                                target: iface,
+                                is_safe: true,
+                                is_checked: false,
+                            },
+                            iface,
+                            expr.lifetime_id,
+                            expr.source_location,
+                        );
+                    }
                 }
                 HirExprKind::Cast {
                     expr: Box::new(self.lower_expression(expression)),
@@ -4907,24 +4920,67 @@ impl<'a> TastToHirContext<'a> {
         self.coerce_parameter_argument(arg, target_iface_type, source_location, false)
     }
 
+    /// The interface a cast from `source` to `target` upcasts to: `target`
+    /// itself, or the interface an abstract `target` wraps.
+    fn interface_upcast_target(&self, source: TypeId, target: TypeId) -> Option<TypeId> {
+        let underlying_of = |ty: TypeId| match self.type_table.borrow().get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Abstract {
+                underlying,
+                symbol_id,
+                ..
+            }) => Some((*underlying, *symbol_id)),
+            _ => None,
+        };
+        // An instance may carry no underlying type; its declaration does.
+        let underlying = underlying_of(target).and_then(|(underlying, symbol)| {
+            underlying.or_else(|| {
+                let declared = self.symbol_table.get_symbol(symbol)?.type_id;
+                underlying_of(declared)?.0
+            })
+        });
+        [Some(target), underlying]
+            .into_iter()
+            .flatten()
+            .find(|&t| self.class_implements_interface(source, t))
+    }
+
     /// `source` is a class type whose hierarchy includes the interface `target`.
+    /// Supertypes are compared by symbol, so `IG<Int>` matches a declared `IG<T>`.
     fn class_implements_interface(&self, source: TypeId, target: TypeId) -> bool {
         let type_table = self.type_table.borrow();
-        let (
-            Some(TypeKind::Class {
-                symbol_id: class, ..
-            }),
-            Some(TypeKind::Interface {
-                symbol_id: iface, ..
-            }),
-        ) = (
-            type_table.get(source).map(|t| &t.kind),
-            type_table.get(target).map(|t| &t.kind),
-        )
-        else {
+        let nominal = |mut ty: TypeId| {
+            for _ in 0..8 {
+                match type_table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Class { symbol_id, .. }) => return Some((*symbol_id, false)),
+                    Some(TypeKind::Interface { symbol_id, .. }) => return Some((*symbol_id, true)),
+                    Some(TypeKind::GenericInstance { base_type, .. }) => ty = *base_type,
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => return None,
+                }
+            }
+            None
+        };
+        let (Some((class, false)), Some((iface, true))) = (nominal(source), nominal(target)) else {
             return false;
         };
-        self.symbol_table.implements_interface(*class, *iface)
+        let mut queue = vec![class];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(sym) = queue.pop() {
+            if !seen.insert(sym) {
+                continue;
+            }
+            let Some(hierarchy) = self.symbol_table.get_class_hierarchy(sym) else {
+                continue;
+            };
+            for &sup in hierarchy.superclass.iter().chain(&hierarchy.interfaces) {
+                match nominal(sup) {
+                    Some((s, true)) if s == iface => return true,
+                    Some((s, _)) => queue.push(s),
+                    None => {}
+                }
+            }
+        }
+        false
     }
 
     /// Preserve representation changes when a formal parameter is substituted.
@@ -7690,8 +7746,18 @@ impl<'a> TastToHirContext<'a> {
                 self.current_lifetime,
                 source_location,
             );
-            let inlined =
+            let mut inlined =
                 self.inline_expression_deep(return_expr, &dummy_this, &param_map, result_type);
+            // An untyped `cast` in the body leaves the underlying's type; the
+            // value is still the abstract the call returns.
+            if let Some(returned) = self
+                .abstract_symbol_of(result_type)
+                .and_then(|symbol| self.abstract_declaration(symbol))
+                .and_then(|declaration| declaration.underlying_type)
+                && returned == inlined.ty
+            {
+                inlined.ty = result_type;
+            }
             return Some(inlined);
         }
 
