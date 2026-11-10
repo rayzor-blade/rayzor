@@ -297,6 +297,11 @@ impl MacroExpander {
                 meta.iter()
                     .any(|m| m.name == "autoBuild" || m.name == ":autoBuild")
             });
+        // A class below an `@:autoBuild` type of another module is built too.
+        let has_auto_build = has_auto_build
+            || (!super::budget::previewing()
+                && !super::build_macros::inherited_auto_builds(&file, &self.class_registry)
+                    .is_empty());
         if !build_macros.is_empty() || has_auto_build {
             for bm in &build_macros {
                 self.context.diagnostics.push(MacroDiagnostic::info(

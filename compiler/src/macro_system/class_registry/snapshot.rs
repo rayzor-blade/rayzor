@@ -181,6 +181,9 @@ impl ClassRegistry {
                 let mut parents: Vec<_> = class.extends.iter().cloned().collect();
                 parents.extend(class.implements.iter().cloned());
                 self.insert_snapshot_definition(TypeDefinition {
+                    is_interface: false,
+                    super_class: class.extends.iter().next().cloned(),
+                    interfaces: class.implements.to_vec(),
                     qualified_name: name.clone(),
                     source_file: source_file.clone(),
                     runtime_class: true,
@@ -244,6 +247,9 @@ impl ClassRegistry {
                         .map(method_field)
                         .collect(),
                     parents: Vec::new(),
+                    is_interface: false,
+                    super_class: None,
+                    interfaces: Vec::new(),
                     is_abstract: true,
                     is_enum_abstract: false,
                     constructors: BTreeMap::new(),
@@ -308,6 +314,9 @@ impl ClassRegistry {
                     metadata: Vec::new(),
                     fields: Vec::new(),
                     parents: Vec::new(),
+                    is_interface: false,
+                    super_class: None,
+                    interfaces: Vec::new(),
                     is_abstract: false,
                     is_enum_abstract: false,
                     constructor_order: decl
@@ -332,6 +341,9 @@ impl ClassRegistry {
                     metadata: Vec::new(),
                     fields: Vec::new(),
                     parents: Vec::new(),
+                    is_interface: false,
+                    super_class: None,
+                    interfaces: Vec::new(),
                     is_abstract: false,
                     is_enum_abstract: false,
                     constructors: BTreeMap::new(),

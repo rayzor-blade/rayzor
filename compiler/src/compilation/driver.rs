@@ -1470,6 +1470,86 @@ impl CompilationUnit {
                 .loaded_import_haxe_files
                 .iter()
                 .any(haxe_file_source_has_macro_hook)
+            || self.ancestor_declares_auto_build(ast_file)
+    }
+
+    /// Whether a class of `ast_file` sits below a type of another module that
+    /// declares `@:autoBuild`, which then builds the class. Parents are read
+    /// from the class path by module path, a bounded walk up the hierarchy.
+    fn ancestor_declares_auto_build(&self, ast_file: &parser::HaxeFile) -> bool {
+        fn parents(file: &parser::HaxeFile) -> Vec<String> {
+            let package: Vec<String> = file
+                .package
+                .as_ref()
+                .map(|p| p.path.clone())
+                .unwrap_or_default();
+            let imports: BTreeMap<&str, String> = file
+                .imports
+                .iter()
+                .filter(|import| matches!(import.mode, parser::ImportMode::Normal))
+                .filter_map(|import| Some((import.path.last()?.as_str(), import.path.join("."))))
+                .collect();
+            let types: Vec<&parser::Type> = file
+                .declarations
+                .iter()
+                .flat_map(|decl| match decl {
+                    parser::TypeDeclaration::Class(c) => c
+                        .extends
+                        .iter()
+                        .chain(c.implements.iter())
+                        .collect::<Vec<_>>(),
+                    parser::TypeDeclaration::Interface(i) => i.extends.iter().collect(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            types
+                .into_iter()
+                .filter_map(|t| match t {
+                    parser::Type::Path { path, .. } if !path.package.is_empty() => Some(
+                        path.package
+                            .iter()
+                            .chain(std::iter::once(&path.name))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("."),
+                    ),
+                    parser::Type::Path { path, .. } => {
+                        Some(imports.get(path.name.as_str()).cloned().unwrap_or_else(|| {
+                            package
+                                .iter()
+                                .chain(std::iter::once(&path.name))
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(".")
+                        }))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+        let mut pending = parents(ast_file);
+        let mut seen = BTreeSet::new();
+        while let Some(module) = pending.pop() {
+            if seen.len() > 32 || !seen.insert(module.clone()) {
+                continue;
+            }
+            let Some(path) = self
+                .namespace_resolver
+                .resolve_qualified_path_to_file_force(&module)
+            else {
+                continue;
+            };
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if source.contains("@:autoBuild") {
+                return true;
+            }
+            if let Ok(file) = parser::parse_haxe_file(&path.to_string_lossy(), &source, false) {
+                pending.extend(parents(&file));
+            }
+        }
+        false
     }
 
     /// Retrying a file expands the same calls again; each expansion is kept once.

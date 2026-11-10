@@ -729,7 +729,6 @@ impl MacroInterpreter {
         self.class_registry
             .as_ref()
             .and_then(|registry| registry.enum_constructor_names(owner))
-            .map(<[String]>::to_vec)
             .ok_or_else(|| MacroError::RuntimeError {
                 message: format!("{owner} is not an enum"),
                 location,

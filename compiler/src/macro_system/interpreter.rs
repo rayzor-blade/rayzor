@@ -406,6 +406,13 @@ impl MacroInterpreter {
                 // Map them to plain strings so `value_to_class_field` (which
                 // matches on `"Public" | "Static" | ...`) accepts either
                 // constructor form.
+                if let Some((owner, 0)) = self.user_enum_constructor(name) {
+                    return Ok(MacroValue::Enum(
+                        Arc::from(owner),
+                        Arc::from(name.as_str()),
+                        Arc::new(Vec::new()),
+                    ));
+                }
                 if let Some(stripped) = enum_ident_as_string(name) {
                     return Ok(MacroValue::String(Arc::from(stripped)));
                 }
@@ -843,7 +850,8 @@ impl MacroInterpreter {
             ExprKind::Field {
                 expr: base, field, ..
             } if path_ends_with_expr_enum(base)
-                && !matches!(&base.kind, ExprKind::Ident(b) if self.env.get(b).is_some()) =>
+                && !matches!(&base.kind, ExprKind::Ident(b) if self.env.get(b).is_some())
+                && !self.names_user_enum(base) =>
             {
                 match expr_enum_value(field) {
                     Some(enum_name) => Ok(MacroValue::Enum(
@@ -1487,6 +1495,12 @@ impl MacroInterpreter {
                 // produces when a macro DESTRUCTURES an Expr. Only the object
                 // form above existed, which is the shape build macros read, so a
                 // macro could take an Expr apart and not put one back together.
+                // An enum of the macro's own scope comes before haxe.macro's.
+                if let Some((owner, arity)) = self.user_enum_constructor(name)
+                    && arg_vals.len() <= arity
+                {
+                    return self.enum_value(&owner, name, arg_vals, location);
+                }
                 if let Some((enum_name, variant)) = expr_enum_ctor(name) {
                     return self.enum_value(enum_name, variant, arg_vals, location);
                 }
@@ -1519,7 +1533,8 @@ impl MacroInterpreter {
             ExprKind::Field {
                 expr: base, field, ..
             } if (expr_enum_ctor(field).is_some() || enum_ctor_tag(field).is_some())
-                && path_ends_with_expr_enum(base) =>
+                && path_ends_with_expr_enum(base)
+                && !self.names_user_enum(base) =>
             {
                 // `ExprDef.EConst(...)` and `Constant.CIdent(...)`: the same
                 // constructors as above, written qualified.
@@ -1892,12 +1907,14 @@ impl MacroInterpreter {
             return Err(MacroError::TimeBudgetExceeded { location });
         }
         if let Some((owner, method)) = &func.static_target {
-            return self
-                .try_static_call(owner, method, &args, location)?
-                .ok_or_else(|| MacroError::TypeError {
-                    message: format!("Class {owner} has no static method '{method}'"),
-                    location,
-                });
+            let found = match self.try_static_call(owner, method, &args, location)? {
+                Some(value) => Some(value),
+                None => self.enum_tools_call(owner, method, &args, location)?,
+            };
+            return found.ok_or_else(|| MacroError::TypeError {
+                message: format!("Class {owner} has no static method '{method}'"),
+                location,
+            });
         }
         self.call_depth += 1;
         if self.call_depth > self.max_call_depth {
@@ -2161,11 +2178,39 @@ impl MacroInterpreter {
         let (head, tail) = class_name
             .split_once('.')
             .map_or((class_name, None), |(head, tail)| (head, Some(tail)));
+        let imported = self.import_map.contains_key(head);
         let mut name = self
             .import_map
             .get(head)
             .map(|owner| tail.map_or_else(|| owner.clone(), |tail| format!("{owner}.{tail}")))
             .unwrap_or_else(|| class_name.into());
+        // `Defs.Kind` names a type of the module `Defs` in the macro's own package.
+        if name.contains('.')
+            && !imported
+            && registry.find_class(&name).is_none()
+            && registry.find_alias(&name).is_none()
+            && let Some(local) = self
+                .macro_class_stack
+                .last()
+                .and_then(|owner| owner.rsplit_once('.'))
+                .map(|(pack, _)| format!("{pack}.{name}"))
+                .filter(|local| registry.has_type(local))
+        {
+            name = local;
+        }
+        // A bare name is a module of the macro's own package before a global
+        // type; a sub-type of another module is not visible by its name.
+        if !name.contains('.')
+            && !imported
+            && let Some(local) = self
+                .macro_class_stack
+                .last()
+                .and_then(|owner| owner.rsplit_once('.'))
+                .map(|(pack, _)| format!("{pack}.{name}"))
+                .filter(|local| registry.is_module_type(local))
+        {
+            name = local;
+        }
         if !name.contains('.')
             && registry.find_class(&name).is_none()
             && registry.find_alias(&name).is_none()
@@ -2281,6 +2326,32 @@ impl MacroInterpreter {
         )
     }
 
+    /// Whether `base` names a user enum, which a haxe.macro enum of the same
+    /// simple name (`Type`, `Constant`) does not shadow.
+    fn names_user_enum(&self, base: &Expr) -> bool {
+        let Some(registry) = self.class_registry.as_ref() else {
+            return false;
+        };
+        let Some((path, _)) = extract_qualified_call(base, "") else {
+            return false;
+        };
+        if self
+            .env
+            .get(path.split('.').next().unwrap_or_default())
+            .is_some()
+        {
+            return false;
+        }
+        let owner = self.resolve_class_name(&path);
+        !owner.starts_with("haxe.macro.") && registry.enum_constructor_names(&owner).is_some()
+    }
+
+    /// An enum constructor in scope that is not a haxe.macro one.
+    fn user_enum_constructor(&self, name: &str) -> Option<(String, usize)> {
+        self.scoped_enum_constructor(name)
+            .filter(|(owner, _)| !owner.starts_with("haxe.macro."))
+    }
+
     fn scoped_enum_constructor(&self, name: &str) -> Option<(String, usize)> {
         let registry = self.class_registry.as_ref()?;
         if let Some((owner, constructor)) = self
@@ -2355,6 +2426,36 @@ impl MacroInterpreter {
     }
 
     /// Try to dispatch a static class method call (e.g., Context.parse, Std.string)
+    /// `E.createAll()` and the other tools of `haxe.EnumTools`, which every
+    /// module is `using`: the `Type` function each tool forwards to, `E` first.
+    fn enum_tools_call(
+        &mut self,
+        owner: &str,
+        method: &str,
+        args: &[MacroValue],
+        location: SourceLocation,
+    ) -> Result<Option<MacroValue>, MacroError> {
+        let forward = match method {
+            "createAll" => "allEnums",
+            "createByName" => "createEnum",
+            "createByIndex" => "createEnumIndex",
+            "getConstructors" => "getEnumConstructs",
+            "getName" => "getEnumName",
+            _ => return Ok(None),
+        };
+        let resolved = self.resolve_class_name(owner);
+        let is_enum = self
+            .class_registry
+            .as_ref()
+            .is_some_and(|registry| registry.enum_constructor_names(&resolved).is_some());
+        if !is_enum {
+            return Ok(None);
+        }
+        let mut forwarded = vec![MacroValue::Class(Arc::from(owner))];
+        forwarded.extend(args.iter().cloned());
+        self.try_static_call("Type", forward, &forwarded, location)
+    }
+
     fn try_static_call(
         &mut self,
         class_name: &str,
@@ -3471,12 +3572,14 @@ impl MacroInterpreter {
 
         // Check for static method calls (e.g., Std.string(), Math.abs())
         if let MacroValue::Class(name) = base {
-            return self
-                .try_static_call(name, method, &args, location)?
-                .ok_or_else(|| MacroError::TypeError {
-                    message: format!("Class {name} has no static method '{method}'"),
-                    location,
-                });
+            let found = match self.try_static_call(name, method, &args, location)? {
+                Some(value) => Some(value),
+                None => self.enum_tools_call(name, method, &args, location)?,
+            };
+            return found.ok_or_else(|| MacroError::TypeError {
+                message: format!("Class {name} has no static method '{method}'"),
+                location,
+            });
         }
         if let MacroValue::String(s) = base {
             if matches!(method, "fastCodeAt" | "unsafeCodeAt") && args.len() == 1 {
@@ -3585,6 +3688,18 @@ impl MacroInterpreter {
                 } else {
                     self.object_method(obj, method, args, location)
                 }
+            }
+            // `haxe.EnumValueTools`, which every module is `using`: the `Type`
+            // function each tool forwards to, the value first.
+            MacroValue::Enum(..) if enum_value_tool(method).is_some() => {
+                let forward = enum_value_tool(method).unwrap_or_default();
+                let mut forwarded = vec![base.clone()];
+                forwarded.extend(args);
+                self.try_static_call("Type", forward, &forwarded, location)?
+                    .ok_or_else(|| MacroError::UnsupportedOperation {
+                        operation: format!("Type.{forward}"),
+                        location,
+                    })
             }
             _ => {
                 // Check for well-known static classes
@@ -5327,7 +5442,8 @@ impl MacroInterpreter {
         mut args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
-        let canonical = if expr_enum_ctor(name).is_some() {
+        // A bare owner is haxe.macro's; a user enum arrives qualified.
+        let canonical = if expr_enum_ctor(name).is_some() && !owner.contains('.') {
             format!("haxe.macro.{owner}")
         } else {
             owner.to_string()
@@ -6228,6 +6344,17 @@ fn extract_qualified_call<'a>(base: &'a Expr, method: &'a str) -> Option<(String
 pub const WILDCARD_OWNERS_KEY: &str = "*";
 
 pub(super) const USING_OWNERS_KEY: &str = "<using>";
+
+/// The `Type` function a `haxe.EnumValueTools` method on an enum value forwards to.
+fn enum_value_tool(method: &str) -> Option<&'static str> {
+    match method {
+        "getName" => Some("enumConstructor"),
+        "getIndex" => Some("enumIndex"),
+        "getParameters" => Some("enumParameters"),
+        "equals" => Some("enumEq"),
+        _ => None,
+    }
+}
 
 pub(super) fn build_file_import_map(file: &parser::HaxeFile) -> BTreeMap<String, String> {
     let mut imports = build_import_map(&file.imports);

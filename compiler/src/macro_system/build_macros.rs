@@ -64,7 +64,33 @@ pub fn process_build_macros_with_class_registry(
         .map(|p| p.path.clone())
         .unwrap_or_default();
     // Collect @:autoBuild interfaces first
-    let auto_build_interfaces = collect_auto_build_interfaces(&file);
+    let mut auto_build_interfaces = collect_auto_build_interfaces(&file);
+    // Ancestors declared in other modules carry their `@:autoBuild` too.
+    let mut inherited_targets: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    if let Some(class_registry) = &class_registry {
+        for (class_name, builds) in inherited_auto_builds(&file, class_registry) {
+            for (owner, build_meta) in builds {
+                let index = match auto_build_interfaces
+                    .iter()
+                    .position(|a| a.interface_name == owner)
+                {
+                    Some(index) => index,
+                    None => {
+                        auto_build_interfaces.push(AutoBuildInfo {
+                            interface_name: owner,
+                            build_meta,
+                        });
+                        auto_build_interfaces.len() - 1
+                    }
+                };
+                inherited_targets
+                    .entry(class_name.clone())
+                    .or_default()
+                    .push(index);
+            }
+        }
+    }
     // Which @:autoBuild types each class sits below, decided before the
     // declarations are taken apart.
     let auto_build_targets: std::collections::BTreeMap<String, Vec<usize>> = file
@@ -82,6 +108,14 @@ pub fn process_build_macros_with_class_registry(
                 .map(|(i, _)| i)
                 .collect();
             (c.name.clone(), hits)
+        })
+        .map(|(name, mut hits): (String, Vec<usize>)| {
+            for index in inherited_targets.get(&name).into_iter().flatten() {
+                if !hits.contains(index) {
+                    hits.push(*index);
+                }
+            }
+            (name, hits)
         })
         .collect();
 
@@ -639,6 +673,68 @@ pub(crate) fn apply_build_macro(
 struct AutoBuildInfo {
     interface_name: String,
     build_meta: Metadata,
+}
+
+/// For each class of `file`, the `@:build` calls that `@:autoBuild` carries on
+/// its ancestors declared in other modules, with the type declaring each.
+pub(crate) fn inherited_auto_builds(
+    file: &HaxeFile,
+    class_registry: &super::class_registry::ClassRegistry,
+) -> Vec<(String, Vec<(String, Metadata)>)> {
+    let file_pack: Vec<String> = file
+        .package
+        .as_ref()
+        .map(|p| p.path.clone())
+        .unwrap_or_default();
+    let imports = super::interpreter::build_file_import_map(file);
+    let local: std::collections::BTreeSet<&str> = file
+        .declarations
+        .iter()
+        .filter_map(|d| match d {
+            TypeDeclaration::Class(c) => Some(c.name.as_str()),
+            TypeDeclaration::Interface(i) => Some(i.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    // A parent named in the file: qualified, imported, else of this package.
+    let qualify = |t: &parser::Type| -> Option<String> {
+        let parser::Type::Path { path, .. } = t else {
+            return None;
+        };
+        if !path.package.is_empty() {
+            let mut parts = path.package.clone();
+            parts.push(path.name.clone());
+            return Some(parts.join("."));
+        }
+        if local.contains(path.name.as_str()) {
+            return None;
+        }
+        Some(imports.get(&path.name).cloned().unwrap_or_else(|| {
+            file_pack
+                .iter()
+                .cloned()
+                .chain(std::iter::once(path.name.clone()))
+                .collect::<Vec<_>>()
+                .join(".")
+        }))
+    };
+    file.declarations
+        .iter()
+        .filter_map(|decl| match decl {
+            TypeDeclaration::Class(class) => Some(class),
+            _ => None,
+        })
+        .filter_map(|class| {
+            let parents: Vec<String> = class
+                .extends
+                .iter()
+                .chain(class.implements.iter())
+                .filter_map(&qualify)
+                .collect();
+            let builds = class_registry.inherited_auto_builds(&parents);
+            (!builds.is_empty()).then(|| (class.name.clone(), builds))
+        })
+        .collect()
 }
 
 /// Collect all interfaces with @:autoBuild metadata

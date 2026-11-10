@@ -66,6 +66,10 @@ struct TypeDefinition {
     source_file: String,
     runtime_class: bool,
     parents: Vec<String>,
+    /// `ClassType.isInterface`, `superClass` and `interfaces`, by qualified name.
+    is_interface: bool,
+    super_class: Option<String>,
+    interfaces: Vec<String>,
     module: String,
     metadata: Vec<Metadata>,
     fields: Vec<FieldDefinition>,
@@ -111,6 +115,8 @@ pub struct ClassRegistry {
     type_definitions: BTreeMap<String, Arc<TypeDefinition>>,
     runtime_short_names: std::sync::OnceLock<BTreeMap<String, Option<String>>>,
     reflected_definitions: std::sync::Mutex<BTreeMap<String, Option<Arc<TypeDefinition>>>>,
+    /// Module paths with no file on the class path.
+    missing_modules: std::sync::Mutex<std::collections::BTreeSet<String>>,
     enum_constants: BTreeMap<String, std::collections::BTreeSet<String>>,
     enum_constructors: BTreeMap<String, BTreeMap<String, usize>>,
     generic_builds: BTreeMap<String, Arc<GenericBuildInfo>>,
@@ -140,6 +146,7 @@ impl ClassRegistry {
             type_definitions: BTreeMap::new(),
             runtime_short_names: Default::default(),
             reflected_definitions: Default::default(),
+            missing_modules: Default::default(),
             enum_constants: BTreeMap::new(),
             enum_constructors: BTreeMap::new(),
             generic_builds: BTreeMap::new(),
@@ -504,7 +511,38 @@ impl ClassRegistry {
                 _ => None,
             };
             let mut next_value: i64 = 0;
+            // A parent named in the file: imported, else of this package.
+            let qualify = |t: &parser::Type| -> Option<String> {
+                let parser::Type::Path { path, .. } = t else {
+                    return None;
+                };
+                let mut parts = path.package.clone();
+                parts.push(path.name.clone());
+                parts.extend(path.sub.clone());
+                let name = parts.join(".");
+                Some(if path.package.is_empty() {
+                    file_imports
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or_else(|| format!("{package_prefix}{name}"))
+                } else {
+                    name
+                })
+            };
+            let (super_class, interfaces) = match decl {
+                TypeDeclaration::Class(c) => (
+                    c.extends.iter().find_map(&qualify),
+                    c.implements.iter().filter_map(&qualify).collect(),
+                ),
+                TypeDeclaration::Interface(c) => {
+                    (None, c.extends.iter().filter_map(&qualify).collect())
+                }
+                _ => (None, Vec::new()),
+            };
             let definition = Arc::new(TypeDefinition {
+                is_interface: matches!(decl, TypeDeclaration::Interface(_)),
+                super_class,
+                interfaces,
                 source_file: file.filename.clone(),
                 qualified_name: format!("{package_prefix}{name}"),
                 runtime_class: matches!(
@@ -519,26 +557,7 @@ impl ClassRegistry {
                         TypeDeclaration::Interface(c) => c.extends.iter().collect(),
                         _ => Vec::new(),
                     };
-                    types
-                        .into_iter()
-                        .filter_map(|t| {
-                            let parser::Type::Path { path, .. } = t else {
-                                return None;
-                            };
-                            let mut parts = path.package.clone();
-                            parts.push(path.name.clone());
-                            parts.extend(path.sub.clone());
-                            let name = parts.join(".");
-                            Some(if path.package.is_empty() {
-                                file_imports
-                                    .get(&name)
-                                    .cloned()
-                                    .unwrap_or_else(|| format!("{package_prefix}{name}"))
-                            } else {
-                                name
-                            })
-                        })
-                        .collect()
+                    types.into_iter().filter_map(&qualify).collect()
                 },
                 module: format!("{package_prefix}{module_name}"),
                 metadata: metadata.clone(),
@@ -879,12 +898,61 @@ impl ClassRegistry {
     }
 
     /// Runtime imports retain source declarations only when reflection requests them.
+    /// The `@:build` calls that `@:autoBuild` on `parents` and on their
+    /// ancestors carries, each with the type that declares it. Names are
+    /// qualified; a type declared in another module is read from the class path.
+    pub(crate) fn inherited_auto_builds(
+        &self,
+        parents: &[String],
+    ) -> Vec<(String, parser::Metadata)> {
+        let mut found = Vec::new();
+        let mut pending = parents.to_vec();
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(name) = pending.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some(definition) = self.reflected_definition(&name, &name) else {
+                continue;
+            };
+            for meta in &definition.metadata {
+                if meta.name != "autoBuild" && meta.name != ":autoBuild" {
+                    continue;
+                }
+                // A bare `@:autoBuild` propagates the type's own `@:build`.
+                let build = if meta.params.is_empty() {
+                    match definition
+                        .metadata
+                        .iter()
+                        .find(|b| b.name == "build" || b.name == ":build")
+                    {
+                        Some(build) => build.clone(),
+                        None => continue,
+                    }
+                } else {
+                    parser::Metadata {
+                        name: "build".to_string(),
+                        params: meta.params.clone(),
+                        span: meta.span,
+                        compile_time: true,
+                    }
+                };
+                found.push((definition.qualified_name.clone(), build));
+            }
+            pending.extend(definition.parents.iter().cloned());
+        }
+        found
+    }
+
     fn reflected_definition(&self, name: &str, module: &str) -> Option<Arc<TypeDefinition>> {
         if let Some(definition) = self.definition(name) {
             return Some(definition.clone());
         }
         if let Some(definition) = self.reflected_definitions.lock().unwrap().get(name) {
             return definition.clone();
+        }
+        if self.missing_modules.lock().unwrap().contains(module) {
+            return None;
         }
         let relative = format!("{}.hx", module.replace('.', "/"));
         let source = self.class_paths.iter().find_map(|root| {
@@ -898,6 +966,13 @@ impl ClassRegistry {
             self.dependencies.register_source(&path);
             Some((path, source))
         });
+        let module_found = source.is_some();
+        if !module_found {
+            self.missing_modules
+                .lock()
+                .unwrap()
+                .insert(module.to_string());
+        }
         let definition = source.and_then(|(path, source)| {
             let mut config = self
                 .reflection_config
@@ -939,10 +1014,14 @@ impl ClassRegistry {
             );
             definition
         });
-        self.reflected_definitions
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), definition.clone());
+        // No module file under this name is no answer: the type may be a
+        // sub-type of another module.
+        if module_found || definition.is_some() {
+            self.reflected_definitions
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), definition.clone());
+        }
         definition
     }
 
@@ -1021,6 +1100,48 @@ impl ClassRegistry {
             });
         }
         view.insert("meta".to_string(), access);
+        // A typed view's own entries carry type parameters; these fill a view
+        // that has none.
+        if matches!(view.get("isInterface"), None | Some(V::Null)) {
+            view.insert("isInterface".to_string(), V::Bool(definition.is_interface));
+        }
+        // Each parent is its own class type, reached through `t.get()`.
+        let parent = |qualified: &str| {
+            let (pack, name) = qualified.rsplit_once('.').unwrap_or(("", qualified));
+            let bare = V::object(BTreeMap::from([
+                ("name".to_string(), V::from_str(name)),
+                (
+                    "pack".to_string(),
+                    V::array(
+                        pack.split('.')
+                            .filter(|part| !part.is_empty())
+                            .map(V::from_str)
+                            .collect(),
+                    ),
+                ),
+            ]));
+            V::object(BTreeMap::from([
+                (
+                    "t".to_string(),
+                    reference(self.enrich_typed_view(bare, None)),
+                ),
+                ("params".to_string(), V::array(Vec::new())),
+            ]))
+        };
+        if matches!(view.get("superClass"), None | Some(V::Null)) {
+            let super_class = definition.super_class.as_deref().map_or(V::Null, &parent);
+            view.insert("superClass".to_string(), super_class);
+        }
+        // Haxe lists them last declared first.
+        if matches!(view.get("interfaces"), None | Some(V::Null)) {
+            let interfaces = definition
+                .interfaces
+                .iter()
+                .rev()
+                .map(|i| parent(i))
+                .collect();
+            view.insert("interfaces".to_string(), V::array(interfaces));
+        }
         let mut implementation_fields = Vec::new();
         for (key, is_static) in [("fields", false), ("statics", true)] {
             let typed_fields = match view.get(key) {
@@ -1137,10 +1258,32 @@ impl ClassRegistry {
     }
 
     /// An enum's constructor names in declaration order.
-    pub(crate) fn enum_constructor_names(&self, owner: &str) -> Option<&[String]> {
+    pub(crate) fn enum_constructor_names(&self, owner: &str) -> Option<Vec<String>> {
         self.definition(owner)
-            .map(|definition| definition.constructor_order.as_slice())
+            .cloned()
+            .or_else(|| self.class_path_definition(owner))
+            .map(|definition| definition.constructor_order.clone())
             .filter(|names| !names.is_empty())
+    }
+
+    /// A type no loaded file declares, read from the class path: `name` is a
+    /// module's own type, or a sub-type of the module its prefix names.
+    fn class_path_definition(&self, name: &str) -> Option<Arc<TypeDefinition>> {
+        // A type already read under its module path answers to its own name.
+        let cached = self
+            .reflected_definitions
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .find(|definition| definition.qualified_name == name)
+            .cloned();
+        cached
+            .or_else(|| self.reflected_definition(name, name))
+            .or_else(|| {
+                let (module, _) = name.rsplit_once('.')?;
+                self.reflected_definition(name, module)
+            })
     }
 
     pub(crate) fn enum_constructor_required(&self, owner: &str, name: &str) -> Option<usize> {
@@ -1201,6 +1344,24 @@ impl ClassRegistry {
     }
 
     /// Find a class by name (tries exact match, then short name index).
+    /// Whether `name` is the main type of the module of the same path
+    /// (`pack.Name` declared in `pack/Name.hx`), the type a bare name of
+    /// the package reaches.
+    pub(crate) fn is_module_type(&self, name: &str) -> bool {
+        self.definition(name)
+            .cloned()
+            .or_else(|| self.class_path_definition(name))
+            .is_some_and(|definition| definition.module == name)
+    }
+
+    /// Whether `name` (a type or module-qualified path) names a known type.
+    pub(crate) fn has_type(&self, name: &str) -> bool {
+        self.find_class(name).is_some()
+            || self.find_alias(name).is_some()
+            || self.definition(name).is_some()
+            || self.class_path_definition(name).is_some()
+    }
+
     pub fn find_class(&self, name: &str) -> Option<&ClassInfo> {
         if let Some(info) = self.classes.get(name) {
             return Some(info);
