@@ -218,4 +218,138 @@ class TestSimpleGeneric {
             }
         }
     }
+
+    /// Lowering errors for a source, including one that aborts the file.
+    fn lowering_messages(code: &str) -> Vec<String> {
+        lowering_messages_in(code, false)
+    }
+
+    /// Lowering errors for `code`, lowered as a user file when `user_file`.
+    fn lowering_messages_in(code: &str, user_file: bool) -> Vec<String> {
+        let haxe_file = parse_haxe_file("member_test.hx", code, true).expect("parse");
+        let mut string_interner = StringInterner::new();
+        let mut symbol_table = SymbolTable::new();
+        let type_table = Rc::new(RefCell::new(TypeTable::new()));
+        let mut scope_tree = ScopeTree::new(ScopeId::first());
+        let mut source_map = SourceMap::new();
+        let file_id = source_map.add_file("member_test.hx".to_string(), code.to_string());
+        let mut namespace_resolver = crate::tast::namespace::NamespaceResolver::new();
+        let mut import_resolver = crate::tast::namespace::ImportResolver::new();
+        let string_interner_rc = Rc::new(RefCell::new(StringInterner::new()));
+        let mut lowering = AstLowering::new(
+            &mut string_interner,
+            string_interner_rc,
+            &mut symbol_table,
+            &type_table,
+            &mut scope_tree,
+            &mut namespace_resolver,
+            &mut import_resolver,
+        );
+        lowering.initialize_span_converter(file_id.as_usize() as u32, code.to_string());
+        lowering.user_file = user_file;
+        let result = lowering.lower_file(&haxe_file);
+        let mut messages: Vec<String> = lowering
+            .get_errors()
+            .iter()
+            .map(|e| format!("{e:?}"))
+            .collect();
+        if let Err(e) = result {
+            messages.push(format!("{e:?}"));
+        }
+        messages
+    }
+
+    #[test]
+    fn test_type_parameter_call_to_missing_member_is_an_error() {
+        let messages = lowering_messages(
+            r#"
+interface I { function yes():Int; }
+class Main {
+    static function f<T:I>(v:T):Int return v.nope(1);
+    static function main() {}
+}
+"#,
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("T has no field nope")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn test_type_parameter_call_to_declared_member_is_not_an_error() {
+        let messages = lowering_messages(
+            r#"
+interface IB { function base():Int; }
+interface IA extends IB { function own():Int; }
+class C { public var f:Int->Int; public function new() f = x -> x; }
+class Ext { public static function twice(v:IA):Int return v.own() * 2; }
+using Ext;
+class Main {
+    static function inherited<T:IA>(v:T):Int return v.base() + v.own();
+    static function structural<T:{function size():Int;}>(v:T):Int return v.size();
+    static function field<T:C>(v:T):Int return v.f(1);
+    static function extension<T:IA>(v:T):Int return v.twice();
+    static function main() {}
+}
+"#,
+        );
+        assert!(
+            !messages.iter().any(|m| m.contains("has no field")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn test_unknown_constructed_types_in_a_user_file_are_errors() {
+        let messages = lowering_messages_in(
+            r#"
+class Main {
+    static function main() {
+        var c = new Nowhere<Int>(5);
+        var d = 1 is Elsewhere;
+    }
+    @:generic static function make<C:haxe.Constraints.Constructible<Void->Void>>(type:Class<C>)
+        return new C();
+}
+abstract Q<T>(Array<T>) from Array<T> {}
+"#,
+            true,
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|m| m.contains("\"T\"") || m.contains("\"C\"")),
+            "{messages:?}"
+        );
+        for name in ["Nowhere", "Elsewhere"] {
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m.contains("UnresolvedType") && m.contains(name)),
+                "{name}: {messages:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_forward_type_references_in_a_user_file_resolve() {
+        let messages = lowering_messages_in(
+            r#"
+class Main {
+    static function main() {
+        var l = new Later();
+        var e:LaterEnum = A;
+    }
+}
+class Later { public function new() {} }
+enum LaterEnum { A; }
+"#,
+            true,
+        );
+        assert!(
+            !messages.iter().any(|m| m.contains("\"Later")),
+            "{messages:?}"
+        );
+    }
 }

@@ -867,7 +867,7 @@ impl<'a> AstLowering<'a> {
                         }
                     };
                     // Resolve via full type resolution (handles user classes, imports, namespaces)
-                    let check_type = self.resolve_type_path(&type_path)?;
+                    let check_type = self.resolve_type_path(&type_path, Some(expression.span))?;
                     TypedExpressionKind::Is {
                         expression: Box::new(left_expr),
                         check_type,
@@ -1220,7 +1220,8 @@ impl<'a> AstLowering<'a> {
                 // hint and base disagree (e.g. hint `StringMap<V>` from
                 // `var m:Map<String,V>` annotation, base `Map` from
                 // `new Map()` call site).
-                let mut base_class_type_id = self.resolve_type_path(type_path)?;
+                let mut base_class_type_id =
+                    self.resolve_type_path(type_path, Some(expression.span))?;
                 let unresolved = matches!(
                     self.context
                         .type_table
@@ -1447,6 +1448,9 @@ impl<'a> AstLowering<'a> {
                     self.append_pos_infos(arg_exprs, ctor_params.as_deref(), expression);
                 let arg_exprs = self.pack_rest_args(arg_exprs, ctor_params.as_deref(), expression);
                 // An argument for an abstract-typed parameter goes through its `@:from`.
+                // Only a parameter the class's type arguments bind is coerced to
+                // its instance; a declared one converts where the call lowers.
+                let declared_params = self.constructor_declared_param_types(constructor_target);
                 let arg_exprs: Vec<TypedExpression> = match &ctor_params {
                     Some(params) => arg_exprs
                         .into_iter()
@@ -1454,6 +1458,24 @@ impl<'a> AstLowering<'a> {
                         .map(|(i, a)| {
                             let a = self.coerce_arg_via_abstract_to(a, params.get(i).copied());
                             let a = self.coerce_arg_via_abstract_from(a, params.get(i).copied());
+                            let bound = declared_params
+                                .as_ref()
+                                .and_then(|declared| declared.get(i))
+                                .is_some_and(|declared| {
+                                    matches!(
+                                        self.context
+                                            .type_table
+                                            .borrow()
+                                            .get(*declared)
+                                            .map(|t| &t.kind),
+                                        Some(TypeKind::TypeParameter { .. })
+                                    )
+                                });
+                            let a = if bound {
+                                self.coerce_to_instantiated_formal(a, params.get(i).copied())
+                            } else {
+                                a
+                            };
                             self.string_as_any(a, params.get(i).copied())
                         })
                         .collect(),

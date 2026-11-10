@@ -1253,10 +1253,61 @@ impl<'a> AstLowering<'a> {
                     .chain(default_case.iter().map(|d| &**d))
                     .filter(|e| e.expr_type != void_type)
                     .collect();
+                // Scalars beside references (`(1.0:Single)`, `"text"`, `null`)
+                // share no type but Dynamic; the first branch's would hold none
+                // of the others.
+                let mixed = {
+                    let table = self.context.type_table.borrow();
+                    let scalar = |ty: TypeId| {
+                        let ty = Self::resolve_alias_chain(&table, ty);
+                        matches!(
+                            table.get(ty).map(|t| &t.kind),
+                            Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+                        ) || table.get(ty).is_some_and(|t| {
+                            matches!(&t.kind, TypeKind::Abstract { symbol_id, .. }
+                            if self.context.symbol_table.get_symbol(*symbol_id).is_some_and(|s| {
+                                self.context.string_interner.get(s.name) == Some("Single")
+                            }))
+                        })
+                    };
+                    let reference = |ty: TypeId| {
+                        let ty = Self::resolve_alias_chain(&table, ty);
+                        matches!(
+                            table.get(ty).map(|t| &t.kind),
+                            Some(
+                                TypeKind::String
+                                    | TypeKind::Class { .. }
+                                    | TypeKind::Interface { .. }
+                                    | TypeKind::Array { .. }
+                                    | TypeKind::Anonymous { .. }
+                            )
+                        )
+                    };
+                    // Only where Dynamic is what the result is wanted as: other
+                    // mismatched branches stay an error of the first branch's type.
+                    let wants_dynamic = self.context.expected_return_type.is_some_and(|ty| {
+                        let mut ty = Self::resolve_alias_chain(&table, ty);
+                        if let Some(TypeKind::Optional { inner_type }) =
+                            table.get(ty).map(|t| &t.kind)
+                        {
+                            ty = *inner_type;
+                        }
+                        matches!(table.get(ty).map(|t| &t.kind), Some(TypeKind::Dynamic))
+                    });
+                    wants_dynamic
+                        && non_void_types.iter().any(|t| scalar(*t))
+                        && non_void_types.iter().any(|t| reference(*t))
+                };
                 Ok(self
                     .join_branches(&branches)
                     .or_else(|| self.common_branch_class(&non_void_types))
-                    .unwrap_or(non_void_types[0]))
+                    .unwrap_or_else(|| {
+                        if mixed {
+                            self.context.type_table.borrow().dynamic_type()
+                        } else {
+                            non_void_types[0]
+                        }
+                    }))
             }
             TypedExpressionKind::Try {
                 try_expr,

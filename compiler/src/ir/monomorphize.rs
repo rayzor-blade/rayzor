@@ -231,6 +231,7 @@ impl Monomorphizer {
         self.propagate_transitive_fixups(module);
         self.adapt_specialized_call_returns(module);
         self.fold_generic_value_adapters(module);
+        Self::widen_generic_box_floats(module);
 
         // Keep the module's id allocator above the instances we just minted.
         // Phase 4 / transitive monomorphization insert directly into
@@ -652,6 +653,98 @@ impl Monomorphizer {
                     })
                 })
             })
+    }
+
+    /// A specialization's `haxe_box_generic_ptr` value is the i64 word of the
+    /// slot: a Float as its bits, a Single first widened to the Float it boxes as.
+    fn widen_generic_box_floats(module: &mut IrModule) {
+        let boxes: BTreeSet<_> = module
+            .extern_functions
+            .iter()
+            .filter(|(_, function)| function.name == "haxe_box_generic_ptr")
+            .map(|(id, _)| *id)
+            .collect();
+        if boxes.is_empty() {
+            return;
+        }
+        for function in module.functions.values_mut() {
+            let mut next = function.next_reg_id;
+            for reg in function.register_types.keys() {
+                next = next.max(reg.0 + 1);
+            }
+            let block_ids: Vec<_> = function.cfg.blocks.keys().copied().collect();
+            for block_id in block_ids {
+                let mut index = 0;
+                loop {
+                    let Some(block) = function.cfg.blocks.get(&block_id) else {
+                        break;
+                    };
+                    let Some(instruction) = block.instructions.get(index) else {
+                        break;
+                    };
+                    let value = match instruction {
+                        IrInstruction::CallDirect { func_id, args, .. }
+                            if boxes.contains(func_id) && !args.is_empty() =>
+                        {
+                            args[0]
+                        }
+                        _ => {
+                            index += 1;
+                            continue;
+                        }
+                    };
+                    let mut adapters = Vec::new();
+                    let mut word = value;
+                    match function.register_types.get(&value) {
+                        Some(IrType::F32) => {
+                            let wide = IrId::new(next);
+                            let bits = IrId::new(next + 1);
+                            next += 2;
+                            adapters.push(IrInstruction::Cast {
+                                dest: wide,
+                                src: value,
+                                from_ty: IrType::F32,
+                                to_ty: IrType::F64,
+                            });
+                            adapters.push(IrInstruction::BitCast {
+                                dest: bits,
+                                src: wide,
+                                ty: IrType::I64,
+                            });
+                            function.register_types.insert(wide, IrType::F64);
+                            function.register_types.insert(bits, IrType::I64);
+                            word = bits;
+                        }
+                        Some(IrType::F64) => {
+                            let bits = IrId::new(next);
+                            next += 1;
+                            adapters.push(IrInstruction::BitCast {
+                                dest: bits,
+                                src: value,
+                                ty: IrType::I64,
+                            });
+                            function.register_types.insert(bits, IrType::I64);
+                            word = bits;
+                        }
+                        _ => {}
+                    }
+                    let inserted = adapters.len();
+                    let Some(block) = function.cfg.blocks.get_mut(&block_id) else {
+                        break;
+                    };
+                    if let Some(IrInstruction::CallDirect { args, .. }) =
+                        block.instructions.get_mut(index)
+                    {
+                        args[0] = word;
+                    }
+                    for (offset, adapter) in adapters.into_iter().enumerate() {
+                        block.instructions.insert(index + offset, adapter);
+                    }
+                    index += inserted + 1;
+                }
+            }
+            function.next_reg_id = function.next_reg_id.max(next);
+        }
     }
 
     /// Concrete specializations retain raw slots without a runtime adapter call.

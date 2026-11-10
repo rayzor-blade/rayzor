@@ -235,6 +235,20 @@ impl<'a> HirToMirContext<'a> {
                 .build_call_direct(box_func_id, vec![value], ptr_u8);
         }
 
+        // `Single` (an abstract over its f32) is boxed as the Float it widens to.
+        if self.builder.get_register_type(value) == Some(IrType::F32) {
+            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+            let wide = self.builder.build_cast(value, IrType::F32, IrType::F64)?;
+            let box_func_id = self.get_or_register_extern_function(
+                "haxe_box_float_ptr",
+                vec![IrType::F64],
+                ptr_u8.clone(),
+            );
+            return self
+                .builder
+                .build_call_direct(box_func_id, vec![wide], ptr_u8);
+        }
+
         match &value_kind_cloned {
             // Value types (need malloc + copy)
             Some(TypeKind::Int) => {
@@ -257,10 +271,17 @@ impl<'a> HirToMirContext<'a> {
             }
             Some(TypeKind::Float) => {
                 debug!("[BOXING] Auto-boxing Float to Dynamic using haxe_box_float_ptr");
-                let value_mir_type = self
+                let mut value_mir_type = self
                     .builder
                     .get_register_type(value)
                     .unwrap_or_else(|| self.convert_type(value_ty));
+                // The box holds an f64: a Single widens first.
+                let value = if value_mir_type == IrType::F32 {
+                    value_mir_type = IrType::F64;
+                    self.builder.build_cast(value, IrType::F32, IrType::F64)?
+                } else {
+                    value
+                };
                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                 let box_func_id = self.get_or_register_extern_function(
                     "haxe_box_float_ptr",
@@ -464,6 +485,11 @@ impl<'a> HirToMirContext<'a> {
             Some(IrType::Bool) => self.builder.build_cast(value, IrType::Bool, IrType::I64)?,
             Some(IrType::F64) | Some(IrType::Ptr(_)) | Some(IrType::String) => {
                 self.builder.build_bitcast(value, IrType::I64)?
+            }
+            // A Single travels as the f64 word the generic box reads for Float.
+            Some(IrType::F32) => {
+                let wide = self.builder.build_cast(value, IrType::F32, IrType::F64)?;
+                self.builder.build_bitcast(wide, IrType::I64)?
             }
             _ => value,
         };

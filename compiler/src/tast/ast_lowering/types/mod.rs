@@ -633,6 +633,8 @@ impl<'a> AstLowering<'a> {
                         .deferred_resolutions
                         .push(DeferredTypeResolution {
                             type_name: name.clone(),
+                            // An annotation can name a parameter its declaration has
+                            // not yet pushed, so its unresolved names stay unreported.
                             location: self.context.create_location(),
                             type_params: params.iter().map(|_| "T".to_string()).collect(), // TODO: extract actual param names
                             target_type_id: placeholder_type,
@@ -792,18 +794,32 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// Where a deferred type reference is reported: its span in a user file.
+    /// Elsewhere the location stays unknown, which marks the reference as one
+    /// a lazily loaded stdlib file may leave for a later load to resolve.
+    fn deferred_type_location(&self, span: Option<parser::Span>) -> SourceLocation {
+        match span {
+            Some(span) if self.user_file => self.context.create_location_from_span(span),
+            _ => self.context.create_location(),
+        }
+    }
+
     pub(crate) fn resolve_type_path(
         &mut self,
         type_path: &parser::TypePath,
+        span: Option<parser::Span>,
     ) -> LoweringResult<TypeId> {
         if let Some(sub) = &type_path.sub {
             let mut package = type_path.package.clone();
             package.push(type_path.name.clone());
-            return self.resolve_type_path(&parser::TypePath {
-                package,
-                name: sub.clone(),
-                sub: None,
-            });
+            return self.resolve_type_path(
+                &parser::TypePath {
+                    package,
+                    name: sub.clone(),
+                    sub: None,
+                },
+                span,
+            );
         }
         if let Some(bound) = self.generic_placeholder_type(type_path) {
             return Ok(bound);
@@ -936,6 +952,13 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        // A type parameter (`new C()` under `@:generic`) resolves at
+        // specialisation, so it is never reported here.
+        let span = span.filter(|_| {
+            !(type_path.package.is_empty()
+                && self.context.resolve_type_parameter(name_interned).is_some())
+        });
+
         // Type not found - create a placeholder and defer resolution
         let placeholder_type = self
             .context
@@ -949,7 +972,7 @@ impl<'a> AstLowering<'a> {
             .push(DeferredTypeResolution {
                 type_name: full_path.clone(),
                 target_type_id: placeholder_type,
-                location: self.context.create_location(),
+                location: self.deferred_type_location(span),
                 type_params: Vec::new(), // For constructor calls, we don't need type params here
             });
 
@@ -981,8 +1004,19 @@ impl<'a> AstLowering<'a> {
                     .map(|symbol| symbol.id);
             }
         }
-        // Namespace lookup failed (or a simple name): the root scope.
+        // A simple name is first a type of the current package.
         let interned_name = self.context.intern_string(type_name);
+        if parts.len() == 1
+            && let Some(package) = self.context.current_package
+            && let Some((_, symbol)) = self
+                .context
+                .namespace_resolver
+                .find_symbols_by_name(interned_name, package)
+                .first()
+        {
+            return Some(*symbol);
+        }
+        // Namespace lookup failed (or a simple name): the root scope.
         self.context
             .symbol_table
             .lookup_symbol(ScopeId::first(), interned_name)

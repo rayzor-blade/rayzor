@@ -864,8 +864,25 @@ impl<'a> HirToMirContext<'a> {
             }
 
             let pre_fill = arg_regs.len();
-            // Coerce Int→Float at cross-module call boundaries
-            self.coerce_args_for_cross_module_call(constructor_func_id, &mut arg_regs, true, &[]);
+            // Coerce Int→Float at cross-module call boundaries. The class's
+            // type arguments say which erased slots hold a Dynamic box.
+            let class_type_args = if hir_type_args.is_empty() {
+                match self.type_table.get(expr.ty).map(|t| &t.kind) {
+                    Some(
+                        TypeKind::Class { type_args, .. }
+                        | TypeKind::GenericInstance { type_args, .. },
+                    ) => type_args.clone(),
+                    _ => Vec::new(),
+                }
+            } else {
+                hir_type_args.clone()
+            };
+            self.coerce_args_for_cross_module_call(
+                constructor_func_id,
+                &mut arg_regs,
+                true,
+                &class_type_args,
+            );
             let hir_types: Vec<Option<TypeId>> = std::iter::once(None)
                 .chain(args.iter().map(|a| Some(a.ty)))
                 .collect();

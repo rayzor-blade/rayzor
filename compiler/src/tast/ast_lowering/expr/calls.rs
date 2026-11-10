@@ -1885,21 +1885,131 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    /// `upcast_to_abstract_interface` for each argument of a lowered call.
+    /// The name of `T` when `v.m()` on `v:T` names a member that none of `T`'s
+    /// class, interface or structure constraints declares. Other constraints
+    /// (String, Array, abstracts) resolve members elsewhere and give `None`.
+    pub(crate) fn type_parameter_missing_member(
+        &self,
+        receiver: TypeId,
+        name: InternedString,
+    ) -> Option<String> {
+        use crate::tast::core::TypeKind;
+        let (param, constraints) = match self
+            .context
+            .type_table
+            .borrow()
+            .get(receiver)
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::TypeParameter {
+                symbol_id,
+                constraints,
+                ..
+            }) if !constraints.is_empty() => (*symbol_id, constraints.clone()),
+            _ => return None,
+        };
+        for constraint in constraints {
+            let kind = {
+                let tt = self.context.type_table.borrow();
+                tt.get(Self::resolve_alias_chain(&tt, constraint))
+                    .map(|t| t.kind.clone())
+            };
+            match kind {
+                Some(TypeKind::Anonymous { fields }) => {
+                    if fields.iter().any(|f| f.name == name) {
+                        return None;
+                    }
+                }
+                Some(TypeKind::Class { symbol_id, .. } | TypeKind::Interface { symbol_id, .. }) => {
+                    // The constraint and every type above it, by direct parents:
+                    // the transitive closure is only built after lowering.
+                    let mut pending = vec![symbol_id];
+                    let mut seen = std::collections::BTreeSet::new();
+                    while let Some(owner) = pending.pop() {
+                        if !seen.insert(owner) {
+                            continue;
+                        }
+                        if self.resolve_class_method_symbol(owner, name).is_some()
+                            || self.lookup_data_field(owner, name).is_some()
+                        {
+                            return None;
+                        }
+                        if let Some(hierarchy) =
+                            self.context.symbol_table.get_class_hierarchy(owner)
+                        {
+                            pending.extend(
+                                hierarchy
+                                    .superclass
+                                    .iter()
+                                    .chain(&hierarchy.interfaces)
+                                    .chain(&hierarchy.all_supertypes)
+                                    .filter_map(|ty| self.resolve_type_to_class_symbol(*ty)),
+                            );
+                        }
+                        pending.extend(self.parent_class_symbol(owner));
+                    }
+                }
+                _ => return None,
+            }
+        }
+        let symbol = self.context.symbol_table.get_symbol(param)?;
+        Some(self.context.string_interner.get(symbol.name)?.to_string())
+    }
+
+    /// An argument for a parameter whose type, as instantiated, is an
+    /// interface (`new Box<IV>(col)`, `box.set(col)`) or Dynamic
+    /// (`cell.put(0.5)` on a `Cell<Dynamic>`): a class instance is upcast to
+    /// the interface, and any other value is boxed as Dynamic.
+    pub(crate) fn coerce_to_instantiated_formal(
+        &self,
+        arg: TypedExpression,
+        formal: Option<TypeId>,
+    ) -> TypedExpression {
+        use crate::tast::core::TypeKind;
+        let Some(formal) = formal else {
+            return arg;
+        };
+        let upcast = {
+            let tt = self.context.type_table.borrow();
+            let target = Self::resolve_alias_chain(&tt, formal);
+            let actual = Self::resolve_alias_chain(&tt, arg.expr_type);
+            let target_kind = tt.get(target).map(|t| &t.kind);
+            let actual_kind = tt.get(actual).map(|t| &t.kind);
+            (matches!(target_kind, Some(TypeKind::Interface { .. }))
+                && matches!(actual_kind, Some(TypeKind::Class { .. })))
+                || (matches!(target_kind, Some(TypeKind::Dynamic))
+                    && !matches!(actual_kind, Some(TypeKind::Dynamic) | None))
+        };
+        if !upcast {
+            return arg;
+        }
+        TypedExpression {
+            expr_type: formal,
+            source_location: arg.source_location,
+            usage: arg.usage.clone(),
+            lifetime_id: arg.lifetime_id,
+            metadata: arg.metadata.clone(),
+            kind: TypedExpressionKind::Cast {
+                expression: Box::new(arg),
+                target_type: formal,
+                cast_kind: CastKind::Implicit,
+            },
+        }
+    }
+
+    /// `upcast_to_abstract_interface` for each argument of a lowered call,
+    /// and `coerce_to_instantiated_formal` at a parameter the receiver
+    /// instantiates.
     pub(crate) fn upcast_call_args_to_abstract_interfaces(&self, call: &mut TypedExpression) {
         use crate::tast::core::TypeKind;
-        let (callee_type, arguments) = match &mut call.kind {
+        let (callee_type, receiver, arguments) = match &mut call.kind {
             TypedExpressionKind::FunctionCall {
                 function,
                 arguments,
                 ..
-            } => (Some(function.expr_type), arguments),
+            } => (Some(function.expr_type), None, arguments),
             TypedExpressionKind::MethodCall {
-                method_symbol,
-                arguments,
-                ..
-            }
-            | TypedExpressionKind::StaticMethodCall {
+                receiver,
                 method_symbol,
                 arguments,
                 ..
@@ -1908,6 +2018,19 @@ impl<'a> AstLowering<'a> {
                     .symbol_table
                     .get_symbol(*method_symbol)
                     .map(|s| s.type_id),
+                Some(receiver.expr_type),
+                arguments,
+            ),
+            TypedExpressionKind::StaticMethodCall {
+                method_symbol,
+                arguments,
+                ..
+            } => (
+                self.context
+                    .symbol_table
+                    .get_symbol(*method_symbol)
+                    .map(|s| s.type_id),
+                None,
                 arguments,
             ),
             _ => return,
@@ -1927,7 +2050,22 @@ impl<'a> AstLowering<'a> {
         };
         for (argument, formal) in arguments.iter_mut().zip(params) {
             let taken = std::mem::replace(argument, argument.clone());
-            *argument = self.upcast_to_abstract_interface(taken, formal);
+            let taken = self.upcast_to_abstract_interface(taken, formal);
+            // Only a parameter the receiver binds: a declared interface
+            // parameter is already wrapped where the call lowers.
+            let instance = receiver
+                .filter(|_| {
+                    matches!(
+                        self.context
+                            .type_table
+                            .borrow()
+                            .get(formal)
+                            .map(|t| &t.kind),
+                        Some(TypeKind::TypeParameter { .. })
+                    )
+                })
+                .map(|receiver| self.substitute_receiver_type(formal, receiver));
+            *argument = self.coerce_to_instantiated_formal(taken, instance);
         }
     }
 
@@ -2374,11 +2512,66 @@ impl<'a> AstLowering<'a> {
         else {
             return None;
         };
-        let ExprKind::Ident(owner_name) = &owner_expr.kind else {
-            return None;
+        let owner = match &owner_expr.kind {
+            ExprKind::Ident(owner_name) => {
+                let owner_interned = self.context.intern_string(owner_name);
+                self.resolve_symbol_in_scope_hierarchy(owner_interned)?
+            }
+            // `pack.Enum` or `Module.Enum`: a type named by its path.
+            ExprKind::Field { .. } => {
+                fn path(expression: &Expr, parts: &mut Vec<String>) -> Option<()> {
+                    match &expression.kind {
+                        ExprKind::Ident(name) => parts.push(name.clone()),
+                        ExprKind::Field {
+                            expr,
+                            field,
+                            is_optional: false,
+                        } => {
+                            path(expr, parts)?;
+                            parts.push(field.clone());
+                        }
+                        _ => return None,
+                    }
+                    Some(())
+                }
+                let mut parts = Vec::new();
+                path(owner_expr, &mut parts)?;
+                let first = self.context.intern_string(parts.first()?);
+                if self
+                    .resolve_symbol_in_scope_hierarchy(first)
+                    .and_then(|id| self.context.symbol_table.get_symbol(id))
+                    .is_some_and(|symbol| {
+                        matches!(
+                            symbol.kind,
+                            crate::tast::SymbolKind::Variable
+                                | crate::tast::SymbolKind::Parameter
+                                | crate::tast::SymbolKind::Field
+                        )
+                    })
+                {
+                    return None;
+                }
+                let name = self.context.intern_string(parts.last()?);
+                let package: Vec<_> = parts[..parts.len() - 1]
+                    .iter()
+                    .map(|part| self.context.intern_string(part))
+                    .collect();
+                let lookup = |lowering: &Self, package: Vec<InternedString>| {
+                    lowering
+                        .context
+                        .namespace_resolver
+                        .lookup_symbol(&crate::tast::namespace::QualifiedPath::new(package, name))
+                };
+                // A module segment names no package: `Module.Enum` is `Enum` of
+                // the module's package.
+                lookup(self, package.clone()).or_else(|| {
+                    let mut package = package;
+                    package.pop()?;
+                    lookup(self, package)
+                })?
+            }
+            _ => return None,
         };
-        let owner_interned = self.context.intern_string(owner_name);
-        let owner = self.resolve_symbol_in_scope_hierarchy(owner_interned)?;
         let owner_sym = self.context.symbol_table.get_symbol(owner)?;
         let (owner_kind, owner_key) = (owner_sym.kind, owner_sym.name);
         let method = self.context.intern_string(field);
@@ -2403,23 +2596,35 @@ impl<'a> AstLowering<'a> {
         }
         let extension = self
             .type_usings
-            .get(&owner_key)?
-            .clone()
+            .get(&owner_key)
+            .cloned()
+            .unwrap_or_default()
             .into_iter()
             .find(|ext| {
                 self.resolve_class_like_symbol_by_name(*ext)
                     .and_then(|class| self.resolve_class_method_symbol(class, method))
                     .and_then(|m| self.context.symbol_table.get_symbol(m))
                     .is_some_and(|m| m.is_static())
-            })?;
+            });
         let mk = |kind| Expr { kind, span };
+        let extension = match extension {
+            Some(extension) => mk(ExprKind::Ident(
+                self.context.string_interner.get(extension)?.to_string(),
+            )),
+            // Every module is `using haxe.EnumTools`: an enum's own names
+            // come first, then the tools' statics take the enum as receiver.
+            None if owner_kind == crate::tast::SymbolKind::Enum => mk(ExprKind::Field {
+                expr: Box::new(mk(ExprKind::Ident("haxe".to_string()))),
+                field: "EnumTools".to_string(),
+                is_optional: false,
+            }),
+            None => return None,
+        };
         let mut call_args = vec![(**owner_expr).clone()];
         call_args.extend(args.iter().cloned());
         Some(mk(ExprKind::Call {
             expr: Box::new(mk(ExprKind::Field {
-                expr: Box::new(mk(ExprKind::Ident(
-                    self.context.string_interner.get(extension)?.to_string(),
-                ))),
+                expr: Box::new(extension),
                 field: field.clone(),
                 is_optional: false,
             })),
@@ -4290,6 +4495,54 @@ impl<'a> AstLowering<'a> {
                             }
                         }
                     } else {
+                        // Every module is `using haxe.EnumValueTools`: a method an
+                        // enum value lacks is that tool, the value its receiver.
+                        let enum_value = matches!(
+                            self.context
+                                .type_table
+                                .borrow()
+                                .get(receiver_expr.expr_type)
+                                .map(|t| &t.kind),
+                            Some(TypeKind::Enum { .. })
+                        );
+                        if enum_value {
+                            let mk = |kind| Expr {
+                                kind,
+                                span: expression.span,
+                            };
+                            let mut tool_args = vec![(**obj_expr).clone()];
+                            tool_args.extend(args.iter().cloned());
+                            let call = mk(ExprKind::Call {
+                                expr: Box::new(mk(ExprKind::Field {
+                                    // A type of the module haxe.EnumTools.
+                                    expr: Box::new(mk(ExprKind::Field {
+                                        expr: Box::new(mk(ExprKind::Field {
+                                            expr: Box::new(mk(ExprKind::Ident("haxe".to_string()))),
+                                            field: "EnumTools".to_string(),
+                                            is_optional: false,
+                                        })),
+                                        field: "EnumValueTools".to_string(),
+                                        is_optional: false,
+                                    })),
+                                    field: field.clone(),
+                                    is_optional: false,
+                                })),
+                                args: tool_args,
+                            });
+                            return self.lower_expression(&call);
+                        }
+                        if let Some(param) =
+                            self.type_parameter_missing_member(receiver_expr.expr_type, method_name)
+                        {
+                            return Err(LoweringError::SemanticError {
+                                message: format!(
+                                    "{} has no field {}",
+                                    param,
+                                    self.context.string_interner.get(method_name).unwrap_or("")
+                                ),
+                                location: self.context.span_to_location(&expression.span),
+                            });
+                        }
                         // No static extension found, use regular method call
                         let mut arg_exprs = arg_exprs;
                         self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
@@ -5987,7 +6240,8 @@ impl<'a> AstLowering<'a> {
         .collect_type_param_symbols(ty, depth, out)
     }
 
-    /// A class literal carries its instance type; `Class<T>` binds T to that type.
+    /// A class literal carries its instance type; `Class<T>` binds T to that
+    /// type, as an enum literal binds `Enum<T>`.
     fn class_literal_parameter(
         &self,
         declared: TypeId,
@@ -5997,15 +6251,24 @@ impl<'a> AstLowering<'a> {
             return None;
         };
         let symbol = self.context.symbol_table.get_symbol(symbol_id)?;
-        if !matches!(symbol.kind, SymbolKind::Class | SymbolKind::TypeAlias) {
-            return None;
-        }
+        let wrapper = match symbol.kind {
+            SymbolKind::Class | SymbolKind::TypeAlias => "Class",
+            SymbolKind::Enum => "Enum",
+            _ => return None,
+        };
         let table = self.context.type_table.borrow();
         let actual = Self::resolve_alias_chain(&table, argument.expr_type);
-        if !matches!(
-            table.get(actual).map(|ty| &ty.kind),
-            Some(TypeKind::Class { .. } | TypeKind::String | TypeKind::Array { .. })
-        ) {
+        let literal = match wrapper {
+            "Enum" => matches!(
+                table.get(actual).map(|ty| &ty.kind),
+                Some(TypeKind::Enum { .. })
+            ),
+            _ => matches!(
+                table.get(actual).map(|ty| &ty.kind),
+                Some(TypeKind::Class { .. } | TypeKind::String | TypeKind::Array { .. })
+            ),
+        };
+        if !literal {
             return None;
         }
         let declared = Self::resolve_alias_chain(&table, declared);
@@ -6023,7 +6286,7 @@ impl<'a> AstLowering<'a> {
         };
         let owner = self.context.symbol_table.get_symbol(owner)?;
         let name = owner.qualified_name.unwrap_or(owner.name);
-        if self.context.string_interner.get(name) != Some("Class") {
+        if self.context.string_interner.get(name) != Some(wrapper) {
             return None;
         }
         match arguments.as_slice() {
@@ -7692,8 +7955,22 @@ impl<'a> AstLowering<'a> {
         forwarded.then_some(current)
     }
 
-    /// The declared parameter types of a class's constructor.
+    /// The parameter types of a class's constructor, as `class_type` instantiates them.
     pub(crate) fn constructor_param_types(&mut self, class_type: TypeId) -> Option<Vec<TypeId>> {
+        let params = self.constructor_declared_param_types(class_type)?;
+        Some(
+            params
+                .into_iter()
+                .map(|param| self.substitute_receiver_type(param, class_type))
+                .collect(),
+        )
+    }
+
+    /// The declared parameter types of a class's constructor.
+    pub(crate) fn constructor_declared_param_types(
+        &mut self,
+        class_type: TypeId,
+    ) -> Option<Vec<TypeId>> {
         let class_symbol = self.resolve_type_to_class_symbol(class_type)?;
         let ctor = self
             .class_constructor_symbols
@@ -7755,12 +8032,7 @@ impl<'a> AstLowering<'a> {
             }
             params
         };
-        Some(
-            params
-                .into_iter()
-                .map(|param| self.substitute_receiver_type(param, class_type))
-                .collect(),
-        )
+        Some(params)
     }
 
     /// The type an enclosing declaration or assignment expects a `new` to
