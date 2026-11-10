@@ -839,7 +839,7 @@ impl<'a> HirToMirContext<'a> {
         &self,
         class_symbol: SymbolId,
     ) -> Option<Vec<(SymbolId, TypeId, u32)>> {
-        let mut fields = self.class_instance_fields.get(&class_symbol)?.clone();
+        let mut fields = self.class_slots(class_symbol)?;
         let mut seen = vec![class_symbol];
         let mut current = class_symbol;
         while let Some(parent) = self.parent_class_symbol(current) {
@@ -847,12 +847,34 @@ impl<'a> HirToMirContext<'a> {
                 break;
             }
             seen.push(parent);
-            if let Some(inherited) = self.class_instance_fields.get(&parent) {
-                fields.extend(inherited.iter().copied());
+            if let Some(inherited) = self.class_slots(parent) {
+                fields.extend(inherited);
             }
             current = parent;
         }
         Some(fields)
+    }
+
+    /// A class's own instance slots: from its declaration when this module
+    /// lowers it, else from the field layout imported under its name.
+    fn class_slots(&self, class_symbol: SymbolId) -> Option<Vec<(SymbolId, TypeId, u32)>> {
+        if let Some(fields) = self.class_instance_fields.get(&class_symbol) {
+            return Some(fields.clone());
+        }
+        let owner = self
+            .symbol_table
+            .get_symbol(class_symbol)?
+            .qualified_name
+            .and_then(|name| self.string_interner.get(name))?;
+        let fields: Vec<_> = self
+            .field_index_map
+            .iter()
+            .filter(|(field, _)| {
+                self.field_class_names.get(field).map(String::as_str) == Some(owner)
+            })
+            .map(|(field, (ty, index))| (*field, *ty, *index))
+            .collect();
+        (!fields.is_empty()).then_some(fields)
     }
 
     /// A value stored into a struct-init field: an Int for a Float (or
