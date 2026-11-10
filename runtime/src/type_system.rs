@@ -4503,6 +4503,29 @@ pub extern "C" fn haxe_unbox_reference_ptr(ptr: *mut u8) -> *mut u8 {
     }
 }
 
+/// The slot word behind a reflective field read of a reference-typed field:
+/// a reference or function box's pointer, an Int box's value (a slot
+/// reflection boxes raw), the value itself when it arrived unboxed.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_reflect_slot_word(ptr: *mut u8) -> *mut u8 {
+    if ptr.is_null() {
+        return ptr;
+    }
+    if is_raw_class_instance(ptr)
+        || stamped_enum_cell_type(ptr as i64).is_some()
+        || crate::anon_object::is_anon_handle(ptr)
+    {
+        return ptr;
+    }
+    match dynamic_box_at(ptr) {
+        Some(dynamic) if is_reference_box(ptr) || dynamic.type_id == TYPE_FUNCTION => {
+            dynamic.value_ptr
+        }
+        Some(dynamic) if dynamic.type_id == TYPE_INT => haxe_unbox_int(dynamic) as *mut u8,
+        _ => ptr,
+    }
+}
+
 /// A class instance that reached a Dynamic slot unboxed: its i64 header
 /// names a class, where a box over one carries the mark in its high half.
 pub(crate) fn is_raw_class_instance(ptr: *mut u8) -> bool {
@@ -4747,6 +4770,12 @@ pub unsafe fn box_class_field_as_dynamic(value: u64, ty: ParamType) -> *mut u8 {
             let p = value as *mut u8;
             if p.is_null() {
                 return std::ptr::null_mut();
+            }
+            // An extern class's slot can hold a packed native value; only an
+            // aligned heap address has a header to read.
+            let addr = value as usize;
+            if addr < 0x1000 || addr & 7 != 0 || addr >> 47 != 0 {
+                return haxe_box_reference_ptr(p, TYPE_INT.0);
             }
             if crate::anon_object::is_anon_handle(p) {
                 return haxe_box_reference_ptr(p, crate::anon_object::TYPE_ANON_OBJECT.0);

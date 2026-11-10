@@ -2601,6 +2601,10 @@ register_symbol!(
     crate::closure_entries::haxe_dynamic_to_slot
 );
 register_symbol!(
+    "haxe_reflect_slot_word",
+    crate::type_system::haxe_reflect_slot_word
+);
+register_symbol!(
     "haxe_dynamic_to_f64",
     crate::closure_entries::haxe_dynamic_to_f64
 );

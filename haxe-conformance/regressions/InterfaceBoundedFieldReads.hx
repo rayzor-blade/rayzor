@@ -28,6 +28,7 @@ interface IValue {
 	var named(default, null):INamed;
 	var meta(default, null):{size:Int};
 	var shift(default, null):Int->Int;
+	var packed(default, null):Handle;
 }
 
 class Color implements IValue {
@@ -37,6 +38,8 @@ class Color implements IValue {
 	public var named(default, null):INamed;
 	public var meta(default, null):{size:Int};
 	public var shift(default, null):Int->Int;
+	// A native handle that is a packed value, not a pointer.
+	public var packed(default, null):Handle;
 
 	public function new(hex:Int) {
 		ptr = new Handle(hex);
@@ -45,6 +48,7 @@ class Color implements IValue {
 		named = new Named("blue");
 		meta = {size: hex - 5};
 		shift = x -> x + hex;
+		packed = cast 6;
 	}
 }
 
@@ -80,6 +84,11 @@ class Holder<T:IValue> {
 		return f(4);
 	}
 
+	public static function packedOf<T:IValue>(v:T):Int {
+		var h:Handle = v.packed;
+		return cast h;
+	}
+
 	static function take(h:Handle):Handle
 		return h;
 }
@@ -102,6 +111,7 @@ class InterfaceBoundedFieldReads {
 		check("anonymous field", Holder.sizeOf(blue), 250);
 		check("function field called", Holder.callShift(blue), 258);
 		check("function field read", Holder.readShift(blue), 259);
+		check("packed handle field", Holder.packedOf(blue), 6);
 		Sys.println("CONFORMANCE_OK");
 	}
 }
