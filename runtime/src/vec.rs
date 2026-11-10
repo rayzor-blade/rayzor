@@ -47,9 +47,12 @@ pub extern "C" fn haxe_vec_push(vec: *mut HaxeVec, value: u8) {
 
         // Check if we need to grow
         if v.len >= v.cap {
-            let new_cap = v.cap * 2;
-            let old_layout = Layout::from_size_align_unchecked(v.cap, 1);
-            let new_ptr = realloc(v.ptr, old_layout, new_cap);
+            let new_cap = (v.cap * 2).max(16);
+            let new_ptr = if v.ptr.is_null() || v.cap == 0 {
+                alloc(Layout::from_size_align_unchecked(new_cap, 1))
+            } else {
+                realloc(v.ptr, Layout::from_size_align_unchecked(v.cap, 1), new_cap)
+            };
 
             if new_ptr.is_null() {
                 panic!("Failed to reallocate Vec");

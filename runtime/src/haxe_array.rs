@@ -279,6 +279,34 @@ pub extern "C" fn haxe_array_take_typed(arr: *mut HaxeArray, from_end: bool, tag
 
 const INITIAL_CAPACITY: usize = 8;
 
+/// Grows `arr` to hold at least `min_cap` elements, doubling from
+/// `INITIAL_CAPACITY`; an unallocated array (cap 0) gets a fresh block.
+/// False when the allocator fails.
+unsafe fn reserve(arr: &mut HaxeArray, min_cap: usize) -> bool {
+    if min_cap <= arr.cap {
+        return true;
+    }
+    let mut new_cap = arr.cap.max(INITIAL_CAPACITY);
+    while new_cap < min_cap {
+        new_cap *= 2;
+    }
+    let new_size = new_cap * arr.elem_size;
+    let new_ptr = unsafe {
+        if arr.ptr.is_null() || arr.cap == 0 {
+            alloc(Layout::from_size_align_unchecked(new_size, 8))
+        } else {
+            let old_layout = Layout::from_size_align_unchecked(arr.cap * arr.elem_size, 8);
+            realloc(arr.ptr, old_layout, new_size)
+        }
+    };
+    if new_ptr.is_null() {
+        return false;
+    }
+    arr.ptr = new_ptr;
+    arr.cap = new_cap;
+    true
+}
+
 // ============================================================================
 // Array Creation
 // ============================================================================
@@ -428,33 +456,9 @@ pub extern "C" fn haxe_array_set(arr: *mut HaxeArray, index: usize, data: *const
         let new_len = index + 1;
         if new_len > arr_ref.len {
             // Ensure we have enough capacity
-            if new_len > arr_ref.cap {
-                let mut new_cap = if arr_ref.cap == 0 {
-                    INITIAL_CAPACITY
-                } else {
-                    arr_ref.cap
-                };
-                while new_cap < new_len {
-                    new_cap *= 2;
-                }
-
-                let new_size = new_cap * arr_ref.elem_size;
-                let new_ptr = if arr_ref.ptr.is_null() || arr_ref.cap == 0 {
-                    let layout = Layout::from_size_align_unchecked(new_size, 8);
-                    alloc(layout)
-                } else {
-                    let old_size = arr_ref.cap * arr_ref.elem_size;
-                    let old_layout = Layout::from_size_align_unchecked(old_size, 8);
-                    realloc(arr_ref.ptr, old_layout, new_size)
-                };
-
-                if new_ptr.is_null() {
-                    debug!("[haxe_array_set] Failed to allocate memory");
-                    return false;
-                }
-
-                arr_ref.ptr = new_ptr;
-                arr_ref.cap = new_cap;
+            if !reserve(arr_ref, new_len) {
+                debug!("[haxe_array_set] Failed to allocate memory");
+                return false;
             }
 
             // Zero-initialize the new elements between old len and index
@@ -507,29 +511,8 @@ pub extern "C" fn haxe_array_set_i64(arr: *mut HaxeArray, index: usize, value: i
         // Auto-expand if needed
         let new_len = index + 1;
         if new_len > arr_ref.len {
-            if new_len > arr_ref.cap {
-                let mut new_cap = if arr_ref.cap == 0 {
-                    INITIAL_CAPACITY
-                } else {
-                    arr_ref.cap
-                };
-                while new_cap < new_len {
-                    new_cap *= 2;
-                }
-                let new_size = new_cap * arr_ref.elem_size;
-                let new_ptr = if arr_ref.ptr.is_null() || arr_ref.cap == 0 {
-                    let layout = Layout::from_size_align_unchecked(new_size, 8);
-                    alloc(layout)
-                } else {
-                    let old_size = arr_ref.cap * arr_ref.elem_size;
-                    let old_layout = Layout::from_size_align_unchecked(old_size, 8);
-                    realloc(arr_ref.ptr, old_layout, new_size)
-                };
-                if new_ptr.is_null() {
-                    return false;
-                }
-                arr_ref.ptr = new_ptr;
-                arr_ref.cap = new_cap;
+            if !reserve(arr_ref, new_len) {
+                return false;
             }
             // Zero-fill gap
             if arr_ref.len < new_len {
@@ -562,29 +545,8 @@ pub extern "C" fn haxe_array_set_f64(arr: *mut HaxeArray, index: usize, value: f
         // Auto-expand if needed
         let new_len = index + 1;
         if new_len > arr_ref.len {
-            if new_len > arr_ref.cap {
-                let mut new_cap = if arr_ref.cap == 0 {
-                    INITIAL_CAPACITY
-                } else {
-                    arr_ref.cap
-                };
-                while new_cap < new_len {
-                    new_cap *= 2;
-                }
-                let new_size = new_cap * arr_ref.elem_size;
-                let new_ptr = if arr_ref.ptr.is_null() || arr_ref.cap == 0 {
-                    let layout = Layout::from_size_align_unchecked(new_size, 8);
-                    alloc(layout)
-                } else {
-                    let old_size = arr_ref.cap * arr_ref.elem_size;
-                    let old_layout = Layout::from_size_align_unchecked(old_size, 8);
-                    realloc(arr_ref.ptr, old_layout, new_size)
-                };
-                if new_ptr.is_null() {
-                    return false;
-                }
-                arr_ref.ptr = new_ptr;
-                arr_ref.cap = new_cap;
+            if !reserve(arr_ref, new_len) {
+                return false;
             }
             if arr_ref.len < new_len {
                 let start = arr_ref.len * arr_ref.elem_size;
@@ -613,29 +575,8 @@ pub extern "C" fn haxe_array_set_null(arr: *mut HaxeArray, index: usize) -> bool
         // Auto-expand if needed
         let new_len = index + 1;
         if new_len > arr_ref.len {
-            if new_len > arr_ref.cap {
-                let mut new_cap = if arr_ref.cap == 0 {
-                    INITIAL_CAPACITY
-                } else {
-                    arr_ref.cap
-                };
-                while new_cap < new_len {
-                    new_cap *= 2;
-                }
-                let new_size = new_cap * arr_ref.elem_size;
-                let new_ptr = if arr_ref.ptr.is_null() || arr_ref.cap == 0 {
-                    let layout = Layout::from_size_align_unchecked(new_size, 8);
-                    alloc(layout)
-                } else {
-                    let old_size = arr_ref.cap * arr_ref.elem_size;
-                    let old_layout = Layout::from_size_align_unchecked(old_size, 8);
-                    realloc(arr_ref.ptr, old_layout, new_size)
-                };
-                if new_ptr.is_null() {
-                    return false;
-                }
-                arr_ref.ptr = new_ptr;
-                arr_ref.cap = new_cap;
+            if !reserve(arr_ref, new_len) {
+                return false;
             }
             if arr_ref.len < new_len {
                 let start = arr_ref.len * arr_ref.elem_size;
@@ -767,32 +708,8 @@ pub extern "C" fn haxe_array_push(arr: *mut HaxeArray, data: *const u8) {
         );
 
         // Check if we need to grow
-        if arr_ref.len >= arr_ref.cap {
-            let new_cap = if arr_ref.cap == 0 {
-                INITIAL_CAPACITY
-            } else {
-                arr_ref.cap * 2
-            };
-
-            let new_size = new_cap * arr_ref.elem_size;
-
-            let new_ptr = if arr_ref.ptr.is_null() || arr_ref.cap == 0 {
-                // First allocation - use alloc instead of realloc
-                let layout = Layout::from_size_align_unchecked(new_size, 8);
-                alloc(layout)
-            } else {
-                // Grow existing allocation
-                let old_size = arr_ref.cap * arr_ref.elem_size;
-                let old_layout = Layout::from_size_align_unchecked(old_size, 8);
-                realloc(arr_ref.ptr, old_layout, new_size)
-            };
-
-            if new_ptr.is_null() {
-                panic!("Failed to allocate/reallocate memory for Array");
-            }
-
-            arr_ref.ptr = new_ptr;
-            arr_ref.cap = new_cap;
+        if !reserve(arr_ref, arr_ref.len + 1) {
+            panic!("Failed to allocate/reallocate memory for Array");
         }
 
         // Add element
@@ -920,21 +837,8 @@ pub extern "C" fn haxe_array_insert(arr: *mut HaxeArray, index: i32, data: *cons
         let arr_ref = &mut *arr;
         let insert_pos = (index.max(0) as usize).min(arr_ref.len);
 
-        // Ensure capacity
-        if arr_ref.len >= arr_ref.cap {
-            let new_cap = arr_ref.cap * 2;
-            let old_size = arr_ref.cap * arr_ref.elem_size;
-            let new_size = new_cap * arr_ref.elem_size;
-
-            let old_layout = Layout::from_size_align_unchecked(old_size, 8);
-            let new_ptr = realloc(arr_ref.ptr, old_layout, new_size);
-
-            if new_ptr.is_null() {
-                panic!("Failed to reallocate memory for Array");
-            }
-
-            arr_ref.ptr = new_ptr;
-            arr_ref.cap = new_cap;
+        if !reserve(arr_ref, arr_ref.len + 1) {
+            panic!("Failed to reallocate memory for Array");
         }
 
         // Shift elements to the right
@@ -1786,26 +1690,8 @@ pub extern "C" fn haxe_array_unshift(arr: *mut HaxeArray, value: i64) {
         let arr_ref = &mut *arr;
 
         // Ensure capacity
-        if arr_ref.len >= arr_ref.cap {
-            let new_cap = if arr_ref.cap == 0 {
-                INITIAL_CAPACITY
-            } else {
-                arr_ref.cap * 2
-            };
-            let new_size = new_cap * arr_ref.elem_size;
-            let new_ptr = if arr_ref.ptr.is_null() || arr_ref.cap == 0 {
-                let layout = Layout::from_size_align_unchecked(new_size, 8);
-                alloc(layout)
-            } else {
-                let old_size = arr_ref.cap * arr_ref.elem_size;
-                let old_layout = Layout::from_size_align_unchecked(old_size, 8);
-                realloc(arr_ref.ptr, old_layout, new_size)
-            };
-            if new_ptr.is_null() {
-                panic!("Failed to reallocate memory for Array.unshift");
-            }
-            arr_ref.ptr = new_ptr;
-            arr_ref.cap = new_cap;
+        if !reserve(arr_ref, arr_ref.len + 1) {
+            panic!("Failed to reallocate memory for Array.unshift");
         }
 
         // Shift all elements right by one
@@ -1974,30 +1860,8 @@ pub extern "C" fn haxe_array_resize(arr: *mut HaxeArray, new_len: i64) {
             return;
         }
 
-        // Extend - ensure capacity
-        if new_len > arr_ref.cap {
-            let mut new_cap = if arr_ref.cap == 0 {
-                INITIAL_CAPACITY
-            } else {
-                arr_ref.cap
-            };
-            while new_cap < new_len {
-                new_cap *= 2;
-            }
-            let new_size = new_cap * arr_ref.elem_size;
-            let new_ptr = if arr_ref.ptr.is_null() || arr_ref.cap == 0 {
-                let layout = Layout::from_size_align_unchecked(new_size, 8);
-                alloc(layout)
-            } else {
-                let old_size = arr_ref.cap * arr_ref.elem_size;
-                let old_layout = Layout::from_size_align_unchecked(old_size, 8);
-                realloc(arr_ref.ptr, old_layout, new_size)
-            };
-            if new_ptr.is_null() {
-                panic!("Failed to allocate memory for Array.resize");
-            }
-            arr_ref.ptr = new_ptr;
-            arr_ref.cap = new_cap;
+        if !reserve(arr_ref, new_len) {
+            panic!("Failed to allocate memory for Array.resize");
         }
 
         // Zero-fill new elements

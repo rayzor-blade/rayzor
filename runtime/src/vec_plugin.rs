@@ -40,7 +40,7 @@ pub extern "C" fn haxe_vec_push_ptr(vec: *mut HaxeVec, value: u8) {
 
         // Check if we need to grow
         if vec_ref.len >= vec_ref.cap {
-            let new_cap = vec_ref.cap * 2;
+            let new_cap = (vec_ref.cap * 2).max(16);
             let old_layout = Layout::from_size_align_unchecked(vec_ref.cap, 1);
             let new_layout = Layout::from_size_align_unchecked(new_cap, 1);
 
