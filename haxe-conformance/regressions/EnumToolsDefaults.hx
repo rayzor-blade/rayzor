@@ -29,6 +29,11 @@ class EnumToolsDefaults {
 		check("getName", b.getName(), "Beta");
 		check("getIndex", Std.string(b.getIndex()), "1");
 		check("getParameters", Std.string(b.getParameters()), "[5]");
+		var s = Dark;
+		check("tag getName", s.getName(), "Dark");
+		check("tag getIndex", Std.string(s.getIndex()), "1");
+		check("tag getParameters", Std.string(s.getParameters()), "[]");
+		check("tag equals", Std.string(s.equals(Dark)), "true");
 		Sys.println("CONFORMANCE_OK");
 	}
 }

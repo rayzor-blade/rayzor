@@ -4497,6 +4497,8 @@ impl<'a> AstLowering<'a> {
                     } else {
                         // Every module is `using haxe.EnumValueTools`: a method an
                         // enum value lacks is that tool, the value its receiver.
+                        // getIndex, getName and getParameters lower natively from
+                        // the enum's own type, which the tool's EnumValue erases.
                         let enum_value = matches!(
                             self.context
                                 .type_table
@@ -4504,6 +4506,9 @@ impl<'a> AstLowering<'a> {
                                 .get(receiver_expr.expr_type)
                                 .map(|t| &t.kind),
                             Some(TypeKind::Enum { .. })
+                        ) && !matches!(
+                            self.context.string_interner.get(method_name),
+                            Some("getIndex" | "getName" | "getParameters")
                         );
                         if enum_value {
                             let mk = |kind| Expr {
