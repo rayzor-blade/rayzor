@@ -95,6 +95,7 @@ impl<'a> HirToMirContext<'a> {
                         let types: Vec<_> = args[1..].iter().map(|arg| arg.ty).collect();
                         let param_types = self.prepare_interface_slot_args(
                             iface_sym,
+                            receiver_type,
                             method_name_i,
                             &mut call_args,
                             &types,
@@ -211,6 +212,7 @@ impl<'a> HirToMirContext<'a> {
                     let types: Vec<_> = args.iter().map(|arg| arg.ty).collect();
                     let param_types = self.prepare_interface_slot_args(
                         iface_sym,
+                        object.ty,
                         method_name_i,
                         &mut call_args,
                         &types,

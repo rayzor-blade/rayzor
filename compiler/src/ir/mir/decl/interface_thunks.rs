@@ -101,9 +101,43 @@ impl<'a> HirToMirContext<'a> {
         Vec::new()
     }
 
+    /// A slot formal at the interface's own type parameter, as the receiver
+    /// instantiates it (`T` of `IBox<Single>` is `Single`).
+    fn interface_formal_instance(&self, formal: TypeId, receiver: TypeId) -> Option<TypeId> {
+        let Some(TypeKind::TypeParameter {
+            symbol_id: param, ..
+        }) = self.type_table.get(formal).map(|t| &t.kind)
+        else {
+            return None;
+        };
+        let Some(TypeKind::Interface {
+            symbol_id,
+            type_args,
+        }) = self
+            .type_table
+            .get(self.resolve_through_aliases(receiver))
+            .map(|t| &t.kind)
+        else {
+            return None;
+        };
+        let name = self.symbol_table.get_symbol(*param)?.name;
+        let position = self
+            .symbol_table
+            .get_class_type_params(*symbol_id)?
+            .iter()
+            .position(|tp| {
+                matches!(self.type_table.get(*tp).map(|t| &t.kind),
+                    Some(TypeKind::TypeParameter { symbol_id, .. })
+                    if symbol_id == param
+                        || self.symbol_table.get_symbol(*symbol_id).is_some_and(|s| s.name == name))
+            })?;
+        type_args.get(position).copied()
+    }
+
     pub(crate) fn prepare_interface_slot_args(
         &mut self,
         interface: SymbolId,
+        receiver: TypeId,
         name: InternedString,
         arguments: &mut Vec<IrId>,
         types: &[TypeId],
@@ -119,6 +153,18 @@ impl<'a> HirToMirContext<'a> {
                 *arg = self.to_null_int(*arg)?;
             } else if let (Some(source), Some(target)) = (types.get(i - 1), formals.get(i - 1)) {
                 *arg = self.adapt_interface_slot_value(*arg, *source, *target)?;
+                // A number passed at a parameter instantiated as a float type
+                // converts to it, as a direct call to the implementation does.
+                if let Some(instance) = self.interface_formal_instance(*target, receiver) {
+                    let to = self.convert_type(instance);
+                    if let Some(from @ (IrType::I32 | IrType::F32 | IrType::F64)) =
+                        self.builder.get_register_type(*arg)
+                        && matches!(to, IrType::F32 | IrType::F64)
+                        && from != to
+                    {
+                        *arg = self.builder.build_cast(*arg, from, to)?;
+                    }
+                }
             }
             params.push(self.builder.get_register_type(*arg).unwrap_or(IrType::I64));
         }
