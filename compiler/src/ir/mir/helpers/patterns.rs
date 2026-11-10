@@ -184,6 +184,8 @@ impl<'a> HirToMirContext<'a> {
                                 IrType::I64 | IrType::F64 | IrType::NullInt => {
                                     (resolved_type.clone(), None)
                                 }
+                                // A Single payload's slot holds its value widened to f64.
+                                IrType::F32 => (IrType::F64, None),
                                 // Unknown/Any: load as I64 for runtime dispatch
                                 _ => (IrType::I64, None),
                             };
@@ -210,6 +212,75 @@ impl<'a> HirToMirContext<'a> {
                                                 &resolved_type,
                                             )
                                             .unwrap_or(field_val);
+                                    }
+                                    // An interface payload may hold a raw instance a
+                                    // cast between instantiations left unwrapped.
+                                    if let Some(interface) = (resolved_type_id != TypeId::invalid())
+                                        .then(|| self.get_interface_symbol(resolved_type_id))
+                                        .flatten()
+                                        && let Some(id) = self
+                                            .deterministic_iface_or_enum_type_id(interface, "iface")
+                                    {
+                                        let ptr = IrType::Ptr(Box::new(IrType::U8));
+                                        let id = self.builder.build_const(IrValue::I32(id as i32));
+                                        let raw =
+                                            self.builder.build_bitcast(field_val, ptr.clone());
+                                        let ensure = self.get_or_register_extern_function(
+                                            "haxe_iface_value",
+                                            vec![ptr.clone(), IrType::I32],
+                                            ptr.clone(),
+                                        );
+                                        if let (Some(id), Some(raw)) = (id, raw)
+                                            && let Some(value) = self.builder.build_call_direct(
+                                                ensure,
+                                                vec![raw, id],
+                                                ptr,
+                                            )
+                                            && let Some(value) = self
+                                                .builder
+                                                .build_bitcast(value, resolved_type.clone())
+                                        {
+                                            field_val = value;
+                                        }
+                                    }
+                                    // A payload at the enum's type parameter is an 8-byte
+                                    // slot holding a float widened to f64; a variable the
+                                    // pattern declares as a float reads it as one.
+                                    let mut resolved_type = resolved_type;
+                                    if resolved_type == IrType::F32
+                                        && self.builder.get_register_type(field_val)
+                                            == Some(IrType::F64)
+                                        && let Some(narrow) = self.builder.build_cast(
+                                            field_val,
+                                            IrType::F64,
+                                            IrType::F32,
+                                        )
+                                    {
+                                        field_val = narrow;
+                                    }
+                                    if let HirPattern::Variable { symbol, .. } = field_pattern
+                                        && self.builder.get_register_type(field_val)
+                                            == Some(IrType::I64)
+                                        && let Some(declared) = self
+                                            .symbol_table
+                                            .get_symbol(*symbol)
+                                            .map(|s| s.type_id)
+                                            .filter(|ty| *ty != TypeId::invalid())
+                                    {
+                                        let want = self.convert_type(declared);
+                                        if matches!(want, IrType::F32 | IrType::F64)
+                                            && let Some(bits) =
+                                                self.builder.build_bitcast(field_val, IrType::F64)
+                                        {
+                                            field_val = if want == IrType::F32 {
+                                                self.builder
+                                                    .build_cast(bits, IrType::F64, IrType::F32)
+                                                    .unwrap_or(bits)
+                                            } else {
+                                                bits
+                                            };
+                                            resolved_type = want;
+                                        }
                                     }
                                     if let HirPattern::Variable { symbol, .. } = field_pattern {
                                         self.symbol_ir_types.insert(*symbol, resolved_type.clone());

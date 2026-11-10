@@ -2600,6 +2600,7 @@ register_symbol!(
     "haxe_dynamic_to_slot",
     crate::closure_entries::haxe_dynamic_to_slot
 );
+register_symbol!("haxe_iface_value", crate::type_system::haxe_iface_value);
 register_symbol!(
     "haxe_reflect_slot_word",
     crate::type_system::haxe_reflect_slot_word

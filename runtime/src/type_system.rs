@@ -5279,6 +5279,20 @@ pub extern "C" fn haxe_iface_fat_ptr_build(obj_ptr: *mut u8, iface_type_id: i32)
     new_ptr
 }
 
+/// An interface value for `iface_type_id`: `ptr` when it already is one (or
+/// null), else a class instance that reached an interface slot unwrapped --
+/// through a cast between instantiations of a generic -- in a new fat pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_iface_value(ptr: *mut u8, iface_type_id: i32) -> *mut u8 {
+    if is_raw_class_instance(ptr) {
+        let built = haxe_iface_fat_ptr_build(ptr, iface_type_id);
+        if !built.is_null() {
+            return built;
+        }
+    }
+    ptr
+}
+
 /// The object an interface value stands for: word 0 of a fat pointer
 /// `[obj][slots..]`. A class instance (word 0 is its 32-bit type id) and
 /// null are their own identity.
