@@ -107,6 +107,9 @@ pub struct MacroInterpreter {
         Shared<std::collections::BTreeMap<String, MacroValue>>,
         String,
     )>,
+    /// Bare constructors in result position of a typed `var` initialiser,
+    /// by node address, with the enum the declaration names.
+    expected_enums: std::collections::HashMap<usize, String>,
     characters: super::strings::Characters,
 }
 
@@ -172,6 +175,7 @@ impl MacroInterpreter {
             macro_context: None,
             macro_class_stack: Vec::new(),
             running_getters: Vec::new(),
+            expected_enums: Default::default(),
             characters: Default::default(),
         }
     }
@@ -201,6 +205,7 @@ impl MacroInterpreter {
             macro_context: None,
             macro_class_stack: Vec::new(),
             running_getters: Vec::new(),
+            expected_enums: Default::default(),
             characters: Default::default(),
         }
     }
@@ -236,6 +241,7 @@ impl MacroInterpreter {
             macro_context: None,
             macro_class_stack: Vec::new(),
             running_getters: Vec::new(),
+            expected_enums: Default::default(),
             characters: Default::default(),
         }
     }
@@ -324,6 +330,13 @@ impl MacroInterpreter {
             ExprKind::Ident(name) => {
                 if let Some(v) = self.env.get(name) {
                     return Ok(v);
+                }
+                if let Some((owner, 0)) = self.expected_constructor(expr, name) {
+                    return Ok(MacroValue::Enum(
+                        Arc::from(owner),
+                        Arc::from(name.as_str()),
+                        Arc::new(Vec::new()),
+                    ));
                 }
                 // A bare instance field inside a method or constructor.
                 if let Some(MacroValue::Object(this)) = self.env.get("this") {
@@ -462,7 +475,7 @@ impl MacroInterpreter {
                 ..
             } => {
                 let value = if let Some(init_expr) = init {
-                    self.eval_value(init_expr)?
+                    self.eval_typed_init(init_expr, type_hint.as_ref())?
                 } else {
                     MacroValue::Null
                 };
@@ -478,7 +491,7 @@ impl MacroInterpreter {
                 ..
             } => {
                 let value = if let Some(init_expr) = init {
-                    self.eval_value(init_expr)?
+                    self.eval_typed_init(init_expr, type_hint.as_ref())?
                 } else {
                     MacroValue::Null
                 };
@@ -1544,7 +1557,9 @@ impl MacroInterpreter {
                 // form above existed, which is the shape build macros read, so a
                 // macro could take an Expr apart and not put one back together.
                 // An enum of the macro's own scope comes before haxe.macro's.
-                if let Some((owner, arity)) = self.user_enum_constructor(name)
+                if let Some((owner, arity)) = self
+                    .expected_constructor(callee, name)
+                    .or_else(|| self.user_enum_constructor(name))
                     && arg_vals.len() <= arity
                 {
                     return self.enum_value(&owner, name, arg_vals, location);
@@ -2443,6 +2458,37 @@ impl MacroInterpreter {
                 Arc::new(Vec::new()),
             )
         })
+    }
+
+    /// `var x:E = Ctor(...)`: a bare constructor in result position belongs
+    /// to the declared enum, whatever else is in scope.
+    fn eval_typed_init(
+        &mut self,
+        init: &Expr,
+        ty: Option<&parser::Type>,
+    ) -> Result<MacroValue, MacroError> {
+        let Some(parser::Type::Path { path, .. }) = ty else {
+            return self.eval_value(init);
+        };
+        let owner = self.type_name_path(path);
+        let mut sites = Vec::new();
+        result_constructor_sites(init, &mut sites);
+        // A site already claimed belongs to an outer evaluation of the same node.
+        sites.retain(|&site| self.expected_enums.insert(site, owner.clone()).is_none());
+        let result = self.eval_value(init);
+        for site in sites {
+            self.expected_enums.remove(&site);
+        }
+        result
+    }
+
+    /// The declared enum's constructor `name`, when `site` is in result
+    /// position of a typed initialiser.
+    fn expected_constructor(&self, site: &Expr, name: &str) -> Option<(String, usize)> {
+        let owner = self.expected_enums.get(&(site as *const Expr as usize))?;
+        self.class_registry
+            .as_ref()?
+            .enum_constructor(Some(owner), name)
     }
 
     /// `import a.B.f` or `import a.B.f in g`: the class and static `name` stands for.
@@ -7683,5 +7729,50 @@ impl MacroInterpreter {
             }
             _ => None,
         }
+    }
+}
+
+/// The bare constructor names an initialiser yields as its value: the
+/// callee of a call or an identifier, through branches and a block's last
+/// expression.
+fn result_constructor_sites(expr: &Expr, sites: &mut Vec<usize>) {
+    match &expr.kind {
+        ExprKind::Ident(_) => sites.push(expr as *const Expr as usize),
+        ExprKind::Call { expr: callee, .. } if matches!(callee.kind, ExprKind::Ident(_)) => {
+            sites.push(&**callee as *const Expr as usize)
+        }
+        ExprKind::Paren(inner) => result_constructor_sites(inner, sites),
+        ExprKind::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            result_constructor_sites(then_expr, sites);
+            result_constructor_sites(else_expr, sites);
+        }
+        ExprKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            result_constructor_sites(then_branch, sites);
+            if let Some(branch) = else_branch {
+                result_constructor_sites(branch, sites);
+            }
+        }
+        ExprKind::Switch { cases, default, .. } => {
+            for case in cases {
+                result_constructor_sites(&case.body, sites);
+            }
+            if let Some(branch) = default {
+                result_constructor_sites(branch, sites);
+            }
+        }
+        ExprKind::Block(elements) => {
+            if let Some(parser::BlockElement::Expr(last)) = elements.last() {
+                result_constructor_sites(last, sites);
+            }
+        }
+        _ => {}
     }
 }

@@ -1,0 +1,5 @@
+[project]
+name = "macro-typed-var-ctor"
+entry = "./MacroTypedVarCtor.hx"
+[build]
+class-paths = ["."]

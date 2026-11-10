@@ -10,7 +10,7 @@ impl MacroInterpreter {
         }
     }
 
-    fn type_name_path(&self, path: &parser::TypePath) -> String {
+    pub(super) fn type_name_path(&self, path: &parser::TypePath) -> String {
         let mut parts = path.package.clone();
         parts.push(path.name.clone());
         if let Some(sub) = &path.sub {
