@@ -12,7 +12,7 @@ use crate::ir::{
     IrTypeDefId, IrTypeDefinition, IrValue, Linkage, UnaryOp,
 };
 use crate::stdlib::{IrTypeDescriptor, MethodSignature, StdlibMapping};
-use crate::tast::symbols::SymbolFlags;
+use crate::tast::symbols::{SymbolFlags, SymbolKind};
 use crate::tast::{
     InternedString, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeKind,
     TypeTable,
@@ -616,49 +616,83 @@ impl<'a> HirToMirContext<'a> {
 
         let start = if skip_first { 1 } else { 0 };
         let mut boxed_params = BTreeSet::new();
+        // A constructor is keyed by its class: its signature is the class's
+        // constructor, and the type arguments bind the class's parameters.
+        let owner = self
+            .external_function_map
+            .iter()
+            .find_map(|(symbol, id)| (*id == func_id).then_some(*symbol))
+            .and_then(|symbol| self.symbol_table.get_symbol(symbol));
+        let (signature, declared) = match owner {
+            Some(class) if class.kind == SymbolKind::Class => (
+                self.symbol_table
+                    .get_class_constructor(class.id)
+                    .and_then(|ctor| self.symbol_table.get_symbol(ctor))
+                    .map(|ctor| ctor.type_id),
+                self.symbol_table
+                    .get_class_type_params(class.id)
+                    .map(|params| {
+                        params
+                            .iter()
+                            .filter_map(|param| {
+                                match self.type_table.get(*param).map(|t| &t.kind) {
+                                    Some(TypeKind::TypeParameter { symbol_id, .. }) => {
+                                        Some(*symbol_id)
+                                    }
+                                    _ => None,
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+            ),
+            Some(function) => (Some(function.type_id), None),
+            None => (None, None),
+        };
         if !type_args.is_empty()
-            && let Some(signature) = self.external_function_map.iter().find_map(|(symbol, id)| {
-                (*id == func_id)
-                    .then(|| self.symbol_table.get_symbol(*symbol))?
-                    .map(|symbol| symbol.type_id)
-            })
+            && let Some(signature) = signature
             && let Some(TypeKind::Function { params, .. }) =
                 self.type_table.get(signature).map(|ty| &ty.kind)
         {
-            let mut variables = BTreeSet::new();
-            let mut seen = BTreeSet::new();
-            let mut pending = vec![signature];
-            while let Some(ty) = pending.pop() {
-                if !seen.insert(ty) {
-                    continue;
+            let variables: Vec<SymbolId> = match declared {
+                Some(declared) => declared,
+                None => {
+                    let mut variables = BTreeSet::new();
+                    let mut seen = BTreeSet::new();
+                    let mut pending = vec![signature];
+                    while let Some(ty) = pending.pop() {
+                        if !seen.insert(ty) {
+                            continue;
+                        }
+                        match self.type_table.get(ty).map(|ty| &ty.kind) {
+                            Some(TypeKind::TypeParameter { symbol_id, .. }) => {
+                                variables.insert(*symbol_id);
+                            }
+                            Some(TypeKind::Function {
+                                params,
+                                return_type,
+                                ..
+                            }) => {
+                                pending.extend(params);
+                                pending.push(*return_type);
+                            }
+                            Some(TypeKind::Array { element_type }) => pending.push(*element_type),
+                            Some(TypeKind::Optional { inner_type }) => pending.push(*inner_type),
+                            Some(TypeKind::Anonymous { fields }) => {
+                                pending.extend(fields.iter().map(|f| f.type_id))
+                            }
+                            Some(
+                                TypeKind::Class { type_args, .. }
+                                | TypeKind::Enum { type_args, .. }
+                                | TypeKind::Abstract { type_args, .. }
+                                | TypeKind::TypeAlias { type_args, .. }
+                                | TypeKind::GenericInstance { type_args, .. },
+                            ) => pending.extend(type_args),
+                            _ => {}
+                        }
+                    }
+                    variables.into_iter().collect()
                 }
-                match self.type_table.get(ty).map(|ty| &ty.kind) {
-                    Some(TypeKind::TypeParameter { symbol_id, .. }) => {
-                        variables.insert(*symbol_id);
-                    }
-                    Some(TypeKind::Function {
-                        params,
-                        return_type,
-                        ..
-                    }) => {
-                        pending.extend(params);
-                        pending.push(*return_type);
-                    }
-                    Some(TypeKind::Array { element_type }) => pending.push(*element_type),
-                    Some(TypeKind::Optional { inner_type }) => pending.push(*inner_type),
-                    Some(TypeKind::Anonymous { fields }) => {
-                        pending.extend(fields.iter().map(|f| f.type_id))
-                    }
-                    Some(
-                        TypeKind::Class { type_args, .. }
-                        | TypeKind::Enum { type_args, .. }
-                        | TypeKind::Abstract { type_args, .. }
-                        | TypeKind::TypeAlias { type_args, .. }
-                        | TypeKind::GenericInstance { type_args, .. },
-                    ) => pending.extend(type_args),
-                    _ => {}
-                }
-            }
+            };
             if variables.len() == type_args.len() {
                 let bindings: BTreeMap<_, _> = variables.into_iter().zip(type_args).collect();
                 for (index, param) in params.iter().enumerate() {

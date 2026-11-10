@@ -1,0 +1,5 @@
+[project]
+name = "dynamic-ctor-args"
+entry = "./DynamicCtorArgs.hx"
+[build]
+class-paths = ["."]
