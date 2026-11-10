@@ -1,0 +1,5 @@
+[project]
+name = "macro-property-getters"
+entry = "./MacroPropertyGetters.hx"
+[build]
+class-paths = ["."]

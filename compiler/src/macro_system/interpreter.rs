@@ -101,6 +101,12 @@ pub struct MacroInterpreter {
     /// when not found as builtins, env vars, or registered macros.
     /// Stack so nested macro calls restore the outer class on return.
     macro_class_stack: Vec<String>,
+    /// Getters running, by object and property: inside its own accessor a
+    /// property is its storage.
+    running_getters: Vec<(
+        Shared<std::collections::BTreeMap<String, MacroValue>>,
+        String,
+    )>,
     characters: super::strings::Characters,
 }
 
@@ -165,6 +171,7 @@ impl MacroInterpreter {
             scheduler,
             macro_context: None,
             macro_class_stack: Vec::new(),
+            running_getters: Vec::new(),
             characters: Default::default(),
         }
     }
@@ -193,6 +200,7 @@ impl MacroInterpreter {
             scheduler,
             macro_context: None,
             macro_class_stack: Vec::new(),
+            running_getters: Vec::new(),
             characters: Default::default(),
         }
     }
@@ -227,6 +235,7 @@ impl MacroInterpreter {
             scheduler,
             macro_context: None,
             macro_class_stack: Vec::new(),
+            running_getters: Vec::new(),
             characters: Default::default(),
         }
     }
@@ -326,6 +335,11 @@ impl MacroInterpreter {
                 }
                 if let Some(v) = self.read_class_static(None, name)? {
                     return Ok(v);
+                }
+                if let Some((owner, member)) = self.static_field_import(name)
+                    && let Some(value) = self.read_class_static(Some(&owner), &member)?
+                {
+                    return Ok(value);
                 }
                 let imported = self
                     .import_map
@@ -487,7 +501,13 @@ impl MacroInterpreter {
                         return Ok(MacroValue::Bool(true));
                     }
                 }
-                let right_val = self.eval_value(right)?;
+                let hinted = matches!(op, BinaryOp::Eq | BinaryOp::NotEq)
+                    .then(|| self.hinted_constructor(&left_val, right))
+                    .flatten();
+                let right_val = match hinted {
+                    Some(value) => value,
+                    None => self.eval_value(right)?,
+                };
                 if let Some(value) = self.abstract_binary(op, &left_val, &right_val, location)? {
                     return Ok(value);
                 }
@@ -909,6 +929,28 @@ impl MacroInterpreter {
                     && let Some(value) = self.read_class_static(Some(name), field)?
                 {
                     return Ok(value);
+                }
+                // A property with a `get` accessor reads through it.
+                if let MacroValue::Object(object) = &base_val
+                    && let Some(owner) = object
+                        .read()
+                        .get("__type__")
+                        .and_then(MacroValue::as_string)
+                        .map(str::to_string)
+                    && self
+                        .class_registry
+                        .as_ref()
+                        .is_some_and(|registry| registry.reads_through_getter(&owner, field))
+                    && !self
+                        .running_getters
+                        .iter()
+                        .any(|(running, name)| running.ptr_eq(object) && name == field)
+                {
+                    self.running_getters.push((object.clone(), field.clone()));
+                    let value =
+                        self.object_method(object, &format!("get_{field}"), Vec::new(), location);
+                    self.running_getters.pop();
+                    return value;
                 }
                 self.field_access(&base_val, field, location)
             }
@@ -1480,6 +1522,12 @@ impl MacroInterpreter {
                     {
                         return Ok(result);
                     }
+                }
+                if let Some((owner, member)) = self.static_field_import(name)
+                    && let Some(result) =
+                        self.try_static_call(&owner, &member, &arg_vals, location)?
+                {
+                    return Ok(result);
                 }
                 // Unqualified registry lookup must not shadow the current class.
                 if let Some(macro_def) = self.registry.find_macro_by_name(name).cloned() {
@@ -2168,6 +2216,12 @@ impl MacroInterpreter {
 
     /// Resolve declaration-local imports and typedef aliases before dispatch.
     fn resolve_class_name(&self, class_name: &str) -> String {
+        // `std.T` is the top-level `T`, whatever the module's scope shadows it with.
+        if let Some(root) = class_name.strip_prefix("std.")
+            && !self.import_map.contains_key("std")
+        {
+            return root.to_string();
+        }
         let Some(registry) = &self.class_registry else {
             return self
                 .import_map
@@ -2197,6 +2251,25 @@ impl MacroInterpreter {
                 .filter(|local| registry.has_type(local))
         {
             name = local;
+        }
+        // `import pack.Mod` brings in every type `pack/Mod.hx` declares.
+        if !name.contains('.')
+            && !imported
+            && let Some(found) = self
+                .import_map
+                .iter()
+                .filter(|(key, _)| {
+                    key.as_str() != WILDCARD_OWNERS_KEY && key.as_str() != USING_OWNERS_KEY
+                })
+                .find_map(|(_, module)| {
+                    let candidate = module
+                        .rsplit_once('.')
+                        .map_or_else(|| name.clone(), |(pack, _)| format!("{pack}.{name}"));
+                    (registry.module_of(&candidate).as_deref() == Some(module.as_str()))
+                        .then_some(candidate)
+                })
+        {
+            name = found;
         }
         // A bare name is a module of the macro's own package before a global
         // type; a sub-type of another module is not visible by its name.
@@ -2347,6 +2420,40 @@ impl MacroInterpreter {
     }
 
     /// An enum constructor in scope that is not a haxe.macro one.
+    /// `x == Ctor`: a bare constructor name takes its enum from the value it
+    /// is compared with, before any enum in scope.
+    fn hinted_constructor(&self, hint: &MacroValue, expr: &Expr) -> Option<MacroValue> {
+        let ExprKind::Ident(name) = &expr.kind else {
+            return None;
+        };
+        if self.env.get(name).is_some() {
+            return None;
+        }
+        let MacroValue::Enum(owner, ..) = hint.underlying() else {
+            return None;
+        };
+        let (owner, arity) = self
+            .class_registry
+            .as_ref()?
+            .enum_constructor(Some(&**owner), name)?;
+        (arity == 0).then(|| {
+            MacroValue::Enum(
+                Arc::from(owner),
+                Arc::from(name.as_str()),
+                Arc::new(Vec::new()),
+            )
+        })
+    }
+
+    /// `import a.B.f` or `import a.B.f in g`: the class and static `name` stands for.
+    fn static_field_import(&self, name: &str) -> Option<(String, String)> {
+        let (owner, member) = self.import_map.get(name)?.rsplit_once('.')?;
+        self.class_registry
+            .as_ref()?
+            .find_executable_class(owner)
+            .map(|_| (owner.to_string(), member.to_string()))
+    }
+
     fn user_enum_constructor(&self, name: &str) -> Option<(String, usize)> {
         self.scoped_enum_constructor(name)
             .filter(|(owner, _)| !owner.starts_with("haxe.macro."))
@@ -2363,11 +2470,25 @@ impl MacroInterpreter {
         {
             return Some(found);
         }
+        // The running module's own enums, private ones included, then the
+        // enums of the modules it imports.
+        if let Some(module) = self
+            .macro_class_stack
+            .last()
+            .and_then(|owner| registry.module_of(owner))
+            && let Some(found) = registry.enum_constructor_in_module(&module, name)
+        {
+            return Some(found);
+        }
         let candidates: std::collections::BTreeSet<_> = self
             .import_map
             .iter()
             .filter(|(key, _)| key.as_str() != WILDCARD_OWNERS_KEY)
-            .filter_map(|(_, owner)| registry.enum_constructor(Some(owner), name))
+            .filter_map(|(_, owner)| {
+                registry
+                    .enum_constructor(Some(owner), name)
+                    .or_else(|| registry.enum_constructor_in_module(owner, name))
+            })
             .collect();
         if candidates.len() == 1 {
             return candidates.into_iter().next();
@@ -2523,15 +2644,18 @@ impl MacroInterpreter {
         let resolved = self.resolve_class_name(class_name);
         // An expression macro's local class is the one its call sits in; a
         // build macro's context names the class being built instead.
+        let built = self
+            .macro_context
+            .as_ref()
+            .and_then(|ctx| ctx.build_class.as_ref())
+            .map(|build| build.qualified_name.as_str());
         if resolved == "haxe.macro.Context"
             && method == "getLocalClass"
-            && let Some(view) = self
-                .macro_context
-                .as_ref()
-                .and_then(|ctx| ctx.build_class.as_ref())
-                .map(|build| build.qualified_name.as_str())
-                .or(self.local_class.as_deref())
-                .and_then(|name| self.class_registry.as_ref()?.local_class_view(name))
+            && let Some(view) = built.or(self.local_class.as_deref()).and_then(|name| {
+                self.class_registry
+                    .as_ref()?
+                    .local_class_view(name, built.is_some())
+            })
         {
             return Ok(Some(view));
         }
@@ -3695,7 +3819,7 @@ impl MacroInterpreter {
                 let forward = enum_value_tool(method).unwrap_or_default();
                 let mut forwarded = vec![base.clone()];
                 forwarded.extend(args);
-                self.try_static_call("Type", forward, &forwarded, location)?
+                self.try_static_call("std.Type", forward, &forwarded, location)?
                     .ok_or_else(|| MacroError::UnsupportedOperation {
                         operation: format!("Type.{forward}"),
                         location,

@@ -228,6 +228,7 @@ impl ClassRegistry {
                             .iter()
                             .map(|method| (method.name.clone(), signature(method)))
                             .collect(),
+                        getters: BTreeSet::new(),
                         source_view: Some(source_view.clone()),
                     },
                 );
@@ -279,6 +280,7 @@ impl ClassRegistry {
                             .chain(&decl.static_methods)
                             .map(|method| (method.name.clone(), signature(method)))
                             .collect(),
+                        getters: BTreeSet::new(),
                         source_view: Some(source_view.clone()),
                     },
                 );

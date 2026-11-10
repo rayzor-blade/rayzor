@@ -1,0 +1,5 @@
+[project]
+name = "macro-ctor-scope"
+entry = "./MacroCtorScope.hx"
+[build]
+class-paths = ["."]

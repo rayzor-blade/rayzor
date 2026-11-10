@@ -15,6 +15,7 @@ class Probe {
 			+ parents.join(","),
 			"alpha=" + Defs.Kind.Alpha + " twice=" + Defs.Util.twice(4) + " limit=" + Defs.Util.LIMIT,
 			"all=" + Defs.Kind.createAll().join(","),
+			"fields=" + c.fields.get().length + " statics=" + c.statics.get().length,
 		];
 		var b = Defs.Kind.Beta(5);
 		parts.push("name=" + b.getName() + " index=" + b.getIndex() + " eq=" + b.equals(Defs.Kind.Beta(5)));

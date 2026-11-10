@@ -7,7 +7,7 @@
 use parser::{
     Access, ClassFieldKind, Expr, FunctionParam, HaxeFile, Metadata, Modifier, TypeDeclaration,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 mod snapshot;
 
@@ -51,6 +51,8 @@ pub struct ClassInfo {
     pub abstract_decl: Option<Arc<parser::AbstractDecl>>,
     pub field_types: BTreeMap<String, parser::Type>,
     pub method_signatures: BTreeMap<String, MethodSignature>,
+    /// Properties read through a `get_<name>` accessor.
+    pub getters: BTreeSet<String>,
     source_view: Option<Arc<std::sync::OnceLock<Option<Box<ClassRegistry>>>>>,
 }
 
@@ -177,6 +179,13 @@ impl ClassRegistry {
         self.type_definitions
             .get(name)
             .or_else(|| self.snapshot.as_ref()?.definition(name))
+    }
+
+    /// The module that declares type `name`.
+    pub(crate) fn module_of(&self, name: &str) -> Option<String> {
+        self.definition(name)
+            .map(|definition| definition.module.clone())
+            .or_else(|| self.class_path_definition(name).map(|d| d.module.clone()))
     }
 
     /// Snapshot declarations load executable macro-view bodies only on demand.
@@ -776,6 +785,18 @@ impl ClassRegistry {
                             _ => None,
                         })
                         .collect(),
+                    getters: class
+                        .fields
+                        .iter()
+                        .filter_map(|field| match &field.kind {
+                            ClassFieldKind::Property {
+                                name,
+                                getter: parser::PropertyAccess::Custom(access),
+                                ..
+                            } if access == "get" => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect(),
                     method_signatures: class
                         .fields
                         .iter()
@@ -1317,6 +1338,26 @@ impl ClassRegistry {
             .flatten()
     }
 
+    /// A constructor `name` of an enum `module` declares, when exactly one does.
+    pub(crate) fn enum_constructor_in_module(
+        &self,
+        module: &str,
+        name: &str,
+    ) -> Option<(String, usize)> {
+        let Some(constructors) = self.enum_constructors.get(name) else {
+            return self
+                .snapshot
+                .as_ref()?
+                .enum_constructor_in_module(module, name);
+        };
+        let mut found = constructors.iter().filter(|(owner, _)| {
+            self.definition(owner)
+                .is_some_and(|definition| definition.module == module)
+        });
+        let (owner, &arity) = found.next()?;
+        found.next().is_none().then(|| (owner.clone(), arity))
+    }
+
     pub(crate) fn enum_constructor_in_scope(
         &self,
         scope: &str,
@@ -1455,8 +1496,13 @@ impl ClassRegistry {
 
     /// `Context.getLocalClass().get()` for a class known only by its source:
     /// path, metadata and fields, each method's `expr()` a `TFunction` whose
-    /// arguments carry their metadata.
-    pub fn local_class_view(&self, qualified_name: &str) -> Option<super::value::MacroValue> {
+    /// arguments carry their metadata. A class being built has no typed
+    /// fields yet, so `building` leaves `fields` and `statics` empty.
+    pub fn local_class_view(
+        &self,
+        qualified_name: &str,
+        building: bool,
+    ) -> Option<super::value::MacroValue> {
         use super::value::MacroValue as V;
         let info = self.find_class(qualified_name)?;
         let pack: Vec<V> = qualified_name
@@ -1471,6 +1517,14 @@ impl ClassRegistry {
             return None;
         };
         view.write(|view| view.insert("pack".to_string(), V::array(pack)));
+        if building {
+            view.write(|view| {
+                for key in ["fields", "statics"] {
+                    view.insert(key.to_string(), reference(V::array(Vec::new())));
+                }
+            });
+            return Some(V::Object(view));
+        }
         for (key, methods) in [
             ("statics", &info.static_methods),
             ("fields", &info.instance_methods),
@@ -1545,6 +1599,23 @@ impl ClassRegistry {
             }
         }
         None
+    }
+
+    /// Whether `field` of an instance of `class_name` reads through `get_<field>`.
+    pub fn reads_through_getter(&self, class_name: &str, field: &str) -> bool {
+        let Some(mut class) = self.find_executable_class(class_name) else {
+            return false;
+        };
+        for _ in 0..128 {
+            if class.getters.contains(field) {
+                return true;
+            }
+            let Some(parent) = self.parent_class(class) else {
+                return false;
+            };
+            class = parent;
+        }
+        false
     }
 
     pub fn find_instance_method(&self, class_name: &str, method: &str) -> Option<&MethodInfo> {

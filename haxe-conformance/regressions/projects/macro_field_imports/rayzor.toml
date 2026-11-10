@@ -1,0 +1,5 @@
+[project]
+name = "macro-field-imports"
+entry = "./MacroFieldImports.hx"
+[build]
+class-paths = ["."]
