@@ -16,6 +16,12 @@ class InterfaceBoundedImports {
 			case BS(s): s.get();
 		};
 
+	static function take(h:Hd):Hd
+		return h;
+
+	static function handleOf<T:IH>(v:T):Hd
+		return take(v.h);
+
 	static function check(label:String, got:Int, want:Int):Void {
 		if (got != want)
 			throw label + ": " + got + " != " + want;
@@ -42,6 +48,9 @@ class InterfaceBoundedImports {
 		check("abstract payload property", ptrRS(BS(s)), 77);
 		check("abstract payload from a class", ptrRS(BS(new SgI(2))), 77);
 		check("abstract payload method", getRS(BS(s)), 2);
+		var hc = new HCol(31);
+		check("imported interface field passed on", handleOf(hc) == hc.h ? 1 : 0, 1);
+		check("imported interface field read", handleOf(hc).id, 31);
 		Sys.println("CONFORMANCE_OK");
 	}
 }

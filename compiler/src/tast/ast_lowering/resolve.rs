@@ -502,6 +502,24 @@ impl<'a> AstLowering<'a> {
         field_name: InternedString,
         arg_types: &[TypeId],
     ) -> Option<(SymbolId, TypeId)> {
+        // `v.f(x)` with `T:IV`: the field is declared on a constraint.
+        let constraints = match self
+            .context
+            .type_table
+            .borrow()
+            .get(receiver_type)
+            .map(|t| &t.kind)
+        {
+            Some(crate::tast::core::TypeKind::TypeParameter { constraints, .. }) => {
+                Some(constraints.clone())
+            }
+            _ => None,
+        };
+        if let Some(constraints) = constraints {
+            return constraints.iter().find_map(|&constraint| {
+                self.resolve_function_typed_field(constraint, field_name, arg_types)
+            });
+        }
         let class_sym = self.resolve_type_to_class_symbol(receiver_type)?;
         let field_sym = self.lookup_data_field(class_sym, field_name)?;
         let sym = self.context.symbol_table.get_symbol(field_sym)?;

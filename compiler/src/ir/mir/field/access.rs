@@ -201,16 +201,42 @@ impl<'a> HirToMirContext<'a> {
             let obj = self.coerce_reg_to(obj, &ptr_ty)?;
             let obj = self.interface_bounded_object(obj, receiver_ty)?;
             let value = self.raw_anon_reflect_field_read(obj, field, field_ty)?;
-            if matches!(
-                self.type_table.get(field_ty).map(|t| &t.kind),
-                Some(TypeKind::Class { .. } | TypeKind::Function { .. })
-            ) {
-                let unbox = self.get_or_register_extern_function(
-                    "haxe_unbox_reference_ptr",
-                    vec![ptr_ty.clone()],
-                    ptr_ty.clone(),
-                );
-                return self.builder.build_call_direct(unbox, vec![value], ptr_ty);
+            // The read boxes the slot by its RTTI shape: a reference shape as
+            // that reference, any other reference slot as its raw word (a
+            // method as a function box), which `haxe_dynamic_to_slot` returns.
+            use crate::ir::IrFieldShape;
+            let unbox = match self.field_shape(field_ty) {
+                IrFieldShape::Class | IrFieldShape::Array | IrFieldShape::Anonymous => {
+                    Some("haxe_unbox_reference_ptr")
+                }
+                IrFieldShape::Unknown
+                    if matches!(
+                        self.type_table
+                            .get(self.resolve_storage_type(field_ty))
+                            .map(|t| &t.kind),
+                        Some(
+                            TypeKind::Class { .. }
+                                | TypeKind::Interface { .. }
+                                | TypeKind::Function { .. }
+                                | TypeKind::Array { .. }
+                                | TypeKind::Anonymous { .. }
+                        )
+                    ) =>
+                {
+                    Some("haxe_dynamic_to_slot")
+                }
+                _ => None,
+            };
+            if let Some(name) = unbox {
+                let ret = if name == "haxe_dynamic_to_slot" {
+                    IrType::I64
+                } else {
+                    ptr_ty.clone()
+                };
+                let f =
+                    self.get_or_register_extern_function(name, vec![ptr_ty.clone()], ret.clone());
+                let raw = self.builder.build_call_direct(f, vec![value], ret)?;
+                return self.coerce_reg_to(raw, &ptr_ty);
             }
             return Some(value);
         }

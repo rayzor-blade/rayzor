@@ -710,6 +710,19 @@ impl<'a> AstLowering<'a> {
                             crate::tast::core::TypeKind::Optional { inner_type } => {
                                 pending.push((*inner_type, through_constraint));
                             }
+                            // `v.ptr` with `T:IV`: the interface declares the field.
+                            crate::tast::core::TypeKind::Interface { symbol_id, .. }
+                                if through_constraint =>
+                            {
+                                if let Some(ty) = self
+                                    .lookup_data_field(*symbol_id, name)
+                                    .and_then(|s| self.context.symbol_table.get_symbol(s))
+                                    .map(|s| s.type_id)
+                                    .filter(|ty| ty.is_valid())
+                                {
+                                    return Ok(self.substitute_receiver_type(ty, current));
+                                }
+                            }
                             crate::tast::core::TypeKind::Class { symbol_id, .. } => {
                                 if through_constraint {
                                     let member =

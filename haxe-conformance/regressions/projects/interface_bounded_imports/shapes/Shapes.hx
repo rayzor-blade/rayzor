@@ -78,3 +78,21 @@ abstract Sg<T>(ISg<T>) from ISg<T> to ISg<T> {}
 enum RS {
 	BS(s:Sg<Int>);
 }
+
+class Hd {
+	public final id:Int;
+
+	public function new(id:Int)
+		this.id = id;
+}
+
+interface IH {
+	var h(default, null):Hd;
+}
+
+class HCol implements IH {
+	public var h(default, null):Hd;
+
+	public function new(id:Int)
+		h = new Hd(id);
+}
