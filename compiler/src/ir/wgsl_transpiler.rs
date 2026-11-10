@@ -13,7 +13,7 @@ use crate::tast::node::{
 };
 use crate::tast::symbols::{SymbolFlags, SymbolKind};
 use crate::tast::{StringInterner, SymbolId, SymbolTable, TypeId, TypeKind, TypeTable};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 /// Transpile a @:shader class from HIR (available during MIR lowering).
@@ -33,6 +33,7 @@ pub fn transpile_shader_from_hir(
         hir_types,
         out: String::new(),
         emitted_structs: BTreeSet::new(),
+        aliases: BTreeMap::new(),
     };
 
     // 1. Emit struct dependencies from method params/returns
@@ -169,6 +170,7 @@ pub fn transpile_shader_class(
         hir_types: &indexmap::IndexMap::new(),
         out: String::new(),
         emitted_structs: BTreeSet::new(),
+        aliases: BTreeMap::new(),
     };
 
     // 1. Emit struct dependencies from method params/returns
@@ -255,6 +257,8 @@ struct WgslCtx<'a> {
     hir_types: &'a indexmap::IndexMap<crate::tast::TypeId, hir::HirTypeDecl>,
     out: String,
     emitted_structs: BTreeSet<String>,
+    /// Unnamed temporaries the lowering bound to a variable: they name it.
+    aliases: BTreeMap<SymbolId, String>,
 }
 
 impl<'a> WgslCtx<'a> {
@@ -263,9 +267,13 @@ impl<'a> WgslCtx<'a> {
     }
 
     fn sym_name(&self, id: SymbolId) -> &str {
+        if let Some(target) = self.aliases.get(&id) {
+            return target;
+        }
         self.st
             .get_symbol(id)
             .and_then(|s| self.si.get(s.name))
+            .filter(|name| !name.is_empty())
             .unwrap_or("_")
     }
 
@@ -701,6 +709,19 @@ impl<'a> WgslCtx<'a> {
                 init,
                 ..
             } => {
+                // A nameless temporary of a variable is that variable: WGSL
+                // would copy it, and writes through the copy would be lost.
+                if let hir::HirPattern::Variable { symbol, .. } = pattern
+                    && self.sym_name(*symbol) == "_"
+                    && let Some(hir::HirExpr {
+                        kind: hir::HirExprKind::Variable { symbol: target, .. },
+                        ..
+                    }) = init
+                {
+                    let target = self.sym_name(*target).to_string();
+                    self.aliases.insert(*symbol, target);
+                    return Ok(());
+                }
                 let name = match pattern {
                     hir::HirPattern::Variable { symbol, .. } => self.sym_name(*symbol).to_string(),
                     _ => "_".to_string(),
