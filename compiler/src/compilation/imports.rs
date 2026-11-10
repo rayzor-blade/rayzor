@@ -651,6 +651,19 @@ impl CompilationUnit {
             .collect();
         deps.retain(|d| !imported_names.contains(d) || explicit_dependencies.contains(d));
 
+        // A constructor of an enum this file declares is that constructor
+        // wherever it is written, never a same-package module.
+        let own_constructors: BTreeSet<&str> = ast
+            .declarations
+            .iter()
+            .filter_map(|decl| match decl {
+                TypeDeclaration::Enum(e) => Some(e.constructors.iter().map(|c| c.name.as_str())),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        deps.retain(|d| !own_constructors.contains(d.as_str()));
+
         // A leading type name is package-relative, including module subtypes
         // such as `Helpers.Worker`; lowercase package paths are absolute. A
         // package wildcard (`import a.b.*`) is searched the same way; candidates
