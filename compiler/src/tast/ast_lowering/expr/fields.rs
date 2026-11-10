@@ -65,7 +65,8 @@ impl<'a> AstLowering<'a> {
             self.context.namespace_resolver.lookup_symbol(&qualified)?
         };
         let declared = self.context.symbol_table.get_symbol(symbol)?;
-        if !matches!(declared.kind, SymbolKind::Abstract | SymbolKind::TypeAlias) {
+        let declared_kind = declared.kind;
+        if !matches!(declared_kind, SymbolKind::Abstract | SymbolKind::TypeAlias) {
             return None;
         }
         let original = self
@@ -107,7 +108,8 @@ impl<'a> AstLowering<'a> {
             };
             owner = self.resolve_type_to_class_symbol(underlying)?;
         }
-        if owner == original {
+        // A typedef's statics are its target's; an abstract's own are its own.
+        if owner == symbol || (owner == original && declared_kind != SymbolKind::TypeAlias) {
             return None;
         }
         let target = self.context.symbol_table.get_symbol(owner)?;

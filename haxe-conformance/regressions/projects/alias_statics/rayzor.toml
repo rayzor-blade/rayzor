@@ -1,0 +1,5 @@
+[project]
+name = "alias-statics"
+entry = "./AliasStatics.hx"
+[build]
+class-paths = ["."]
