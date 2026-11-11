@@ -484,7 +484,7 @@ fn test_binary_operations_comprehensive() {
             loc
         )
         .unwrap(),
-        MacroValue::Int(5)
+        MacroValue::Float(5.0)
     );
     assert_eq!(
         apply_binary_op(
@@ -664,15 +664,15 @@ fn test_binary_operations_comprehensive() {
         matches!(interpreter.eval_expr(function.body.as_ref().unwrap()),Err(MacroError::Return {value:Some(value)}) if *value==MacroValue::Int(10))
     );
 
-    // Division by zero
-    let err = apply_binary_op(
+    // Division by zero is an infinity, as Haxe's Float division gives
+    let value = apply_binary_op(
         &BinaryOp::Div,
         &MacroValue::Int(1),
         &MacroValue::Int(0),
         loc,
     )
-    .unwrap_err();
-    assert!(matches!(err, MacroError::DivisionByZero { .. }));
+    .unwrap();
+    assert_eq!(value, MacroValue::Float(f64::INFINITY));
 
     // Modulo by zero
     let err = apply_binary_op(

@@ -326,14 +326,17 @@ pub fn apply_binary_op(
         BinaryOp::Add => apply_add(left, right, location),
         BinaryOp::Sub => apply_numeric_op(left, right, |a, b| a - b, |a, b| a - b, location),
         BinaryOp::Mul => apply_numeric_op(left, right, |a, b| a * b, |a, b| a * b, location),
-        BinaryOp::Div => {
-            // Check for division by zero
-            match right {
-                MacroValue::Int(0) => Err(MacroError::DivisionByZero { location }),
-                MacroValue::Float(f) if *f == 0.0 => Err(MacroError::DivisionByZero { location }),
-                _ => apply_numeric_op(left, right, |a, b| a / b, |a, b| a / b, location),
+        // Haxe's `/` is Float division, Int operands included; zero gives an
+        // infinity or NaN.
+        BinaryOp::Div => match (left.as_float(), right.as_float()) {
+            (Some(a), Some(b))
+                if matches!(left, MacroValue::Int(_) | MacroValue::Float(_))
+                    && matches!(right, MacroValue::Int(_) | MacroValue::Float(_)) =>
+            {
+                Ok(MacroValue::Float(a / b))
             }
-        }
+            _ => apply_numeric_op(left, right, |a, b| a / b, |a, b| a / b, location),
+        },
         BinaryOp::Mod => match right {
             MacroValue::Int(0) => Err(MacroError::DivisionByZero { location }),
             _ => apply_numeric_op(left, right, |a, b| a % b, |a, b| a % b, location),
@@ -747,7 +750,7 @@ mod tests {
                 loc
             )
             .unwrap(),
-            MacroValue::Int(3)
+            MacroValue::Float(10.0 / 3.0)
         );
 
         // String concat
@@ -797,6 +800,7 @@ mod tests {
 
     #[test]
     fn test_division_by_zero() {
+        // Haxe's `/` is Float division: by zero it is an infinity, not an error.
         let loc = SourceLocation::unknown();
         let result = apply_binary_op(
             &BinaryOp::Div,
@@ -804,11 +808,7 @@ mod tests {
             &MacroValue::Int(0),
             loc,
         );
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            MacroError::DivisionByZero { .. }
-        ));
+        assert_eq!(result.unwrap(), MacroValue::Float(f64::INFINITY));
     }
 
     #[test]

@@ -1280,12 +1280,8 @@ fn vm_mul(a: MacroValue, b: MacroValue) -> Result<MacroValue, VmError> {
 
 fn vm_div(a: MacroValue, b: MacroValue) -> Result<MacroValue, VmError> {
     match (&a, &b) {
-        (MacroValue::Int(x), MacroValue::Int(y)) => {
-            if *y == 0 {
-                return Err(VmError::new("division by zero"));
-            }
-            Ok(MacroValue::Int(x / y))
-        }
+        // Haxe's `/` is Float division, Int operands included.
+        (MacroValue::Int(x), MacroValue::Int(y)) => Ok(MacroValue::Float(*x as f64 / *y as f64)),
         (MacroValue::Float(x), MacroValue::Float(y)) => Ok(MacroValue::Float(x / y)),
         (MacroValue::Int(x), MacroValue::Float(y)) => Ok(MacroValue::Float(*x as f64 / y)),
         (MacroValue::Float(x), MacroValue::Int(y)) => Ok(MacroValue::Float(x / *y as f64)),
@@ -1842,7 +1838,10 @@ mod tests {
             op: parser::BinaryOp::Div,
             right: Box::new(make_expr(parser::ExprKind::Int(3))),
         });
-        assert_eq!(compile_and_run(&expr).unwrap(), MacroValue::Int(3));
+        assert_eq!(
+            compile_and_run(&expr).unwrap(),
+            MacroValue::Float(10.0 / 3.0)
+        );
 
         // 10.0 / 3.0
         let expr2 = make_expr(parser::ExprKind::Binary {

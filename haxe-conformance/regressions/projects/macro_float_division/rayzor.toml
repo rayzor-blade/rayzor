@@ -1,0 +1,5 @@
+[project]
+name = "macro-float-division"
+entry = "./MacroFloatDivision.hx"
+[build]
+class-paths = ["."]

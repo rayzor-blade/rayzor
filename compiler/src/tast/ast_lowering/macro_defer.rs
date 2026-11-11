@@ -2132,7 +2132,7 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 pending.extend(self.type_children(ty));
             }
         }
-        let compatible = unify(
+        let mut compatible = unify(
             a,
             b,
             self.lowering.context.type_table,
@@ -2141,6 +2141,95 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
             bindings,
             0,
         );
+        // `Null<T>` unifies as the `T` it holds.
+        if !compatible {
+            let inner = match self
+                .lowering
+                .context
+                .type_table
+                .borrow()
+                .get(a)
+                .map(|t| &t.kind)
+            {
+                Some(crate::tast::TypeKind::Optional { inner_type }) => Some(*inner_type),
+                _ => None,
+            };
+            if let Some(inner) = inner {
+                return self.unify_types(inner, b, monomorphs, bindings);
+            }
+        }
+        // A class or interface also unifies with each of its supertypes. An
+        // interface can be registered twice, so one with b's qualified name is b.
+        let qualified = |ty: TypeId| {
+            named_shape(self.lowering.context.type_table, ty)
+                .filter(|(_, args)| args.is_empty())
+                .and_then(|(symbol, _)| self.lowering.context.symbol_table.get_symbol(symbol))
+                .and_then(|symbol| symbol.qualified_name)
+        };
+        let target_name = qualified(b);
+        let same_declaration = |ty: TypeId| target_name.is_some() && qualified(ty) == target_name;
+        if !compatible {
+            let mut pending = vec![a];
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(ty) = pending.pop() {
+                if !seen.insert(ty) {
+                    continue;
+                }
+                let symbol = {
+                    let table = self.lowering.context.type_table.borrow();
+                    match table.get(ty).map(|t| &t.kind) {
+                        Some(crate::tast::TypeKind::Class { symbol_id, .. })
+                        | Some(crate::tast::TypeKind::Interface { symbol_id, .. }) => {
+                            Some(*symbol_id)
+                        }
+                        Some(crate::tast::TypeKind::GenericInstance { base_type, .. }) => {
+                            match table.get(*base_type).map(|t| &t.kind) {
+                                Some(crate::tast::TypeKind::Class { symbol_id, .. })
+                                | Some(crate::tast::TypeKind::Interface { symbol_id, .. }) => {
+                                    Some(*symbol_id)
+                                }
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                };
+                let Some(hierarchy) =
+                    symbol.and_then(|s| self.lowering.context.symbol_table.get_class_hierarchy(s))
+                else {
+                    continue;
+                };
+                let supers: Vec<TypeId> = hierarchy
+                    .superclass
+                    .into_iter()
+                    .chain(hierarchy.interfaces.iter().copied())
+                    .collect();
+                for sup in supers {
+                    if same_declaration(sup) {
+                        compatible = true;
+                        break;
+                    }
+                    let mut trial = bindings.clone();
+                    if unify(
+                        sup,
+                        b,
+                        self.lowering.context.type_table,
+                        &self.lowering.abstract_casts,
+                        &variables,
+                        &mut trial,
+                        0,
+                    ) {
+                        *bindings = trial;
+                        compatible = true;
+                        break;
+                    }
+                    pending.push(sup);
+                }
+                if compatible {
+                    break;
+                }
+            }
+        }
         if compatible && let Some(inferred) = &mut self.inferred {
             let table = self.lowering.context.type_table.borrow();
             for parameter in parameters {

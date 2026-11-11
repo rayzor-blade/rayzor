@@ -1,0 +1,5 @@
+[project]
+name = "macro-unify-subtypes"
+entry = "./MacroUnifySubtypes.hx"
+[build]
+class-paths = ["."]

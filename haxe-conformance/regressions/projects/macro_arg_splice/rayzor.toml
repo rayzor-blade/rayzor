@@ -1,0 +1,5 @@
+[project]
+name = "macro-arg-splice"
+entry = "./MacroArgSplice.hx"
+[build]
+class-paths = ["."]

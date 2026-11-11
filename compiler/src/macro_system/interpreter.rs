@@ -7807,7 +7807,7 @@ class Probe {
         // Try/catch should catch runtime errors
         let source = r#"
             try {
-                var x = 1 / 0;
+                var x = 1 % 0;
                 return x;
             } catch (e) {
                 return -1;
@@ -7818,11 +7818,18 @@ class Probe {
     }
 
     #[test]
-    fn test_division_by_zero_error() {
-        let result = eval("return 10 / 0;");
+    fn test_division_by_zero_is_infinity() {
+        assert_eq!(
+            eval("return 10 / 0;").unwrap(),
+            MacroValue::Float(f64::INFINITY)
+        );
+    }
+
+    #[test]
+    fn test_modulo_by_zero_error() {
+        let result = eval("return 10 % 0;");
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(!err.is_control_flow());
+        assert!(!result.unwrap_err().is_control_flow());
     }
 
     #[test]

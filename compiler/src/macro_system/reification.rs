@@ -116,8 +116,17 @@ impl ReificationEngine {
     ///
     /// Non-dollar expressions are returned as-is (they become literal AST nodes).
     /// Dollar identifiers are evaluated and their results are spliced into the output.
-    /// A list of expressions (array elements, call or `new` arguments) in
-    /// which `$a{exprs}` splices its elements in place.
+    /// Call or `new` arguments: `$a{exprs}` as the only argument is the
+    /// argument list; beside other arguments it is one array literal.
+    fn process_args(args: &[Expr], env: &Environment) -> Result<Vec<Expr>, MacroError> {
+        if args.len() == 1 {
+            return Self::process_list(args, env);
+        }
+        args.iter().map(|e| Self::process_expr(e, env)).collect()
+    }
+
+    /// A list of expressions (array elements, metadata parameters) in which
+    /// `$a{exprs}` splices its elements in place.
     fn process_list(elements: &[Expr], env: &Environment) -> Result<Vec<Expr>, MacroError> {
         let mut out: Vec<Expr> = Vec::with_capacity(elements.len());
         for e in elements {
@@ -209,7 +218,7 @@ impl ReificationEngine {
                 Ok(Expr {
                     kind: ExprKind::Call {
                         expr: Box::new(new_callee),
-                        args: Self::process_list(args, env)?,
+                        args: Self::process_args(args, env)?,
                     },
                     span: expr.span,
                 })
@@ -459,7 +468,7 @@ impl ReificationEngine {
                             .iter()
                             .map(|ty| Self::process_type(ty, env))
                             .collect::<Result<_, _>>()?,
-                        args: Self::process_list(args, env)?,
+                        args: Self::process_args(args, env)?,
                     },
                     span: expr.span,
                 })
