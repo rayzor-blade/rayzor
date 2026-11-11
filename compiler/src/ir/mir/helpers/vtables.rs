@@ -182,7 +182,22 @@ impl<'a> HirToMirContext<'a> {
                 .parent_chain(cls)
                 .into_iter()
                 .any(|parent| self.abstract_methods.contains(&(parent, name)));
-            if inherits_abstract {
+            // A parent in another module: Haxe requires `override` for every
+            // redefinition but an abstract method's, so a same-named instance
+            // method an ancestor declares, written without it, implements one.
+            let implements_remote = !inherits_abstract
+                && self.static_sig_index.clone().is_some_and(|index| {
+                    let mut index = index.borrow_mut();
+                    let method = self.string_interner.get(name).unwrap_or("");
+                    method != "new"
+                        && self.parent_chain(cls).into_iter().any(|parent| {
+                            !self.class_method_by_name.contains_key(&(parent, name))
+                                && self
+                                    .class_qualified_name(parent)
+                                    .is_some_and(|qn| index.declares_instance_method(&qn, method))
+                        })
+                });
+            if inherits_abstract || implements_remote {
                 self.override_methods.insert((cls, name));
             }
         }
@@ -222,6 +237,20 @@ impl<'a> HirToMirContext<'a> {
                 };
                 if method != "new" && index.is_overridden_below(class_qn, method) {
                     seeded_virtual.insert((cls, name));
+                }
+            }
+        }
+
+        // An abstract method is virtual wherever it is implemented, including
+        // subclasses in modules lowered after this one.
+        for declaration in self.current_hir_types.values() {
+            if let HirTypeDecl::Class(class) = declaration {
+                for method in class
+                    .methods
+                    .iter()
+                    .filter(|m| m.is_abstract && !m.is_static)
+                {
+                    seeded_virtual.insert((class.symbol_id, method.function.name));
                 }
             }
         }
