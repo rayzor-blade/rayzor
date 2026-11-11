@@ -448,6 +448,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
                         },
                     };
                 }
+                // After a block or statement-shaped form, `[` and `(` start the
+                // next statement, as `++` does.
+                TokenKind::LBracket | TokenKind::LParen if !takes_postfix(&expr) => break,
                 TokenKind::LBracket => {
                     self.stream.advance();
                     let index = self.parse_expression()?;
