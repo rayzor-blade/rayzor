@@ -1,0 +1,5 @@
+[project]
+name = "static-map-field"
+entry = "./StaticMapField.hx"
+[build]
+class-paths = ["."]

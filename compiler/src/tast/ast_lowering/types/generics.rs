@@ -308,12 +308,22 @@ impl<'a> AstLowering<'a> {
                 self.context
                     .symbol_table
                     .lookup_symbol(ScopeId::first(), concrete_name_interned)
-            })?;
+            })
+            .map(|symbol| symbol.id);
+        // A container not loaded yet: the builtin map a local of this type
+        // gets, not the IMap-backed abstract, whose storage is an interface.
+        let Some(symbol) = symbol else {
+            return Some(crate::tast::type_resolution::create_map_type(
+                &self.context.type_table,
+                key_ty,
+                value_ty,
+            ));
+        };
         Some(
             self.context
                 .type_table
                 .borrow_mut()
-                .create_class_type(symbol.id, concrete_type_args),
+                .create_class_type(symbol, concrete_type_args),
         )
     }
 
