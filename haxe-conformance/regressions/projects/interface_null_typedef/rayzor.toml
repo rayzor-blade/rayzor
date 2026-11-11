@@ -1,0 +1,5 @@
+[project]
+name = "interface-null-typedef"
+entry = "./InterfaceNullTypedef.hx"
+[build]
+class-paths = ["."]

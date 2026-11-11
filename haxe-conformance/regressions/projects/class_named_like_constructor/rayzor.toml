@@ -1,0 +1,5 @@
+[project]
+name = "class-named-like-constructor"
+entry = "./ClassNamedLikeConstructor.hx"
+[build]
+class-paths = ["."]

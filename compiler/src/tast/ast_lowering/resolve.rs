@@ -839,16 +839,25 @@ impl<'a> AstLowering<'a> {
     }
 
     /// The same-named constructor of the enum `expected` names, when the
-    /// scope walk picked `variant` of a different enum. Haxe resolves a bare
-    /// constructor against the expected type before the scope.
+    /// scope walk picked `variant` of a different enum, or a type of that
+    /// name. Haxe resolves a bare constructor against the expected type
+    /// before the scope.
     pub(crate) fn expected_enum_variant(
         &self,
         variant: SymbolId,
         expected: TypeId,
     ) -> Option<SymbolId> {
+        use crate::tast::symbols::SymbolKind;
         let symbols = &self.context.symbol_table;
         let sym = symbols.get_symbol(variant)?;
-        if sym.kind != crate::tast::symbols::SymbolKind::EnumVariant {
+        if !matches!(
+            sym.kind,
+            SymbolKind::EnumVariant
+                | SymbolKind::Class
+                | SymbolKind::Interface
+                | SymbolKind::Abstract
+                | SymbolKind::TypeAlias
+        ) {
             return None;
         }
         let name = sym.name;

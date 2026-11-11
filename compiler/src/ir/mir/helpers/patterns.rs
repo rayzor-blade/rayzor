@@ -323,12 +323,93 @@ impl<'a> HirToMirContext<'a> {
                 self.bind_pattern_with_scrutinee_type(pattern, value, scrutinee_type);
             }
             HirPattern::Or(patterns) => {
-                // Only the first alternative is bound; binding all of them is
-                // not implemented.
-                if let Some(first) = patterns.first() {
-                    self.bind_pattern_with_scrutinee_type(first, value, scrutinee_type);
+                self.bind_or_pattern(pattern, patterns, value, scrutinee_type);
+            }
+        }
+    }
+
+    /// `A(x, _) | B(_, x)`: each alternative binds `x` from its own position.
+    /// The alternatives are tested in order, the matching one is bound in a
+    /// block of its own, and each variable is the phi of what they bound.
+    fn bind_or_pattern(
+        &mut self,
+        pattern: &HirPattern,
+        alternatives: &[HirPattern],
+        value: IrId,
+        scrutinee_type: Option<TypeId>,
+    ) {
+        let mut variables = std::collections::BTreeSet::new();
+        self.collect_pattern_variables(pattern, &mut variables);
+        if alternatives.len() < 2 || variables.is_empty() {
+            if let Some(first) = alternatives.first() {
+                self.bind_pattern_with_scrutinee_type(first, value, scrutinee_type);
+            }
+            return;
+        }
+        let Some(merge) = self.builder.create_block() else {
+            return;
+        };
+        let mut types: std::collections::BTreeMap<SymbolId, IrType> = Default::default();
+        let mut incoming: Vec<(IrBlockId, Vec<(SymbolId, IrId)>)> = Vec::new();
+        for (index, alternative) in alternatives.iter().enumerate() {
+            let next = if index + 1 < alternatives.len() {
+                let Some(test) =
+                    self.lower_pattern_test_with_scrutinee_type(value, alternative, scrutinee_type)
+                else {
+                    return;
+                };
+                let (Some(bind), Some(next)) =
+                    (self.builder.create_block(), self.builder.create_block())
+                else {
+                    return;
+                };
+                self.builder.build_cond_branch(test, bind, next);
+                self.builder.switch_to_block(bind);
+                Some(next)
+            } else {
+                None
+            };
+            self.bind_pattern_with_scrutinee_type(alternative, value, scrutinee_type);
+            let mut bound = Vec::new();
+            for symbol in &variables {
+                let Some(&register) = self.symbol_map.get(symbol) else {
+                    continue;
+                };
+                let register = match types.get(symbol) {
+                    Some(ty) => self.coerce_reg_to(register, ty).unwrap_or(register),
+                    None => {
+                        if let Some(ty) = self.builder.get_register_type(register) {
+                            types.insert(*symbol, ty);
+                        }
+                        register
+                    }
+                };
+                bound.push((*symbol, register));
+            }
+            let Some(from) = self.builder.current_block() else {
+                return;
+            };
+            self.builder.build_branch(merge);
+            incoming.push((from, bound));
+            if let Some(next) = next {
+                self.builder.switch_to_block(next);
+            }
+        }
+        self.builder.switch_to_block(merge);
+        for symbol in &variables {
+            let Some(ty) = types.get(symbol).cloned() else {
+                continue;
+            };
+            let Some(phi) = self.builder.build_phi(merge, ty) else {
+                continue;
+            };
+            for (from, bound) in &incoming {
+                if let Some(&(_, register)) = bound.iter().find(|(s, _)| s == symbol) {
+                    self.builder.add_phi_incoming(merge, phi, *from, register);
                 }
             }
+            self.symbol_map.insert(*symbol, phi);
+            let _ = self.box_capture_binding(*symbol, phi);
         }
     }
 
@@ -359,6 +440,14 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(rest_pat) = rest {
                     self.collect_pattern_variables(rest_pat, variables);
                 }
+            }
+            HirPattern::Or(patterns) => {
+                for p in patterns {
+                    self.collect_pattern_variables(p, variables);
+                }
+            }
+            HirPattern::Guard { pattern, .. } | HirPattern::Typed { pattern, .. } => {
+                self.collect_pattern_variables(pattern, variables);
             }
             _ => {}
         }

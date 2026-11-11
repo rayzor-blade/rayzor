@@ -2084,9 +2084,12 @@ impl<'a> HirToMirContext<'a> {
                 }
                 // `Null<T>` of a reference type is the same raw pointer as `T`, so
                 // its members resolve through `T`; a scalar's `Null` is a box.
+                // `T` is judged after its own aliases and forward references.
                 Some(TypeKind::Optional { inner_type })
                     if matches!(
-                        type_table.get(*inner_type).map(|t| &t.kind),
+                        type_table
+                            .get(self.resolve_through_aliases(*inner_type))
+                            .map(|t| &t.kind),
                         Some(
                             TypeKind::String
                                 | TypeKind::Class { .. }
@@ -2096,11 +2099,10 @@ impl<'a> HirToMirContext<'a> {
                                 | TypeKind::Function { .. }
                                 | TypeKind::Enum { .. }
                                 | TypeKind::Map { .. }
-                                | TypeKind::TypeAlias { .. }
                         )
                     ) =>
                 {
-                    current = *inner_type
+                    current = self.resolve_through_aliases(*inner_type)
                 }
                 Some(TypeKind::Placeholder { name }) => {
                     // Forward references retain their placeholder after declaration.

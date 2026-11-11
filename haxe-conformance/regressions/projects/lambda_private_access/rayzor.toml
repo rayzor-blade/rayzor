@@ -1,0 +1,5 @@
+[project]
+name = "lambda-private-access"
+entry = "./LambdaPrivateAccess.hx"
+[build]
+class-paths = ["."]

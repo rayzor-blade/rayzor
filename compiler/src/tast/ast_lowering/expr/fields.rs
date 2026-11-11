@@ -385,12 +385,25 @@ impl<'a> AstLowering<'a> {
                                     ))
                                     .or_else(|| self.resolve_class_like_symbol_by_name(name))
                             };
+                            // `Owner.Name` is the owner's static or enum
+                            // constructor before any type named `Name`.
                             if owner.is_some_and(|owner| {
                                 self.class_fields.get(&owner).is_some_and(|fields| {
                                     fields.iter().any(|(name, _, is_static)| {
                                         *name == class_name_interned && *is_static
                                     })
-                                })
+                                }) || self
+                                    .context
+                                    .symbol_table
+                                    .get_enum_variants(owner)
+                                    .is_some_and(|variants| {
+                                        variants.iter().any(|&variant| {
+                                            self.context
+                                                .symbol_table
+                                                .get_symbol(variant)
+                                                .is_some_and(|v| v.name == class_name_interned)
+                                        })
+                                    })
                             }) {
                                 return None;
                             }

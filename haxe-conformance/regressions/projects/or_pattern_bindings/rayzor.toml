@@ -1,0 +1,5 @@
+[project]
+name = "or-pattern-bindings"
+entry = "./OrPatternBindings.hx"
+[build]
+class-paths = ["."]

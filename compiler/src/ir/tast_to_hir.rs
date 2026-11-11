@@ -51,6 +51,10 @@ pub struct TastToHirContext<'a> {
     /// Current scope
     current_scope: ScopeId,
 
+    /// The type a switch's case patterns are matched against, while they are
+    /// lowered: it says which enum a constructor name belongs to.
+    pattern_subject: Option<TypeId>,
+
     /// Current lifetime
     current_lifetime: LifetimeId,
 
@@ -204,6 +208,7 @@ impl<'a> TastToHirContext<'a> {
                 },
             },
             current_scope: ScopeId::from_raw(0),
+            pattern_subject: None,
             current_lifetime: LifetimeId::from_raw(0),
             loop_labels: Vec::new(),
             errors: Vec::new(),
@@ -3449,10 +3454,12 @@ impl<'a> TastToHirContext<'a> {
                     let mut hir_cases = Vec::new();
 
                     for case in cases {
+                        let outer_subject = self.pattern_subject.replace(discriminant.expr_type);
                         let mut patterns = vec![self.lower_case_value_pattern(&case.case_value)];
                         for extra in &case.extra_case_values {
                             patterns.push(self.lower_case_value_pattern(extra));
                         }
+                        self.pattern_subject = outer_subject;
                         let body = self.lower_case_body_to_assign(&case.body, result_symbol);
 
                         hir_cases.push(HirMatchCase {
@@ -6178,6 +6185,105 @@ impl<'a> TastToHirContext<'a> {
         }
     }
 
+    /// The enum constructor a `case Name(...)` pattern names. A class may
+    /// share the name, so only constructors are candidates; a qualifier
+    /// (`Op.Name`) selects the enum, and among several the arity decides.
+    fn pattern_constructor_symbol(
+        &self,
+        path: &parser::TypePath,
+        arity: usize,
+    ) -> Option<&crate::tast::symbols::Symbol> {
+        use crate::tast::symbols::SymbolKind;
+        let name = self.string_interner.intern(&path.name);
+        let qualifier = path
+            .sub
+            .as_ref()
+            .map(|_| path.name.as_str())
+            .or_else(|| path.package.last().map(String::as_str));
+        let parent_name = |symbol: &crate::tast::symbols::Symbol| {
+            self.symbol_table
+                .find_parent_enum_for_constructor(symbol.id)
+                .and_then(|parent| self.symbol_table.get_symbol(parent))
+                .and_then(|parent| self.string_interner.get(parent.name))
+        };
+        let lookup_name = path
+            .sub
+            .as_deref()
+            .map(|sub| self.string_interner.intern(sub))
+            .unwrap_or(name);
+        let mut candidates = self
+            .symbol_table
+            .find_symbols_named(lookup_name, |s| s.kind == SymbolKind::EnumVariant);
+        if let Some(qualifier) = qualifier {
+            let qualified: Vec<_> = candidates
+                .iter()
+                .copied()
+                .filter(|s| parent_name(s) == Some(qualifier))
+                .collect();
+            if !qualified.is_empty() {
+                candidates = qualified;
+            }
+        }
+        // The switched value's own enum, through `Null<E>` and aliases.
+        if candidates.len() > 1
+            && let Some(subject) = self.pattern_subject
+        {
+            let subject_enum = {
+                let table = self.type_table.borrow();
+                let mut current = subject;
+                let mut steps = 0;
+                loop {
+                    steps += 1;
+                    match table.get(current).map(|t| &t.kind) {
+                        Some(crate::tast::TypeKind::Optional { inner_type }) if steps < 16 => {
+                            current = *inner_type
+                        }
+                        Some(crate::tast::TypeKind::TypeAlias { target_type, .. })
+                            if steps < 16 =>
+                        {
+                            current = *target_type
+                        }
+                        Some(crate::tast::TypeKind::Enum { symbol_id, .. }) => {
+                            break Some(*symbol_id);
+                        }
+                        _ => break None,
+                    }
+                }
+            };
+            if let Some(subject_enum) = subject_enum
+                && let Some(found) = candidates.iter().copied().find(|s| {
+                    self.symbol_table.find_parent_enum_for_constructor(s.id) == Some(subject_enum)
+                })
+            {
+                return Some(found);
+            }
+        }
+        if candidates.len() > 1 {
+            let in_scope = self
+                .symbol_table
+                .lookup_symbol(crate::tast::ScopeId::first(), lookup_name)
+                .filter(|s| s.kind == SymbolKind::EnumVariant)
+                .map(|s| s.id);
+            if let Some(found) = candidates.iter().find(|s| Some(s.id) == in_scope) {
+                return Some(found);
+            }
+            let fitting: Vec<_> = candidates
+                .iter()
+                .copied()
+                .filter(|s| {
+                    matches!(
+                        self.type_table.borrow().get(s.type_id).map(|t| &t.kind),
+                        Some(crate::tast::TypeKind::Function { params, .. }) if params.len() == arity
+                    )
+                })
+                .collect();
+            if fitting.len() == 1 {
+                return fitting.into_iter().next();
+            }
+        }
+        candidates.into_iter().next()
+    }
+
     /// Convert a parser::Pattern to HirPattern for switch case matching
     fn lower_parser_pattern_to_hir(&mut self, pattern: &parser::Pattern) -> HirPattern {
         self.lower_parser_pattern_to_hir_with_bindings(pattern, &[])
@@ -6193,10 +6299,7 @@ impl<'a> TastToHirContext<'a> {
             parser::Pattern::Constructor { path, params } => {
                 let name_interned = self.string_interner.intern(&path.name);
                 // Look up the enum variant symbol
-                if let Some(sym) = self
-                    .symbol_table
-                    .lookup_symbol(crate::tast::ScopeId::first(), name_interned)
-                {
+                if let Some(sym) = self.pattern_constructor_symbol(path, params.len()) {
                     let sym_id = sym.id;
                     if sym.kind == crate::tast::symbols::SymbolKind::EnumVariant {
                         let enum_type = self
@@ -6236,9 +6339,13 @@ impl<'a> TastToHirContext<'a> {
                 }
 
                 // Not bound by AST lowering: a constructor with no arguments.
+                let bare = parser::TypePath {
+                    package: Vec::new(),
+                    name: name.clone(),
+                    sub: None,
+                };
                 if let Some(sym) = self
-                    .symbol_table
-                    .lookup_symbol(crate::tast::ScopeId::first(), name_interned)
+                    .pattern_constructor_symbol(&bare, 0)
                     .filter(|s| s.kind == crate::tast::symbols::SymbolKind::EnumVariant)
                 {
                     let enum_type = self
@@ -10325,10 +10432,13 @@ impl<'a> TastToHirContext<'a> {
             | TypedExpressionKind::Continue
             | TypedExpressionKind::StaticFieldAccess { .. }
             | TypedExpressionKind::PatternPlaceholder { .. }
-            | TypedExpressionKind::Meta { .. }
             | TypedExpressionKind::DollarIdent { .. }
             | TypedExpressionKind::MacroExpression { .. }
             | TypedExpressionKind::CompilerSpecific { .. } => {}
+            // `@:privateAccess e` and other metadata read what `e` reads.
+            TypedExpressionKind::Meta { expression, .. } => {
+                self.collect_var_refs_expr(expression, refs);
+            }
         }
     }
 
@@ -10612,6 +10722,9 @@ impl<'a> TastToHirContext<'a> {
                 self.collect_local_defs_expr(index, defs);
             }
             TypedExpressionKind::Cast { expression, .. } => {
+                self.collect_local_defs_expr(expression, defs);
+            }
+            TypedExpressionKind::Meta { expression, .. } => {
                 self.collect_local_defs_expr(expression, defs);
             }
             _ => {} // Other expression types don't define local variables

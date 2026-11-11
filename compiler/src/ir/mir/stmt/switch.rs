@@ -150,6 +150,12 @@ impl<'a> HirToMirContext<'a> {
         // Every case starts from the bindings before the switch: a loop in one
         // case rebinds even names it never assigns to registers of its own blocks.
         let pre_switch_symbols = self.symbol_map.clone();
+        // `case A(x) | B(x)` and `case A(x), B(x)`: every pattern binds from
+        // its own positions, whichever matched.
+        let case_binding = |patterns: &[HirPattern]| match patterns {
+            [single] => single.clone(),
+            _ => HirPattern::Or(patterns.to_vec()),
+        };
 
         for (i, case) in cases.iter().enumerate() {
             self.symbol_map = pre_switch_symbols.clone();
@@ -235,7 +241,7 @@ impl<'a> HirToMirContext<'a> {
                     // dominates the body, which reuses the bindings.
                     if !case.patterns.is_empty() {
                         self.bind_pattern_with_scrutinee_type(
-                            &case.patterns[0],
+                            &case_binding(&case.patterns),
                             binding_value(&case.patterns[0]),
                             Some(scrut_ty),
                         );
@@ -273,7 +279,7 @@ impl<'a> HirToMirContext<'a> {
             // Bind pattern variables (extract enum fields into variable symbols)
             if !bound && !case.patterns.is_empty() {
                 self.bind_pattern_with_scrutinee_type(
-                    &case.patterns[0],
+                    &case_binding(&case.patterns),
                     binding_value(&case.patterns[0]),
                     Some(scrut_ty),
                 );
