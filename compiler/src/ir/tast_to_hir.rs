@@ -482,9 +482,16 @@ impl<'a> TastToHirContext<'a> {
                 file.abstracts
                     .iter()
                     .flat_map(|abs| {
-                        abs.fields
-                            .iter()
-                            .filter(move |field| abs.is_enum_abstract || is_inline_field(field))
+                        // An enum abstract's values are of the abstract's type;
+                        // its other statics are ordinary fields.
+                        let type_table = &self.type_table;
+                        abs.fields.iter().filter(move |field| {
+                            let own = matches!(
+                                type_table.borrow().get(field.field_type).map(|t| &t.kind),
+                                Some(TypeKind::Abstract { symbol_id, .. }) if *symbol_id == abs.symbol_id
+                            );
+                            (abs.is_enum_abstract && own) || is_inline_field(field)
+                        })
                     })
                     .filter(|field| field.is_static && field.initializer.is_some()),
             )
@@ -2105,7 +2112,13 @@ impl<'a> TastToHirContext<'a> {
                             ) {
                                 return None;
                             }
-                            self.inline_value_named(field.name, |_| true)
+                            let want_qname = field.qualified_name;
+                            self.inline_value_named(field.name, |sym| {
+                                match (want_qname, sym.qualified_name) {
+                                    (Some(want), Some(cand)) => want == cand,
+                                    _ => true,
+                                }
+                            })
                         });
                 if let Some(literal) = inline_literal {
                     if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
@@ -2155,8 +2168,14 @@ impl<'a> TastToHirContext<'a> {
                                 .map_or(false, |s| s.is_inline())
                                 || field.mutability != crate::tast::symbols::Mutability::Mutable;
                             if should_inline {
+                                // A regex literal is an object built once, not a constant.
                                 if let Some(ref init_expr) = field.initializer {
                                     if let TypedExpressionKind::Literal { value } = &init_expr.kind
+                                        && !matches!(
+                                            value,
+                                            LiteralValue::Regex(_)
+                                                | LiteralValue::RegexWithFlags { .. }
+                                        )
                                     {
                                         inlined_value =
                                             Some(HirExprKind::Literal(self.lower_literal(value)));
@@ -7847,6 +7866,10 @@ impl<'a> TastToHirContext<'a> {
         }
 
         if let Some(return_expr) = return_expr {
+            // A body the inliner cannot substitute through is called instead.
+            if !self.inline_safe(return_expr, &param_map) {
+                return None;
+            }
             // Use a dummy this_replacement (not used for static methods)
             let dummy_this = HirExpr::new(
                 HirExprKind::Null,
@@ -10726,6 +10749,29 @@ impl<'a> TastToHirContext<'a> {
             }
             TypedExpressionKind::Meta { expression, .. } => {
                 self.collect_local_defs_expr(expression, defs);
+            }
+            TypedExpressionKind::ArrayLiteral { elements, .. } => {
+                for elem in elements {
+                    self.collect_local_defs_expr(elem, defs);
+                }
+            }
+            TypedExpressionKind::MapLiteral { entries, .. } => {
+                for entry in entries {
+                    self.collect_local_defs_expr(&entry.key, defs);
+                    self.collect_local_defs_expr(&entry.value, defs);
+                }
+            }
+            TypedExpressionKind::ObjectLiteral { fields, .. } => {
+                for field in fields {
+                    self.collect_local_defs_expr(&field.value, defs);
+                }
+            }
+            TypedExpressionKind::StringInterpolation { parts, .. } => {
+                for part in parts {
+                    if let StringInterpolationPart::Expression(e) = part {
+                        self.collect_local_defs_expr(e, defs);
+                    }
+                }
             }
             _ => {} // Other expression types don't define local variables
         }
