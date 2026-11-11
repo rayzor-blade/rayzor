@@ -1866,7 +1866,11 @@ impl MacroExpander {
         // SAFETY: cleared before this function returns, on every path.
         unsafe { self.context.set_typer(typer) };
         let statics = self.class_registry.statics_snapshot();
-        let result = self.expand_macro_call(name, args, call);
+        // The result's own macro calls expand with the typer still live, as
+        // the immediate path walks an expansion.
+        let result = self
+            .expand_macro_call(name, args, call)
+            .and_then(|expanded| self.expand_expr(expanded));
         self.context.clear_typer();
         if matches!(&result, Err(MacroError::NeedsModule { .. })) {
             self.class_registry.restore_statics(statics);
