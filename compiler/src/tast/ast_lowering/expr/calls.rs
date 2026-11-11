@@ -8014,11 +8014,42 @@ impl<'a> AstLowering<'a> {
 
     /// The parameter types of a class's constructor, as `class_type` instantiates them.
     pub(crate) fn constructor_param_types(&mut self, class_type: TypeId) -> Option<Vec<TypeId>> {
-        let params = self.constructor_declared_param_types(class_type)?;
+        // A class without a constructor of its own takes its nearest ancestor's,
+        // written over that ancestor's type parameters: each `extends Base<Props>`
+        // on the way binds them.
+        let mut supertypes = Vec::new();
+        let mut current = self.resolve_type_to_class_symbol(class_type);
+        while let Some(class) = current {
+            let Some(superclass) = self
+                .context
+                .symbol_table
+                .get_class_hierarchy(class)
+                .and_then(|h| h.superclass)
+            else {
+                break;
+            };
+            if supertypes.len() > 16 || supertypes.contains(&superclass) {
+                break;
+            }
+            supertypes.push(superclass);
+            current = self.resolve_type_to_class_symbol(superclass);
+        }
+        let params = match self.constructor_declared_param_types(class_type) {
+            Some(params) => params,
+            None => supertypes
+                .clone()
+                .into_iter()
+                .find_map(|superclass| self.constructor_declared_param_types(superclass))?,
+        };
         Some(
             params
                 .into_iter()
-                .map(|param| self.substitute_receiver_type(param, class_type))
+                .map(|param| {
+                    let param = self.substitute_receiver_type(param, class_type);
+                    supertypes.iter().fold(param, |param, &superclass| {
+                        self.substitute_receiver_type(param, superclass)
+                    })
+                })
                 .collect(),
         )
     }

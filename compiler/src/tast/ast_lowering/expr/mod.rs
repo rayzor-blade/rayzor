@@ -2876,6 +2876,11 @@ impl<'a> AstLowering<'a> {
                 let previous_return = self.context.expected_return_type;
                 self.context.expected_return_type = body_return_hint;
                 self.expected_arg_type_stack.push(body_return_hint);
+                // `() -> new Map()` builds the map the expected return type names.
+                let previous_new_hint = self.context.expected_new_type_hint;
+                if !matches!(&expr.kind, ExprKind::Block(_)) {
+                    self.context.expected_new_type_hint = body_return_hint;
+                }
                 let lowered: Result<_, LoweringError> = (|| {
                     if matches!(&expr.kind, ExprKind::Block(_)) {
                         let body = self.lower_function_body(expr)?;
@@ -2902,6 +2907,7 @@ impl<'a> AstLowering<'a> {
                         Ok((body, return_type))
                     }
                 })();
+                self.context.expected_new_type_hint = previous_new_hint;
                 self.expected_arg_type_stack.pop();
                 self.context.expected_return_type = previous_return;
                 let (mut body, return_type) = lowered?;
