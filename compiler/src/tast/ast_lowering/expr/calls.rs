@@ -857,6 +857,29 @@ impl<'a> AstLowering<'a> {
                 );
             }
         }
+        let receiver_symbol = match self
+            .context
+            .type_table
+            .borrow()
+            .get(receiver.expr_type)
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Class { symbol_id, .. } | TypeKind::Abstract { symbol_id, .. }) => {
+                Some(*symbol_id)
+            }
+            _ => None,
+        };
+        if let Some(owner) = receiver_symbol.filter(|s| self.incomplete_classes.contains(s))
+            && self.incomplete_member_owner.is_none()
+        {
+            self.incomplete_member_owner = self
+                .context
+                .symbol_table
+                .get_symbol(owner)
+                .and_then(|s| s.qualified_name.or(Some(s.name)))
+                .and_then(|q| self.context.string_interner.get(q))
+                .map(str::to_string);
+        }
         let new_symbol = self.context.symbol_table.create_function(method_name);
         if let Some(symbol) = self.context.symbol_table.get_symbol_mut(new_symbol) {
             symbol
@@ -930,8 +953,12 @@ impl<'a> AstLowering<'a> {
                 .context
                 .symbol_table
                 .find_symbols_named(method_name, |sym| {
+                    // A placeholder an earlier attempt made is not the method.
                     sym.kind == crate::tast::symbols::SymbolKind::Function
                         && sym.name == method_name
+                        && !sym
+                            .flags
+                            .contains(crate::tast::SymbolFlags::METHOD_PLACEHOLDER)
                         && sym
                             .qualified_name
                             .and_then(|qn| self.context.string_interner.get(qn))
@@ -3223,11 +3250,36 @@ impl<'a> AstLowering<'a> {
                     _ => None,
                 }
             });
+            if let Some(formal) = arg_type_hint {
+                slf.try_bind_inferred_array_to_formal(&args[i], formal);
+            }
             slf.expected_lambda_params_stack.push(hint);
             slf.expected_arg_type_stack.push(arg_type_hint);
+            // `new Map()` as an argument takes the formal's type arguments.
+            let previous_new_hint = slf.context.expected_new_type_hint;
+            slf.context.expected_new_type_hint = arg_type_hint;
+            // An empty `[]` for a Map formal is the empty-map literal.
+            let empty_map = match (&args[i].kind, arg_type_hint) {
+                (ExprKind::Array(elements), Some(formal)) if elements.is_empty() => {
+                    slf.map_class_name(formal).map(|name| Expr {
+                        kind: ExprKind::New {
+                            type_path: parser::TypePath {
+                                package: Vec::new(),
+                                name,
+                                sub: None,
+                            },
+                            params: Vec::new(),
+                            args: Vec::new(),
+                        },
+                        span: args[i].span,
+                    })
+                }
+                _ => None,
+            };
             let result = slf
-                .lower_value_expression(&args[i])
+                .lower_value_expression(empty_map.as_ref().unwrap_or(&args[i]))
                 .map(|typed| slf.instantiate_function_reference(typed, arg_type_hint));
+            slf.context.expected_new_type_hint = previous_new_hint;
             slf.expected_arg_type_stack.pop();
             slf.expected_lambda_params_stack.pop();
             let typed = result?;

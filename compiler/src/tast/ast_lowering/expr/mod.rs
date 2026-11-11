@@ -1458,6 +1458,25 @@ impl<'a> AstLowering<'a> {
                         .map(|(i, a)| {
                             let a = self.coerce_arg_via_abstract_to(a, params.get(i).copied());
                             let a = self.coerce_arg_via_abstract_from(a, params.get(i).copied());
+                            // Literals inside a structure argument take the formal's
+                            // field types; a top-level Int for a Float is the call's.
+                            let a = match params.get(i).copied() {
+                                Some(formal) => {
+                                    // A formal over the class's type parameters is
+                                    // bound by this argument, not imposed on it.
+                                    let keep = {
+                                        let tt = self.context.type_table.borrow();
+                                        (a.expr_type == tt.int_type() && formal == tt.float_type())
+                                            || self.type_mentions_type_param(&tt, formal)
+                                    };
+                                    if keep {
+                                        a
+                                    } else {
+                                        self.retype_literal_to(a, formal)
+                                    }
+                                }
+                                None => a,
+                            };
                             let bound = declared_params
                                 .as_ref()
                                 .and_then(|declared| declared.get(i))
@@ -1847,8 +1866,11 @@ impl<'a> AstLowering<'a> {
                 else_expr,
             } => {
                 let cond_expr = self.lower_expression(cond)?;
-                let then_expression = self.lower_expression(then_expr)?;
-                let else_expression = Some(Box::new(self.lower_expression(else_expr)?));
+                let mut then_expression = self.lower_expression(then_expr)?;
+                let mut else_expression = self.lower_expression(else_expr)?;
+                // `c ? 0 : 4.5` is a Float, as Haxe unifies the branches.
+                self.widen_mixed_numeric(vec![&mut then_expression, &mut else_expression]);
+                let else_expression = Some(Box::new(else_expression));
 
                 TypedExpressionKind::Conditional {
                     condition: Box::new(cond_expr),
@@ -2040,9 +2062,11 @@ impl<'a> AstLowering<'a> {
                 else_branch,
             } => {
                 let cond_expr = self.lower_expression(cond)?;
-                let then_expr = self.lower_expression(then_branch)?;
+                let mut then_expr = self.lower_expression(then_branch)?;
                 let else_expr = if let Some(else_branch) = else_branch {
-                    Some(Box::new(self.lower_expression(else_branch)?))
+                    let mut otherwise = self.lower_expression(else_branch)?;
+                    self.widen_mixed_numeric(vec![&mut then_expr, &mut otherwise]);
+                    Some(Box::new(otherwise))
                 } else {
                     None
                 };
@@ -2103,8 +2127,20 @@ impl<'a> AstLowering<'a> {
                     .flatten()
                     .or(previous_hint)
                     .and_then(|ty| self.array_element_of(ty));
+                // A function literal element takes the element type's signature.
+                let lambda_hint = element_hint.and_then(|ty| {
+                    let table = self.context.type_table.borrow();
+                    match table
+                        .get(Self::resolve_alias_chain(&table, ty))
+                        .map(|t| &t.kind)
+                    {
+                        Some(TypeKind::Function { params, .. }) => Some(params.clone()),
+                        _ => None,
+                    }
+                });
                 self.context.expected_new_type_hint = element_hint;
                 self.expected_arg_type_stack.push(element_hint);
+                self.expected_lambda_params_stack.push(lambda_hint);
                 let lowered = elements
                     .iter()
                     .map(|elem| {
@@ -2114,6 +2150,7 @@ impl<'a> AstLowering<'a> {
                         })
                     })
                     .collect::<Result<Vec<_>, _>>();
+                self.expected_lambda_params_stack.pop();
                 self.expected_arg_type_stack.pop();
                 self.context.expected_new_type_hint = previous_hint;
                 let mut element_exprs = lowered?;
@@ -4488,16 +4525,24 @@ impl<'a> AstLowering<'a> {
                 }
                 expr
             }
-            // An Int where a Float is expected is that Float.
+            // An Int where a Float or Single is expected is that float.
             _ => {
-                let (int_t, float_t) = {
+                let (int_t, float_t, single_target) = {
                     let tt = self.context.type_table.borrow();
-                    (tt.int_type(), tt.float_type())
+                    let single = matches!(
+                        tt.get(target).map(|t| &t.kind),
+                        Some(TypeKind::Abstract { symbol_id, .. })
+                            if self.context.symbol_table.get_symbol(*symbol_id).is_some_and(|s| {
+                                is_haxe_std_type(s, self.context.string_interner, &["Single"])
+                            })
+                    );
+                    (tt.int_type(), tt.float_type(), single)
                 };
-                let float_target = target == float_t;
+                let float_target = target == float_t || single_target;
                 if !float_target || expr.expr_type != int_t {
                     return expr;
                 }
+                let float_t = target;
                 if let TypedExpressionKind::Literal {
                     value: LiteralValue::Int(n),
                 } = expr.kind

@@ -1071,9 +1071,13 @@ impl<'a> AstLowering<'a> {
 
                 let class_symbol = {
                     let type_table = self.context.type_table.borrow();
-                    let t = type_table.get(receiver_type_id)?;
+                    let t =
+                        type_table.get(Self::resolve_alias_chain(&type_table, receiver_type_id))?;
                     match &t.kind {
-                        crate::tast::core::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                        crate::tast::core::TypeKind::Class { symbol_id, .. }
+                        | crate::tast::core::TypeKind::Abstract { symbol_id, .. } => {
+                            Some(*symbol_id)
+                        }
                         _ => None,
                     }
                 };
@@ -1081,7 +1085,15 @@ impl<'a> AstLowering<'a> {
                 if let Some(method_sym) = class_symbol
                     .and_then(|class| self.resolve_class_method_symbol(class, method_name))
                 {
-                    return self.function_param_types_from_symbol(method_sym);
+                    // The receiver's type arguments stand for the owner's parameters.
+                    return self
+                        .function_param_types_from_symbol(method_sym)
+                        .map(|params| {
+                            params
+                                .into_iter()
+                                .map(|param| self.substitute_receiver_type(param, receiver_type_id))
+                                .collect()
+                        });
                 }
 
                 // Extension calls omit the receiver from their written arguments.
@@ -1096,6 +1108,24 @@ impl<'a> AstLowering<'a> {
                         .map(|p| self.substitute_alias_args(*p, &bindings))
                         .collect(),
                 )
+            }
+            // A call through a function value (`handlers.get(k)(a, b)`): its
+            // function type's parameters.
+            ExprKind::Call { .. } | ExprKind::Index { .. } | ExprKind::Paren(_) => {
+                let callee_type = self.lower_expression(callee).ok()?.expr_type;
+                let table = self.context.type_table.borrow();
+                let mut ty = Self::resolve_alias_chain(&table, callee_type);
+                if let Some(crate::tast::core::TypeKind::Optional { inner_type }) =
+                    table.get(ty).map(|t| &t.kind)
+                {
+                    ty = Self::resolve_alias_chain(&table, *inner_type);
+                }
+                match table.get(ty).map(|t| &t.kind) {
+                    Some(crate::tast::core::TypeKind::Function { params, .. }) => {
+                        Some(params.clone())
+                    }
+                    _ => None,
+                }
             }
             _ => None,
         }

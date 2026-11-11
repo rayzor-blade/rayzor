@@ -768,7 +768,14 @@ impl<'a> AstLowering<'a> {
         // iteration handles it
         let map_key_value_types: Option<(TypeId, TypeId)> = {
             let type_table = self.context.type_table.borrow();
-            if let Some(actual_type) = type_table.get(iterable_expr.expr_type) {
+            // `Null<Map<K, V>>` iterates as the map it holds.
+            let mut iterated = Self::resolve_alias_chain(&type_table, iterable_expr.expr_type);
+            if let Some(TypeKind::Optional { inner_type }) =
+                type_table.get(iterated).map(|t| &t.kind)
+            {
+                iterated = Self::resolve_alias_chain(&type_table, *inner_type);
+            }
+            if let Some(actual_type) = type_table.get(iterated) {
                 match &actual_type.kind {
                     TypeKind::Map {
                         key_type,

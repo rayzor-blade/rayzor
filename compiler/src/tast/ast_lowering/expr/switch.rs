@@ -1137,6 +1137,28 @@ impl<'a> AstLowering<'a> {
         })
     }
 
+    /// A bare name the switched enum abstract declares as one of its values.
+    fn names_subject_abstract_value(&mut self, pattern: &parser::Pattern) -> bool {
+        let parser::Pattern::Var(name) = pattern else {
+            return false;
+        };
+        let interned = self.context.intern_string(name);
+        self.resolve_enum_constructor_from_discriminant(interned)
+            .and_then(|symbol| self.context.symbol_table.get_symbol(symbol))
+            .is_some_and(|symbol| symbol.kind != crate::tast::symbols::SymbolKind::EnumVariant)
+    }
+
+    /// An or-pattern of values (`case A | B` over an enum abstract) is a list
+    /// of case values, not a binding pattern.
+    fn is_value_alternatives(&mut self, pattern: &parser::Pattern) -> bool {
+        match pattern {
+            parser::Pattern::Or(alternatives) => alternatives.iter().all(|alt| {
+                !self.pattern_has_variables(alt) || self.names_subject_abstract_value(alt)
+            }),
+            _ => false,
+        }
+    }
+
     /// The case with its value-naming bare names rewritten as constants.
     fn with_value_field_patterns(&mut self, case: &parser::Case) -> Option<parser::Case> {
         let mut changed = false;
@@ -1189,7 +1211,9 @@ impl<'a> AstLowering<'a> {
         // For switch expressions, the case body should be an expression
         let case_value = if let Some(first_pattern) = case.patterns.first() {
             // Check if this is a complex pattern that requires variable binding
-            if self.pattern_has_variables(first_pattern) {
+            if self.pattern_has_variables(first_pattern)
+                && !self.is_value_alternatives(first_pattern)
+            {
                 // Create a new scope for this case to bind pattern variables
                 let case_scope = self
                     .context
@@ -1304,7 +1328,9 @@ impl<'a> AstLowering<'a> {
         // TODO: Handle multiple patterns and guards properly
         let case_value = if let Some(first_pattern) = case.patterns.first() {
             // Check if this is a complex pattern that requires variable binding
-            if self.pattern_has_variables(first_pattern) {
+            if self.pattern_has_variables(first_pattern)
+                && !self.is_value_alternatives(first_pattern)
+            {
                 // Create a new scope for this case to bind pattern variables
                 let case_scope = self
                     .context
@@ -1443,7 +1469,7 @@ impl<'a> AstLowering<'a> {
             // multi-value-with-bindings is a rare combination and
             // mixing bindings across alternates would require the
             // pattern compiler to merge their scopes.
-            if self.pattern_has_variables(p) {
+            if self.pattern_has_variables(p) && !self.names_subject_abstract_value(p) {
                 continue;
             }
             match self.lower_pattern_to_expression(p) {

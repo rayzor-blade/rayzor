@@ -312,6 +312,14 @@ impl CompilationUnit {
                 }
             }
             build_roots.extend(inherited);
+            // A module declaring `macro function`s runs with its own imports and
+            // `using`s, which reach the interpreter only through its graph.
+            build_roots.extend(
+                self.loaded_import_haxe_files
+                    .iter()
+                    .filter(|file| declares_macro_functions(file))
+                    .filter_map(module_path_of),
+            );
             for root in &build_roots {
                 if let Err(error) = self.load_initialization_macro_modules(root) {
                     debug!("Cannot load macro dependencies for {root}: {error}");
@@ -700,7 +708,18 @@ impl CompilationUnit {
         );
 
         let t_ast_lower = profile_timer(self.config.profile_typecheck);
-        let lowered = lowering.lower_file(ast_file);
+        let mut lowered = lowering.lower_file(ast_file);
+        // A member synthesized on a type whose module has not compiled yet
+        // stands in for one its build has still to add: retry after it.
+        if retryable_import
+            && lowered.is_ok()
+            && let Some(type_name) = lowering.incomplete_member_owner.take()
+        {
+            lowered = Err(crate::tast::ast_lowering::LoweringError::UnresolvedType {
+                type_name,
+                location: crate::tast::SourceLocation::unknown(),
+            });
+        }
         let partial = lowering.partial_typed_file.take();
         if !lowering.editor_macro_diagnostics.is_empty() {
             self.file_macro_diagnostics
@@ -717,6 +736,8 @@ impl CompilationUnit {
         // its retry must read `Class.staticField` as the static it is.
         // A successful retry replaces what its failed attempt exported.
         let replaces = lowered.is_ok() && self.failed_attempts.contains(filename);
+        // Every type of a file that failed is incomplete until it compiles,
+        // whether or not its fields were reached.
         for (class_sym, fields) in lowering.export_class_fields() {
             if lowered.is_ok() {
                 self.incomplete_classes.remove(class_sym);
@@ -2050,6 +2071,32 @@ impl CompilationUnit {
 
 /// The modules `@:build` / `@:autoBuild` calls in `file` name: for
 /// `pkg.Mod.f()`, `pkg.Mod` and, for a sub-type, `pkg.Mod.Sub`'s module.
+/// Whether a type of `file` declares a `macro function`.
+fn declares_macro_functions(file: &HaxeFile) -> bool {
+    file.declarations.iter().any(|decl| {
+        let fields = match decl {
+            parser::TypeDeclaration::Class(c) => &c.fields,
+            parser::TypeDeclaration::Abstract(a) => &a.fields,
+            _ => return false,
+        };
+        fields
+            .iter()
+            .any(|field| field.modifiers.contains(&parser::Modifier::Macro))
+    })
+}
+
+/// `pack.Module` for a parsed file: its package and file stem.
+fn module_path_of(file: &HaxeFile) -> Option<String> {
+    let stem = std::path::Path::new(&file.filename).file_stem()?.to_str()?;
+    let mut parts: Vec<String> = file
+        .package
+        .as_ref()
+        .map(|p| p.path.clone())
+        .unwrap_or_default();
+    parts.push(stem.to_string());
+    Some(parts.join("."))
+}
+
 fn build_macro_module_paths(file: &HaxeFile) -> Vec<String> {
     let metas = file.declarations.iter().flat_map(|decl| match decl {
         parser::TypeDeclaration::Class(c) => c.meta.iter().collect::<Vec<_>>(),

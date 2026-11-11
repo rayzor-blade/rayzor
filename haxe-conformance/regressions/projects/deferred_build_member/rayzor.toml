@@ -1,0 +1,5 @@
+[project]
+name = "deferred-build-member"
+entry = "./DeferredBuildMember.hx"
+[build]
+class-paths = ["."]

@@ -1610,6 +1610,8 @@ pub struct AstLowering<'a> {
     /// Classes declared by a file whose last attempt failed: their inherited
     /// members are not in place, so a subclass waits for the retry.
     pub(crate) incomplete_classes: std::collections::BTreeSet<SymbolId>,
+    /// The qualified name of an incomplete type a placeholder member was made for.
+    pub(crate) incomplete_member_owner: Option<String>,
     /// This file is compiled by the import loop, which retries a failed file.
     pub(crate) retryable_import: bool,
     /// This file is one the unit compiles for its own sake, not an import:

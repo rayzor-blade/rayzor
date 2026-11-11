@@ -1,0 +1,5 @@
+[project]
+name = "macro-function-deps"
+entry = "./MacroFunctionDeps.hx"
+[build]
+class-paths = ["."]

@@ -76,6 +76,43 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// An untyped empty array passed for an `Array<T>` formal with a concrete
+    /// `T` is that array type, as the use binds Haxe's monomorph.
+    pub(crate) fn try_bind_inferred_array_to_formal(&mut self, arg_ast: &Expr, formal: TypeId) {
+        let ExprKind::Ident(name) = &arg_ast.kind else {
+            return;
+        };
+        let interned = self.context.intern_string(name);
+        let Some(sym) = self.resolve_symbol_in_scope_hierarchy(interned) else {
+            return;
+        };
+        if !self.empty_array_inferred.contains_key(&sym) {
+            return;
+        }
+        let concrete = {
+            let tt = self.context.type_table.borrow();
+            let formal = Self::resolve_alias_chain(&tt, formal);
+            match tt.get(formal).map(|t| &t.kind) {
+                Some(TypeKind::Array { element_type }) => (!matches!(
+                    tt.get(*element_type).map(|t| &t.kind),
+                    None | Some(
+                        TypeKind::Dynamic
+                            | TypeKind::Unknown
+                            | TypeKind::Error
+                            | TypeKind::TypeParameter { .. }
+                    )
+                ))
+                .then_some(formal),
+                _ => None,
+            }
+        };
+        if let Some(array_ty) = concrete {
+            self.context.symbol_table.update_symbol_type(sym, array_ty);
+            self.empty_array_inferred.remove(&sym);
+            self.empty_array_used_uncertain.remove(&sym);
+        }
+    }
+
     /// Drain the "untyped empty array, element type uncertain" warnings: symbols
     /// that were used but never bound to a concrete element type, so they stay
     /// `Array<Dynamic>`. Returns (declaration location, message) pairs for the
