@@ -1607,6 +1607,10 @@ fn run_file(
         "jit"
     };
     let mut compile_defines: Vec<String> = vec![tier_define.to_string()];
+    let initialization_macros: Vec<String> = manifest_project
+        .as_ref()
+        .map(|project| project.initialization_macros())
+        .unwrap_or_default();
 
     // Native source runs now honor manifest `[build.defines]`, matching the
     // WASM command. The current preprocessor stores define presence only, so
@@ -1704,6 +1708,7 @@ fn run_file(
         std::env::var("RAYZOR_RAW_MIR").is_ok().hash(&mut h);
         skip_mir_opt.hash(&mut h);
         compile_defines.hash(&mut h);
+        initialization_macros.hash(&mut h);
         resources.hash(&mut h);
         for dir in &manifest_dirs {
             dir.to_string_lossy().hash(&mut h);
@@ -1825,6 +1830,7 @@ fn run_file(
                 None
             },
             resources,
+            &initialization_macros,
         )?;
         let mut mir_module = compile_result.module;
         let compile_diagnostics = compile_result.diagnostics;

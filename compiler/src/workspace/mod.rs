@@ -177,6 +177,15 @@ impl Project {
             .collect()
     }
 
+    /// `[build] macros`: initialization macro calls, in declaration order.
+    pub fn initialization_macros(&self) -> Vec<String> {
+        self.manifest
+            .build
+            .as_ref()
+            .map(|b| b.macros.clone())
+            .unwrap_or_default()
+    }
+
     /// Get defines as (key, optional value) pairs.
     pub fn defines(&self) -> Vec<(String, Option<String>)> {
         self.manifest

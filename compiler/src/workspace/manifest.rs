@@ -137,6 +137,10 @@ pub struct BuildConfig {
     /// relative to the manifest's directory. Without `@` the name is the file.
     #[serde(default)]
     pub resources: Vec<String>,
+    /// Initialization macros, as `--macro` spells them (`pack.Class.call()`),
+    /// run in order before the program's types are built.
+    #[serde(default)]
+    pub macros: Vec<String>,
 }
 
 /// `[cache]` section.

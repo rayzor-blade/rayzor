@@ -351,6 +351,10 @@ pub fn cmd_run_wasm(
         !no_cache,
         None,
         Vec::new(),
+        &project
+            .as_ref()
+            .map(|project| project.initialization_macros())
+            .unwrap_or_default(),
     )?;
 
     let _loaded_rpkgs = compile_inputs.loaded_rpkgs;
@@ -2160,6 +2164,7 @@ mod tests {
             false,
             None,
             Vec::new(),
+            &[],
         )
         .unwrap();
         let module = optimize_wasm_mir(result.module);

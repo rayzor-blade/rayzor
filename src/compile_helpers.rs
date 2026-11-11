@@ -55,6 +55,7 @@ pub fn compile_haxe_to_mir_with_cache(
         enable_cache,
         cache_dir,
         Vec::new(),
+        &[],
     )?;
     Ok((result.module, result.diagnostics))
 }
@@ -96,6 +97,7 @@ pub fn compile_haxe_to_mir_with_defines(
         true,
         None,
         Vec::new(),
+        &[],
     )
 }
 
@@ -151,6 +153,7 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
     enable_cache: bool,
     cache_dir: Option<PathBuf>,
     resources: Vec<(String, Vec<u8>)>,
+    initialization_macros: &[String],
 ) -> Result<MirCompilationResult, String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
 
@@ -196,6 +199,11 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
     let t_stdlib = profile_compile.then(std::time::Instant::now);
     unit.load_stdlib()
         .map_err(|e| format!("Failed to load stdlib: {}", e))?;
+    // `--macro` calls run before the program's own files are added.
+    let failures = unit.run_initialization_macros(initialization_macros);
+    if !failures.is_empty() {
+        return Err(failures.join("\n"));
+    }
     let stdlib_ms = t_stdlib
         .map(|t| t.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
