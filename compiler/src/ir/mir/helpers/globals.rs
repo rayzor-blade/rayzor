@@ -32,6 +32,18 @@ impl<'a> HirToMirContext<'a> {
         if self.bypass_accessors {
             return None;
         }
+        // The same class typed twice gives its field two symbols with one
+        // qualified name; the property is recorded under one of them.
+        let symbol = if self.property_access_map.contains_key(&symbol) {
+            symbol
+        } else {
+            let qn = self.symbol_table.get_symbol(symbol)?.qualified_name?;
+            *self.property_access_map.keys().find(|candidate| {
+                self.symbol_table
+                    .get_symbol(**candidate)
+                    .is_some_and(|s| s.qualified_name == Some(qn))
+            })?
+        };
         let info = self.property_access_map.get(&symbol)?;
         let accessor = if read { &info.getter } else { &info.setter };
         let crate::tast::PropertyAccessor::Method(name) = accessor else {

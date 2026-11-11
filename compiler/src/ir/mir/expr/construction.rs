@@ -423,40 +423,34 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Final fallback before the value wrap: constructor_name_map, bare name
-        // first, then the qualified name from the symbol table.
+        // Final fallback before the value wrap: constructor_name_map by the
+        // qualified name, then by the bare name. A root-package class's
+        // qualified name is bare, so the order keeps `p.Thing` off it.
         if !has_constructor {
-            if let Some(class_name) = final_class_name {
-                if let Some(&func_id) = self.constructor_name_map.get(class_name) {
-                    constructor_type_id = *class_type;
-                    has_constructor = true;
-                    ctor_path = "bare-name";
-                    self.constructor_map.insert(*class_type, func_id);
-                    let bare = class_name.rsplit('.').next().unwrap_or(class_name);
-                    self.constructor_owner_map
-                        .entry(func_id)
-                        .or_insert_with(|| bare.to_string());
-                }
-            }
-            if !has_constructor {
-                if let Some(sym_id) = actual_symbol_id {
-                    if let Some(sym) = self.symbol_table.get_symbol(sym_id) {
-                        if let Some(qn) = sym.qualified_name {
-                            if let Some(qual_name) = self.string_interner.get(qn) {
-                                if let Some(&func_id) = self.constructor_name_map.get(qual_name) {
-                                    constructor_type_id = *class_type;
-                                    has_constructor = true;
-                                    ctor_path = "qual-name";
-                                    self.constructor_map.insert(*class_type, func_id);
-                                    let bare = qual_name.rsplit('.').next().unwrap_or(qual_name);
-                                    self.constructor_owner_map
-                                        .entry(func_id)
-                                        .or_insert_with(|| bare.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
+            let qualified = actual_symbol_id
+                .and_then(|sym_id| self.symbol_table.get_symbol(sym_id))
+                .and_then(|sym| sym.qualified_name)
+                .and_then(|qn| self.string_interner.get(qn));
+            let found = qualified
+                .and_then(|qn| {
+                    self.constructor_name_map
+                        .get(qn)
+                        .map(|&f| (f, qn, "qual-name"))
+                })
+                .or_else(|| {
+                    final_class_name.and_then(|name| {
+                        self.constructor_name_map
+                            .get(name)
+                            .map(|&f| (f, name, "bare-name"))
+                    })
+                });
+            if let Some((func_id, name, path)) = found {
+                constructor_type_id = *class_type;
+                has_constructor = true;
+                ctor_path = path;
+                self.constructor_map.insert(*class_type, func_id);
+                let bare = name.rsplit('.').next().unwrap_or(name).to_string();
+                self.constructor_owner_map.entry(func_id).or_insert(bare);
             }
         }
 

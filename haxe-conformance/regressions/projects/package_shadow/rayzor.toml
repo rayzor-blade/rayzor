@@ -1,0 +1,5 @@
+[project]
+name = "package-shadow"
+entry = "./PackageShadow.hx"
+[build]
+class-paths = ["."]

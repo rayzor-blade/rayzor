@@ -54,9 +54,10 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Check the iterable expression's type to determine iteration strategy
+        // `Null<Map<K, V>>` iterates as the map it holds.
         let iter_type_kind = {
-            let type_table = self.type_table;
-            type_table.get(iter_expr.ty).map(|t| t.kind.clone())
+            let iterated = self.resolve_through_aliases(iter_expr.ty);
+            self.type_table.get(iterated).map(|t| t.kind.clone())
         };
 
         // For Map types (including IntMap/StringMap extern classes), convert keys

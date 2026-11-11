@@ -310,11 +310,9 @@ impl<'a> HirToMirContext<'a> {
                         reg
                     };
                     if callee_is_user_defined {
-                        let is_heap_intermediate = matches!(
-                            &arg.kind,
-                            HirExprKind::New { .. } | HirExprKind::Call { .. }
-                        ) && self.get_drop_behavior(arg.ty)
-                            == DropBehavior::AutoDrop
+                        // Only a `new` is this call's own: a call result may be held elsewhere.
+                        let is_heap_intermediate = matches!(&arg.kind, HirExprKind::New { .. })
+                            && self.get_drop_behavior(arg.ty) == DropBehavior::AutoDrop
                             && !self.is_type_token_call(arg)
                             && !self.interface_wrapped_args.contains(&reg);
                         if is_heap_intermediate {

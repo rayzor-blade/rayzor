@@ -140,6 +140,20 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_call_direct(f, vec![value], IrType::I32)
     }
 
+    /// The declared type of `field` in the object slot `slot`. Only a field of
+    /// the same name there carries it; other classes' symbols may share the
+    /// slot, so otherwise the access's own type stands.
+    fn slot_field_type(&self, slot: (TypeId, u32), field: SymbolId, field_ty: TypeId) -> TypeId {
+        let name = self.symbol_table.get_symbol(field).map(|s| s.name);
+        self.field_index_map
+            .iter()
+            .filter(|(_, at)| **at == slot)
+            .filter_map(|(sym, _)| self.symbol_table.get_symbol(*sym))
+            .find(|si| Some(si.name) == name)
+            .map(|si| si.type_id)
+            .unwrap_or(field_ty)
+    }
+
     pub(crate) fn lower_field_access(
         &mut self,
         obj: IrId,
@@ -1056,17 +1070,7 @@ impl<'a> HirToMirContext<'a> {
                         .map(|s| s.type_id)
                         .unwrap_or(field_ty)
                 } else {
-                    let (cty, cidx) = chosen;
-                    let mut st = field_ty;
-                    for (sym, &(mcty, mcidx)) in &self.field_index_map {
-                        if mcty == cty && mcidx == cidx {
-                            if let Some(si) = self.symbol_table.get_symbol(*sym) {
-                                st = si.type_id;
-                            }
-                            break;
-                        }
-                    }
-                    st
+                    self.slot_field_type(chosen, field, field_ty)
                 };
                 (chosen.0, chosen.1, sym_type)
             }
@@ -1086,19 +1090,11 @@ impl<'a> HirToMirContext<'a> {
                 let found_result = self
                     .resolve_field_index_by_name(field_name, receiver_ty)
                     .map(|(class_ty, idx)| {
-                        let sym_type = {
-                            let mut st = field_ty;
-                            for (sym, &(cty, cidx)) in &self.field_index_map {
-                                if cty == class_ty && cidx == idx {
-                                    if let Some(si) = self.symbol_table.get_symbol(*sym) {
-                                        st = si.type_id;
-                                    }
-                                    break;
-                                }
-                            }
-                            st
-                        };
-                        (class_ty, idx, sym_type)
+                        (
+                            class_ty,
+                            idx,
+                            self.slot_field_type((class_ty, idx), field, field_ty),
+                        )
                     });
 
                 // Derive-trait returns (e.g. clone()) leave the receiver's HIR type
