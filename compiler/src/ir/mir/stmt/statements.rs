@@ -1738,7 +1738,11 @@ impl<'a> HirToMirContext<'a> {
 
         if trailing {
             let value = match block.statements.last()? {
-                HirStatement::Expr(expr) => self.lower_expression(expr),
+                HirStatement::Expr(expr) => {
+                    let value = self.lower_expression(expr);
+                    self.release_block_value(expr);
+                    value
+                }
                 stmt @ HirStatement::Assign { .. } => self.lower_statement(stmt),
                 _ => unreachable!("checked above"),
             };
@@ -1748,9 +1752,21 @@ impl<'a> HirToMirContext<'a> {
         }
 
         if let Some(expr) = &block.expr {
-            self.lower_expression(expr)
+            let value = self.lower_expression(expr);
+            self.release_block_value(expr);
+            value
         } else {
             None
+        }
+    }
+
+    /// `{ var t = new C(); t; }`: the block's value is the local it names, so the
+    /// local's ownership moves to whatever receives the value.
+    fn release_block_value(&mut self, expr: &HirExpr) {
+        if let HirExprKind::Variable { symbol, .. } = &expr.kind
+            && self.owned_heap_values.remove(symbol).is_some()
+        {
+            self.reassigned_in_scope.insert(*symbol);
         }
     }
 }
