@@ -239,6 +239,70 @@ pub fn process_build_macros_with_class_registry(
 
                 new_decls.push(TypeDeclaration::Class(class));
             }
+            // An abstract's `@:build` sees and returns its fields through the
+            // same class-shaped view.
+            TypeDeclaration::Abstract(mut abstract_decl)
+                if abstract_decl
+                    .meta
+                    .iter()
+                    .any(|m| m.name == "build" || m.name == ":build") =>
+            {
+                let build_metas: Vec<_> = abstract_decl
+                    .meta
+                    .iter()
+                    .filter(|m| m.name == "build" || m.name == ":build")
+                    .cloned()
+                    .collect();
+                let mut view = ClassDecl {
+                    meta: abstract_decl.meta.clone(),
+                    access: abstract_decl.access.clone(),
+                    modifiers: abstract_decl.modifiers.clone(),
+                    name: abstract_decl.name.clone(),
+                    type_params: abstract_decl.type_params.clone(),
+                    extends: None,
+                    implements: Vec::new(),
+                    fields: std::mem::take(&mut abstract_decl.fields),
+                    span: abstract_decl.span,
+                    is_abstract: false,
+                };
+                let mut deferred = false;
+                for meta in &build_metas {
+                    if deferred {
+                        defer_build_macro(&mut view, meta);
+                        continue;
+                    }
+                    match apply_build_macro(
+                        &mut view,
+                        meta,
+                        registry,
+                        class_registry.clone(),
+                        &file_pack,
+                        &file.filename,
+                        None,
+                    ) {
+                        Ok(emitted) => {
+                            diagnostics.extend(emitted);
+                            applied_count += 1;
+                        }
+                        Err(MacroError::NeedsTyper { .. }) => {
+                            defer_build_macro(&mut view, meta);
+                            deferred = true;
+                        }
+                        Err(e) => {
+                            diagnostics.push(
+                                MacroDiagnostic::error(
+                                    format!("@:build macro failed on '{}': {}", view.name, e),
+                                    e.location(),
+                                )
+                                .with_call_site(super::errors::span_to_location(meta.span)),
+                            );
+                        }
+                    }
+                }
+                abstract_decl.fields = view.fields;
+                abstract_decl.meta = view.meta;
+                new_decls.push(TypeDeclaration::Abstract(abstract_decl));
+            }
             other => new_decls.push(other),
         }
     }

@@ -1,0 +1,5 @@
+[project]
+name = "abstract-build-macros"
+entry = "./AbstractBuildMacros.hx"
+[build]
+class-paths = ["."]

@@ -325,8 +325,13 @@ impl MacroExpander {
             self.expansion_origins.extend(build_result.origins);
             file = build_result.file;
             self.deferred_builds = file.declarations.iter().any(|declaration| {
-                matches!(declaration, TypeDeclaration::Class(class)
-                    if class.meta.iter().any(|meta| meta.name.trim_start_matches(':') == "rayzorDeferredBuild"))
+                let meta = match declaration {
+                    TypeDeclaration::Class(class) => &class.meta,
+                    TypeDeclaration::Abstract(abstract_decl) => &abstract_decl.meta,
+                    _ => return false,
+                };
+                meta.iter()
+                    .any(|meta| meta.name.trim_start_matches(':') == "rayzorDeferredBuild")
             });
             self.expansions_count += build_result.applied_count;
             for diag in build_result.diagnostics {
@@ -1777,16 +1782,19 @@ pub struct BuildMacroInfo {
 fn collect_build_macros(file: &HaxeFile) -> Vec<BuildMacroInfo> {
     let mut result = Vec::new();
     for decl in &file.declarations {
-        if let TypeDeclaration::Class(class) = decl {
-            for meta in &class.meta {
-                if meta.name == "build" || meta.name == ":build" {
-                    let macro_name = extract_build_macro_name(meta);
-                    result.push(BuildMacroInfo {
-                        macro_name,
-                        class_name: class.name.clone(),
-                        location: super::errors::span_to_location(meta.span),
-                    });
-                }
+        let (name, metas) = match decl {
+            TypeDeclaration::Class(class) => (&class.name, &class.meta),
+            TypeDeclaration::Abstract(abstract_decl) => (&abstract_decl.name, &abstract_decl.meta),
+            _ => continue,
+        };
+        for meta in metas {
+            if meta.name == "build" || meta.name == ":build" {
+                let macro_name = extract_build_macro_name(meta);
+                result.push(BuildMacroInfo {
+                    macro_name,
+                    class_name: name.clone(),
+                    location: super::errors::span_to_location(meta.span),
+                });
             }
         }
     }

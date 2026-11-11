@@ -211,6 +211,37 @@ impl<'a> AstLowering<'a> {
             self.context.update_symbol_qualified_name(abstract_symbol);
         }
 
+        // A `@:build` that needed the typer runs now, through the class-shaped
+        // view the expansion pass used, and the abstract takes its fields.
+        let built_abstract = if abstract_decl
+            .meta
+            .iter()
+            .any(|meta| meta.name.trim_start_matches(':') == "rayzorDeferredBuild")
+        {
+            let view = parser::ClassDecl {
+                meta: abstract_decl.meta.clone(),
+                access: abstract_decl.access.clone(),
+                modifiers: abstract_decl.modifiers.clone(),
+                name: abstract_decl.name.clone(),
+                type_params: abstract_decl.type_params.clone(),
+                extends: None,
+                implements: Vec::new(),
+                fields: abstract_decl.fields.clone(),
+                span: abstract_decl.span,
+                is_abstract: false,
+            };
+            self.apply_deferred_class_builds(&view, abstract_symbol)?
+                .map(|built| {
+                    let mut abstract_built = abstract_decl.clone();
+                    abstract_built.fields = built.fields;
+                    abstract_built.meta = built.meta;
+                    abstract_built
+                })
+        } else {
+            None
+        };
+        let abstract_decl = built_abstract.as_ref().unwrap_or(abstract_decl);
+
         // Extract @:native metadata for abstracts
         let mut abstract_meta_flags =
             self.extract_metadata_flags(&abstract_decl.meta, abstract_symbol);
@@ -814,6 +845,25 @@ impl<'a> AstLowering<'a> {
                         Ok(mut typed_field) => {
                             // For enum abstracts, all var fields are implicitly static
                             if abstract_decl.is_enum_abstract && !typed_field.is_static {
+                                // A value of an enum abstract is of the abstract's
+                                // type, not its underlying one (`E.B.of(r)`). A
+                                // declared `Kind<String>` already is, with its arguments.
+                                let declared_abstract = matches!(
+                                    self.context.type_table.borrow().get(typed_field.field_type).map(|t| &t.kind),
+                                    Some(crate::tast::TypeKind::Abstract { symbol_id, .. }) if *symbol_id == abstract_symbol
+                                );
+                                if let Some(abstract_type) = self
+                                    .context
+                                    .symbol_table
+                                    .get_symbol(abstract_symbol)
+                                    .map(|s| s.type_id)
+                                    .filter(|t| t.is_valid() && !declared_abstract)
+                                {
+                                    typed_field.field_type = abstract_type;
+                                    self.context
+                                        .symbol_table
+                                        .update_symbol_type(typed_field.symbol_id, abstract_type);
+                                }
                                 typed_field.is_static = true;
                                 self.context.symbol_table.add_symbol_flags(
                                     typed_field.symbol_id,
