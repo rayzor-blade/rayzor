@@ -1087,11 +1087,15 @@ impl<'a> AstLowering<'a> {
                                 | TypeKind::Function { .. }
                                 | TypeKind::Class { .. }
                                 | TypeKind::Interface { .. }
+                                | TypeKind::Anonymous { .. }
                         )
                     )
                 };
                 if then_null && !else_null && reference(&else_kind) {
                     return Ok(else_t);
+                }
+                if else_null && !then_null && reference(&then_kind) {
+                    return Ok(then_t);
                 }
                 let nullable = match (then_null, else_null) {
                     (true, false) if scalar(&else_kind) => Some(else_t),
@@ -1827,6 +1831,17 @@ impl<'a> AstLowering<'a> {
             ) && matches!(
                 tt.get(unalias(*return_type)).map(|t| &t.kind),
                 Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
+            ) {
+                return *return_type;
+            }
+            // `() -> 9999.0` where `Void->Dynamic` is expected returns a
+            // Dynamic: the scalar is boxed where the caller reads a box.
+            if matches!(
+                tt.get(unalias(*return_type)).map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            ) && matches!(
+                tt.get(unalias(inferred)).map(|t| &t.kind),
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
             ) {
                 return *return_type;
             }

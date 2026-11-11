@@ -322,7 +322,16 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    if static_fallback.is_none() && qualified.is_none() {
+                    if static_fallback.is_none()
+                        && qualified.is_none()
+                        && !matches!(
+                            sym_info.kind,
+                            crate::tast::SymbolKind::Field
+                                | crate::tast::SymbolKind::Property
+                                | crate::tast::SymbolKind::Variable
+                                | crate::tast::SymbolKind::Parameter
+                        )
+                    {
                         debug!(
                             "[STATIC-FALLBACK] Trying global find_static_method_by_name_and_params('{}', {})...",
                             method_name,

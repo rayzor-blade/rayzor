@@ -1583,7 +1583,18 @@ impl<'a> HirToMirContext<'a> {
                                     )
                                 })
                                 .or_else(|| {
-                                    if source_owner.is_some() {
+                                    // A field holding a function is called, not a
+                                    // runtime static that shares its name.
+                                    let field_holds_value =
+                                        self.symbol_table.get_symbol(*field).is_some_and(|s| {
+                                            matches!(
+                                                s.kind,
+                                                crate::tast::SymbolKind::Field
+                                                    | crate::tast::SymbolKind::Property
+                                                    | crate::tast::SymbolKind::Variable
+                                            )
+                                        });
+                                    if source_owner.is_some() || field_holds_value {
                                         return None;
                                     }
                                     self.stdlib_mapping

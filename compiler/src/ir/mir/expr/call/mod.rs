@@ -767,8 +767,18 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        // True last resort: class-less static method lookup.
-                        if runtime_func_name.is_none() {
+                        // True last resort: class-less static method lookup. A field
+                        // or variable holding a function is called, never a stdlib
+                        // static that shares its name.
+                        if runtime_func_name.is_none()
+                            && !matches!(
+                                sym_info.kind,
+                                crate::tast::SymbolKind::Field
+                                    | crate::tast::SymbolKind::Property
+                                    | crate::tast::SymbolKind::Variable
+                                    | crate::tast::SymbolKind::Parameter
+                            )
+                        {
                             if let Some((_sig, mapping)) =
                                 self.stdlib_mapping.find_static_method_by_name_and_params(
                                     method_name,
@@ -1268,7 +1278,11 @@ impl<'a> HirToMirContext<'a> {
                         .map(|f| f.signature.parameters.len())
                     {
                         if expected_params != arg_regs.len() {
-                            if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
+                            if let Some(sym_info) = self
+                                .symbol_table
+                                .get_symbol(*symbol)
+                                .filter(|s| s.kind == crate::tast::SymbolKind::Function)
+                            {
                                 if let Some(method_name) = self.string_interner.get(sym_info.name) {
                                     if let Some((_sig, mapping)) =
                                         self.stdlib_mapping.find_static_method_by_name_and_params(

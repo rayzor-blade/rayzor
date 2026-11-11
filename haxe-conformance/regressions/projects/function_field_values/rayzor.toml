@@ -1,0 +1,5 @@
+[project]
+name = "function-field-values"
+entry = "./FunctionFieldValues.hx"
+[build]
+class-paths = ["."]
