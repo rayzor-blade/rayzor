@@ -97,7 +97,13 @@ impl MacroInterpreter {
                     _ if path.name == "Expr" => is_expr_value(value),
                     _ => {
                         if let MacroValue::Enum(owner, _, _) = value {
+                            // A haxe.macro enum value carries its short name
+                            // (`ExprDef`) for `haxe.macro.Expr.ExprDef`.
+                            let builtin_owner = !owner.contains('.')
+                                && name.starts_with("haxe.macro.")
+                                && name.rsplit('.').next() == Some(owner.as_ref());
                             if owner.as_ref() == name
+                                || builtin_owner
                                 || self
                                     .class_registry
                                     .as_ref()
