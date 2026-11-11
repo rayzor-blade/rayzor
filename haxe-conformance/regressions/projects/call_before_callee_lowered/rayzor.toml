@@ -1,0 +1,5 @@
+[project]
+name = "call-before-callee-lowered"
+entry = "./CallBeforeCalleeLowered.hx"
+[build]
+class-paths = ["."]

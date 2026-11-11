@@ -1009,6 +1009,28 @@ impl<'a> AstLowering<'a> {
                         {
                             return self.function_param_types_from_symbol(method_sym);
                         }
+                        // A static of a module not lowered yet: its declaration
+                        // says what it takes, read in its own module's terms.
+                        if let Some(sig) =
+                            self.resolve_declared_method_sig(class_sym, method_name, true)
+                            && !sig.is_macro
+                            && sig.type_params.is_empty()
+                        {
+                            let dynamic = self.context.type_table.borrow().dynamic_type();
+                            let params: Vec<TypeId> = sig
+                                .params
+                                .iter()
+                                .map(|hint| {
+                                    hint.as_ref()
+                                        .and_then(|hint| sig.runtime_hint(hint))
+                                        .and_then(|t| self.lower_type(t).ok())
+                                        .unwrap_or(dynamic)
+                                })
+                                .collect();
+                            if params.iter().any(|t| *t != dynamic) {
+                                return Some(params);
+                            }
+                        }
                     }
                 }
                 // Instance call: lower the receiver to find its class, then
