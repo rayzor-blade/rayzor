@@ -297,10 +297,21 @@ impl CompilationUnit {
                 .collect();
             // Build helpers have dependencies that exist only under `#if macro`.
             // Load that graph before making the interpreter's class registry.
-            let build_roots: BTreeSet<_> = std::iter::once(ast_file)
+            let mut build_roots: BTreeSet<_> = std::iter::once(ast_file)
                 .chain(generic_build_modules.iter())
                 .flat_map(build_macro_module_paths)
                 .collect();
+            // `@:autoBuild` inherited from a type of another module.
+            let mut inherited = Vec::new();
+            for (_, builds) in crate::macro_system::build_macros::inherited_auto_builds(
+                ast_file,
+                &self.macro_class_registry(),
+            ) {
+                for (_, meta) in &builds {
+                    build_call_module_paths(meta, &mut inherited);
+                }
+            }
+            build_roots.extend(inherited);
             for root in &build_roots {
                 if let Err(error) = self.load_initialization_macro_modules(root) {
                     debug!("Cannot load macro dependencies for {root}: {error}");
@@ -332,12 +343,12 @@ impl CompilationUnit {
             class_registry.register_files(&self.loaded_import_haxe_files);
             class_registry.register_files(&generic_build_modules);
             class_registry
-                .register_files(&generic_build_modules.iter().map(view).collect::<Vec<_>>());
+                .register_macro_views(&generic_build_modules.iter().map(view).collect::<Vec<_>>());
             class_registry.register_files(&build_modules);
             class_registry.register_files(&self.stdlib_files);
             class_registry
-                .register_files(&self.import_hx_files.iter().map(view).collect::<Vec<_>>());
-            class_registry.register_files(
+                .register_macro_views(&self.import_hx_files.iter().map(view).collect::<Vec<_>>());
+            class_registry.register_macro_views(
                 &self
                     .loaded_import_haxe_files
                     .iter()
@@ -346,7 +357,7 @@ impl CompilationUnit {
             );
             class_registry.register_file(ast_file);
             if let Some(view) = &current_view {
-                class_registry.register_file(view);
+                class_registry.register_macro_views(std::slice::from_ref(view));
             }
             // Phase 2 fix: pass user files AND macro-bearing import files as
             // "dependency" files so cross-file macros (e.g.
@@ -2000,11 +2011,11 @@ impl CompilationUnit {
         files.extend(self.loaded_import_haxe_files.iter().cloned());
         let mut class_registry = self.macro_class_registry();
         class_registry.register_files(&files);
-        for file in &files {
-            if let Some(view) = self.macro_context_view(file, None) {
-                class_registry.register_file(&view);
-            }
-        }
+        let views: Vec<HaxeFile> = files
+            .iter()
+            .filter_map(|file| self.macro_context_view(file, None))
+            .collect();
+        class_registry.register_macro_views(&views);
         class_registry.register_files(&self.initialization_macro_files);
         let to_error = |message: String, location| CompilationError {
             message: format!("[E0700] {}", message),
@@ -2040,6 +2051,26 @@ impl CompilationUnit {
 /// The modules `@:build` / `@:autoBuild` calls in `file` name: for
 /// `pkg.Mod.f()`, `pkg.Mod` and, for a sub-type, `pkg.Mod.Sub`'s module.
 fn build_macro_module_paths(file: &HaxeFile) -> Vec<String> {
+    let metas = file.declarations.iter().flat_map(|decl| match decl {
+        parser::TypeDeclaration::Class(c) => c.meta.iter().collect::<Vec<_>>(),
+        parser::TypeDeclaration::Interface(i) => i.meta.iter().collect(),
+        parser::TypeDeclaration::Abstract(a) => a.meta.iter().collect(),
+        parser::TypeDeclaration::Enum(e) => e.meta.iter().collect(),
+        parser::TypeDeclaration::Typedef(t) => t.meta.iter().collect(),
+        _ => Vec::new(),
+    });
+    let mut paths = Vec::new();
+    for meta in metas {
+        build_call_module_paths(meta, &mut paths);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// The modules a `@:build`, `@:autoBuild` or `@:genericBuild` call may name:
+/// every prefix of its callee's dotted path.
+fn build_call_module_paths(meta: &parser::Metadata, paths: &mut Vec<String>) {
     fn dotted(e: &parser::Expr) -> Option<Vec<String>> {
         match &e.kind {
             parser::ExprKind::Ident(name) => Some(vec![name.clone()]),
@@ -2051,35 +2082,21 @@ fn build_macro_module_paths(file: &HaxeFile) -> Vec<String> {
             _ => None,
         }
     }
-    let metas = file.declarations.iter().flat_map(|decl| match decl {
-        parser::TypeDeclaration::Class(c) => c.meta.iter().collect::<Vec<_>>(),
-        parser::TypeDeclaration::Interface(i) => i.meta.iter().collect(),
-        parser::TypeDeclaration::Abstract(a) => a.meta.iter().collect(),
-        parser::TypeDeclaration::Enum(e) => e.meta.iter().collect(),
-        parser::TypeDeclaration::Typedef(t) => t.meta.iter().collect(),
-        _ => Vec::new(),
-    });
-    let mut paths = Vec::new();
-    for meta in metas {
-        if !matches!(
-            meta.name.trim_start_matches(':'),
-            "build" | "autoBuild" | "genericBuild"
-        ) {
-            continue;
-        }
-        let Some(parser::ExprKind::Call { expr, .. }) = meta.params.first().map(|p| &p.kind) else {
-            continue;
-        };
-        let Some(mut path) = dotted(expr) else {
-            continue;
-        };
-        path.pop();
-        while !path.is_empty() {
-            paths.push(path.join("."));
-            path.pop();
-        }
+    if !matches!(
+        meta.name.trim_start_matches(':'),
+        "build" | "autoBuild" | "genericBuild"
+    ) {
+        return;
     }
-    paths.sort();
-    paths.dedup();
-    paths
+    let Some(parser::ExprKind::Call { expr, .. }) = meta.params.first().map(|p| &p.kind) else {
+        return;
+    };
+    let Some(mut path) = dotted(expr) else {
+        return;
+    };
+    path.pop();
+    while !path.is_empty() {
+        paths.push(path.join("."));
+        path.pop();
+    }
 }

@@ -709,6 +709,26 @@ pub(crate) fn inherited_auto_builds(
         if local.contains(path.name.as_str()) {
             return None;
         }
+        // `import pack.Mod` brings in every type the module declares; tried
+        // when the name is neither imported itself nor of this package.
+        let own = file_pack
+            .iter()
+            .cloned()
+            .chain(std::iter::once(path.name.clone()))
+            .collect::<Vec<_>>()
+            .join(".");
+        if !imports.contains_key(&path.name)
+            && class_registry.module_of(&own).is_none()
+            && let Some(found) = imports
+                .iter()
+                .filter(|(key, _)| {
+                    key.as_str() != super::interpreter::WILDCARD_OWNERS_KEY
+                        && key.as_str() != super::interpreter::USING_OWNERS_KEY
+                })
+                .find_map(|(_, module)| class_registry.module_type(module, &path.name))
+        {
+            return Some(found);
+        }
         Some(imports.get(&path.name).cloned().unwrap_or_else(|| {
             file_pack
                 .iter()

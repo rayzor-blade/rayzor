@@ -1,0 +1,5 @@
+[project]
+name = "macro-case-scope"
+entry = "./MacroCaseScope.hx"
+[build]
+class-paths = ["."]

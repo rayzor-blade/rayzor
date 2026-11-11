@@ -762,7 +762,10 @@ impl MacroInterpreter {
             },
             ("getEnum", None) => match &target {
                 MacroValue::Enum(owner, _, _) => MacroValue::Class(owner.clone()),
-                _ => MacroValue::Null,
+                _ => super::object_enum_constructor(&target)
+                    .map_or(MacroValue::Null, |(owner, _)| {
+                        MacroValue::Class(Arc::from(owner))
+                    }),
             },
             ("resolveClass" | "resolveEnum", None) => {
                 let name = string_arg(args, 0, "Type.resolveClass", location)?;

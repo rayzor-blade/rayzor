@@ -353,6 +353,56 @@ impl MacroValue {
         })
     }
 
+    /// `f.bind(args)`: a function of the `_` placeholders and of `f`'s
+    /// parameters past the given ones, calling `f` with the bound values.
+    pub(crate) fn bound_function(function: Self, bound: Vec<Option<Self>>) -> Self {
+        use parser::{ExprKind, Span};
+        let expression = |kind| Expr {
+            kind,
+            span: Span::default(),
+        };
+        let declared = match &function {
+            Self::Function(f) => f.params.clone(),
+            _ => Vec::new(),
+        };
+        let mut captures =
+            BTreeMap::from([("<bound>".to_string(), Arc::new(Mutex::new(function)))]);
+        let mut params = Vec::new();
+        let mut call_args = Vec::new();
+        for (index, value) in bound.into_iter().enumerate() {
+            let name = format!("<arg{index}>");
+            match value {
+                Some(value) => {
+                    captures.insert(name.clone(), Arc::new(Mutex::new(value)));
+                }
+                None => params.push(MacroParam {
+                    name: name.clone(),
+                    optional: declared.get(index).is_some_and(|param| param.optional),
+                    rest: false,
+                    default_value: None,
+                    type_hint: None,
+                }),
+            }
+            call_args.push(expression(ExprKind::Ident(name)));
+        }
+        for param in declared.iter().skip(call_args.len()) {
+            params.push(param.clone());
+            call_args.push(expression(ExprKind::Ident(param.name.clone())));
+        }
+        Self::Function(Arc::new(MacroFunction {
+            name: "<bind>".to_string(),
+            params,
+            body: Arc::new(expression(ExprKind::Call {
+                expr: Box::new(expression(ExprKind::Ident("<bound>".to_string()))),
+                args: call_args,
+            })),
+            captures,
+            context: None,
+            return_type: None,
+            static_target: None,
+        }))
+    }
+
     /// An iterator over `array`, which it reads as it advances.
     pub(crate) fn array_iterator(array: Self) -> Self {
         use parser::{BinaryOp, ExprKind, Span, UnaryOp};

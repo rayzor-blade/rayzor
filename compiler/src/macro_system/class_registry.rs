@@ -80,6 +80,8 @@ struct TypeDefinition {
     constructors: BTreeMap<String, (usize, usize)>,
     /// Enum constructor names in declaration order.
     constructor_order: Vec<String>,
+    /// Each constructor's declared parameter types, `None` where omitted.
+    constructor_params: BTreeMap<String, Vec<Option<parser::Type>>>,
 }
 
 impl TypeDefinition {
@@ -135,6 +137,9 @@ pub struct ClassRegistry {
         parser::preprocessor::PreprocessorConfig,
         Vec<std::path::PathBuf>,
     )>,
+    /// Registering macro-context views: a type keeps the metadata its
+    /// ordinary parse gave it, which `#if !macro` may hide from the view.
+    registering_views: bool,
 }
 
 impl ClassRegistry {
@@ -159,6 +164,7 @@ impl ClassRegistry {
             defines: BTreeMap::new(),
             source_overrides: Default::default(),
             reflection_config: None,
+            registering_views: false,
         }
     }
 
@@ -179,6 +185,16 @@ impl ClassRegistry {
         self.type_definitions
             .get(name)
             .or_else(|| self.snapshot.as_ref()?.definition(name))
+    }
+
+    /// Class `name` is `@:structInit`: an object literal of its type is an instance.
+    pub(crate) fn is_struct_init(&self, name: &str) -> bool {
+        self.definition(name).is_some_and(|definition| {
+            definition
+                .metadata
+                .iter()
+                .any(|meta| meta.name.trim_start_matches(':') == "structInit")
+        })
     }
 
     /// The module that declares type `name`.
@@ -602,6 +618,23 @@ impl ClassRegistry {
                         .collect(),
                     _ => Vec::new(),
                 },
+                constructor_params: match decl {
+                    TypeDeclaration::Enum(declaration) => declaration
+                        .constructors
+                        .iter()
+                        .map(|constructor| {
+                            (
+                                constructor.name.clone(),
+                                constructor
+                                    .params
+                                    .iter()
+                                    .map(|param| param.type_hint.clone())
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                    _ => BTreeMap::new(),
+                },
                 fields: fields
                     .iter()
                     .map(|field| {
@@ -654,6 +687,13 @@ impl ClassRegistry {
                     })
                     .collect(),
             });
+            let mut definition = definition;
+            if self.registering_views
+                && let Some(previous) = self.type_definitions.get(&definition.qualified_name)
+                && let Some(fresh) = Arc::get_mut(&mut definition)
+            {
+                fresh.metadata = previous.metadata.clone();
+            }
             if let Some(previous) = self.type_definitions.get(&definition.qualified_name) {
                 for field in previous.fields.iter().filter(|field| field.is_enum_value) {
                     if let Some(owners) = self.enum_constants.get_mut(&field.name) {
@@ -933,7 +973,11 @@ impl ClassRegistry {
             if !seen.insert(name.clone()) {
                 continue;
             }
-            let Some(definition) = self.reflected_definition(&name, &name) else {
+            let Some(definition) = self.reflected_definition(&name, &name).or_else(|| {
+                let (module, sub) = name.rsplit_once('.')?;
+                let qualified = self.module_type(module, sub)?;
+                self.reflected_definition(&qualified, module)
+            }) else {
                 continue;
             };
             for meta in &definition.metadata {
@@ -963,6 +1007,17 @@ impl ClassRegistry {
             pending.extend(definition.parents.iter().cloned());
         }
         found
+    }
+
+    /// The qualified name of type `name` that module `module` (`pack.Mod`)
+    /// declares, reading the module from the class path when needed.
+    pub(crate) fn module_type(&self, module: &str, name: &str) -> Option<String> {
+        let qualified = match module.rsplit_once('.') {
+            Some((pack, _)) => format!("{pack}.{name}"),
+            None => name.to_string(),
+        };
+        let definition = self.reflected_definition(&qualified, module)?;
+        (definition.module == module).then(|| definition.qualified_name.clone())
     }
 
     fn reflected_definition(&self, name: &str, module: &str) -> Option<Arc<TypeDefinition>> {
@@ -1269,6 +1324,14 @@ impl ClassRegistry {
         }
     }
 
+    /// Registers macro-context views of files whose ordinary parse is
+    /// already registered.
+    pub fn register_macro_views(&mut self, files: &[HaxeFile]) {
+        self.registering_views = true;
+        self.register_files(files);
+        self.registering_views = false;
+    }
+
     pub(crate) fn enum_constant_owner(&self, name: &str) -> Option<String> {
         let Some(owners) = self.enum_constants.get(name) else {
             return self.snapshot.as_ref()?.enum_constant_owner(name);
@@ -1339,6 +1402,38 @@ impl ClassRegistry {
     }
 
     /// A constructor `name` of an enum `module` declares, when exactly one does.
+    /// Every enum of `module` that declares constructor `name`, with that
+    /// constructor's declared parameter types.
+    pub(crate) fn enum_constructors_in_module(
+        &self,
+        module: &str,
+        name: &str,
+    ) -> Vec<(String, Vec<Option<parser::Type>>)> {
+        let Some(constructors) = self.enum_constructors.get(name) else {
+            return self
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.enum_constructors_in_module(module, name))
+                .unwrap_or_default();
+        };
+        constructors
+            .keys()
+            .filter_map(|owner| {
+                let definition = self.definition(owner)?;
+                (definition.module == module).then(|| {
+                    (
+                        owner.clone(),
+                        definition
+                            .constructor_params
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn enum_constructor_in_module(
         &self,
         module: &str,

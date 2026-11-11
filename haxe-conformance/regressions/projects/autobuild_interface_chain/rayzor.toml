@@ -1,0 +1,5 @@
+[project]
+name = "autobuild-interface-chain"
+entry = "./AutobuildInterfaceChain.hx"
+[build]
+class-paths = ["."]

@@ -72,6 +72,28 @@ impl MacroInterpreter {
                                 self.value_matches_type_at_depth(value, ty, depth + 1)
                             })
                     }
+                    // Structural: anything with an `iterator()`, as `Lambda` takes it.
+                    "Iterable" | "KeyValueIterable" => {
+                        let method = if name == "Iterable" {
+                            "iterator"
+                        } else {
+                            "keyValueIterator"
+                        };
+                        matches!(value, MacroValue::Array(_) | MacroValue::Map(_))
+                            || value.as_object().is_some_and(|object| {
+                                object.contains_key(method)
+                                    || object
+                                        .get("__type__")
+                                        .and_then(MacroValue::as_string)
+                                        .is_some_and(|owner| {
+                                            self.class_registry.as_ref().is_some_and(|registry| {
+                                                registry
+                                                    .find_instance_method(owner, method)
+                                                    .is_some()
+                                            })
+                                        })
+                            })
+                    }
                     _ if path.name == "Expr" => is_expr_value(value),
                     _ => {
                         if let MacroValue::Enum(owner, _, _) = value {
@@ -212,6 +234,15 @@ impl MacroInterpreter {
                     let result = self.coerce_type(value, &target, location, depth + 1);
                     self.import_map = previous;
                     return result;
+                }
+                if let MacroValue::Object(fields) = &value
+                    && !fields.read().contains_key("__type__")
+                    && self
+                        .class_registry
+                        .as_ref()
+                        .is_some_and(|registry| registry.is_struct_init(&name))
+                {
+                    return self.struct_init_instance(&name, fields, location);
                 }
                 if let MacroValue::Abstract(owner, inner) = &value {
                     if owner.as_ref() == name {
@@ -383,6 +414,80 @@ impl MacroInterpreter {
             self.env.get("this"),
             location,
         )
+    }
+
+    /// `{f: v, ...}` typed as a `@:structInit` class becomes an instance in
+    /// place: its constructor takes the fields by parameter name; without one
+    /// the fields are assigned over the declared defaults.
+    fn struct_init_instance(
+        &mut self,
+        name: &str,
+        fields: &Shared<BTreeMap<String, MacroValue>>,
+        location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        let literal: BTreeMap<String, MacroValue> = fields
+            .read()
+            .iter()
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect();
+        let params = self
+            .class_registry
+            .as_ref()
+            .and_then(|registry| registry.find_executable_class(name))
+            .and_then(|class| class.constructor.as_ref())
+            .map(|constructor| constructor.params.clone());
+        let Some(params) = params else {
+            let types = self
+                .class_registry
+                .as_ref()
+                .and_then(|registry| registry.find_executable_class(name))
+                .map(|class| (class.field_types.clone(), class.imports.clone()));
+            let mut values = Vec::with_capacity(literal.len());
+            for (field, value) in literal {
+                let declared = types.as_ref().and_then(|(types, imports)| {
+                    Some((types.get(&field)?.clone(), imports.clone()))
+                });
+                let value = match declared {
+                    Some((ty, imports)) => {
+                        let previous = std::mem::replace(&mut self.import_map, imports);
+                        let value = self.coerce_value(value, Some(&ty), location);
+                        self.import_map = previous;
+                        value?
+                    }
+                    None => value,
+                };
+                values.push((field, value));
+            }
+            let instance = self.construct_named(name, name.to_string(), Vec::new(), location)?;
+            return Ok(Self::become_instance(fields, &instance, values));
+        };
+        let args = params
+            .iter()
+            .map(|param| {
+                literal
+                    .get(&param.name)
+                    .cloned()
+                    .unwrap_or(MacroValue::Null)
+            })
+            .collect();
+        let instance = self.construct_named(name, name.to_string(), args, location)?;
+        Ok(Self::become_instance(fields, &instance, Vec::new()))
+    }
+
+    /// The literal object takes the instance's fields, then `overrides`, so
+    /// every reference to it, a map key among them, sees one instance.
+    fn become_instance(
+        literal: &Shared<BTreeMap<String, MacroValue>>,
+        instance: &MacroValue,
+        overrides: Vec<(String, MacroValue)>,
+    ) -> MacroValue {
+        let MacroValue::Object(built) = instance else {
+            return instance.clone();
+        };
+        let mut fields = (*built.read()).clone();
+        fields.extend(overrides);
+        literal.set(fields);
+        MacroValue::Object(literal.clone())
     }
 
     pub(super) fn try_extension(
@@ -688,8 +793,12 @@ impl MacroInterpreter {
         let result = self.call_function(&func, args, location);
         let updated = self.env.get("this");
         self.env.pop_scope();
+        self.updated_this = None;
         if let Some((old, new)) = this.zip(updated) {
             self.replace_references(&old, &new);
+            if !old.haxe_equals(&new) {
+                self.updated_this = Some(new);
+            }
         }
         result
     }

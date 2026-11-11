@@ -509,6 +509,8 @@ fn compare_values(
     location: SourceLocation,
 ) -> Result<MacroValue, MacroError> {
     let ordering = match (left, right) {
+        // Ordering against null is undefined in eval: every comparison is false.
+        (MacroValue::Null, _) | (_, MacroValue::Null) => return Ok(MacroValue::Bool(false)),
         (MacroValue::Int(a), MacroValue::Int(b)) => a.cmp(b),
         (MacroValue::Float(a), MacroValue::Float(b)) => {
             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)

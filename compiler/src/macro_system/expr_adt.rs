@@ -432,7 +432,12 @@ pub(crate) fn type_path_of(v: &MacroValue, span: Span) -> Option<(TypePath, Vec<
 /// parser type.
 pub fn type_of_value(v: &MacroValue, span: Span) -> Option<Type> {
     match v {
-        MacroValue::Enum(e, variant, args) if &**e == "ComplexType" => {
+        MacroValue::Enum(e, variant, args)
+            if matches!(
+                &**e,
+                "ComplexType" | "haxe.macro.ComplexType" | "haxe.macro.Expr.ComplexType"
+            ) =>
+        {
             match (&**variant, args.as_slice()) {
                 ("TPath", [p]) => {
                     let (path, params) = type_path_of(p, span)?;
@@ -470,6 +475,8 @@ pub fn type_of_value(v: &MacroValue, span: Span) -> Option<Type> {
                                     a.first().and_then(|t| type_of_value(t, span))
                                 }
                                 MacroValue::Enum(_, v, a) if &**v == "FProp" => a.get(2).and_then(|t| type_of_value(t, span)),
+                                // `FVar(t)` / `FProp(...)` built in object form.
+                                MacroValue::Object(_) => field(&kind, "type").and_then(|t| type_of_value(&t, span)),
                                 _ => None,
                             }?;
                             let optional = list_of(field(f, "meta").as_ref()).iter().any(|m| {

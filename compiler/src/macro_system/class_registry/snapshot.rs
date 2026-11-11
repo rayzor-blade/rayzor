@@ -195,6 +195,7 @@ impl ClassRegistry {
                     is_enum_abstract: false,
                     constructors: BTreeMap::new(),
                     constructor_order: Vec::new(),
+                    constructor_params: BTreeMap::new(),
                 });
                 self.short_name_index
                     .entry(class.name.clone())
@@ -255,6 +256,7 @@ impl ClassRegistry {
                     is_enum_abstract: false,
                     constructors: BTreeMap::new(),
                     constructor_order: Vec::new(),
+                    constructor_params: BTreeMap::new(),
                 });
                 self.short_name_index
                     .entry(decl.name.clone())
@@ -326,6 +328,7 @@ impl ClassRegistry {
                         .iter()
                         .map(|variant| variant.name.clone())
                         .collect(),
+                    constructor_params: BTreeMap::new(),
                     constructors,
                 });
             }
@@ -350,6 +353,7 @@ impl ClassRegistry {
                     is_enum_abstract: false,
                     constructors: BTreeMap::new(),
                     constructor_order: Vec::new(),
+                    constructor_params: BTreeMap::new(),
                 });
             }
         }

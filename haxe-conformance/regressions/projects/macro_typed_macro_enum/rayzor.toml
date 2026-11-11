@@ -1,0 +1,5 @@
+[project]
+name = "macro-typed-macro-enum"
+entry = "./MacroTypedMacroEnum.hx"
+[build]
+class-paths = ["."]

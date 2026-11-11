@@ -1,0 +1,5 @@
+[project]
+name = "macro-abstract-this"
+entry = "./MacroAbstractThis.hx"
+[build]
+class-paths = ["."]

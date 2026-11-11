@@ -107,6 +107,9 @@ pub struct MacroInterpreter {
         Shared<std::collections::BTreeMap<String, MacroValue>>,
         String,
     )>,
+    /// The receiver an abstract method left in `this`, when it reassigned it;
+    /// the call site stores it back into the receiver's place.
+    updated_this: Option<MacroValue>,
     /// Bare constructors in result position of a typed `var` initialiser,
     /// by node address, with the enum the declaration names.
     expected_enums: std::collections::HashMap<usize, String>,
@@ -176,6 +179,7 @@ impl MacroInterpreter {
             macro_class_stack: Vec::new(),
             running_getters: Vec::new(),
             expected_enums: Default::default(),
+            updated_this: None,
             characters: Default::default(),
         }
     }
@@ -206,6 +210,7 @@ impl MacroInterpreter {
             macro_class_stack: Vec::new(),
             running_getters: Vec::new(),
             expected_enums: Default::default(),
+            updated_this: None,
             characters: Default::default(),
         }
     }
@@ -242,6 +247,7 @@ impl MacroInterpreter {
             macro_class_stack: Vec::new(),
             running_getters: Vec::new(),
             expected_enums: Default::default(),
+            updated_this: None,
             characters: Default::default(),
         }
     }
@@ -338,11 +344,14 @@ impl MacroInterpreter {
                         Arc::new(Vec::new()),
                     ));
                 }
-                // A bare instance field inside a method or constructor.
+                // A bare instance field or method inside a method or constructor.
                 if let Some(MacroValue::Object(this)) = self.env.get("this") {
                     if name != "__type__" {
                         if let Some(v) = this.read().get(name.as_str()) {
                             return Ok(v.clone());
+                        }
+                        if let Some(method) = self.bound_method(&this, name) {
+                            return Ok(method);
                         }
                     }
                 }
@@ -364,10 +373,7 @@ impl MacroInterpreter {
                         return Ok(value);
                     }
                 }
-                if let Some(owner) = self
-                    .class_registry
-                    .as_ref()
-                    .and_then(|registry| registry.enum_constant_owner(name))
+                if let Some(owner) = self.visible_enum_constant(name)
                     && let Some(value) = self.read_class_static(Some(&owner), name)?
                 {
                     return Ok(value);
@@ -433,7 +439,9 @@ impl MacroInterpreter {
                 // Map them to plain strings so `value_to_class_field` (which
                 // matches on `"Public" | "Static" | ...`) accepts either
                 // constructor form.
-                if let Some((owner, 0)) = self.user_enum_constructor(name) {
+                if !self.expects_macro_enum(expr)
+                    && let Some((owner, 0)) = self.user_enum_constructor(name)
+                {
                     return Ok(MacroValue::Enum(
                         Arc::from(owner),
                         Arc::from(name.as_str()),
@@ -457,6 +465,17 @@ impl MacroInterpreter {
                         Arc::from(name.as_str()),
                         Arc::new(Vec::new()),
                     ));
+                }
+                // The one enum abstract declaring `name`, as an expected type
+                // would select it (`node.nodeType != Element`), once nothing in
+                // scope defines the name.
+                if let Some(owner) = self
+                    .class_registry
+                    .as_ref()
+                    .and_then(|registry| registry.enum_constant_owner(name))
+                    && let Some(value) = self.read_class_static(Some(&owner), name)?
+                {
+                    return Ok(value);
                 }
                 if let Some(name) = self.runtime_class_name(name) {
                     return Ok(MacroValue::Class(Arc::from(name)));
@@ -734,15 +753,23 @@ impl MacroInterpreter {
                 let val = self.eval_expr(switch_expr)?;
                 for case in cases {
                     for pattern in &case.patterns {
-                        if self.match_pattern(&val, pattern)? {
-                            // Check guard
-                            if let Some(guard) = &case.guard {
-                                let guard_val = self.eval_expr(guard)?;
-                                if !guard_val.is_truthy() {
-                                    continue;
-                                }
-                            }
-                            return self.eval_expr(&case.body);
+                        // A case's bindings are its own, matched or not.
+                        self.env.push_scope();
+                        let matched = match self.match_pattern(&val, pattern) {
+                            Ok(true) => match &case.guard {
+                                Some(guard) => self.eval_expr(guard).map(|v| v.is_truthy()),
+                                None => Ok(true),
+                            },
+                            other => other,
+                        };
+                        let result = match matched {
+                            Ok(true) => Some(self.eval_expr(&case.body)),
+                            Ok(false) => None,
+                            Err(error) => Some(Err(error)),
+                        };
+                        self.env.pop_scope();
+                        if let Some(result) = result {
+                            return result;
                         }
                     }
                 }
@@ -1279,7 +1306,16 @@ impl MacroInterpreter {
             right_val
         };
 
-        // Assign to the target
+        self.assign_place(left, new_val, location)
+    }
+
+    /// Stores `new_val` in the place `left` names.
+    fn assign_place(
+        &mut self,
+        left: &Expr,
+        new_val: MacroValue,
+        location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
         match &left.kind {
             ExprKind::This => {
                 self.env.set("this", new_val.clone());
@@ -1435,6 +1471,23 @@ impl MacroInterpreter {
         args: &[Expr],
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        // `f.bind(a, _, c)`: `_` leaves that argument to the bound function's caller.
+        if let ExprKind::Field {
+            expr: base, field, ..
+        } = &callee.kind
+            && field == "bind"
+            && matches!(base.kind, ExprKind::Ident(_) | ExprKind::Field { .. })
+            && let function @ MacroValue::Function(_) = self.eval_value(base)?
+        {
+            let mut bound = Vec::with_capacity(args.len());
+            for arg in args {
+                bound.push(match &arg.kind {
+                    ExprKind::Ident(name) if name == "_" => None,
+                    _ => Some(self.eval_value(arg)?),
+                });
+            }
+            return Ok(MacroValue::bound_function(function, bound));
+        }
         // `value.match(pattern)`: the argument is a pattern, never evaluated.
         // A String receiver keeps `EReg`-style matching as a method.
         if let ExprKind::Field {
@@ -1557,14 +1610,19 @@ impl MacroInterpreter {
                 // form above existed, which is the shape build macros read, so a
                 // macro could take an Expr apart and not put one back together.
                 // An enum of the macro's own scope comes before haxe.macro's.
-                if let Some((owner, arity)) = self
-                    .expected_constructor(callee, name)
-                    .or_else(|| self.user_enum_constructor(name))
+                if let Some((owner, arity)) =
+                    self.expected_constructor(callee, name).or_else(|| {
+                        (!self.expects_macro_enum(callee))
+                            .then(|| self.user_enum_constructor(name))
+                            .flatten()
+                    })
                     && arg_vals.len() <= arity
                 {
                     return self.enum_value(&owner, name, arg_vals, location);
                 }
-                if let Some((enum_name, variant)) = expr_enum_ctor(name) {
+                if let Some((enum_name, variant)) = expr_enum_ctor(name)
+                    && !self.names_complex_type(None, name)
+                {
                     return self.enum_value(enum_name, variant, arg_vals, location);
                 }
                 if let Some(tag) = enum_ctor_tag(name) {
@@ -1573,6 +1631,9 @@ impl MacroInterpreter {
                 if let Some((owner, arity)) = self.scoped_enum_constructor(name)
                     && arg_vals.len() <= arity
                 {
+                    return self.enum_value(&owner, name, arg_vals, location);
+                }
+                if let Some(owner) = self.constructor_by_arguments(name, &arg_vals) {
                     return self.enum_value(&owner, name, arg_vals, location);
                 }
                 // An unqualified call may be a static brought in by
@@ -1605,7 +1666,10 @@ impl MacroInterpreter {
                 for a in args {
                     arg_vals.push(self.eval_expr(a)?);
                 }
-                let Some((enum_name, variant)) = expr_enum_ctor(field) else {
+                let qualifier = extract_qualified_call(base, "").map(|(path, _)| path);
+                let Some((enum_name, variant)) = expr_enum_ctor(field)
+                    .filter(|_| !self.names_complex_type(qualifier.as_deref(), field))
+                else {
                     let tag = enum_ctor_tag(field).unwrap_or_default();
                     return Ok(build_enum_ctor_value(tag, &arg_vals));
                 };
@@ -1624,7 +1688,8 @@ impl MacroInterpreter {
                         if let Some(result) = receiver.mutate_map(field, &arg_vals) {
                             return Ok(result);
                         }
-                        return self.method_call(&receiver, field, arg_vals, location);
+                        return self
+                            .method_call_in_place(base, &receiver, field, arg_vals, location);
                     }
                     // Simple: Context.parse(...)
                     if let Some(result) =
@@ -1648,8 +1713,7 @@ impl MacroInterpreter {
                 if let Some(result) = base_val.mutate_map(field, &arg_vals) {
                     return Ok(result);
                 }
-                let result = self.method_call(&base_val, field, arg_vals, location)?;
-                Ok(result)
+                self.method_call_in_place(base, &base_val, field, arg_vals, location)
             }
             _ => {
                 // Evaluate callee as expression (e.g., function variable)
@@ -2267,21 +2331,26 @@ impl MacroInterpreter {
         {
             name = local;
         }
-        // `import pack.Mod` brings in every type `pack/Mod.hx` declares.
+        // `import pack.Mod` and `using pack.Mod` bring in every type
+        // `pack/Mod.hx` declares.
         if !name.contains('.')
             && !imported
             && let Some(found) = self
                 .import_map
                 .iter()
-                .filter(|(key, _)| {
-                    key.as_str() != WILDCARD_OWNERS_KEY && key.as_str() != USING_OWNERS_KEY
+                .filter(|(key, _)| key.as_str() != WILDCARD_OWNERS_KEY)
+                .flat_map(|(key, module)| {
+                    if key == USING_OWNERS_KEY {
+                        module.lines().collect::<Vec<_>>()
+                    } else {
+                        vec![module.as_str()]
+                    }
                 })
-                .find_map(|(_, module)| {
+                .find_map(|module| {
                     let candidate = module
                         .rsplit_once('.')
                         .map_or_else(|| name.clone(), |(pack, _)| format!("{pack}.{name}"));
-                    (registry.module_of(&candidate).as_deref() == Some(module.as_str()))
-                        .then_some(candidate)
+                    (registry.module_of(&candidate).as_deref() == Some(module)).then_some(candidate)
                 })
         {
             name = found;
@@ -2434,6 +2503,85 @@ impl MacroInterpreter {
         !owner.starts_with("haxe.macro.") && registry.enum_constructor_names(&owner).is_some()
     }
 
+    /// The modules an `import` or `using` of this scope names.
+    fn imported_modules(&self) -> Vec<String> {
+        self.import_map
+            .iter()
+            .filter(|(key, _)| key.as_str() != WILDCARD_OWNERS_KEY)
+            .flat_map(|(key, path)| {
+                if key == USING_OWNERS_KEY {
+                    path.lines().map(str::to_string).collect::<Vec<_>>()
+                } else {
+                    vec![path.clone()]
+                }
+            })
+            .collect()
+    }
+
+    /// A constructor name several enums in scope declare: the one whose
+    /// declared parameter types the arguments fit, when exactly one does.
+    fn constructor_by_arguments(&self, name: &str, args: &[MacroValue]) -> Option<String> {
+        let registry = self.class_registry.as_ref()?;
+        let mut modules = self.imported_modules();
+        if let Some(module) = self
+            .macro_class_stack
+            .last()
+            .and_then(|owner| registry.module_of(owner))
+        {
+            modules.push(module);
+        }
+        let candidates: std::collections::BTreeMap<_, _> = modules
+            .iter()
+            .flat_map(|module| registry.enum_constructors_in_module(module, name))
+            .collect();
+        let mut fitting = candidates.into_iter().filter(|(_, params)| {
+            params.len() == args.len()
+                && params.iter().zip(args).all(|(ty, arg)| {
+                    ty.as_ref()
+                        .is_none_or(|ty| self.value_matches_type(arg, ty))
+                })
+        });
+        let (owner, _) = fitting.next()?;
+        fitting.next().is_none().then_some(owner)
+    }
+
+    /// The enum abstract whose constant `name` is, when that abstract is in
+    /// scope here: declared by the running module, or imported itself, by
+    /// its module, or by a wildcard over its package.
+    fn visible_enum_constant(&self, name: &str) -> Option<String> {
+        let registry = self.class_registry.as_ref()?;
+        let owner = registry.enum_constant_owner(name)?;
+        let module = registry.module_of(&owner);
+        let package = owner.rsplit_once('.').map(|(package, _)| package);
+        let running = self
+            .macro_class_stack
+            .last()
+            .and_then(|class| registry.module_of(class));
+        let imported = self
+            .import_map
+            .iter()
+            .any(|(key, path)| match key.as_str() {
+                WILDCARD_OWNERS_KEY => path
+                    .lines()
+                    .any(|wildcard| Some(wildcard) == package || wildcard == owner),
+                USING_OWNERS_KEY => false,
+                _ => path == &owner || Some(path) == module.as_ref(),
+            });
+        (imported || (module.is_some() && module == running)).then_some(owner)
+    }
+
+    /// `TAnonymous`, which both `ComplexType` and `haxe.macro.Type` declare, is
+    /// `ComplexType`'s unless qualified as `Type` or `haxe.macro.Type` is imported.
+    fn names_complex_type(&self, qualifier: Option<&str>, name: &str) -> bool {
+        if enum_ctor_tag(name).is_none() {
+            return false;
+        }
+        match qualifier {
+            Some(path) => !matches!(path.rsplit('.').next(), Some("Type")),
+            None => self.import_map.get("Type").map(String::as_str) != Some("haxe.macro.Type"),
+        }
+    }
+
     /// An enum constructor in scope that is not a haxe.macro one.
     /// `x == Ctor`: a bare constructor name takes its enum from the value it
     /// is compared with, before any enum in scope.
@@ -2484,11 +2632,23 @@ impl MacroInterpreter {
 
     /// The declared enum's constructor `name`, when `site` is in result
     /// position of a typed initialiser.
+    /// A haxe.macro enum is left to the haxe.macro constructors, which build
+    /// the shape reification reads.
     fn expected_constructor(&self, site: &Expr, name: &str) -> Option<(String, usize)> {
         let owner = self.expected_enums.get(&(site as *const Expr as usize))?;
+        if owner.starts_with("haxe.macro.") {
+            return None;
+        }
         self.class_registry
             .as_ref()?
             .enum_constructor(Some(owner), name)
+    }
+
+    /// `site` is in result position of an initialiser typed as a haxe.macro enum.
+    fn expects_macro_enum(&self, site: &Expr) -> bool {
+        self.expected_enums
+            .get(&(site as *const Expr as usize))
+            .is_some_and(|owner| owner.starts_with("haxe.macro."))
     }
 
     /// `import a.B.f` or `import a.B.f in g`: the class and static `name` stands for.
@@ -2527,13 +2687,12 @@ impl MacroInterpreter {
             return Some(found);
         }
         let candidates: std::collections::BTreeSet<_> = self
-            .import_map
-            .iter()
-            .filter(|(key, _)| key.as_str() != WILDCARD_OWNERS_KEY)
-            .filter_map(|(_, owner)| {
+            .imported_modules()
+            .into_iter()
+            .filter_map(|owner| {
                 registry
-                    .enum_constructor(Some(owner), name)
-                    .or_else(|| registry.enum_constructor_in_module(owner, name))
+                    .enum_constructor(Some(&owner), name)
+                    .or_else(|| registry.enum_constructor_in_module(&owner, name))
             })
             .collect();
         if candidates.len() == 1 {
@@ -2620,7 +2779,7 @@ impl MacroInterpreter {
         }
         let mut forwarded = vec![MacroValue::Class(Arc::from(owner))];
         forwarded.extend(args.iter().cloned());
-        self.try_static_call("Type", forward, &forwarded, location)
+        self.try_static_call("std.Type", forward, &forwarded, location)
     }
 
     fn try_static_call(
@@ -3189,11 +3348,14 @@ impl MacroInterpreter {
                     }
                     "enumConstructor" => match &target {
                         MacroValue::Enum(_, variant, _) => MacroValue::String(variant.clone()),
-                        _ => MacroValue::Null,
+                        _ => object_enum_constructor(&target)
+                            .map_or(MacroValue::Null, |(_, tag)| {
+                                MacroValue::String(Arc::from(tag))
+                            }),
                     },
                     "enumParameters" => match &target {
                         MacroValue::Enum(_, _, payload) => MacroValue::array(payload.to_vec()),
-                        _ => MacroValue::array(Vec::new()),
+                        _ => MacroValue::array(object_enum_parameters(&target)),
                     },
                     "enumEq" => MacroValue::Bool(Some(&target) == args.get(1)),
                     _ => return Ok(None),
@@ -3683,8 +3845,44 @@ impl MacroInterpreter {
                             })
                 }
             },
-            _ => matches!(short, "Error" | "Exception"),
+            // The interpreter's own failures are haxe.macro.Error values; a
+            // user class of the same short name does not catch them.
+            _ => {
+                let resolved = self.resolve_class_name(&name);
+                match resolved.as_str() {
+                    "haxe.Exception" | "haxe.macro.Error" | "haxe.macro.Expr.Error" => true,
+                    "Error" | "Exception" => self
+                        .class_registry
+                        .as_ref()
+                        .is_none_or(|registry| registry.find_class(&resolved).is_none()),
+                    _ => false,
+                }
+            }
         }
+    }
+
+    /// `place.method(args)`: an abstract method that reassigns `this`
+    /// stores the new value back into `place`.
+    fn method_call_in_place(
+        &mut self,
+        place: &Expr,
+        receiver: &MacroValue,
+        method: &str,
+        args: Vec<MacroValue>,
+        location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        self.updated_this = None;
+        let result = self.method_call(receiver, method, args, location)?;
+        if let Some(updated) = self.updated_this.take()
+            && matches!(receiver, MacroValue::Abstract(..))
+            && matches!(
+                place.kind,
+                ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { .. }
+            )
+        {
+            self.assign_place(place, updated, location)?;
+        }
+        Ok(result)
     }
 
     /// Call a method on a value
@@ -3708,7 +3906,14 @@ impl MacroInterpreter {
                 .and_then(|registry| registry.find_instance_method(owner, method))
                 .is_some()
             {
-                return self.invoke_abstract(owner, inner.as_ref().clone(), method, args, location);
+                self.updated_this = None;
+                let result =
+                    self.invoke_abstract(owner, inner.as_ref().clone(), method, args, location);
+                self.updated_this = self
+                    .updated_this
+                    .take()
+                    .map(|this| MacroValue::Abstract(owner.clone(), Arc::new(this)));
+                return result;
             }
             return self.method_call(inner, method, args, location);
         }
@@ -3795,7 +4000,7 @@ impl MacroInterpreter {
                     let mut all = vec![base.clone()];
                     all.extend(args);
                     Ok(self
-                        .try_static_call("StringTools", method, &all, location)?
+                        .try_static_call("std.StringTools", method, &all, location)?
                         .ok_or(unsupported)?)
                 }
                 other => other,
@@ -3833,7 +4038,15 @@ impl MacroInterpreter {
                         location,
                     })
             }
-            MacroValue::Array(arr) => self.array_method(arr, method, args, location),
+            // Not an Array method: a `using` extension in scope (`Lambda.has`).
+            MacroValue::Array(arr) => {
+                match self.array_method(arr, method, args.clone(), location) {
+                    Err(unsupported @ MacroError::UnsupportedOperation { .. }) => Ok(self
+                        .try_extension(base, method, &args, location)?
+                        .ok_or(unsupported)?),
+                    other => other,
+                }
+            }
             MacroValue::Map(_) => {
                 base.map_method(method, &args)
                     .ok_or_else(|| MacroError::UnsupportedOperation {
@@ -4495,7 +4708,7 @@ impl MacroInterpreter {
             "toString" => return Ok(data),
             "get_length" => return self.field_access(&data, "length", location),
             "add" => self
-                .try_static_call("Std", "string", &args, location)?
+                .try_static_call("std.Std", "string", &args, location)?
                 .unwrap_or(MacroValue::Null)
                 .to_display_string(),
             "addChar" => args
@@ -4818,6 +5031,40 @@ impl MacroInterpreter {
         }
     }
 
+    /// `object.method` read as a value: the method closed over its instance.
+    fn bound_method(
+        &self,
+        object: &Shared<BTreeMap<String, MacroValue>>,
+        name: &str,
+    ) -> Option<MacroValue> {
+        let owner = object.read().get("__type__")?.as_string()?.to_string();
+        let registry = self.class_registry.as_ref()?;
+        let method = registry.find_instance_method(&owner, name)?;
+        let context = registry.find_executable_class(&method.owner).map(|class| {
+            super::value::MacroFunctionContext {
+                imports: class.imports.clone(),
+                source_file: Some(class.source_file.clone()),
+                owner: Some(class.qualified_name.clone()),
+            }
+        });
+        Some(MacroValue::Function(Arc::new(MacroFunction {
+            name: format!("{}.{name}", method.owner),
+            params: method
+                .params
+                .iter()
+                .map(MacroParam::from_function_param)
+                .collect(),
+            body: method.body.clone(),
+            captures: BTreeMap::from([(
+                "this".to_string(),
+                Arc::new(std::sync::Mutex::new(MacroValue::Object(object.clone()))),
+            )]),
+            context,
+            return_type: method.return_type.clone(),
+            static_target: None,
+        })))
+    }
+
     /// Access a field on a value
     fn field_access(
         &self,
@@ -4865,7 +5112,10 @@ impl MacroInterpreter {
                 )
             }
             MacroValue::Object(map) => {
-                Ok(map.read().get(field).cloned().unwrap_or(MacroValue::Null))
+                if let Some(value) = map.read().get(field) {
+                    return Ok(value.clone());
+                }
+                Ok(self.bound_method(map, field).unwrap_or(MacroValue::Null))
             }
             MacroValue::Array(arr) => match field {
                 "length" => Ok(MacroValue::Int(arr.read().len() as i64)),
@@ -5700,6 +5950,17 @@ impl MacroInterpreter {
                     if &**variant == name.as_str() && args.is_empty()))
             }
             parser::Pattern::Var(name) => {
+                // A constructor of the switched value's own enum, before any
+                // other type's constant or constructor of that name.
+                if let MacroValue::Enum(owner, variant, payload) = value.underlying()
+                    && self
+                        .class_registry
+                        .as_ref()
+                        .and_then(|registry| registry.enum_constructor(Some(owner), name))
+                        .is_some()
+                {
+                    return Ok(variant.as_ref() == name && payload.is_empty());
+                }
                 if let Some(owner) = self
                     .class_registry
                     .as_ref()
@@ -6154,6 +6415,37 @@ fn enum_ctor_tag(name: &str) -> Option<&'static str> {
         "TOptional" => Some("TOptional"),
         _ => None,
     }
+}
+
+/// The haxe.macro enum and constructor of a value built in object form by
+/// `build_enum_ctor_value`.
+pub(super) fn object_enum_constructor(value: &MacroValue) -> Option<(&'static str, String)> {
+    let MacroValue::Object(fields) = value.underlying() else {
+        return None;
+    };
+    let tag = fields.read().get("kind")?.as_string()?.to_string();
+    let owner = match enum_ctor_tag(&tag)? {
+        "FVar" | "FFun" | "FProp" => "haxe.macro.FieldType",
+        _ => "haxe.macro.ComplexType",
+    };
+    Some((owner, tag))
+}
+
+/// The constructor arguments of an object-form haxe.macro enum value.
+fn object_enum_parameters(value: &MacroValue) -> Vec<MacroValue> {
+    let MacroValue::Object(fields) = value.underlying() else {
+        return Vec::new();
+    };
+    let fields = fields.read();
+    if let Some(MacroValue::Array(args)) = fields.get("__args__").or_else(|| fields.get("args")) {
+        return args.read().to_vec();
+    }
+    let payload = fields
+        .iter()
+        .filter(|(key, _)| key.as_str() != "kind")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    vec![MacroValue::object(payload)]
 }
 
 /// Construct the object form of an enum-constructor call.
