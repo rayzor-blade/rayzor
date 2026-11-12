@@ -1,0 +1,5 @@
+[project]
+name = "macro-typeof-nested-call"
+entry = "./MacroTypeofNestedCall.hx"
+[build]
+class-paths = ["."]

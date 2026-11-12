@@ -1596,6 +1596,36 @@ impl DeferredMacroTyper<'_, '_> {
     }
 }
 
+impl DeferredMacroTyper<'_, '_> {
+    /// `expr` with its macro calls expanded, or None when it has none or the
+    /// expander is unavailable.
+    fn expand_probe_macros(&mut self, expr: &parser::Expr) -> Option<parser::Expr> {
+        // A literal, a name or a field path holds no call.
+        fn leaf(e: &parser::Expr) -> bool {
+            match &e.kind {
+                parser::ExprKind::Ident(_)
+                | parser::ExprKind::Int(_)
+                | parser::ExprKind::Float(_)
+                | parser::ExprKind::String(_)
+                | parser::ExprKind::Bool(_)
+                | parser::ExprKind::Null
+                | parser::ExprKind::This => true,
+                parser::ExprKind::Field { expr, .. } => leaf(expr),
+                _ => false,
+            }
+        }
+        if leaf(expr) {
+            return None;
+        }
+        let mut fork = self
+            .lowering
+            .deferred_macro_template
+            .clone()?
+            .fork_for_typing();
+        fork.expand_with_typer(expr.clone(), self).ok()
+    }
+}
+
 impl MacroTyper for DeferredMacroTyper<'_, '_> {
     fn type_expr_in_scope(&mut self, expr: &parser::Expr) -> Result<TypeId, String> {
         if let Some((receiver, ty)) = self.receiver {
@@ -1607,6 +1637,10 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         // result. Errors raised by the probe belong to the macro (typeError
         // catches them); they must not surface as user diagnostics, so both
         // error sinks are wound back to where they were.
+        // Macro calls inside the probed expression expand first: what is
+        // typed is what they produce.
+        let expanded = self.expand_probe_macros(expr);
+        let expr = expanded.as_ref().unwrap_or(expr);
         let outer_before = self.lowering.collected_errors.len();
         let ctx_before = self.lowering.context.errors.len();
 

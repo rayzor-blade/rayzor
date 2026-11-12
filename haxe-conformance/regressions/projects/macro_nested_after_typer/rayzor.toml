@@ -1,0 +1,5 @@
+[project]
+name = "macro-nested-after-typer"
+entry = "./MacroNestedAfterTyper.hx"
+[build]
+class-paths = ["."]

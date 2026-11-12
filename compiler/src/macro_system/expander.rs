@@ -110,6 +110,8 @@ pub struct MacroExpander {
     bound_names: std::collections::BTreeSet<String>,
     /// Import map for the current file: short name → qualified name
     import_map: BTreeMap<String, String>,
+    /// Set while a deferred call's result is walked with the typer live.
+    expanding_deferred_result: bool,
     /// The current file's imports as written.
     file_imports: Vec<parser::Import>,
     source_file: Option<String>,
@@ -136,6 +138,7 @@ impl MacroExpander {
             deferred_classes: std::collections::BTreeSet::new(),
             bound_names: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
+            expanding_deferred_result: false,
             file_imports: Vec::new(),
             source_file: None,
             class_registry: Arc::new(ClassRegistry::new()),
@@ -160,6 +163,7 @@ impl MacroExpander {
             deferred_classes: std::collections::BTreeSet::new(),
             bound_names: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
+            expanding_deferred_result: false,
             file_imports: Vec::new(),
             source_file: None,
             class_registry: Arc::new(ClassRegistry::new()),
@@ -184,6 +188,7 @@ impl MacroExpander {
             deferred_classes: std::collections::BTreeSet::new(),
             bound_names: std::collections::BTreeSet::new(),
             import_map: BTreeMap::new(),
+            expanding_deferred_result: false,
             file_imports: Vec::new(),
             source_file: None,
             class_registry: Arc::new(class_registry),
@@ -705,9 +710,10 @@ impl MacroExpander {
                             .find_macro_by_name(&macro_name)
                             .and_then(|def| def.qualified_name.rsplit_once('.'))
                             .map(|(class, _)| class.to_string());
-                        if class
-                            .as_ref()
-                            .is_some_and(|c| self.deferred_classes.contains(c))
+                        if !self.expanding_deferred_result
+                            && class
+                                .as_ref()
+                                .is_some_and(|c| self.deferred_classes.contains(c))
                         {
                             self.deferred.push(DeferredMacroCall {
                                 name: macro_name,
@@ -719,6 +725,13 @@ impl MacroExpander {
                         // is the only run that takes effect.
                         let statics = self.class_registry.statics_snapshot();
                         match self.expand_macro_call(&macro_name, args, &expr) {
+                            // Under a deferred result the expansion's own calls
+                            // expand now, as the typer is live.
+                            Ok(expanded) if self.expanding_deferred_result => {
+                                self.expansions_count += 1;
+                                let (expanded, _) = self.walk_expr(expanded)?;
+                                return Ok((expanded, true));
+                            }
                             Ok(expanded) => {
                                 self.expansions_count += 1;
                                 return Ok((expanded, true));
@@ -1851,6 +1864,22 @@ impl MacroExpander {
     /// `call` is the exact call expression parked at expansion time; lowering
     /// matched it by span. The typer is installed on the context only for the
     /// span of this call — the guard clears it even on the error path.
+    /// Expand the macro calls inside `expr` with `typer` live, as a typing
+    /// probe needs them gone before it can type the expression.
+    pub(crate) fn expand_with_typer(
+        &mut self,
+        expr: parser::Expr,
+        typer: &mut dyn super::context_api::MacroTyper,
+    ) -> Result<parser::Expr, MacroError> {
+        // SAFETY: cleared before this function returns, on every path.
+        unsafe { self.context.set_typer(typer) };
+        let outer = std::mem::replace(&mut self.expanding_deferred_result, true);
+        let result = self.expand_expr(expr);
+        self.expanding_deferred_result = outer;
+        self.context.clear_typer();
+        result
+    }
+
     pub fn expand_deferred_call(
         &mut self,
         name: &str,
@@ -1870,7 +1899,14 @@ impl MacroExpander {
         // the immediate path walks an expansion.
         let result = self
             .expand_macro_call(name, args, call)
-            .and_then(|expanded| self.expand_expr(expanded));
+            .and_then(|expanded| {
+                // The typer is live for the whole walk, so a call into a parked
+                // class expands here rather than parking again.
+                let outer = std::mem::replace(&mut self.expanding_deferred_result, true);
+                let out = self.expand_expr(expanded);
+                self.expanding_deferred_result = outer;
+                out
+            });
         self.context.clear_typer();
         if matches!(&result, Err(MacroError::NeedsModule { .. })) {
             self.class_registry.restore_statics(statics);
