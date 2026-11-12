@@ -1255,7 +1255,7 @@ impl<'a> HirToMirContext<'a> {
                                 | Some(TypeKind::String)
                                 | Some(TypeKind::Array { .. })
                                 | Some(TypeKind::Anonymous { .. })
-                        )
+                        ) || self.convert_type(resolved_param) == IrType::F32
                     };
                     if param_unboxes {
                         if let Some(unboxed) =
