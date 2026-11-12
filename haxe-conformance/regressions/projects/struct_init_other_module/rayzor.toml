@@ -1,0 +1,5 @@
+[project]
+name = "struct-init-other-module"
+entry = "./StructInitOtherModule.hx"
+[build]
+class-paths = ["."]

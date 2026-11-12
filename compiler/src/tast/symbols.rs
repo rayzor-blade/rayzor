@@ -850,6 +850,12 @@ impl SymbolTable {
         self.symbol_cache.invalidate_scope(scope_id);
     }
 
+    /// Drop the binding of `name` in `scope_id`.
+    pub fn unbind_symbol_in_scope(&mut self, scope_id: ScopeId, name: InternedString) {
+        self.symbols_by_name.remove(&(scope_id, name));
+        self.symbol_cache.invalidate_scope(scope_id);
+    }
+
     /// Index an existing symbol as a member of `scope_id` under `name`, as
     /// creating it there would have.
     pub fn place_symbol_in_scope(
@@ -1552,6 +1558,16 @@ impl SymbolTable {
     /// Record that a type is private to its module, with the path Haxe prints for it.
     pub fn set_private_type_path(&mut self, type_symbol: SymbolId, path: InternedString) {
         self.private_type_paths.insert(type_symbol, path);
+    }
+
+    /// Whether `type_symbol` is registered under its module's private path.
+    pub fn is_module_scoped_private(&self, type_symbol: SymbolId) -> bool {
+        self.private_type_paths
+            .get(&type_symbol)
+            .is_some_and(|path| {
+                self.get_symbol(type_symbol)
+                    .is_some_and(|s| s.qualified_name == Some(*path))
+            })
     }
 
     /// A type's path as Haxe prints it: the qualified name, or for a

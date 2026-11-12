@@ -1621,6 +1621,9 @@ pub struct AstLowering<'a> {
     /// Bare names of the types the file being lowered declares: they take
     /// precedence over imports, default imports included.
     pub(crate) current_module_types: std::collections::BTreeSet<String>,
+    /// `pack._Module` of the user module being registered or lowered, where its
+    /// private types live.
+    pub(crate) private_scope: Option<Vec<InternedString>>,
     /// The file's module-level fields by bare name: the class holding them,
     /// and whether the field is a function.
     pub(crate) module_statics: BTreeMap<String, (String, bool)>,

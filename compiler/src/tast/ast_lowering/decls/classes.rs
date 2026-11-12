@@ -53,8 +53,13 @@ impl<'a> AstLowering<'a> {
     ) -> LoweringResult<TypedDeclaration> {
         let class_name = self.context.intern_string(&class_decl.name);
 
+        let own_private = matches!(class_decl.access, Some(parser::Access::Private))
+            .then(|| self.own_private_type(class_name))
+            .flatten();
         // Look up the existing symbol that was created during pre-registration
-        let class_symbol = if self.root_slot_is_foreign_type(class_name) {
+        let class_symbol = if let Some(symbol) = own_private {
+            symbol
+        } else if self.root_slot_is_foreign_type(class_name) {
             match self.package_type_symbol(class_name, crate::tast::SymbolKind::Class) {
                 Some(symbol) => symbol,
                 None => {
@@ -136,10 +141,24 @@ impl<'a> AstLowering<'a> {
                 self.context.current_scope = sid;
                 (sid, true)
             }
-            None => (
-                self.context.enter_named_scope(ScopeKind::Class, class_name),
-                false,
-            ),
+            None => {
+                // A module-private class qualifies its members as `_Module.Name.member`.
+                let scope_name = match (own_private, self.private_scope.as_ref()) {
+                    (Some(_), Some(scope)) => {
+                        let module = scope
+                            .last()
+                            .and_then(|m| self.context.string_interner.get(*m))
+                            .unwrap_or_default();
+                        let name = format!("{module}.{}", class_decl.name);
+                        self.context.intern_string(&name)
+                    }
+                    _ => class_name,
+                };
+                (
+                    self.context.enter_named_scope(ScopeKind::Class, scope_name),
+                    false,
+                )
+            }
         };
 
         // Note: The class symbol remains in the parent scope, while its members are in class_scope

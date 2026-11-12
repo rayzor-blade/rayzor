@@ -982,21 +982,22 @@ impl<'a> AstLowering<'a> {
             // type so it never prefers a fresh placeholder.
             let class_bare = class_qname.rsplit('.').next().unwrap_or(class_qname);
             let suffix = format!(".{}.{}", class_bare, method_name_str);
-            if let Some(sym) = self
-                .context
-                .symbol_table
-                .find_symbols_named(method_name, |sym| {
-                    sym.kind == crate::tast::symbols::SymbolKind::Function
-                        && sym.name == method_name
-                        && sym.type_id.is_valid()
-                        && sym
-                            .qualified_name
-                            .and_then(|qn| self.context.string_interner.get(qn))
-                            .map(|qn| qn.ends_with(&suffix))
-                            .unwrap_or(false)
-                })
-                .into_iter()
-                .next()
+            if !self.is_module_private_type(class_symbol)
+                && let Some(sym) = self
+                    .context
+                    .symbol_table
+                    .find_symbols_named(method_name, |sym| {
+                        sym.kind == crate::tast::symbols::SymbolKind::Function
+                            && sym.name == method_name
+                            && sym.type_id.is_valid()
+                            && sym
+                                .qualified_name
+                                .and_then(|qn| self.context.string_interner.get(qn))
+                                .map(|qn| qn.ends_with(&suffix))
+                                .unwrap_or(false)
+                    })
+                    .into_iter()
+                    .next()
             {
                 return Some(sym.id);
             }
@@ -1036,7 +1037,11 @@ impl<'a> AstLowering<'a> {
         // another `Bytes` Class with methods registered in its own scope.
         // If the resolved class symbol has no methods of its own, walk the
         // symbol table for ALL same-named classes and pick one whose scope
-        // does have this method.
+        // does have this method. A module-private class is none of them:
+        // its methods are its own, lowered with its module.
+        if self.is_module_private_type(class_symbol) {
+            return None;
+        }
         let short_class_name = class_sym.name;
         let mut candidates = self
             .context
@@ -1046,6 +1051,7 @@ impl<'a> AstLowering<'a> {
                     && s.name == short_class_name
                     && s.id != class_symbol
             });
+        candidates.retain(|s| !self.is_module_private_type(s.id));
         candidates.sort_by_key(|s| s.id);
         for cand in candidates {
             if let Some(sym) = self
@@ -3302,6 +3308,18 @@ impl<'a> AstLowering<'a> {
             slf.expected_arg_type_stack.pop();
             slf.expected_lambda_params_stack.pop();
             let typed = result?;
+            // A structure literal for a class formal is that class's `@:structInit`.
+            let typed = match (&args[i].kind, arg_type_hint) {
+                (ExprKind::Object(_), Some(formal))
+                    if matches!(
+                        slf.context.type_table.borrow().get(formal).map(|t| &t.kind),
+                        Some(TypeKind::Class { .. })
+                    ) =>
+                {
+                    slf.retype_literal_to(typed, formal)
+                }
+                _ => typed,
+            };
             if let Some(converted) = slf.lower_macro_from(&args[i], &typed, arg_type_hint)? {
                 converted_macro = true;
                 Ok(converted)

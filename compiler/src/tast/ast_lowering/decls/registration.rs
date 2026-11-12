@@ -21,6 +21,7 @@ impl<'a> AstLowering<'a> {
     /// type names need to be available before any file is fully compiled.
     pub fn pre_register_file(&mut self, file: &HaxeFile) -> LoweringResult<()> {
         self.record_module_types(file);
+        self.set_private_scope(file);
 
         // Process package declaration to set up the namespace context
         self.context.current_package = None;
@@ -47,6 +48,7 @@ impl<'a> AstLowering<'a> {
 
         // Reset package context for next file
         self.context.current_package = None;
+        self.private_scope = None;
 
         // Return any errors that occurred during pre-registration
         if !self.collected_errors.is_empty() {
@@ -219,6 +221,90 @@ impl<'a> AstLowering<'a> {
             .is_some_and(|p| !p.full_path.is_empty())
     }
 
+    /// Enter `file` for its private types: a user module's live under `pack._Module`.
+    pub(crate) fn set_private_scope(&mut self, file: &HaxeFile) {
+        self.private_scope =
+            crate::tast::sig_index::module_private_package(&file.filename).map(|module| {
+                file.package
+                    .iter()
+                    .flat_map(|package| package.path.iter())
+                    .map(String::as_str)
+                    .chain(std::iter::once(module.as_str()))
+                    .map(|segment| self.context.string_interner.intern(segment))
+                    .collect()
+            });
+    }
+
+    /// The current module's own private type `name`.
+    pub(crate) fn own_private_type(&self, name: InternedString) -> Option<SymbolId> {
+        let path = self.private_scope.as_ref()?;
+        let package = self.context.namespace_resolver.get_package_by_path(path)?;
+        self.context
+            .namespace_resolver
+            .get_package(package)?
+            .symbols
+            .get(&name)
+            .copied()
+    }
+
+    /// Whether `symbol` is a type private to its module (registered under `pack._Module`).
+    pub(crate) fn is_module_private_type(&self, symbol: SymbolId) -> bool {
+        let interner = &self.context.string_interner;
+        self.context
+            .symbol_table
+            .get_symbol(symbol)
+            .and_then(|s| s.package_id)
+            .and_then(|package| self.context.namespace_resolver.get_package(package))
+            .and_then(|package| package.full_path.last().copied())
+            .and_then(|segment| interner.get(segment))
+            .and_then(|segment| segment.strip_prefix('_'))
+            .is_some_and(|module| module.starts_with(|c: char| c.is_ascii_uppercase()))
+    }
+
+    /// Whether `declaration` registers in the current module's private scope.
+    fn registers_module_private(&self, declaration: &TypeDeclaration) -> bool {
+        self.private_scope.is_some() && crate::tast::sig_index::is_module_private(declaration)
+    }
+
+    /// Mint the module-private symbol for `name`, bound under `pack._Module` and
+    /// leaving the root scope's binding as it was.
+    fn create_module_private_type(&mut self, name: InternedString) -> SymbolId {
+        let root = self
+            .context
+            .symbol_table
+            .lookup_symbol(ScopeId::first(), name)
+            .map(|s| s.id);
+        // A typedef starts as a class placeholder, as at package level, so a
+        // reference resolved before its declaration lowers still names it.
+        let symbol = self
+            .context
+            .symbol_table
+            .create_class_in_scope(name, ScopeId::first());
+        match root {
+            Some(root) => {
+                self.context
+                    .symbol_table
+                    .remap_symbol_in_scope(ScopeId::first(), name, root)
+            }
+            None => self
+                .context
+                .symbol_table
+                .unbind_symbol_in_scope(ScopeId::first(), name),
+        }
+        let path = self.private_scope.clone().expect("module-private scope");
+        let package = self.context.namespace_resolver.get_or_create_package(path);
+        let outer = self.context.current_package.replace(package);
+        let text = self
+            .context
+            .string_interner
+            .get(name)
+            .unwrap_or("")
+            .to_string();
+        self.register_symbol_with_package(symbol, &text);
+        self.context.current_package = outer;
+        symbol
+    }
+
     pub(crate) fn root_slot_is_foreign_type(&self, name: InternedString) -> bool {
         let named_package = |package: Option<crate::tast::namespace::PackageId>| {
             package.filter(|&id| {
@@ -357,6 +443,25 @@ impl<'a> AstLowering<'a> {
             TypeDeclaration::Class(class_decl) => {
                 let class_name = self.context.intern_string(&class_decl.name);
                 self.record_type_usings(class_name, &class_decl.meta);
+
+                if self.registers_module_private(declaration) {
+                    if self.own_private_type(class_name).is_none() {
+                        let class_symbol = self.create_module_private_type(class_name);
+                        let class_type = self.context.type_table.borrow_mut().create_type(
+                            crate::tast::core::TypeKind::Class {
+                                symbol_id: class_symbol,
+                                type_args: Vec::new(),
+                            },
+                        );
+                        self.context
+                            .symbol_table
+                            .update_symbol_type(class_symbol, class_type);
+                        self.context
+                            .symbol_table
+                            .register_type_symbol_mapping(class_type, class_symbol);
+                    }
+                    return Ok(());
+                }
 
                 if self.root_slot_is_foreign_type(class_name) {
                     if self
@@ -693,6 +798,13 @@ impl<'a> AstLowering<'a> {
                 let typedef_name = self.context.intern_string(&typedef_decl.name);
                 self.record_type_usings(typedef_name, &typedef_decl.meta);
 
+                if self.registers_module_private(declaration) {
+                    if self.own_private_type(typedef_name).is_none() {
+                        self.create_module_private_type(typedef_name);
+                    }
+                    return Ok(());
+                }
+
                 if self.in_named_package() && self.root_slot_is_foreign_type(typedef_name) {
                     if self.packaged_symbol(typedef_name).is_none() {
                         let root = self
@@ -902,7 +1014,46 @@ impl<'a> AstLowering<'a> {
     /// The type of a literal initializer, known before any body is lowered, so
     /// a class earlier in the file sees `static var n = 0` as an Int. An
     /// integer outside the Int range is left to the initializer's lowering.
-    fn literal_field_type(&self, initializer: &parser::Expr) -> Option<TypeId> {
+    fn literal_field_type(&mut self, initializer: &parser::Expr) -> Option<TypeId> {
+        match &initializer.kind {
+            parser::ExprKind::Regex { .. } => {
+                let ereg = parser::Type::Path {
+                    path: parser::TypePath {
+                        package: Vec::new(),
+                        name: "EReg".to_string(),
+                        sub: None,
+                    },
+                    params: Vec::new(),
+                    span: initializer.span,
+                };
+                return self.lower_type(&ereg).ok();
+            }
+            // An array of literals of one type; Int beside Float is Float.
+            parser::ExprKind::Array(elements) if !elements.is_empty() => {
+                let mut element = None;
+                for value in elements {
+                    let ty = self.literal_field_type(value)?;
+                    element = match element {
+                        None => Some(ty),
+                        Some(seen) if seen == ty => Some(seen),
+                        Some(seen) => {
+                            let table = self.context.type_table.borrow();
+                            let numeric = [table.int_type(), table.float_type()];
+                            (numeric.contains(&seen) && numeric.contains(&ty))
+                                .then(|| table.float_type())
+                        }
+                    };
+                    element?;
+                }
+                return Some(
+                    self.context
+                        .type_table
+                        .borrow_mut()
+                        .create_array_type(element?),
+                );
+            }
+            _ => {}
+        }
         let table = self.context.type_table.borrow();
         let number = |expr: &parser::Expr| match expr.kind {
             parser::ExprKind::Int(v) if i32::try_from(v).is_ok() => Some(table.int_type()),
@@ -997,8 +1148,13 @@ impl<'a> AstLowering<'a> {
     ) -> LoweringResult<()> {
         let class_name = self.context.intern_string(&class_decl.name);
 
+        let own_private = matches!(class_decl.access, Some(parser::Access::Private))
+            .then(|| self.own_private_type(class_name))
+            .flatten();
         // Look up the pre-registered class symbol
-        let class_symbol = if self.root_slot_is_foreign_type(class_name) {
+        let class_symbol = if let Some(symbol) = own_private {
+            symbol
+        } else if self.root_slot_is_foreign_type(class_name) {
             match self.package_type_symbol(class_name, crate::tast::SymbolKind::Class) {
                 Some(symbol) => symbol,
                 None => return Ok(()),

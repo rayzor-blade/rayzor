@@ -1,0 +1,5 @@
+[project]
+name = "private-types-per-module"
+entry = "./PrivateTypesPerModule.hx"
+[build]
+class-paths = ["."]

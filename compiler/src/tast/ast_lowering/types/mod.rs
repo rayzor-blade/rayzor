@@ -190,20 +190,29 @@ impl<'a> AstLowering<'a> {
                     .and_then(|sym_id| self.context.symbol_table.get_symbol(sym_id))
                     .map(|s| (s.id, s.kind.clone()));
 
-                let own_symbol =
-                    if path.package.is_empty() && self.current_module_types.contains(&path.name) {
-                        self.context.current_package.and_then(|package| {
-                            self.context
-                                .namespace_resolver
-                                .find_symbols_by_name(interned_name, package)
-                                .into_iter()
-                                .find(|(owner, _)| *owner == package)
-                                .and_then(|(_, id)| self.context.symbol_table.get_symbol(id))
-                                .map(|symbol| (symbol.id, symbol.kind))
-                        })
-                    } else {
-                        None
-                    };
+                let own_private = path
+                    .package
+                    .is_empty()
+                    .then(|| self.own_private_type(interned_name))
+                    .flatten()
+                    .and_then(|id| self.context.symbol_table.get_symbol(id))
+                    .map(|symbol| (symbol.id, symbol.kind));
+                let own_symbol = if own_private.is_some() {
+                    own_private
+                } else if path.package.is_empty() && self.current_module_types.contains(&path.name)
+                {
+                    self.context.current_package.and_then(|package| {
+                        self.context
+                            .namespace_resolver
+                            .find_symbols_by_name(interned_name, package)
+                            .into_iter()
+                            .find(|(owner, _)| *owner == package)
+                            .and_then(|(_, id)| self.context.symbol_table.get_symbol(id))
+                            .map(|symbol| (symbol.id, symbol.kind))
+                    })
+                } else {
+                    None
+                };
                 // A declaration in this module precedes imports and root names.
                 let symbol_info = own_symbol
                     .or(import_resolved_symbol)
@@ -686,7 +695,24 @@ impl<'a> AstLowering<'a> {
                 // Create proper anonymous type with fields
                 let mut anonymous_fields = Vec::new();
                 for field in fields {
-                    let field_type_id = self.lower_type(&field.type_hint)?;
+                    let mut field_type_id = self.lower_type(&field.type_hint)?;
+                    // `?n:Int` is `Null<Int>`: a scalar's zero is a value, not absence.
+                    if field.optional
+                        && matches!(
+                            self.context
+                                .type_table
+                                .borrow()
+                                .get(field_type_id)
+                                .map(|t| &t.kind),
+                            Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+                        )
+                    {
+                        field_type_id = self
+                            .context
+                            .type_table
+                            .borrow_mut()
+                            .create_optional_type(field_type_id);
+                    }
                     let field_name = self.context.intern_string(&field.name);
                     anonymous_fields.push(crate::tast::core::AnonymousField {
                         name: field_name,
@@ -831,6 +857,7 @@ impl<'a> AstLowering<'a> {
             && self.current_module_types.contains(&type_path.name)
         {
             let own = match self.context.current_package {
+                _ if let Some(own) = self.own_private_type(name_interned) => Some(own),
                 Some(package) => self
                     .context
                     .namespace_resolver

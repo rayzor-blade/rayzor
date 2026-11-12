@@ -62,6 +62,7 @@ impl<'a> AstLowering<'a> {
         self.pos_file_name = crate::tast::type_resolution::pos_infos_file_name(&file.filename);
         self.file_uses_coroutines = super::coroutines::file_uses_coroutines(&file.filename);
         self.current_module_types = module_type_names(&file.declarations);
+        self.private_scope = None;
         self.record_module_types(file);
         let file_name = file
             .filename
@@ -125,6 +126,7 @@ impl<'a> AstLowering<'a> {
         if let Err(e) = self.process_import_hx_files(&file) {
             self.collected_errors.push(e);
         }
+        self.set_private_scope(file);
 
         // Process imports - collect errors but continue
         for import in &file.imports {
@@ -665,7 +667,12 @@ impl<'a> AstLowering<'a> {
 
         // Look up existing symbol or create a new one; see `in_named_package`.
         let named_package = self.in_named_package();
-        let typedef_symbol = if let Some(symbol) = named_package
+        let own_private = matches!(typedef_decl.access, Some(parser::Access::Private))
+            .then(|| self.own_private_type(typedef_name))
+            .flatten();
+        let typedef_symbol = if let Some(symbol) = own_private {
+            symbol
+        } else if let Some(symbol) = named_package
             .then(|| self.packaged_symbol(typedef_name))
             .flatten()
         {

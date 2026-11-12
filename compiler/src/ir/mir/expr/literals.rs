@@ -952,6 +952,82 @@ impl<'a> HirToMirContext<'a> {
         self.coerce_null_int(value, &field_ir_type).unwrap_or(value)
     }
 
+    /// `new C(..)` for a struct-init literal of a class another module
+    /// declares: its fields are the declared constructor's arguments by name,
+    /// and an omitted one takes its literal default, else null.
+    fn imported_struct_init_new(
+        &self,
+        fields: &[(InternedString, HirExpr)],
+        class_type: TypeId,
+        class_symbol: SymbolId,
+    ) -> Option<HirExpr> {
+        let owner = self
+            .symbol_table
+            .get_symbol(class_symbol)?
+            .qualified_name
+            .and_then(|name| self.string_interner.get(name))?;
+        let (names, defaults) = self
+            .static_sig_index
+            .as_ref()?
+            .borrow_mut()
+            .constructor_parameters(owner)?;
+        if names.is_empty() && !fields.is_empty() {
+            return None;
+        }
+        let named = |name: &str| {
+            fields
+                .iter()
+                .find(|(field, _)| self.string_interner.get(*field) == Some(name))
+                .map(|(_, e)| e.clone())
+        };
+        let (lifetime, location) = fields
+            .first()
+            .map(|(_, e)| (e.lifetime, e.source_location))
+            .unwrap_or((
+                crate::tast::LifetimeId::from_raw(0),
+                SourceLocation::unknown(),
+            ));
+        let last = names.iter().rposition(|name| named(name).is_some());
+        let mut args = Vec::new();
+        for (index, name) in names.iter().take(last.map_or(0, |l| l + 1)).enumerate() {
+            if let Some(arg) = named(name) {
+                args.push(arg);
+                continue;
+            }
+            let (kind, ty) = match defaults.get(index).cloned().flatten() {
+                Some(parser::ExprKind::Int(v)) => (
+                    HirExprKind::Literal(HirLiteral::Int(v)),
+                    self.type_table.int_type(),
+                ),
+                Some(parser::ExprKind::Float(v)) => (
+                    HirExprKind::Literal(HirLiteral::Float(v)),
+                    self.type_table.float_type(),
+                ),
+                Some(parser::ExprKind::Bool(v)) => (
+                    HirExprKind::Literal(HirLiteral::Bool(v)),
+                    self.type_table.bool_type(),
+                ),
+                Some(parser::ExprKind::String(v)) => (
+                    HirExprKind::Literal(HirLiteral::String(self.string_interner.intern(&v))),
+                    self.type_table.string_type(),
+                ),
+                _ => (HirExprKind::Null, self.type_table.dynamic_type()),
+            };
+            args.push(HirExpr::new(kind, ty, lifetime, location));
+        }
+        Some(HirExpr::new(
+            HirExprKind::New {
+                class_type,
+                type_args: Vec::new(),
+                args,
+                class_name: None,
+            },
+            class_type,
+            lifetime,
+            location,
+        ))
+    }
+
     fn lower_struct_init_class_literal(
         &mut self,
         fields: &[(InternedString, HirExpr)],
@@ -1005,6 +1081,11 @@ impl<'a> HirToMirContext<'a> {
                 lifetime,
                 location,
             );
+            return self.lower_expression(&new);
+        }
+        if hir_class.is_none()
+            && let Some(new) = self.imported_struct_init_new(fields, class_type, class_symbol)
+        {
             return self.lower_expression(&new);
         }
         let storage_fields = self.struct_init_storage_fields(class_symbol)?;

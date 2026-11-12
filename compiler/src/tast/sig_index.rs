@@ -90,6 +90,10 @@ struct ClassSigs {
     /// extern, bodyless `new`, inherited ctor) is absent, because a `<C>.new`
     /// stub for those would dangle and SIGILL at the call.
     ctor_params: Option<usize>,
+    /// Declared `@:structInit`: a structure literal builds an instance.
+    struct_init: bool,
+    /// That constructor's parameter names and literal defaults.
+    ctor_signature: Option<(Vec<String>, Vec<Option<parser::ExprKind>>)>,
     /// Declares `new` in any form, or has a build macro that may add one.
     may_declare_new: bool,
     /// Interface slots: inherited declarations first, then own methods and accessors.
@@ -230,6 +234,24 @@ impl StaticSigIndex {
             self.ensure_indexed_from_known_files(class_name);
         }
         self.classes.get(class_name)?.ctor_params
+    }
+
+    /// Whether the class indexed under `class_name` is `@:structInit`.
+    pub fn is_struct_init(&mut self, class_name: &str) -> bool {
+        if self.known_file(class_name).is_some() {
+            self.ensure_indexed_from_known_files(class_name);
+        }
+        self.classes.get(class_name).is_some_and(|c| c.struct_init)
+    }
+
+    /// Parameter names and literal defaults of the constructor counted by
+    /// `declared_constructor_arity`.
+    pub fn constructor_parameters(
+        &mut self,
+        class_name: &str,
+    ) -> Option<(Vec<String>, Vec<Option<parser::ExprKind>>)> {
+        self.declared_constructor_arity(class_name)?;
+        self.classes.get(class_name)?.ctor_signature.clone()
     }
 
     /// The class `class_name` extends, under the name this index records it.
@@ -795,6 +817,10 @@ impl StaticSigIndex {
                 _ => continue,
             };
             let identity = (pack.clone(), Self::qualify(&package, module));
+            let package = match module_private_package(&file.filename) {
+                Some(private) if is_module_private(decl) => Self::qualify(&package, &private),
+                _ => package.clone(),
+            };
             self.declaration_modules
                 .insert(Self::qualify(&package, name), identity.clone());
             self.declaration_modules.insert(
@@ -904,6 +930,10 @@ impl StaticSigIndex {
                         )
                     });
                     class.may_declare_new |= declares_new || built;
+                    class.struct_init |= c
+                        .meta
+                        .iter()
+                        .any(|m| m.name.trim_start_matches(':') == "structInit");
                     class.extends_type = c.extends.clone();
                     class.implements = c
                         .implements
@@ -1106,6 +1136,10 @@ impl StaticSigIndex {
                     && entry.ctor_params.is_none()
                 {
                     entry.ctor_params = Some(func.params.len());
+                    entry.ctor_signature = Some((
+                        func.params.iter().map(|p| p.name.clone()).collect(),
+                        func.params.iter().map(Self::default_literal).collect(),
+                    ));
                 }
                 continue;
             }
@@ -1192,7 +1226,7 @@ impl StaticSigIndex {
             .insert(qname);
     }
 
-    fn qualify(package: &str, name: &str) -> String {
+    pub(crate) fn qualify(package: &str, name: &str) -> String {
         if package.is_empty() {
             name.to_string()
         } else {
@@ -1400,6 +1434,7 @@ impl StaticSigIndex {
             return;
         }
         let parsed = resolve_file(name)
+            .or_else(|| private_type_module(name).and_then(|module| resolve_file(&module)))
             .and_then(|path| std::fs::read_to_string(&path).ok().map(|src| (path, src)))
             .and_then(|(path, src)| {
                 parser::haxe_parser::parse_haxe_file_with_config(
@@ -1540,4 +1575,45 @@ mod preprocessor_tests {
         }
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// The `_Module` segment Haxe paths a user module's private types under
+/// (`pack._Module.Name`). Standard-library modules keep their private types at
+/// package level: runtime type ids are derived from those names.
+pub(crate) fn module_private_package(filename: &str) -> Option<String> {
+    if filename.contains("haxe-std/") || filename.contains("haxe-std\\") {
+        return None;
+    }
+    let stem = std::path::Path::new(filename).file_stem()?.to_str()?;
+    Some(format!("_{stem}"))
+}
+
+/// The module `pack.Module` that declares the private type `pack._Module.Name`.
+fn private_type_module(name: &str) -> Option<String> {
+    let mut segments: Vec<&str> = name.split('.').collect();
+    segments.pop()?;
+    let module = segments.pop()?.strip_prefix('_')?;
+    module
+        .starts_with(|c: char| c.is_ascii_uppercase())
+        .then_some(())?;
+    segments.push(module);
+    Some(segments.join("."))
+}
+
+/// A private class or typedef, the declarations scoped to their module. A
+/// `@:generic` template stays at package level, where its instances find it.
+pub(crate) fn is_module_private(decl: &parser::TypeDeclaration) -> bool {
+    let access = match decl {
+        parser::TypeDeclaration::Class(d)
+            if !d
+                .meta
+                .iter()
+                .any(|m| m.name.trim_start_matches(':') == "generic") =>
+        {
+            &d.access
+        }
+        parser::TypeDeclaration::Typedef(d) => &d.access,
+        _ => return false,
+    };
+    matches!(access, Some(parser::Access::Private))
 }

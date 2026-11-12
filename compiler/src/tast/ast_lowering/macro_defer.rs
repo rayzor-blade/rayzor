@@ -695,6 +695,7 @@ impl AstLowering<'_> {
         let lambda_params = std::mem::take(&mut self.expected_lambda_params_stack);
         let arg_types = std::mem::take(&mut self.expected_arg_type_stack);
         let map_uses = std::mem::take(&mut self.map_first_uses);
+        let private_scope = self.private_scope.take();
         self.context.current_scope = crate::tast::ScopeId::first();
         self.context.current_package = None;
         self.set_package_from_parts(pack);
@@ -702,6 +703,7 @@ impl AstLowering<'_> {
         self.lowering_callee = false;
         self.closure_depth = 0;
         let result = lower(self);
+        self.private_scope = private_scope;
         self.context.current_scope = scope;
         self.context.current_package = package;
         self.context.class_context_stack = classes;

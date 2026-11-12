@@ -45,13 +45,15 @@ impl<'a> HirToMirContext<'a> {
         }
         let field_name = self.string_interner.get(field.name).unwrap_or("<unknown>");
         let class_name = self.string_interner.get(owner_name).unwrap_or("<unknown>");
+        // A module-private owner is named by its path; its short name is not its own.
+        let global_name = if self.symbol_table.is_module_scoped_private(owner_symbol) {
+            format!("{qualified_owner}.{field_name}")
+        } else {
+            format!("{class_name}.{field_name}")
+        };
 
         // Reuse storage when the declaring type has already been compiled.
-        if let Some((gid, _)) = self
-            .external_globals
-            .get(&format!("{}.{}", class_name, field_name))
-            .cloned()
-        {
+        if let Some((gid, _)) = self.external_globals.get(&global_name).cloned() {
             self.global_symbol_map.insert(field.symbol_id, gid);
             return;
         }
@@ -107,7 +109,7 @@ impl<'a> HirToMirContext<'a> {
 
         let ir_global = IrGlobal {
             id: global_id,
-            name: format!("{}.{}", class_name, field_name),
+            name: global_name,
             symbol_id: field.symbol_id,
             ty: global_ty,
             initializer,
@@ -262,7 +264,9 @@ impl<'a> HirToMirContext<'a> {
         // Haxe exposes private secondary types through their containing module:
         // package._Module.Type. The symbol's qualified name remains unchanged
         // for source-level lookup and the existing deterministic runtime ID.
-        let reflection_name = if class.visibility == crate::tast::Visibility::Private {
+        let reflection_name = if self.symbol_table.is_module_scoped_private(class.symbol_id) {
+            qualified_name.to_owned()
+        } else if class.visibility == crate::tast::Visibility::Private {
             let module_name = std::path::Path::new(&self.builder.module.source_file)
                 .file_stem()
                 .and_then(|stem| stem.to_str());

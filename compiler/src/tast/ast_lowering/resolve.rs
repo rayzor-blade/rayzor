@@ -250,8 +250,13 @@ impl<'a> AstLowering<'a> {
             }
         }
 
-        // This file's enum abstract values come before a namesake that only
-        // the root scope holds.
+        // This module's private types, then its enum abstract values, come
+        // before a namesake that only the root scope holds.
+        if (outer_match.is_none() || outer_in_root)
+            && let Some(own) = self.own_private_type(name)
+        {
+            return Some(own);
+        }
         if outer_match.is_none() || outer_in_root {
             if let Some(&value) = self.module_enum_abstract_values.get(&name) {
                 return Some(value);

@@ -1390,41 +1390,121 @@ impl<'a> AstLowering<'a> {
                     .and_then(|formals| {
                         self.skipped_optional_formals_for(&ctor_optional, args, formals)
                     });
-                let mut arg_exprs = Vec::with_capacity(args.len());
-                for (index, arg) in args.iter().enumerate() {
-                    let formal = formal_of.as_ref().map_or(index, |map| map[index]);
-                    let expected = ctor_params
-                        .as_ref()
-                        .and_then(|ps| ps.get(formal))
-                        .copied()
-                        .filter(|_| !constructor_has_unbound_params)
-                        .filter(|ty| {
-                            !matches!(
-                                self.context.type_table.borrow().get(*ty).map(|t| &t.kind),
-                                Some(
-                                    TypeKind::Dynamic
-                                        | TypeKind::Unknown
-                                        | TypeKind::Placeholder { .. }
-                                )
-                            )
-                        });
-                    let lambda_hint = expected.and_then(|ty| {
-                        let table = self.context.type_table.borrow();
-                        match table
-                            .get(Self::resolve_alias_chain(&table, ty))
-                            .map(|t| &t.kind)
-                        {
-                            Some(TypeKind::Function { params, .. }) => Some(params.clone()),
-                            _ => None,
+                // A function literal whose parameters are written over the class's
+                // unbound type parameters takes them from the other arguments,
+                // which lower first, as a call's do.
+                let is_literal = |e: &Expr| {
+                    let mut e = e;
+                    while let ExprKind::Paren(inner) = &e.kind {
+                        e = inner;
+                    }
+                    matches!(e.kind, ExprKind::Function(_) | ExprKind::Arrow { .. })
+                };
+                let deferred: Vec<bool> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(index, arg)| {
+                        constructor_has_unbound_params
+                            && is_literal(arg)
+                            && ctor_params
+                                .as_ref()
+                                .and_then(|ps| ps.get(index))
+                                .is_some_and(|formal| {
+                                    let table = self.context.type_table.borrow();
+                                    match table
+                                        .get(Self::resolve_alias_chain(&table, *formal))
+                                        .map(|t| &t.kind)
+                                    {
+                                        Some(TypeKind::Function { params, .. }) => params
+                                            .iter()
+                                            .any(|p| self.type_mentions_type_param(&table, *p)),
+                                        _ => false,
+                                    }
+                                })
+                    })
+                    .collect();
+                let mut bindings: BTreeMap<SymbolId, TypeId> = BTreeMap::new();
+                let mut lowered_args: Vec<Option<TypedExpression>> = vec![None; args.len()];
+                for pass in [false, true] {
+                    for (index, arg) in args.iter().enumerate() {
+                        if deferred[index] != pass {
+                            continue;
                         }
-                    });
-                    self.expected_arg_type_stack.push(expected);
-                    self.expected_lambda_params_stack.push(lambda_hint);
-                    let lowered = self.lower_expression(arg);
-                    self.expected_lambda_params_stack.pop();
-                    self.expected_arg_type_stack.pop();
-                    arg_exprs.push(lowered?);
+                        if pass {
+                            // The literal's parameters, with what the earlier
+                            // arguments bound substituted.
+                            let hint = ctor_params.as_ref().and_then(|ps| ps.get(index)).and_then(
+                                |formal| {
+                                    let formal =
+                                        self.substitute_bound_type_params(*formal, &bindings);
+                                    let table = self.context.type_table.borrow();
+                                    match table
+                                        .get(Self::resolve_alias_chain(&table, formal))
+                                        .map(|t| &t.kind)
+                                    {
+                                        Some(TypeKind::Function { params, .. }) => {
+                                            Some(params.clone())
+                                        }
+                                        _ => None,
+                                    }
+                                },
+                            );
+                            self.expected_arg_type_stack.push(None);
+                            self.expected_lambda_params_stack.push(hint);
+                            let lowered = self.lower_expression(arg);
+                            self.expected_lambda_params_stack.pop();
+                            self.expected_arg_type_stack.pop();
+                            lowered_args[index] = Some(lowered?);
+                            continue;
+                        }
+                        let formal = formal_of.as_ref().map_or(index, |map| map[index]);
+                        let expected = ctor_params
+                            .as_ref()
+                            .and_then(|ps| ps.get(formal))
+                            .copied()
+                            .filter(|_| !constructor_has_unbound_params)
+                            .filter(|ty| {
+                                !matches!(
+                                    self.context.type_table.borrow().get(*ty).map(|t| &t.kind),
+                                    Some(
+                                        TypeKind::Dynamic
+                                            | TypeKind::Unknown
+                                            | TypeKind::Placeholder { .. }
+                                    )
+                                )
+                            });
+                        let lambda_hint = expected.and_then(|ty| {
+                            let table = self.context.type_table.borrow();
+                            match table
+                                .get(Self::resolve_alias_chain(&table, ty))
+                                .map(|t| &t.kind)
+                            {
+                                Some(TypeKind::Function { params, .. }) => Some(params.clone()),
+                                _ => None,
+                            }
+                        });
+                        // An unannotated `[]` local passed here takes the formal's
+                        // element type, as a call argument does.
+                        if let Some(formal) = expected {
+                            self.try_bind_inferred_array_to_formal(arg, formal);
+                        }
+                        self.expected_arg_type_stack.push(expected);
+                        self.expected_lambda_params_stack.push(lambda_hint);
+                        let lowered = self.lower_expression(arg);
+                        self.expected_lambda_params_stack.pop();
+                        self.expected_arg_type_stack.pop();
+                        let lowered = lowered?;
+                        if constructor_has_unbound_params {
+                            if let Some(formal) = ctor_params.as_ref().and_then(|ps| ps.get(index))
+                            {
+                                self.bind_type_params(*formal, lowered.expr_type, &mut bindings);
+                            }
+                        }
+                        lowered_args[index] = Some(lowered);
+                    }
                 }
+                let mut arg_exprs: Vec<TypedExpression> =
+                    lowered_args.into_iter().flatten().collect();
                 // Skipped optional formals travel as null.
                 if let Some(map) = &formal_of {
                     let location = self.context.create_location_from_span(expression.span);
@@ -4444,6 +4524,28 @@ impl<'a> AstLowering<'a> {
             }
             TypedExpressionKind::ObjectLiteral { fields } => {
                 let Some(target_fields) = self.structure_fields(target) else {
+                    // A structure literal for a `@:structInit` class builds one.
+                    let class = match self
+                        .context
+                        .type_table
+                        .borrow()
+                        .get(target)
+                        .map(|t| &t.kind)
+                    {
+                        Some(crate::tast::core::TypeKind::Class { symbol_id, .. }) => {
+                            Some(*symbol_id)
+                        }
+                        _ => None,
+                    };
+                    let struct_init = class
+                        .and_then(|symbol| self.context.symbol_table.get_symbol(symbol))
+                        .and_then(|symbol| symbol.qualified_name)
+                        .and_then(|name| self.context.string_interner.get(name))
+                        .zip(self.static_sig_index.as_ref())
+                        .is_some_and(|(name, index)| index.borrow_mut().is_struct_init(name));
+                    if struct_init {
+                        expr.expr_type = target;
+                    }
                     return expr;
                 };
                 // A field the structure lacks means the literal is not it.
