@@ -1071,6 +1071,15 @@ impl<'a> AstLowering<'a> {
                 if nullable_inner(else_t) == Some(then_t) {
                     return Ok(else_t);
                 }
+                // An Int beside a `Null<Float>` is that Float: the branch is
+                // `Null<Float>`, as Haxe unifies them.
+                let (int, float) = (type_table.int_type(), type_table.float_type());
+                if nullable_inner(then_t) == Some(float) && else_t == int {
+                    return Ok(then_t);
+                }
+                if nullable_inner(else_t) == Some(float) && then_t == int {
+                    return Ok(else_t);
+                }
                 let kind_of = |id: TypeId| type_table.get(id).map(|t| t.kind.clone());
                 let (then_kind, else_kind) = (kind_of(then_t), kind_of(else_t));
                 drop(type_table);
@@ -1877,6 +1886,21 @@ impl<'a> AstLowering<'a> {
                             unalias(*target) == unalias(*return_type)
                                 || tt.get(unalias(*target)).map(|t| &t.kind)
                                     == tt.get(unalias(*return_type)).map(|t| &t.kind)
+                        })
+                    })
+            }) {
+                return *return_type;
+            }
+            // An abstract the inferred value converts to by its `from` clause
+            // (`Int->Single` over `x * 2.5`) is what the lambda returns.
+            if self.abstract_symbol_of(*return_type).is_some_and(|symbol| {
+                self.abstract_casts
+                    .get(&symbol)
+                    .is_some_and(|(sources, _)| {
+                        sources.iter().any(|source| {
+                            unalias(*source) == unalias(inferred)
+                                || tt.get(unalias(*source)).map(|t| &t.kind)
+                                    == tt.get(unalias(inferred)).map(|t| &t.kind)
                         })
                     })
             }) {

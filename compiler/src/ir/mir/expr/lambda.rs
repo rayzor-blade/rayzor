@@ -281,6 +281,7 @@ impl<'a> HirToMirContext<'a> {
                 )
             ) || self.is_optional_primitive(ret)
                 || self.is_null_int_type(ret)
+                || self.convert_type(ret) == IrType::F32
         });
         if declared_return.is_some() {
             self.current_function_return_type = declared_return;
@@ -433,6 +434,7 @@ impl<'a> HirToMirContext<'a> {
                         }
                     })
                     .or(Some(reg))
+                    .map(|reg| self.cast_to_declared_number(reg, ret_ty))
             }
             (r, _) => r,
         };
@@ -492,6 +494,21 @@ impl<'a> HirToMirContext<'a> {
         self.restore_state(saved_state);
 
         Some(func_id)
+    }
+
+    /// A numeric result in the representation its declared type has: a Float
+    /// body of a `Single` lambda returns an f32.
+    fn cast_to_declared_number(&mut self, reg: IrId, declared: TypeId) -> IrId {
+        let want = self.convert_type(declared);
+        let have = self.builder.get_register_type(reg);
+        let numeric =
+            |t: &IrType| matches!(t, IrType::I32 | IrType::I64 | IrType::F32 | IrType::F64);
+        match have {
+            Some(have) if have != want && numeric(&have) && numeric(&want) => {
+                self.builder.build_cast(reg, have, want).unwrap_or(reg)
+            }
+            _ => reg,
+        }
     }
 
     /// Lower `HirExprKind::MethodReference { receiver, method_symbol }`

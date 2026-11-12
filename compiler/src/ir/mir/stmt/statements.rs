@@ -1008,6 +1008,20 @@ impl<'a> HirToMirContext<'a> {
                                     .declared_symbol_type(*field)
                                     .map(|t| self.convert_type(t))
                                     .filter(|t| matches!(t, IrType::F32 | IrType::F64)),
+                                // So does a float array element.
+                                HirLValue::Index { object, .. } => {
+                                    match self
+                                        .type_table
+                                        .get(self.resolve_through_aliases(object.ty))
+                                        .map(|t| &t.kind)
+                                    {
+                                        Some(TypeKind::Array { element_type }) => {
+                                            Some(self.convert_type(*element_type))
+                                                .filter(|t| matches!(t, IrType::F32 | IrType::F64))
+                                        }
+                                        _ => None,
+                                    }
+                                }
                                 _ => None,
                             };
                             if let Some(converted) = tgt_ir_opt
@@ -1387,7 +1401,12 @@ impl<'a> HirToMirContext<'a> {
                                     | IrType::U64,
                             )
                         );
-                        if needs_int_to_float || needs_float_to_int {
+                        // A Single result narrows a Float, a Float result widens a Single.
+                        let float_width = matches!(
+                            (&val_ir, &ret_ir),
+                            (IrType::F64, IrType::F32) | (IrType::F32, IrType::F64)
+                        );
+                        if needs_int_to_float || needs_float_to_int || float_width {
                             if let Some(cast_val) = self.builder.build_cast(val, val_ir, ret_ir) {
                                 return Some(cast_val);
                             }
