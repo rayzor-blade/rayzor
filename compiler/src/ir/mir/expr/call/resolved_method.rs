@@ -1672,7 +1672,24 @@ impl<'a> HirToMirContext<'a> {
                                                 declared.get(i).and_then(|k| k.as_deref()),
                                                 Some("Null") | Some("Dynamic")
                                             );
-                                            let boxed = if box_slot {
+                                            let boxed = if box_slot
+                                                && self.is_int64_type(arg.ty)
+                                                && self.builder.get_register_type(reg)
+                                                    == Some(IrType::I64)
+                                            {
+                                                // An Int64 boxes as its two-word class.
+                                                let ptr = IrType::Ptr(Box::new(IrType::U8));
+                                                let box_fn = self.get_or_register_extern_function(
+                                                    "haxe_box_int64_ptr",
+                                                    vec![IrType::I64],
+                                                    ptr.clone(),
+                                                );
+                                                self.builder.build_call_direct(
+                                                    box_fn,
+                                                    vec![reg],
+                                                    ptr,
+                                                )
+                                            } else if box_slot {
                                                 self.box_scalar_register(reg)
                                             } else {
                                                 None

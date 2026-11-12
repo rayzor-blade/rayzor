@@ -76,10 +76,21 @@ impl<'a> HirToMirContext<'a> {
                                 qual_name_str, existing_func_id
                             );
 
-                            let arg_regs: Vec<_> = unresolved_call_args
+                            let mut arg_regs: Vec<_> = unresolved_call_args
                                 .iter()
                                 .filter_map(|a| self.lower_expression(a))
                                 .collect();
+                            if arg_regs.len() == unresolved_call_args.len() {
+                                let types: Vec<TypeId> =
+                                    unresolved_call_args.iter().map(|a| a.ty).collect();
+                                let params: Vec<usize> = (0..types.len()).collect();
+                                self.box_int64_args_for_box_slots(
+                                    existing_func_id,
+                                    &mut arg_regs,
+                                    &types,
+                                    &params,
+                                );
+                            }
 
                             let type_args = type_args
                                 .iter()

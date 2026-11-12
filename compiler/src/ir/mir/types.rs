@@ -601,6 +601,45 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Coerce cross-module arguments using both the erased ABI and specialization.
+    /// An Int64 argument bound for an external box slot (`Null<Int64>`,
+    /// `Dynamic`) travels as its two-word class, as a local call boxes it.
+    /// `params[i]` is the formal argument `i` binds.
+    pub(crate) fn box_int64_args_for_box_slots(
+        &mut self,
+        func_id: IrFunctionId,
+        arg_regs: &mut [IrId],
+        arg_types: &[TypeId],
+        params: &[usize],
+    ) {
+        let Some(formals) = self.external_function_param_types.get(&func_id).cloned() else {
+            return;
+        };
+        for (i, reg) in arg_regs.iter_mut().enumerate() {
+            let (Some(&ty), Some(&param)) = (arg_types.get(i), params.get(i)) else {
+                continue;
+            };
+            let box_slot = matches!(
+                formals.get(param),
+                Some(IrType::Ptr(inner)) if matches!(**inner, IrType::U8 | IrType::Void)
+            );
+            if !box_slot
+                || !self.is_int64_type(ty)
+                || self.builder.get_register_type(*reg) != Some(IrType::I64)
+            {
+                continue;
+            }
+            let ptr = IrType::Ptr(Box::new(IrType::U8));
+            let box_fn = self.get_or_register_extern_function(
+                "haxe_box_int64_ptr",
+                vec![IrType::I64],
+                ptr.clone(),
+            );
+            if let Some(boxed) = self.builder.build_call_direct(box_fn, vec![*reg], ptr) {
+                *reg = boxed;
+            }
+        }
+    }
+
     pub(crate) fn coerce_args_for_cross_module_call(
         &mut self,
         func_id: IrFunctionId,

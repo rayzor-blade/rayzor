@@ -323,6 +323,14 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
+            if arg_regs.len() == args.len() {
+                self.box_int64_args_for_box_slots(
+                    func_id,
+                    &mut arg_regs,
+                    &call_arg_types,
+                    &param_of,
+                );
+            }
             self.bind_skipped_optional_args(func_id, &mut arg_regs, &call_arg_types, false);
             self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, false, type_args);
             let hir_types: Vec<Option<TypeId>> = call_arg_types.iter().map(|t| Some(*t)).collect();
