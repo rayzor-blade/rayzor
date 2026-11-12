@@ -1090,6 +1090,24 @@ impl<'a> AstLowering<'a> {
                         .create_function_type(params, ret);
                     return Some(vec![callback]);
                 }
+                // A function stored into an array of functions takes the element
+                // type, so an untyped literal is typed as the slot it fills.
+                let function_elem = array_elem.filter(|elem| {
+                    let tt = self.context.type_table.borrow();
+                    matches!(
+                        tt.get(Self::resolve_alias_chain(&tt, *elem))
+                            .map(|t| &t.kind),
+                        Some(crate::tast::core::TypeKind::Function { .. })
+                    )
+                });
+                if let Some(elem) = function_elem {
+                    let int = self.context.type_table.borrow().int_type();
+                    match field.as_str() {
+                        "push" | "unshift" => return Some(vec![elem]),
+                        "insert" => return Some(vec![int, elem]),
+                        _ => {}
+                    }
+                }
 
                 let class_symbol = {
                     let type_table = self.context.type_table.borrow();
