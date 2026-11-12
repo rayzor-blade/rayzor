@@ -102,6 +102,17 @@ impl<'a> HirToMirContext<'a> {
             }
             _ => {}
         }
+        // `(v : T)` of a `Null<T>` primitive is the value it holds.
+        if self.optional_inner_type(expr.ty).is_some_and(|inner| {
+            self.resolve_through_aliases(inner) == target_type
+                && self.optional_inner_is_boxable_primitive(inner)
+        }) {
+            let value = self.lower_expression(expr)?;
+            return Some(
+                self.maybe_unbox_optional_for_target(value, expr.ty, target_type)
+                    .unwrap_or(value),
+            );
+        }
         if *is_checked
             && self.runtime_type_id(target_type) >= rayzor_runtime::type_system::TYPE_USER_START
             && matches!(
