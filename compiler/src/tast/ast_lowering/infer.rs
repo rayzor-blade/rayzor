@@ -1080,13 +1080,14 @@ impl<'a> AstLowering<'a> {
                 };
                 let then_null = matches!(then_expr.kind, TypedExpressionKind::Null);
                 let else_null = matches!(else_e.kind, TypedExpressionKind::Null);
-                // A null branch next to a reference branch takes that branch's
-                // type: null is a value of it.
+                // A null branch next to a reference or nullable branch takes
+                // that branch's type: null is a value of it.
                 let reference = |kind: &Option<TypeKind>| {
                     matches!(
                         kind,
                         Some(
-                            TypeKind::String
+                            TypeKind::Optional { .. }
+                                | TypeKind::String
                                 | TypeKind::Array { .. }
                                 | TypeKind::Map { .. }
                                 | TypeKind::Function { .. }
