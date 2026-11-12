@@ -1,0 +1,5 @@
+[project]
+name = "inherited-ctor-compiled-ancestor"
+entry = "./InheritedCtorCompiledAncestor.hx"
+[build]
+class-paths = ["."]

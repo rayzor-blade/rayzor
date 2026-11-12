@@ -984,14 +984,6 @@ impl<'a> HirToMirContext<'a> {
                     arg_regs.push(reg);
                 }
             }
-            let param_types: Vec<IrType> = arg_regs
-                .iter()
-                .map(|r| {
-                    self.builder
-                        .get_register_type(*r)
-                        .unwrap_or(IrType::Ptr(Box::new(IrType::Void)))
-                })
-                .collect();
             // A class that inherits its constructor declares none, so a stub
             // keyed on its own name has nothing to bind to; the ancestor that
             // declares one is what this call runs.
@@ -999,10 +991,27 @@ impl<'a> HirToMirContext<'a> {
                 .strip_suffix(".new")
                 .and_then(|fqn| self.inherited_constructor_fqn_key(fqn))
                 .unwrap_or(ctor_key);
-            let stub_id =
-                self.register_stdlib_mir_forward_ref(&ctor_key, param_types, IrType::Void);
+            // An ancestor already compiled is called as itself: a stub typed
+            // from these arguments would stand in for its signature.
+            let target = match self.external_function_name_map.get(&ctor_key).copied() {
+                Some(ctor_fn) => {
+                    self.coerce_args_for_cross_module_call(ctor_fn, &mut arg_regs, true, &[]);
+                    ctor_fn
+                }
+                None => {
+                    let param_types: Vec<IrType> = arg_regs
+                        .iter()
+                        .map(|r| {
+                            self.builder
+                                .get_register_type(*r)
+                                .unwrap_or(IrType::Ptr(Box::new(IrType::Void)))
+                        })
+                        .collect();
+                    self.register_stdlib_mir_forward_ref(&ctor_key, param_types, IrType::Void)
+                }
+            };
             self.builder
-                .build_call_direct(stub_id, arg_regs, IrType::Void);
+                .build_call_direct(target, arg_regs, IrType::Void);
             for arg in args.iter() {
                 if let HirExprKind::Variable { symbol, .. } = &arg.kind {
                     self.owned_heap_values.remove(symbol);
