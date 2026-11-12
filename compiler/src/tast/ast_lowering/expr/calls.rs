@@ -1185,20 +1185,30 @@ impl<'a> AstLowering<'a> {
             .into_iter()
             .collect();
         let mut seen = std::collections::BTreeSet::new();
+        // A type declared in another module carries its `@:using` in the index.
+        let mut indexed_usings: Vec<(InternedString, SymbolId)> = Vec::new();
         while let Some(class) = queue.pop_front() {
             if !seen.insert(class) {
                 continue;
             }
             if let Some(symbol) = self.context.symbol_table.get_symbol(class) {
-                if let Some(names) = self.type_usings.get(&symbol.name) {
-                    type_using_names.extend(names.iter().copied());
-                }
+                let has_local_usings = match self.type_usings.get(&symbol.name) {
+                    Some(names) => {
+                        type_using_names.extend(names.iter().copied());
+                        true
+                    }
+                    None => false,
+                };
+                let mut declared_usings = Vec::new();
                 if let Some(index) = &self.static_sig_index {
                     let name = self
                         .context
                         .string_interner
                         .get(symbol.qualified_name.unwrap_or(symbol.name))
                         .unwrap_or("");
+                    if !has_local_usings {
+                        declared_usings = index.borrow_mut().usings_of(name);
+                    }
                     for interface in index.borrow_mut().interfaces_of(name) {
                         if let Some(symbol) =
                             self.context.symbol_table.all_symbols().find(|symbol| {
@@ -1214,6 +1224,14 @@ impl<'a> AstLowering<'a> {
                         }
                     }
                 }
+                for using in declared_usings {
+                    let qualified = self.context.intern_string(&using);
+                    if let Some(target) =
+                        self.context.symbol_table.resolve_qualified_name(qualified)
+                    {
+                        indexed_usings.push((qualified, target));
+                    }
+                }
             }
             if let Some(parent) = self.parent_class_symbol(class) {
                 queue.push_back(parent);
@@ -1224,6 +1242,7 @@ impl<'a> AstLowering<'a> {
             .iter()
             .chain(self.unresolved_usings.iter().rev())
             .filter_map(|name| Some((*name, self.resolve_class_like_symbol_by_name(*name)?)))
+            .chain(indexed_usings)
             .collect();
         let candidates: Vec<_> = late
             .into_iter()
