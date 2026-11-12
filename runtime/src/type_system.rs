@@ -3926,7 +3926,9 @@ pub extern "C" fn haxe_unbox_erased_return(ptr: *mut u8) -> i64 {
 /// A generic Dynamic keeps its box; concrete type arguments consume its payload.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_generic_return(ptr: *mut u8, type_tag: i32) -> i64 {
-    if type_tag == ValueTag::Dynamic as i32 {
+    if type_tag == ValueTag::Dynamic as i32
+        || (type_tag == ValueTag::Int64 as i32 && !int64_slot_may_be_object(ptr))
+    {
         ptr as i64
     } else if type_tag == ValueTag::Int64 as i32
         && is_raw_class_instance(ptr)
@@ -3935,6 +3937,29 @@ pub extern "C" fn haxe_unbox_generic_return(ptr: *mut u8, type_tag: i32) -> i64 
         unsafe { int64_from_object(ptr) }
     } else {
         haxe_unbox_erased_return(ptr)
+    }
+}
+
+/// An erased Int64 slot holds either the raw value or an `___Int64` object.
+/// A raw value can look like an aligned address, so only a value the heap
+/// owns is probed as an object; any other is the value itself.
+fn int64_slot_may_be_object(ptr: *mut u8) -> bool {
+    // A malloc zone owns every object; the lookup reads no memory at `ptr`.
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn malloc_zone_from_ptr(ptr: *const libc::c_void) -> *mut libc::c_void;
+        }
+        !unsafe { malloc_zone_from_ptr(ptr as *const libc::c_void) }.is_null()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::haxe_sys::addr_is_readable(ptr as usize, 8)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = ptr;
+        true
     }
 }
 

@@ -468,7 +468,7 @@ fn format_array_slot(val: i64) -> String {
 /// Check whether `len` bytes starting at `addr` lie inside a mapped page.
 /// Used to gate suspect pointer dereferences in `format_array_slot`.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn addr_is_readable(addr: usize, len: usize) -> bool {
+pub(crate) fn addr_is_readable(addr: usize, len: usize) -> bool {
     if addr == 0 || len == 0 {
         return false;
     }
@@ -510,7 +510,7 @@ fn addr_is_readable(addr: usize, len: usize) -> bool {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn addr_is_readable(_addr: usize, _len: usize) -> bool {
+pub(crate) fn addr_is_readable(_addr: usize, _len: usize) -> bool {
     // Other platforms (Windows, WASM) — skip the runtime probe and
     // print as int. The compiler-side heterogeneous-array boxing still
     // applies, but we avoid the dereference.
