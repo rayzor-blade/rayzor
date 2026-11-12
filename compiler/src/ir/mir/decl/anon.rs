@@ -91,11 +91,28 @@ impl<'a> HirToMirContext<'a> {
         let ptr = IrType::Ptr(Box::new(IrType::U8));
         let get = self.get_or_register_extern_function(
             "rayzor_anon_get_struct_field",
-            vec![ptr.clone(), IrType::I32, IrType::I32, ptr],
+            vec![ptr.clone(), IrType::I32, IrType::I32, ptr, IrType::I32],
             IrType::I64,
         );
-        let args = self.structural_access_args(obj, structure, index, name)?;
+        let mut args = self.structural_access_args(obj, structure, index, name)?;
+        let want = self.structural_field_tag(structure, name).unwrap_or(0);
+        args.push(self.builder.build_const(IrValue::I32(want as i32))?);
         self.builder.build_call_direct(get, args, IrType::I64)
+    }
+
+    /// The runtime tag structure `ty` gives its field `name` (as in its shape).
+    fn structural_field_tag(&self, ty: TypeId, name: &str) -> Option<u32> {
+        let Some(TypeKind::Anonymous { fields }) = self.type_table.get(ty).map(|t| &t.kind) else {
+            return None;
+        };
+        let field = fields
+            .iter()
+            .find(|f| self.string_interner.get(f.name) == Some(name))?;
+        self.anon_field_descriptor(name, field.type_id)
+            .split(':')
+            .nth(1)?
+            .parse()
+            .ok()
     }
 
     /// Store `bits` into field `name` of a structure-typed value.

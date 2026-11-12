@@ -2813,7 +2813,13 @@ pub extern "C" fn rayzor_anon_set_field_by_index(obj: i32, idx: i32, val: i64) {
 
 /// A structure's field; wasm objects are always anonymous in the structure's layout.
 #[unsafe(no_mangle)]
-pub extern "C" fn rayzor_anon_get_struct_field(obj: i32, idx: i32, _shape: i32, _name: i32) -> i64 {
+pub extern "C" fn rayzor_anon_get_struct_field(
+    obj: i32,
+    idx: i32,
+    _shape: i32,
+    _name: i32,
+    _want: i32,
+) -> i64 {
     rayzor_anon_get_field_by_index(obj, idx)
 }
 

@@ -362,6 +362,7 @@ pub extern "C" fn rayzor_anon_get_struct_field(
     index: u32,
     shape: u32,
     name: *mut u8,
+    want: u32,
 ) -> u64 {
     if ptr.is_null() {
         return rayzor_anon_get_field_by_index(ptr, index);
@@ -375,7 +376,14 @@ pub extern "C" fn rayzor_anon_get_struct_field(
             return fields.get(index as usize).copied().unwrap_or(0);
         }
         return crate::reflect::field_name_str(name)
-            .and_then(|name| anon_raw_field(target, name))
+            .and_then(|field| {
+                let bits = anon_raw_field(target, field)?;
+                Some(adapt_field_bits(
+                    bits,
+                    anon_field_tag(arc.shape_id, field),
+                    want,
+                ))
+            })
             .unwrap_or(0);
     }
     // A class holds `Null<Int>` unboxed where a structure's slot holds the box.
@@ -390,6 +398,44 @@ pub extern "C" fn rayzor_anon_get_struct_field(
                 _ => bits,
             }
         })
+}
+
+/// The runtime type tag a shape gives its field `name`.
+fn anon_field_tag(shape_id: u32, name: &str) -> Option<u32> {
+    let shape = get_shape(shape_id)?;
+    let i = shape.field_names.iter().position(|n| n == name)?;
+    shape.field_types.get(i).copied()
+}
+
+/// A field's bits as the reader's structure holds them: a `Null<Float>` or
+/// `Null<Bool>` slot holds a box, a `Float` or `Bool` slot the raw value.
+fn adapt_field_bits(bits: u64, stored: Option<u32>, wanted: u32) -> u64 {
+    use crate::type_system::{TYPE_BOOL, TYPE_DYNAMIC_TOKEN, TYPE_FLOAT};
+    let Some(stored) = stored else {
+        return bits;
+    };
+    let boxed = TYPE_DYNAMIC_TOKEN.0;
+    // A type parameter's slot shares the box tag but holds raw bits: only a
+    // real scalar box is opened.
+    let scalar_box = || {
+        crate::type_system::dynamic_box_at(bits as *mut u8).is_some_and(|d| {
+            matches!(
+                d.type_id,
+                TYPE_FLOAT | TYPE_BOOL | crate::type_system::TYPE_INT
+            )
+        })
+    };
+    if stored == boxed && wanted == TYPE_FLOAT.0 && scalar_box() {
+        crate::type_system::haxe_coerce_dynamic_to_float(bits as *mut u8).to_bits()
+    } else if stored == boxed && wanted == TYPE_BOOL.0 && scalar_box() {
+        crate::type_system::haxe_dynamic_truthy(bits as *mut u8) as u64
+    } else if stored == TYPE_FLOAT.0 && wanted == boxed {
+        crate::type_system::haxe_box_float_ptr(f64::from_bits(bits)) as u64
+    } else if stored == TYPE_BOOL.0 && wanted == boxed {
+        crate::type_system::haxe_box_bool_ptr(bits != 0) as u64
+    } else {
+        bits
+    }
 }
 
 /// Store `value` into a structure's field `name`; see `rayzor_anon_get_struct_field`.

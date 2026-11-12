@@ -147,6 +147,14 @@ impl<'a> HirToMirContext<'a> {
             })
         };
         let elem_iface_sym = element_type_id.and_then(|et| self.get_interface_symbol(et));
+        let structure_elements = element_type_id.is_some_and(|et| {
+            matches!(
+                self.type_table
+                    .get(self.resolve_through_aliases(et))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Anonymous { .. })
+            )
+        });
         // An `Array<Null<Int>>` slot holds the `NullInt` itself. Int elements
         // beside a null or a `Null<Int>` take that layout too: `[1, null]` is
         // an `Array<Null<Int>>` even where it was typed `Array<Int>`, and an
@@ -301,8 +309,22 @@ impl<'a> HirToMirContext<'a> {
                             HirExprKind::Array { elements: inner } if dynamic_elements => {
                                 (self.lower_array_literal(inner, array_type)?, array_type)
                             }
+                            // A structure literal takes the element's declared
+                            // layout, as a `let` of that type would.
+                            HirExprKind::ObjectLiteral { .. } if structure_elements => {
+                                let prev = self
+                                    .object_literal_target_ty
+                                    .replace(element_type_id.expect("structure element type"));
+                                let v = self.lower_expression(elem);
+                                self.object_literal_target_ty = prev;
+                                (v?, elem.ty)
+                            }
                             _ => (self.lower_expression(elem)?, elem.ty),
                         };
+                        // An element escapes into the array: the local no longer owns it.
+                        if let HirExprKind::Variable { symbol, .. } = &elem.kind {
+                            self.owned_heap_values.remove(symbol);
+                        }
                         let v = if let Some(iface_sym) = elem_iface_sym {
                             let class_sym = self.get_class_symbol(elem.ty);
                             if let Some(class_sym) = class_sym {
@@ -671,6 +693,12 @@ impl<'a> HirToMirContext<'a> {
             for (key, value) in entries.iter() {
                 let key_val = self.lower_expression(key)?;
                 let value_val = self.lower_expression(value)?;
+                // Keys and values escape into the map: their locals no longer own them.
+                for entry in [key, value] {
+                    if let HirExprKind::Variable { symbol, .. } = &entry.kind {
+                        self.owned_heap_values.remove(symbol);
+                    }
+                }
 
                 // Cast key to i64
                 let key_type = self.convert_type(key.ty);
@@ -731,6 +759,12 @@ impl<'a> HirToMirContext<'a> {
             for (key, value) in entries.iter() {
                 let key_val = self.lower_expression(key)?;
                 let value_val = self.lower_expression(value)?;
+                // Keys and values escape into the map: their locals no longer own them.
+                for entry in [key, value] {
+                    if let HirExprKind::Variable { symbol, .. } = &entry.kind {
+                        self.owned_heap_values.remove(symbol);
+                    }
+                }
 
                 // Cast value to u64 for raw storage
                 let val_type = self.convert_type(value.ty);
@@ -781,6 +815,12 @@ impl<'a> HirToMirContext<'a> {
             for (key, value) in entries.iter() {
                 let key_val = self.lower_expression(key)?;
                 let value_val = self.lower_expression(value)?;
+                // Keys and values escape into the map: their locals no longer own them.
+                for entry in [key, value] {
+                    if let HirExprKind::Variable { symbol, .. } = &entry.kind {
+                        self.owned_heap_values.remove(symbol);
+                    }
+                }
 
                 // Cast key pointer to u64 for identity-based lookup
                 let key_type = self.convert_type(key.ty);
@@ -1079,6 +1119,26 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// A non-nullable Float or Bool, held raw.
+    fn is_plain_scalar(&self, ty: TypeId) -> bool {
+        matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::Float | TypeKind::Bool)
+        )
+    }
+
+    /// A `Null<scalar>` other than `Null<Int>`, held as a box or null.
+    fn is_boxed_null_scalar(&self, ty: TypeId) -> bool {
+        !self.is_null_int_type(ty)
+            && matches!(
+                self.type_table.get(self.resolve_through_aliases(ty)).map(|t| &t.kind),
+                Some(TypeKind::Optional { inner_type })
+                    if self.optional_inner_is_boxable_primitive(*inner_type)
+            )
+    }
+
     pub(crate) fn lower_object_literal(
         &mut self,
         fields: &[(InternedString, HirExpr)],
@@ -1208,6 +1268,9 @@ impl<'a> HirToMirContext<'a> {
                         let ty = target
                             .filter(|t| {
                                 self.is_null_int_type(*t)
+                                    || self.is_boxed_null_scalar(*t)
+                                    || (self.is_plain_scalar(*t)
+                                        && self.is_boxed_null_scalar(fields[*orig_idx].1.ty))
                                     || (self.is_null_int_type(fields[*orig_idx].1.ty)
                                         && self.convert_type(*t) == IrType::I32)
                                     || matches!(fields[*orig_idx].1.kind, HirExprKind::Null)
@@ -1259,6 +1322,10 @@ impl<'a> HirToMirContext<'a> {
         let mut lowered_values: BTreeMap<usize, IrId> = BTreeMap::new();
         for orig_idx in source_order {
             let value = self.lower_expression(&fields[orig_idx].1)?;
+            // A field value escapes into the object: the local no longer owns it.
+            if let HirExprKind::Variable { symbol, .. } = &fields[orig_idx].1.kind {
+                self.owned_heap_values.remove(symbol);
+            }
             lowered_values.insert(orig_idx, value);
         }
 
@@ -1311,9 +1378,29 @@ impl<'a> HirToMirContext<'a> {
                         .get(field_name)
                         .copied()
                         .filter(|t| self.is_null_int_type(*t));
+                    let boxed_scalar_target = field_target_types
+                        .get(field_name)
+                        .copied()
+                        .filter(|t| self.is_boxed_null_scalar(*t));
                     let val_as_i64 = if let Some(target_ty) = null_int_target {
                         // A `Null<Int>` anon slot holds a box or null.
                         self.coerce_to_i64(field_val, target_ty)?
+                    } else if let Some(target_ty) = boxed_scalar_target {
+                        // A `Null<Float>` or `Null<Bool>` slot holds a box or null.
+                        let boxed = self
+                            .maybe_box_for_optional(field_val, field_val_ty, target_ty)
+                            .unwrap_or(field_val);
+                        self.coerce_to_i64(boxed, target_ty)?
+                    } else if let Some(target_ty) =
+                        field_target_types.get(field_name).copied().filter(|t| {
+                            self.is_boxed_null_scalar(field_val_ty) && self.is_plain_scalar(*t)
+                        })
+                    {
+                        // A plain scalar slot takes the value out of its `Null<T>` box.
+                        let raw = self
+                            .maybe_unbox_value(field_val, field_val_ty, target_ty)
+                            .unwrap_or(field_val);
+                        self.coerce_to_i64(raw, target_ty)?
                     } else if self.builder.get_register_type(field_val) == Some(IrType::NullInt)
                         && field_target_types
                             .get(field_name)

@@ -465,7 +465,13 @@ impl CompileCtx {
                 vec![],
             ),
             "rayzor_anon_get_struct_field" => (
-                vec![ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+                vec![
+                    ValType::I32,
+                    ValType::I32,
+                    ValType::I32,
+                    ValType::I32,
+                    ValType::I32,
+                ],
                 vec![ValType::I64],
             ),
             "rayzor_anon_new" => (vec![ValType::I32, ValType::I32], vec![ValType::I32]),

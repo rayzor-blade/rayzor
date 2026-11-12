@@ -858,7 +858,25 @@ impl<'a> HirToMirContext<'a> {
                                         .filter(|t| *t != TypeId::invalid())
                                 })
                             }
-                            _ => None,
+                            // A `Null<T>` element is a box; a value stored into
+                            // one is boxed as it is pushed.
+                            HirLValue::Index { object, .. } => {
+                                match self
+                                    .type_table
+                                    .get(self.resolve_through_aliases(object.ty))
+                                    .map(|t| &t.kind)
+                                {
+                                    Some(TypeKind::Array { element_type })
+                                        if matches!(
+                                            self.type_table.get(*element_type).map(|t| &t.kind),
+                                            Some(TypeKind::Optional { .. })
+                                        ) =>
+                                    {
+                                        Some(*element_type)
+                                    }
+                                    _ => None,
+                                }
+                            }
                         };
                         // Recover the concrete type of an interface-call RHS, which TAST
                         // erased to `Dynamic`; otherwise the coercion below unboxes a raw
