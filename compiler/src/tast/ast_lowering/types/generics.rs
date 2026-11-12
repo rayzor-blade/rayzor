@@ -380,10 +380,22 @@ impl<'a> AstLowering<'a> {
         let qualified = format!("haxe.ds.{concrete_name}");
         let qualified_interned = self.context.string_interner.intern(&qualified);
         let concrete_name_interned = self.context.string_interner.intern(concrete_name);
-        let resolved = self
-            .context
-            .symbol_table
-            .lookup_symbol(ScopeId::first(), qualified_interned)
+        let packaged = {
+            let package = ["haxe", "ds"].map(|p| self.context.string_interner.intern(p));
+            self.context
+                .namespace_resolver
+                .lookup_symbol(&crate::tast::namespace::QualifiedPath::new(
+                    package.to_vec(),
+                    concrete_name_interned,
+                ))
+                .and_then(|id| self.context.symbol_table.get_symbol(id))
+        };
+        let resolved = packaged
+            .or_else(|| {
+                self.context
+                    .symbol_table
+                    .lookup_symbol(ScopeId::first(), qualified_interned)
+            })
             .or_else(|| {
                 self.context
                     .symbol_table

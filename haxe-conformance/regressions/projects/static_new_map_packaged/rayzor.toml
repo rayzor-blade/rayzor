@@ -1,0 +1,5 @@
+[project]
+name = "static-new-map-packaged"
+entry = "./StaticNewMapPackaged.hx"
+[build]
+class-paths = ["."]

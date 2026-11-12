@@ -43,10 +43,37 @@ impl CompilationUnit {
             }
         }
 
+        // `Map<K, V>` is built as the concrete map its key selects, which the
+        // abstract's module does not load.
+        fn concrete_map_deps(
+            path: &parser::TypePath,
+            params: &[Type],
+            deps: &mut std::collections::BTreeSet<String>,
+        ) {
+            let is_map =
+                path.name == "Map" && (path.package.is_empty() || path.package == ["haxe", "ds"]);
+            if !is_map {
+                return;
+            }
+            let key = match params.first() {
+                Some(Type::Path { path, .. }) if path.package.is_empty() => path.name.as_str(),
+                _ => "",
+            };
+            let concrete: &[&str] = match key {
+                "String" => &["StringMap"],
+                "Int" => &["IntMap"],
+                _ => &["ObjectMap", "EnumValueMap", "StringMap", "IntMap"],
+            };
+            for name in concrete {
+                deps.insert(format!("haxe.ds.{name}"));
+            }
+        }
+
         // Helper to extract type references from a Type
         fn extract_type_deps(ty: &Type, deps: &mut std::collections::BTreeSet<String>) {
             match ty {
                 Type::Path { path, params, .. } => {
+                    concrete_map_deps(path, params, deps);
                     // Only add if it looks like a class name (starts with uppercase)
                     if path.package.is_empty() && !path.name.is_empty() {
                         let first_char = path.name.chars().next();
@@ -149,6 +176,7 @@ impl CompilationUnit {
                     params,
                     args,
                 } => {
+                    concrete_map_deps(type_path, params, deps);
                     // Extract class name from new expression
                     if type_path.package.is_empty() && !type_path.name.is_empty() {
                         let first_char = type_path.name.chars().next();
