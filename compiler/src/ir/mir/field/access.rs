@@ -307,17 +307,6 @@ impl<'a> HirToMirContext<'a> {
                     }
                     if let Some(IrType::Ptr(inner)) = &obj_ir_type {
                         if matches!(**inner, IrType::Void) {
-                            // Try the stdlib name-based dispatch first. Only
-                            // covers `Array.length`-style zero-arg properties
-                            // returning a primitive; boxes the result so
-                            // downstream Dynamic-aware code (string concat,
-                            // trace) gets a `DynamicValue*` rather than a
-                            // raw i32 it would later deref as a pointer.
-                            if let Some(boxed) =
-                                self.try_dynamic_stdlib_property_dispatch(obj, field)
-                            {
-                                return Some(boxed);
-                            }
                             // The box's tag says what it holds; a field name
                             // alone does not (`length` is an array's, a
                             // string's and a List's), and reading a class slot

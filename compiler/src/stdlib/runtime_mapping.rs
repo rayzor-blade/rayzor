@@ -573,33 +573,6 @@ impl StdlibMapping {
         self.mappings.get(sig)
     }
 
-    /// Find any zero-arg instance property by name (e.g. `length` on
-    /// Array/String/Bytes/StringBuf, …). Used to dispatch a field read
-    /// on a Dynamic-typed receiver whose actual class is unknown at
-    /// compile time but whose runtime value is one of the stdlib
-    /// reference types. The dispatch then runs against the raw pointer.
-    ///
-    /// Accepted only when every match names the SAME runtime function: with
-    /// no receiver class, distinct targets are a guess, and running the wrong
-    /// one against a raw pointer reads whatever sits at that offset rather
-    /// than failing. Callers fall through to the class/reflect path, which
-    /// dispatches on the instance's `__type_id` header. Same rule as
-    /// `find_unique_by_method`.
-    pub fn find_instance_property_by_name(
-        &self,
-        method: &str,
-    ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
-        let mut matches = self
-            .mappings
-            .iter()
-            .filter(|(sig, call)| !sig.is_static && sig.method == method && call.param_count == 0);
-        let first = matches.next()?;
-        if matches.any(|(_, call)| call.runtime_name != first.1.runtime_name) {
-            return None;
-        }
-        Some(first)
-    }
-
     /// Check if a method is a stdlib method with runtime mapping
     pub fn has_mapping(&self, class: ClassKey, method: &str, is_static: bool) -> bool {
         self.class_entries(class.as_str())

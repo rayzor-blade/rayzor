@@ -241,51 +241,6 @@ impl<'a> HirToMirContext<'a> {
         Some(result)
     }
 
-    /// Dispatch a Dynamic-receiver field read to a stdlib runtime property getter
-    /// (`Array.length`, `String.length`, …) before falling through to
-    /// `haxe_unbox_reference_ptr` + reflect.
-    ///
-    /// Matches any zero-arg instance property of that name in the stdlib mapping.
-    /// Primitive results are boxed as `DynamicValue*` so Dynamic-aware consumers
-    /// (string concat, trace, `+`) don't dereference a raw integer as a pointer.
-    pub(crate) fn try_dynamic_stdlib_property_dispatch(
-        &mut self,
-        obj: IrId,
-        field: SymbolId,
-    ) -> Option<IrId> {
-        let field_name = self
-            .symbol_table
-            .get_symbol(field)
-            .and_then(|s| self.string_interner.get(s.name))
-            .map(|s| s.to_string())?;
-        let (_, call) = self
-            .stdlib_mapping
-            .find_instance_property_by_name(&field_name)?;
-
-        let (runtime_ret_ty, box_kind) =
-            match call.return_type.as_ref().unwrap_or(&IrTypeDescriptor::I64) {
-                IrTypeDescriptor::I32 => (IrType::I32, Some(PrimBoxKind::Int)),
-                IrTypeDescriptor::I64 => (IrType::I64, Some(PrimBoxKind::Int)),
-                IrTypeDescriptor::F64 | IrTypeDescriptor::F32 => {
-                    (IrType::F64, Some(PrimBoxKind::Float))
-                }
-                IrTypeDescriptor::Bool => (IrType::Bool, Some(PrimBoxKind::Bool)),
-                _ => (IrType::Ptr(Box::new(IrType::U8)), None),
-            };
-        let func_id = self.get_or_register_extern_function(
-            call.runtime_name,
-            vec![IrType::Ptr(Box::new(IrType::Void))],
-            runtime_ret_ty.clone(),
-        );
-        let raw = self
-            .builder
-            .build_call_direct(func_id, vec![obj], runtime_ret_ty.clone())?;
-        match box_kind {
-            Some(kind) => self.box_primitive_as_dynamic(raw, runtime_ret_ty, kind),
-            None => Some(raw),
-        }
-    }
-
     /// Infer type info for Reflect.compare args.
     /// Returns:
     /// - `Some(Ok(tag))` for concrete types (Int=1, Bool=2, Float=4, String=5)
