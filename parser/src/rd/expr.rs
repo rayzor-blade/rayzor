@@ -1885,14 +1885,26 @@ impl<'a, 'b> RdParser<'a, 'b> {
                             params,
                         })
                     } else {
-                        // Qualified constant: Enum.Value
-                        let path_str = parts.join(".");
+                        // Qualified constant: Enum.Value, as the field chain an
+                        // expression would parse to.
+                        let mut parts = parts.into_iter();
+                        let mut owner = Expr {
+                            kind: ExprKind::Ident(parts.next().unwrap_or_default()),
+                            span: Span::default(),
+                        };
+                        for part in parts {
+                            owner = Expr {
+                                kind: ExprKind::Field {
+                                    expr: Box::new(owner),
+                                    field: part,
+                                    is_optional: false,
+                                },
+                                span: Span::default(),
+                            };
+                        }
                         Ok(Pattern::Const(Expr {
                             kind: ExprKind::Field {
-                                expr: Box::new(Expr {
-                                    kind: ExprKind::Ident(path_str),
-                                    span: Span::default(),
-                                }),
+                                expr: Box::new(owner),
                                 field: final_name,
                                 is_optional: false,
                             },

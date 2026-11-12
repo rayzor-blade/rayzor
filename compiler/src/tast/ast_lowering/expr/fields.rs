@@ -15,6 +15,31 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// `pack.Module.Type...` names a type its module declares, which is
+    /// registered under `pack` alone: drop the module segment.
+    fn drop_module_segment(&mut self, path: &mut Vec<String>) {
+        let upper = |s: &str| s.starts_with(|c: char| c.is_ascii_uppercase());
+        for i in 1..path.len().saturating_sub(1) {
+            if !upper(&path[i]) || !upper(&path[i + 1]) {
+                continue;
+            }
+            let package: Vec<_> = path[..i]
+                .iter()
+                .map(|segment| self.context.intern_string(segment))
+                .collect();
+            let module = self.context.intern_string(&path[i]);
+            let name = self.context.intern_string(&path[i + 1]);
+            if self
+                .context
+                .namespace_resolver
+                .module_declares(&package, module, name)
+            {
+                path.remove(i);
+            }
+            return;
+        }
+    }
+
     pub(crate) fn forwarded_static_expression(&mut self, expression: &Expr) -> Option<Expr> {
         fn path(expression: &Expr) -> Option<Vec<String>> {
             match &expression.kind {
@@ -296,6 +321,9 @@ impl<'a> AstLowering<'a> {
                     )
                 })
                 .unwrap_or(false);
+            if !base_is_local_var {
+                self.drop_module_segment(&mut path);
+            }
 
             // Try to resolve this as a package.Class.staticMethod pattern
             // Start from the full path and work backwards to find the class
