@@ -2322,11 +2322,21 @@ impl<'a> AstLowering<'a> {
                     }
 
                     // Lower the default case if present
-                    let default_case = if let Some(default_expr) = default {
+                    let mut default_case = if let Some(default_expr) = default {
                         Some(Box::new(self.lower_expression(default_expr)?))
                     } else {
                         None
                     };
+                    // An Int arm beside a Float one is a Float, as for `?:`.
+                    let mut values: Vec<&mut TypedExpression> = typed_cases
+                        .iter_mut()
+                        .filter_map(|case| match &mut case.body {
+                            TypedStatement::Expression { expression, .. } => Some(expression),
+                            _ => None,
+                        })
+                        .collect();
+                    values.extend(default_case.as_deref_mut());
+                    self.widen_mixed_numeric(values);
 
                     TypedExpressionKind::Switch {
                         discriminant,
@@ -2886,12 +2896,15 @@ impl<'a> AstLowering<'a> {
                         let body = self.lower_function_body(expr)?;
                         let mut return_type = self.infer_return_type_from_body(&body);
                         let void = self.context.type_table.borrow().void_type();
-                        if return_type == void && !crate::tast::ast_lowering::has_bare_return(expr)
-                        {
+                        // An arrow's block is its value: the tail is returned even
+                        // beside early `return`s, which type the result first.
+                        if !crate::tast::ast_lowering::has_bare_return(expr) {
                             if let Some(TypedStatement::Expression { expression, .. }) = body.last()
                             {
                                 if expression.expr_type != void && expression.expr_type.is_valid() {
-                                    return_type = expression.expr_type;
+                                    if return_type == void {
+                                        return_type = expression.expr_type;
+                                    }
                                     tail_is_value = true;
                                 }
                             }
