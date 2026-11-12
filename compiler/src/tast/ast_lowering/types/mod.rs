@@ -53,9 +53,24 @@ impl<'a> AstLowering<'a> {
         if !scopes.contains(&ScopeId::first()) {
             scopes.push(ScopeId::first());
         }
-        self.context
-            .import_resolver
-            .resolve_type(name, &scopes, self.context.namespace_resolver)
+        let mut candidates = self.context.import_resolver.resolve_type(
+            name,
+            &scopes,
+            self.context.namespace_resolver,
+        );
+        // This file's own import of the name comes before one another file made.
+        if let Some(path) = self.file_imports.get(&name) {
+            let own = |candidate: &crate::tast::namespace::QualifiedPath| {
+                path.last() == Some(&candidate.name)
+                    && (candidate.package[..] == path[..path.len() - 1]
+                        || (path.len() >= 2 && candidate.package[..] == path[..path.len() - 2]))
+            };
+            if let Some(index) = candidates.iter().position(own) {
+                let preferred = candidates.remove(index);
+                candidates.insert(0, preferred);
+            }
+        }
+        candidates
     }
 
     /// A function-type argument's name and `?`, read through the parentheses
@@ -876,7 +891,12 @@ impl<'a> AstLowering<'a> {
         }
         // Then the import resolver — user imports take priority
         // over top-level stdlib builtins (Array, Map, etc.)
-        let candidates = self.import_candidates(name_interned);
+        // A qualified path names its own package; imports answer bare names.
+        let candidates = if type_path.package.is_empty() {
+            self.import_candidates(name_interned)
+        } else {
+            Vec::new()
+        };
 
         if !candidates.is_empty() {
             // Use the first candidate (in a full implementation, we'd handle ambiguity)

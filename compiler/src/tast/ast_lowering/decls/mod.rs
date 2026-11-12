@@ -127,6 +127,23 @@ impl<'a> AstLowering<'a> {
             self.collected_errors.push(e);
         }
         self.set_private_scope(file);
+        self.file_imports = file
+            .imports
+            .iter()
+            .filter_map(|import| {
+                let name = match &import.mode {
+                    parser::ImportMode::Normal => import.path.last()?.clone(),
+                    parser::ImportMode::Alias(alias) => alias.clone(),
+                    _ => return None,
+                };
+                let path = import
+                    .path
+                    .iter()
+                    .map(|segment| self.context.intern_string(segment))
+                    .collect();
+                Some((self.context.intern_string(&name), path))
+            })
+            .collect();
 
         // Process imports - collect errors but continue
         for import in &file.imports {

@@ -1,0 +1,5 @@
+[project]
+name = "imported-name-over-std-type"
+entry = "./ImportedNameOverStdType.hx"
+[build]
+class-paths = ["."]
