@@ -1,0 +1,5 @@
+[project]
+name = "recursive-local-int64"
+entry = "./RecursiveLocalInt64.hx"
+[build]
+class-paths = ["."]

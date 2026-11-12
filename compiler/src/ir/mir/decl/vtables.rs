@@ -43,6 +43,8 @@ enum SlotKind {
     Erased,
     /// A `Null<Int>`: crosses a slot or a Dynamic entry as its box.
     NullInt,
+    /// An Int64: raw bits in a slot, its two-word class through a Dynamic entry.
+    Int64,
     Void,
 }
 
@@ -723,6 +725,9 @@ impl<'a> HirToMirContext<'a> {
         let mut cur = haxe_ty;
         for _ in 0..4 {
             let Some(ty) = cur else { break };
+            if self.is_int64_type(ty) {
+                return SlotKind::Int64;
+            }
             match self.type_table.get(ty).map(|t| &t.kind) {
                 Some(TypeKind::Dynamic) => return SlotKind::Dynamic,
                 // An Int parameter its callee defaults itself.
@@ -969,6 +974,24 @@ impl<'a> HirToMirContext<'a> {
                 _ => self.builder.build_cast(reg, IrType::I64, want.clone()),
             },
             EntryShape::Dynamic | EntryShape::Packed => match kind {
+                SlotKind::Int64 => {
+                    let unbox = self.get_or_register_extern_function(
+                        "haxe_unbox_generic_return",
+                        vec![ptr_u8.clone(), IrType::I32],
+                        IrType::I64,
+                    );
+                    let tag = self.builder.build_const(IrValue::I32(
+                        rayzor_runtime::type_system::ValueTag::Int64 as i32,
+                    ))?;
+                    let bits =
+                        self.builder
+                            .build_call_direct(unbox, vec![reg, tag], IrType::I64)?;
+                    if matches!(want, IrType::I64) {
+                        Some(bits)
+                    } else {
+                        self.builder.build_cast(bits, IrType::I64, want.clone())
+                    }
+                }
                 SlotKind::Dynamic => {
                     if *want == ptr_u8 {
                         Some(reg)
@@ -1062,6 +1085,15 @@ impl<'a> HirToMirContext<'a> {
                 let (box_fn, param_ty, arg) = match kind {
                     SlotKind::Void => return self.builder.build_const(IrValue::Null),
                     SlotKind::NullInt => return self.null_int_to_dynamic(r),
+                    SlotKind::Int64 => (
+                        "haxe_box_int64_ptr",
+                        IrType::I64,
+                        if matches!(ret_ty, IrType::I64) {
+                            Some(r)
+                        } else {
+                            self.builder.build_cast(r, ret_ty.clone(), IrType::I64)
+                        },
+                    ),
                     SlotKind::Dynamic => {
                         return if *ret_ty == ptr_u8 {
                             Some(r)
