@@ -1,0 +1,5 @@
+[project]
+name = "defaults-callee-lowered-later"
+entry = "./DefaultsCalleeLoweredLater.hx"
+[build]
+class-paths = ["."]

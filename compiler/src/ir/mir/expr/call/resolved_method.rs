@@ -1704,9 +1704,37 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                     }
                                     // Trailing optional parameters the call leaves
-                                    // out take the zero of their declared type, as
+                                    // out take their declared literal default, else
+                                    // the zero of their declared type, as
                                     // `fill_default_args` gives a cross-module call.
-                                    for name in declared.iter().skip(arg_regs.len()) {
+                                    let literals = self
+                                        .static_sig_index
+                                        .as_ref()
+                                        .and_then(|i| {
+                                            i.borrow().declared_default_literals(owner, method_name)
+                                        })
+                                        .unwrap_or_default();
+                                    let provided = arg_regs.len();
+                                    for (offset, name) in declared.iter().skip(provided).enumerate()
+                                    {
+                                        let literal_slot = match name.as_deref() {
+                                            Some("Int") => Some(IrType::I32),
+                                            Some("Float") => Some(IrType::F64),
+                                            Some("Bool") => Some(IrType::Bool),
+                                            Some("String") => Some(IrType::String),
+                                            _ => None,
+                                        };
+                                        if let (Some(ty), Some(Some(literal))) =
+                                            (literal_slot, literals.get(provided + offset))
+                                        {
+                                            if let Some(reg) =
+                                                self.declared_default_const(literal, &ty)
+                                            {
+                                                arg_regs.push(reg);
+                                                param_types.push(ty);
+                                                continue;
+                                            }
+                                        }
                                         if name.as_deref() == Some("NullInt") {
                                             let Some(reg) = self.builder.build_null_int() else {
                                                 break;

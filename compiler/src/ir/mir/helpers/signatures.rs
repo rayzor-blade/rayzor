@@ -843,6 +843,27 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// A declared literal default as a constant of the slot's type; None when
+    /// the literal cannot fill that type.
+    pub(crate) fn declared_default_const(
+        &mut self,
+        literal: &parser::ExprKind,
+        ty: &IrType,
+    ) -> Option<IrId> {
+        let value = match (literal, ty) {
+            (parser::ExprKind::Int(v), IrType::I32 | IrType::U32) => IrValue::I32(*v as i32),
+            (parser::ExprKind::Int(v), IrType::I64) => IrValue::I64(*v),
+            (parser::ExprKind::Int(v), IrType::F64) => IrValue::F64(*v as f64),
+            (parser::ExprKind::Int(v), IrType::F32) => IrValue::F32(*v as f32),
+            (parser::ExprKind::Float(v), IrType::F64) => IrValue::F64(*v),
+            (parser::ExprKind::Float(v), IrType::F32) => IrValue::F32(*v as f32),
+            (parser::ExprKind::Bool(v), IrType::Bool) => IrValue::Bool(*v),
+            (parser::ExprKind::String(v), IrType::String) => IrValue::String(v.clone()),
+            _ => return None,
+        };
+        self.builder.build_const(value)
+    }
+
     pub(crate) fn record_constrained_params(
         &mut self,
         func_id: IrFunctionId,
