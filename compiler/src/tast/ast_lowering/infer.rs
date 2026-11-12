@@ -1102,9 +1102,24 @@ impl<'a> AstLowering<'a> {
                 if else_null && !then_null && reference(&then_kind) {
                     return Ok(then_t);
                 }
+                // Int64 is a value type too: its null branch makes it nullable.
+                let int64 = |kind: &Option<TypeKind>| match kind {
+                    Some(TypeKind::Abstract { symbol_id, .. }) => self
+                        .context
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .is_some_and(|s| {
+                            crate::tast::core::is_haxe_std_type(
+                                s,
+                                self.context.string_interner,
+                                &["Int64"],
+                            )
+                        }),
+                    _ => false,
+                };
                 let nullable = match (then_null, else_null) {
-                    (true, false) if scalar(&else_kind) => Some(else_t),
-                    (false, true) if scalar(&then_kind) => Some(then_t),
+                    (true, false) if scalar(&else_kind) || int64(&else_kind) => Some(else_t),
+                    (false, true) if scalar(&then_kind) || int64(&then_kind) => Some(then_t),
                     _ => None,
                 };
                 if let Some(ty) = nullable {
