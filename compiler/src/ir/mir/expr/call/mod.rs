@@ -980,17 +980,6 @@ impl<'a> HirToMirContext<'a> {
                                 } else {
                                     reg
                                 };
-                                if i > 0 && callee_is_user_defined {
-                                    // Only a `new` is this call's own: a call result may be held elsewhere.
-                                    let is_heap_intermediate =
-                                        matches!(&arg.kind, HirExprKind::New { .. })
-                                            && self.get_drop_behavior(arg.ty)
-                                                == DropBehavior::AutoDrop
-                                            && !self.is_type_token_call(arg);
-                                    if is_heap_intermediate {
-                                        self.temp_heap_values.push(reg);
-                                    }
-                                }
                                 arg_regs.push(reg);
                             }
                         }
@@ -1233,17 +1222,6 @@ impl<'a> HirToMirContext<'a> {
                             } else {
                                 reg
                             };
-                            if callee_is_user_defined {
-                                // Only a `new` is this call's own: a call result may be held elsewhere.
-                                let is_heap_intermediate =
-                                    matches!(&arg.kind, HirExprKind::New { .. })
-                                        && self.get_drop_behavior(arg.ty) == DropBehavior::AutoDrop
-                                        && !self.is_type_token_call(arg)
-                                        && !self.interface_wrapped_args.contains(&reg);
-                                if is_heap_intermediate {
-                                    self.temp_heap_values.push(reg);
-                                }
-                            }
                             arg_regs.push(reg);
                         }
                     }
