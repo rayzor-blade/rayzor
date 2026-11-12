@@ -2162,6 +2162,18 @@ impl<'a> HirToMirContext<'a> {
                         .build_call_direct(unbox_func, vec![value], IrType::I64)?;
                 self.builder.build_cast(result, IrType::I64, IrType::Bool)
             }
+            // A `Null<Single>` holds a float box.
+            (IrType::F32, IrType::F32) => {
+                let unbox_func = self.get_or_register_extern_function(
+                    "haxe_unbox_float_ptr",
+                    vec![ptr_u8],
+                    IrType::F64,
+                );
+                let result =
+                    self.builder
+                        .build_call_direct(unbox_func, vec![value], IrType::F64)?;
+                self.builder.build_cast(result, IrType::F64, IrType::F32)
+            }
             _ => None,
         }
     }

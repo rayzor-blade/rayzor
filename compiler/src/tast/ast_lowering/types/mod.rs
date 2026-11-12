@@ -712,16 +712,37 @@ impl<'a> AstLowering<'a> {
                 for field in fields {
                     let mut field_type_id = self.lower_type(&field.type_hint)?;
                     // `?n:Int` is `Null<Int>`: a scalar's zero is a value, not absence.
-                    if field.optional
-                        && matches!(
-                            self.context
-                                .type_table
-                                .borrow()
-                                .get(field_type_id)
-                                .map(|t| &t.kind),
-                            Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
-                        )
-                    {
+                    // So is an abstract over one, and `Single`.
+                    let scalar = |kind: Option<&TypeKind>| {
+                        matches!(kind, Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool))
+                    };
+                    let optional_scalar = {
+                        let table = self.context.type_table.borrow();
+                        let resolved = Self::resolve_alias_chain(&table, field_type_id);
+                        match table.get(resolved).map(|t| &t.kind) {
+                            kind if scalar(kind) => true,
+                            Some(TypeKind::Abstract {
+                                symbol_id,
+                                underlying,
+                                ..
+                            }) => {
+                                underlying.is_some_and(|u| scalar(table.get(u).map(|t| &t.kind)))
+                                    || self
+                                        .context
+                                        .symbol_table
+                                        .get_symbol(*symbol_id)
+                                        .is_some_and(|s| {
+                                            crate::tast::core::is_haxe_std_type(
+                                                s,
+                                                self.context.string_interner,
+                                                &["Single"],
+                                            )
+                                        })
+                            }
+                            _ => false,
+                        }
+                    };
+                    if field.optional && optional_scalar {
                         field_type_id = self
                             .context
                             .type_table
