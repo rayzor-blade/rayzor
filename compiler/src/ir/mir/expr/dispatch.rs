@@ -446,6 +446,10 @@ impl<'a> HirToMirContext<'a> {
             self.builder
                 .build_cond_branch(cond_reg, then_block, else_block);
 
+            // A symbol the source never assigns can still be rebound inside an
+            // arm (a loop in it carries it through a phi); the other arm and the
+            // code after the `if` keep the binding from before it.
+            let symbol_map_before_if = self.symbol_map.clone();
             self.builder.switch_to_block(then_block);
             for (sym, then_phi, _) in &branch_phi_rebind {
                 self.symbol_map.insert(*sym, *then_phi);
@@ -475,6 +479,9 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.switch_to_block(else_block);
                 // The else arm starts from the values before the `if`, not
                 // from what the then arm left in `symbol_map`.
+                for (symbol_id, reg) in &symbol_map_before_if {
+                    self.symbol_map.insert(*symbol_id, *reg);
+                }
                 for (symbol_id, (initial_reg, _)) in &var_initial_values {
                     self.symbol_map.insert(*symbol_id, *initial_reg);
                 }
@@ -584,6 +591,11 @@ impl<'a> HirToMirContext<'a> {
                     }
 
                     self.symbol_map.insert(*symbol_id, phi_reg);
+                }
+            }
+            for (symbol_id, reg) in &symbol_map_before_if {
+                if !var_initial_values.contains_key(symbol_id) {
+                    self.symbol_map.insert(*symbol_id, *reg);
                 }
             }
         }
