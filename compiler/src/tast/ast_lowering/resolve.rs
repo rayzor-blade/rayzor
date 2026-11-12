@@ -674,6 +674,13 @@ impl<'a> AstLowering<'a> {
                     // Continue unwrapping to find the base enum
                     current_type_id = *base_type;
                 }
+                // A nullable or aliased subject cases on its values the same way.
+                crate::tast::core::TypeKind::Optional { inner_type } => {
+                    current_type_id = *inner_type;
+                }
+                crate::tast::core::TypeKind::TypeAlias { target_type, .. } => {
+                    current_type_id = *target_type;
+                }
                 // An `enum abstract` is an Abstract whose values are STATIC
                 // FIELDS, not enum variants, so the walk above cannot find
                 // them. Without this, a bare `case A:` never resolves to the
@@ -726,12 +733,24 @@ impl<'a> AstLowering<'a> {
         drop(type_table);
 
         if let Some(abs) = abstract_symbol {
-            return self.class_fields.get(&abs).and_then(|fields| {
-                fields
-                    .iter()
-                    .find(|(name, _, is_static)| *is_static && *name == constructor_name)
-                    .map(|(_, symbol, _)| *symbol)
-            });
+            // Fields this module lowered, else the abstract's own scope.
+            return self
+                .class_fields
+                .get(&abs)
+                .and_then(|fields| {
+                    fields
+                        .iter()
+                        .find(|(name, _, is_static)| *is_static && *name == constructor_name)
+                        .map(|(_, symbol, _)| *symbol)
+                })
+                .or_else(|| {
+                    let scope = self.context.symbol_table.get_symbol(abs)?.scope_id;
+                    self.context
+                        .symbol_table
+                        .lookup_symbol(scope, constructor_name)
+                        .filter(|s| s.is_static())
+                        .map(|s| s.id)
+                });
         }
 
         // Look up the enum's variants

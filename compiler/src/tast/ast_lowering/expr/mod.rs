@@ -412,14 +412,30 @@ impl<'a> AstLowering<'a> {
                         .unwrap_or(expected)
                 });
                 let preferred_abstract_field = prefer.and_then(|expected_ty| {
+                    // Through `Null<T>` and aliases: an optional field of the type.
                     let expected_abstract = {
                         let type_table = self.context.type_table.borrow();
-                        type_table.get(expected_ty).and_then(|ty| match &ty.kind {
-                            crate::tast::core::TypeKind::Abstract { symbol_id, .. } => {
-                                Some(*symbol_id)
+                        let mut ty = expected_ty;
+                        let mut found = None;
+                        for _ in 0..8 {
+                            match type_table.get(ty).map(|t| &t.kind) {
+                                Some(crate::tast::core::TypeKind::Optional { inner_type }) => {
+                                    ty = *inner_type
+                                }
+                                Some(crate::tast::core::TypeKind::TypeAlias {
+                                    target_type,
+                                    ..
+                                }) => ty = *target_type,
+                                Some(crate::tast::core::TypeKind::Abstract {
+                                    symbol_id, ..
+                                }) => {
+                                    found = Some(*symbol_id);
+                                    break;
+                                }
+                                _ => break,
                             }
-                            _ => None,
-                        })
+                        }
+                        found
                     }?;
                     self.class_fields
                         .get(&expected_abstract)
@@ -431,11 +447,49 @@ impl<'a> AstLowering<'a> {
                                 })
                                 .map(|(_, field_symbol, _)| *field_symbol)
                         })
+                        .or_else(|| {
+                            let scope = self
+                                .context
+                                .symbol_table
+                                .get_symbol(expected_abstract)?
+                                .scope_id;
+                            self.context
+                                .symbol_table
+                                .lookup_symbol(scope, id_name)
+                                .filter(|s| s.is_static())
+                                .map(|s| s.id)
+                        })
                 });
-                // Need to resolve symbol by walking up the scope hierarchy
-                let mut symbol_id = match self
-                    .resolve_symbol_in_scope_hierarchy(id_name)
+                // A local, a parameter or a member of this class shadows the
+                // expected type's constant; anything further out does not.
+                let in_scope = self.resolve_symbol_in_scope_hierarchy(id_name);
+                let member = |symbol: SymbolId| {
+                    self.context
+                        .class_context_stack
+                        .last()
+                        .is_some_and(|class| {
+                            self.class_fields
+                                .get(class)
+                                .is_some_and(|f| f.iter().any(|(_, s, _)| *s == symbol))
+                                || self
+                                    .class_methods
+                                    .get(class)
+                                    .is_some_and(|m| m.iter().any(|(_, s, _)| *s == symbol))
+                        })
+                };
+                let local = in_scope.filter(|s| {
+                    member(*s)
+                        || self.context.symbol_table.get_symbol(*s).is_some_and(|s| {
+                            matches!(
+                                s.kind,
+                                crate::tast::symbols::SymbolKind::Variable
+                                    | crate::tast::symbols::SymbolKind::Parameter
+                            )
+                        })
+                });
+                let mut symbol_id = match local
                     .or(preferred_abstract_field)
+                    .or(in_scope)
                     // Last, so a local, a parameter or a field still shadows it.
                     .or_else(|| self.resolve_wildcard_static_import(id_name))
                 {
@@ -1175,6 +1229,17 @@ impl<'a> AstLowering<'a> {
                     self.expected_arg_type_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;
                     result?
+                };
+                // A literal assigned takes the target's type, as a declaration's does.
+                let value_expr = if matches!(op, parser::AssignOp::Assign)
+                    && matches!(
+                        value_expr.kind,
+                        TypedExpressionKind::ObjectLiteral { .. }
+                            | TypedExpressionKind::ArrayLiteral { .. }
+                    ) {
+                    self.retype_literal_to(value_expr, target_expr.expr_type)
+                } else {
+                    value_expr
                 };
 
                 // Monomorph rewrite: `var x = null` takes the type of its

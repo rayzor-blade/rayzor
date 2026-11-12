@@ -1,0 +1,5 @@
+[project]
+name = "enum-abstract-value-by-expected-type"
+entry = "./EnumAbstractValueByExpectedType.hx"
+[build]
+class-paths = ["."]
