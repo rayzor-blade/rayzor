@@ -949,16 +949,29 @@ impl<'a> AstLowering<'a> {
             }
             ExprKind::Ident(name) => {
                 let name_interned = self.context.string_interner.intern(name);
-                // Direct scope lookup first: free functions and locals/params
-                // holding a closure value (a local shadows a same-name method).
-                if let Some(sym) = self
-                    .context
-                    .symbol_table
-                    .lookup_symbol(self.context.current_scope, name_interned)
-                {
-                    if let Some(params) = self.function_param_types_from_symbol(sym.id) {
-                        return Some(params);
+                // Scope lookup first, out through enclosing scopes: free functions
+                // and locals/params holding a closure value, including one a
+                // lambda captures (a local shadows a same-name method).
+                let mut scope = Some(self.context.current_scope);
+                while let Some(current) = scope {
+                    if let Some(sym) = self
+                        .context
+                        .symbol_table
+                        .lookup_symbol(current, name_interned)
+                    {
+                        if let Some(params) = self.function_param_types_from_symbol(sym.id) {
+                            return Some(params);
+                        }
+                        break;
                     }
+                    if current == ScopeId::first() {
+                        break;
+                    }
+                    scope = self
+                        .context
+                        .scope_tree
+                        .get_scope(current)
+                        .and_then(|s| s.parent_id);
                 }
                 // A bare constructor of an enclosing scope types its arguments
                 // by the constructor the expected type selects, as its own
