@@ -796,6 +796,11 @@ impl<'a> AstLowering<'a> {
                                 receiver_ty = *target_type;
                                 continue;
                             }
+                            // `Null<Array<T>>` indexes as the array it holds.
+                            Some(TypeKind::Optional { inner_type }) => {
+                                receiver_ty = *inner_type;
+                                continue;
+                            }
                             Some(crate::tast::core::TypeKind::Array { element_type }) => {
                                 return Ok(*element_type);
                             }
