@@ -39,6 +39,8 @@ pub struct StaticMethodSig {
     /// takes as a `NullInt` and defaults itself (MIR's
     /// `param_defaults_in_callee`).
     pub defaulted_ints: Vec<bool>,
+    /// Each parameter's default when it is a literal (`1.0`, `-2`, `true`, `"a"`).
+    pub default_literals: Vec<Option<parser::ExprKind>>,
 }
 
 impl StaticMethodSig {
@@ -99,6 +101,8 @@ struct ClassSigs {
     forward_instances: Option<Vec<String>>,
     /// Declared parameters of an abstract that forwards its constructor.
     forward_constructor: Option<Vec<String>>,
+    /// Types named by `@:using(..)`, as written.
+    usings: Vec<String>,
 }
 
 impl ClassSigs {
@@ -260,6 +264,21 @@ impl StaticSigIndex {
         parents
             .into_iter()
             .map(|parent| self.qualify_parent(parent, &package))
+            .collect()
+    }
+
+    /// The types a declaration's `@:using(..)` names, qualified like a parent.
+    pub fn usings_of(&mut self, name: &str) -> Vec<String> {
+        self.ensure_indexed_from_known_files(name);
+        let Some(class) = self.classes.get(name) else {
+            return Vec::new();
+        };
+        let package = class.package.clone();
+        class
+            .usings
+            .clone()
+            .into_iter()
+            .map(|using| self.qualify_parent(using, &package))
             .collect()
     }
 
@@ -629,6 +648,41 @@ impl StaticSigIndex {
             .collect()
     }
 
+    /// A parameter's default value when it is a literal, a negation folded in.
+    fn default_literal(p: &parser::FunctionParam) -> Option<parser::ExprKind> {
+        let default = p.default_value.as_deref()?;
+        match &default.kind {
+            kind @ (parser::ExprKind::Int(_)
+            | parser::ExprKind::Float(_)
+            | parser::ExprKind::Bool(_)
+            | parser::ExprKind::String(_)
+            | parser::ExprKind::Null) => Some(kind.clone()),
+            parser::ExprKind::Unary {
+                op: parser::UnaryOp::Neg,
+                expr,
+            } => match expr.kind {
+                parser::ExprKind::Int(v) => Some(parser::ExprKind::Int(-v)),
+                parser::ExprKind::Float(v) => Some(parser::ExprKind::Float(-v)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The literal defaults of a declared method's parameters, static first.
+    pub fn declared_default_literals(
+        &self,
+        owner: &str,
+        method: &str,
+    ) -> Option<Vec<Option<parser::ExprKind>>> {
+        let class = self.classes.get(owner)?;
+        let sig = class
+            .statics
+            .get(method)
+            .or_else(|| class.instances.get(method))?;
+        Some(sig.default_literals.clone())
+    }
+
     /// A plain Int parameter with a non-null default: annotated `Int`, or
     /// unannotated with an Int literal default.
     fn defaulted_int(p: &parser::FunctionParam) -> bool {
@@ -790,6 +844,40 @@ impl StaticSigIndex {
     }
 
     fn index_declaration(&mut self, package: &str, decl: &parser::TypeDeclaration) {
+        use parser::TypeDeclaration;
+        self.index_declaration_members(package, decl);
+        let (name, meta) = match decl {
+            TypeDeclaration::Class(d) => (&d.name, &d.meta),
+            TypeDeclaration::Interface(d) => (&d.name, &d.meta),
+            TypeDeclaration::Abstract(d) => (&d.name, &d.meta),
+            TypeDeclaration::Enum(d) => (&d.name, &d.meta),
+            TypeDeclaration::Typedef(d) => (&d.name, &d.meta),
+            _ => return,
+        };
+        fn dotted(expr: &parser::Expr) -> Option<String> {
+            match &expr.kind {
+                parser::ExprKind::Ident(name) => Some(name.clone()),
+                parser::ExprKind::Field { expr, field, .. } => {
+                    Some(format!("{}.{field}", dotted(expr)?))
+                }
+                _ => None,
+            }
+        }
+        let usings: Vec<String> = meta
+            .iter()
+            .filter(|m| m.name.trim_start_matches(':') == "using")
+            .flat_map(|m| m.params.iter())
+            .filter_map(dotted)
+            .collect();
+        if usings.is_empty() {
+            return;
+        }
+        if let Some(class) = self.classes.get_mut(&Self::qualify(package, name)) {
+            class.usings = usings;
+        }
+    }
+
+    fn index_declaration_members(&mut self, package: &str, decl: &parser::TypeDeclaration) {
         use parser::TypeDeclaration;
         match decl {
             TypeDeclaration::Class(c) => {
@@ -1095,6 +1183,7 @@ impl StaticSigIndex {
                         .map(|p| p.optional || p.default_value.is_some())
                         .collect(),
                     defaulted_ints: func.params.iter().map(Self::defaulted_int).collect(),
+                    default_literals: func.params.iter().map(Self::default_literal).collect(),
                 });
         }
         self.bare_to_qualified
