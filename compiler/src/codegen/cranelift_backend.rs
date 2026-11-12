@@ -1520,10 +1520,12 @@ impl CraneliftBackend {
         }
         for i in 0..rows.len() {
             let (start, fid, qname) = &rows[i];
-            let end = if i + 1 < rows.len() {
-                rows[i + 1].0
-            } else {
-                *start
+            // The compiled size where known; the last row of a batch has no
+            // successor to bound it.
+            let end = match self.code_sizes.get(fid) {
+                Some(size) => start + *size,
+                None if i + 1 < rows.len() => rows[i + 1].0,
+                None => *start,
             };
             let size = end.saturating_sub(*start);
             let safe = qname.replace('"', "''");
