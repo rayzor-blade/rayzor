@@ -178,11 +178,31 @@ impl<'a> AstLowering<'a> {
                 let sym = self.resolve_symbol_in_scope_hierarchy(interned)?;
                 self.context.symbol_table.get_symbol(sym).map(|s| s.type_id)
             }
-            ExprKind::Binary { left, right, .. } => {
+            ExprKind::Binary { left, op, right } => {
+                use parser::BinaryOp;
+                if matches!(
+                    op,
+                    BinaryOp::Eq
+                        | BinaryOp::NotEq
+                        | BinaryOp::Lt
+                        | BinaryOp::Le
+                        | BinaryOp::Gt
+                        | BinaryOp::Ge
+                        | BinaryOp::And
+                        | BinaryOp::Or
+                ) {
+                    return Some(self.context.type_table.borrow().bool_type());
+                }
                 let lt = self.peek_ast_expr_type(left);
                 let rt = self.peek_ast_expr_type(right);
-                let ftype = self.context.type_table.borrow().float_type();
-                if lt == Some(ftype) || rt == Some(ftype) {
+                let (ftype, stype) = {
+                    let table = self.context.type_table.borrow();
+                    (table.float_type(), table.string_type())
+                };
+                // `"" + x` is a String whatever `x` is.
+                if matches!(op, BinaryOp::Add) && (lt == Some(stype) || rt == Some(stype)) {
+                    Some(stype)
+                } else if lt == Some(ftype) || rt == Some(ftype) {
                     Some(ftype)
                 } else {
                     lt.or(rt)

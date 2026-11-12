@@ -538,12 +538,16 @@ impl<'a> HirToMirContext<'a> {
                             None
                         }
                     })
+                    // An abstract's element prints as what it stores; a
+                    // `Single` slot holds an f64.
                     .and_then(|et| {
+                        let single = self.convert_type(et) == IrType::F32;
                         type_table
-                            .get(self.resolve_through_aliases(et))
-                            .map(|t| t.kind.clone())
+                            .get(self.resolve_storage_type(et))
+                            .map(|t| (t.kind.clone(), single))
                     })
-                    .map(|k| match k {
+                    .map(|(k, single)| match k {
+                        _ if single => 4,
                         TypeKind::Int => 1,
                         TypeKind::Bool => 2,
                         TypeKind::Float => 4,
