@@ -222,10 +222,11 @@ pub extern "C" fn rayzor_null_access() {
     std::process::abort();
 }
 
+/// Throws `msg` as a Haxe String, the value a compiled `throw "..."` throws,
+/// so `catch (e:String)` binds the string itself.
 pub fn throw_with_message(msg: String) -> ! {
     let haxe_str = crate::native_stack_trace::make_haxe_string(msg);
-    let boxed = crate::type_system::haxe_box_reference_ptr(haxe_str as *mut u8, 5); // TYPE_STRING = TypeId(5)
-    rayzor_throw_typed(boxed as i64, 5); // TYPE_STRING = 5
+    rayzor_throw_typed(haxe_str as i64, crate::type_system::TYPE_STRING.0);
     unreachable!()
 }
 
