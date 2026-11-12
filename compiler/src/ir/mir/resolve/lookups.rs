@@ -336,6 +336,10 @@ impl<'a> HirToMirContext<'a> {
         let type_ref = type_table.get(type_id)?;
         match &type_ref.kind {
             TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
+            // `Null<A>` over an interface-backed abstract is the same fat pointer or null.
+            TypeKind::Optional { inner_type } if *inner_type != type_id => {
+                self.get_interface_symbol(*inner_type)
+            }
             TypeKind::Class { symbol_id, .. } | TypeKind::Abstract { symbol_id, .. }
                 if self
                     .symbol_table

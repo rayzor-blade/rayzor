@@ -504,6 +504,52 @@ impl<'a> HirToMirContext<'a> {
         Some(result)
     }
 
+    /// A class value bound for an interface: a null object stays null, any
+    /// other is wrapped. Haxe class references are nullable.
+    fn wrap_class_or_null(
+        &mut self,
+        value_reg: IrId,
+        value_type: TypeId,
+        class_sym: SymbolId,
+        iface_sym: SymbolId,
+    ) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let as_int = self
+            .builder
+            .build_bitcast(value_reg, IrType::I64)
+            .unwrap_or(value_reg);
+        let zero = self.builder.build_const(IrValue::I64(0))?;
+        let is_null = self.builder.build_cmp(CompareOp::Eq, as_int, zero)?;
+        let null_block = self.builder.create_block()?;
+        let wrap_block = self.builder.create_block()?;
+        let join_block = self.builder.create_block()?;
+        self.builder
+            .build_cond_branch(is_null, null_block, wrap_block)?;
+        self.builder.switch_to_block(null_block);
+        let null_ptr = self.builder.build_const(IrValue::I64(0))?;
+        let null_ptr = self
+            .builder
+            .build_bitcast(null_ptr, ptr_u8.clone())
+            .unwrap_or(null_ptr);
+        self.builder.build_branch(join_block)?;
+        self.builder.switch_to_block(wrap_block);
+        let fat =
+            self.wrap_in_interface_fat_ptr_for(value_reg, value_type, class_sym, iface_sym)?;
+        let fat = self
+            .builder
+            .build_bitcast(fat, ptr_u8.clone())
+            .unwrap_or(fat);
+        let wrap_end = self.builder.current_block()?;
+        self.builder.build_branch(join_block)?;
+        self.builder.switch_to_block(join_block);
+        let result = self.builder.build_phi(join_block, ptr_u8.clone())?;
+        self.builder
+            .add_phi_incoming(join_block, result, null_block, null_ptr);
+        self.builder
+            .add_phi_incoming(join_block, result, wrap_end, fat);
+        Some(result)
+    }
+
     /// If value_type is a class and target_type is an interface the class implements,
     /// wrap the value in a fat pointer. Otherwise return the value unchanged.
     pub(crate) fn maybe_wrap_for_interface(
@@ -536,9 +582,7 @@ impl<'a> HirToMirContext<'a> {
             // No (class, iface) vtable here does not mean no implementation: an
             // imported class has none in this context, and the builder resolves
             // its slots by name.
-            return match self
-                .wrap_in_interface_fat_ptr_for(value_reg, value_type, class_sym, iface_sym)
-            {
+            return match self.wrap_class_or_null(value_reg, value_type, class_sym, iface_sym) {
                 Some(wrapped) => (wrapped, true),
                 None => (value_reg, false),
             };
@@ -593,44 +637,7 @@ impl<'a> HirToMirContext<'a> {
             if self.interface_wrapped_args.contains(&value_reg) {
                 return (value_reg, false);
             }
-            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-            let wrapped = (|| {
-                let as_int = self
-                    .builder
-                    .build_bitcast(value_reg, IrType::I64)
-                    .unwrap_or(value_reg);
-                let zero = self.builder.build_const(IrValue::I64(0))?;
-                let is_null = self.builder.build_cmp(CompareOp::Eq, as_int, zero)?;
-                let null_block = self.builder.create_block()?;
-                let wrap_block = self.builder.create_block()?;
-                let join_block = self.builder.create_block()?;
-                self.builder
-                    .build_cond_branch(is_null, null_block, wrap_block)?;
-                self.builder.switch_to_block(null_block);
-                let null_ptr = self.builder.build_const(IrValue::I64(0))?;
-                let null_ptr = self
-                    .builder
-                    .build_bitcast(null_ptr, ptr_u8.clone())
-                    .unwrap_or(null_ptr);
-                self.builder.build_branch(join_block)?;
-                self.builder.switch_to_block(wrap_block);
-                let fat = self
-                    .wrap_in_interface_fat_ptr_for(value_reg, inner_type, class_sym, iface_sym)?;
-                let fat = self
-                    .builder
-                    .build_bitcast(fat, ptr_u8.clone())
-                    .unwrap_or(fat);
-                let wrap_end = self.builder.current_block()?;
-                self.builder.build_branch(join_block)?;
-                self.builder.switch_to_block(join_block);
-                let result = self.builder.build_phi(join_block, ptr_u8.clone())?;
-                self.builder
-                    .add_phi_incoming(join_block, result, null_block, null_ptr);
-                self.builder
-                    .add_phi_incoming(join_block, result, wrap_end, fat);
-                Some(result)
-            })();
-            return match wrapped {
+            return match self.wrap_class_or_null(value_reg, inner_type, class_sym, iface_sym) {
                 Some(w) => (w, true),
                 None => (value_reg, false),
             };
