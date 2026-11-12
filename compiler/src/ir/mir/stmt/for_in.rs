@@ -1131,13 +1131,18 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        let Some((loop_step_block, step_phi_nodes)) =
+            self.index_loop_step_block(&loop_var_initial_values, &phi_nodes)
+        else {
+            return;
+        };
         // Push loop context for break/continue
         self.loop_stack.push(LoopContext {
-            continue_block: loop_cond_block,
+            continue_block: loop_step_block,
             break_block: loop_exit_block,
             label: label.cloned(),
             exit_phi_nodes: exit_phi_nodes.clone(),
-            continue_phi_nodes: BTreeMap::new(),
+            continue_phi_nodes: step_phi_nodes.clone(),
             carried_slots: BTreeMap::new(),
         });
 
@@ -1235,45 +1240,13 @@ impl<'a> HirToMirContext<'a> {
         self.enter_drop_scope();
         self.lower_block(body);
 
-        // Add back-edge phi incoming values from body end to cond block
-        let body_end_block = self.builder.current_block().unwrap_or(loop_body_block);
-        for (symbol_id, phi_reg) in &phi_nodes {
-            let back_edge_value = if let Some(&updated_reg) = self.symbol_map.get(symbol_id) {
-                updated_reg
-            } else {
-                *phi_reg
-            };
-            self.builder.add_phi_incoming(
-                loop_cond_block,
-                *phi_reg,
-                body_end_block,
-                back_edge_value,
-            );
-        }
-
-        if !self.is_terminated() {
-            self.exit_drop_scope();
-            self.loop_carried_symbols.pop();
-            let Some(idx_to_inc) = self.builder.build_load(index_ptr, IrType::I64) else {
-                self.loop_stack.pop();
-                return;
-            };
-            let Some(one) = self.builder.build_const(IrValue::I64(1)) else {
-                self.loop_stack.pop();
-                return;
-            };
-            let Some(next_val) =
-                self.builder
-                    .build_binop(crate::ir::instructions::BinaryOp::Add, idx_to_inc, one)
-            else {
-                self.loop_stack.pop();
-                return;
-            };
-            self.builder.build_store(index_ptr, next_val);
-            self.builder.build_branch(loop_cond_block);
-        } else {
-            self.loop_carried_symbols.pop();
-        }
+        self.finish_index_loop(
+            index_ptr,
+            loop_cond_block,
+            loop_step_block,
+            &phi_nodes,
+            &step_phi_nodes,
+        );
 
         self.loop_stack.pop();
         self.builder.switch_to_block(loop_exit_block);
@@ -1291,6 +1264,107 @@ impl<'a> HirToMirContext<'a> {
 
     /// Helper: iterate over a HaxeArray by index. Used by both Array for-in and Map for-in
     /// (where keys are first converted to a HaxeArray).
+    /// The step block of an index loop, with a phi per loop-carried symbol:
+    /// `continue` and the body's end both reach it with their values, and it
+    /// advances the index before the back edge.
+    fn index_loop_step_block(
+        &mut self,
+        loop_var_initial_values: &BTreeMap<SymbolId, (IrId, IrType)>,
+        phi_nodes: &BTreeMap<SymbolId, IrId>,
+    ) -> Option<(IrBlockId, BTreeMap<SymbolId, IrId>)> {
+        let step = self.builder.create_block()?;
+        let saved = self.builder.current_block();
+        self.builder.switch_to_block(step);
+        let mut step_phis = BTreeMap::new();
+        for symbol in phi_nodes.keys() {
+            let Some((_, ty)) = loop_var_initial_values.get(symbol) else {
+                continue;
+            };
+            let Some(reg) = self.builder.build_phi(step, ty.clone()) else {
+                continue;
+            };
+            if let Some(func) = self.builder.current_function_mut() {
+                func.locals.insert(
+                    reg,
+                    crate::ir::IrLocal {
+                        name: format!("step_phi_{}", symbol.as_raw()),
+                        ty: ty.clone(),
+                        mutable: true,
+                        source_location: crate::ir::IrSourceLocation::unknown(),
+                        allocation: crate::ir::AllocationHint::Register,
+                    },
+                );
+            }
+            step_phis.insert(*symbol, reg);
+        }
+        if let Some(saved) = saved {
+            self.builder.switch_to_block(saved);
+        }
+        Some((step, step_phis))
+    }
+
+    /// Ends an index loop's body: its values reach the step block, which
+    /// increments the index and branches back to the condition. A step block
+    /// nothing reaches (every path breaks or returns) is left empty.
+    fn finish_index_loop(
+        &mut self,
+        index_ptr: IrId,
+        loop_cond_block: IrBlockId,
+        step_block: IrBlockId,
+        phi_nodes: &BTreeMap<SymbolId, IrId>,
+        step_phis: &BTreeMap<SymbolId, IrId>,
+    ) {
+        if !self.is_terminated() {
+            if let Some(body_end) = self.builder.current_block() {
+                for (symbol, step_phi) in step_phis {
+                    let value = self
+                        .symbol_map
+                        .get(symbol)
+                        .copied()
+                        .or_else(|| phi_nodes.get(symbol).copied())
+                        .unwrap_or(*step_phi);
+                    self.builder
+                        .add_phi_incoming(step_block, *step_phi, body_end, value);
+                }
+            }
+            self.exit_drop_scope();
+            self.builder.build_branch(step_block);
+        }
+        self.loop_carried_symbols.pop();
+        let reached = self
+            .builder
+            .current_function_mut()
+            .and_then(|f| f.cfg.get_block_mut(step_block))
+            .is_some_and(|b| !b.predecessors.is_empty());
+        self.builder.switch_to_block(step_block);
+        if !reached {
+            if let Some(func) = self.builder.current_function_mut() {
+                if let Some(block) = func.cfg.get_block_mut(step_block) {
+                    block.phi_nodes.clear();
+                }
+            }
+            self.builder.build_unreachable();
+            return;
+        }
+        let next = self
+            .builder
+            .build_load(index_ptr, IrType::I64)
+            .and_then(|index| {
+                let one = self.builder.build_const(IrValue::I64(1))?;
+                self.builder
+                    .build_binop(crate::ir::instructions::BinaryOp::Add, index, one)
+            });
+        if let Some(next) = next {
+            self.builder.build_store(index_ptr, next);
+        }
+        for (symbol, phi) in phi_nodes {
+            let value = step_phis.get(symbol).copied().unwrap_or(*phi);
+            self.builder
+                .add_phi_incoming(loop_cond_block, *phi, step_block, value);
+        }
+        self.builder.build_branch(loop_cond_block);
+    }
+
     pub(crate) fn lower_for_in_over_array(
         &mut self,
         pattern: &HirPattern,
@@ -1461,13 +1535,18 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        let Some((loop_step_block, step_phi_nodes)) =
+            self.index_loop_step_block(&loop_var_initial_values, &phi_nodes)
+        else {
+            return;
+        };
         // Push loop context for break/continue
         self.loop_stack.push(LoopContext {
-            continue_block: loop_cond_block,
+            continue_block: loop_step_block,
             break_block: loop_exit_block,
             label: label.cloned(),
             exit_phi_nodes: exit_phi_nodes.clone(),
-            continue_phi_nodes: BTreeMap::new(),
+            continue_phi_nodes: step_phi_nodes.clone(),
             carried_slots: BTreeMap::new(),
         });
 
@@ -1541,47 +1620,13 @@ impl<'a> HirToMirContext<'a> {
         self.enter_drop_scope();
         self.lower_block(body);
 
-        // Add loop-carried phi incoming values from the body-end block.
-        let body_end_block = self.builder.current_block().unwrap_or(loop_body_block);
-        for (symbol_id, phi_reg) in &phi_nodes {
-            let back_edge_value = if let Some(&updated_reg) = self.symbol_map.get(symbol_id) {
-                updated_reg
-            } else {
-                *phi_reg
-            };
-            self.builder.add_phi_incoming(
-                loop_cond_block,
-                *phi_reg,
-                body_end_block,
-                back_edge_value,
-            );
-        }
-
-        if !self.is_terminated() {
-            self.exit_drop_scope();
-            self.loop_carried_symbols.pop();
-            let Some(idx_to_inc) = self.builder.build_load(index_ptr, IrType::I64) else {
-                self.loop_stack.pop();
-                return;
-            };
-            let Some(one) = self.builder.build_const(IrValue::I64(1)) else {
-                self.loop_stack.pop();
-                return;
-            };
-            let Some(next_index) =
-                self.builder
-                    .build_binop(crate::ir::instructions::BinaryOp::Add, idx_to_inc, one)
-            else {
-                self.loop_stack.pop();
-                return;
-            };
-            self.builder.build_store(index_ptr, next_index);
-            self.builder.build_branch(loop_cond_block);
-        } else {
-            // Terminated body (break/return/continue) skipped exit_drop_scope;
-            // keep the loop-carried stack balanced.
-            self.loop_carried_symbols.pop();
-        }
+        self.finish_index_loop(
+            index_ptr,
+            loop_cond_block,
+            loop_step_block,
+            &phi_nodes,
+            &step_phi_nodes,
+        );
 
         self.loop_stack.pop();
         self.builder.switch_to_block(loop_exit_block);
