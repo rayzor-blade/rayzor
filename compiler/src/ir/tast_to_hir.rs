@@ -712,6 +712,42 @@ impl<'a> TastToHirContext<'a> {
         }
     }
 
+    /// The parameter types and `?` flags of the constructor a class inherits:
+    /// its nearest ancestor's that declares one.
+    fn inherited_constructor_params(&self, class: &TypedClass) -> Vec<(TypeId, bool)> {
+        let type_table = self.type_table.borrow();
+        let class_of = |ty: TypeId| match type_table.get(ty).map(|t| &t.kind) {
+            Some(crate::tast::core::TypeKind::Class { symbol_id, .. }) => Some(*symbol_id),
+            _ => None,
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut current = class.super_class.and_then(class_of);
+        while let Some(ancestor) = current {
+            if !seen.insert(ancestor) {
+                break;
+            }
+            if let Some(ctor) = self.symbol_table.get_class_constructor(ancestor) {
+                let Some(ctor_type) = self.symbol_table.get_symbol(ctor).map(|s| s.type_id) else {
+                    break;
+                };
+                return match type_table.get(ctor_type).map(|t| &t.kind) {
+                    Some(crate::tast::core::TypeKind::Function { params, labels, .. }) => params
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ty)| (*ty, labels.get(i).is_some_and(|l| l.optional)))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+            }
+            current = self
+                .symbol_table
+                .get_class_hierarchy(ancestor)
+                .and_then(|h| h.superclass)
+                .and_then(class_of);
+        }
+        Vec::new()
+    }
+
     /// Lower a class declaration
     fn lower_class(&mut self, class: &TypedClass) {
         self.pos_class = Some(class.symbol_id);
@@ -754,13 +790,34 @@ impl<'a> TastToHirContext<'a> {
                     value: self.lower_expression(f.initializer.as_ref().unwrap()),
                 })
                 .collect();
-            // A synthesised constructor REPLACES the inherited one, so without
-            // this the parent's own initialisation stops happening: the child's
-            // fields start reading correctly and the parent's start reading
-            // zero, which trades one silent wrong value for another.
-            let super_call = class.super_class.map(|_| HirSuperCall { args: Vec::new() });
+            // A synthesised constructor replaces the inherited one, so it takes
+            // the inherited parameters and hands them to `super`, as Haxe does.
+            let mut params = Vec::new();
+            let mut args = Vec::new();
+            for (ty, is_optional) in self.inherited_constructor_params(class) {
+                let (name, symbol_id) = self.gen_temp_var();
+                params.push(HirParam {
+                    symbol_id,
+                    name,
+                    ty,
+                    default: None,
+                    is_optional,
+                    is_rest: false,
+                    ownership: Default::default(),
+                });
+                args.push(HirExpr::new(
+                    HirExprKind::Variable {
+                        symbol: symbol_id,
+                        capture_mode: None,
+                    },
+                    ty,
+                    self.current_lifetime,
+                    SourceLocation::unknown(),
+                ));
+            }
+            let super_call = class.super_class.map(|_| HirSuperCall { args });
             hir_constructor = Some(HirConstructor {
-                params: Vec::new(),
+                params,
                 super_call,
                 field_inits,
                 pre_super_stmts: Vec::new(),
