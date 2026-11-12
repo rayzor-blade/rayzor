@@ -737,11 +737,16 @@ impl CompilationUnit {
         // A successful retry replaces what its failed attempt exported.
         let replaces = lowered.is_ok() && self.failed_attempts.contains(filename);
         // Every type of a file that failed is incomplete until it compiles,
-        // whether or not its fields were reached.
+        // whether or not its fields were reached. Seeded entries of other
+        // modules' types keep the state their own file gave them.
+        let declared = declared_type_names(ast_file);
         for (class_sym, fields) in lowering.export_class_fields() {
-            if lowered.is_ok() {
+            let own = lowering
+                .symbol_qualified_name(*class_sym)
+                .is_some_and(|name| declared.contains(name));
+            if own && lowered.is_ok() {
                 self.incomplete_classes.remove(class_sym);
-            } else {
+            } else if own {
                 self.incomplete_classes.insert(*class_sym);
             }
             if replaces {
@@ -2146,4 +2151,52 @@ fn build_call_module_paths(meta: &parser::Metadata, paths: &mut Vec<String>) {
         paths.push(path.join("."));
         path.pop();
     }
+}
+
+/// The qualified names a module's declarations take, both `pkg.Type` and
+/// `pkg.Module.Type`, across every conditional branch.
+fn declared_type_names(file: &parser::HaxeFile) -> std::collections::BTreeSet<String> {
+    fn walk(
+        decls: &[parser::TypeDeclaration],
+        prefixes: &[String],
+        names: &mut std::collections::BTreeSet<String>,
+    ) {
+        for decl in decls {
+            let name = match decl {
+                parser::TypeDeclaration::Class(d) => &d.name,
+                parser::TypeDeclaration::Interface(d) => &d.name,
+                parser::TypeDeclaration::Enum(d) => &d.name,
+                parser::TypeDeclaration::Typedef(d) => &d.name,
+                parser::TypeDeclaration::Abstract(d) => &d.name,
+                parser::TypeDeclaration::Conditional(c) => {
+                    walk(&c.if_branch.content, prefixes, names);
+                    for branch in &c.elseif_branches {
+                        walk(&branch.content, prefixes, names);
+                    }
+                    if let Some(other) = &c.else_branch {
+                        walk(other, prefixes, names);
+                    }
+                    continue;
+                }
+            };
+            for prefix in prefixes {
+                names.insert(format!("{prefix}{name}"));
+            }
+        }
+    }
+    let package = file
+        .package
+        .as_ref()
+        .map(|p| p.path.join("."))
+        .filter(|p| !p.is_empty())
+        .map(|p| format!("{p}."))
+        .unwrap_or_default();
+    let module = std::path::Path::new(&file.filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("");
+    let prefixes = [package.clone(), format!("{package}{module}.")];
+    let mut names = std::collections::BTreeSet::new();
+    walk(&file.declarations, &prefixes, &mut names);
+    names
 }

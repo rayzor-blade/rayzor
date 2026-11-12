@@ -34,6 +34,12 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// The qualified name of a symbol, as other modules name it.
+    pub fn symbol_qualified_name(&self, symbol: SymbolId) -> Option<&str> {
+        let symbol = self.context.symbol_table.get_symbol(symbol)?;
+        self.context.string_interner.get(symbol.qualified_name?)
+    }
+
     /// Export class_fields for accumulation across file compilations.
     pub fn export_class_fields(
         &self,
