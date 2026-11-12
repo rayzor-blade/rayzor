@@ -180,6 +180,21 @@ impl<'a> HirToMirContext<'a> {
         let value_is_dynamic = matches!(&value_kind_cloned, Some(TypeKind::Dynamic));
         let needs_boxing = target_is_dynamic && !value_is_dynamic;
 
+        // A `Null<scalar>` value already in a pointer is the box itself: a
+        // conditional with a null branch boxes its scalar branch to join them.
+        let target_is_null_scalar = matches!(
+            self.type_table.get(target_ty).map(|t| &t.kind),
+            Some(TypeKind::Optional { inner_type })
+                if self.optional_inner_is_boxable_primitive(*inner_type)
+                    || self.is_int64_type(*inner_type)
+        );
+        if needs_boxing
+            && target_is_null_scalar
+            && matches!(self.builder.get_register_type(value), Some(IrType::Ptr(_)))
+        {
+            return Some(value);
+        }
+
         if !needs_boxing {
             // A `Null<scalar>` slot is a box whatever the typer called the
             // value: `len = b.length - pos` types as Null<Int> yet the
@@ -939,6 +954,40 @@ impl<'a> HirToMirContext<'a> {
                 .build_call_direct(exists_fn, probe_args, IrType::Bool)?;
             let null = self.builder.build_null_int()?;
             return self.builder.build_select(present, value, null);
+        }
+        // `Null<T>` over a type parameter: the value boxed as `T`, or null when
+        // the probe says absent; the raw slot alone cannot tell 0 from absent.
+        if let Some(TypeKind::TypeParameter { symbol_id, .. }) =
+            self.type_table.get(inner).map(|t| &t.kind)
+        {
+            let (Some((exists_fn, probe_args)), Some(name)) = (
+                probe,
+                self.symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|sym| self.string_interner.get(sym.name))
+                    .map(str::to_string),
+            ) else {
+                return None;
+            };
+            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+            let bits = self.coerce_reg_to(raw, &IrType::I64)?;
+            let (tag, metadata) = self.type_param_value_descriptor(name, 0)?;
+            let box_fn = self.get_or_register_extern_function(
+                "haxe_box_generic_ptr",
+                vec![IrType::I64, IrType::I32, IrType::U64],
+                ptr_u8.clone(),
+            );
+            let boxed = self.builder.build_call_direct(
+                box_fn,
+                vec![bits, tag, metadata],
+                ptr_u8.clone(),
+            )?;
+            let present = self
+                .builder
+                .build_call_direct(exists_fn, probe_args, IrType::Bool)?;
+            let zero = self.builder.build_const(IrValue::I64(0))?;
+            let null = self.builder.build_bitcast(zero, ptr_u8)?;
+            return self.builder.build_select(present, boxed, null);
         }
         if !self.optional_inner_is_boxable_primitive(inner) {
             return None;
