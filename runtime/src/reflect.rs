@@ -398,7 +398,11 @@ unsafe fn class_field_of(type_id: u32, obj: *mut u8, name: &str) -> *mut u8 {
 
 /// The instance accessor `prefix + name` of the class `obj` is, as a
 /// dynamic-entry closure `(code, env)`.
-fn property_accessor(obj: *mut u8, prefix: &str, field: *mut u8) -> Option<(usize, usize)> {
+pub(crate) fn property_accessor(
+    obj: *mut u8,
+    prefix: &str,
+    field: *mut u8,
+) -> Option<(usize, usize)> {
     let (ptr, len) = unsafe { extract_field_name(field)? };
     let name =
         unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize)) };

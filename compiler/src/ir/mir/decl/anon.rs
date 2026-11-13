@@ -94,6 +94,9 @@ impl<'a> HirToMirContext<'a> {
             vec![ptr.clone(), IrType::I32, IrType::I32, ptr, IrType::I32],
             IrType::I64,
         );
+        // A class seen through the structure may answer with a property's
+        // getter, which the runtime finds by name.
+        self.dynamic_member_names.insert(format!("get_{name}"));
         let mut args = self.structural_access_args(obj, structure, index, name)?;
         let want = self.structural_field_tag(structure, name).unwrap_or(0);
         args.push(self.builder.build_const(IrValue::I32(want as i32))?);

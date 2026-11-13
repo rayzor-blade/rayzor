@@ -389,17 +389,25 @@ pub extern "C" fn rayzor_anon_get_struct_field(
             .unwrap_or(0);
     }
     // A class holds `Null<Int>` unboxed where a structure's slot holds the box.
-    crate::reflect::field_name_str(name)
-        .and_then(|name| crate::reflect::class_instance_slot(target, name))
-        .map_or(0, |(slot, ty)| {
-            let bits = unsafe { std::ptr::read_unaligned(slot) };
-            match ty {
-                crate::type_system::ParamType::NullInt => {
-                    crate::type_system::haxe_null_int_to_dynamic(bits as i64) as u64
-                }
-                _ => bits,
+    let stored = crate::reflect::field_name_str(name)
+        .and_then(|name| crate::reflect::class_instance_slot(target, name));
+    if let Some((slot, ty)) = stored {
+        let bits = unsafe { std::ptr::read_unaligned(slot) };
+        return match ty {
+            crate::type_system::ParamType::NullInt => {
+                crate::type_system::haxe_null_int_to_dynamic(bits as i64) as u64
             }
-        })
+            _ => bits,
+        };
+    }
+    // A property with no storage reads through its `get_` accessor.
+    match crate::reflect::property_accessor(target, "get_", name) {
+        Some((code, env)) => {
+            let getter: extern "C" fn(usize) -> *mut u8 = unsafe { std::mem::transmute(code) };
+            crate::type_system::haxe_unbox_erased_return(getter(env)) as u64
+        }
+        None => 0,
+    }
 }
 
 /// The runtime type tag a shape gives its field `name`.
