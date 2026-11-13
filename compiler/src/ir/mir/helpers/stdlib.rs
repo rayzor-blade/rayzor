@@ -695,6 +695,18 @@ impl<'a> HirToMirContext<'a> {
         if self.abstract_name_of(source_type) == Some(abs_name) {
             return None;
         }
+        // `fromState<T>(s:Signal<T>)` converts every `Signal<X>`: a rule over a
+        // generic class or enum whose arguments are its own type parameters
+        // takes any instantiation of that class or enum.
+        if let Some(source_base) = self.generic_base_symbol(source_type)
+            && let Some(rule) = rules.iter().find(|r| {
+                r.cast_function.is_some()
+                    && self.generic_base_symbol(r.from_type) == Some(source_base)
+                    && self.generic_args_are_parameters(r.from_type)
+            })
+        {
+            return Some(rule.clone());
+        }
         // `from(i:Iterable<T>)` takes anything that supplies `iterator()`.
         if self.iter_protocol_of(source_type).is_none()
             && matches!(
@@ -754,6 +766,44 @@ impl<'a> HirToMirContext<'a> {
         } else {
             value
         }
+    }
+
+    /// The class or enum a type instantiates, through aliases.
+    fn generic_base_symbol(&self, ty: TypeId) -> Option<SymbolId> {
+        let mut ty = self.resolve_through_aliases(ty);
+        for _ in 0..8 {
+            match self.type_table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::GenericInstance { base_type, .. }) => {
+                    ty = self.resolve_through_aliases(*base_type)
+                }
+                Some(TypeKind::Class { symbol_id, .. } | TypeKind::Enum { symbol_id, .. }) => {
+                    return Some(*symbol_id);
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// Whether `ty` is a generic class or enum applied only to type parameters.
+    fn generic_args_are_parameters(&self, ty: TypeId) -> bool {
+        let args = match self
+            .type_table
+            .get(self.resolve_through_aliases(ty))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::GenericInstance { type_args, .. })
+            | Some(TypeKind::Class { type_args, .. })
+            | Some(TypeKind::Enum { type_args, .. }) => type_args.clone(),
+            _ => return false,
+        };
+        !args.is_empty()
+            && args.iter().all(|arg| {
+                matches!(
+                    self.type_table.get(*arg).map(|t| &t.kind),
+                    Some(TypeKind::TypeParameter { .. })
+                )
+            })
     }
 
     /// The abstract a type names, through aliases and instantiations.
