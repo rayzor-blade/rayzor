@@ -380,7 +380,7 @@ impl<'a> HirToMirContext<'a> {
                 let bound = if is_dynamic {
                     self.exception_as_dynamic(exception_id)
                 } else {
-                    exception_id
+                    self.thrown_float_value(exception_id, catch_clause.exception_var)
                 };
                 self.symbol_map.insert(catch_clause.exception_var, bound);
                 self.lower_block(&catch_clause.body);
@@ -575,6 +575,25 @@ impl<'a> HirToMirContext<'a> {
         self.builder
             .build_call_direct(throw_fn, vec![exception, type_id], IrType::Void);
         self.builder.build_unreachable();
+    }
+
+    /// A thrown float travels as its bits; a Float or Single catch variable reads them back.
+    fn thrown_float_value(&mut self, exception: IrId, var: SymbolId) -> IrId {
+        let Some(ty) = self.symbol_table.get_symbol(var).map(|s| s.type_id) else {
+            return exception;
+        };
+        match self.convert_type(ty) {
+            IrType::F64 => self
+                .builder
+                .build_bitcast(exception, IrType::F64)
+                .unwrap_or(exception),
+            IrType::F32 => self
+                .builder
+                .build_bitcast(exception, IrType::F64)
+                .and_then(|wide| self.builder.build_cast(wide, IrType::F64, IrType::F32))
+                .unwrap_or(exception),
+            _ => exception,
+        }
     }
 
     pub(crate) fn lower_try_catch_expr(&mut self, expr: &HirExpr) -> Option<IrId> {
@@ -798,7 +817,7 @@ impl<'a> HirToMirContext<'a> {
                 let bound = if is_dynamic {
                     self.exception_as_dynamic(exception_id)
                 } else {
-                    exception_id
+                    self.thrown_float_value(exception_id, handler.exception_var)
                 };
                 self.symbol_map.insert(handler.exception_var, bound);
                 let handler_value = self.lower_expression(&handler.body);

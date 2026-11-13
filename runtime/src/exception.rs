@@ -98,6 +98,12 @@ pub extern "C" fn rayzor_throw(exception_value: i64) {
 pub extern "C" fn rayzor_throw_typed(exception_value: i64, type_id: u32) {
     // A thrown null is an instance of no type; a value type's zero is a value.
     use crate::type_system::{TYPE_BOOL, TYPE_FLOAT, TYPE_FROM_HEADER, TYPE_INT, TYPE_NULL};
+    // A Dynamic (a rethrown `catch (e:Dynamic)`) throws the value its box holds.
+    let (exception_value, type_id) = if type_id == crate::type_system::TYPE_DYNAMIC_TOKEN.0 {
+        open_thrown_box(exception_value)
+    } else {
+        (exception_value, type_id)
+    };
     let type_id =
         if exception_value == 0 && ![TYPE_INT.0, TYPE_FLOAT.0, TYPE_BOOL.0].contains(&type_id) {
             TYPE_NULL.0
@@ -169,6 +175,23 @@ pub extern "C" fn rayzor_exception_as_dynamic() -> *mut u8 {
     exception_as_dynamic(value, type_id)
 }
 
+/// The value and type a Dynamic box holds, as `exception_as_dynamic` boxed them.
+fn open_thrown_box(value: i64) -> (i64, u32) {
+    use crate::type_system::*;
+    let p = value as *mut u8;
+    let Some(boxed) = dynamic_box_at(p) else {
+        return (value, TYPE_FROM_HEADER.0);
+    };
+    match boxed.type_id {
+        t if t == TYPE_INT => (haxe_unbox_int_ptr(p), t.0),
+        t if t == TYPE_FLOAT => (haxe_unbox_float_ptr(p).to_bits() as i64, t.0),
+        t if t == TYPE_BOOL => (i64::from(haxe_unbox_bool_ptr(p)), t.0),
+        t if t == TYPE_STRING => (boxed.value_ptr as i64, t.0),
+        t if t == TYPE_NULL => (0, t.0),
+        t => (haxe_unbox_reference_ptr(p) as i64, t.0),
+    }
+}
+
 fn exception_as_dynamic(value: i64, thrown_type_id: u32) -> *mut u8 {
     use crate::type_system::*;
     if value == 0 {
@@ -182,7 +205,7 @@ fn exception_as_dynamic(value: i64, thrown_type_id: u32) -> *mut u8 {
     match raw {
         x if x == TYPE_STRING.0 => haxe_box_haxestring_ptr(p),
         x if x == TYPE_INT.0 => haxe_box_int_ptr(value),
-        x if x == TYPE_FLOAT.0 => haxe_box_float_ptr(value as f64),
+        x if x == TYPE_FLOAT.0 => haxe_box_float_ptr(f64::from_bits(value as u64)),
         x if x == TYPE_BOOL.0 => haxe_box_bool_ptr(value != 0),
         _ if thrown_type_id >= TYPE_USER_START => haxe_box_reference_ptr(p, thrown_type_id),
         _ => p,
@@ -377,7 +400,7 @@ fn format_uncaught_exception(exception_value: i64, thrown_type_id: u32) -> Strin
         };
     }
     if raw_type_id == crate::type_system::TYPE_FLOAT.0 {
-        return (exception_value as f64).to_string();
+        return f64::from_bits(exception_value as u64).to_string();
     }
 
     exception_value.to_string()

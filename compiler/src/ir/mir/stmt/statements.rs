@@ -1626,12 +1626,23 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Cast exception to i64 for uniform storage
+                    // Cast exception to i64 for uniform storage; a float travels as its bits.
                     let reg_type = self
                         .builder
                         .get_register_type(exception_reg)
                         .unwrap_or(IrType::I64);
-                    let exc_as_i64 = if reg_type != IrType::I64 {
+                    let exc_as_i64 = if matches!(reg_type, IrType::F64 | IrType::F32) {
+                        let wide = if reg_type == IrType::F32 {
+                            self.builder
+                                .build_cast(exception_reg, IrType::F32, IrType::F64)
+                                .unwrap_or(exception_reg)
+                        } else {
+                            exception_reg
+                        };
+                        self.builder
+                            .build_bitcast(wide, IrType::I64)
+                            .unwrap_or(exception_reg)
+                    } else if reg_type != IrType::I64 {
                         self.builder
                             .build_cast(exception_reg, reg_type, IrType::I64)
                             .unwrap_or(exception_reg)
