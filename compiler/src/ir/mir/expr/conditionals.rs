@@ -862,11 +862,59 @@ impl<'a> HirToMirContext<'a> {
                 let then_is_null_lit = matches!(then_expr.kind, HirExprKind::Null);
                 let else_is_null_lit = matches!(else_expr.kind, HirExprKind::Null);
 
+                // An enum with a payload, an object or a structure carried in a
+                // scalar register is already a nullable reference: the null
+                // arm is that register's zero, and the value stays unboxed.
+                let is_scalar_reference = |this: &Self, ty: TypeId| {
+                    let mut ty = this.resolve_through_aliases(ty);
+                    if let Some(TypeKind::Optional { inner_type }) =
+                        this.type_table.get(ty).map(|t| &t.kind)
+                    {
+                        ty = this.resolve_through_aliases(*inner_type);
+                    }
+                    if let Some(TypeKind::GenericInstance { base_type, .. }) =
+                        this.type_table.get(ty).map(|t| &t.kind)
+                    {
+                        ty = *base_type;
+                    }
+                    !this.is_tag_only_enum_type(ty)
+                        && matches!(
+                            this.type_table.get(ty).map(|t| &t.kind),
+                            Some(
+                                TypeKind::Enum { .. }
+                                    | TypeKind::Class { .. }
+                                    | TypeKind::Anonymous { .. }
+                            )
+                        )
+                };
+                let then_reference_beside_null = then_is_prim
+                    && else_is_ptr
+                    && else_is_null_lit
+                    && is_scalar_reference(self, then_expr.ty);
+                let else_reference_beside_null = else_is_prim
+                    && then_is_ptr
+                    && then_is_null_lit
+                    && is_scalar_reference(self, else_expr.ty);
+
                 // A `Null<Int>` arm meeting another shape: both take the
                 // result's type, or `NullInt` when there is none.
                 let then_ni = then_rty == Some(IrType::NullInt);
                 let else_ni = else_rty == Some(IrType::NullInt);
-                if then_ni != else_ni {
+                if then_reference_beside_null || else_reference_beside_null {
+                    let (null_block, scalar_ty) = if then_reference_beside_null {
+                        (else_end_block, then_rty.clone().unwrap())
+                    } else {
+                        (then_end_block, else_rty.clone().unwrap())
+                    };
+                    self.builder.switch_to_block(null_block);
+                    if let Some(z) = self.zero_of_ir_type(&scalar_ty) {
+                        if then_reference_beside_null {
+                            else_val = Some(z);
+                        } else {
+                            then_val = Some(z);
+                        }
+                    }
+                } else if then_ni != else_ni {
                     // Against a scalar arm the result is Null<Int> even when the
                     // expression's type decayed to a pointer: boxing the
                     // Null<Int> arm would leave a pointer in a scalar phi.
