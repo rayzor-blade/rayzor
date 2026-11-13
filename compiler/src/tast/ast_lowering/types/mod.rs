@@ -299,6 +299,7 @@ impl<'a> AstLowering<'a> {
                                     .context
                                     .symbol_table
                                     .lookup_symbol(ScopeId::first(), class_interned)
+                                    .filter(|sym| self.may_target(sym.id))
                                 {
                                     // Verify the symbol's qualified name matches
                                     if let Some(qn) = sym.qualified_name {
@@ -1013,6 +1014,7 @@ impl<'a> AstLowering<'a> {
                 .context
                 .symbol_table
                 .lookup_symbol(ScopeId::first(), name_interned)
+                .filter(|symbol| self.may_target(symbol.id))
             {
                 let sym_id = symbol.id;
                 let type_id = symbol.type_id;

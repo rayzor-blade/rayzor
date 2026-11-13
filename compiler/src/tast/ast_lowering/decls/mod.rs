@@ -676,6 +676,14 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Lower a typedef declaration
+    /// Whether the root symbol `symbol` may stand for the type a typedef
+    /// targets. A user module's typedef being declared is never its own
+    /// target; the standard library's share the root symbol of the class
+    /// they name.
+    pub(crate) fn may_target(&self, symbol: SymbolId) -> bool {
+        Some(symbol) != self.lowering_typedef || self.private_scope.is_none()
+    }
+
     pub(crate) fn lower_typedef_declaration(
         &mut self,
         typedef_decl: &TypedefDecl,
@@ -742,7 +750,9 @@ impl<'a> AstLowering<'a> {
         self.context.push_type_parameters(type_param_map);
 
         // Now process target type (can reference type parameters)
+        let outer_typedef = self.lowering_typedef.replace(typedef_symbol);
         let target_type = self.lower_type(&typedef_decl.type_def);
+        self.lowering_typedef = outer_typedef;
         let extended = if target_type.is_ok() {
             self.extended_types(&typedef_decl.type_def)
         } else {

@@ -1,0 +1,7 @@
+[project]
+name = "alias-to-class-in-import-cycle"
+entry = "./AliasToClassInImportCycle.hx"
+[build]
+class-paths = ["."]
+[build.defines]
+my_gpu = true
