@@ -1476,7 +1476,7 @@ impl<'a> AstLowering<'a> {
             return Ok(self.context.type_table.borrow().dynamic_type());
         };
 
-        // A typedef of a built-in is that built-in here.
+        // A typedef of a built-in, or `Null<>` of one, is that built-in here.
         let receiver_type = {
             let tt = self.context.type_table.borrow();
             let mut t = receiver_type;
@@ -1485,6 +1485,7 @@ impl<'a> AstLowering<'a> {
                     Some(crate::tast::core::TypeKind::TypeAlias { target_type, .. }) => {
                         t = *target_type
                     }
+                    Some(crate::tast::core::TypeKind::Optional { inner_type }) => t = *inner_type,
                     _ => break,
                 }
             }
