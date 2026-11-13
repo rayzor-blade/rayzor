@@ -4046,6 +4046,13 @@ pub extern "C" fn haxe_bytes_get_string(
     }
 }
 
+/// Get 16-bit unsigned integer (little-endian)
+/// bytes.getUInt16(pos: Int): Int
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_bytes_get_uint16(bytes: *const HaxeBytes, pos: i32) -> i32 {
+    haxe_bytes_get_int16(bytes, pos) & 0xFFFF
+}
+
 /// Get 16-bit integer (little-endian)
 /// bytes.getInt16(pos: Int): Int
 #[unsafe(no_mangle)]

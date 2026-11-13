@@ -953,6 +953,10 @@ register_symbol!(
     crate::haxe_sys::haxe_bytes_get_int16
 );
 register_symbol!(
+    "haxe_bytes_get_uint16",
+    crate::haxe_sys::haxe_bytes_get_uint16
+);
+register_symbol!(
     "haxe_bytes_get_int32",
     crate::haxe_sys::haxe_bytes_get_int32
 );

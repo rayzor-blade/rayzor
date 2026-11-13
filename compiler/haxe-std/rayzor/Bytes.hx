@@ -177,6 +177,18 @@ extern class Bytes {
     public function getInt16(pos: Int): Int;
 
     /**
+        Gets a 16-bit unsigned integer at the given position.
+        Uses little-endian byte order.
+    **/
+    public function getUInt16(pos: Int): Int;
+
+    /**
+        Stores the low 16 bits of `value` at the given position.
+        Uses little-endian byte order.
+    **/
+    public function setUInt16(pos: Int, value: Int): Void;
+
+    /**
         Gets a 32-bit signed integer at the given position.
         Uses little-endian byte order.
 

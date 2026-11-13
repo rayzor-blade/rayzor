@@ -2002,6 +2002,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             "haxe_bytes_get" => Some("haxe_bytes_get"),
             "haxe_bytes_set" => Some("haxe_bytes_set"),
             "haxe_bytes_get_int16" => Some("haxe_bytes_get_int16"),
+            "haxe_bytes_get_uint16" => Some("haxe_bytes_get_uint16"),
             "haxe_bytes_set_int16" => Some("haxe_bytes_set_int16"),
             "haxe_bytes_get_int32" => Some("haxe_bytes_get_int32"),
             "haxe_bytes_set_int32" => Some("haxe_bytes_set_int32"),
@@ -2027,7 +2028,9 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             "get" => Some("haxe_bytes_get"),
             "set" => Some("haxe_bytes_set"),
             "getInt16" => Some("haxe_bytes_get_int16"),
+            "getUInt16" => Some("haxe_bytes_get_uint16"),
             "setInt16" => Some("haxe_bytes_set_int16"),
+            "setUInt16" => Some("haxe_bytes_set_int16"),
             "getInt32" => Some("haxe_bytes_get_int32"),
             "setInt32" => Some("haxe_bytes_set_int32"),
             "getInt64" => Some("haxe_bytes_get_int64"),
@@ -2443,6 +2446,26 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let pos = val_i32(&params[1]) as usize;
                             let buf = read_bytes_slice(&mut caller, h, pos, 2);
                             let val = i16::from_le_bytes(buf[0..2].try_into().unwrap()) as i32;
+                            results[0] = ret_int(val, &rt);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- getUInt16(handle, pos) -> i32 --
+            "haxe_bytes_get_uint16" => {
+                let rt = ret_ty.clone();
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let pos = val_i32(&params[1]) as usize;
+                            let buf = read_bytes_slice(&mut caller, h, pos, 2);
+                            let val = u16::from_le_bytes(buf[0..2].try_into().unwrap()) as i32;
                             results[0] = ret_int(val, &rt);
                             Ok(())
                         },

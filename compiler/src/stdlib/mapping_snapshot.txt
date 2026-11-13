@@ -357,6 +357,7 @@ rayzor.Bytes getInt16 static=false ctor=false params=1 -> haxe_bytes_get_int16
 rayzor.Bytes getInt32 static=false ctor=false params=1 -> haxe_bytes_get_int32
 rayzor.Bytes getInt64 static=false ctor=false params=1 -> haxe_bytes_get_int64
 rayzor.Bytes getString static=false ctor=false params=2 -> haxe_bytes_get_string
+rayzor.Bytes getUInt16 static=false ctor=false params=1 -> haxe_bytes_get_uint16
 rayzor.Bytes length static=false ctor=false params=0 -> haxe_bytes_length
 rayzor.Bytes loadI32AlignedUnchecked static=false ctor=false params=1 -> rayzor_bytes_load_i32_aligned_unchecked
 rayzor.Bytes new static=true ctor=true params=2 -> haxe_bytes_of_int_array
@@ -369,6 +370,7 @@ rayzor.Bytes setFloat static=false ctor=false params=2 -> haxe_bytes_set_float
 rayzor.Bytes setInt16 static=false ctor=false params=2 -> haxe_bytes_set_int16
 rayzor.Bytes setInt32 static=false ctor=false params=2 -> haxe_bytes_set_int32
 rayzor.Bytes setInt64 static=false ctor=false params=2 -> haxe_bytes_set_int64
+rayzor.Bytes setUInt16 static=false ctor=false params=2 -> haxe_bytes_set_int16
 rayzor.Bytes storeI32AlignedUnchecked static=false ctor=false params=2 -> rayzor_bytes_store_i32_aligned_unchecked
 rayzor.Bytes sub static=false ctor=false params=2 -> haxe_bytes_sub
 rayzor.Bytes subU64 static=false ctor=false params=3 -> haxe_bytes_sub_u64lh

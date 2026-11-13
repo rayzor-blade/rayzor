@@ -3168,6 +3168,9 @@ impl StdlibMapping {
             // bytes.getInt16(pos: Int): Int
             map_method!(instance "rayzor.Bytes", "getInt16" => "haxe_bytes_get_int16", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
+            // bytes.getUInt16(pos: Int): Int
+            map_method!(instance "rayzor.Bytes", "getUInt16" => "haxe_bytes_get_uint16", params: 1, returns: primitive,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
             // bytes.getInt32(pos: Int): Int
             map_method!(instance "rayzor.Bytes", "getInt32" => "haxe_bytes_get_int32", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
@@ -3188,6 +3191,9 @@ impl StdlibMapping {
             // Integer setters (little-endian)
             // bytes.setInt16(pos: Int, value: Int): Void
             map_method!(instance "rayzor.Bytes", "setInt16" => "haxe_bytes_set_int16", params: 2, returns: void,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
+            // bytes.setUInt16(pos: Int, value: Int): Void -- the same low 16 bits.
+            map_method!(instance "rayzor.Bytes", "setUInt16" => "haxe_bytes_set_int16", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             // bytes.setInt32(pos: Int, value: Int): Void
             map_method!(instance "rayzor.Bytes", "setInt32" => "haxe_bytes_set_int32", params: 2, returns: void,
