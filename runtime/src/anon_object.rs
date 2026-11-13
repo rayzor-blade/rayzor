@@ -1,6 +1,7 @@
 //! Anonymous Object runtime for Haxe Dynamic/Any values
 //!
-//! Implements Arc-based refcounting with Copy-on-Write (COW) semantics.
+//! Implements Arc-based refcounting. Haxe structures are references: every
+//! handle onto one object sees a write through any of them.
 //! Two storage modes:
 //! - Inline: fixed-layout fields (compile-time known shape)
 //! - Map: HashMap for runtime-flexible objects (Reflect.setField/deleteField)
@@ -8,8 +9,8 @@
 //! ## Handle Layout
 //!
 //! Each JIT variable holding an anon object stores a `*mut u8` that points to
-//! a boxed tag word and `Arc<AnonObject>`. This double indirection allows COW
-//! via `Arc::make_mut` without changing the handle pointer seen by JIT code.
+//! a boxed tag word and `Arc<AnonObject>`, so each variable owns a handle and
+//! dropping it releases one reference.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -276,12 +277,13 @@ unsafe fn borrow_arc(ptr: *mut u8) -> &'static Arc<AnonObject> {
     unsafe { &(*(ptr as *const AnonHandle)).arc }
 }
 
-/// Borrow the Arc mutably from a handle pointer (does NOT take ownership)
+/// The object a handle points to, for writing in place.
 ///
 /// # Safety
-/// ptr must be a valid handle, and no other references must exist
-unsafe fn borrow_arc_mut(ptr: *mut u8) -> &'static mut Arc<AnonObject> {
-    unsafe { &mut (*(ptr as *mut AnonHandle)).arc }
+/// ptr must be a valid handle, and no other reference to the object may be
+/// live for the duration of the borrow.
+unsafe fn object_mut(ptr: *mut u8) -> &'static mut AnonObject {
+    unsafe { &mut *(Arc::as_ptr(borrow_arc(ptr)) as *mut AnonObject) }
 }
 
 // ============================================================================
@@ -465,7 +467,7 @@ pub extern "C" fn rayzor_anon_set_struct_field(
         }
         return;
     }
-    let obj = Arc::make_mut(unsafe { borrow_arc_mut(target) });
+    let obj = unsafe { object_mut(target) };
     if obj.shape_id == shape
         && let AnonData::Inline(fields) = &mut obj.data
     {
@@ -493,15 +495,14 @@ pub extern "C" fn rayzor_anon_set_struct_field(
     }
 }
 
-/// Set field by index with COW (optimized path for known shapes)
+/// Set field by index (optimized path for known shapes)
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_set_field_by_index(ptr: *mut u8, index: u32, value: u64) {
     if ptr.is_null() {
         return;
     }
     unsafe {
-        let arc = borrow_arc_mut(ptr);
-        let obj = Arc::make_mut(arc);
+        let obj = object_mut(ptr);
         if let AnonData::Inline(fields) = &mut obj.data
             && (index as usize) < fields.len()
         {
@@ -594,7 +595,7 @@ pub extern "C" fn rayzor_anon_get_field(
     }
 }
 
-/// Set field by name with COW (dynamic path)
+/// Set field by name (dynamic path)
 /// value_ptr: pointer to DynamicValue containing the value to store
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_set_field(
@@ -635,8 +636,7 @@ pub extern "C" fn rayzor_anon_set_field(
     let layout = crate::type_system::boxed_array_slot_layout(value_ptr).unwrap_or(0);
 
     unsafe {
-        let arc = borrow_arc_mut(ptr);
-        let obj = Arc::make_mut(arc);
+        let obj = object_mut(ptr);
 
         match &mut obj.data {
             AnonData::Inline(fields) => {
@@ -688,7 +688,7 @@ pub extern "C" fn rayzor_anon_set_field(
     }
 }
 
-/// Delete field by name with COW (returns true if field existed)
+/// Delete field by name (returns true if field existed)
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_anon_delete_field(
     ptr: *mut u8,
@@ -703,8 +703,7 @@ pub extern "C" fn rayzor_anon_delete_field(
     };
 
     unsafe {
-        let arc = borrow_arc_mut(ptr);
-        let obj = Arc::make_mut(arc);
+        let obj = object_mut(ptr);
 
         match &mut obj.data {
             AnonData::Inline(fields) => {
@@ -892,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cow_clone() {
+    fn test_clone_shares_object() {
         // Create object with 2 fields
         let a = rayzor_anon_new(DYNAMIC_SHAPE, 0);
         rayzor_anon_drop(a);
@@ -901,14 +900,13 @@ mod tests {
         rayzor_anon_set_field_by_index(a, 0, 10);
         rayzor_anon_set_field_by_index(a, 1, 20);
 
-        // Clone: a and b share backing
+        // Clone: a and b are two handles onto one object
         let b = rayzor_anon_clone(a);
 
-        // Mutate b — should COW (clone backing)
+        // A write through either handle is seen through both
         rayzor_anon_set_field_by_index(b, 0, 99);
 
-        // a unchanged, b modified
-        assert_eq!(rayzor_anon_get_field_by_index(a, 0), 10);
+        assert_eq!(rayzor_anon_get_field_by_index(a, 0), 99);
         assert_eq!(rayzor_anon_get_field_by_index(b, 0), 99);
 
         rayzor_anon_drop(a);
