@@ -36,6 +36,7 @@ fn source_type(ty: &BladeType) -> parser::Type {
                         is_final: field.is_final,
                         getter: source_access(&field.getter),
                         setter: source_access(&field.setter),
+                        is_method: field.is_method,
                     },
                     span,
                 })

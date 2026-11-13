@@ -426,7 +426,10 @@ fn anon_field<'a>(full: &'a str, input: &'a str) -> PResult<'a, AnonField> {
                 name,
                 optional: has_optional_meta,
                 type_hint,
-                access: AnonFieldAccess::default(),
+                access: AnonFieldAccess {
+                    is_method: true,
+                    ..Default::default()
+                },
                 span: Span::new(start, end),
             },
         ));
@@ -458,6 +461,7 @@ fn anon_field<'a>(full: &'a str, input: &'a str) -> PResult<'a, AnonField> {
             is_final,
             getter,
             setter,
+            is_method: false,
         },
     );
     let (input, _) = symbol(":").parse(input)?;

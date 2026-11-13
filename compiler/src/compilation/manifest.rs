@@ -761,6 +761,7 @@ impl CompilationUnit {
                     .map_or(parser::PropertyAccess::Default, |property| {
                         source_property_access(&property.setter)
                     }),
+                is_method: false,
             },
         );
 
@@ -1177,6 +1178,7 @@ impl CompilationUnit {
                             is_final: f.is_final,
                             getter: source_property_access(&f.getter),
                             setter: source_property_access(&f.setter),
+                            is_method: f.is_method,
                         }
                         .into(),
                     })

@@ -367,7 +367,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     name: field_name,
                     optional: optional_from_meta,
                     type_hint,
-                    access: AnonFieldAccess::default(),
+                    access: AnonFieldAccess {
+                        is_method: true,
+                        ..Default::default()
+                    },
                     span: field_span,
                 });
                 if !self.stream.at(TokenKind::RBrace) && self.stream.eat(TokenKind::Comma).is_none()

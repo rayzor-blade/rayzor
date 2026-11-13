@@ -490,6 +490,7 @@ pub fn type_of_value(v: &MacroValue, span: Span) -> Option<Type> {
                                     is_final: list_of(field(f, "access").as_ref()).iter().any(|a| matches!(a, MacroValue::Enum(_, name, _) if &**name == "AFinal")),
                                     getter: match &kind { MacroValue::Enum(_, name, args) if &**name == "FProp" => property_access(&string_of(args.first()).unwrap_or_default()), _ => parser::PropertyAccess::Default },
                                     setter: match &kind { MacroValue::Enum(_, name, args) if &**name == "FProp" => property_access(&string_of(args.get(1)).unwrap_or_default()), _ => parser::PropertyAccess::Default },
+                                    is_method: false,
                                 },
                                 span,
                             })

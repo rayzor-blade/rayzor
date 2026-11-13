@@ -656,6 +656,9 @@ pub struct AnonFieldAccess {
     pub is_final: bool,
     pub getter: PropertyAccess,
     pub setter: PropertyAccess,
+    /// Declared `function f():T;`, which a class method satisfies, rather
+    /// than `var f:Void->T`.
+    pub is_method: bool,
 }
 
 impl Default for AnonFieldAccess {
@@ -664,6 +667,7 @@ impl Default for AnonFieldAccess {
             is_final: false,
             getter: PropertyAccess::Default,
             setter: PropertyAccess::Default,
+            is_method: false,
         }
     }
 }

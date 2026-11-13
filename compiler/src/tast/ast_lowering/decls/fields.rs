@@ -320,6 +320,7 @@ impl<'a> AstLowering<'a> {
                 is_final: false,
                 getter: getter.clone(),
                 setter: setter.clone(),
+                is_method: false,
             },
             _ => parser::AnonFieldAccess::default(),
         };

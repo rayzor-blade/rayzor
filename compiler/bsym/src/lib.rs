@@ -83,7 +83,7 @@ impl From<postcard::Error> for BladeError {
 const SYMBOL_MAGIC: &[u8; 4] = b"BSYM";
 
 /// Current symbol format version
-const SYMBOL_VERSION: u32 = 4;
+const SYMBOL_VERSION: u32 = 5;
 
 /// A BLADE editor index contains portable query data, without executable MIR
 /// or compiler-local symbol IDs. The editor owns the payload schema.
@@ -235,6 +235,8 @@ pub struct BladeAnonField {
     pub is_final: bool,
     pub getter: BladeAccess,
     pub setter: BladeAccess,
+    /// Declared in method form, `function f():T;`.
+    pub is_method: bool,
 }
 
 /// Complete symbol information for a field
@@ -987,6 +989,7 @@ pub fn type_to_blade(ty: &parser::Type) -> BladeType {
                     is_optional: f.optional,
                     ty: type_to_blade(&f.type_hint),
                     is_final: f.access.is_final,
+                    is_method: f.access.is_method,
                     getter: match &f.access.getter {
                         parser::PropertyAccess::Default => BladeAccess::Default,
                         parser::PropertyAccess::Null => BladeAccess::Null,
