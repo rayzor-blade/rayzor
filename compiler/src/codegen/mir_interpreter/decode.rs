@@ -2657,8 +2657,10 @@ impl Decoder<'_> {
                 .find(|(b, _)| *b == from)
                 .ok_or_else(|| {
                     format!(
-                        "No incoming value for phi node {:?} from block {:?}",
-                        phi.dest, from
+                        "No incoming value for phi node {:?} from block {:?} in `{}`",
+                        phi.dest,
+                        from,
+                        self.function.display_name()
                     )
                 })?;
             let (c1, c2) = phi_coercion(self.mt(*value), Mt::phi(&phi.ty));
@@ -2737,7 +2739,10 @@ impl Decoder<'_> {
                     None => Term::Return(None),
                 }
             }
-            IrTerminator::Unreachable => Term::Trap(Arc::from("unreachable code")),
+            IrTerminator::Unreachable => Term::Trap(Arc::from(format!(
+                "unreachable code in `{}`",
+                self.function.display_name()
+            ))),
             IrTerminator::NoReturn { .. } => Term::Trap(Arc::from("NoReturn terminator executed")),
         })
     }
