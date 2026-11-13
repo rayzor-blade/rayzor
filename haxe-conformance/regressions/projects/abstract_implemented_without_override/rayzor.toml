@@ -1,0 +1,5 @@
+[project]
+name = "abstract-implemented-without-override"
+entry = "./AbstractImplementedWithoutOverride.hx"
+[build]
+class-paths = ["."]

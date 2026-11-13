@@ -85,6 +85,9 @@ struct ClassSigs {
     package: String,
     /// Instance methods this class declares with `override`.
     overrides: BTreeSet<String>,
+    /// Bodyless instance methods of an `abstract class`: virtual whether or
+    /// not an implementation says `override`.
+    abstracts: BTreeSet<String>,
     /// Parameter count of a body-ful `function new` this class declares itself,
     /// recorded only for a non-`extern` `class`. Every other shape (abstract,
     /// extern, bodyless `new`, inherited ctor) is absent, because a `<C>.new`
@@ -364,8 +367,8 @@ impl StaticSigIndex {
             .is_some_and(|c| !c.instances.is_empty())
     }
 
-    /// The instance methods of `class_name` that some indexed subclass
-    /// overrides, in name order: the class's own virtual slots, as every
+    /// The instance methods of `class_name` that are abstract or that some
+    /// indexed subclass overrides, in name order: the class's own virtual slots, as every
     /// module computes them.
     pub fn virtual_methods_of(&mut self, class_name: &str) -> Vec<String> {
         if self.known_file(class_name).is_some() {
@@ -374,10 +377,11 @@ impl StaticSigIndex {
         let Some(class) = self.classes.get(class_name) else {
             return Vec::new();
         };
+        let abstracts = class.abstracts.clone();
         let names: Vec<String> = class.instances.keys().cloned().collect();
         names
             .into_iter()
-            .filter(|m| self.is_overridden_below(class_name, m))
+            .filter(|m| abstracts.contains(m) || self.is_overridden_below(class_name, m))
             .collect()
     }
 
@@ -919,6 +923,19 @@ impl StaticSigIndex {
                 self.index_fields(package, &c.name, &c.fields, parent, record_ctor);
                 let qname = Self::qualify(package, &c.name);
                 if let Some(class) = self.classes.get_mut(&qname) {
+                    if c.is_abstract {
+                        for field in &c.fields {
+                            if let parser::ClassFieldKind::Function(f) = &field.kind {
+                                let is_static = field
+                                    .modifiers
+                                    .iter()
+                                    .any(|m| matches!(m, parser::Modifier::Static));
+                                if f.body.is_none() && !is_static && f.name != "new" {
+                                    class.abstracts.insert(f.name.clone());
+                                }
+                            }
+                        }
+                    }
                     let declares_new = c.fields.iter().any(|field| match &field.kind {
                         parser::ClassFieldKind::Function(f) => f.name == "new",
                         _ => false,
