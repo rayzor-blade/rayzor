@@ -672,9 +672,26 @@ impl CompilationUnit {
 
     /// Renumber import MIR function IDs to avoid collisions and push to import_mir_modules
     pub(crate) fn renumber_and_push_import_mir(&mut self, mut import_mir: IrModule) {
+        use crate::ir::init_order::IMPORT_STRIDE;
         use crate::ir::{IrFunctionId, IrGlobalId, IrInstruction};
 
-        let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
+        let import_base = self.next_import_base;
+        let span = import_mir
+            .functions
+            .keys()
+            .chain(import_mir.extern_functions.keys())
+            .map(|id| id.0)
+            .chain(import_mir.globals.keys().map(|id| id.0))
+            .max()
+            .map_or(1, |max| max + 1);
+        let blocks = span.div_ceil(IMPORT_STRIDE).max(1);
+        let first_block = import_base / IMPORT_STRIDE;
+        for block in first_block + 1..first_block + blocks {
+            import_mir.import_file_blocks.insert(block, first_block);
+        }
+        self.next_import_base = import_base
+            .checked_add(blocks * IMPORT_STRIDE)
+            .expect("import id space exhausted");
 
         // Build old→new ID mapping (include both functions and extern_functions)
         let mut id_map: std::collections::BTreeMap<IrFunctionId, IrFunctionId> =

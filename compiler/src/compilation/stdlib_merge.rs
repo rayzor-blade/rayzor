@@ -122,6 +122,9 @@ impl CompilationUnit {
                     .entry(func_id)
                     .or_insert(name);
             }
+            mir_module
+                .import_file_blocks
+                .extend(import_module.import_file_blocks);
         }
 
         // Resolve name-keyed forward-ref dispatch-thunk stubs. A file that

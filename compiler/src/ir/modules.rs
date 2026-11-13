@@ -52,6 +52,11 @@ pub struct IrModule {
     /// since function IDs are session-specific (renumbered with different bases).
     #[serde(default)]
     pub external_function_names: BTreeMap<IrFunctionId, String>,
+
+    /// Import id blocks past a file's first, keyed to that first block: a file
+    /// with more ids than one block owns the blocks after it.
+    #[serde(default)]
+    pub import_file_blocks: BTreeMap<u32, u32>,
 }
 
 /// Global variable identifier
@@ -461,6 +466,7 @@ impl IrModule {
             symbol_to_register: BTreeMap::new(),
             register_to_symbol: BTreeMap::new(),
             external_function_names: BTreeMap::new(),
+            import_file_blocks: BTreeMap::new(),
         }
     }
 

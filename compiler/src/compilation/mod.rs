@@ -391,6 +391,10 @@ pub struct CompilationUnit {
     /// being stored as separate modules, because their function IDs would collide.
     import_mir_modules: Vec<crate::ir::IrModule>,
 
+    /// Id base of the next import module; each takes as many
+    /// `IMPORT_STRIDE` blocks as its ids need.
+    next_import_base: u32,
+
     /// Function IDs from import modules that correspond to source-level declarations
     /// (class methods, constructors, top-level functions — NOT generated MIR wrappers).
     /// These must be protected from stdlib merge name collisions.
@@ -747,6 +751,7 @@ impl CompilationUnit {
             pipeline,
             mir_modules: Vec::new(),
             import_mir_modules: Vec::new(),
+            next_import_base: crate::ir::init_order::IMPORT_BASE,
             import_own_func_ids: std::collections::BTreeSet::new(),
             loaded_stdlib_typed_files: Vec::new(),
             loaded_import_haxe_files: Vec::new(),

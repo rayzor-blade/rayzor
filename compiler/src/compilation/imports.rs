@@ -1535,8 +1535,7 @@ impl CompilationUnit {
                     let own_ids = self.last_compiled_own_func_ids.take().unwrap_or_default();
                     let is_user_package = !filename.contains("haxe-std");
                     if is_user_package {
-                        let import_base: u32 =
-                            100_000 + (self.import_mir_modules.len() as u32 * 10_000);
+                        let import_base = self.next_import_base;
                         // The function map also holds other modules' already
                         // renumbered ids; offset, they would protect unrelated
                         // functions of later modules. Only ids defined here count.
@@ -1759,7 +1758,7 @@ impl CompilationUnit {
         // the fresh path.
         let is_user_package = !filename.contains("haxe-std");
         if is_user_package {
-            let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
+            let import_base = self.next_import_base;
             for entry in &cached_maps.functions {
                 if !mir
                     .functions

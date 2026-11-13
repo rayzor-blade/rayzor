@@ -1,0 +1,5 @@
+[project]
+name = "import-id-blocks"
+entry = "./ImportIdBlocks.hx"
+[build]
+class-paths = ["."]
