@@ -1200,41 +1200,36 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
     let mut removed_phis: BTreeSet<IrId> = BTreeSet::new();
     removed_phis.insert(candidate.phi_dest); // The main phi we're replacing
 
+    // A pointer phi fed the replaced object on any edge carries that object on
+    // every edge, round a loop included: it goes with it, and so does any phi
+    // it feeds.
+    loop {
+        let mut grew = false;
+        for block in function.cfg.blocks.values() {
+            for phi in &block.phi_nodes {
+                if phi.dest != candidate.phi_dest
+                    && !removed_phis.contains(&phi.dest)
+                    && phi.incoming.iter().any(|(_, value)| {
+                        directly_removed.contains(value) || removed_phis.contains(value)
+                    })
+                {
+                    removed_phis.insert(phi.dest);
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
     for block_id in &block_order {
-        let block = match function.cfg.blocks.get_mut(block_id) {
-            Some(b) => b,
-            None => continue,
-        };
-
-        for phi in &mut block.phi_nodes {
-            // Skip the phi we're about to remove
-            if phi.dest == candidate.phi_dest {
-                continue;
-            }
-
-            // Only remove incoming edges that reference directly removed values
-            // (the malloc results and the original phi dest, NOT derived GEPs/copies)
-            let original_len = phi.incoming.len();
-            phi.incoming
-                .retain(|(_, value)| !directly_removed.contains(value));
-
-            if phi.incoming.len() < original_len {
-                eliminated += original_len - phi.incoming.len();
-            }
+        if let Some(block) = function.cfg.blocks.get_mut(block_id) {
+            let before = block.phi_nodes.len();
+            block
+                .phi_nodes
+                .retain(|phi| phi.dest == candidate.phi_dest || !removed_phis.contains(&phi.dest));
+            eliminated += before - block.phi_nodes.len();
         }
-
-        // Remove phi nodes that have become empty and track them
-        let mut empty_phi_dests = Vec::new();
-        for phi in &block.phi_nodes {
-            if phi.incoming.is_empty() && phi.dest != candidate.phi_dest {
-                empty_phi_dests.push(phi.dest);
-            }
-        }
-        for dest in empty_phi_dests {
-            removed_phis.insert(dest);
-            eliminated += 1;
-        }
-        block.phi_nodes.retain(|phi| !phi.incoming.is_empty());
     }
 
     // Add removed phis to dead_pointers so Free instructions for them get removed
