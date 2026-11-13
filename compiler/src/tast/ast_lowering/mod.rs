@@ -1625,6 +1625,8 @@ pub struct AstLowering<'a> {
     pub(crate) lowering_typedef: Option<SymbolId>,
     /// The current file's single-type imports: imported name to its path.
     pub(crate) file_imports: BTreeMap<InternedString, Vec<InternedString>>,
+    /// The current file's import paths, dotted, each flagged when it ends in `.*`.
+    pub(crate) file_import_paths: Vec<(String, bool)>,
     /// `pack._Module` of the user module being registered or lowered, where its
     /// private types live.
     pub(crate) private_scope: Option<Vec<InternedString>>,

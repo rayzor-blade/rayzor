@@ -165,6 +165,15 @@ impl<'a> AstLowering<'a> {
                 break;
             }
         }
+        // Enum-abstract values sit in the root scope for every module; only
+        // the files that can name them bare see them there.
+        if outer_in_root
+            && let Some(found) = outer_match
+            && self.enum_abstract_value_hidden(found)
+        {
+            outer_match = None;
+            outer_in_root = false;
+        }
 
         // Check if the symbol is a field of the current class (implicit this access)
         if let Some(class_symbol) = self.context.class_context_stack.last() {
@@ -297,12 +306,119 @@ impl<'a> AstLowering<'a> {
         // (e.g., imported enums from other packages)
         let root_scope = ScopeId::first();
         if current_scope != root_scope {
-            if let Some(symbol) = self.context.symbol_table.lookup_symbol(root_scope, name) {
+            if let Some(symbol) = self.context.symbol_table.lookup_symbol(root_scope, name)
+                && !self.enum_abstract_value_hidden(symbol.id)
+            {
                 return Some(self.prefer_package_type(name, symbol.id));
             }
         }
 
         None
+    }
+
+    /// True for a value of an enum abstract that the current file can not name
+    /// bare: Haxe brings those in only from their own module, from inside the
+    /// abstract, or through `import pkg.Abstract` / `import pkg.Abstract.*`.
+    fn enum_abstract_value_hidden(&self, value: SymbolId) -> bool {
+        use crate::tast::symbols::SymbolKind;
+        let symbols = &self.context.symbol_table;
+        let Some(sym) = symbols.get_symbol(value) else {
+            return false;
+        };
+        if sym.kind != SymbolKind::Field {
+            return false;
+        }
+        let owner = match self
+            .context
+            .type_table
+            .borrow()
+            .get(sym.type_id)
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Abstract { symbol_id, .. }) => *symbol_id,
+            _ => return false,
+        };
+        let Some(owner_sym) = symbols.get_symbol(owner) else {
+            return false;
+        };
+        if owner_sym.kind != SymbolKind::Abstract
+            || self
+                .context
+                .scope_tree
+                .get_scope(sym.scope_id)
+                .and_then(|s| s.name)
+                != Some(owner_sym.name)
+        {
+            return false;
+        }
+        if self.module_enum_abstract_values.get(&sym.name) == Some(&value)
+            || self.context.class_context_stack.contains(&owner)
+        {
+            return false;
+        }
+        let interner = &self.context.string_interner;
+        let Some(owner_name) = interner.get(owner_sym.name) else {
+            return false;
+        };
+        let owner_fqn = owner_sym
+            .qualified_name
+            .and_then(|q| interner.get(q))
+            .filter(|q| q.contains('.'))
+            .map(str::to_string)
+            .or_else(|| {
+                let package = self
+                    .context
+                    .namespace_resolver
+                    .get_package(owner_sym.package_id?)?;
+                let mut parts: Vec<&str> = package
+                    .full_path
+                    .iter()
+                    .filter_map(|p| interner.get(*p))
+                    .collect();
+                parts.push(owner_name);
+                Some(parts.join("."))
+            })
+            .unwrap_or_else(|| owner_name.to_string());
+        // `import pkg.Abstract`, `import pkg.Module` declaring it, or
+        // `import pkg.Abstract.*`; a package wildcard does not bring values in.
+        let imported = self.file_import_paths.iter().any(|(path, wildcard)| {
+            *path == owner_fqn || (!*wildcard && format!("{path}.{owner_name}") == owner_fqn)
+        });
+        // Only a type the file does see by that name displaces the value: a
+        // bare argument whose expected type is the abstract still reaches it.
+        !imported && self.type_visible_as(sym.name)
+    }
+
+    /// A type the current file names `name`: imported, or of its own package.
+    fn type_visible_as(&self, name: InternedString) -> bool {
+        if self.file_imports.contains_key(&name) {
+            return true;
+        }
+        let interner = &self.context.string_interner;
+        let Some(name) = interner.get(name) else {
+            return false;
+        };
+        let package = self
+            .context
+            .current_package
+            .and_then(|p| self.context.namespace_resolver.get_package(p))
+            .map(|p| {
+                p.full_path
+                    .iter()
+                    .filter_map(|s| interner.get(*s))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            })
+            .unwrap_or_default();
+        let qualified = if package.is_empty() {
+            name.to_string()
+        } else {
+            format!("{package}.{name}")
+        };
+        self.context
+            .namespace_resolver
+            .declared_kind(&qualified)
+            .is_some()
     }
 
     /// Module declarations, explicit imports and package siblings precede ambient types.

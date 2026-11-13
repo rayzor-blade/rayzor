@@ -51,6 +51,7 @@ impl<'a> AstLowering<'a> {
             lowering_typedef: None,
             private_scope: None,
             file_imports: BTreeMap::new(),
+            file_import_paths: Vec::new(),
             module_statics: BTreeMap::new(),
             unknown_return_slots: std::collections::BTreeSet::new(),
             module_enum_abstract_values: BTreeMap::new(),

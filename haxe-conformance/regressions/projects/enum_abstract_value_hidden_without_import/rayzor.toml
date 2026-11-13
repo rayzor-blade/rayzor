@@ -1,0 +1,5 @@
+[project]
+name = "enum-abstract-value-hidden-without-import"
+entry = "./EnumAbstractValueHiddenWithoutImport.hx"
+[build]
+class-paths = ["."]

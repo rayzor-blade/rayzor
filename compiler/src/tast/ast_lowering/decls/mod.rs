@@ -145,6 +145,20 @@ impl<'a> AstLowering<'a> {
             })
             .collect();
 
+        self.file_import_paths = file
+            .imports
+            .iter()
+            .filter_map(|import| {
+                let wildcard = match &import.mode {
+                    parser::ImportMode::Normal | parser::ImportMode::Alias(_) => false,
+                    parser::ImportMode::Wildcard
+                    | parser::ImportMode::WildcardWithExclusions(_) => true,
+                    _ => return None,
+                };
+                Some((import.path.join("."), wildcard))
+            })
+            .collect();
+
         // Process imports - collect errors but continue
         for import in &file.imports {
             match self.lower_import(import) {
