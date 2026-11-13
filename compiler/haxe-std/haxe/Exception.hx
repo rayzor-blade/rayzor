@@ -14,11 +14,11 @@ class Exception {
     public function new(message:String, ?previous:Exception, ?native:Any):Void {
         this.message = message;
         this.previous = previous;
-        __nativeException = native != null ? native : this;
+        __nativeException = native;
     }
 
     function get_native():Any {
-        return __nativeException;
+        return __nativeException != null ? __nativeException : this;
     }
 
     function get_stack():CallStack {
