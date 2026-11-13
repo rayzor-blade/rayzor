@@ -302,9 +302,14 @@ impl<'a> HirToMirContext<'a> {
                                         .map(|(class, _, _)| *class)
                                         .collect::<Vec<_>>()
                                         .join(", ");
+                                    let within = self
+                                        .builder
+                                        .current_function()
+                                        .map(|f| format!(" in `{}`", f.display_name()))
+                                        .unwrap_or_default();
                                     let message = format!(
-                                        "E0801: ambiguous dynamic method dispatch: `{}` with {} argument(s) matches multiple stdlib classes ({}) and the receiver's type is unresolved",
-                                        method_name, actual_param_count, candidates
+                                        "E0801: ambiguous dynamic method dispatch: `{}` with {} argument(s) matches multiple stdlib classes ({}) and the receiver's type is unresolved{}",
+                                        method_name, actual_param_count, candidates, within
                                     );
                                     return self.dispatch_dynamic_call_by_tag(
                                         args,
