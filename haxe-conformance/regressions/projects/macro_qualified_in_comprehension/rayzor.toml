@@ -1,0 +1,5 @@
+[project]
+name = "macro-qualified-in-comprehension"
+entry = "./MacroQualifiedInComprehension.hx"
+[build]
+class-paths = ["."]

@@ -774,7 +774,11 @@ impl AstLowering<'_> {
             return None;
         }
         let name = self.context.intern_string(&path);
-        let owner = self.resolve_class_like_symbol_by_name(name)?;
+        let qualified = path
+            .contains('.')
+            .then(|| self.context.symbol_table.resolve_qualified_name(name))
+            .flatten();
+        let owner = qualified.or_else(|| self.resolve_class_like_symbol_by_name(name))?;
         let owner = self.context.symbol_table.get_symbol(owner)?;
         let owner = self
             .context
