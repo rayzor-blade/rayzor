@@ -774,6 +774,31 @@ impl<'a> AstLowering<'a> {
     /// read off its first `set`; `None` leaves the declaration as it was.
     /// The concrete map class a `Map<K,V>` annotation resolved to, for
     /// building an empty-map literal `[]` as that class.
+    /// `[]` where a Map is expected: the empty map, as `new` of the class the
+    /// type picks.
+    pub(crate) fn empty_map_literal(
+        &self,
+        expr: &parser::Expr,
+        target_ty: Option<TypeId>,
+    ) -> Option<parser::Expr> {
+        if !matches!(&expr.kind, parser::ExprKind::Array(e) if e.is_empty()) {
+            return None;
+        }
+        let name = self.map_class_name(target_ty?)?;
+        Some(parser::Expr {
+            kind: parser::ExprKind::New {
+                type_path: parser::TypePath {
+                    package: Vec::new(),
+                    name,
+                    sub: None,
+                },
+                params: Vec::new(),
+                args: Vec::new(),
+            },
+            span: expr.span,
+        })
+    }
+
     pub(crate) fn map_class_name(&self, target_ty: TypeId) -> Option<String> {
         use crate::tast::core::TypeKind;
         let tt = self.context.type_table.borrow();

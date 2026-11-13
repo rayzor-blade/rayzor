@@ -1200,6 +1200,10 @@ impl<'a> AstLowering<'a> {
                 let target_expr = self.lower_expression(left);
                 self.macro_probe_write_target = previous_target;
                 let target_expr = target_expr?;
+                let empty_map = matches!(op, parser::AssignOp::Assign)
+                    .then(|| self.empty_map_literal(right, Some(target_expr.expr_type)))
+                    .flatten();
+                let right: &Expr = empty_map.as_ref().unwrap_or(right);
                 let widened = self.widen_function_literal(right, target_expr.expr_type);
                 let right: &Expr = widened.as_ref().unwrap_or(right);
                 // Same `@:multiType` propagation as Var declarations: when

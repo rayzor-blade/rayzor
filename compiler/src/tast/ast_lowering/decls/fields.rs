@@ -108,7 +108,8 @@ impl<'a> AstLowering<'a> {
                     let initializer = if let Some(expr) = expr {
                         let prev_hint = self.context.expected_new_type_hint;
                         self.context.expected_new_type_hint = hint;
-                        let lowered = self.lower_expression(expr);
+                        let empty_map = self.empty_map_literal(expr, hint);
+                        let lowered = self.lower_expression(empty_map.as_ref().unwrap_or(expr));
                         self.context.expected_new_type_hint = prev_hint;
                         Some(lowered?)
                     } else {
@@ -153,7 +154,8 @@ impl<'a> AstLowering<'a> {
                     let initializer = if let Some(expr) = expr {
                         let prev_hint = self.context.expected_new_type_hint;
                         self.context.expected_new_type_hint = hint;
-                        let lowered = self.lower_expression(expr);
+                        let empty_map = self.empty_map_literal(expr, hint);
+                        let lowered = self.lower_expression(empty_map.as_ref().unwrap_or(expr));
                         self.context.expected_new_type_hint = prev_hint;
                         Some(lowered?)
                     } else {
@@ -198,7 +200,10 @@ impl<'a> AstLowering<'a> {
                     self.context.expected_new_type_hint = hint;
                     let initializer = expr
                         .as_ref()
-                        .map(|expr| self.lower_expression(expr))
+                        .map(|expr| {
+                            let empty_map = self.empty_map_literal(expr, hint);
+                            self.lower_expression(empty_map.as_ref().unwrap_or(expr))
+                        })
                         .transpose();
                     self.context.expected_new_type_hint = previous_hint;
                     let initializer = initializer?;
