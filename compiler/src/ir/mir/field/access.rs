@@ -529,12 +529,12 @@ impl<'a> HirToMirContext<'a> {
                     if sym_name != field_name {
                         continue;
                     }
-                    if let (Some(owner), Some(recv)) = (
-                        self.field_class_names.get(sym_id),
-                        receiver_class_name.as_ref(),
-                    ) {
-                        if !Self::class_names_match(owner, recv) {
-                            continue;
+                    // With the receiver's class known, only a property confirmed
+                    // to be its own answers; one of unknown owner is a guess.
+                    if let Some(recv) = receiver_class_name.as_ref() {
+                        match self.field_class_names.get(sym_id) {
+                            Some(owner) if Self::class_names_match(owner, recv) => {}
+                            _ => continue,
                         }
                     }
                     match info.getter {
