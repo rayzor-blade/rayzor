@@ -14,6 +14,30 @@ use std::fmt;
 use std::rc::Rc;
 use tracing::warn;
 
+/// `a` is `b` once `Null<>` is stripped from the type arguments of each.
+fn same_but_nullable_args(types: &TypeTable, a: TypeId, b: TypeId) -> bool {
+    let plain = |ty: TypeId| match types.get(ty).map(|t| &t.kind) {
+        Some(TypeKind::Optional { inner_type }) => *inner_type,
+        _ => ty,
+    };
+    let args = |ty: TypeId| match types.get(ty).map(|t| &t.kind) {
+        Some(TypeKind::Abstract {
+            symbol_id,
+            type_args,
+            ..
+        })
+        | Some(TypeKind::Class {
+            symbol_id,
+            type_args,
+        }) => Some((
+            *symbol_id,
+            type_args.iter().map(|t| plain(*t)).collect::<Vec<_>>(),
+        )),
+        _ => None,
+    };
+    a == b || matches!((args(a), args(b)), (Some(x), Some(y)) if x == y)
+}
+
 impl<'a> AstLowering<'a> {
     /// Resolve an allowed forwarded member on the instantiated storage type.
     pub(crate) fn forwarded_method_receiver(
@@ -2195,6 +2219,39 @@ impl<'a> AstLowering<'a> {
         let Some(formal_ty) = formal else {
             return arg;
         };
+        // A conditional converts arm by arm: one arm may already be the
+        // abstract while the other needs its `@:from`.
+        if matches!(arg.kind, TypedExpressionKind::Conditional { .. })
+            && self.abstract_symbol_of(formal_ty).is_some()
+        {
+            let mut arg = arg;
+            let mut converted = false;
+            if let TypedExpressionKind::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } = &mut arg.kind
+            {
+                let value =
+                    std::mem::replace(then_expr.as_mut(), super::expr_placeholder(formal_ty));
+                let before = value.expr_type;
+                **then_expr = self.coerce_arg_via_abstract_from(value, Some(formal_ty));
+                converted |= then_expr.expr_type != before;
+                if let Some(otherwise) = else_expr {
+                    let value =
+                        std::mem::replace(otherwise.as_mut(), super::expr_placeholder(formal_ty));
+                    let before = value.expr_type;
+                    **otherwise = self.coerce_arg_via_abstract_from(value, Some(formal_ty));
+                    converted |= otherwise.expr_type != before;
+                }
+            }
+            // Only a conversion makes the conditional the abstract; arms left
+            // as they were keep the conditional's own type.
+            if converted {
+                arg.expr_type = formal_ty;
+            }
+            return arg;
+        }
         if matches!(
             arg.kind,
             TypedExpressionKind::Cast {
@@ -2462,12 +2519,23 @@ impl<'a> AstLowering<'a> {
                     _ => None,
                 }
             });
-        // Infer the conversion's result from its argument before binding the
-        // caller's generic formal to that resulting abstract instantiation.
-        let expr_type = declared_return
+        // The result the argument infers, which binds a generic formal. A
+        // concrete formal that differs from it only by `Null<>` on a type
+        // argument takes the formal: a nullable value passes as the plain one.
+        let inferred = declared_return
             .map(|ret| self.bind_return_type_params(ret, method_symbol, &arguments))
             .filter(|ty| self.abstract_symbol_of(*ty) == Some(abstract_symbol))
             .unwrap_or(formal_ty);
+        let expr_type = {
+            let types = self.context.type_table.borrow();
+            if !self.type_mentions_type_param(&types, formal_ty)
+                && same_but_nullable_args(&types, inferred, formal_ty)
+            {
+                formal_ty
+            } else {
+                inferred
+            }
+        };
         TypedExpression {
             expr_type,
             kind: crate::tast::node::TypedExpressionKind::StaticMethodCall {
@@ -2487,7 +2555,15 @@ impl<'a> AstLowering<'a> {
     /// `actual` as it is. Haxe tries those before any `@:from` method.
     fn header_from_accepts(&mut self, abstract_symbol: SymbolId, actual: TypeId) -> bool {
         use crate::tast::core::TypeKind;
-        let Some((from_types, _)) = self.abstract_casts.get(&abstract_symbol).cloned() else {
+        // The `from Y` clauses only: an `@:from` method's source needs its call.
+        let Some((from_types, _)) = self
+            .context
+            .type_table
+            .borrow()
+            .abstract_declared_casts
+            .get(&abstract_symbol)
+            .cloned()
+        else {
             return false;
         };
         let compound = |kind: Option<&TypeKind>| {
@@ -4457,6 +4533,47 @@ impl<'a> AstLowering<'a> {
                     });
                 }
 
+                // A structure's function-typed var is called through its value,
+                // before any method or extension of that name.
+                if let Some(fn_type) =
+                    self.structure_function_field(receiver_expr.expr_type, method_name)
+                {
+                    let field_sym = self.context.symbol_table.create_field(method_name);
+                    self.context
+                        .symbol_table
+                        .update_symbol_type(field_sym, fn_type);
+                    let lifetime_id = receiver_expr.lifetime_id;
+                    let field_access = TypedExpression {
+                        kind: TypedExpressionKind::FieldAccess {
+                            object: Box::new(receiver_expr),
+                            field_symbol: field_sym,
+                            is_optional: is_optional_call,
+                        },
+                        expr_type: fn_type,
+                        usage: VariableUsage::Borrow,
+                        lifetime_id,
+                        source_location: self.context.span_to_location(&expression.span),
+                        metadata: ExpressionMetadata::default(),
+                    };
+                    let kind = TypedExpressionKind::FunctionCall {
+                        function: Box::new(field_access),
+                        arguments: arg_exprs,
+                        type_arguments: Vec::new(),
+                    };
+                    let expr_type = self.infer_expression_type(&kind)?;
+                    let usage = self.determine_variable_usage(&kind);
+                    let lifetime_id = self.assign_lifetime(&kind, &expr_type);
+                    let metadata = self.analyze_expression_metadata(&kind);
+                    return Ok(TypedExpression {
+                        expr_type,
+                        kind,
+                        usage,
+                        lifetime_id,
+                        source_location: self.context.span_to_location(&expression.span),
+                        metadata,
+                    });
+                }
+
                 // First, try to resolve as a regular method on the receiver
                 let method_symbol = self.resolve_method_symbol(&receiver_expr, method_name);
                 // `using` makes the static an extension: `div(a, b).toInt()`.
@@ -5805,8 +5922,19 @@ impl<'a> AstLowering<'a> {
             let mut from_result = Vec::new();
             self.unify_call_type_args(return_type, expected, &mut from_result);
             for (var, ty) in from_result {
-                if !bindings.iter().any(|(bound, _)| *bound == var) {
-                    bindings.push((var, ty));
+                match bindings.iter_mut().find(|(bound, _)| *bound == var) {
+                    // A `Null<X>` argument where the result wants `X` passes as
+                    // `X`: the variable is the non-null type.
+                    Some((_, bound)) => {
+                        let nullable_of_result = matches!(
+                            self.context.type_table.borrow().get(*bound).map(|t| &t.kind),
+                            Some(TypeKind::Optional { inner_type }) if *inner_type == ty
+                        );
+                        if nullable_of_result {
+                            *bound = ty;
+                        }
+                    }
+                    None => bindings.push((var, ty)),
                 }
             }
         }

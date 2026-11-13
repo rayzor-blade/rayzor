@@ -4494,6 +4494,33 @@ impl<'a> AstLowering<'a> {
         None
     }
 
+    /// The function type of structure `ty`'s field `name`, through `Null<>`,
+    /// when the field holds a function.
+    pub(crate) fn structure_function_field(
+        &self,
+        ty: TypeId,
+        name: InternedString,
+    ) -> Option<TypeId> {
+        use crate::tast::core::TypeKind;
+        // A `function f():T;` member is a class method on a class object.
+        let field = self
+            .structure_fields(ty)?
+            .into_iter()
+            .find(|field| field.name == name)
+            .filter(|field| !field.access.is_method)?;
+        let tt = self.context.type_table.borrow();
+        let mut fn_type = field.type_id;
+        for _ in 0..8 {
+            match tt.get(fn_type).map(|t| &t.kind) {
+                Some(TypeKind::Function { .. }) => return Some(fn_type),
+                Some(TypeKind::Optional { inner_type }) => fn_type = *inner_type,
+                Some(TypeKind::TypeAlias { target_type, .. }) => fn_type = *target_type,
+                _ => return None,
+            }
+        }
+        None
+    }
+
     /// The element type of an array type, through aliases and `Null<T>`.
     fn array_element_of(&self, ty: TypeId) -> Option<TypeId> {
         use crate::tast::core::TypeKind;
