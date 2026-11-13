@@ -535,6 +535,34 @@ impl<'a> HirToMirContext<'a> {
                         );
                     }
 
+                    // A parameter the method declares concretely is its type, whatever
+                    // the argument expression types as: a value typed Dynamic would
+                    // otherwise be boxed into a native's scalar parameter.
+                    let declared_params: Vec<Option<IrType>> = self
+                        .symbol_table
+                        .get_symbol(*symbol)
+                        .and_then(|method| self.type_table.get(method.type_id))
+                        .and_then(|ty| match &ty.kind {
+                            TypeKind::Function { params, .. } => Some(params.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|param| {
+                            let concrete = !matches!(
+                                self.type_table
+                                    .get(self.resolve_through_aliases(param))
+                                    .map(|t| &t.kind),
+                                None | Some(
+                                    TypeKind::Dynamic
+                                        | TypeKind::Unknown
+                                        | TypeKind::TypeParameter { .. }
+                                        | TypeKind::Placeholder { .. }
+                                )
+                            );
+                            concrete.then(|| self.convert_type(param))
+                        })
+                        .collect();
                     // Extern C path: register as extern function
                     // Get expected parameter types from the extern function signature
                     let (expected_param_types, actual_return_type) = self
@@ -557,6 +585,8 @@ impl<'a> HirToMirContext<'a> {
                                     params.push(IrType::U64);
                                 } else if extend_to_i64_params & user_bit != 0 {
                                     params.push(IrType::I64);
+                                } else if let Some(Some(declared)) = declared_params.get(i) {
+                                    params.push(declared.clone());
                                 } else {
                                     params.push(self.convert_type(arg.ty));
                                 }
