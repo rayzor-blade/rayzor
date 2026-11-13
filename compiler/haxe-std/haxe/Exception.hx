@@ -4,14 +4,21 @@ class Exception {
     public var message:String;
     public var previous:Exception;
     public var stack(get, set):CallStack;
+    public var native(get, never):Any;
 
     /** The call stack text, written where the exception is thrown. */
     @:noCompletion var __nativeStack:String;
     @:noCompletion var __stack:CallStack;
+    @:noCompletion var __nativeException:Any;
 
     public function new(message:String, ?previous:Exception, ?native:Any):Void {
         this.message = message;
         this.previous = previous;
+        __nativeException = native != null ? native : this;
+    }
+
+    function get_native():Any {
+        return __nativeException;
     }
 
     function get_stack():CallStack {
