@@ -322,7 +322,6 @@ impl<'a> HirToMirContext<'a> {
             _ => None,
         };
         self.refresh_boxed_capture_symbols();
-        self.current_stmt_index = 0;
 
         // Map lambda parameters to registers and register them as locals, the same
         // way regular function parameters are set up.

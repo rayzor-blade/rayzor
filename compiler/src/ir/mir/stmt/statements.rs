@@ -405,33 +405,6 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        // Clone anonymous object handles for COW semantics.
-                        // Skip if: object literal (fresh), anon view (backed by class/wider anon),
-                        // or copying from a backed variable (shares backing reference).
-                        let src_has_view = if let HirExprKind::Variable {
-                            symbol: src_sym, ..
-                        } = &init_expr.kind
-                        {
-                            self.anon_views.contains_key(src_sym)
-                        } else {
-                            false
-                        };
-                        // A value boxed for a Dynamic binding is a box now, not
-                        // a handle: cloning it read the box as the object.
-                        // Compiler temporaries preserve the receiver's identity.
-                        let is_source_binding = matches!(pattern, HirPattern::Variable { symbol, .. }
-                            if self.symbol_table.get_symbol(*symbol).is_some());
-                        let final_value = if is_source_binding
-                            && !is_anon_view
-                            && !src_has_view
-                            && !matches!(&init_expr.kind, HirExprKind::ObjectLiteral { .. })
-                            && !self.boxed_value_regs.contains(&final_value)
-                        {
-                            self.maybe_clone_anonymous(final_value, init_expr.ty)
-                        } else {
-                            final_value
-                        };
-
                         // A local whose type came from a later assignment (`var x = null;
                         // ... x = 1;`) is Null<Int> although its initializer is a pointer.
                         let final_value = match pattern {
@@ -1075,17 +1048,6 @@ impl<'a> HirToMirContext<'a> {
                             } else {
                                 value
                             }
-                        };
-
-                        // Clone anonymous object handles for COW semantics on reassignment.
-                        // Skip for object literals (fresh handles) and compound assignments.
-                        let value = if op.is_none()
-                            && !matches!(&rhs.kind, HirExprKind::ObjectLiteral { .. })
-                            && !self.boxed_value_regs.contains(&value)
-                        {
-                            self.maybe_clone_anonymous(value, rhs.ty)
-                        } else {
-                            value
                         };
 
                         // The reflective write into a Dynamic boxes the value by
@@ -1746,9 +1708,7 @@ impl<'a> HirToMirContext<'a> {
             self.lower_statement(stmt);
 
             // Free variables whose last use is this statement (lifetime-based drop).
-            self.check_drop_points_after_statement();
-
-            self.current_stmt_index += 1;
+            self.check_drop_points_after_statement(stmt);
         }
 
         if let Some(expr) = &block.expr {
@@ -1780,12 +1740,12 @@ impl<'a> HirToMirContext<'a> {
 
         for stmt in block.statements[..last].iter() {
             self.lower_statement(stmt);
-            self.check_drop_points_after_statement();
-            self.current_stmt_index += 1;
+            self.check_drop_points_after_statement(stmt);
         }
 
         if trailing {
-            let value = match block.statements.last()? {
+            let last_stmt = block.statements.last()?;
+            let value = match last_stmt {
                 HirStatement::Expr(expr) => {
                     let value = self.lower_expression(expr);
                     self.release_block_value(expr);
@@ -1794,8 +1754,7 @@ impl<'a> HirToMirContext<'a> {
                 stmt @ HirStatement::Assign { .. } => self.lower_statement(stmt),
                 _ => unreachable!("checked above"),
             };
-            self.check_drop_points_after_statement();
-            self.current_stmt_index += 1;
+            self.check_drop_points_after_statement(last_stmt);
             return value;
         }
 

@@ -356,7 +356,6 @@ impl<'a> HirToMirContext<'a> {
         if let Some(body) = &hir_func.body {
             let mut analyzer = DropPointAnalyzer::new();
             self.current_drop_points = Some(analyzer.analyze_function(body));
-            self.current_stmt_index = 0;
             trace!(
                 "Drop analysis: Found {} heap variables, {} escaping",
                 self.current_drop_points
@@ -370,7 +369,6 @@ impl<'a> HirToMirContext<'a> {
             );
         } else {
             self.current_drop_points = None;
-            self.current_stmt_index = 0;
         }
         self.refresh_boxed_capture_symbols();
 
@@ -569,7 +567,6 @@ impl<'a> HirToMirContext<'a> {
             self.temp_heap_values.clear();
             self.reassigned_in_scope.clear();
             self.current_drop_points = None;
-            self.current_stmt_index = 0;
 
             // Load captured params from environment
             if let Some(layout) = &inner_context.env_layout {
@@ -898,11 +895,10 @@ impl<'a> HirToMirContext<'a> {
 
         // Drop-point analysis on the constructor body, as `lower_function_body`
         // does. Without it the body lowers under the previously-lowered
-        // function's `current_drop_points` / `current_stmt_index`, misrouting
+        // function's `current_drop_points`, misrouting
         // `build_free` / `build_drop` for heap values from extern callees.
         let mut analyzer = DropPointAnalyzer::new();
         self.current_drop_points = Some(analyzer.analyze_function(&constructor.body));
-        self.current_stmt_index = 0;
 
         // Implicit field accesses in the body resolve against the class type.
         self.current_this_type = Some(type_id);

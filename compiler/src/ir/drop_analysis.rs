@@ -78,6 +78,19 @@ pub struct DropPoints {
     /// Variables captured by closures - these truly escape the function scope
     /// and should NOT be freed at scope exit (the closure owns them)
     pub lambda_captures: BTreeSet<SymbolId>,
+
+    /// The index of every statement the analysis numbered, keyed by its
+    /// address; lowering finds a statement's index here, not by counting.
+    pub statement_indices: BTreeMap<usize, usize>,
+}
+
+impl DropPoints {
+    /// The index the analysis gave `stmt`, if it numbered it.
+    pub fn index_of(&self, stmt: &HirStatement) -> Option<usize> {
+        self.statement_indices
+            .get(&(stmt as *const HirStatement as usize))
+            .copied()
+    }
 }
 
 /// Information about a variable's last use
@@ -121,6 +134,14 @@ pub struct DropPointAnalyzer {
 
     /// Variables captured by lambdas (truly escape scope)
     lambda_captures: BTreeSet<SymbolId>,
+
+    /// Statement addresses to their indices.
+    statement_indices: BTreeMap<usize, usize>,
+
+    /// Inside a try/catch: uses count as uses by the enclosing statement, and
+    /// the statements within get no index, since an exception leaves them at
+    /// any point.
+    pinned_stmt_idx: Option<usize>,
 }
 
 /// Captures of lambdas and bound methods in `block`, including nested ones.
@@ -351,6 +372,8 @@ impl DropPointAnalyzer {
             reassigned: BTreeSet::new(),
             escaping: BTreeSet::new(),
             lambda_captures: BTreeSet::new(),
+            statement_indices: BTreeMap::new(),
+            pinned_stmt_idx: None,
         }
     }
 
@@ -365,6 +388,8 @@ impl DropPointAnalyzer {
         self.reassigned.clear();
         self.escaping.clear();
         self.lambda_captures.clear();
+        self.statement_indices.clear();
+        self.pinned_stmt_idx = None;
 
         // Traverse the function body
         self.analyze_block(body);
@@ -396,6 +421,7 @@ impl DropPointAnalyzer {
             heap_allocated: self.heap_vars.clone(),
             escaping: self.escaping.clone(),
             lambda_captures: self.lambda_captures.clone(),
+            statement_indices: std::mem::take(&mut self.statement_indices),
         }
     }
 
@@ -403,6 +429,10 @@ impl DropPointAnalyzer {
         self.current_depth += 1;
 
         for stmt in &block.statements {
+            if self.pinned_stmt_idx.is_none() {
+                self.statement_indices
+                    .insert(stmt as *const HirStatement as usize, self.current_stmt_idx);
+            }
             self.analyze_statement(stmt);
             self.current_stmt_idx += 1;
         }
@@ -508,6 +538,46 @@ impl DropPointAnalyzer {
                 self.in_loop = was_in_loop;
             }
 
+            // Nested blocks advance the statement counter as lowering does,
+            // in the order lowering visits them.
+            HirStatement::DoWhile {
+                body, condition, ..
+            } => {
+                let was_in_loop = self.in_loop;
+                self.in_loop = true;
+                self.analyze_block(body);
+                self.analyze_expr(condition);
+                self.in_loop = was_in_loop;
+            }
+
+            HirStatement::Switch { scrutinee, cases } => {
+                self.analyze_expr(scrutinee);
+                for case in cases {
+                    if let Some(guard) = &case.guard {
+                        self.analyze_expr(guard);
+                    }
+                    self.analyze_block(&case.body);
+                }
+            }
+
+            HirStatement::TryCatch {
+                try_block,
+                catches,
+                finally_block,
+            } => {
+                let outer = self.pin();
+                self.analyze_block(try_block);
+                for catch in catches {
+                    self.analyze_block(&catch.body);
+                }
+                if let Some(finally) = finally_block {
+                    self.analyze_block(finally);
+                }
+                self.pinned_stmt_idx = outer;
+            }
+
+            HirStatement::Label { block, .. } => self.analyze_block(block),
+
             _ => {}
         }
     }
@@ -563,6 +633,25 @@ impl DropPointAnalyzer {
                 self.analyze_block(block);
             }
 
+            HirExprKind::TryCatch {
+                try_expr,
+                catch_handlers,
+                finally_expr,
+            } => {
+                let outer = self.pin();
+                self.analyze_expr(try_expr);
+                for handler in catch_handlers {
+                    if let Some(guard) = &handler.guard {
+                        self.analyze_expr(guard);
+                    }
+                    self.analyze_expr(&handler.body);
+                }
+                if let Some(finally) = finally_expr {
+                    self.analyze_expr(finally);
+                }
+                self.pinned_stmt_idx = outer;
+            }
+
             HirExprKind::New { args, .. } => {
                 for arg in args {
                     self.analyze_expr(arg);
@@ -615,8 +704,16 @@ impl DropPointAnalyzer {
     }
 
     fn record_use(&mut self, symbol: SymbolId) {
+        let idx = self.pinned_stmt_idx.unwrap_or(self.current_stmt_idx);
         let uses = self.uses.entry(symbol).or_insert_with(Vec::new);
-        uses.push((self.current_stmt_idx, self.in_loop, self.current_depth));
+        uses.push((idx, self.in_loop, self.current_depth));
+    }
+
+    /// Pin uses to the current statement; returns the previous pin.
+    fn pin(&mut self) -> Option<usize> {
+        let outer = self.pinned_stmt_idx;
+        self.pinned_stmt_idx = Some(outer.unwrap_or(self.current_stmt_idx));
+        outer
     }
 
     fn is_heap_allocation(&self, expr: &HirExpr) -> bool {

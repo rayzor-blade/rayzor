@@ -347,9 +347,6 @@ pub struct HirToMirContext<'a> {
     /// Contains last-use information for precise drop insertion
     current_drop_points: Option<DropPoints>,
 
-    /// Current statement index during lowering (for drop point matching)
-    current_stmt_index: usize,
-
     /// Symbols that have been reassigned in the current scope
     /// These should be skipped at scope exit (they're freed at reassignment time)
     reassigned_in_scope: BTreeSet<SymbolId>,
@@ -786,7 +783,6 @@ pub(crate) struct SavedLoweringState {
     temp_heap_values: Vec<IrId>,
     reassigned_in_scope: BTreeSet<SymbolId>,
     current_drop_points: Option<DropPoints>,
-    current_stmt_index: usize,
     boxed_dynamic_symbols: BTreeSet<SymbolId>,
     value_type_symbols: BTreeSet<SymbolId>,
     anon_views: BTreeMap<SymbolId, AnonBacking>,
@@ -1461,7 +1457,6 @@ impl<'a> HirToMirContext<'a> {
             drop_scope_stack: Vec::new(),
             temp_heap_values: Vec::new(),
             current_drop_points: None,
-            current_stmt_index: 0,
             reassigned_in_scope: BTreeSet::new(),
             cstruct_layouts: BTreeMap::new(),
             gpu_struct_layouts: BTreeMap::new(),

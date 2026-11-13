@@ -1,4 +1,4 @@
-//! Value-semantics copies: shallow copy and anonymous-structure cloning.
+//! Shallow copies of class instances and structural views of anonymous structures.
 
 use super::*;
 use crate::ir::drop_analysis::{DropBehavior, DropPointAnalyzer, DropPoints};
@@ -65,37 +65,6 @@ impl<'a> HirToMirContext<'a> {
         }
 
         Some(new_ptr)
-    }
-
-    /// Clone an anonymous object handle if the value type is Anonymous.
-    /// This ensures each variable gets its own Box<Arc<AnonObject>> for proper COW semantics.
-    /// Returns the cloned handle, or the original value if not anonymous.
-    pub(crate) fn maybe_clone_anonymous(&mut self, value: IrId, value_ty: TypeId) -> IrId {
-        use crate::tast::TypeKind;
-
-        let is_anon = {
-            let type_table = self.type_table;
-            matches!(
-                type_table.get(value_ty).map(|t| &t.kind),
-                Some(TypeKind::Anonymous { .. })
-            )
-        };
-
-        if !is_anon {
-            return value;
-        }
-
-        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-        let clone_func_id =
-            self.get_or_register_extern_function("rayzor_anon_clone", vec![ptr_u8.clone()], ptr_u8);
-
-        self.builder
-            .build_call_direct(
-                clone_func_id,
-                vec![value],
-                IrType::Ptr(Box::new(IrType::U8)),
-            )
-            .unwrap_or(value)
     }
 
     /// Try to register a structural subtyping view for an anonymous-typed variable.

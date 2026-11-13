@@ -139,7 +139,6 @@ impl<'a> HirToMirContext<'a> {
             temp_heap_values: self.temp_heap_values.clone(),
             reassigned_in_scope: self.reassigned_in_scope.clone(),
             current_drop_points: self.current_drop_points.clone(),
-            current_stmt_index: self.current_stmt_index,
             boxed_dynamic_symbols: self.boxed_dynamic_symbols.clone(),
             value_type_symbols: self.value_type_symbols.clone(),
             anon_views: self.anon_views.clone(),
@@ -169,7 +168,6 @@ impl<'a> HirToMirContext<'a> {
         self.temp_heap_values = state.temp_heap_values;
         self.reassigned_in_scope = state.reassigned_in_scope;
         self.current_drop_points = state.current_drop_points;
-        self.current_stmt_index = state.current_stmt_index;
         self.boxed_dynamic_symbols = state.boxed_dynamic_symbols;
         self.value_type_symbols = state.value_type_symbols;
         self.anon_views = state.anon_views;

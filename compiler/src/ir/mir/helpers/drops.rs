@@ -254,17 +254,18 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// Check drop points and emit Free for variables at their last use
-    /// Called after each statement during lowering
-    pub(crate) fn check_drop_points_after_statement(&mut self) {
+    /// Free the variables whose last use is `stmt`, after lowering it. A
+    /// statement the analysis did not number frees nothing.
+    pub(crate) fn check_drop_points_after_statement(&mut self, stmt: &HirStatement) {
         use crate::ir::drop_analysis::should_drop_at_statement;
 
         let drop_points = match &self.current_drop_points {
             Some(dp) => dp,
             None => return,
         };
-
-        let current_idx = self.current_stmt_index;
+        let Some(current_idx) = drop_points.index_of(stmt) else {
+            return;
+        };
         let mut to_drop = Vec::new();
 
         for (&symbol, &ir_id) in &self.owned_heap_values {
