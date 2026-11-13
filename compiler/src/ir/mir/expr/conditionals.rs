@@ -1039,6 +1039,35 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // A result of type parameter `T`, or an arm that is the erased `?T`
+        // slot, makes both arms that slot: an arm left in another
+        // representation (a parameter's raw `i64`) would merge with the other's
+        // and reinterpret wrongly once `T` is bound.
+        let arm_slot = [then_val, else_val].into_iter().flatten().find_map(|reg| {
+            match self.builder.get_register_type(reg) {
+                Some(ty @ IrType::TypeVar(_)) => Some(ty),
+                _ => None,
+            }
+        });
+        let result_slot = result_ty
+            .map(|t| self.convert_type(t))
+            .filter(|ty| matches!(ty, IrType::TypeVar(_)));
+        if let Some(slot) = result_slot.or(arm_slot) {
+            for (terminated, end_block, val) in [
+                (then_terminated, then_end_block, &mut then_val),
+                (else_terminated, else_end_block, &mut else_val),
+            ] {
+                let Some(reg) = *val else { continue };
+                if terminated || self.builder.get_register_type(reg).as_ref() == Some(&slot) {
+                    continue;
+                }
+                self.builder.switch_to_block(end_block);
+                if let Some(cast) = self.builder.build_bitcast(reg, slot.clone()) {
+                    *val = Some(cast);
+                }
+            }
+        }
+
         // Now build branches for non-terminated blocks
         if !then_terminated {
             self.builder.switch_to_block(then_end_block);
