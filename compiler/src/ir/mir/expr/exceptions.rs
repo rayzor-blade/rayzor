@@ -396,6 +396,10 @@ impl<'a> HirToMirContext<'a> {
                     }
                     self.builder.build_branch(after_catch_target);
                 }
+                // A clause without a test takes every exception; later ones are unreachable.
+                if next_test_block.is_none() {
+                    break;
+                }
             }
 
             // No clause matched: the exception propagates to the enclosing
@@ -833,6 +837,10 @@ impl<'a> HirToMirContext<'a> {
                         value_exits.push((blk, handler_value));
                     }
                     self.builder.build_branch(continuation_block);
+                }
+                // A clause without a test takes every exception; later ones are unreachable.
+                if next_test_block.is_none() {
+                    break;
                 }
             }
 
