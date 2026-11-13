@@ -1049,8 +1049,24 @@ impl<'a> AstLowering<'a> {
             });
         }
 
-        // Lower the expression in the comprehension scope
-        let typed_expr = self.lower_expression(expr)?;
+        // The body is an element of the array the context expects, so an
+        // untyped `cast` in it takes that element type.
+        let expected_element = self
+            .expected_arg_type_stack
+            .last()
+            .copied()
+            .flatten()
+            .or(self.context.expected_return_type)
+            .and_then(
+                |ty| match self.context.type_table.borrow().get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Array { element_type }) => Some(*element_type),
+                    _ => None,
+                },
+            );
+        self.expected_arg_type_stack.push(expected_element);
+        let typed_expr = self.lower_expression(expr);
+        self.expected_arg_type_stack.pop();
+        let typed_expr = typed_expr?;
         let element_type = typed_expr.expr_type;
 
         // Restore the previous scope
