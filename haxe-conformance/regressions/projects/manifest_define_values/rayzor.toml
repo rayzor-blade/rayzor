@@ -1,0 +1,12 @@
+[project]
+name = "manifest-define-values"
+entry = "./ManifestDefineValues.hx"
+[build]
+class-paths = ["."]
+
+[build.defines]
+plain_flag = true
+off_flag = false
+my_css = "/tmp/some/dir/Scene.css"
+my_list = "a.css,b.css"
+my_num = "42"

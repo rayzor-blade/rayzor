@@ -795,6 +795,18 @@ where
 #[cfg(target_os = "linux")]
 use tikv_jemalloc_sys as _;
 
+/// A manifest `[build.defines]` entry as a `-D` setting: `false`, `0` or an
+/// empty value leaves it undefined, `true` or `1` defines the flag, and any
+/// other value is `name=value`, which `Context.definedValue` returns.
+pub(crate) fn manifest_define(key: &str, value: Option<&str>) -> Option<String> {
+    match value.map(str::trim) {
+        None | Some("true") | Some("1") => Some(key.to_string()),
+        Some(v) if v.is_empty() || v == "0" || v.eq_ignore_ascii_case("false") => None,
+        Some(v) if v.eq_ignore_ascii_case("true") => Some(key.to_string()),
+        Some(v) => Some(format!("{key}={v}")),
+    }
+}
+
 fn main() {
     startup_times::process_started();
     rayzor_runtime::crash_diagnostics::install();
@@ -1612,20 +1624,12 @@ fn run_file(
         .map(|project| project.initialization_macros())
         .unwrap_or_default();
 
-    // Native source runs now honor manifest `[build.defines]`, matching the
-    // WASM command. The current preprocessor stores define presence only, so
-    // false/0 values are treated as disabled and other values as enabled.
+    // Native source runs honor manifest `[build.defines]`, matching the WASM
+    // command; see `manifest_define`.
     if let Some(project) = manifest_project.as_ref() {
         for (key, value) in project.defines() {
-            let enabled = value
-                .as_deref()
-                .map(|v| {
-                    let v = v.trim();
-                    !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
-                })
-                .unwrap_or(true);
-            if enabled {
-                compile_defines.push(key);
+            if let Some(define) = manifest_define(&key, value.as_deref()) {
+                compile_defines.push(define);
             }
         }
     }

@@ -141,9 +141,9 @@ fn wasm_defines(project: Option<&compiler::workspace::Project>) -> Vec<String> {
     seen.insert("wasm".to_string());
     defines.push("wasm".to_string());
     if let Some(project) = project {
-        for (key, _value) in project.defines() {
+        for (key, value) in project.defines() {
             if seen.insert(key.clone()) {
-                defines.push(key);
+                defines.extend(crate::manifest_define(&key, value.as_deref()));
             }
         }
     }
