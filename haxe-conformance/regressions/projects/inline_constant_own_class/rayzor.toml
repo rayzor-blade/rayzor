@@ -1,0 +1,5 @@
+[project]
+name = "inline-constant-own-class"
+entry = "./InlineConstantOwnClass.hx"
+[build]
+class-paths = ["."]

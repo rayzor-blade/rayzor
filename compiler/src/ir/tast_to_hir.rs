@@ -366,10 +366,10 @@ impl<'a> TastToHirContext<'a> {
         let symbol_table = &self.symbol_table;
         let string_interner = &self.string_interner;
 
-        // The value for each field name: the first key in order that names it.
-        let mut by_field: BTreeMap<&str, HirLiteral> = BTreeMap::new();
+        // Every (key, value) for each field name; a key is
+        // "ClassName.fieldName" or "package.ClassName.fieldName".
+        let mut by_field: BTreeMap<&str, Vec<(&str, HirLiteral)>> = BTreeMap::new();
         for (key, value) in global_vars {
-            // key is "ClassName.fieldName" or "package.ClassName.fieldName"
             let dot_pos = key.rfind('.').unwrap_or(0);
             let field_name = &key[dot_pos + 1..];
             let literal = match value {
@@ -378,22 +378,43 @@ impl<'a> TastToHirContext<'a> {
                 crate::ir::blade::BladeInlineValue::Bool(v) => HirLiteral::Bool(*v),
                 crate::ir::blade::BladeInlineValue::String(_) => continue,
             };
-            by_field.entry(field_name).or_insert(literal);
+            by_field
+                .entry(field_name)
+                .or_default()
+                .push((key.as_str(), literal));
         }
         if by_field.is_empty() {
             return;
         }
 
-        // Only the symbols carrying one of those names.
+        // A symbol takes the value whose key names its own class: a static
+        // field's qualified name is `Class.field`, the key may add a package.
+        // A symbol without one takes a value only when its name has just one.
         let mut seeded = Vec::new();
-        for (field_name, literal) in &by_field {
+        for (field_name, values) in &by_field {
             let Some(name) = string_interner.get_id(field_name) else {
                 continue;
             };
             for sym in symbol_table.find_symbols_named(name, |sym| {
                 matches!(sym.kind, crate::tast::SymbolKind::Variable)
             }) {
-                seeded.push((sym.id, literal.clone()));
+                let qname = sym.qualified_name.and_then(|q| string_interner.get(q));
+                let literal = match qname {
+                    Some(q) => values
+                        .iter()
+                        .find(|(key, _)| {
+                            *key == q
+                                || key
+                                    .strip_suffix(q)
+                                    .is_some_and(|package| package.ends_with('.'))
+                        })
+                        .map(|(_, literal)| literal),
+                    None if values.len() == 1 => Some(&values[0].1),
+                    None => None,
+                };
+                if let Some(literal) = literal {
+                    seeded.push((sym.id, literal.clone()));
+                }
             }
         }
         for (sym_id, literal) in seeded {
