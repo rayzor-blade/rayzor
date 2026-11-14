@@ -76,6 +76,39 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// A comparison of an untyped empty array's element with a value of
+    /// concrete type binds the element to that type, as Haxe unifies the
+    /// monomorph there.
+    pub(crate) fn try_bind_inferred_array_by_comparison(&mut self, left: &Expr, right: &Expr) {
+        fn strip(mut e: &Expr) -> &Expr {
+            while let ExprKind::Paren(inner) = &e.kind {
+                e = inner;
+            }
+            e
+        }
+        for (element, other) in [(strip(left), right), (strip(right), left)] {
+            let ExprKind::Index { expr: recv, .. } = &element.kind else {
+                continue;
+            };
+            let concrete = self.peek_ast_expr_type(other).is_some_and(|t| {
+                let tt = self.context.type_table.borrow();
+                !matches!(
+                    tt.get(t).map(|ty| &ty.kind),
+                    None | Some(
+                        TypeKind::Dynamic
+                            | TypeKind::Unknown
+                            | TypeKind::Error
+                            | TypeKind::Placeholder { .. }
+                    )
+                )
+            });
+            if concrete {
+                self.try_bind_inferred_array(recv, other);
+                return;
+            }
+        }
+    }
+
     /// An untyped empty array passed for an `Array<T>` formal with a concrete
     /// `T` is that array type, as the use binds Haxe's monomorph.
     pub(crate) fn try_bind_inferred_array_to_formal(&mut self, arg_ast: &Expr, formal: TypeId) {

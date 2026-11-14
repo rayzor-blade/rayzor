@@ -962,6 +962,17 @@ impl<'a> AstLowering<'a> {
                     };
                     return self.lower_expression(&iterator);
                 } else {
+                    if matches!(
+                        op,
+                        BinaryOp::Eq
+                            | BinaryOp::NotEq
+                            | BinaryOp::Lt
+                            | BinaryOp::Le
+                            | BinaryOp::Gt
+                            | BinaryOp::Ge
+                    ) {
+                        self.try_bind_inferred_array_by_comparison(left, right);
+                    }
                     let left_expr = self.lower_expression(left)?;
                     // For ==/!= and ?? the LHS's static type is the expected
                     // type of the RHS — disambiguates a bare enum-variant
@@ -1063,6 +1074,37 @@ impl<'a> AstLowering<'a> {
             {
                 let table = self.resource_table_expr(expression.span);
                 return self.lower_expression(&table);
+            }
+            ExprKind::Call { expr, args }
+                if args.len() > 1
+                    && matches!(&expr.kind, ExprKind::Ident(name) if name == "trace")
+                    && self.is_builtin_trace() =>
+            {
+                // `trace(a, b, …)` prints its values joined by `,`.
+                let mk = |kind| Expr {
+                    kind,
+                    span: expression.span,
+                };
+                let mut joined = mk(ExprKind::String(String::new()));
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        joined = mk(ExprKind::Binary {
+                            left: Box::new(joined),
+                            op: BinaryOp::Add,
+                            right: Box::new(mk(ExprKind::String(",".to_string()))),
+                        });
+                    }
+                    joined = mk(ExprKind::Binary {
+                        left: Box::new(joined),
+                        op: BinaryOp::Add,
+                        right: Box::new(arg.clone()),
+                    });
+                }
+                let call = mk(ExprKind::Call {
+                    expr: expr.clone(),
+                    args: vec![joined],
+                });
+                return self.lower_expression(&call);
             }
             ExprKind::Call { expr, args } => {
                 if let Some(call) = self.coroutine_call(expression, expr, args)? {
@@ -4492,6 +4534,19 @@ impl<'a> AstLowering<'a> {
             }
         }
         None
+    }
+
+    /// `trace` names the built-in global, not a declaration that shadows it.
+    fn is_builtin_trace(&mut self) -> bool {
+        let name = self.context.intern_string("trace");
+        self.resolve_symbol_in_scope_hierarchy(name)
+            .and_then(|id| self.context.symbol_table.get_symbol(id))
+            .is_some_and(|s| {
+                s.kind == crate::tast::SymbolKind::Function
+                    && s.qualified_name.is_none()
+                    && s.package_id.is_none()
+                    && s.scope_id == ScopeId::first()
+            })
     }
 
     /// The function type of structure `ty`'s field `name`, through `Null<>`,
