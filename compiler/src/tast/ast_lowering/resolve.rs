@@ -1244,14 +1244,18 @@ impl<'a> AstLowering<'a> {
                     return Some(vec![callback]);
                 }
                 // A function stored into an array of functions takes the element
-                // type, so an untyped literal is typed as the slot it fills.
+                // type, so an untyped literal is typed as the slot it fills; a
+                // `new Map()` stored into an array of maps takes its key type.
                 let function_elem = array_elem.filter(|elem| {
-                    let tt = self.context.type_table.borrow();
-                    matches!(
-                        tt.get(Self::resolve_alias_chain(&tt, *elem))
-                            .map(|t| &t.kind),
-                        Some(crate::tast::core::TypeKind::Function { .. })
-                    )
+                    let is_function = {
+                        let tt = self.context.type_table.borrow();
+                        matches!(
+                            tt.get(Self::resolve_alias_chain(&tt, *elem))
+                                .map(|t| &t.kind),
+                            Some(crate::tast::core::TypeKind::Function { .. })
+                        )
+                    };
+                    is_function || self.map_class_name(*elem).is_some()
                 });
                 if let Some(elem) = function_elem {
                     let int = self.context.type_table.borrow().int_type();
