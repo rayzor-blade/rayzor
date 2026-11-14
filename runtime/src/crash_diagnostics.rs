@@ -129,8 +129,16 @@ unsafe extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: 
             _ => b"unknown",
         });
         if !info.is_null() {
+            let fault = (*info).si_addr() as usize;
             write(b" fault=");
-            hex((*info).si_addr() as usize);
+            hex(fault);
+            let sp = stack_pointer(ctx);
+            if (sig == libc::SIGSEGV || sig == libc::SIGBUS)
+                && sp != 0
+                && fault.abs_diff(sp) < STACK_OVERFLOW_REACH
+            {
+                write(b" (stack overflow)");
+            }
         }
         let (pc, caller) = registers(ctx);
         write(b" pc=");
@@ -181,14 +189,90 @@ unsafe fn registers(ctx: *mut libc::c_void) -> (usize, usize) {
     }
 }
 
+/// A fault this close to the stack pointer is a write past the stack's end.
+const STACK_OVERFLOW_REACH: usize = 64 * 1024;
+/// Size of the signal stack given to a thread that has none.
+const SIGNAL_STACK_SIZE: usize = 64 * 1024;
+
+#[cfg(unix)]
+unsafe fn stack_pointer(ctx: *mut libc::c_void) -> usize {
+    unsafe {
+        if ctx.is_null() {
+            return 0;
+        }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            let mc = (*(ctx as *const libc::ucontext_t)).uc_mcontext;
+            return if mc.is_null() {
+                0
+            } else {
+                (*mc).__ss.__sp as usize
+            };
+        }
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            let mc = (*(ctx as *const libc::ucontext_t)).uc_mcontext;
+            return if mc.is_null() {
+                0
+            } else {
+                (*mc).__ss.__rsp as usize
+            };
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            return (*(ctx as *const libc::ucontext_t)).uc_mcontext.gregs[libc::REG_RSP as usize]
+                as usize;
+        }
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        {
+            return (*(ctx as *const libc::ucontext_t)).uc_mcontext.sp as usize;
+        }
+        #[allow(unreachable_code)]
+        0
+    }
+}
+
+/// The handler runs on a signal stack, so it can still report once the
+/// thread's own stack is exhausted. Rust gives its threads one; the
+/// installing thread gets one here if it has none.
+#[cfg(unix)]
+unsafe fn ensure_signal_stack() {
+    unsafe {
+        let mut current: libc::stack_t = std::mem::zeroed();
+        if libc::sigaltstack(std::ptr::null(), &mut current) != 0
+            || current.ss_flags & libc::SS_DISABLE == 0
+        {
+            return;
+        }
+        let memory = libc::mmap(
+            std::ptr::null_mut(),
+            SIGNAL_STACK_SIZE,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        );
+        if memory == libc::MAP_FAILED {
+            return;
+        }
+        let stack = libc::stack_t {
+            ss_sp: memory,
+            ss_flags: 0,
+            ss_size: SIGNAL_STACK_SIZE,
+        };
+        libc::sigaltstack(&stack, std::ptr::null_mut());
+    }
+}
+
 /// The CLI opts in; embedders retain their own signal handlers.
 pub fn install() {
     #[cfg(unix)]
     unsafe {
+        ensure_signal_stack();
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = handler as *const () as usize;
         // Stays installed: a converted null access returns to Haxe code.
-        action.sa_flags = libc::SA_SIGINFO;
+        action.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
         libc::sigemptyset(&mut action.sa_mask);
         for sig in [
             libc::SIGSEGV,
@@ -226,6 +310,42 @@ mod tests {
             stderr.contains("Fixture.main [Cranelift] +0x0000000000000004"),
             "{stderr}"
         );
+    }
+
+    #[test]
+    fn stack_overflow_is_reported() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "crash_diagnostics::tests::overflow_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            matches!(
+                output.status.code(),
+                Some(code) if code == 128 + libc::SIGSEGV || code == 128 + libc::SIGBUS
+            ),
+            "{:?} {stderr}",
+            output.status
+        );
+        assert!(stderr.contains("(stack overflow)"), "{stderr}");
+    }
+
+    #[test]
+    #[ignore = "subprocess used by stack_overflow_is_reported"]
+    fn overflow_child() {
+        #[allow(unconditional_recursion)]
+        fn recurse(depth: u64) -> u64 {
+            let frame = std::hint::black_box([depth; 64]);
+            recurse(depth + 1) + frame[0]
+        }
+        super::install();
+        std::hint::black_box(recurse(0));
+        panic!("recursion returned");
     }
 
     #[test]
