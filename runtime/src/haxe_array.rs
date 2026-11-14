@@ -1918,6 +1918,26 @@ pub extern "C" fn haxe_array_to_string_bool(arr: *const HaxeArray) -> *mut HaxeS
     unsafe { array_to_string_typed(arr, |v| if v != 0 { "true" } else { "false" }.to_string()) }
 }
 
+/// `toString` for an array whose element type is statically `String`: an
+/// empty string is `""`, not a null.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_to_string_string(arr: *const HaxeArray) -> *mut HaxeString {
+    unsafe {
+        array_to_string_typed(arr, |v| {
+            let s = v as *const HaxeString;
+            if s.is_null() {
+                return "null".to_string();
+            }
+            let s = &*s;
+            if s.ptr.is_null() || s.len == 0 {
+                return String::new();
+            }
+            String::from_utf8_lossy(std::slice::from_raw_parts(s.ptr as *const u8, s.len))
+                .into_owned()
+        })
+    }
+}
+
 /// Shared body for the typed array formatters: every slot rendered by the
 /// caller's element formatter, no null heuristic.
 unsafe fn array_to_string_typed(

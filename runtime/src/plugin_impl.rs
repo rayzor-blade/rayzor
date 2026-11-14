@@ -310,6 +310,10 @@ register_symbol!(
     "haxe_array_to_string_bool",
     crate::haxe_array::haxe_array_to_string_bool
 );
+register_symbol!(
+    "haxe_array_to_string_string",
+    crate::haxe_array::haxe_array_to_string_string
+);
 
 // Higher-order methods
 register_symbol!("haxe_array_map", crate::haxe_array::haxe_array_map);

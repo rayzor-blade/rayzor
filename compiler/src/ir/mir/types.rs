@@ -1158,6 +1158,7 @@ impl<'a> HirToMirContext<'a> {
             Some(crate::tast::TypeKind::Int) => "haxe_array_to_string_i64",
             Some(crate::tast::TypeKind::Bool) => "haxe_array_to_string_bool",
             Some(crate::tast::TypeKind::Float) => "haxe_array_to_string_f64",
+            Some(crate::tast::TypeKind::String) => "haxe_array_to_string_string",
             _ => "haxe_array_to_string",
         }
     }

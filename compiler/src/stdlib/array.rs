@@ -309,6 +309,15 @@ fn declare_array_externs(builder: &mut MirBuilder) {
         .build();
     builder.mark_as_extern(func_id);
 
+    // haxe_array_to_string_string: typed stringifier for Array<String>
+    let func_id = builder
+        .begin_function("haxe_array_to_string_string")
+        .param("arr", ptr_void.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
     // haxe_array_map(out: *mut HaxeArray, arr: *const HaxeArray, fn_ptr: usize, env_ptr: *mut u8)
     let func_id = builder
         .begin_function("haxe_array_map")

@@ -469,6 +469,19 @@ impl<'a> HirToMirContext<'a> {
                             | TypeKind::TypeAlias { .. }
                     )
                 });
+        // `toString` of an array whose element type is known formats each slot
+        // as that type, as `Std.string` of it does.
+        if vname == "toString"
+            && *is_method
+            && args.len() == 1
+            && let Some(TypeKind::Array { element_type }) = self
+                .type_table
+                .get(self.resolve_through_aliases(args[0].ty))
+                .map(|t| t.kind.clone())
+        {
+            let arr = self.lower_expression(&args[0])?;
+            return self.build_array_to_string(arr, element_type);
+        }
         if vname == "join" && *is_method && args.len() == 2 && receiver_is_arrayish {
             let enum_element = self
                 .type_table
