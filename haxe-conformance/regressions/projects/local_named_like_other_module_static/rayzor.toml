@@ -1,0 +1,5 @@
+[project]
+name = "local-named-like-other-module-static"
+entry = "src/Main.hx"
+[build]
+class-paths = ["src"]

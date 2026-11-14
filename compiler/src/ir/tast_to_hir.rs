@@ -389,7 +389,8 @@ impl<'a> TastToHirContext<'a> {
 
         // A symbol takes the value whose key names its own class: a static
         // field's qualified name is `Class.field`, the key may add a package.
-        // A symbol without one takes a value only when its name has just one.
+        // A static without one takes a value only when its name has just one;
+        // a local never does.
         let mut seeded = Vec::new();
         for (field_name, values) in &by_field {
             let Some(name) = string_interner.get_id(field_name) else {
@@ -409,7 +410,7 @@ impl<'a> TastToHirContext<'a> {
                                     .is_some_and(|package| package.ends_with('.'))
                         })
                         .map(|(_, literal)| literal),
-                    None if values.len() == 1 => Some(&values[0].1),
+                    None if values.len() == 1 && sym.is_static() => Some(&values[0].1),
                     None => None,
                 };
                 if let Some(literal) = literal {
@@ -1962,11 +1963,13 @@ impl<'a> TastToHirContext<'a> {
                 // renumbered, but the referring file still holds the original SymbolId).
                 let inline_lookup = self.inline_var_values.get(symbol_id).cloned().or_else(|| {
                     let want = self.symbol_table.get_symbol(*symbol_id)?;
-                    // Callable declarations do not inherit a same-named field's constant.
+                    // Callable declarations do not inherit a same-named field's constant,
+                    // nor does a local, which has no qualified name to tell it apart.
                     if matches!(
                         want.kind,
                         crate::tast::SymbolKind::Function | crate::tast::SymbolKind::EnumVariant
-                    ) {
+                    ) || (want.qualified_name.is_none() && !want.is_static())
+                    {
                         return None;
                     }
                     if self
