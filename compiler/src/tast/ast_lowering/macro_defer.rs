@@ -2063,6 +2063,69 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         ) {
             return Err(format!("Type not found: {name}"));
         }
+        // A bare name is a type the module imports, one of its own package, or
+        // a top-level type; not any packaged type that happens to be loaded
+        // (`Input` is not `haxe.io.Input` without an import).
+        if name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+            && self.lowering.resolve_builtin_type(name).is_none()
+        {
+            let symbol = self.lowering.resolve_type_to_class_symbol(id).or_else(|| {
+                match self
+                    .lowering
+                    .context
+                    .type_table
+                    .borrow()
+                    .get(id)
+                    .map(|t| &t.kind)
+                {
+                    Some(
+                        crate::tast::TypeKind::Enum { symbol_id, .. }
+                        | crate::tast::TypeKind::Abstract { symbol_id, .. }
+                        | crate::tast::TypeKind::TypeAlias { symbol_id, .. },
+                    ) => Some(*symbol_id),
+                    _ => None,
+                }
+            });
+            let qualified = symbol
+                .and_then(|s| self.lowering.context.symbol_table.get_symbol(s))
+                .and_then(|s| s.qualified_name)
+                .and_then(|q| self.lowering.context.string_interner.get(q))
+                .filter(|q| q.contains('.'))
+                .map(str::to_string);
+            if let Some(qualified) = qualified {
+                let interned = self.lowering.context.string_interner.intern(name);
+                // This file's own imports: the root scope's are shared by files.
+                let package = qualified.rsplit_once('.').map_or("", |(p, _)| p);
+                let imported = self.lowering.file_imports.contains_key(&interned)
+                    || self
+                        .lowering
+                        .file_import_paths
+                        .iter()
+                        .any(|(path, wildcard)| {
+                            if *wildcard {
+                                path.trim_end_matches(".*") == package
+                            } else {
+                                *path == qualified || qualified.starts_with(&format!("{path}."))
+                            }
+                        });
+                let own_package = self
+                    .lowering
+                    .context
+                    .current_package
+                    .is_some_and(|package| {
+                        self.lowering
+                            .context
+                            .namespace_resolver
+                            .find_symbols_by_name(interned, package)
+                            .iter()
+                            .any(|(_, s)| Some(*s) == symbol)
+                    });
+                let own_module = self.lowering.current_module_types.contains(name);
+                if !imported && !own_package && !own_module {
+                    return Err(format!("Type not found: {name}"));
+                }
+            }
+        }
         Ok(with_unknown_parameters(
             self.lowering.context.type_table,
             id,
@@ -2078,12 +2141,22 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
         }
         let mut candidates = Vec::new();
         if !name.contains('.') {
+            // This file's own imports: the root scope's are shared by files.
             let interned = self.lowering.context.intern_string(name);
+            if let Some(path) = self.lowering.file_imports.get(&interned) {
+                candidates.push(
+                    path.iter()
+                        .filter_map(|part| self.lowering.context.string_interner.get(*part))
+                        .collect::<Vec<_>>()
+                        .join("."),
+                );
+            }
             candidates.extend(
                 self.lowering
-                    .import_candidates(interned)
+                    .file_import_paths
                     .iter()
-                    .map(|path| path.to_string(self.lowering.context.string_interner)),
+                    .filter(|(_, wildcard)| *wildcard)
+                    .map(|(path, _)| format!("{}.{name}", path.trim_end_matches(".*"))),
             );
             if let Some(package) = self
                 .lowering
