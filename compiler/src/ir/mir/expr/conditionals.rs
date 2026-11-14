@@ -74,6 +74,65 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// An operand that runs on one edge into `merge` only (the right side of
+    /// `&&`, `||`, `??`): each variable it rebound gets a phi at `merge`, with
+    /// the earlier value on the `skip` edge, so no later use reads a register
+    /// that does not dominate it.
+    fn merge_one_sided_bindings(
+        &mut self,
+        before: &BTreeMap<SymbolId, IrId>,
+        merge: IrBlockId,
+        skip: IrBlockId,
+        taken: IrBlockId,
+    ) {
+        let changed: Vec<(SymbolId, IrId)> = self
+            .symbol_map
+            .iter()
+            .filter(|(sym, reg)| before.get(sym) != Some(reg))
+            .map(|(sym, reg)| (*sym, *reg))
+            .collect();
+        for (sym, after) in changed {
+            let Some(&earlier) = before.get(&sym) else {
+                self.symbol_map.remove(&sym);
+                continue;
+            };
+            let local = self
+                .builder
+                .current_function()
+                .and_then(|f| f.locals.get(&earlier).or_else(|| f.locals.get(&after)))
+                .cloned();
+            let Some(ty) = local
+                .as_ref()
+                .map(|l| l.ty.clone())
+                .or_else(|| self.builder.get_register_type(earlier))
+            else {
+                self.symbol_map.insert(sym, earlier);
+                continue;
+            };
+            let Some(phi) = self.builder.build_phi(merge, ty.clone()) else {
+                self.symbol_map.insert(sym, earlier);
+                continue;
+            };
+            self.builder.add_phi_incoming(merge, phi, skip, earlier);
+            self.builder.add_phi_incoming(merge, phi, taken, after);
+            if let Some(local) = local
+                && let Some(func) = self.builder.current_function_mut()
+            {
+                func.locals.insert(
+                    phi,
+                    crate::ir::IrLocal {
+                        name: format!("{}_phi", local.name),
+                        ty,
+                        mutable: true,
+                        source_location: local.source_location,
+                        allocation: crate::ir::AllocationHint::Register,
+                    },
+                );
+            }
+            self.symbol_map.insert(sym, phi);
+        }
+    }
+
     pub(crate) fn lower_logical_and(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
         // Short-circuit AND: if lhs is false, don't evaluate rhs.
         let eval_rhs = self.builder.create_block()?;
@@ -89,6 +148,7 @@ impl<'a> HirToMirContext<'a> {
         let lhs_block = self.builder.current_block()?;
 
         self.builder.build_cond_branch(lhs_val, eval_rhs, merge)?;
+        let before_rhs = self.symbol_map.clone();
 
         self.builder.switch_to_block(eval_rhs);
         let rhs_val = self.lower_expression(rhs)?;
@@ -97,6 +157,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_branch(merge)?;
 
         self.builder.switch_to_block(merge);
+        self.merge_one_sided_bindings(&before_rhs, merge, lhs_block, rhs_block);
         let result = self.builder.build_phi(merge, IrType::Bool)?;
         // lhs_block is where we came from if LHS was false (short-circuit path)
         self.builder
@@ -122,6 +183,7 @@ impl<'a> HirToMirContext<'a> {
         let lhs_block = self.builder.current_block()?;
 
         self.builder.build_cond_branch(lhs_val, merge, eval_rhs)?;
+        let before_rhs = self.symbol_map.clone();
 
         self.builder.switch_to_block(eval_rhs);
         let rhs_val = self.lower_expression(rhs)?;
@@ -130,6 +192,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_branch(merge)?;
 
         self.builder.switch_to_block(merge);
+        self.merge_one_sided_bindings(&before_rhs, merge, lhs_block, rhs_block);
         let result = self.builder.build_phi(merge, IrType::Bool)?;
         // lhs_block is where we came from if LHS was true (short-circuit path)
         self.builder
@@ -471,12 +534,14 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_branch(merge)?;
 
         self.builder.switch_to_block(eval_rhs);
+        let before_rhs = self.symbol_map.clone();
         let rhs_incoming = self.lower_null_coal_rhs(rhs, result_ty, merge)?;
         self.finish_null_coalesce(
             merge,
             result_type,
             (lhs_pass_block, lhs_final),
             rhs_incoming,
+            &before_rhs,
         )
     }
 
@@ -504,8 +569,15 @@ impl<'a> HirToMirContext<'a> {
         result_type: IrType,
         lhs_incoming: (IrBlockId, IrId),
         rhs_incoming: Option<(IrBlockId, IrId)>,
+        before_rhs: &BTreeMap<SymbolId, IrId>,
     ) -> Option<IrId> {
         self.builder.switch_to_block(merge);
+        match rhs_incoming {
+            Some((rhs_block, _)) => {
+                self.merge_one_sided_bindings(before_rhs, merge, lhs_incoming.0, rhs_block)
+            }
+            None => self.symbol_map = before_rhs.clone(),
+        }
         let result = self.builder.build_phi(merge, result_type)?;
         self.builder
             .add_phi_incoming(merge, result, lhs_incoming.0, lhs_incoming.1)?;
@@ -625,12 +697,14 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_branch(merge)?;
 
         self.builder.switch_to_block(eval_rhs);
+        let before_rhs = self.symbol_map.clone();
         let rhs_incoming = self.lower_null_coal_rhs(rhs, result_ty, merge)?;
         self.finish_null_coalesce(
             merge,
             result_type,
             (lhs_pass_block, lhs_final),
             rhs_incoming,
+            &before_rhs,
         )
     }
 
