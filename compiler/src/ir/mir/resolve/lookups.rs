@@ -1876,6 +1876,37 @@ impl<'a> HirToMirContext<'a> {
             return FieldIndexResolution::Ambiguous(all_matches);
         }
 
+        // A known receiver class whose own layout is not published yet: a
+        // candidate owned by a class outside its ancestry is another class's
+        // same-named field, not this one.
+        if let Some(start) = recv_symbol_for_walk {
+            let mut lineage: Vec<&str> = Vec::new();
+            let mut walk = Some(start);
+            for _ in 0..16 {
+                let Some(sym) = walk else { break };
+                if let Some(name) = self
+                    .symbol_table
+                    .get_symbol(sym)
+                    .and_then(|s| self.string_interner.get(s.name))
+                {
+                    lineage.push(name);
+                }
+                walk = self.class_parent_map.get(&sym).copied().or_else(|| {
+                    self.symbol_table
+                        .class_hierarchies
+                        .get(&sym)
+                        .and_then(|h| h.superclass)
+                        .and_then(|ty| self.symbol_table.get_symbol_from_type(ty))
+                });
+            }
+            let foreign = |owner: &Option<&str>| {
+                owner.is_some_and(|o| !lineage.iter().any(|n| Self::class_names_match(o, n)))
+            };
+            if match_owners.iter().all(foreign) {
+                return FieldIndexResolution::None;
+            }
+        }
+
         let (class_ty, idx) = all_matches[0];
         FieldIndexResolution::Unique(class_ty, idx)
     }
