@@ -2457,7 +2457,16 @@ impl<'a> AstLowering<'a> {
                             let source = self.substitute_alias_args(*param_ty, &bindings);
                             return self.abstract_source_accepts(source, arg.expr_type, 0);
                         }
+                        // A `Null<Float>` passes where a Float is taken, as it unifies.
                         (Some(source), Some(actual)) => {
+                            let actual = match actual {
+                                TypeKind::Optional { inner_type } => {
+                                    let table = self.context.type_table.borrow();
+                                    let inner = Self::resolve_alias_chain(&table, inner_type);
+                                    table.get(inner).map(|ty| ty.kind.clone()).unwrap_or(actual)
+                                }
+                                actual => actual,
+                            };
                             return std::mem::discriminant(&source)
                                 == std::mem::discriminant(&actual)
                                 && matches!(
