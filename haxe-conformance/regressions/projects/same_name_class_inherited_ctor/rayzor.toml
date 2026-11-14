@@ -1,0 +1,5 @@
+[project]
+name = "same-name-class-inherited-ctor"
+entry = "./SameNameClassInheritedCtor.hx"
+[build]
+class-paths = ["."]

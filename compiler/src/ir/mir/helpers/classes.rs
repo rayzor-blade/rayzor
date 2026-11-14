@@ -911,25 +911,30 @@ impl<'a> HirToMirContext<'a> {
         Some(format!("{}.new", owner))
     }
 
-    /// Whether this module declares the class `sym` (or bare `name`) names.
+    /// Whether this module declares the class `sym` (or `name`) names.
     /// Compared by qualified and bare name too: the entry file is typed
     /// twice, and a module-private class can resolve to a std type's symbol.
+    /// A qualified `name` matches only the class of that qualified name, so a
+    /// local `a.Label` is not `b.Label`.
     pub(crate) fn declares_class(&self, sym: SymbolId, name: Option<&str>) -> bool {
         let qname = self
             .symbol_table
             .get_symbol(sym)
             .and_then(|s| s.qualified_name);
-        let bare = name.map(|n| n.rsplit('.').next().unwrap_or(n));
         self.current_hir_types.values().any(|decl| match decl {
             crate::ir::hir::HirTypeDecl::Class(c) => {
-                c.symbol_id == sym
-                    || qname.is_some()
-                        && self
-                            .symbol_table
-                            .get_symbol(c.symbol_id)
-                            .and_then(|s| s.qualified_name)
-                            == qname
-                    || bare.is_some() && self.string_interner.get(c.name) == bare
+                let local_qname = self
+                    .symbol_table
+                    .get_symbol(c.symbol_id)
+                    .and_then(|s| s.qualified_name);
+                let by_name = name.is_some_and(|name| {
+                    if name.contains('.') {
+                        local_qname.and_then(|q| self.string_interner.get(q)) == Some(name)
+                    } else {
+                        self.string_interner.get(c.name) == Some(name)
+                    }
+                });
+                c.symbol_id == sym || qname.is_some() && local_qname == qname || by_name
             }
             _ => false,
         })

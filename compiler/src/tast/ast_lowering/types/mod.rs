@@ -1008,13 +1008,21 @@ impl<'a> AstLowering<'a> {
 
         // For qualified names (e.g., "haxe.ds.IntMap"), also try the simple name
         // in root scope. Extern classes loaded via load_imports_efficiently may be
-        // registered under their simple name, not the fully qualified path.
+        // registered under their simple name, not the fully qualified path. A
+        // symbol whose qualified name is another type's is not this one: in
+        // `b.Label`, the root `Label` may be `a.Label`.
         if !type_path.package.is_empty() {
             if let Some(symbol) = self
                 .context
                 .symbol_table
                 .lookup_symbol(ScopeId::first(), name_interned)
                 .filter(|symbol| self.may_target(symbol.id))
+                .filter(|symbol| {
+                    symbol
+                        .qualified_name
+                        .and_then(|q| self.context.string_interner.get(q))
+                        .is_none_or(|q| same_type_path(q, &full_path))
+                })
             {
                 let sym_id = symbol.id;
                 let type_id = symbol.type_id;
@@ -1207,3 +1215,21 @@ impl<'a> AstLowering<'a> {
 
 mod generics;
 mod predicates;
+
+/// Whether two dotted paths name one type, with or without the module segment
+/// of a sub-type (`pack.Module.Type` is `pack.Type`).
+fn same_type_path(a: &str, b: &str) -> bool {
+    fn without_module(path: &str) -> String {
+        let parts: Vec<&str> = path.split('.').collect();
+        match parts.as_slice() {
+            [pack @ .., module, name] if module.starts_with(char::is_uppercase) => pack
+                .iter()
+                .chain(std::iter::once(name))
+                .copied()
+                .collect::<Vec<_>>()
+                .join("."),
+            _ => path.to_string(),
+        }
+    }
+    a == b || without_module(a) == without_module(b)
+}
