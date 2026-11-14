@@ -1822,6 +1822,47 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // A receiver still a forward-reference placeholder names its class:
+        // that class's published slot, else a candidate it owns, else nothing.
+        // Never a same-named field of another class.
+        let placeholder_name = match self.type_table.get(receiver_ty).map(|t| &t.kind) {
+            Some(TypeKind::Placeholder { name }) => self.string_interner.get(*name),
+            _ => None,
+        };
+        if let Some(named) = placeholder_name {
+            let bare = named.rsplit('.').next().unwrap_or(named);
+            let classes: Vec<SymbolId> = self
+                .symbol_table
+                .find_symbols(|s| {
+                    s.kind == crate::tast::SymbolKind::Class
+                        && self.string_interner.get(s.name) == Some(bare)
+                        && (bare == named
+                            || s.qualified_name.and_then(|q| self.string_interner.get(q))
+                                == Some(named))
+                })
+                .iter()
+                .map(|s| s.id)
+                .collect();
+            if let [class] = classes.as_slice()
+                && let Some(idx) = self.registered_field_slot(*class, &target_name_str)
+            {
+                return FieldIndexResolution::Unique(receiver_ty, idx);
+            }
+            let owned: Vec<(TypeId, u32)> = all_matches
+                .iter()
+                .zip(&match_owners)
+                .filter(|(_, owner)| {
+                    owner.is_some_and(|o| o == named || o.rsplit('.').next() == Some(bare))
+                })
+                .map(|(m, _)| *m)
+                .collect();
+            return match owned.as_slice() {
+                [only] => FieldIndexResolution::Unique(only.0, only.1),
+                [] => FieldIndexResolution::None,
+                _ => FieldIndexResolution::Ambiguous(owned),
+            };
+        }
+
         let mut distinct_indexes: Vec<u32> = all_matches.iter().map(|&(_, idx)| idx).collect();
         distinct_indexes.sort_unstable();
         distinct_indexes.dedup();
