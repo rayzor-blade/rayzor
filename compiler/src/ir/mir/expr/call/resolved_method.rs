@@ -1105,6 +1105,16 @@ impl<'a> HirToMirContext<'a> {
                                         .as_ref()
                                         .and_then(|(params, _)| params.get(param_idx).cloned())
                                         .unwrap_or_else(|| actual_ty.clone());
+                                    let declared_ty = self
+                                        .get_extern_function_signature(&runtime_name)
+                                        .and_then(|(params, _)| params.get(param_idx).cloned())
+                                        .unwrap_or_else(|| expected_ty.clone());
+                                    if let Some(opened) =
+                                        self.open_dynamic_for_scalar_param(reg, arg, &declared_ty)
+                                    {
+                                        arg_regs.push(opened);
+                                        continue;
+                                    }
                                     let final_reg = match self.box_for_runtime_dynamic_param(
                                         &runtime_name,
                                         param_idx,
@@ -1818,6 +1828,11 @@ impl<'a> HirToMirContext<'a> {
                                                 self.builder.get_register_type(reg)
                                             ) {
                                                 if *expected_ty != actual_ty {
+                                                    if let Some(opened) = static_args.get(i).and_then(|arg| {
+                                                        self.open_dynamic_for_scalar_param(reg, arg, expected_ty)
+                                                    }) {
+                                                        return opened;
+                                                    }
                                                     let is_ptr_u8 = matches!(expected_ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8));
                                                     if is_ptr_u8 && i < args.len() {
                                                         if let Some(boxed) = self.box_value_for_dynamic(reg, args[i].ty) {

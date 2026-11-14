@@ -73,7 +73,7 @@ impl<'a> HirToMirContext<'a> {
             }
             HirLValue::Index { object, index } => {
                 if let Some(obj_reg) = self.lower_expression(object) {
-                    if let Some(idx_reg) = self.lower_expression(index) {
+                    if let Some(idx_reg) = self.lower_index_operand(object.ty, index) {
                         self.load_index_with_regs(obj_reg, idx_reg, object.ty, None)
                     } else {
                         None
@@ -192,7 +192,7 @@ impl<'a> HirToMirContext<'a> {
             }
             HirLValue::Index { object, index } => {
                 if let Some(obj_reg) = self.lower_expression(object) {
-                    if let Some(idx_reg) = self.lower_expression(index) {
+                    if let Some(idx_reg) = self.lower_index_operand(object.ty, index) {
                         self.store_index_with_regs(obj_reg, idx_reg, object.ty, value);
                     }
                 }

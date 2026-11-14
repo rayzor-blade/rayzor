@@ -308,7 +308,9 @@ impl<'a> HirToMirContext<'a> {
                                 // unless the binding is typed as a structure, in which
                                 // case the unbox below yields one whose shape nothing
                                 // here knows (a parsed JSON object), so it reads by name.
-                                let target_is_structure = {
+                                // A binding typed as anything else (an Array, a String,
+                                // a class) holds that value, not a handle.
+                                let (target_is_structure, target_is_dynamic) = {
                                     let tt = self.type_table;
                                     let mut t = target_ty;
                                     for _ in 0..4 {
@@ -319,14 +321,16 @@ impl<'a> HirToMirContext<'a> {
                                             _ => break,
                                         }
                                     }
-                                    matches!(
-                                        tt.get(t).map(|ti| &ti.kind),
-                                        Some(TypeKind::Anonymous { .. })
+                                    let kind = tt.get(t).map(|ti| &ti.kind);
+                                    (
+                                        matches!(kind, Some(TypeKind::Anonymous { .. })),
+                                        matches!(kind, Some(TypeKind::Dynamic)),
                                     )
                                 };
                                 if is_dynamic_init
                                     && is_ptr_u8
-                                    && (!self.boxed_value_regs.contains(&value_reg)
+                                    && ((target_is_dynamic
+                                        && !self.boxed_value_regs.contains(&value_reg))
                                         || target_is_structure)
                                 {
                                     self.raw_anon_symbols.insert(*symbol);
@@ -1228,6 +1232,29 @@ impl<'a> HirToMirContext<'a> {
                             let raw = self.unbox_generic_value(val, fn_ret_ty)?;
                             return self.coerce_reg_to(raw, &self.convert_type_arg(fn_ret_ty));
                         }
+                        // A Dynamic returned as a scalar, array, string or
+                        // structure opens by tag or coercion, which also takes a
+                        // raw value as it is. A Dynamic variable's register is a
+                        // box even where it is typed `*void`.
+                        let declared_dynamic = match &e.kind {
+                            HirExprKind::Variable { symbol, .. } => {
+                                self.symbol_table.get_symbol(*symbol).is_some_and(|s| {
+                                    self.dynamic_opens_safely_as(s.type_id, fn_ret_ty)
+                                })
+                            }
+                            _ => false,
+                        };
+                        if (declared_dynamic || self.dynamic_opens_safely_as(e.ty, fn_ret_ty))
+                            && !matches!(
+                                self.builder.get_register_type(val),
+                                Some(IrType::I32 | IrType::I64 | IrType::F64 | IrType::Bool)
+                            )
+                        {
+                            let dynamic = self.type_table.dynamic_type();
+                            if let Some(unboxed) = self.maybe_unbox_value(val, dynamic, fn_ret_ty) {
+                                return Some(unboxed);
+                            }
+                        }
                         // Inverse: a `Null<T>` expression (boxed `DynamicValue*`) returned
                         // from a `:T` function must be unboxed, or the caller reads the box
                         // pointer's address as the value.
@@ -1254,6 +1281,7 @@ impl<'a> HirToMirContext<'a> {
                                 return Some(unboxed);
                             }
                         }
+
                         // A register known to hold a box, returned as a
                         // concrete type, comes out of it. Only a KNOWN box:
                         // a Dynamic by decay may be the raw value already.

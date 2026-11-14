@@ -380,6 +380,10 @@ impl<'a> HirToMirContext<'a> {
                                     self.builder
                                         .build_cast(reg, IrType::I64, expected_ty.clone())
                                         .unwrap_or(reg)
+                                } else if let Some(opened) =
+                                    self.open_dynamic_for_scalar_param(reg, arg, &expected_ty)
+                                {
+                                    opened
                                 } else {
                                     self.maybe_box_for_extern_call(reg, &actual_ty, &expected_ty)?
                                 };
@@ -639,7 +643,14 @@ impl<'a> HirToMirContext<'a> {
                             .cloned()
                             .unwrap_or_else(|| actual_ty.clone());
                         let final_reg =
-                            self.maybe_box_for_extern_call(arg_reg, &actual_ty, &expected_ty)?;
+                            match self.open_dynamic_for_scalar_param(arg_reg, arg, &expected_ty) {
+                                Some(opened) => opened,
+                                None => self.maybe_box_for_extern_call(
+                                    arg_reg,
+                                    &actual_ty,
+                                    &expected_ty,
+                                )?,
+                            };
                         arg_regs.push(final_reg);
                     }
 

@@ -22,6 +22,48 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// A Dynamic argument for a Float, Int or Bool extern parameter, opened
+    /// from its box rather than reinterpreted. Only a value that is Dynamic
+    /// itself: one cast to Dynamic for a Dynamic formal is passed as it is,
+    /// and an `i64` parameter is a handle or key, not an Int.
+    pub(crate) fn open_dynamic_for_scalar_param(
+        &mut self,
+        reg: IrId,
+        arg: &HirExpr,
+        want: &IrType,
+    ) -> Option<IrId> {
+        let mut source = arg;
+        while let HirExprKind::Cast { expr, .. } = &source.kind {
+            source = expr;
+        }
+        let is_dynamic = |ty| {
+            matches!(
+                self.type_table
+                    .get(self.resolve_through_aliases(ty))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            )
+        };
+        if !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_)))
+            || !is_dynamic(arg.ty)
+            || !is_dynamic(source.ty)
+        {
+            return None;
+        }
+        let arg_ty = arg.ty;
+        let target = match want {
+            IrType::F32 | IrType::F64 => self.type_table.float_type(),
+            IrType::I32 => self.type_table.int_type(),
+            IrType::Bool => self.type_table.bool_type(),
+            _ => return None,
+        };
+        let opened = self.maybe_unbox_value(reg, arg_ty, target)?;
+        match self.builder.get_register_type(opened) {
+            Some(have) if have != *want => self.builder.build_cast(opened, have, want.clone()),
+            _ => Some(opened),
+        }
+    }
+
     pub(crate) fn try_stdlib_static_call(
         &mut self,
         expr: &HirExpr,
@@ -225,6 +267,15 @@ impl<'a> HirToMirContext<'a> {
                                             self.builder.get_register_type(reg)
                                         ) {
                                             if *expected_ty != actual_ty {
+                                                if i < runtime_call_args.len()
+                                                    && let Some(opened) = self.open_dynamic_for_scalar_param(
+                                                        reg,
+                                                        &runtime_call_args[i],
+                                                        expected_ty,
+                                                    )
+                                                {
+                                                    return opened;
+                                                }
                                                 // Ptr(U8) means the param is Dynamic, so the value is boxed rather than cast.
                                                 let is_ptr_u8 = matches!(expected_ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8));
                                                 if is_ptr_u8 && i < runtime_call_args.len() {

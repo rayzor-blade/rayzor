@@ -153,7 +153,7 @@ impl<'a> HirToMirContext<'a> {
                     (map_value_is_numeric, &operand.kind)
                 {
                     let obj_reg = self.lower_expression(object)?;
-                    let idx_reg = self.lower_expression(index)?;
+                    let idx_reg = self.lower_index_operand(object.ty, index)?;
                     let loaded =
                         self.load_index_with_regs(obj_reg, idx_reg, object.ty, Some(operand.ty))?;
                     // A `Null<scalar>` element is a box: open it, count, close it.

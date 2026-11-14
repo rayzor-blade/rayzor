@@ -1897,7 +1897,7 @@ impl<'a> HirToMirContext<'a> {
             let _ = lane_count;
         }
 
-        let idx_reg = self.lower_expression(index)?;
+        let idx_reg = self.lower_index_operand(object.ty, index)?;
 
         // Map index: `a[k]` where `a` is a Map (or IntMap/StringMap/ObjectMap
         // extern class) must call the map's get, not GEP into array storage.
@@ -1919,6 +1919,27 @@ impl<'a> HirToMirContext<'a> {
         }
 
         self.lower_index_access(obj_reg, idx_reg, expr.ty)
+    }
+
+    /// An index operand; a Dynamic one opens to Int unless the receiver is a
+    /// map, whose key it is.
+    pub(crate) fn lower_index_operand(
+        &mut self,
+        object_ty: TypeId,
+        index: &HirExpr,
+    ) -> Option<IrId> {
+        let idx_reg = self.lower_expression(index)?;
+        let dynamic_index = matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(index.ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        );
+        if !dynamic_index || self.map_index_info(object_ty).is_some() {
+            return Some(idx_reg);
+        }
+        let int_ty = self.type_table.int_type();
+        self.maybe_unbox_value(idx_reg, index.ty, int_ty)
     }
 
     pub(crate) fn load_erased_array_index(

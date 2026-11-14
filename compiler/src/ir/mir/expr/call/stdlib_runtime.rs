@@ -956,6 +956,15 @@ impl<'a> HirToMirContext<'a> {
                                             self.builder.get_register_type(reg)
                                         ) {
                                             if *expected_ty != actual_ty {
+                                                if i < static_args.len()
+                                                    && let Some(opened) = self.open_dynamic_for_scalar_param(
+                                                        reg,
+                                                        &static_args[i],
+                                                        expected_ty,
+                                                    )
+                                                {
+                                                    return opened;
+                                                }
                                                 let is_ptr_u8 = matches!(expected_ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8));
                                                 if is_ptr_u8 && i < static_args.len() {
                                                     if let Some(boxed) = self.box_value_for_dynamic(reg, static_args[i].ty) {

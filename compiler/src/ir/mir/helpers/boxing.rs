@@ -1270,6 +1270,29 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// `value_ty` is Dynamic and `target_ty` one whose unboxing accepts a raw
+    /// value too: a scalar, an array, a string or a structure.
+    pub(crate) fn dynamic_opens_safely_as(&self, value_ty: TypeId, target_ty: TypeId) -> bool {
+        use crate::tast::TypeKind;
+        let kind = |t| {
+            self.type_table
+                .get(self.resolve_through_aliases(t))
+                .map(|ty| ty.kind.clone())
+        };
+        matches!(kind(value_ty), Some(TypeKind::Dynamic))
+            && matches!(
+                kind(target_ty),
+                Some(
+                    TypeKind::Int
+                        | TypeKind::Float
+                        | TypeKind::Bool
+                        | TypeKind::String
+                        | TypeKind::Array { .. }
+                        | TypeKind::Anonymous { .. }
+                )
+            )
+    }
+
     /// Insert automatic unboxing if needed when reading from Dynamic
     /// Returns the (potentially unboxed) value
     pub(crate) fn maybe_unbox_value(
