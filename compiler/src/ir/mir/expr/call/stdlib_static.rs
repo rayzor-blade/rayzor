@@ -22,10 +22,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
-    /// A Dynamic argument for a Float, Int or Bool extern parameter, opened
-    /// from its box rather than reinterpreted. Only a value that is Dynamic
-    /// itself: one cast to Dynamic for a Dynamic formal is passed as it is,
-    /// and an `i64` parameter is a handle or key, not an Int.
+    /// A Dynamic or boxed `Null<T>` argument for a Float, Int or Bool extern
+    /// parameter, opened from its box rather than reinterpreted. Only a value
+    /// that is Dynamic itself: one cast to Dynamic for a Dynamic formal is
+    /// passed as it is, and an `i64` parameter is a handle or key, not an Int.
     pub(crate) fn open_dynamic_for_scalar_param(
         &mut self,
         reg: IrId,
@@ -44,9 +44,15 @@ impl<'a> HirToMirContext<'a> {
                 Some(TypeKind::Dynamic)
             )
         };
+        // `resolve_through_aliases` unwraps Optional, so it is read unresolved.
+        let is_optional = |ty| {
+            matches!(
+                self.type_table.get(ty).map(|t| &t.kind),
+                Some(TypeKind::Optional { .. })
+            )
+        };
         if !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_)))
-            || !is_dynamic(arg.ty)
-            || !is_dynamic(source.ty)
+            || !(is_dynamic(arg.ty) && is_dynamic(source.ty) || is_optional(arg.ty))
         {
             return None;
         }
