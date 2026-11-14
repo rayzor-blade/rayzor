@@ -1326,8 +1326,8 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         // A raw-value extern such as `Map.get` hands a String back in an integer
-        // register: the value is a pointer and the HIR type is the only thing
-        // that still says so, so reading it as a number prints the address.
+        // or untyped pointer register: the HIR type is the only thing that
+        // still says it is a String, not a number or a Dynamic box.
         if let Some(type_id) = hir_type_id {
             // `Map.get` declares `Null<V>`, so the String sits inside an
             // Optional at the call site even though the register is the same
@@ -1351,7 +1351,8 @@ impl<'a> HirToMirContext<'a> {
                         })
                         .unwrap_or(false)
             };
-            if matches!(from_type, IrType::I64 | IrType::U64) && names_a_string {
+            let untyped_ptr = matches!(from_type, IrType::Ptr(inner) if **inner == IrType::Void);
+            if (matches!(from_type, IrType::I64 | IrType::U64) || untyped_ptr) && names_a_string {
                 let string = self.builder.build_bitcast(value, IrType::String)?;
                 return self.normalize_nullable_string(string, &IrType::String);
             }
