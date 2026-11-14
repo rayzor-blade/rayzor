@@ -1,0 +1,5 @@
+[project]
+name = "macro-forwarded-argument-position"
+entry = "./MacroForwardedArgumentPosition.hx"
+[build]
+class-paths = ["."]

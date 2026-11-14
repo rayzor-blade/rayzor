@@ -3112,6 +3112,10 @@ impl<'a> AstLowering<'a> {
                     .var_init_expected
                     .filter(|(span, _)| *span == key)
                     .map(|(_, ty)| ty);
+                // An argument the macro placed at its own call's position
+                // (`@:pos(arg.pos)`) shares the key. While the call expands and
+                // its result lowers, that span is the argument, not the call.
+                self.deferred_macro_calls.remove(&key);
                 let expanded = {
                     let mut typer = super::super::macro_defer::DeferredMacroTyper {
                         lowering: self,
@@ -3121,8 +3125,10 @@ impl<'a> AstLowering<'a> {
                     };
                     typer.expand_deferred_call(&name, expression)
                 };
-                match expanded {
-                    Ok(result) => return self.lower_deferred_expansion(&result),
+                let lowered = expanded.map(|result| self.lower_deferred_expansion(&result));
+                self.deferred_macro_calls.insert(key, name.clone());
+                match lowered {
+                    Ok(lowered) => return lowered,
                     Err(e) => {
                         let error = self.deferred_macro_error(&name, e, expression.span);
                         if matches!(error, LoweringError::UnresolvedType { .. }) {
