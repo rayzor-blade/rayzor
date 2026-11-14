@@ -341,8 +341,11 @@ impl<'a> AstLowering<'a> {
                 .map(|t| &t.kind)
             {
                 Some(crate::tast::core::TypeKind::Placeholder { .. }) => true,
+                // A parent this module declares lowers in this same pass; waiting
+                // for it would wait for this file.
                 Some(crate::tast::core::TypeKind::Class { symbol_id, .. }) => {
                     self.incomplete_classes.contains(symbol_id)
+                        && !self.declares_own_class(*symbol_id)
                 }
                 _ => false,
             };
@@ -2059,6 +2062,29 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Resolve a TypeId to the underlying class-like symbol for member lookup.
+    /// Whether `class` is declared by the module being lowered: a type it names
+    /// in its own package.
+    pub(crate) fn declares_own_class(&self, class: SymbolId) -> bool {
+        // Compared by path: the root package is both `None` and its own id.
+        let path = |package: Option<crate::tast::namespace::PackageId>| {
+            package
+                .and_then(|id| self.context.namespace_resolver.get_package(id))
+                .map(|p| p.qualified_path(self.context.string_interner))
+                .unwrap_or_default()
+        };
+        self.context
+            .symbol_table
+            .get_symbol(class)
+            .is_some_and(|symbol| {
+                path(symbol.package_id) == path(self.context.current_package)
+                    && self
+                        .context
+                        .string_interner
+                        .get(symbol.name)
+                        .is_some_and(|name| self.current_module_types.contains(name))
+            })
+    }
+
     pub(crate) fn resolve_type_to_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
         let type_table = self.context.type_table.borrow();
         let mut current = type_id;

@@ -1,0 +1,5 @@
+[project]
+name = "subtype-extends-own-module-in-cycle"
+entry = "src/Main.hx"
+[build]
+class-paths = ["src"]
