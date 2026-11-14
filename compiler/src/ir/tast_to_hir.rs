@@ -2014,9 +2014,15 @@ impl<'a> TastToHirContext<'a> {
                                     || field.mutability
                                         != crate::tast::symbols::Mutability::Mutable;
                                 if should_inline {
+                                    // A regex literal is an object built once, not a constant.
                                     if let Some(ref init_expr) = field.initializer {
                                         if let TypedExpressionKind::Literal { value } =
                                             &init_expr.kind
+                                            && !matches!(
+                                                value,
+                                                LiteralValue::Regex(_)
+                                                    | LiteralValue::RegexWithFlags { .. }
+                                            )
                                         {
                                             let lowered = self.lower_literal(value);
                                             inlined_static = Some(HirExprKind::Literal(lowered));
