@@ -228,9 +228,27 @@ impl<'a> AstLowering<'a> {
                 } else {
                     None
                 };
+                // A type of this file's package precedes the root scope, which
+                // holds names other files imported.
+                let package_symbol = path
+                    .package
+                    .is_empty()
+                    .then_some(self.context.current_package)
+                    .flatten()
+                    .and_then(|package| {
+                        self.context
+                            .namespace_resolver
+                            .find_symbols_by_name(interned_name, package)
+                            .into_iter()
+                            .find(|(owner, _)| *owner == package)
+                    })
+                    .and_then(|(_, id)| self.context.symbol_table.get_symbol(id))
+                    .filter(|symbol| symbol.kind.is_type())
+                    .map(|symbol| (symbol.id, symbol.kind.clone()));
                 // A declaration in this module precedes imports and root names.
                 let symbol_info = own_symbol
                     .or(import_resolved_symbol)
+                    .or(package_symbol)
                     .or_else(|| {
                         self.context
                             .symbol_table

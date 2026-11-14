@@ -1,0 +1,5 @@
+[project]
+name = "package-type-before-root-import"
+entry = "src/Main.hx"
+[build]
+class-paths = ["src"]
