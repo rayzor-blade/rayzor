@@ -1,0 +1,5 @@
+[project]
+name = "generic-base-override-other-module"
+entry = "./GenericBaseOverrideOtherModule.hx"
+[build]
+class-paths = ["."]

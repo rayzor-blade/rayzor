@@ -94,12 +94,6 @@ impl<'a> HirToMirContext<'a> {
         receiver_ty: TypeId,
         method_name: InternedString,
     ) -> Option<u32> {
-        // Generic classes dispatch through their monomorphized direct entries.
-        if matches!(self.type_table.get(self.resolve_through_aliases(receiver_ty)).map(|t| &t.kind),
-            Some(TypeKind::Class { type_args, .. }) if !type_args.is_empty())
-        {
-            return None;
-        }
         let class_name = self.class_qualified_name_of_type(receiver_ty)?;
         let method_name = self.string_interner.get(method_name)?;
         let index = self.static_sig_index.as_ref()?;
@@ -214,15 +208,6 @@ impl<'a> HirToMirContext<'a> {
                 .map(|(cls, name)| (*cls, *name))
                 .collect();
             for (cls, name) in declared {
-                // A generic class's methods are specialised per instantiation
-                // and the vtable would hold the erased body: those keep the
-                // direct call an override in another module cannot reach.
-                let generic = self.current_hir_types.values().any(|d| {
-                    matches!(d, HirTypeDecl::Class(c) if c.symbol_id == cls && !c.type_params.is_empty())
-                });
-                if generic {
-                    continue;
-                }
                 let Some(sym) = self.symbol_table.get_symbol(cls) else {
                     continue;
                 };
