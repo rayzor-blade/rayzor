@@ -93,6 +93,9 @@ struct ClassSigs {
     /// extern, bodyless `new`, inherited ctor) is absent, because a `<C>.new`
     /// stub for those would dangle and SIGILL at the call.
     ctor_params: Option<usize>,
+    /// Has an instance field initialiser: without a `new` of its own, the
+    /// class still gets one, taking its inherited constructor's parameters.
+    instance_inits: bool,
     /// Declared `@:structInit`: a structure literal builds an instance.
     struct_init: bool,
     /// That constructor's parameter names and literal defaults.
@@ -489,6 +492,9 @@ impl StaticSigIndex {
     pub fn constructor_owner(&mut self, class_name: &str) -> Option<(String, usize)> {
         let mut next = Some(class_name.to_string());
         let mut seen: BTreeSet<String> = BTreeSet::new();
+        // The nearest class with field initialisers owns a synthesised `new`
+        // of the arity it inherits.
+        let mut synthesised: Option<String> = None;
         while let Some(name) = next {
             if !seen.insert(name.clone()) {
                 break; // cyclic `extends` -- stop rather than spin
@@ -500,12 +506,15 @@ impl StaticSigIndex {
             }
             let class = self.classes.get(&name)?;
             if let Some(arity) = class.ctor_params {
-                return Some((name, arity));
+                return Some((synthesised.unwrap_or(name), arity));
+            }
+            if class.instance_inits && synthesised.is_none() {
+                synthesised = Some(name.clone());
             }
             let (parent, pkg) = (class.extends.clone(), class.package.clone());
             next = parent.map(|p| self.qualify_parent(p, &pkg));
         }
-        None
+        synthesised.map(|name| (name, 0))
     }
 
     /// Whether `class_name` and every class it extends are indexed and none
@@ -1135,6 +1144,15 @@ impl StaticSigIndex {
                 };
                 if !is_static && fresh && stored {
                     entry.instance_field_count += 1;
+                }
+                let initialised = matches!(
+                    &field.kind,
+                    parser::ClassFieldKind::Var { expr: Some(_), .. }
+                        | parser::ClassFieldKind::Final { expr: Some(_), .. }
+                        | parser::ClassFieldKind::Property { expr: Some(_), .. }
+                );
+                if record_ctor && !is_static && initialised {
+                    entry.instance_inits = true;
                 }
                 continue;
             };

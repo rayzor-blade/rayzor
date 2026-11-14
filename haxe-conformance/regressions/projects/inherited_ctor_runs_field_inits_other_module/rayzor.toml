@@ -1,0 +1,5 @@
+[project]
+name = "inherited-ctor-runs-field-inits-other-module"
+entry = "src/Main.hx"
+[build]
+class-paths = ["src"]
