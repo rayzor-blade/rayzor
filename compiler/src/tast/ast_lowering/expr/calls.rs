@@ -2349,10 +2349,17 @@ impl<'a> AstLowering<'a> {
                             _ => None,
                         })
                 };
+                // `IntoR<String>` is the expected `IntoR<Null<String>>`: Null<T>
+                // in a type argument names the same instantiation.
                 !result.is_some_and(|result| {
                     let result =
                         self.bind_return_type_params(result, *method, std::slice::from_ref(&arg));
                     self.same_type(result, formal_ty)
+                        || same_but_nullable_args(
+                            &self.context.type_table.borrow(),
+                            result,
+                            formal_ty,
+                        )
                 })
             });
         }
