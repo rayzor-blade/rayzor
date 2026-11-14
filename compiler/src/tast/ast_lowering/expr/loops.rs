@@ -1514,6 +1514,8 @@ impl<'a> AstLowering<'a> {
             match kind {
                 Some(TypeKind::Array { element_type }) => return element_type,
                 Some(TypeKind::Map { value_type, .. }) => return value_type,
+                // `Null<Array<T>>` iterates as its array.
+                Some(TypeKind::Optional { inner_type }) => ty = inner_type,
                 Some(TypeKind::Abstract {
                     symbol_id,
                     underlying,

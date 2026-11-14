@@ -1,0 +1,5 @@
+[project]
+name = "for-in-nullable-array-element"
+entry = "src/Main.hx"
+[build]
+class-paths = ["src"]
