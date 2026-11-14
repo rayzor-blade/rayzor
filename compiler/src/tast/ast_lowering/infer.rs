@@ -1866,13 +1866,13 @@ impl<'a> AstLowering<'a> {
                 return *return_type;
             }
             // `() -> 9999.0` where `Void->Dynamic` is expected returns a
-            // Dynamic: the scalar is boxed where the caller reads a box.
+            // Dynamic: the scalar or String is boxed where the caller reads a box.
             if matches!(
                 tt.get(unalias(*return_type)).map(|t| &t.kind),
                 Some(TypeKind::Dynamic)
             ) && matches!(
                 tt.get(unalias(inferred)).map(|t| &t.kind),
-                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
             ) {
                 return *return_type;
             }
