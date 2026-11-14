@@ -266,6 +266,7 @@ impl<'a> HirToMirContext<'a> {
             _ => None,
         }
         .filter(|ret| {
+            let declared = *ret;
             let ret = self.resolve_through_aliases(*ret);
             matches!(
                 self.type_table.get(ret).map(|t| &t.kind),
@@ -282,6 +283,15 @@ impl<'a> HirToMirContext<'a> {
             ) || self.is_optional_primitive(ret)
                 || self.is_null_int_type(ret)
                 || self.convert_type(ret) == IrType::F32
+                // A nullable enum returns the box its callers test against null.
+                || matches!(
+                    self.type_table.get(declared).map(|t| &t.kind),
+                    Some(TypeKind::Optional { inner_type })
+                        if matches!(
+                            self.type_table.get(self.resolve_through_aliases(*inner_type)).map(|t| &t.kind),
+                            Some(TypeKind::Enum { .. })
+                        )
+                )
         });
         // Never the enclosing function's: a returned object literal would be
         // built as whatever type that function returns.
@@ -412,6 +422,37 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             _ => self.lower_expression(body),
+        };
+        // A nullable enum result: the body's discriminant carries null as the
+        // NullInt sentinel, the declared `Null<E>` as zero.
+        let nullable_enum_return = declared_return.is_some_and(|ret| {
+            matches!(
+                self.type_table.get(ret).map(|t| &t.kind),
+                Some(TypeKind::Optional { inner_type })
+                    if self.resolve_enum_symbol(*inner_type).is_some()
+            )
+        });
+        let body_result = match body_result {
+            Some(reg)
+                if nullable_enum_return
+                    && matches!(
+                        self.builder.get_register_type(reg),
+                        Some(IrType::I64 | IrType::NullInt)
+                    ) =>
+            {
+                let ret = declared_return?;
+                let inner = match self.type_table.get(ret).map(|t| &t.kind) {
+                    Some(TypeKind::Optional { inner_type }) => *inner_type,
+                    _ => ret,
+                };
+                let bits = self.builder.build_bitcast(reg, IrType::I64)?;
+                let value = self.maybe_box_for_optional(bits, inner, ret)?;
+                Some(
+                    self.builder
+                        .build_bitcast(value, IrType::Ptr(Box::new(IrType::U8)))?,
+                )
+            }
+            other => other,
         };
         // The implicit result of an expression body is a `return` too.
         let body_result = match (body_result, declared_return) {

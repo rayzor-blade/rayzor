@@ -1912,10 +1912,12 @@ impl<'a> AstLowering<'a> {
             else {
                 continue;
             };
+            // A nullable enum is a box as a nullable scalar is: a lambda returning
+            // `cond ? Variant : null` returns the expected `Null<E>`.
             let inner = tt.get(unalias(*inner_type)).map(|t| &t.kind);
             if !matches!(
                 inner,
-                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+                Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Enum { .. })
             ) {
                 continue;
             }
