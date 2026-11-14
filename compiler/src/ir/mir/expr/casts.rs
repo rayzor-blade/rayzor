@@ -127,6 +127,19 @@ impl<'a> HirToMirContext<'a> {
                 return Some(result);
             }
         }
+        // A Single has no runtime type of its own to check against: a Dynamic
+        // holding one opens as its Float.
+        if self.convert_type(target_type) == IrType::F32
+            && matches!(
+                self.type_table
+                    .get(self.resolve_storage_type(expr.ty))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            )
+        {
+            let value = self.lower_expression(expr)?;
+            return self.maybe_unbox_value(value, expr.ty, target_type);
+        }
         // `(cast this : Int)` in an abstract method lowers to
         // Cast(safe, Int) { Cast(unsafe, Dynamic) { This/Variable } }. The inner
         // cast is a no-op for abstract types and the outer one extracts the
