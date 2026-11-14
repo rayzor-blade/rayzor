@@ -644,6 +644,12 @@ pub struct SymbolTable {
     enum_abstracts: BTreeSet<SymbolId>,
     /// Static `@:to` methods, whose parameter is the underlying value.
     static_to_conversions: BTreeSet<SymbolId>,
+    /// `@:allow` paths on a member or class: the types that may use its
+    /// private members.
+    allow_paths: BTreeMap<SymbolId, Vec<String>>,
+    /// `@:access` paths on a class: the types and members whose private
+    /// members it may use.
+    access_paths: BTreeMap<SymbolId, Vec<String>>,
     /// Enhanced symbol resolution cache
     symbol_cache: Rc<SymbolResolutionCache>,
 }
@@ -672,6 +678,8 @@ impl SymbolTable {
             private_type_paths: BTreeMap::new(),
             enum_abstracts: BTreeSet::new(),
             static_to_conversions: BTreeSet::new(),
+            allow_paths: BTreeMap::new(),
+            access_paths: BTreeMap::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::new(1000)),
         }
     }
@@ -699,6 +707,8 @@ impl SymbolTable {
             private_type_paths: BTreeMap::new(),
             enum_abstracts: BTreeSet::new(),
             static_to_conversions: BTreeSet::new(),
+            allow_paths: BTreeMap::new(),
+            access_paths: BTreeMap::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::with_sizes(capacity, capacity / 2)),
         }
     }
@@ -1548,6 +1558,28 @@ impl SymbolTable {
     /// Whether `method` is a static `@:to` method.
     pub fn is_static_to_conversion(&self, method: SymbolId) -> bool {
         self.static_to_conversions.contains(&method)
+    }
+
+    /// Record the `@:allow` paths of a member or class.
+    pub fn set_allow_paths(&mut self, symbol: SymbolId, paths: Vec<String>) {
+        if !paths.is_empty() {
+            self.allow_paths.insert(symbol, paths);
+        }
+    }
+
+    pub fn allow_paths(&self, symbol: SymbolId) -> &[String] {
+        self.allow_paths.get(&symbol).map_or(&[], Vec::as_slice)
+    }
+
+    /// Record the `@:access` paths of a class.
+    pub fn set_access_paths(&mut self, symbol: SymbolId, paths: Vec<String>) {
+        if !paths.is_empty() {
+            self.access_paths.insert(symbol, paths);
+        }
+    }
+
+    pub fn access_paths(&self, symbol: SymbolId) -> &[String] {
+        self.access_paths.get(&symbol).map_or(&[], Vec::as_slice)
     }
 
     /// Whether `abstract_symbol` is an `enum abstract`.

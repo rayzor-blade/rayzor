@@ -1014,6 +1014,35 @@ impl<'a> AstLowering<'a> {
     /// The type of a literal initializer, known before any body is lowered, so
     /// a class earlier in the file sees `static var n = 0` as an Int. An
     /// integer outside the Int range is left to the initializer's lowering.
+    /// `new C()` in C's own field (`static var current = new C()`) is a `C`
+    /// when C takes no type parameters: C is the class being registered.
+    fn own_instance_field_type(
+        &mut self,
+        class_decl: &parser::ClassDecl,
+        initializer: &parser::Expr,
+    ) -> Option<TypeId> {
+        let parser::ExprKind::New {
+            type_path, params, ..
+        } = &initializer.kind
+        else {
+            return None;
+        };
+        if !params.is_empty()
+            || !class_decl.type_params.is_empty()
+            || type_path.sub.is_some()
+            || type_path.name != class_decl.name
+            || !type_path.package.is_empty()
+        {
+            return None;
+        }
+        self.lower_type(&parser::Type::Path {
+            path: type_path.clone(),
+            params: Vec::new(),
+            span: initializer.span,
+        })
+        .ok()
+    }
+
     fn literal_field_type(&mut self, initializer: &parser::Expr) -> Option<TypeId> {
         match &initializer.kind {
             parser::ExprKind::Regex { .. } => {
@@ -1027,6 +1056,19 @@ impl<'a> AstLowering<'a> {
                     span: initializer.span,
                 };
                 return self.lower_type(&ereg).ok();
+            }
+            // `new C<A, B>(...)` with its type arguments written is a `C<A, B>`.
+            // Without them the class may not be registered yet; it stays Dynamic.
+            parser::ExprKind::New {
+                type_path, params, ..
+            } if !params.is_empty() => {
+                return self
+                    .lower_type(&parser::Type::Path {
+                        path: type_path.clone(),
+                        params: params.clone(),
+                        span: initializer.span,
+                    })
+                    .ok();
             }
             // An array of literals of one type; Int beside Float is Float.
             parser::ExprKind::Array(elements) if !elements.is_empty() => {
@@ -1241,6 +1283,7 @@ impl<'a> AstLowering<'a> {
                     .and_then(|expr| {
                         self.function_field_signature(expr)
                             .or_else(|| self.literal_field_type(expr))
+                            .or_else(|| self.own_instance_field_type(class_decl, expr))
                     })
                     .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type())
             };
@@ -1263,6 +1306,10 @@ impl<'a> AstLowering<'a> {
             } else {
                 self.lower_access(&field.access)
             };
+            self.context.symbol_table.set_allow_paths(
+                field_symbol,
+                crate::tast::ast_lowering::metadata::metadata_paths(&field.meta, "allow"),
+            );
             if let Some(sym) = self.context.symbol_table.get_symbol_mut(field_symbol) {
                 sym.visibility = visibility;
                 sym.kind = crate::tast::SymbolKind::Field;

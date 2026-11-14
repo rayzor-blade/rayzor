@@ -189,6 +189,14 @@ impl<'a> AstLowering<'a> {
                 .or_insert_with(Vec::new);
         }
 
+        self.context.symbol_table.set_allow_paths(
+            class_symbol,
+            crate::tast::ast_lowering::metadata::metadata_paths(&class_decl.meta, "allow"),
+        );
+        self.context.symbol_table.set_access_paths(
+            class_symbol,
+            crate::tast::ast_lowering::metadata::metadata_paths(&class_decl.meta, "access"),
+        );
         // Extract metadata flags from @:generic, @:final, @:native, etc.
         let mut symbol_flags = self.extract_metadata_flags(&class_decl.meta, class_symbol);
         if class_decl.is_abstract {
@@ -455,6 +463,10 @@ impl<'a> AstLowering<'a> {
                 } else {
                     self.lower_access(&field.access)
                 };
+                self.context.symbol_table.set_allow_paths(
+                    method_symbol,
+                    crate::tast::ast_lowering::metadata::metadata_paths(&field.meta, "allow"),
+                );
                 if let Some(symbol) = self.context.symbol_table.get_symbol_mut(method_symbol) {
                     symbol.visibility = visibility;
                     for modifier in &field.modifiers {

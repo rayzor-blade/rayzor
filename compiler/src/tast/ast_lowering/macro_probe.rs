@@ -942,7 +942,8 @@ impl AstLowering<'_> {
         let Some(owner) = owner else {
             return Ok(());
         };
-        let mut current = self.context.class_context_stack.last().copied();
+        let accessor = self.context.class_context_stack.last().copied();
+        let mut current = accessor;
         for _ in 0..32 {
             let Some(class) = current else {
                 break;
@@ -957,10 +958,71 @@ impl AstLowering<'_> {
                 .and_then(|ty| self.resolve_type_to_class_symbol(ty));
         }
         let name = self.context.string_interner.get(symbol.name).unwrap_or("");
+        if let Some(accessor) = accessor {
+            // A path covers itself, what lies under it, and the type holding a
+            // member it names.
+            let covers = |granted: &str, path: &str| {
+                path == granted
+                    || path
+                        .strip_prefix(granted)
+                        .is_some_and(|rest| rest.starts_with('.'))
+                    || granted
+                        .strip_prefix(path)
+                        .is_some_and(|rest| rest.starts_with('.'))
+            };
+            let accessor_paths = self.private_access_type_paths(accessor);
+            let table = &self.context.symbol_table;
+            let allowed = table
+                .allow_paths(member)
+                .iter()
+                .chain(table.allow_paths(owner))
+                .any(|granted| accessor_paths.iter().any(|path| covers(granted, path)));
+            let owner_paths = self.private_access_type_paths(owner);
+            let table = &self.context.symbol_table;
+            let accessed = table.access_paths(accessor).iter().any(|granted| {
+                owner_paths
+                    .iter()
+                    .any(|path| covers(granted, &format!("{path}.{name}")))
+            });
+            if allowed || accessed {
+                return Ok(());
+            }
+        }
         Err(LoweringError::SemanticError {
             message: format!("Cannot access private field {name}"),
             location: expression.source_location,
         })
+    }
+
+    /// The paths `@:allow` and `@:access` may name a class by: its qualified
+    /// name, and for a module sub-type also `pack.Name`.
+    fn private_access_type_paths(&self, class: SymbolId) -> Vec<String> {
+        let Some(symbol) = self.context.symbol_table.get_symbol(class) else {
+            return Vec::new();
+        };
+        let name = self
+            .context
+            .string_interner
+            .get(symbol.name)
+            .unwrap_or("")
+            .to_string();
+        let qualified = symbol
+            .qualified_name
+            .and_then(|q| self.context.string_interner.get(q))
+            .map_or_else(|| name.clone(), str::to_string);
+        let mut paths = vec![qualified.clone()];
+        let segments: Vec<&str> = qualified.split('.').collect();
+        if let [pack @ .., module, last] = segments.as_slice()
+            && module.starts_with(char::is_uppercase)
+        {
+            let mut short = pack.join(".");
+            if !short.is_empty() {
+                short.push('.');
+            }
+            short.push_str(last);
+            paths.push(short);
+        }
+        paths
     }
 
     pub(crate) fn macro_probe_argument_error(

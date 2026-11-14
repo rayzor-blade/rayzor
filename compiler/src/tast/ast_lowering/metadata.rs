@@ -14,6 +14,22 @@ use std::fmt;
 use std::rc::Rc;
 use tracing::warn;
 
+/// The dotted paths named by every `@:<tag>(a.b.C, ...)` entry.
+pub(crate) fn metadata_paths(meta: &[Metadata], tag: &str) -> Vec<String> {
+    fn dotted(expr: &Expr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Ident(name) => Some(name.clone()),
+            ExprKind::Field { expr, field, .. } => Some(format!("{}.{field}", dotted(expr)?)),
+            ExprKind::Paren(inner) => dotted(inner),
+            _ => None,
+        }
+    }
+    meta.iter()
+        .filter(|m| m.name.trim_start_matches(':') == tag)
+        .flat_map(|m| m.params.iter().filter_map(dotted))
+        .collect()
+}
+
 impl<'a> AstLowering<'a> {
     /// Extract SymbolFlags and optional native name from metadata entries.
     /// Shared across class, abstract, and other type declarations.
