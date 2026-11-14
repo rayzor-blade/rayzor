@@ -283,9 +283,9 @@ impl<'a> HirToMirContext<'a> {
                 || self.is_null_int_type(ret)
                 || self.convert_type(ret) == IrType::F32
         });
-        if declared_return.is_some() {
-            self.current_function_return_type = declared_return;
-        }
+        // Never the enclosing function's: a returned object literal would be
+        // built as whatever type that function returns.
+        self.current_function_return_type = declared_return;
 
         // Switch to lambda context
         self.enclosing_function = self.enclosing_function.or(self.builder.current_function);
