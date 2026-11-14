@@ -1074,6 +1074,23 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// The declared parameter types of a constructor compiled in another
+    /// module, read off its class's constructor symbol.
+    fn external_constructor_param_types(&self, func_id: IrFunctionId) -> Option<Vec<TypeId>> {
+        let class = self
+            .external_function_map
+            .iter()
+            .find_map(|(symbol, id)| (*id == func_id).then_some(*symbol))
+            .and_then(|symbol| self.symbol_table.get_symbol(symbol))
+            .filter(|symbol| symbol.kind == crate::tast::SymbolKind::Class)?;
+        let ctor = self.symbol_table.get_class_constructor(class.id)?;
+        let ty = self.symbol_table.get_symbol(ctor)?.type_id;
+        match self.type_table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Function { params, .. }) => Some(params.clone()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn maybe_materialize_for_call(
         &mut self,
         arg_expr: &HirExpr,
@@ -1116,7 +1133,12 @@ impl<'a> HirToMirContext<'a> {
 
         // Path 2: direct class→anon or wider-anon→anon conversion at the call boundary.
         if let Some(func_id) = callee_func_id {
-            if let Some(param_types) = self.function_param_hir_types.get(&func_id).cloned() {
+            let param_types = self
+                .function_param_hir_types
+                .get(&func_id)
+                .cloned()
+                .or_else(|| self.external_constructor_param_types(func_id));
+            if let Some(param_types) = param_types {
                 if let Some(&param_type_id) = param_types.get(param_index) {
                     let resolved_param = self.resolve_through_aliases(param_type_id);
                     let resolved_arg = self.resolve_through_aliases(arg_expr.ty);

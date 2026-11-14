@@ -1,0 +1,5 @@
+[project]
+name = "dynamic-ctor-param-other-module"
+entry = "./DynamicCtorParamOtherModule.hx"
+[build]
+class-paths = ["."]
