@@ -245,20 +245,24 @@ impl<'a> AstLowering<'a> {
                     .and_then(|(_, id)| self.context.symbol_table.get_symbol(id))
                     .filter(|symbol| symbol.kind.is_type())
                     .map(|symbol| (symbol.id, symbol.kind.clone()));
+                let own_found = own_symbol.is_some();
                 // A declaration in this module precedes imports and root names.
                 let symbol_info = own_symbol
                     .or(import_resolved_symbol)
                     .or(package_symbol)
+                    // Only a type: the root scope also holds enum-abstract values.
                     .or_else(|| {
                         self.context
                             .symbol_table
                             .lookup_symbol(self.context.current_scope, interned_name)
+                            .filter(|s| s.kind.is_type())
                             .or_else(|| {
                                 self.context.symbol_table.lookup_symbol(
                                     ScopeId::first(), // Root scope contains imports and top-level types
                                     interned_name,
                                 )
                             })
+                            .filter(|s| s.kind.is_type())
                             .map(|s| (s.id, s.kind.clone()))
                     })
                     // For qualified names (e.g. "rayzor.Bytes"), also try looking up via
@@ -317,7 +321,7 @@ impl<'a> AstLowering<'a> {
                                     .context
                                     .symbol_table
                                     .lookup_symbol(ScopeId::first(), class_interned)
-                                    .filter(|sym| self.may_target(sym.id))
+                                    .filter(|sym| sym.kind.is_type() && self.may_target(sym.id))
                                 {
                                     // Verify the symbol's qualified name matches
                                     if let Some(qn) = sym.qualified_name {
@@ -338,6 +342,21 @@ impl<'a> AstLowering<'a> {
                         }
                     });
 
+                // A name another file imported gives way to this package's own type.
+                let symbol_info = match symbol_info {
+                    Some((id, _))
+                        if !own_found
+                            && path.package.is_empty()
+                            && self.foreign_type_shadowed(interned_name, id) =>
+                    {
+                        package_symbol.or_else(|| {
+                            let sym = self.same_package_type_placeholder(&name)?;
+                            let kind = self.context.symbol_table.get_symbol(sym)?.kind;
+                            Some((sym, kind))
+                        })
+                    }
+                    other => other,
+                };
                 if std::env::var_os("RAYZOR_SYM_DEBUG").is_some() && name.contains('.') {
                     eprintln!("[sym] type-path {name} -> {symbol_info:?}");
                 }

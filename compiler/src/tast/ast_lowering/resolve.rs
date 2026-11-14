@@ -297,7 +297,7 @@ impl<'a> AstLowering<'a> {
         // A namesake from an enclosing scope, now that the class hierarchy has
         // had its turn.
         if let Some(found) = outer_match {
-            return Some(self.prefer_package_type(name, found));
+            return self.prefer_package_type(name, found);
         }
 
         // Fallback: explicitly check the global root scope (ScopeId::first())
@@ -309,7 +309,7 @@ impl<'a> AstLowering<'a> {
             if let Some(symbol) = self.context.symbol_table.lookup_symbol(root_scope, name)
                 && !self.enum_abstract_value_hidden(symbol.id)
             {
-                return Some(self.prefer_package_type(name, symbol.id));
+                return self.prefer_package_type(name, symbol.id);
             }
         }
 
@@ -421,8 +421,66 @@ impl<'a> AstLowering<'a> {
             .is_some()
     }
 
-    /// Module declarations, explicit imports and package siblings precede ambient types.
-    fn prefer_package_type(&self, name: InternedString, found: SymbolId) -> SymbolId {
+    /// `found`, a packaged type of another package that this packaged file
+    /// does not import, stands where its own package declares a type named
+    /// `name`: the root scope holds the names every other file imported.
+    pub(crate) fn foreign_type_shadowed(&self, name: InternedString, found: SymbolId) -> bool {
+        use crate::tast::symbols::SymbolKind;
+        let interner = &self.context.string_interner;
+        let Some(symbol) = self.context.symbol_table.get_symbol(found) else {
+            return false;
+        };
+        if !matches!(
+            symbol.kind,
+            SymbolKind::Class
+                | SymbolKind::Abstract
+                | SymbolKind::Enum
+                | SymbolKind::Interface
+                | SymbolKind::TypeAlias
+        ) || self.file_imports.contains_key(&name)
+        {
+            return false;
+        }
+        let Some((found_package, _)) = symbol
+            .qualified_name
+            .and_then(|q| interner.get(q))
+            .and_then(|q| q.rsplit_once('.'))
+        else {
+            return false;
+        };
+        let own_package = self
+            .context
+            .current_package
+            .and_then(|p| self.context.namespace_resolver.get_package(p))
+            .map(|p| p.qualified_path(interner))
+            .unwrap_or_default();
+        if own_package.is_empty() || found_package == own_package {
+            return false;
+        }
+        let imported = self.file_import_paths.iter().any(|(path, wildcard)| {
+            let path = path.trim_end_matches(".*");
+            if *wildcard {
+                path == found_package
+            } else {
+                path.rsplit_once('.')
+                    .is_some_and(|(p, _)| p == found_package)
+            }
+        });
+        let Some(name) = interner.get(name) else {
+            return false;
+        };
+        // A typedef there may alias `found` itself; it is not stood in for.
+        !imported
+            && self
+                .context
+                .namespace_resolver
+                .declared_kind(&format!("{own_package}.{name}"))
+                .is_some_and(|kind| kind != "typedef")
+    }
+
+    /// Module declarations, explicit imports and package siblings precede
+    /// ambient types; None where the own package's type is not declared yet.
+    fn prefer_package_type(&self, name: InternedString, found: SymbolId) -> Option<SymbolId> {
         use crate::tast::symbols::SymbolKind;
         let is_type = |k: SymbolKind| {
             matches!(
@@ -446,7 +504,23 @@ impl<'a> AstLowering<'a> {
             .get(name)
             .is_some_and(|n| self.current_module_types.contains(n));
         if !foreign_type {
-            return found;
+            return Some(found);
+        }
+        if self.foreign_type_shadowed(name, found) {
+            return self
+                .context
+                .namespace_resolver
+                .find_symbols_by_name(name, pkg)
+                .into_iter()
+                .find(|(p, id)| {
+                    *p == pkg
+                        && self
+                            .context
+                            .symbol_table
+                            .get_symbol(*id)
+                            .is_some_and(|s| is_type(s.kind))
+                })
+                .map(|(_, id)| id);
         }
         let lookup_type = |path: &QualifiedPath| {
             self.context
@@ -472,14 +546,14 @@ impl<'a> AstLowering<'a> {
                     if !import.is_wildcard
                         && import.alias.unwrap_or(import.package_path.name) == name
                     {
-                        return lookup_type(&import.package_path).unwrap_or(found);
+                        return Some(lookup_type(&import.package_path).unwrap_or(found));
                     }
                     // `import pkg.Module` brings in every type the module declares.
                     if !import.is_wildcard && import.alias.is_none() {
                         let mut package = import.package_path.package.clone();
                         package.push(import.package_path.name);
                         if let Some(own) = lookup_type(&QualifiedPath { package, name }) {
-                            return own;
+                            return Some(own);
                         }
                     }
                 }
@@ -503,7 +577,7 @@ impl<'a> AstLowering<'a> {
                     .is_some_and(|s| is_type(s.kind))
             })
             .or_else(|| lookup_type(&QualifiedPath::simple(name)))
-            .unwrap_or(found)
+            .or(Some(found))
     }
 
     /// Resolve built-in types

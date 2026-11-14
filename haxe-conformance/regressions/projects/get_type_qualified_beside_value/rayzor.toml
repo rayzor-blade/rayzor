@@ -1,0 +1,5 @@
+[project]
+name = "get-type-qualified-beside-value"
+entry = "src/Main.hx"
+[build]
+class-paths = ["src"]

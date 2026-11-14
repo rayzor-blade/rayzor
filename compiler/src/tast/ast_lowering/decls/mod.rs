@@ -122,42 +122,17 @@ impl<'a> AstLowering<'a> {
             self.register_toplevel_stdlib_symbols();
         }
 
+        // The file's imports: its import.hx files', then its own, which win.
+        self.file_imports = BTreeMap::new();
+        self.file_import_paths = Vec::new();
         // Process import.hx files in the current directory hierarchy
         if let Err(e) = self.process_import_hx_files(&file) {
             self.collected_errors.push(e);
         }
+        for import in &file.imports {
+            self.record_file_import(import);
+        }
         self.set_private_scope(file);
-        self.file_imports = file
-            .imports
-            .iter()
-            .filter_map(|import| {
-                let name = match &import.mode {
-                    parser::ImportMode::Normal => import.path.last()?.clone(),
-                    parser::ImportMode::Alias(alias) => alias.clone(),
-                    _ => return None,
-                };
-                let path = import
-                    .path
-                    .iter()
-                    .map(|segment| self.context.intern_string(segment))
-                    .collect();
-                Some((self.context.intern_string(&name), path))
-            })
-            .collect();
-
-        self.file_import_paths = file
-            .imports
-            .iter()
-            .filter_map(|import| {
-                let wildcard = match &import.mode {
-                    parser::ImportMode::Normal | parser::ImportMode::Alias(_) => false,
-                    parser::ImportMode::Wildcard
-                    | parser::ImportMode::WildcardWithExclusions(_) => true,
-                    _ => return None,
-                };
-                Some((import.path.join("."), wildcard))
-            })
-            .collect();
 
         // Process imports - collect errors but continue
         for import in &file.imports {

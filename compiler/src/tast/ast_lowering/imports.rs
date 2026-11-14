@@ -34,6 +34,35 @@ impl<'a> AstLowering<'a> {
     /// Lower a complete Haxe file to TAST
 
     /// Process import.hx files in the directory hierarchy
+    /// Records `import` as one the file being lowered makes.
+    pub(crate) fn record_file_import(&mut self, import: &Import) {
+        let name = match &import.mode {
+            parser::ImportMode::Normal => import.path.last().cloned(),
+            parser::ImportMode::Alias(alias) => Some(alias.clone()),
+            _ => None,
+        };
+        if let Some(name) = name {
+            let path = import
+                .path
+                .iter()
+                .map(|segment| self.context.intern_string(segment))
+                .collect();
+            let name = self.context.intern_string(&name);
+            self.file_imports.insert(name, path);
+        }
+        let wildcard = match &import.mode {
+            parser::ImportMode::Normal | parser::ImportMode::Alias(_) => Some(false),
+            parser::ImportMode::Wildcard | parser::ImportMode::WildcardWithExclusions(_) => {
+                Some(true)
+            }
+            _ => None,
+        };
+        if let Some(wildcard) = wildcard {
+            self.file_import_paths
+                .push((import.path.join("."), wildcard));
+        }
+    }
+
     pub(crate) fn process_import_hx_files(
         &mut self,
         current_file: &HaxeFile,
@@ -116,6 +145,7 @@ impl<'a> AstLowering<'a> {
 
     /// Process an import from import.hx file
     fn process_import_from_import_hx(&mut self, import: &Import) -> LoweringResult<()> {
+        self.record_file_import(import);
         // An import.hx entry is an ordinary import that happens to be written
         // in another file, so it goes through the ordinary path. Handling it
         // separately is what silently dropped every wildcard: this only ever

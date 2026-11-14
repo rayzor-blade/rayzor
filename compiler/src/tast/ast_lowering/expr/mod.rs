@@ -36,7 +36,7 @@ impl<'a> AstLowering<'a> {
     /// resolves those without an import. It gets the placeholder an import
     /// would mint, so `Type.method(..)` links by qualified name later instead
     /// of decaying to `this.Type`.
-    fn same_package_type_placeholder(&mut self, name: &str) -> Option<SymbolId> {
+    pub(crate) fn same_package_type_placeholder(&mut self, name: &str) -> Option<SymbolId> {
         if !name.chars().next().is_some_and(char::is_uppercase) {
             return None;
         }

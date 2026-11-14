@@ -1,0 +1,5 @@
+[project]
+name = "package-type-in-cycle-before-foreign-import"
+entry = "src/Main.hx"
+[build]
+class-paths = ["src"]
