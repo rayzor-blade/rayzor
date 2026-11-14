@@ -22,8 +22,28 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
-    fn box_conditional_arm(&mut self, value: IrId, ty: TypeId, ir: IrType) -> Option<IrId> {
+    fn box_conditional_arm(
+        &mut self,
+        value: IrId,
+        ty: TypeId,
+        ir: IrType,
+        result: Option<TypeId>,
+        other: &IrType,
+    ) -> Option<IrId> {
         if self.resolve_enum_symbol(ty).is_some() {
+            // A payload enum is its cell pointer in either register type; only
+            // a Dynamic result takes it boxed.
+            let dynamic_result = result.is_none_or(|r| {
+                matches!(
+                    self.type_table
+                        .get(self.resolve_through_aliases(r))
+                        .map(|t| &t.kind),
+                    Some(TypeKind::Dynamic)
+                )
+            });
+            if !dynamic_result && !self.is_tag_only_enum_type(ty) {
+                return self.builder.build_bitcast(value, other.clone());
+            }
             return self.maybe_box_value(value, ty, self.type_table.dynamic_type());
         }
         if let Some(TypeKind::TypeParameter { symbol_id, .. }) = self
@@ -1065,14 +1085,26 @@ impl<'a> HirToMirContext<'a> {
                 } else if then_is_ptr && else_is_prim {
                     // Box the else value (primitive) to match the then pointer
                     self.builder.switch_to_block(else_end_block);
-                    let boxed = self.box_conditional_arm(ev, else_expr.ty, else_rty.unwrap());
+                    let boxed = self.box_conditional_arm(
+                        ev,
+                        else_expr.ty,
+                        else_rty.unwrap(),
+                        result_ty,
+                        then_rty.as_ref().unwrap(),
+                    );
                     if let Some(b) = boxed {
                         else_val = Some(b);
                     }
                 } else if else_is_ptr && then_is_prim {
                     // Box the then value (primitive) to match the else pointer
                     self.builder.switch_to_block(then_end_block);
-                    let boxed = self.box_conditional_arm(tv, then_expr.ty, then_rty.unwrap());
+                    let boxed = self.box_conditional_arm(
+                        tv,
+                        then_expr.ty,
+                        then_rty.unwrap(),
+                        result_ty,
+                        else_rty.as_ref().unwrap(),
+                    );
                     if let Some(b) = boxed {
                         then_val = Some(b);
                     }
