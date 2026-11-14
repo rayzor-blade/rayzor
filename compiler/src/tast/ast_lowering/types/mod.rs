@@ -1012,16 +1012,23 @@ impl<'a> AstLowering<'a> {
         // symbol whose qualified name is another type's is not this one: in
         // `b.Label`, the root `Label` may be `a.Label`.
         if !type_path.package.is_empty() {
+            let package_qualified = type_path
+                .package
+                .first()
+                .is_some_and(|head| head.starts_with(char::is_lowercase));
             if let Some(symbol) = self
                 .context
                 .symbol_table
                 .lookup_symbol(ScopeId::first(), name_interned)
                 .filter(|symbol| self.may_target(symbol.id))
                 .filter(|symbol| {
-                    symbol
-                        .qualified_name
-                        .and_then(|q| self.context.string_interner.get(q))
-                        .is_none_or(|q| same_type_path(q, &full_path))
+                    // Only a path through a package (`b.Label`) names its owner;
+                    // one through an imported module (`Hv.HCol`) does not.
+                    !package_qualified
+                        || symbol
+                            .qualified_name
+                            .and_then(|q| self.context.string_interner.get(q))
+                            .is_none_or(|q| same_type_path(q, &full_path))
                 })
             {
                 let sym_id = symbol.id;
