@@ -567,7 +567,7 @@ impl<'a> HirToMirContext<'a> {
         )?;
 
         // Copy fields from source anon with remapped indices
-        for (sorted_idx, (name, _)) in target_fields.iter().enumerate() {
+        for (sorted_idx, (name, target_ty)) in target_fields.iter().enumerate() {
             if let Some(&src_idx) = source_index_map.get(name.as_str()) {
                 let src_idx_val = self.builder.build_const(IrValue::I32(src_idx as i32))?;
                 let raw_val = self.builder.build_call_direct(
@@ -575,6 +575,31 @@ impl<'a> HirToMirContext<'a> {
                     vec![source_handle, src_idx_val],
                     IrType::I64,
                 )?;
+                // A plain scalar moving into a `Null<T>` or Dynamic slot is boxed:
+                // the target's readers unbox it.
+                let source_ty = source_fields[src_idx].1;
+                let scalar_ir = match self.type_table.get(source_ty).map(|t| &t.kind) {
+                    Some(TypeKind::Float) => Some(IrType::F64),
+                    Some(TypeKind::Int) => Some(IrType::I32),
+                    Some(TypeKind::Bool) => Some(IrType::Bool),
+                    _ => None,
+                };
+                let boxes = scalar_ir.is_some()
+                    && matches!(
+                        self.type_table.get(*target_ty).map(|t| &t.kind),
+                        Some(TypeKind::Optional { .. } | TypeKind::Dynamic)
+                    );
+                let raw_val = match scalar_ir.filter(|_| boxes) {
+                    Some(ir) => {
+                        let value = match ir {
+                            IrType::F64 => self.builder.build_bitcast(raw_val, IrType::F64)?,
+                            other => self.builder.build_cast(raw_val, IrType::I64, other)?,
+                        };
+                        let boxed = self.maybe_box_value(value, source_ty, *target_ty)?;
+                        self.builder.build_bitcast(boxed, IrType::I64)?
+                    }
+                    None => raw_val,
+                };
                 let idx_val = self.builder.build_const(IrValue::I32(sorted_idx as i32))?;
                 self.builder.build_call_direct(
                     anon_set_id,
