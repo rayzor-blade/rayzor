@@ -295,6 +295,33 @@ impl<'a> HirToMirContext<'a> {
                 }
                 return self.builder.build_cast(value_reg, from_type, to_type);
             }
+            // An interface value is its handle; the class is the object in it.
+            let source_is_interface = matches!(
+                self.type_table
+                    .get(self.resolve_storage_type(expr.ty))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Interface { .. })
+            );
+            let target_is_class = matches!(
+                self.type_table
+                    .get(self.resolve_storage_type(*target))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Class { .. })
+            );
+            if source_is_interface && target_is_class {
+                let value_reg = self.lower_expression(expr)?;
+                let ptr = IrType::Ptr(Box::new(IrType::U8));
+                let value_reg = self.coerce_reg_to(value_reg, &ptr)?;
+                let identity = self.get_or_register_extern_function(
+                    "haxe_iface_identity",
+                    vec![ptr.clone()],
+                    ptr.clone(),
+                );
+                let object =
+                    self.builder
+                        .build_call_direct(identity, vec![value_reg], ptr.clone())?;
+                return self.builder.build_bitcast(object, to_type);
+            }
         }
 
         // An abstract and its underlying type share a MIR type, so the cast is a

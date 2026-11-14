@@ -93,11 +93,12 @@ impl<'a> HirToMirContext<'a> {
         if stores_dynamic(value_storage) && !self.is_type_handle(value_ty) {
             value_ty = value_storage;
         }
-        // An abstract over an Array boxes as that Array.
+        // An abstract over an Array boxes as that Array, and one over an
+        // interface as that interface: its value is the interface's handle.
         if value_storage != value_ty
             && matches!(
                 self.type_table.get(value_storage).map(|ty| &ty.kind),
-                Some(TypeKind::Array { .. })
+                Some(TypeKind::Array { .. } | TypeKind::Interface { .. })
             )
         {
             value_ty = value_storage;
