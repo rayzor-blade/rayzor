@@ -244,12 +244,18 @@ impl<'a> AstLowering<'a> {
     }
 
     /// With a Float among Int and Float literal values, the Int ones widen.
-    fn widen_mixed_numeric(&self, mut values: Vec<&mut TypedExpression>) {
+    fn widen_mixed_numeric(&self, values: Vec<&mut TypedExpression>) {
+        self.widen_ints(values, false);
+    }
+
+    /// Int values widen to Float when a Float is among them or, with
+    /// `expected_float`, when the context expects Float elements.
+    fn widen_ints(&self, mut values: Vec<&mut TypedExpression>, expected_float: bool) {
         let (int_t, float_t) = {
             let tt = self.context.type_table.borrow();
             (tt.int_type(), tt.float_type())
         };
-        if !values.iter().any(|e| e.expr_type == float_t)
+        if !(expected_float || values.iter().any(|e| e.expr_type == float_t))
             || !values
                 .iter()
                 .all(|e| e.expr_type == float_t || e.expr_type == int_t)
@@ -2331,13 +2337,18 @@ impl<'a> AstLowering<'a> {
             }
             ExprKind::Array(elements) => {
                 let previous_hint = self.context.expected_new_type_hint;
-                let element_hint = self
+                let expected = self
                     .expected_arg_type_stack
                     .last()
                     .copied()
                     .flatten()
-                    .or(previous_hint)
-                    .and_then(|ty| self.array_element_of(ty));
+                    .or(previous_hint);
+                let element_hint = expected.and_then(|ty| {
+                    self.array_element_of(ty).or_else(|| {
+                        let target = self.from_literal_target(ty)?;
+                        self.array_element_of(target)
+                    })
+                });
                 // A function literal element takes the element type's signature.
                 let lambda_hint = element_hint.and_then(|ty| {
                     let table = self.context.type_table.borrow();
@@ -2365,8 +2376,12 @@ impl<'a> AstLowering<'a> {
                 self.expected_arg_type_stack.pop();
                 self.context.expected_new_type_hint = previous_hint;
                 let mut element_exprs = lowered?;
-                // `[1, 2.5]` is Array<Float>.
-                self.widen_mixed_numeric(element_exprs.iter_mut().collect());
+                // `[1, 2.5]` is Array<Float>, as is `[1, 2]` where one is expected.
+                let float_expected = element_hint.is_some_and(|ty| {
+                    let tt = self.context.type_table.borrow();
+                    Self::resolve_alias_chain(&tt, ty) == tt.float_type()
+                });
+                self.widen_ints(element_exprs.iter_mut().collect(), float_expected);
 
                 TypedExpressionKind::ArrayLiteral {
                     elements: element_exprs,
@@ -2684,7 +2699,12 @@ impl<'a> AstLowering<'a> {
                 // Object literal
                 let expected = self.expected_arg_type_stack.last().copied().flatten();
                 let target_fields = expected
-                    .and_then(|ty| self.structure_fields(ty))
+                    .and_then(|ty| {
+                        self.structure_fields(ty).or_else(|| {
+                            let target = self.from_literal_target(ty)?;
+                            self.structure_fields(target)
+                        })
+                    })
                     .unwrap_or_default();
                 let mut typed_fields = Vec::with_capacity(fields.len());
                 for field in fields {

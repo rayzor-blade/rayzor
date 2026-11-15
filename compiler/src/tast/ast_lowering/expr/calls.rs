@@ -1860,6 +1860,62 @@ impl<'a> AstLowering<'a> {
     }
 
     /// An imported abstract's `@:from` methods: (method, parameter type).
+    /// The type a literal takes where `ty` is expected and `ty` is an abstract
+    /// with `@:from function f<T>(v:T):A<T>`: the abstract's argument for T,
+    /// as Haxe types the literal against that conversion's parameter.
+    pub(crate) fn from_literal_target(&mut self, ty: TypeId) -> Option<TypeId> {
+        let (abstract_symbol, args) = {
+            let table = self.context.type_table.borrow();
+            let ty = Self::resolve_alias_chain(&table, ty);
+            match table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Abstract {
+                    symbol_id,
+                    type_args,
+                    ..
+                }) if !type_args.is_empty() => (*symbol_id, type_args.clone()),
+                _ => return None,
+            }
+        };
+        if !self.abstract_from_methods.contains_key(&abstract_symbol) {
+            let imported = self.imported_from_methods(abstract_symbol);
+            self.abstract_from_methods.insert(abstract_symbol, imported);
+        }
+        let table = self.context.type_table.borrow();
+        let type_param = |ty: TypeId| match table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::TypeParameter { symbol_id, .. }) => Some(*symbol_id),
+            _ => None,
+        };
+        self.abstract_from_methods[&abstract_symbol]
+            .iter()
+            .find_map(|&(method, _)| {
+                let symbol = self.context.symbol_table.get_symbol(method)?;
+                let TypeKind::Function {
+                    params,
+                    return_type,
+                    ..
+                } = &table.get(symbol.type_id)?.kind
+                else {
+                    return None;
+                };
+                let source = type_param(*params.first()?)?;
+                let Some(TypeKind::Abstract {
+                    symbol_id,
+                    type_args,
+                    ..
+                }) = table.get(*return_type).map(|t| &t.kind)
+                else {
+                    return None;
+                };
+                if *symbol_id != abstract_symbol {
+                    return None;
+                }
+                let index = type_args
+                    .iter()
+                    .position(|a| type_param(*a) == Some(source))?;
+                args.get(index).copied()
+            })
+    }
+
     fn imported_from_methods(&self, abstract_symbol: SymbolId) -> Vec<(SymbolId, TypeId)> {
         use crate::tast::core::TypeKind;
         use crate::tast::symbols::SymbolFlags;
