@@ -2695,19 +2695,25 @@ impl<'a> AstLowering<'a> {
                         .map(|target| target.type_id);
                     // A function literal takes its untyped parameters from the
                     // expected structure's field, as a call argument does; a
-                    // macro may have wrapped it in parentheses or metadata.
-                    let mut literal = &field.expr;
-                    while let ExprKind::Paren(inner) | ExprKind::Meta { expr: inner, .. } =
-                        &literal.kind
-                    {
-                        literal = inner;
+                    // macro may have wrapped it in parentheses or metadata, and
+                    // it may be an arm of a conditional.
+                    fn function_literal(expr: &Expr) -> bool {
+                        match &expr.kind {
+                            ExprKind::Paren(inner) | ExprKind::Meta { expr: inner, .. } => {
+                                function_literal(inner)
+                            }
+                            ExprKind::Ternary {
+                                then_expr,
+                                else_expr,
+                                ..
+                            } => function_literal(then_expr) || function_literal(else_expr),
+                            ExprKind::Function(_) | ExprKind::Arrow { .. } => true,
+                            _ => false,
+                        }
                     }
-                    let lambda_hint =
-                        matches!(literal.kind, ExprKind::Function(_) | ExprKind::Arrow { .. })
-                            .then(|| {
-                                expected.and_then(|t| self.expected_field_params(t, &field.name))
-                            })
-                            .flatten();
+                    let lambda_hint = function_literal(&field.expr)
+                        .then(|| expected.and_then(|t| self.expected_field_params(t, &field.name)))
+                        .flatten();
                     let previous_hint = self.context.expected_new_type_hint;
                     self.context.expected_new_type_hint = target;
                     self.expected_arg_type_stack.push(target);
