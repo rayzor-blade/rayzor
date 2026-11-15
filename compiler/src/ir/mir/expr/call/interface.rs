@@ -110,7 +110,16 @@ impl<'a> HirToMirContext<'a> {
                             resolved_ret_type_id,
                             expr.source_location,
                         );
-                        let return_type = Box::new(return_ir_type);
+                        let word = self.interface_slot_return_word(
+                            iface_sym,
+                            method_name_i,
+                            &return_ir_type,
+                        );
+                        let return_type = Box::new(if word {
+                            IrType::I64
+                        } else {
+                            return_ir_type.clone()
+                        });
                         let func_signature = IrType::Function {
                             params: param_types,
                             return_type,
@@ -120,6 +129,11 @@ impl<'a> HirToMirContext<'a> {
                         let call_result =
                             self.builder
                                 .build_call_indirect(fn_ptr, call_args, func_signature)?;
+                        let call_result = if word {
+                            self.from_word(call_result, &return_ir_type)?
+                        } else {
+                            call_result
+                        };
                         if let Some(real_ty) = resolved_ret_type_id {
                             self.interface_call_result_types
                                 .insert(call_result, real_ty);
@@ -227,7 +241,13 @@ impl<'a> HirToMirContext<'a> {
                         resolved_ret_type_id,
                         expr.source_location,
                     );
-                    let return_type = Box::new(return_ir_type);
+                    let word =
+                        self.interface_slot_return_word(iface_sym, method_name_i, &return_ir_type);
+                    let return_type = Box::new(if word {
+                        IrType::I64
+                    } else {
+                        return_ir_type.clone()
+                    });
                     let func_signature = IrType::Function {
                         params: param_types,
                         return_type,
@@ -237,6 +257,11 @@ impl<'a> HirToMirContext<'a> {
                     let call_result =
                         self.builder
                             .build_call_indirect(fn_ptr, call_args, func_signature)?;
+                    let call_result = if word {
+                        self.from_word(call_result, &return_ir_type)?
+                    } else {
+                        call_result
+                    };
                     // Record (register → TypeId) so a binding site can override
                     // the variable's effective type when the HIR type was Dynamic.
                     if let Some(real_ty) = resolved_ret_type_id {

@@ -134,6 +134,29 @@ impl<'a> HirToMirContext<'a> {
         type_args.get(position).copied()
     }
 
+    /// Whether an interface slot position declared as `slot` carries a word
+    /// for a value of IR type `native`: a type parameter holding a scalar,
+    /// under `RAYZOR_ERASED_WORDS`.
+    pub(crate) fn interface_slot_is_word(&self, slot: TypeId, native: &IrType) -> bool {
+        crate::debug_flags::erased_words()
+            && crate::ir::erased_word::is_word_scalar(native)
+            && matches!(
+                self.type_table.get(slot).map(|t| &t.kind),
+                Some(TypeKind::TypeParameter { .. })
+            )
+    }
+
+    /// Whether the slot's result is a word the caller decodes to `native`.
+    pub(crate) fn interface_slot_return_word(
+        &self,
+        interface: SymbolId,
+        name: InternedString,
+        native: &IrType,
+    ) -> bool {
+        self.interface_slot_signature(interface, name)
+            .is_some_and(|(_, result)| self.interface_slot_is_word(result, native))
+    }
+
     pub(crate) fn prepare_interface_slot_args(
         &mut self,
         interface: SymbolId,
@@ -164,6 +187,10 @@ impl<'a> HirToMirContext<'a> {
                     {
                         *arg = self.builder.build_cast(*arg, from, to)?;
                     }
+                }
+                let ty = self.builder.get_register_type(*arg).unwrap_or(IrType::I64);
+                if self.interface_slot_is_word(*target, &ty) {
+                    *arg = self.into_word(*arg)?;
                 }
             }
             params.push(self.builder.get_register_type(*arg).unwrap_or(IrType::I64));
@@ -365,11 +392,19 @@ impl<'a> HirToMirContext<'a> {
             .as_ref()
             .map(|sig| sig.return_type.clone())
             .unwrap_or_else(|| self.convert_type(native_return));
-        let slot_ir_return = if self.interface_slot_needs_conversion(native_return, slot_return) {
+        let return_word = self.interface_slot_is_word(slot_return, &native_ir_return);
+        let slot_ir_return = if return_word {
+            IrType::I64
+        } else if self.interface_slot_needs_conversion(native_return, slot_return) {
             self.convert_type(slot_return)
         } else {
             native_ir_return.clone()
         };
+        let param_words: Vec<bool> = slot_params
+            .iter()
+            .zip(&native_ir_params)
+            .map(|(slot, native)| self.interface_slot_is_word(*slot, native))
+            .collect();
         let mut sig = FunctionSignatureBuilder::new()
             .param("env".to_owned(), IrType::Ptr(Box::new(IrType::U8)))
             .param("this".to_owned(), IrType::Ptr(Box::new(IrType::Void)))
@@ -379,7 +414,9 @@ impl<'a> HirToMirContext<'a> {
         // disagree on whether a plain Int is defaulted by the callee.
         let defaulted = self.interface_slot_defaulted_ints(interface, name);
         for (i, (slot, native)) in slot_params.iter().zip(&native_params).enumerate() {
-            let ty = if defaulted.get(i).copied().unwrap_or(false) {
+            let ty = if param_words[i] {
+                IrType::I64
+            } else if defaulted.get(i).copied().unwrap_or(false) {
                 IrType::NullInt
             } else if self.interface_slot_needs_conversion(*slot, *native)
                 || (native_ir_params[i] == IrType::NullInt
@@ -410,13 +447,19 @@ impl<'a> HirToMirContext<'a> {
                 .map(|i| function.get_param_reg(i))
                 .collect::<Option<Vec<_>>>()?;
             for (i, (slot, native)) in slot_params.iter().zip(&native_params).enumerate() {
-                args[i + 1] = self.adapt_interface_slot_value(args[i + 1], *slot, *native)?;
+                args[i + 1] = if param_words[i] {
+                    self.from_word(args[i + 1], &native_ir_params[i])?
+                } else {
+                    self.adapt_interface_slot_value(args[i + 1], *slot, *native)?
+                };
             }
             let result = self
                 .builder
                 .build_call_direct(method_id, args, native_ir_return.clone());
             let result = if native_ir_return == IrType::Void {
                 None
+            } else if return_word {
+                Some(self.into_word(result?)?)
             } else {
                 Some(self.adapt_interface_slot_value(result?, native_return, slot_return)?)
             };
