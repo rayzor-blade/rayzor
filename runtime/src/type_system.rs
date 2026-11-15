@@ -238,6 +238,8 @@ pub enum ValueTag {
     Array = 13,
     /// Native Int64 bits, boxed as the Haxe two-word integer class.
     Int64 = 14,
+    /// An erased-slot word (`erased_word.rs`), which describes itself.
+    Word = 15,
 }
 
 impl ValueTag {
@@ -256,6 +258,7 @@ impl ValueTag {
             12 => Some(ValueTag::Dynamic),
             13 => Some(ValueTag::Array),
             14 => Some(ValueTag::Int64),
+            15 => Some(ValueTag::Word),
             _ => None,
         }
     }

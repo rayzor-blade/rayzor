@@ -35,6 +35,94 @@ pub const HAXE_ARRAY_BOXED_ELEMS: usize = 4;
 /// The upper bytes describe raw slots exposed through an erased array view.
 pub const HAXE_ARRAY_SLOT_LAYOUT: usize = 8;
 
+/// Bits 56..63: the elements' native kind, as an `erased_array_slot_layout`
+/// code, recorded for erased code that moves words in and out. Compiled
+/// concrete code ignores them.
+pub const HAXE_ARRAY_KIND_SHIFT: u32 = 56;
+pub const HAXE_ARRAY_KIND_MASK: usize = 0xff << HAXE_ARRAY_KIND_SHIFT;
+
+/// Record `kind` as `arr`'s native element kind unless one is set.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_array_mark_elem_kind(arr: *mut HaxeArray, kind: u64) {
+    if arr.is_null() || kind == 0 {
+        return;
+    }
+    unsafe {
+        if (*arr).flags & HAXE_ARRAY_KIND_MASK == 0 {
+            (*arr).flags |= ((kind as usize) & 0xff) << HAXE_ARRAY_KIND_SHIFT;
+        }
+    }
+}
+
+/// The native element kind: recorded, else the erased-view layout's.
+fn elem_kind(array: &HaxeArray) -> u64 {
+    match (array.flags & HAXE_ARRAY_KIND_MASK) >> HAXE_ARRAY_KIND_SHIFT {
+        0 => stored_slot_layout(array).map_or(0, |layout| layout & 0xff),
+        kind => kind as u64,
+    }
+}
+
+/// A native slot as an erased-slot word.
+fn slot_to_word(array: &HaxeArray, bits: i64) -> i64 {
+    use crate::erased_word::*;
+    if array.flags & HAXE_ARRAY_BOXED_ELEMS != 0 {
+        return haxe_word_from_dynamic(bits as *mut u8) as i64;
+    }
+    let null_int = bits == crate::type_system::NULL_INT;
+    (match elem_kind(array) {
+        2 => encode_bool(bits != 0),
+        3 | 8 if null_int => 0,
+        3 | 8 => encode_int(bits as i32),
+        4 => encode_float(f64::from_bits(bits as u64)),
+        9 => crate::type_system::haxe_box_int64_ptr(bits) as u64,
+        _ => bits as u64,
+    }) as i64
+}
+
+/// An erased-slot word as `array`'s native slot. An array with no recorded
+/// kind takes the first scalar word's. Only the raw pointer is used, since
+/// recording the kind writes the header.
+fn word_to_slot(array: *mut HaxeArray, word: i64) -> i64 {
+    use crate::erased_word::*;
+    let word = word as u64;
+    let (boxed, mut kind_code) = unsafe {
+        (
+            (*array).flags & HAXE_ARRAY_BOXED_ELEMS != 0,
+            elem_kind(&*array),
+        )
+    };
+    if boxed {
+        return haxe_word_to_dynamic(word) as i64;
+    }
+    if kind_code == 0 {
+        kind_code = match kind(word) {
+            WordKind::Int => 3,
+            WordKind::Float => 4,
+            WordKind::Bool => 2,
+            WordKind::Reference => 0,
+        };
+        haxe_array_mark_elem_kind(array, kind_code);
+    }
+    match kind_code {
+        2 => i64::from(haxe_word_to_bool(word)),
+        3 => i64::from(haxe_word_to_int(word)),
+        8 if word == 0 => crate::type_system::NULL_INT,
+        8 => i64::from(haxe_word_to_int(word)),
+        4 => haxe_word_to_float(word).to_bits() as i64,
+        9 => crate::type_system::haxe_unbox_int_ptr(word as *mut u8),
+        _ => word as i64,
+    }
+}
+
+/// `bits` as `arr`'s slot for a write tagged `tag`.
+fn encode_slot(arr: *mut HaxeArray, bits: i64, tag: i32, metadata: u64) -> i64 {
+    if tag == crate::type_system::ValueTag::Word as i32 {
+        word_to_slot(arr, bits)
+    } else {
+        encode_typed_array_slot(unsafe { &*arr }, bits, tag, metadata)
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_init_element_tag(arr: *mut HaxeArray, tag: i32) {
     if !arr.is_null() && tag == crate::type_system::ValueTag::Dynamic as i32 {
@@ -61,7 +149,7 @@ pub(crate) fn stored_slot_layout(array: &HaxeArray) -> Option<u64> {
     if array.flags & HAXE_ARRAY_BOXED_ELEMS != 0 {
         Some(0)
     } else if array.flags & HAXE_ARRAY_SLOT_LAYOUT != 0 {
-        Some((array.flags >> 8) as u64)
+        Some(((array.flags & !HAXE_ARRAY_KIND_MASK) >> 8) as u64)
     } else if array.flags & (HAXE_ARRAY_INT_ELEMS | HAXE_ARRAY_VIEW) != 0 {
         Some(3)
     } else {
@@ -94,6 +182,9 @@ pub extern "C" fn haxe_array_get_typed(arr: *const HaxeArray, index: i64, tag: i
             };
         }
         let bits = ptr::read_unaligned(array.ptr.add(index as usize * 8).cast::<i64>());
+        if tag == ValueTag::Word as i32 {
+            return slot_to_word(array, bits);
+        }
         if tag == ValueTag::Unresolved as i32 {
             return if array.flags & HAXE_ARRAY_BOXED_ELEMS != 0 {
                 haxe_unbox_erased_return(bits as *mut u8)
@@ -176,7 +267,7 @@ pub extern "C" fn haxe_array_set_typed(
     if arr.is_null() {
         return false;
     }
-    let value = encode_typed_array_slot(unsafe { &*arr }, bits, tag, metadata);
+    let value = encode_slot(arr, bits, tag, metadata);
     if tag == crate::type_system::ValueTag::NullInt as i32
         && unsafe { (*arr).flags & HAXE_ARRAY_BOXED_ELEMS == 0 }
     {
@@ -199,7 +290,7 @@ pub extern "C" fn haxe_array_push_typed(
     if arr.is_null() {
         return 0;
     }
-    let value = encode_typed_array_slot(unsafe { &*arr }, bits, tag, metadata);
+    let value = encode_slot(arr, bits, tag, metadata);
     haxe_array_push_i64(arr, value);
     unsafe { (*arr).len as i32 }
 }
@@ -235,7 +326,7 @@ pub extern "C" fn haxe_array_unshift_typed(
     if arr.is_null() {
         return;
     }
-    let value = encode_typed_array_slot(unsafe { &*arr }, bits, tag, metadata);
+    let value = encode_slot(arr, bits, tag, metadata);
     haxe_array_unshift(arr, value);
 }
 
@@ -250,7 +341,7 @@ pub extern "C" fn haxe_array_insert_typed(
     if arr.is_null() {
         return;
     }
-    let value = encode_typed_array_slot(unsafe { &*arr }, bits, tag, metadata);
+    let value = encode_slot(arr, bits, tag, metadata);
     haxe_array_insert(arr, index, (&value as *const i64).cast());
 }
 
@@ -2469,6 +2560,34 @@ mod shared_array_layout_tests {
         assert_eq!(boxed_array_slot_layout(boxed_array), Some(0));
         assert_eq!(haxe_array_get_erased(boxed_array, 0, 1), 7);
         haxe_array_free(&mut array);
+    }
+
+    #[test]
+    fn word_accessors_keep_native_storage() {
+        use crate::erased_word::*;
+        let word = ValueTag::Word as i32;
+        let mut floats = array();
+        haxe_array_push_typed(&mut floats, encode_float(0.25) as i64, word, 0);
+        haxe_array_unshift_typed(&mut floats, encode_float(2.5) as i64, word, 0);
+        assert_eq!(elem_kind(&floats), 4);
+        let slot = unsafe { ptr::read_unaligned(floats.ptr.cast::<f64>()) };
+        assert_eq!(slot, 2.5);
+        assert_eq!(
+            haxe_array_get_typed(&floats, 1, word),
+            encode_float(0.25) as i64
+        );
+        assert_eq!(
+            haxe_array_take_typed(&mut floats, true, word),
+            encode_float(0.25) as i64
+        );
+        haxe_array_free(&mut floats);
+
+        let mut ints = array();
+        haxe_array_push_typed(&mut ints, encode_int(-4) as i64, word, 0);
+        let slot = unsafe { ptr::read_unaligned(ints.ptr.cast::<i64>()) };
+        assert_eq!(slot, -4);
+        assert_eq!(haxe_array_get_typed(&ints, 0, word), encode_int(-4) as i64);
+        haxe_array_free(&mut ints);
     }
 
     #[test]
