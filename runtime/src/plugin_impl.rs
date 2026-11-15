@@ -2040,6 +2040,26 @@ register_symbol!(
 register_symbol!("haxe_reflect_field", crate::reflect::haxe_reflect_field);
 register_symbol!("haxe_dynamic_field", crate::reflect::haxe_dynamic_field);
 register_symbol!("haxe_unbox_if_tag", crate::type_system::haxe_unbox_if_tag);
+register_symbol!(
+    "haxe_word_from_dynamic",
+    crate::erased_word::haxe_word_from_dynamic
+);
+register_symbol!(
+    "haxe_word_to_dynamic",
+    crate::erased_word::haxe_word_to_dynamic
+);
+register_symbol!("haxe_word_from_int", crate::erased_word::haxe_word_from_int);
+register_symbol!(
+    "haxe_word_from_float",
+    crate::erased_word::haxe_word_from_float
+);
+register_symbol!(
+    "haxe_word_from_bool",
+    crate::erased_word::haxe_word_from_bool
+);
+register_symbol!("haxe_word_to_int", crate::erased_word::haxe_word_to_int);
+register_symbol!("haxe_word_to_float", crate::erased_word::haxe_word_to_float);
+register_symbol!("haxe_word_to_bool", crate::erased_word::haxe_word_to_bool);
 register_symbol!("haxe_dynamic_tag", crate::type_system::haxe_dynamic_tag);
 register_symbol!(
     "haxe_iter_handle_from_dynamic",

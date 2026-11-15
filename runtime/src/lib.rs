@@ -45,6 +45,7 @@ pub mod generic_vec;
 pub mod anon_object; // Anonymous object runtime (Arc-based, COW)
 pub mod compress; // DEFLATE compression/decompression (haxe.zip.Compress/Uncompress)
 pub mod concurrency; // Concurrency primitives (Thread, Arc, Mutex, Channel)
+pub mod erased_word; // The self-describing word an erased generic slot holds
 pub mod ereg; // EReg regular expressions (regex crate)
 pub mod exception;
 pub mod fiber; // Stackful fibers for Haxe coroutines
