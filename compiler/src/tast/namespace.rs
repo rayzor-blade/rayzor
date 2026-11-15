@@ -263,13 +263,13 @@ impl NamespaceResolver {
         let file_path = qualified_path.replace('.', "/") + ".hx";
         for source_path in &self.source_paths {
             let full_path = source_path.join(&file_path);
-            if full_path.exists() && self.is_file_loaded(&full_path) {
+            if module_file_exists(source_path, &file_path) && self.is_file_loaded(&full_path) {
                 return true;
             }
         }
         for stdlib_path in &self.stdlib_paths {
             let full_path = stdlib_path.join(&file_path);
-            if full_path.exists() && self.is_file_loaded(&full_path) {
+            if module_file_exists(stdlib_path, &file_path) && self.is_file_loaded(&full_path) {
                 return true;
             }
         }
@@ -299,7 +299,7 @@ impl NamespaceResolver {
         // First check source paths (user workspace)
         for source_path in &self.source_paths {
             let full_path = source_path.join(&file_path);
-            if full_path.exists() {
+            if module_file_exists(source_path, &file_path) {
                 if check_loaded && self.is_file_loaded(&full_path) {
                     // Already loaded from cache - skip
                     return None;
@@ -311,7 +311,7 @@ impl NamespaceResolver {
         // Then check stdlib paths
         for stdlib_path in &self.stdlib_paths {
             let full_path = stdlib_path.join(&file_path);
-            if full_path.exists() {
+            if module_file_exists(stdlib_path, &file_path) {
                 if check_loaded && self.is_file_loaded(&full_path) {
                     // Already loaded from cache - skip
                     return None;
@@ -343,7 +343,7 @@ impl NamespaceResolver {
                 let all_paths = self.source_paths.iter().chain(self.stdlib_paths.iter());
                 for base in all_paths {
                     let full_path = base.join(&module_path);
-                    if full_path.exists() {
+                    if module_file_exists(base, &module_path) {
                         if let Ok(content) = std::fs::read_to_string(&full_path) {
                             let declares = Self::declaring_keyword(&content, sub_type).is_some();
                             if declares {
@@ -396,8 +396,8 @@ impl NamespaceResolver {
         self.source_paths
             .iter()
             .chain(self.stdlib_paths.iter())
+            .find(|base| module_file_exists(base, &file_path))
             .map(|base| base.join(&file_path))
-            .find(|path| path.exists())
             .and_then(|file| std::fs::read_to_string(file).ok())
             .map(|content| Self::top_level_class_names(&content))
             .unwrap_or_default()
@@ -621,6 +621,40 @@ impl NamespaceResolver {
     }
 }
 
+/// `base/rel` exists with every component of `rel` spelled as on disk. A
+/// case-insensitive filesystem would otherwise give `MOTION.hx` for `Motion.hx`,
+/// where Haxe resolves modules case-sensitively.
+fn module_file_exists(base: &std::path::Path, rel: &str) -> bool {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Mutex;
+    static LISTINGS: Mutex<BTreeMap<PathBuf, Option<BTreeSet<std::ffi::OsString>>>> =
+        Mutex::new(BTreeMap::new());
+    if !base.join(rel).exists() {
+        return false;
+    }
+    let mut dir = base.to_path_buf();
+    for part in rel.split('/').filter(|p| !p.is_empty()) {
+        let listed = {
+            let mut cache = LISTINGS.lock().unwrap_or_else(|e| e.into_inner());
+            cache
+                .entry(dir.clone())
+                .or_insert_with(|| {
+                    std::fs::read_dir(&dir)
+                        .ok()
+                        .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+                })
+                .as_ref()
+                .map(|names| names.contains(std::ffi::OsStr::new(part)))
+        };
+        // An unreadable directory keeps the plain existence answer.
+        if listed == Some(false) {
+            return false;
+        }
+        dir.push(part);
+    }
+    true
+}
+
 /// Import resolver for managing import visibility and precedence
 pub struct ImportResolver {
     /// Imports organized by scope
@@ -730,6 +764,21 @@ impl ImportResolver {
 mod tests {
     use super::*;
     use crate::tast::StringInterner;
+
+    #[test]
+    fn module_files_match_case_exactly() {
+        let dir = std::env::temp_dir().join(format!("rz-case-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("pkg")).unwrap();
+        std::fs::write(dir.join("Motion.hx"), "class Motion {}").unwrap();
+        std::fs::write(dir.join("pkg/Css.hx"), "class Css {}").unwrap();
+        assert!(module_file_exists(&dir, "Motion.hx"));
+        assert!(module_file_exists(&dir, "pkg/Css.hx"));
+        assert!(!module_file_exists(&dir, "MOTION.hx"));
+        assert!(!module_file_exists(&dir, "PKG/Css.hx"));
+        assert!(!module_file_exists(&dir, "pkg/CSS.hx"));
+        std::fs::remove_file(dir.join("Motion.hx")).ok();
+        std::fs::remove_file(dir.join("pkg/Css.hx")).ok();
+    }
 
     #[test]
     fn test_package_hierarchy() {
