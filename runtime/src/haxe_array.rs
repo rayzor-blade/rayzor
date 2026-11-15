@@ -92,12 +92,17 @@ fn apply_kind_hint(array: *mut HaxeArray, tag: i32) {
 
 /// A native slot as an erased-slot word.
 fn slot_to_word(array: &HaxeArray, bits: i64) -> i64 {
-    use crate::erased_word::*;
     if array.flags & HAXE_ARRAY_BOXED_ELEMS != 0 {
-        return haxe_word_from_dynamic(bits as *mut u8) as i64;
+        return crate::erased_word::haxe_word_from_dynamic(bits as *mut u8) as i64;
     }
+    slot_word_of_kind(bits, elem_kind(array))
+}
+
+/// A native slot of element kind `kind` as a word; a reference is itself.
+fn slot_word_of_kind(bits: i64, elem: u64) -> i64 {
+    use crate::erased_word::*;
     let null_int = bits == crate::type_system::NULL_INT;
-    (match elem_kind(array) {
+    (match elem {
         2 => encode_bool(bits != 0),
         3 | 8 if null_int => 0,
         3 | 8 => encode_int(bits as i32),
@@ -2381,7 +2386,11 @@ pub extern "C" fn haxe_array_get_erased(array: *mut u8, index: i64, target: i32)
     if array.is_null() || index < 0 {
         return 0;
     }
+    let word = crate::erased_word::is_word_tag(target);
     if let Some(value) = crate::generic_vec::get_erased_vector(array, index as usize) {
+        if word {
+            return crate::erased_word::haxe_word_from_dynamic(value);
+        }
         return match target {
             1 => haxe_coerce_dynamic_to_int(value) as u64,
             2 => haxe_coerce_dynamic_to_float(value).to_bits(),
@@ -2410,6 +2419,9 @@ pub extern "C" fn haxe_array_get_erased(array: *mut u8, index: i64, target: i32)
             return 0;
         }
         if let Some(value) = crate::haxe_sys::bytes_data_get(array, index as usize) {
+            if word {
+                return crate::erased_word::encode_int(value as i32);
+            }
             return if target == 0 {
                 haxe_box_int_ptr(value) as u64
             } else {
@@ -2417,6 +2429,25 @@ pub extern "C" fn haxe_array_get_erased(array: *mut u8, index: i64, target: i32)
             };
         }
         let value = std::ptr::read_unaligned(array.ptr.add(index as usize * 8) as *const u64);
+        // A word target reads the slot as a word. Through a Dynamic box the
+        // reader is Dynamic, so a reference element comes back in its box,
+        // as the box's layout makes it.
+        if word {
+            let own = elem_kind(array);
+            let kind = if own == 0 && boxed {
+                slot_layout & 0xff
+            } else {
+                own
+            };
+            if boxed && matches!(kind, 5..=7) {
+                let value = box_erased_array_slot(value, slot_layout);
+                return crate::erased_word::haxe_word_from_dynamic(value);
+            }
+            if array.flags & HAXE_ARRAY_BOXED_ELEMS != 0 {
+                return slot_to_word(array, value as i64) as u64;
+            }
+            return slot_word_of_kind(value as i64, kind) as u64;
+        }
         let slot_layout = stored_slot_layout(array).or_else(|| boxed.then_some(slot_layout));
         let Some(slot_layout) = slot_layout else {
             return value;
