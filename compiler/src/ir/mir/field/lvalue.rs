@@ -1330,8 +1330,7 @@ impl<'a> HirToMirContext<'a> {
             let len = self.builder.build_array_header(obj, ArrayField::Len)?;
             let below_len = self.builder.build_cmp(CompareOp::ULt, idx64, len)?;
             let flags = self.builder.build_array_header(obj, ArrayField::Flags)?;
-            let zero = self.builder.build_const(IrValue::I64(0))?;
-            let plain = self.builder.build_cmp(CompareOp::Eq, flags, zero)?;
+            let plain = self.array_is_plain(flags, element_ty)?;
             self.builder.build_binop(BinaryOp::And, below_len, plain)
         })();
         let (Some(in_bounds), Some(fast), Some(slow), Some(merge)) = (

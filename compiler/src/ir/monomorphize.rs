@@ -593,7 +593,7 @@ impl Monomorphizer {
         let mut regs = super::erased_word::Regs::new(function);
         for (id, returned) in returns {
             let mut out = Vec::new();
-            let value = if super::erased_word::is_word_scalar(&ty) {
+            let value = if super::erased_word::is_word_scalar(&ty) || ty == IrType::dynamic_ptr() {
                 regs.decode(self.word_decoders.as_ref(), &mut out, returned, &ty)
             } else {
                 let dest = regs.function().alloc_reg();

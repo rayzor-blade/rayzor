@@ -36,6 +36,14 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn array_element_descriptor(&mut self, ty: TypeId) -> Option<(IrId, IrId)> {
+        // A word describes itself; the tag is not a type-parameter fixup.
+        if self.array_element_is_word(ty) {
+            let word = rayzor_runtime::type_system::ValueTag::Word as i32;
+            return Some((
+                self.builder.build_const(IrValue::I32(word))?,
+                self.builder.build_const(IrValue::U64(0))?,
+            ));
+        }
         if let Some(name) = self.resolve_type_param_name(ty)
             && self.current_type_param_names().contains(&name)
         {

@@ -25,6 +25,7 @@ pub(crate) fn is_word_scalar(ty: &IrType) -> bool {
 pub(crate) struct Decoders {
     to_float: IrFunctionId,
     to_bool: IrFunctionId,
+    to_dynamic: IrFunctionId,
 }
 
 impl Decoders {
@@ -34,6 +35,7 @@ impl Decoders {
         crate::debug_flags::erased_words().then(|| Self {
             to_float: extern_fn(module, "haxe_word_to_float", IrType::F64),
             to_bool: extern_fn(module, "haxe_word_to_bool", IrType::Bool),
+            to_dynamic: extern_fn(module, "haxe_word_to_dynamic", IrType::dynamic_ptr()),
         })
     }
 }
@@ -225,6 +227,16 @@ impl<'f> Regs<'f> {
                     value
                 }
             }
+            // A scalar word boxes; a reference is its own Dynamic.
+            _ if *ty == IrType::dynamic_ptr() && words => {
+                let func_id = decoders
+                    .expect("declared with RAYZOR_ERASED_WORDS")
+                    .to_dynamic;
+                let value = self.fresh(ty.clone());
+                out.push(call(value, func_id, word));
+                value
+            }
+            _ if *ty == IrType::dynamic_ptr() => self.cast(out, word, &IrType::I64, ty),
             IrType::Bool => {
                 let func_id = decoders.expect("declared with RAYZOR_ERASED_WORDS").to_bool;
                 let value = self.fresh(IrType::Bool);

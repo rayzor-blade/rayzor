@@ -10,6 +10,38 @@ use super::*;
 use crate::ir::erased_word::{self, CANONICAL_NAN, DOUBLE_OFFSET, FALSE_WORD, INT_TAG};
 
 impl<'a> HirToMirContext<'a> {
+    /// Whether elements of type `ty` move as words: a type parameter of the
+    /// function being lowered, under `RAYZOR_ERASED_WORDS`.
+    pub(crate) fn array_element_is_word(&self, ty: TypeId) -> bool {
+        crate::debug_flags::erased_words()
+            && self
+                .resolve_type_param_name(ty)
+                .is_some_and(|name| self.current_type_param_names().contains(&name))
+    }
+
+    /// Whether an array whose header `flags` were read may be accessed
+    /// inline. Under `RAYZOR_ERASED_WORDS` the element-kind bits do not
+    /// count, and word elements never are.
+    pub(crate) fn array_is_plain(
+        &mut self,
+        flags: IrId,
+        element_ty: Option<TypeId>,
+    ) -> Option<IrId> {
+        if element_ty.is_some_and(|ty| self.array_element_is_word(ty)) {
+            return self.builder.build_const(IrValue::Bool(false));
+        }
+        let flags = if crate::debug_flags::erased_words() {
+            let mask = self.builder.build_const(IrValue::I64(
+                !(rayzor_runtime::haxe_array::HAXE_ARRAY_KIND_MASK as i64),
+            ))?;
+            self.builder.build_binop(BinaryOp::And, flags, mask)?
+        } else {
+            flags
+        };
+        let zero = self.builder.build_const(IrValue::I64(0))?;
+        self.builder.build_cmp(CompareOp::Eq, flags, zero)
+    }
+
     /// Whether `field` is declared at a type parameter: an erased slot.
     pub(crate) fn field_is_erased(&self, field: SymbolId) -> bool {
         let ty = self.symbol_table.get_symbol(field).map(|s| s.type_id);

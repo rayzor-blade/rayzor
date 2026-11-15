@@ -1529,8 +1529,7 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder.switch_to_block(read_block);
         let flags = self.builder.build_array_header(obj, ArrayField::Flags)?;
-        let zero_flags = self.builder.build_const(IrValue::I64(0))?;
-        let plain = self.builder.build_cmp(CompareOp::Eq, flags, zero_flags)?;
+        let plain = self.array_is_plain(flags, Some(ty))?;
         let fast_block = self.builder.create_block()?;
         let slow_block = self.builder.create_block()?;
         self.builder
@@ -1570,7 +1569,9 @@ impl<'a> HirToMirContext<'a> {
             .add_phi_incoming(merge, value, oob_exit, zero)?;
 
         let semantic_type = self.convert_type_or_type_var(ty, &self.current_type_param_names());
-        if matches!(semantic_type, IrType::TypeVar(_)) {
+        // A word stays an i64 slot; specialization decodes it, a bitcast to the
+        // type variable would reinterpret it.
+        if matches!(semantic_type, IrType::TypeVar(_)) && !self.array_element_is_word(ty) {
             return self.builder.build_bitcast(value, semantic_type);
         }
         let value = if load_type != target_type {

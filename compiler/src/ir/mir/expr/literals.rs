@@ -274,6 +274,27 @@ impl<'a> HirToMirContext<'a> {
             self.init_array_element_layout(array_ptr, array_type)?;
         }
 
+        // Word elements are pushed as words, which the runtime stores in
+        // their native form.
+        if element_count > 0 && element_type_id.is_some_and(|ty| self.array_element_is_word(ty)) {
+            let ptr = IrType::Ptr(Box::new(IrType::U8));
+            let push = self.get_or_register_extern_function(
+                "haxe_array_push_typed",
+                vec![ptr.clone(), IrType::I64, IrType::I32, IrType::U64],
+                IrType::I32,
+            );
+            let array = self.coerce_reg_to(array_ptr, &ptr)?;
+            for elem in elements {
+                let value = self.lower_expression(elem)?;
+                let word = self.into_word(value)?;
+                let word = self.coerce_reg_to(word, &IrType::I64)?;
+                let (tag, metadata) = self.array_element_descriptor(element_type_id?)?;
+                self.builder
+                    .build_call_direct(push, vec![array, word, tag, metadata], IrType::I32);
+            }
+            return Some(array_ptr);
+        }
+
         // For non-empty arrays, push each element using the appropriate
         // typed runtime function. This avoids cross-type bitcasts that lose
         // precision on WASM32 (where IrType::I64 lowers to WASM i32).
