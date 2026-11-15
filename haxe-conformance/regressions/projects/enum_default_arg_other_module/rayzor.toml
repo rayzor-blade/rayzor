@@ -1,0 +1,5 @@
+[project]
+name = "enum-default-arg-other-module"
+entry = "src/Main.hx"
+[build]
+class-paths = ["src"]

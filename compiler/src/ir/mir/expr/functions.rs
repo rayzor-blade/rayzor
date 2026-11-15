@@ -400,7 +400,7 @@ impl<'a> HirToMirContext<'a> {
                 {
                     self.bind_defaulted_int_param(param, sig_param.reg)
                 } else {
-                    sig_param.reg
+                    self.bind_defaulted_ref_param(hir_func, param, sig_param.reg)
                 };
                 self.symbol_map.insert(param.symbol_id, reg);
                 let _ = self.box_capture_binding(param.symbol_id, reg);

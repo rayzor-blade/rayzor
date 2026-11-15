@@ -310,6 +310,72 @@ impl<'a> HirToMirContext<'a> {
         .unwrap_or(reg)
     }
 
+    /// A pointer-typed parameter with a non-null default takes the default
+    /// when its argument is null, as Haxe does in the callee: a caller in
+    /// another module that cannot evaluate the default passes null.
+    pub(crate) fn bind_defaulted_ref_param(
+        &mut self,
+        func: &HirFunction,
+        param: &HirParam,
+        reg: IrId,
+    ) -> IrId {
+        let Some(default) = param.default.as_ref() else {
+            return reg;
+        };
+        if func.is_async || func.body.is_none() || matches!(default.kind, HirExprKind::Null) {
+            return reg;
+        }
+        // Only a reference whose default is of its own representation: a
+        // `Null<scalar>` or Dynamic slot boxes its default elsewhere.
+        if !matches!(
+            self.type_table.get(param.ty).map(|t| &t.kind),
+            Some(
+                TypeKind::Class { .. }
+                    | TypeKind::Enum { .. }
+                    | TypeKind::String
+                    | TypeKind::Array { .. }
+            )
+        ) {
+            return reg;
+        }
+        // A payload enum is its cell pointer in an i64; a tag-only one's 0 is
+        // its first constructor, not null.
+        let payload_enum =
+            self.resolve_enum_symbol(param.ty).is_some() && !self.is_tag_only_enum_type(param.ty);
+        let ty = match self.builder.get_register_type(reg) {
+            Some(ty @ (IrType::Ptr(_) | IrType::String)) => ty,
+            Some(IrType::I64) if payload_enum => IrType::I64,
+            _ => return reg,
+        };
+        (|| {
+            let null = if ty == IrType::I64 {
+                self.builder.build_const(IrValue::I64(0))?
+            } else {
+                let null = self.builder.build_const(IrValue::Null)?;
+                self.builder.build_bitcast(null, ty.clone())?
+            };
+            let is_null = self.builder.build_cmp(CompareOp::Eq, reg, null)?;
+            let value_block = self.builder.current_block()?;
+            let use_default = self.builder.create_block()?;
+            let merge = self.builder.create_block()?;
+            self.builder
+                .build_cond_branch(is_null, use_default, merge)?;
+            self.builder.switch_to_block(use_default);
+            let fallback = self.lower_expression(default)?;
+            let fallback = self.coerce_reg_to(fallback, &ty)?;
+            let default_block = self.builder.current_block()?;
+            self.builder.build_branch(merge)?;
+            self.builder.switch_to_block(merge);
+            let result = self.builder.build_phi(merge, ty.clone())?;
+            self.builder
+                .add_phi_incoming(merge, result, value_block, reg)?;
+            self.builder
+                .add_phi_incoming(merge, result, default_block, fallback)?;
+            Some(result)
+        })()
+        .unwrap_or(reg)
+    }
+
     /// Place supplied arguments in the parameters they can actually occupy,
     /// filling any LEADING optional the caller skipped.
     ///
