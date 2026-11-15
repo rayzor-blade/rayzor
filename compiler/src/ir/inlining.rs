@@ -798,7 +798,7 @@ impl InliningPass {
                         for inst in &mut block.instructions {
                             if let IrInstruction::Const { dest, value } = inst {
                                 if *dest == *mapped_reg {
-                                    *value = IrValue::I32(type_tag);
+                                    *value = super::erased_word::resolve_tag_fixup(value, type_tag);
                                 }
                             }
                         }

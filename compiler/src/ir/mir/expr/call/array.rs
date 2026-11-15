@@ -36,13 +36,13 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn array_element_descriptor(&mut self, ty: TypeId) -> Option<(IrId, IrId)> {
-        // A word describes itself; the tag is not a type-parameter fixup.
-        if self.array_element_is_word(ty) {
+        // A word describes itself. Its tag is still a type-parameter fixup,
+        // which specialization resolves into the element-kind hint.
+        if self.array_element_is_word(ty)
+            && let Some(name) = self.resolve_type_param_name(ty)
+        {
             let word = rayzor_runtime::type_system::ValueTag::Word as i32;
-            return Some((
-                self.builder.build_const(IrValue::I32(word))?,
-                self.builder.build_const(IrValue::U64(0))?,
-            ));
+            return self.type_param_value_descriptor(name, word);
         }
         if let Some(name) = self.resolve_type_param_name(ty)
             && self.current_type_param_names().contains(&name)

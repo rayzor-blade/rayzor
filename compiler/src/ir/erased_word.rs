@@ -15,6 +15,16 @@ pub(crate) const DOUBLE_OFFSET: i64 = 1 << 49;
 pub(crate) const FALSE_WORD: i64 = 0x06;
 pub(crate) const CANONICAL_NAN: i64 = 0x7FF8_0000_0000_0000;
 
+/// A type-parameter tag fixup resolved to `tag`: a word tag keeps its marker
+/// and carries `tag` as the element-kind hint in bits 8..15.
+pub(crate) fn resolve_tag_fixup(current: &IrValue, tag: i32) -> IrValue {
+    let word = rayzor_runtime::type_system::ValueTag::Word as i32;
+    match current {
+        IrValue::I32(old) if old & 0xff == word => IrValue::I32(word | (tag & 0xff) << 8),
+        _ => IrValue::I32(tag),
+    }
+}
+
 /// Whether `ty` is a scalar an erased slot holds encoded.
 pub(crate) fn is_word_scalar(ty: &IrType) -> bool {
     matches!(ty, IrType::F64 | IrType::F32 | IrType::I32 | IrType::Bool)

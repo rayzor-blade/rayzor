@@ -625,42 +625,57 @@ impl Monomorphizer {
             .iter()
             .filter(|(_, parameter)| parameter == name)
             .all(|(tag, _)| {
-                function.cfg.blocks.values().any(|block| {
-                    block
-                        .instructions
-                        .iter()
-                        .any(|instruction| instruction.uses().contains(tag))
-                }) && function.cfg.blocks.values().all(|block| {
-                    block.instructions.iter().all(|instruction| {
-                        if !instruction.uses().contains(tag) {
-                            return true;
-                        }
-                        let IrInstruction::CallDirect { func_id, args, .. } = instruction else {
-                            return false;
-                        };
-                        let callee = module
-                            .extern_functions
-                            .get(func_id)
-                            .map(|function| function.name.as_str())
-                            .or_else(|| {
-                                module
-                                    .functions
-                                    .get(func_id)
-                                    .map(|function| function.name.as_str())
-                            });
-                        callee.is_some_and(|callee| match callee {
-                            "haxe_array_init_element_tag" | "haxe_unbox_generic_return" => {
-                                args.get(1) == Some(tag)
+                // A word access's tag carries the element-kind hint only a
+                // specialization can supply.
+                let word = rayzor_runtime::type_system::ValueTag::Word as i32;
+                let word_tag = function.cfg.blocks.values().any(|block| {
+                    block.instructions.iter().any(|instruction| {
+                        matches!(
+                            instruction,
+                            IrInstruction::Const { dest, value: IrValue::I32(v) }
+                                if dest == tag && v & 0xff == word
+                        )
+                    })
+                });
+                !word_tag
+                    && function.cfg.blocks.values().any(|block| {
+                        block
+                            .instructions
+                            .iter()
+                            .any(|instruction| instruction.uses().contains(tag))
+                    })
+                    && function.cfg.blocks.values().all(|block| {
+                        block.instructions.iter().all(|instruction| {
+                            if !instruction.uses().contains(tag) {
+                                return true;
                             }
-                            "haxe_array_get_typed" => args.get(2) == Some(tag),
-                            "haxe_array_push_typed" => args.get(2) == Some(tag),
-                            "haxe_adapt_generic_value" => {
-                                args.get(1) == Some(tag) || args.get(2) == Some(tag)
-                            }
-                            _ => false,
+                            let IrInstruction::CallDirect { func_id, args, .. } = instruction
+                            else {
+                                return false;
+                            };
+                            let callee = module
+                                .extern_functions
+                                .get(func_id)
+                                .map(|function| function.name.as_str())
+                                .or_else(|| {
+                                    module
+                                        .functions
+                                        .get(func_id)
+                                        .map(|function| function.name.as_str())
+                                });
+                            callee.is_some_and(|callee| match callee {
+                                "haxe_array_init_element_tag" | "haxe_unbox_generic_return" => {
+                                    args.get(1) == Some(tag)
+                                }
+                                "haxe_array_get_typed" => args.get(2) == Some(tag),
+                                "haxe_array_push_typed" => args.get(2) == Some(tag),
+                                "haxe_adapt_generic_value" => {
+                                    args.get(1) == Some(tag) || args.get(2) == Some(tag)
+                                }
+                                _ => false,
+                            })
                         })
                     })
-                })
             })
     }
 
@@ -1155,7 +1170,7 @@ impl Monomorphizer {
                 for inst in block.instructions.iter_mut() {
                     if let IrInstruction::Const { dest, value } = inst {
                         if *dest == *reg_id {
-                            *value = IrValue::I32(type_tag);
+                            *value = super::erased_word::resolve_tag_fixup(value, type_tag);
                         }
                     }
                 }
