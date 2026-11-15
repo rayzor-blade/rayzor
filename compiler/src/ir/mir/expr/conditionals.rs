@@ -30,17 +30,26 @@ impl<'a> HirToMirContext<'a> {
         result: Option<TypeId>,
         other: &IrType,
     ) -> Option<IrId> {
+        // A payload enum or a function value is a pointer in either register
+        // type; only a Dynamic result takes it boxed.
+        let dynamic_result = result.is_none_or(|r| {
+            matches!(
+                self.type_table
+                    .get(self.resolve_through_aliases(r))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            )
+        });
+        let is_function = matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::Function { .. })
+        );
+        if is_function && !dynamic_result {
+            return self.builder.build_bitcast(value, other.clone());
+        }
         if self.resolve_enum_symbol(ty).is_some() {
-            // A payload enum is its cell pointer in either register type; only
-            // a Dynamic result takes it boxed.
-            let dynamic_result = result.is_none_or(|r| {
-                matches!(
-                    self.type_table
-                        .get(self.resolve_through_aliases(r))
-                        .map(|t| &t.kind),
-                    Some(TypeKind::Dynamic)
-                )
-            });
             if !dynamic_result && !self.is_tag_only_enum_type(ty) {
                 return self.builder.build_bitcast(value, other.clone());
             }
