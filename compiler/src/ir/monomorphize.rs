@@ -136,6 +136,9 @@ pub struct Monomorphizer {
 
     /// Statistics
     stats: MonomorphizationStats,
+
+    /// Word decoders for erased returns, declared per module.
+    word_decoders: Option<super::erased_word::Decoders>,
 }
 
 impl Monomorphizer {
@@ -147,6 +150,7 @@ impl Monomorphizer {
             instantiation_sub_maps: BTreeMap::new(),
             pending_transitive_funcs: Vec::new(),
             stats: MonomorphizationStats::default(),
+            word_decoders: None,
         }
     }
 
@@ -203,6 +207,7 @@ impl Monomorphizer {
         if generic_funcs.is_empty() {
             return; // No generic functions to monomorphize
         }
+        self.word_decoders = super::erased_word::Decoders::declare(module);
 
         // Phase 2: Collect all instantiation requests
         let instantiation_requests = self.collect_instantiation_requests(module, &generic_funcs);
@@ -572,34 +577,38 @@ impl Monomorphizer {
         ) {
             return;
         }
-        let blocks: Vec<_> = function.cfg.blocks.keys().copied().collect();
-        for id in blocks {
-            let returned = match function.cfg.blocks.get(&id).map(|b| &b.terminator) {
-                Some(IrTerminator::Return { value: Some(value) }) => *value,
-                _ => continue,
-            };
-            if function.register_types.get(&returned) != Some(&IrType::I64) {
-                continue;
-            }
-            let dest = function.alloc_reg();
-            function.register_types.insert(dest, ty.clone());
-            let instruction = if matches!(ty, IrType::F64 | IrType::F32) {
-                IrInstruction::BitCast {
-                    dest,
-                    src: returned,
-                    ty: ty.clone(),
+        let returns: Vec<_> = function
+            .cfg
+            .blocks
+            .iter()
+            .filter_map(|(id, block)| match &block.terminator {
+                IrTerminator::Return { value: Some(value) }
+                    if function.register_types.get(value) == Some(&IrType::I64) =>
+                {
+                    Some((*id, *value))
                 }
+                _ => None,
+            })
+            .collect();
+        let mut regs = super::erased_word::Regs::new(function);
+        for (id, returned) in returns {
+            let mut out = Vec::new();
+            let value = if super::erased_word::is_word_scalar(&ty) {
+                regs.decode(self.word_decoders.as_ref(), &mut out, returned, &ty)
             } else {
-                IrInstruction::Cast {
+                let dest = regs.function().alloc_reg();
+                regs.function().register_types.insert(dest, ty.clone());
+                out.push(IrInstruction::Cast {
                     dest,
                     src: returned,
                     from_ty: IrType::I64,
                     to_ty: ty.clone(),
-                }
+                });
+                dest
             };
-            if let Some(block) = function.cfg.blocks.get_mut(&id) {
-                block.instructions.push(instruction);
-                block.terminator = IrTerminator::Return { value: Some(dest) };
+            if let Some(block) = regs.function().cfg.blocks.get_mut(&id) {
+                block.instructions.extend(out);
+                block.terminator = IrTerminator::Return { value: Some(value) };
             }
         }
     }

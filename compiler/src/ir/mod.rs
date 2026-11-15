@@ -24,6 +24,7 @@ pub mod devirtualize; // Devirtualization: indirect → direct calls
 pub mod dump; // MIR pretty-printer for debugging
 pub mod environment_layout; // Closure environment layout abstraction
 pub mod erased_census; // RAYZOR_ERASED_CENSUS report
+pub(crate) mod erased_word;
 pub mod escape_analysis; // Intra-loop escape analysis for Alloc hoisting
 pub mod free_graph; // What the free-insertion pass decided, for inspection
 pub mod functions;

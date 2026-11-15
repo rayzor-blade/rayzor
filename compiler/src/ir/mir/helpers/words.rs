@@ -7,10 +7,7 @@
 
 use super::*;
 
-const INT_TAG: i64 = 0xFFFE_0000_0000_0000_u64 as i64;
-const DOUBLE_OFFSET: i64 = 1 << 49;
-const FALSE_WORD: i64 = 0x06;
-const CANONICAL_NAN: i64 = 0x7FF8_0000_0000_0000;
+use crate::ir::erased_word::{self, CANONICAL_NAN, DOUBLE_OFFSET, FALSE_WORD, INT_TAG};
 
 impl<'a> HirToMirContext<'a> {
     /// `value` as the i64 an erased slot holds. A register that already is a
@@ -85,6 +82,83 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(decode, vec![word], IrType::Bool)
             }
             _ => Some(word),
+        }
+    }
+}
+
+impl<'a> HirToMirContext<'a> {
+    /// Encode every scalar a direct call passes to a parameter declared as a
+    /// type parameter. Specialization keeps such a parameter an erased slot,
+    /// so the caller is where the scalar's type is known.
+    pub(crate) fn encode_erased_call_args(&self, module: &mut IrModule) {
+        let erased: BTreeMap<IrFunctionId, Vec<bool>> = self
+            .function_param_hir_types
+            .iter()
+            .map(|(id, params)| {
+                let flags: Vec<bool> = params
+                    .iter()
+                    .map(|ty| {
+                        matches!(
+                            self.type_table.get(*ty).map(|t| &t.kind),
+                            Some(TypeKind::TypeParameter { .. })
+                        )
+                    })
+                    .collect();
+                (*id, flags)
+            })
+            .filter(|(id, flags)| {
+                flags.iter().any(|erased| *erased)
+                    && module.functions.get(id).is_none_or(|f| {
+                        // Declared params trail the receiver.
+                        let ir = &f.signature.parameters;
+                        ir.len() >= flags.len()
+                            && ir[ir.len() - flags.len()..]
+                                .iter()
+                                .zip(flags)
+                                .all(|(p, erased)| !erased || p.ty == IrType::I64)
+                    })
+            })
+            .collect();
+        if erased.is_empty() {
+            return;
+        }
+        for function in module.functions.values_mut() {
+            let calls = function.cfg.blocks.values().any(|b| {
+                b.instructions.iter().any(|i| {
+                    matches!(i, IrInstruction::CallDirect { func_id, .. } if erased.contains_key(func_id))
+                })
+            });
+            if !calls {
+                continue;
+            }
+            let mut regs = crate::ir::erased_word::Regs::new(function);
+            let block_ids: Vec<_> = regs.function().cfg.blocks.keys().copied().collect();
+            for id in block_ids {
+                let Some(block) = regs.function().cfg.blocks.get_mut(&id) else {
+                    continue;
+                };
+                let old = std::mem::take(&mut block.instructions);
+                let mut out = Vec::with_capacity(old.len());
+                for mut instruction in old {
+                    if let IrInstruction::CallDirect { func_id, args, .. } = &mut instruction
+                        && let Some(flags) = erased.get(func_id)
+                        && let Some(offset) = args.len().checked_sub(flags.len())
+                    {
+                        for (arg, erased) in args[offset..].iter_mut().zip(flags) {
+                            let ty = regs.function().register_types.get(arg).cloned();
+                            if let Some(ty) =
+                                ty.filter(|ty| *erased && erased_word::is_word_scalar(ty))
+                            {
+                                *arg = regs.encode(&mut out, *arg, &ty);
+                            }
+                        }
+                    }
+                    out.push(instruction);
+                }
+                if let Some(block) = regs.function().cfg.blocks.get_mut(&id) {
+                    block.instructions = out;
+                }
+            }
         }
     }
 }
