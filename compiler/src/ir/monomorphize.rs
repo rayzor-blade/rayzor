@@ -150,6 +150,10 @@ pub struct Monomorphizer {
 
     /// Word decoders for erased returns, declared per module.
     word_decoders: Option<super::erased_word::Decoders>,
+
+    /// Runtime calls that store or load a field in its native form, so a T
+    /// value crossing them is not a word.
+    native_field_calls: BTreeSet<IrFunctionId>,
 }
 
 impl Monomorphizer {
@@ -162,6 +166,7 @@ impl Monomorphizer {
             pending_transitive_funcs: Vec::new(),
             stats: MonomorphizationStats::default(),
             word_decoders: None,
+            native_field_calls: BTreeSet::new(),
         }
     }
 
@@ -219,6 +224,26 @@ impl Monomorphizer {
             return; // No generic functions to monomorphize
         }
         self.word_decoders = super::erased_word::Decoders::declare(module);
+        const NATIVE_FIELD_CALLS: &[&str] = &[
+            "rayzor_anon_set_field_by_index",
+            "rayzor_anon_set_field",
+            "rayzor_anon_set_struct_field",
+            "rayzor_anon_get_field_by_index",
+            "rayzor_anon_get_field",
+            "rayzor_anon_get_struct_field",
+        ];
+        self.native_field_calls = module
+            .all_functions()
+            .filter(|(_, name)| NATIVE_FIELD_CALLS.contains(name))
+            .map(|(id, _)| id)
+            .chain(
+                module
+                    .external_function_names
+                    .iter()
+                    .filter(|(_, name)| NATIVE_FIELD_CALLS.contains(&name.as_str()))
+                    .map(|(id, _)| *id),
+            )
+            .collect();
 
         // Phase 2: Collect all instantiation requests
         let instantiation_requests = self.collect_instantiation_requests(module, &generic_funcs);
@@ -577,10 +602,37 @@ impl Monomorphizer {
             return Vec::new();
         }
         let slot = |ty: Option<&IrType>| matches!(ty, Some(IrType::I64 | IrType::U64));
+        // A register produced by, or only consumed by, a native field call
+        // holds the field's native form.
+        let mut native_defs = BTreeSet::new();
+        let mut uses: BTreeMap<IrId, (usize, usize)> = BTreeMap::new();
+        for block in function.cfg.blocks.values() {
+            for instruction in &block.instructions {
+                let native = matches!(instruction,
+                    IrInstruction::CallDirect { func_id, .. } if self.native_field_calls.contains(func_id));
+                if native && let Some(dest) = instruction.dest() {
+                    native_defs.insert(dest);
+                }
+                for used in instruction.uses() {
+                    let entry = uses.entry(used).or_default();
+                    entry.0 += 1;
+                    if native {
+                        entry.1 += 1;
+                    }
+                }
+            }
+        }
+        let native_only = |reg: &IrId| {
+            uses.get(reg)
+                .is_some_and(|(all, native)| all == native && *all > 0)
+        };
         let mut out = Vec::new();
         for (id, block) in &function.cfg.blocks {
             for (index, instruction) in block.instructions.iter().enumerate() {
                 match instruction {
+                    IrInstruction::BitCast { dest, src, .. }
+                    | IrInstruction::Cast { dest, src, .. }
+                        if native_defs.contains(src) || native_only(dest) => {}
                     IrInstruction::BitCast { src, ty, .. } => {
                         match (function.register_types.get(src), ty) {
                             (source, IrType::TypeVar(name)) if slot(source) => {
