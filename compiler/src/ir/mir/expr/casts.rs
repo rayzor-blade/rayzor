@@ -113,6 +113,26 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or(value),
             );
         }
+        // `(v : Single)` of a boxed `Null<Float>` opens the box, then narrows.
+        if self.convert_type(target_type) == IrType::F32
+            && self
+                .optional_inner_type(expr.ty)
+                .is_some_and(|inner| self.optional_inner_is_boxable_primitive(inner))
+        {
+            let value = self.lower_expression(expr)?;
+            if matches!(
+                self.builder.get_register_type(value),
+                Some(IrType::Ptr(_) | IrType::NullInt)
+            ) {
+                return self.maybe_unbox_value(value, expr.ty, target_type);
+            }
+            let have = self.builder.get_register_type(value)?;
+            return if have == IrType::F32 {
+                Some(value)
+            } else {
+                self.builder.build_cast(value, have, IrType::F32)
+            };
+        }
         if *is_checked
             && self.runtime_type_id(target_type) >= rayzor_runtime::type_system::TYPE_USER_START
             && matches!(
