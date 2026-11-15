@@ -42,6 +42,18 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_cmp(CompareOp::Eq, flags, zero)
     }
 
+    /// An erased slot's `word` as a register of type `ty`'s type variable,
+    /// when `ty` is a type parameter of the body being lowered, under
+    /// `RAYZOR_ERASED_WORDS`. Specialization decodes the bitcast; the generic
+    /// body keeps the word.
+    pub(crate) fn erased_value_as_type_var(&mut self, word: IrId, ty: TypeId) -> Option<IrId> {
+        if !self.array_element_is_word(ty) {
+            return None;
+        }
+        let name = self.resolve_type_param_name(ty)?;
+        self.builder.build_bitcast(word, IrType::TypeVar(name))
+    }
+
     /// Whether `field` is declared at a type parameter: an erased slot.
     pub(crate) fn field_is_erased(&self, field: SymbolId) -> bool {
         let ty = self.symbol_table.get_symbol(field).map(|s| s.type_id);

@@ -1436,6 +1436,14 @@ impl<'a> HirToMirContext<'a> {
             return Some(coerced);
         }
 
+        // Inside the generic body the word enters a T register, which
+        // specialization decodes.
+        if field_is_type_param
+            && let Some(value) = self.erased_value_as_type_var(field_value, field_ty)
+        {
+            return Some(value);
+        }
+
         // Later instructions (e.g. Cmp) read the register type.
         self.builder.set_register_type(field_value, field_ir_ty);
 
