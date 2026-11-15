@@ -1415,7 +1415,12 @@ impl<'a> AstLowering<'a> {
                 value_type,
                 ..
             } => {
-                // Map comprehension creates a Map<K, V> type
+                // Typed like a map literal: the concrete map for K.
+                if let Some(concrete) =
+                    self.resolve_multitype_map_to_concrete(&[*key_type, *value_type])
+                {
+                    return Ok(concrete);
+                }
                 Ok(type_resolution::create_map_type(
                     &self.context.type_table,
                     *key_type,

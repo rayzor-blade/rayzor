@@ -1182,12 +1182,16 @@ impl<'a> AstLowering<'a> {
         // Restore the previous scope
         self.context.current_scope = previous_scope;
 
-        // Create the map type
+        // Typed like a map literal: the concrete map for K, so its methods
+        // resolve with V known.
         let map_type = self
-            .context
-            .type_table
-            .borrow_mut()
-            .create_map_type(key_type, value_type);
+            .resolve_multitype_map_to_concrete(&[key_type, value_type])
+            .unwrap_or_else(|| {
+                self.context
+                    .type_table
+                    .borrow_mut()
+                    .create_map_type(key_type, value_type)
+            });
 
         Ok(TypedExpression {
             expr_type: map_type,
