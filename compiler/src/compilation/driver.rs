@@ -1371,6 +1371,9 @@ impl CompilationUnit {
         let mut monomorphizer = Monomorphizer::new();
         monomorphizer.monomorphize_module(&mut mir_module);
         add_profile_ms(&mut self.typecheck_timings.monomorphize_ms, t_monomorphize);
+        if crate::debug_flags::erased_census() {
+            crate::ir::erased_census::report(&mir_module, filename);
+        }
         // RAYZOR_DUMP_MIR_MONO=1 dumps the module after specialization.
         if std::env::var("RAYZOR_DUMP_MIR_MONO").is_ok() {
             eprintln!("=== MIR DUMP (post-mono) for {} ===", filename);
@@ -1479,6 +1482,9 @@ impl CompilationUnit {
                 let t_mono = profile_timer(self.config.profile_typecheck);
                 Monomorphizer::new().monomorphize_module(&mut module);
                 add_profile_ms(&mut self.typecheck_timings.monomorphize_ms, t_mono);
+                if crate::debug_flags::erased_census() {
+                    crate::ir::erased_census::report(&module, &ast_file.filename);
+                }
                 if std::env::var_os("RAYZOR_DUMP_MIR").is_some() {
                     eprintln!("=== MIR DUMP (post-merge) for {} ===", ast_file.filename);
                     eprintln!("{}", crate::ir::dump::dump_module(&module));

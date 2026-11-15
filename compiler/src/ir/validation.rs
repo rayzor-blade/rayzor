@@ -689,7 +689,7 @@ fn validate_return_types(ctx: &mut ValidationContext, function: &IrFunction) {
 }
 
 /// Get the type of a value
-fn value_type(value: &IrValue) -> IrType {
+pub(crate) fn value_type(value: &IrValue) -> IrType {
     match value {
         IrValue::Void => IrType::Void,
         IrValue::Undef => IrType::Any,

@@ -71,3 +71,9 @@ cached_flag!(
     null_int_boxed,
     "RAYZOR_NULL_INT_BOXED"
 );
+cached_flag!(
+    /// `RAYZOR_ERASED_CENSUS`: report scalars crossing erased generic slots
+    /// without a word conversion. Report only; safe to run with.
+    erased_census,
+    "RAYZOR_ERASED_CENSUS"
+);
