@@ -35,6 +35,9 @@ enum WordSite {
     Encode,
     /// A T register as this call argument.
     Arg(usize),
+    /// A cast that converts a T register from its erased i64 form; it
+    /// converts from the bound type instead.
+    Retype,
 }
 
 /// Key for caching monomorphized function instances
@@ -644,6 +647,16 @@ impl Monomorphizer {
                             _ => {}
                         }
                     }
+                    IrInstruction::Cast {
+                        src,
+                        from_ty: IrType::I64 | IrType::U64,
+                        to_ty,
+                        ..
+                    } if !matches!(to_ty, IrType::TypeVar(_))
+                        && let Some(IrType::TypeVar(name)) = function.register_types.get(src) =>
+                    {
+                        out.push((*id, index, WordSite::Retype, name.clone()));
+                    }
                     IrInstruction::Cast { from_ty, to_ty, .. } => match (from_ty, to_ty) {
                         (IrType::I64 | IrType::U64, IrType::TypeVar(name)) => {
                             out.push((*id, index, WordSite::Decode, name.clone()));
@@ -739,6 +752,24 @@ impl Monomorphizer {
                             };
                             regs.function().register_types.insert(dest, ty);
                             instruction = IrInstruction::Copy { dest, src: value };
+                        }
+                        (
+                            WordSite::Retype,
+                            IrInstruction::Cast {
+                                dest,
+                                src,
+                                from_ty,
+                                to_ty,
+                            },
+                        ) => {
+                            if bound == to_ty {
+                                instruction = IrInstruction::Copy {
+                                    dest: *dest,
+                                    src: *src,
+                                };
+                            } else {
+                                *from_ty = bound.clone();
+                            }
                         }
                         _ => {}
                     }
