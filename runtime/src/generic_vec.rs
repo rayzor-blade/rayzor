@@ -57,6 +57,7 @@ fn unregister_erased_vector<T>(vector: *mut T) {
 /// Retain the logical element type when a generic vector uses pointer-sized slots.
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_set_element_descriptor(vector: *mut u8, tag: i32, metadata: u64) {
+    let tag = crate::erased_word::element_tag(tag);
     register_erased_vector(vector, ErasedVectorKind::TypedPointer { tag, metadata });
 }
 

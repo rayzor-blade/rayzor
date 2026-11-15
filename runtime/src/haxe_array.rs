@@ -62,12 +62,6 @@ fn elem_kind(array: &HaxeArray) -> u64 {
     }
 }
 
-/// Whether `tag` marks an erased-slot word. Bits 8..15 may carry the
-/// instantiation's element tag, a hint for an array with no recorded kind.
-fn is_word_tag(tag: i32) -> bool {
-    tag & 0xff == crate::type_system::ValueTag::Word as i32
-}
-
 /// The element kind a word tag's hint names, 0 when it names none.
 fn hinted_kind(tag: i32) -> u64 {
     use crate::type_system::ValueTag;
@@ -150,7 +144,7 @@ fn word_to_slot(array: *mut HaxeArray, word: i64) -> i64 {
 
 /// `bits` as `arr`'s slot for a write tagged `tag`.
 fn encode_slot(arr: *mut HaxeArray, bits: i64, tag: i32, metadata: u64) -> i64 {
-    if is_word_tag(tag) {
+    if crate::erased_word::is_word_tag(tag) {
         apply_kind_hint(arr, tag);
         word_to_slot(arr, bits)
     } else {
@@ -160,6 +154,7 @@ fn encode_slot(arr: *mut HaxeArray, bits: i64, tag: i32, metadata: u64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_init_element_tag(arr: *mut HaxeArray, tag: i32) {
+    let tag = crate::erased_word::element_tag(tag);
     if !arr.is_null() && tag == crate::type_system::ValueTag::Dynamic as i32 {
         unsafe { (*arr).flags |= HAXE_ARRAY_BOXED_ELEMS };
     }
@@ -217,7 +212,7 @@ pub extern "C" fn haxe_array_get_typed(arr: *const HaxeArray, index: i64, tag: i
             };
         }
         let bits = ptr::read_unaligned(array.ptr.add(index as usize * 8).cast::<i64>());
-        if is_word_tag(tag) {
+        if crate::erased_word::is_word_tag(tag) {
             apply_kind_hint(arr as *mut HaxeArray, tag);
             return slot_to_word(&*arr, bits);
         }

@@ -229,6 +229,7 @@ pub extern "C" fn haxe_trace_string_struct(s_ptr: *const HaxeString) {
 /// type_tag values: 1=Int, 2=Bool, 4=Float, 5=String
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_typed(value: i64, type_tag: i32) {
+    let (value, type_tag) = crate::erased_word::native_value(value, type_tag);
     match type_tag {
         1 | 3 => haxe_trace_int(value),
         2 => haxe_trace_bool(value != 0),
@@ -629,6 +630,7 @@ pub extern "C" fn haxe_string_from_bool(value: bool) -> *mut HaxeString {
 /// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Object
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_value_to_string_by_tag(value: i64, type_tag: i32) -> *mut HaxeString {
+    let (value, type_tag) = crate::erased_word::native_value(value, type_tag);
     use crate::type_system::ValueTag;
     match ValueTag::from_i32(type_tag) {
         // value is already a HaxeString pointer, return it directly
@@ -683,6 +685,7 @@ pub extern "C" fn haxe_value_to_string_with_metadata(
     type_tag: i32,
     metadata: u64,
 ) -> *mut HaxeString {
+    let (value, type_tag) = crate::erased_word::native_value(value, type_tag);
     if metadata != 0 || type_tag == crate::type_system::ValueTag::Int64 as i32 {
         let boxed = crate::type_system::haxe_box_generic_ptr(value, type_tag, metadata);
         crate::type_system::haxe_std_string_ptr(boxed)

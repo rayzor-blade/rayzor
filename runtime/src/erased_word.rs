@@ -152,6 +152,49 @@ pub extern "C" fn haxe_word_to_bool(word: u64) -> bool {
     }
 }
 
+/// Whether a value tag marks an erased-slot word. Bits 8..15 may carry the
+/// instantiation's element tag as a hint.
+pub fn is_word_tag(tag: i32) -> bool {
+    tag & 0xff == crate::type_system::ValueTag::Word as i32
+}
+
+/// `(value, tag)` with a word opened into the native value and the tag it
+/// needs: a scalar by its own kind, a reference by the hint, or unresolved
+/// when there is none. Any other tag passes through.
+pub fn native_value(value: i64, tag: i32) -> (i64, i32) {
+    use crate::type_system::ValueTag;
+    if !is_word_tag(tag) {
+        return (value, tag);
+    }
+    let word = value as u64;
+    match kind(word) {
+        WordKind::Int => (i64::from(word as u32 as i32), ValueTag::Int as i32),
+        WordKind::Float => (decode_float(word).to_bits() as i64, ValueTag::Float as i32),
+        WordKind::Bool => (i64::from(word == TRUE_WORD), ValueTag::Bool as i32),
+        WordKind::Reference => (value, (tag >> 8) & 0xff),
+    }
+}
+
+/// The element type a tag describes: a word tag's hint, else the tag.
+pub fn element_tag(tag: i32) -> i32 {
+    if is_word_tag(tag) {
+        (tag >> 8) & 0xff
+    } else {
+        tag
+    }
+}
+
+/// The word for a native `value` described by `tag`; a reference is itself.
+pub fn word_from_native(value: i64, tag: i32) -> i64 {
+    use crate::type_system::ValueTag;
+    (match ValueTag::from_i32(tag & 0xff) {
+        Some(ValueTag::Int) => encode_int(value as i32),
+        Some(ValueTag::Float) => encode_float(f64::from_bits(value as u64)),
+        Some(ValueTag::Bool) => encode_bool(value != 0),
+        _ => value as u64,
+    }) as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -943,6 +943,8 @@ pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
 /// 9=Function
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i64 {
+    let (b, _) = crate::erased_word::native_value(b, type_tag);
+    let (a, type_tag) = crate::erased_word::native_value(a, type_tag);
     match type_tag {
         1 | 3 => {
             // Int comparison (type_tag 1=TYPE_INT, 3=legacy)

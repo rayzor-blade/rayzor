@@ -3929,6 +3929,15 @@ pub extern "C" fn haxe_unbox_erased_return(ptr: *mut u8) -> i64 {
 /// A generic Dynamic keeps its box; concrete type arguments consume its payload.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_generic_return(ptr: *mut u8, type_tag: i32) -> i64 {
+    // A word is its own result; a box in the slot opens into one.
+    if type_tag & 0xff == ValueTag::Word as i32 {
+        return match crate::erased_word::kind(ptr as u64) {
+            crate::erased_word::WordKind::Reference => {
+                crate::erased_word::haxe_word_from_dynamic(ptr) as i64
+            }
+            _ => ptr as i64,
+        };
+    }
     if type_tag == ValueTag::Dynamic as i32
         || (type_tag == ValueTag::Int64 as i32 && !int64_slot_may_be_object(ptr))
     {
@@ -3976,6 +3985,10 @@ pub extern "C" fn haxe_adapt_generic_value(
 ) -> i64 {
     if source_tag == target_tag {
         return value;
+    }
+    let (value, source_tag) = crate::erased_word::native_value(value, source_tag);
+    if crate::erased_word::is_word_tag(target_tag) {
+        return crate::erased_word::word_from_native(value, source_tag);
     }
     if target_tag == ValueTag::Dynamic as i32 {
         haxe_box_generic_ptr(value, source_tag, metadata) as i64
@@ -4227,6 +4240,7 @@ pub extern "C" fn haxe_dynamic_order(a: *mut u8, b: *mut u8) -> i32 {
 /// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Dynamic, 0=unresolved.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_equals_typed(raw: i64, type_tag: i32, other: *mut u8) -> bool {
+    let (raw, type_tag) = crate::erased_word::native_value(raw, type_tag);
     if type_tag == ValueTag::Interface as i32 {
         let object = haxe_iface_identity(raw as *mut u8);
         return if object.is_null() {
@@ -4310,6 +4324,7 @@ pub extern "C" fn haxe_unbox_bool_ptr(ptr: *mut u8) -> bool {
 /// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Object
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
+    let (value, type_tag) = crate::erased_word::native_value(value, type_tag);
     match ValueTag::from_i32(type_tag) {
         Some(ValueTag::Dynamic) => value as *mut u8,
         Some(ValueTag::Array) if value == 0 => std::ptr::null_mut(),
@@ -4397,6 +4412,7 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
 /// Box generic bits using the semantic type information retained at the call site.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_generic_ptr(value: i64, type_tag: i32, metadata: u64) -> *mut u8 {
+    let (value, type_tag) = crate::erased_word::native_value(value, type_tag);
     match metadata & 0xff {
         7 if value != 0 => haxe_box_array_ptr(value as *mut u8, metadata >> 8),
         6 if value != 0 && is_raw_class_instance(value as *mut u8) => {
