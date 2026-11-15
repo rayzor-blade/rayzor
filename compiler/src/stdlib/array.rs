@@ -1309,10 +1309,15 @@ fn build_array_iterator_next(builder: &mut MirBuilder) {
     let current = builder.load(current_slot, IrType::I64);
 
     // A boxed array yields Dynamic boxes; a typed array yields raw slots.
+    // Under RAYZOR_ERASED_WORDS every element comes back as a word.
     let get_func = builder
         .get_function_by_name("haxe_array_get_erased")
         .expect("haxe_array_get_erased extern not found");
-    let target = builder.const_i32(0);
+    let target = builder.const_i32(if crate::debug_flags::erased_words() {
+        rayzor_runtime::type_system::ValueTag::Word as i32
+    } else {
+        0
+    });
     let value = builder
         .call(get_func, vec![array_ptr, current, target])
         .expect("haxe_array_get_erased should return");

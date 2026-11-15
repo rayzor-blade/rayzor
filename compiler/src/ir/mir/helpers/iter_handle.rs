@@ -365,8 +365,81 @@ impl<'a> HirToMirContext<'a> {
             .get(&method_sym)
             .copied()
             .or_else(|| self.external_function_map.get(&method_sym).copied())?;
+        if method == "next"
+            && crate::debug_flags::erased_words()
+            && let Some(thunk) = self.iter_word_next_thunk(method_sym, func_id)
+        {
+            return Some(thunk);
+        }
         self.ensure_vtable_dispatch_thunk(func_id)
             .or_else(|| self.ensure_cross_module_dispatch_thunk(method_sym, func_id))
+    }
+
+    /// `(env, this) -> word` over a class's `next`: a handle's `next` yields a
+    /// word under `RAYZOR_ERASED_WORDS`, whatever the method returns.
+    fn iter_word_next_thunk(
+        &mut self,
+        method_sym: SymbolId,
+        func_id: IrFunctionId,
+    ) -> Option<IrFunctionId> {
+        let name = {
+            let symbol = self.symbol_table.get_symbol(method_sym)?;
+            let qname = self
+                .string_interner
+                .get(symbol.qualified_name.unwrap_or(symbol.name))?;
+            let sanitized: String = qname
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                .collect();
+            format!("__iter_word_next__{sanitized}")
+        };
+        if let Some((id, _)) = self
+            .builder
+            .module
+            .functions
+            .iter()
+            .find(|(_, f)| f.name == name)
+        {
+            return Some(*id);
+        }
+        let ret = match self.builder.module.functions.get(&func_id) {
+            Some(function) => function.signature.return_type.clone(),
+            None => {
+                let ty = self.symbol_table.get_symbol(method_sym)?.type_id;
+                let (_, ret) = self.resolve_function_type_signature(ty)?;
+                self.convert_type(ret)
+            }
+        };
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        let sig = FunctionSignatureBuilder::new()
+            .param("env".to_owned(), ptr_u8)
+            .param("this".to_owned(), ptr_void)
+            .returns(IrType::I64)
+            .calling_convention(CallingConvention::Haxe)
+            .build();
+        let symbol = SymbolId::from_raw(u32::MAX - 9000 - self.next_wrapper_id);
+        self.next_wrapper_id += 1;
+        let saved_function = self.builder.current_function;
+        let saved_block = self.builder.current_block;
+        let saved_symbols = std::mem::take(&mut self.symbol_map);
+        let saved_boxes = std::mem::take(&mut self.boxed_value_regs);
+        let id = self.builder.start_function(symbol, name, sig);
+        let body = (|| {
+            let this = self.builder.current_function()?.get_param_reg(1)?;
+            let value = self
+                .builder
+                .build_call_direct(func_id, vec![this], ret.clone())?;
+            let word = self.into_word(value)?;
+            let word = self.coerce_reg_to(word, &IrType::I64)?;
+            self.builder.build_return(Some(word))
+        })();
+        self.builder.finish_function();
+        self.builder.current_function = saved_function;
+        self.builder.current_block = saved_block;
+        self.symbol_map = saved_symbols;
+        self.boxed_value_regs = saved_boxes;
+        body.map(|_| id)
     }
 
     /// The entry point for a stdlib iterator method named by its runtime symbol.
@@ -1266,7 +1339,46 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// An iterator's `next` result as type `ty`. Under `RAYZOR_ERASED_WORDS`
+    /// every iterator yields a word, which decodes by the consumer's type.
     pub(crate) fn array_iterator_next_result(
+        &mut self,
+        value: IrId,
+        ty: TypeId,
+        target: &IrType,
+    ) -> Option<IrId> {
+        if crate::debug_flags::erased_words() {
+            return self.iterator_word_result(value, ty, target);
+        }
+        self.slot_value_result(value, ty, target)
+    }
+
+    fn iterator_word_result(&mut self, word: IrId, ty: TypeId, target: &IrType) -> Option<IrId> {
+        let word = self.coerce_reg_to(word, &IrType::I64)?;
+        if let Some(value) = self.erased_value_as_type_var(word, ty) {
+            return Some(value);
+        }
+        if self.is_null_int_type(ty) {
+            let boxer = self.get_or_register_extern_function(
+                "haxe_word_to_dynamic",
+                vec![IrType::I64],
+                IrType::Ptr(Box::new(IrType::U8)),
+            );
+            let boxed = self.builder.build_call_direct(
+                boxer,
+                vec![word],
+                IrType::Ptr(Box::new(IrType::U8)),
+            )?;
+            return self.to_null_int(boxed);
+        }
+        if let Some(value) = self.erased_field_word(word, target) {
+            return Some(value);
+        }
+        self.coerce_reg_to(word, target)
+    }
+
+    /// A raw or boxed slot as type `ty`, by its tag.
+    pub(crate) fn slot_value_result(
         &mut self,
         value: IrId,
         ty: TypeId,

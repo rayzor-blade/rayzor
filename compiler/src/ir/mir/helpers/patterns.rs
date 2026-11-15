@@ -237,7 +237,7 @@ impl<'a> HirToMirContext<'a> {
                                     if resolved_type_id != TypeId::invalid() {
                                         // Reflected constructors can store boxed payload fields.
                                         field_val = self
-                                            .array_iterator_next_result(
+                                            .slot_value_result(
                                                 field_val,
                                                 resolved_type_id,
                                                 &resolved_type,
