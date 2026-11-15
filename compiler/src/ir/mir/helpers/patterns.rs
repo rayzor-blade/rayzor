@@ -138,6 +138,11 @@ impl<'a> HirToMirContext<'a> {
                     })
                     .unwrap_or(*enum_type);
                 let field_types = self.get_enum_variant_field_types(effective_type, *variant);
+                let erased = if crate::debug_flags::erased_words() {
+                    self.enum_variant_erased_fields(effective_type, *variant)
+                } else {
+                    Vec::new()
+                };
 
                 // effective_type first, then the pattern's enum_type if it won't resolve.
                 let enum_symbol = self
@@ -174,6 +179,32 @@ impl<'a> HirToMirContext<'a> {
                                 .cloned()
                                 .unwrap_or((IrType::I64, TypeId::invalid()));
 
+                            // An erased payload holds a word; it decodes to the
+                            // instantiation's type.
+                            if erased.get(i).copied().unwrap_or(false)
+                                && crate::ir::erased_word::is_word_scalar(&resolved_type)
+                            {
+                                let word = self
+                                    .builder
+                                    .build_bitcast(field_ptr, IrType::Ptr(Box::new(IrType::I64)))
+                                    .and_then(|p| self.builder.build_load(p, IrType::I64))
+                                    .and_then(|w| self.from_word(w, &resolved_type));
+                                if let Some(field_val) = word {
+                                    if let HirPattern::Variable { symbol, .. } = field_pattern {
+                                        self.symbol_ir_types.insert(*symbol, resolved_type.clone());
+                                        if resolved_type_id != TypeId::invalid() {
+                                            self.symbol_type_ids.insert(*symbol, resolved_type_id);
+                                        }
+                                    }
+                                    self.bind_pattern_with_scrutinee_type(
+                                        field_pattern,
+                                        field_val,
+                                        (resolved_type_id != TypeId::invalid())
+                                            .then_some(resolved_type_id),
+                                    );
+                                }
+                                continue;
+                            }
                             let (load_type, needs_bitcast_after) = match &resolved_type {
                                 // Pointer types: load as raw I64, then bitcast to pointer
                                 IrType::Ptr(_) | IrType::String => {

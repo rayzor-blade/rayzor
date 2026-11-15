@@ -363,6 +363,7 @@ impl<'a> HirToMirContext<'a> {
         enum_ptr: IrId,
         variant_discriminant: i64,
         fields: &[HirPattern],
+        words: &[Option<IrType>],
     ) -> Option<IrId> {
         // Load tag at offset 0
         let zero_offset = self.builder.build_int(0, IrType::I64)?;
@@ -411,6 +412,11 @@ impl<'a> HirToMirContext<'a> {
                 .builder
                 .build_bitcast(field_gep, IrType::Ptr(Box::new(IrType::I64)))?;
             let field_val = self.builder.build_load(field_ptr, IrType::I64)?;
+            // An erased payload is a word; its pattern tests the decoded value.
+            let field_val = match words.get(i) {
+                Some(Some(ty)) => self.from_word(field_val, ty)?,
+                _ => field_val,
+            };
 
             let field_match = self.lower_pattern_test(field_val, field_pattern)?;
             all_fields_match = Some(match all_fields_match {
@@ -556,8 +562,25 @@ impl<'a> HirToMirContext<'a> {
                 self.builder
                     .build_cond_branch(not_null, tag_block, outer_merge);
                 self.builder.switch_to_block(tag_block);
-                let inner =
-                    self.lower_boxed_constructor_test(enum_ptr, variant_discriminant, fields);
+                let words = if crate::debug_flags::erased_words() {
+                    let erased = self.enum_variant_erased_fields(effective_enum_type, *variant);
+                    let types = self.get_enum_variant_field_types(effective_enum_type, *variant);
+                    erased
+                        .iter()
+                        .zip(types)
+                        .map(|(erased, (ty, _))| {
+                            (*erased && crate::ir::erased_word::is_word_scalar(&ty)).then_some(ty)
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let inner = self.lower_boxed_constructor_test(
+                    enum_ptr,
+                    variant_discriminant,
+                    fields,
+                    &words,
+                );
                 let inner_exit = self.builder.current_block()?;
                 self.builder.build_branch(outer_merge);
                 self.builder.switch_to_block(outer_merge);

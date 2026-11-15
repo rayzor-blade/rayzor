@@ -207,6 +207,14 @@ impl<'a> HirToMirContext<'a> {
         let type_val = self.builder.build_const(IrValue::I32(type_id))?;
         self.builder.build_store(type_ptr_i32, type_val)?;
 
+        let erased = if crate::debug_flags::erased_words() {
+            self.symbol_table
+                .get_enum_variants(enum_symbol)
+                .and_then(|variants| variants.get(tag_idx as usize).copied())
+                .map_or_else(Vec::new, |v| self.variant_erased_fields(v))
+        } else {
+            Vec::new()
+        };
         for (i, arg) in constructor_args.iter().take(field_count).enumerate() {
             let prev_target = self.let_target_type_hint.take();
             if matches!(&arg.kind, HirExprKind::Call { .. }) {
@@ -291,7 +299,16 @@ impl<'a> HirToMirContext<'a> {
                     );
                 }
             }
-            arg_reg = self.coerce_reg_to(arg_reg, &IrType::I64)?;
+            arg_reg = if erased.get(i).copied().unwrap_or(false)
+                && self
+                    .builder
+                    .get_register_type(arg_reg)
+                    .is_some_and(|ty| crate::ir::erased_word::is_word_scalar(&ty))
+            {
+                self.into_word(arg_reg)?
+            } else {
+                self.coerce_reg_to(arg_reg, &IrType::I64)?
+            };
             let field_offset = self.builder.build_const(IrValue::I64((8 + i * 8) as i64))?;
             let field_ptr = self.builder.build_gep(
                 ptr,

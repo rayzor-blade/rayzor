@@ -292,6 +292,41 @@ impl<'a> HirToMirContext<'a> {
         vec![]
     }
 
+    /// Which payloads of `variant` are declared at a type parameter: erased
+    /// slots, holding a word under `RAYZOR_ERASED_WORDS`.
+    pub(crate) fn enum_variant_erased_fields(
+        &self,
+        enum_type: TypeId,
+        variant_name: InternedString,
+    ) -> Vec<bool> {
+        self.resolve_enum_symbol(enum_type)
+            .and_then(|enum_sym| self.symbol_table.get_enum_variants(enum_sym))
+            .and_then(|variants| {
+                variants.iter().copied().find(|v| {
+                    self.symbol_table
+                        .get_symbol(*v)
+                        .is_some_and(|s| s.name == variant_name)
+                })
+            })
+            .map_or_else(Vec::new, |v| self.variant_erased_fields(v))
+    }
+
+    pub(crate) fn variant_erased_fields(&self, variant: SymbolId) -> Vec<bool> {
+        let ty = self.symbol_table.get_symbol(variant).map(|s| s.type_id);
+        match ty.and_then(|ty| self.type_table.get(ty)).map(|t| &t.kind) {
+            Some(TypeKind::Function { params, .. }) => params
+                .iter()
+                .map(|p| {
+                    matches!(
+                        self.type_table.get(*p).map(|t| &t.kind),
+                        Some(TypeKind::TypeParameter { .. })
+                    )
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn get_enum_variant_field_count(
         &self,
         enum_symbol: SymbolId,
