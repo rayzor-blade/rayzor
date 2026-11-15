@@ -26,6 +26,17 @@ use super::{
     IrTerminator, IrType, IrValue,
 };
 
+/// How a generic body moves a T value across an erased slot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WordSite {
+    /// `bitcast i64 -> T`.
+    Decode,
+    /// `bitcast T -> i64`.
+    Encode,
+    /// A T register as this call argument.
+    Arg(usize),
+}
+
 /// Key for caching monomorphized function instances
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MonoKey {
@@ -505,7 +516,9 @@ impl Monomorphizer {
         }
 
         // Substitute types in CFG instructions
+        let crossings = self.word_crossings(generic_func);
         self.substitute_cfg(&mut specialized.cfg);
+        self.apply_word_crossings(&mut specialized, crossings);
 
         self.adapt_erased_returns(&mut specialized);
 
@@ -552,6 +565,127 @@ impl Monomorphizer {
                 .cloned()
                 .collect(),
             uses_sret: sig.uses_sret,
+        }
+    }
+
+    /// Where a generic body moves a T value between an i64 slot and its
+    /// type-variable register: the bitcasts in and out, and a T register
+    /// passed straight to a call, whose parameter is an erased slot. Empty
+    /// unless `RAYZOR_ERASED_WORDS` is set, when the slot holds a word.
+    fn word_crossings(&self, function: &IrFunction) -> Vec<(IrBlockId, usize, WordSite, String)> {
+        if self.word_decoders.is_none() {
+            return Vec::new();
+        }
+        let slot = |ty: Option<&IrType>| matches!(ty, Some(IrType::I64 | IrType::U64));
+        let mut out = Vec::new();
+        for (id, block) in &function.cfg.blocks {
+            for (index, instruction) in block.instructions.iter().enumerate() {
+                match instruction {
+                    IrInstruction::BitCast { src, ty, .. } => {
+                        match (function.register_types.get(src), ty) {
+                            (source, IrType::TypeVar(name)) if slot(source) => {
+                                out.push((*id, index, WordSite::Decode, name.clone()));
+                            }
+                            (Some(IrType::TypeVar(name)), IrType::I64 | IrType::U64) => {
+                                out.push((*id, index, WordSite::Encode, name.clone()));
+                            }
+                            _ => {}
+                        }
+                    }
+                    IrInstruction::CallDirect { args, .. } => {
+                        for (position, arg) in args.iter().enumerate() {
+                            if let Some(IrType::TypeVar(name)) = function.register_types.get(arg) {
+                                out.push((*id, index, WordSite::Arg(position), name.clone()));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    /// Where T is bound to a scalar (or Dynamic), a slot-to-T bitcast decodes
+    /// the word, and a T-to-slot bitcast or a T argument encodes one.
+    fn apply_word_crossings(
+        &self,
+        function: &mut IrFunction,
+        crossings: Vec<(IrBlockId, usize, WordSite, String)>,
+    ) {
+        let mut by_block: BTreeMap<IrBlockId, BTreeMap<usize, Vec<(WordSite, IrType)>>> =
+            BTreeMap::new();
+        for (block, index, site, name) in crossings {
+            if let Some(bound) = self.substitution_map.get(&name).filter(|ty| {
+                super::erased_word::is_word_scalar(ty) || **ty == IrType::dynamic_ptr()
+            }) {
+                by_block
+                    .entry(block)
+                    .or_default()
+                    .entry(index)
+                    .or_default()
+                    .push((site, bound.clone()));
+            }
+        }
+        if by_block.is_empty() {
+            return;
+        }
+        let decoders = self.word_decoders.as_ref();
+        let mut regs = super::erased_word::Regs::new(function);
+        let mut encode = |regs: &mut super::erased_word::Regs,
+                          out: &mut Vec<IrInstruction>,
+                          src,
+                          bound: &IrType| {
+            if *bound == IrType::dynamic_ptr() {
+                regs.encode_dynamic(decoders, out, src)
+            } else {
+                regs.encode(out, src, bound)
+            }
+        };
+        for (block_id, sites) in by_block {
+            let Some(block) = regs.function().cfg.blocks.get_mut(&block_id) else {
+                continue;
+            };
+            let old = std::mem::take(&mut block.instructions);
+            let mut out = Vec::with_capacity(old.len() + sites.len() * 4);
+            for (index, mut instruction) in old.into_iter().enumerate() {
+                let Some(here) = sites.get(&index) else {
+                    out.push(instruction);
+                    continue;
+                };
+                for (site, bound) in here {
+                    match (site, &mut instruction) {
+                        (WordSite::Arg(position), IrInstruction::CallDirect { args, .. }) => {
+                            if let Some(arg) = args.get_mut(*position) {
+                                *arg = encode(&mut regs, &mut out, *arg, bound);
+                            }
+                        }
+                        (
+                            WordSite::Decode | WordSite::Encode,
+                            IrInstruction::BitCast { dest, src, .. },
+                        ) => {
+                            let (dest, src) = (*dest, *src);
+                            let value = if *site == WordSite::Decode {
+                                regs.decode(decoders, &mut out, src, bound)
+                            } else {
+                                encode(&mut regs, &mut out, src, bound)
+                            };
+                            let ty = if *site == WordSite::Decode {
+                                bound.clone()
+                            } else {
+                                IrType::I64
+                            };
+                            regs.function().register_types.insert(dest, ty);
+                            instruction = IrInstruction::Copy { dest, src: value };
+                        }
+                        _ => {}
+                    }
+                }
+                out.push(instruction);
+            }
+            if let Some(block) = regs.function().cfg.blocks.get_mut(&block_id) {
+                block.instructions = out;
+            }
         }
     }
 
@@ -824,6 +958,10 @@ impl Monomorphizer {
                         continue;
                     };
                     let dynamic = rayzor_runtime::type_system::ValueTag::Dynamic as i32;
+                    let word = rayzor_runtime::type_system::ValueTag::Word as i32;
+                    if source & 0xff == word || target & 0xff == word {
+                        continue;
+                    }
                     if source == target || (*source != dynamic && *target != dynamic) {
                         *instruction = IrInstruction::Copy {
                             dest: *dest,
@@ -1468,7 +1606,9 @@ impl Monomorphizer {
         }
 
         // Substitute types in CFG
+        let crossings = self.word_crossings(generic_func);
         self.substitute_cfg(&mut specialized.cfg);
+        self.apply_word_crossings(&mut specialized, crossings);
 
         self.adapt_erased_returns(&mut specialized);
 

@@ -532,6 +532,13 @@ impl<'a> HirToMirContext<'a> {
         name: String,
         default_tag: i32,
     ) -> Option<(IrId, IrId)> {
+        // A T value is a word under RAYZOR_ERASED_WORDS; specialization adds
+        // the bound type as a hint rather than replacing the marker.
+        let default_tag = if crate::debug_flags::erased_words() {
+            rayzor_runtime::type_system::ValueTag::Word as i32
+        } else {
+            default_tag
+        };
         let tag = self.builder.build_const(IrValue::I32(default_tag))?;
         let metadata = self.builder.build_const(IrValue::U64(0))?;
         if let Some(function) = self.builder.current_function_mut() {

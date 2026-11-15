@@ -36,6 +36,7 @@ pub(crate) struct Decoders {
     to_float: IrFunctionId,
     to_bool: IrFunctionId,
     to_dynamic: IrFunctionId,
+    from_dynamic: IrFunctionId,
 }
 
 impl Decoders {
@@ -43,14 +44,25 @@ impl Decoders {
     /// no call.
     pub(crate) fn declare(module: &mut IrModule) -> Option<Self> {
         crate::debug_flags::erased_words().then(|| Self {
-            to_float: extern_fn(module, "haxe_word_to_float", IrType::F64),
-            to_bool: extern_fn(module, "haxe_word_to_bool", IrType::Bool),
-            to_dynamic: extern_fn(module, "haxe_word_to_dynamic", IrType::dynamic_ptr()),
+            to_float: extern_fn(module, "haxe_word_to_float", IrType::I64, IrType::F64),
+            to_bool: extern_fn(module, "haxe_word_to_bool", IrType::I64, IrType::Bool),
+            to_dynamic: extern_fn(
+                module,
+                "haxe_word_to_dynamic",
+                IrType::I64,
+                IrType::dynamic_ptr(),
+            ),
+            from_dynamic: extern_fn(
+                module,
+                "haxe_word_from_dynamic",
+                IrType::dynamic_ptr(),
+                IrType::I64,
+            ),
         })
     }
 }
 
-fn extern_fn(module: &mut IrModule, name: &str, ret: IrType) -> IrFunctionId {
+fn extern_fn(module: &mut IrModule, name: &str, param: IrType, ret: IrType) -> IrFunctionId {
     if let Some(f) = module.extern_functions.values().find(|f| f.name == name) {
         return f.id;
     }
@@ -62,7 +74,7 @@ fn extern_fn(module: &mut IrModule, name: &str, ret: IrType) -> IrFunctionId {
         signature: IrFunctionSignature {
             parameters: vec![IrParameter {
                 name: String::new(),
-                ty: IrType::I64,
+                ty: param,
                 reg: IrId(0),
                 by_ref: false,
             }],
@@ -157,6 +169,22 @@ impl<'f> Regs<'f> {
             ty: to.clone(),
         });
         dest
+    }
+
+    /// A Dynamic `src` as an erased-slot word: a scalar box opens, a reference
+    /// is itself.
+    pub(crate) fn encode_dynamic(
+        &mut self,
+        decoders: Option<&Decoders>,
+        out: &mut Vec<IrInstruction>,
+        src: IrId,
+    ) -> IrId {
+        let Some(decoders) = decoders else {
+            return self.cast(out, src, &IrType::dynamic_ptr(), &IrType::I64);
+        };
+        let word = self.fresh(IrType::I64);
+        out.push(call(word, decoders.from_dynamic, src));
+        word
     }
 
     /// `src: ty` as an erased-slot word, appending its instructions to `out`.
