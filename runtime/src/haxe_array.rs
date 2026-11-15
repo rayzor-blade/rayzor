@@ -62,6 +62,40 @@ fn elem_kind(array: &HaxeArray) -> u64 {
     }
 }
 
+/// Whether `tag` marks an erased-slot word. Bits 8..15 may carry the
+/// instantiation's element tag, a hint for an array with no recorded kind.
+fn is_word_tag(tag: i32) -> bool {
+    tag & 0xff == crate::type_system::ValueTag::Word as i32
+}
+
+/// The element kind a word tag's hint names, 0 when it names none.
+fn hinted_kind(tag: i32) -> u64 {
+    use crate::type_system::ValueTag;
+    match ValueTag::from_i32((tag >> 8) & 0xff) {
+        Some(ValueTag::Int) => 3,
+        Some(ValueTag::Float) => 4,
+        Some(ValueTag::Bool) => 2,
+        Some(ValueTag::NullInt) => 8,
+        Some(ValueTag::Int64) => 9,
+        Some(ValueTag::String) => 5,
+        Some(
+            ValueTag::Reference
+            | ValueTag::Interface
+            | ValueTag::Function
+            | ValueTag::Enum
+            | ValueTag::Array,
+        ) => 6,
+        _ => 0,
+    }
+}
+
+/// Record the hinted kind of a word access on an array with none.
+fn apply_kind_hint(array: *mut HaxeArray, tag: i32) {
+    if unsafe { elem_kind(&*array) } == 0 {
+        haxe_array_mark_elem_kind(array, hinted_kind(tag));
+    }
+}
+
 /// A native slot as an erased-slot word.
 fn slot_to_word(array: &HaxeArray, bits: i64) -> i64 {
     use crate::erased_word::*;
@@ -116,7 +150,8 @@ fn word_to_slot(array: *mut HaxeArray, word: i64) -> i64 {
 
 /// `bits` as `arr`'s slot for a write tagged `tag`.
 fn encode_slot(arr: *mut HaxeArray, bits: i64, tag: i32, metadata: u64) -> i64 {
-    if tag == crate::type_system::ValueTag::Word as i32 {
+    if is_word_tag(tag) {
+        apply_kind_hint(arr, tag);
         word_to_slot(arr, bits)
     } else {
         encode_typed_array_slot(unsafe { &*arr }, bits, tag, metadata)
@@ -182,8 +217,9 @@ pub extern "C" fn haxe_array_get_typed(arr: *const HaxeArray, index: i64, tag: i
             };
         }
         let bits = ptr::read_unaligned(array.ptr.add(index as usize * 8).cast::<i64>());
-        if tag == ValueTag::Word as i32 {
-            return slot_to_word(array, bits);
+        if is_word_tag(tag) {
+            apply_kind_hint(arr as *mut HaxeArray, tag);
+            return slot_to_word(&*arr, bits);
         }
         if tag == ValueTag::Unresolved as i32 {
             return if array.flags & HAXE_ARRAY_BOXED_ELEMS != 0 {
@@ -2588,6 +2624,16 @@ mod shared_array_layout_tests {
         assert_eq!(slot, -4);
         assert_eq!(haxe_array_get_typed(&ints, 0, word), encode_int(-4) as i64);
         haxe_array_free(&mut ints);
+
+        // A hint names the kind before the first word does: an Int word
+        // pushed into an Array<Float> is stored as a Float.
+        let float_hint = word | (ValueTag::Float as i32) << 8;
+        let mut hinted = array();
+        haxe_array_push_typed(&mut hinted, encode_int(3) as i64, float_hint, 0);
+        assert_eq!(elem_kind(&hinted), 4);
+        let slot = unsafe { ptr::read_unaligned(hinted.ptr.cast::<f64>()) };
+        assert_eq!(slot, 3.0);
+        haxe_array_free(&mut hinted);
     }
 
     #[test]
