@@ -2678,6 +2678,14 @@ register_symbol!(
     crate::closure_entries::haxe_closure_dynamic_view
 );
 register_symbol!(
+    "haxe_closure_word_view",
+    crate::closure_entries::haxe_closure_word_view
+);
+register_symbol!(
+    "haxe_closure_register_word_entry",
+    crate::closure_entries::haxe_closure_register_word_entry
+);
+register_symbol!(
     "haxe_call_method_dynamic",
     crate::closure_entries::haxe_call_method_dynamic
 );

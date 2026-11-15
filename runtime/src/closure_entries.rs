@@ -11,7 +11,10 @@
 //! - the *slot* entry is `(env, i64..) -> i64`: every argument and the
 //!   result travel as 64-bit slots (a float as its bits);
 //! - the *dynamic* entry is `(env, box..) -> box`: every argument and the
-//!   result are `DynamicValue` boxes.
+//!   result are `DynamicValue` boxes;
+//! - the *word* entry is `(env, word..) -> word`: every argument and the
+//!   result are erased-slot words (`erased_word.rs`), for a call from code
+//!   compiled with `RAYZOR_ERASED_WORDS`.
 
 use crate::type_system::{
     TYPE_BOOL, TYPE_FLOAT, TYPE_INT, dynamic_value_if_boxed, haxe_unbox_float, haxe_unbox_int,
@@ -25,6 +28,7 @@ struct Entries {
     slot: usize,
     dynamic: usize,
     packed: usize,
+    word: usize,
 }
 
 static ENTRIES: RwLock<Option<HashMap<usize, Entries>>> = RwLock::new(None);
@@ -73,6 +77,9 @@ pub extern "C" fn haxe_closure_alias_code(alias: usize, code: usize) {
         }
         if target.packed == 0 {
             target.packed = entry.packed;
+        }
+        if target.word == 0 {
+            target.word = entry.word;
         }
     }
     if let Some(methods) = METHODS.write().unwrap().as_mut() {
@@ -137,6 +144,21 @@ pub extern "C" fn haxe_closure_register_packed_entry(target: *const u8, packed: 
     }
 }
 
+/// Register the word-shaped entry for the closure whose record is `target`.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_closure_register_word_entry(target: *const u8, word: *const u8) {
+    let (code, word) = unsafe { (record_code(target), record_code(word)) };
+    if code != 0 && word != 0 {
+        ENTRIES
+            .write()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .entry(code)
+            .or_default()
+            .word = word;
+    }
+}
+
 /// Instance methods reachable by name, `(class type id, name) -> code` of
 /// the method's bound thunk: `(env, args..)` with the receiver in `env[0]`.
 static METHODS: RwLock<Option<HashMap<(u32, String), usize>>> = RwLock::new(None);
@@ -193,7 +215,10 @@ fn lookup(code: usize) -> Entries {
             m.get(&code).copied().or_else(|| {
                 m.values()
                     .find(|entry| {
-                        entry.slot == code || entry.dynamic == code || entry.packed == code
+                        entry.slot == code
+                            || entry.dynamic == code
+                            || entry.packed == code
+                            || entry.word == code
                     })
                     .copied()
             })
@@ -232,6 +257,34 @@ pub extern "C" fn haxe_closure_slot_view(closure: *mut u8) -> *mut u8 {
         closure
     } else {
         Box::into_raw(Box::new([entry, env])) as *mut u8
+    }
+}
+
+/// A view of `closure` taking and returning erased-slot words. The closure
+/// itself when it has no slot entry either (every declared type already is
+/// a word); a closure with a slot entry but no word entry was compiled
+/// without `RAYZOR_ERASED_WORDS`, which cannot be mixed.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_closure_word_view(closure: *mut u8) -> *mut u8 {
+    if closure.is_null() {
+        return closure;
+    }
+    let (code, env) = unsafe {
+        (
+            *(closure as *const usize),
+            *(closure as *const usize).add(1),
+        )
+    };
+    let entries = lookup(code);
+    match (entries.word, entries.slot) {
+        (0, 0) => closure,
+        (0, _) => {
+            eprintln!(
+                "closure has a slot entry but no word entry: compiled without RAYZOR_ERASED_WORDS"
+            );
+            std::process::abort();
+        }
+        (word, _) => Box::into_raw(Box::new([word, env])) as *mut u8,
     }
 }
 
