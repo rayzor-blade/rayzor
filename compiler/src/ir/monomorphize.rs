@@ -592,6 +592,15 @@ impl Monomorphizer {
                             _ => {}
                         }
                     }
+                    IrInstruction::Cast { from_ty, to_ty, .. } => match (from_ty, to_ty) {
+                        (IrType::I64 | IrType::U64, IrType::TypeVar(name)) => {
+                            out.push((*id, index, WordSite::Decode, name.clone()));
+                        }
+                        (IrType::TypeVar(name), IrType::I64 | IrType::U64) => {
+                            out.push((*id, index, WordSite::Encode, name.clone()));
+                        }
+                        _ => {}
+                    },
                     IrInstruction::CallDirect { args, .. } => {
                         for (position, arg) in args.iter().enumerate() {
                             if let Some(IrType::TypeVar(name)) = function.register_types.get(arg) {
@@ -662,7 +671,8 @@ impl Monomorphizer {
                         }
                         (
                             WordSite::Decode | WordSite::Encode,
-                            IrInstruction::BitCast { dest, src, .. },
+                            IrInstruction::BitCast { dest, src, .. }
+                            | IrInstruction::Cast { dest, src, .. },
                         ) => {
                             let (dest, src) = (*dest, *src);
                             let value = if *site == WordSite::Decode {
