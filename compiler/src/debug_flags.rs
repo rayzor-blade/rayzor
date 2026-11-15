@@ -77,3 +77,10 @@ cached_flag!(
     erased_census,
     "RAYZOR_ERASED_CENSUS"
 );
+cached_flag!(
+    /// `RAYZOR_ERASED_WORDS`: an erased generic slot holds a self-describing
+    /// word instead of raw bits. Incomplete until every crossing uses it; not
+    /// safe to run with yet. Compile with `--no-cache`.
+    erased_words,
+    "RAYZOR_ERASED_WORDS"
+);

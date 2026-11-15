@@ -261,6 +261,7 @@ pub struct HirToMirContext<'a> {
     dynamic_member_fallback: Option<(usize, IrId)>,
     closure_slot_entries: BTreeMap<IrFunctionId, Option<IrFunctionId>>,
     closure_dynamic_entries: BTreeMap<IrFunctionId, Option<IrFunctionId>>,
+    closure_word_entries: BTreeMap<IrFunctionId, Option<IrFunctionId>>,
 
     /// Mapping from qualified class name to constructor IrFunctionId
     /// This is a fallback when TypeIds don't match (e.g., across separately compiled files)
@@ -1438,6 +1439,7 @@ impl<'a> HirToMirContext<'a> {
             dynamic_member_fallback: None,
             closure_slot_entries: BTreeMap::new(),
             closure_dynamic_entries: BTreeMap::new(),
+            closure_word_entries: BTreeMap::new(),
             constructor_name_map: BTreeMap::new(),
             constructor_owner_map: BTreeMap::new(),
             current_hir_types: hir_types,

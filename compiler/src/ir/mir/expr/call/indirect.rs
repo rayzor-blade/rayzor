@@ -281,10 +281,7 @@ impl<'a> HirToMirContext<'a> {
                     let boxed = self.null_int_to_dynamic(*reg)?;
                     self.builder.build_bitcast(boxed, IrType::I64)?
                 }
-                IrType::F32 => {
-                    let widened = self.builder.build_cast(*reg, IrType::F32, IrType::F64)?;
-                    self.builder.build_bitcast(widened, IrType::I64)?
-                }
+                IrType::F64 | IrType::F32 | IrType::I32 | IrType::Bool => self.into_word(*reg)?,
                 ty if ty.is_integer() => self.builder.build_cast(*reg, ty, IrType::I64)?,
                 _ => self.builder.build_bitcast(*reg, IrType::I64)?,
             };
@@ -305,7 +302,11 @@ impl<'a> HirToMirContext<'a> {
             .collect::<Vec<_>>();
         let ptr = IrType::Ptr(Box::new(IrType::U8));
         let view = self.get_or_register_extern_function(
-            "haxe_closure_slot_view",
+            if crate::debug_flags::erased_words() {
+                "haxe_closure_word_view"
+            } else {
+                "haxe_closure_slot_view"
+            },
             vec![ptr.clone()],
             ptr.clone(),
         );
@@ -331,9 +332,8 @@ impl<'a> HirToMirContext<'a> {
                     .build_bitcast(result, IrType::Ptr(Box::new(IrType::U8)))?;
                 self.to_null_int(as_ptr)
             }
-            IrType::F32 => {
-                let value = self.builder.build_bitcast(result, IrType::F64)?;
-                self.builder.build_cast(value, IrType::F64, IrType::F32)
+            IrType::F64 | IrType::F32 | IrType::I32 | IrType::Bool => {
+                self.from_word(result, &expected)
             }
             ty if ty.is_integer() => self.builder.build_cast(result, IrType::I64, ty),
             ty => self.builder.build_bitcast(result, ty),

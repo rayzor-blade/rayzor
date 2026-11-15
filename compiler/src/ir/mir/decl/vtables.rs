@@ -27,6 +27,8 @@ pub(crate) enum EntryShape {
     Slot,
     Dynamic,
     Packed,
+    /// Slot-shaped, with every scalar an erased-slot word.
+    Word,
 }
 
 /// What a closure's declared parameter or result holds.
@@ -696,6 +698,33 @@ impl<'a> HirToMirContext<'a> {
         entry
     }
 
+    /// The word-shaped entry of a closure target, `(env, word..) -> word`:
+    /// what a call through an erased function type reaches. None when no
+    /// slot entry is needed either.
+    pub(crate) fn ensure_closure_word_entry(
+        &mut self,
+        target: IrFunctionId,
+        fn_type: Option<TypeId>,
+    ) -> Option<IrFunctionId> {
+        if let Some(cached) = self.closure_word_entries.get(&target) {
+            return *cached;
+        }
+        let entry = self
+            .ensure_closure_slot_entry(target, fn_type)
+            .and_then(|_| {
+                let sig = self
+                    .builder
+                    .module
+                    .functions
+                    .get(&target)?
+                    .signature
+                    .clone();
+                self.build_closure_entry(target, &sig, fn_type, EntryShape::Word)
+            });
+        self.closure_word_entries.insert(target, entry);
+        entry
+    }
+
     /// The box-shaped entry of a closure target, `(env, box..) -> box`: what
     /// a call through a Dynamic-typed value reaches.
     pub(crate) fn ensure_closure_dynamic_entry(
@@ -789,6 +818,7 @@ impl<'a> HirToMirContext<'a> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let (slot_ty, suffix) = match shape {
             EntryShape::Slot => (IrType::I64, "slot"),
+            EntryShape::Word => (IrType::I64, "word"),
             EntryShape::Dynamic => (ptr_u8.clone(), "dyn"),
             EntryShape::Packed => (ptr_u8.clone(), "packed"),
         };
@@ -950,7 +980,7 @@ impl<'a> HirToMirContext<'a> {
         if *kind == SlotKind::NullInt {
             // A slot holds the `NullInt` bits or an Int, where 0 is a value; a
             // Dynamic holds a box or null.
-            if shape == EntryShape::Slot {
+            if matches!(shape, EntryShape::Slot | EntryShape::Word) {
                 let from_slot = self.get_or_register_extern_function(
                     "haxe_null_int_from_slot",
                     vec![IrType::I64],
@@ -963,7 +993,15 @@ impl<'a> HirToMirContext<'a> {
             return self.to_null_int(reg);
         }
         match shape {
-            EntryShape::Slot => match kind {
+            EntryShape::Word
+                if matches!(
+                    kind,
+                    SlotKind::Float(_) | SlotKind::Bool | SlotKind::Scalar(IrType::I32)
+                ) =>
+            {
+                self.from_word(reg, want)
+            }
+            EntryShape::Slot | EntryShape::Word => match kind {
                 SlotKind::Erased => Some(reg),
                 SlotKind::Float(IrType::F32) => {
                     let f = self.builder.build_bitcast(reg, IrType::F64)?;
@@ -1060,14 +1098,23 @@ impl<'a> HirToMirContext<'a> {
         // A slot result is an array element, which holds the `NullInt` itself.
         if let (Some(r), SlotKind::NullInt) = (result, kind) {
             let r = self.to_null_int(r)?;
-            return if shape == EntryShape::Slot {
+            return if matches!(shape, EntryShape::Slot | EntryShape::Word) {
                 self.builder.build_bitcast(r, IrType::I64)
             } else {
                 self.null_int_to_dynamic(r)
             };
         }
         match shape {
-            EntryShape::Slot => match (result, kind) {
+            EntryShape::Word
+                if result.is_some()
+                    && matches!(
+                        kind,
+                        SlotKind::Float(_) | SlotKind::Bool | SlotKind::Scalar(IrType::I32)
+                    ) =>
+            {
+                self.into_word(result?)
+            }
+            EntryShape::Slot | EntryShape::Word => match (result, kind) {
                 (None, _) => self.builder.build_const(IrValue::I64(0)),
                 (Some(r), SlotKind::Erased) => Some(r),
                 (Some(r), SlotKind::Float(IrType::F32)) => {
@@ -1960,6 +2007,19 @@ impl<'a> HirToMirContext<'a> {
             })
             .filter(|(_, slot, dynamic)| slot.is_some() || dynamic.is_some())
             .collect();
+        let word_entries: Vec<(IrFunctionId, IrFunctionId)> = if crate::debug_flags::erased_words()
+        {
+            self.closure_targets
+                .clone()
+                .into_iter()
+                .filter_map(|(target, fn_type)| {
+                    self.ensure_closure_word_entry(target, fn_type)
+                        .map(|entry| (target, entry))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let packed_entries: Vec<_> = self
             .closure_targets
             .clone()
@@ -2379,9 +2439,25 @@ impl<'a> HirToMirContext<'a> {
 
         let register_packed = self.get_or_register_extern_function(
             "haxe_closure_register_packed_entry",
-            vec![ptr_u8.clone(), ptr_u8],
+            vec![ptr_u8.clone(), ptr_u8.clone()],
             IrType::Void,
         );
+        if !word_entries.is_empty() {
+            let register_word = self.get_or_register_extern_function(
+                "haxe_closure_register_word_entry",
+                vec![ptr_u8.clone(), ptr_u8],
+                IrType::Void,
+            );
+            for (target, word) in word_entries {
+                if let (Some(target), Some(word)) = (
+                    self.builder.build_function_ref(target),
+                    self.builder.build_function_ref(word),
+                ) {
+                    self.builder
+                        .build_call_direct(register_word, vec![target, word], IrType::Void);
+                }
+            }
+        }
         for (target, packed) in packed_entries {
             if let (Some(target), Some(packed)) = (
                 self.builder.build_function_ref(target),

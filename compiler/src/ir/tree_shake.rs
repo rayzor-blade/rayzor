@@ -56,6 +56,7 @@ const CLASS_KEYED: &[&str] = &[
 const TARGET_KEYED: &[&str] = &[
     "haxe_closure_register_entries",
     "haxe_closure_register_packed_entry",
+    "haxe_closure_register_word_entry",
     "haxe_closure_register_bound_thunk",
 ];
 
