@@ -10,6 +10,39 @@ use super::*;
 use crate::ir::erased_word::{self, CANONICAL_NAN, DOUBLE_OFFSET, FALSE_WORD, INT_TAG};
 
 impl<'a> HirToMirContext<'a> {
+    /// Whether `field` is declared at a type parameter: an erased slot.
+    pub(crate) fn field_is_erased(&self, field: SymbolId) -> bool {
+        let ty = self.symbol_table.get_symbol(field).map(|s| s.type_id);
+        matches!(
+            ty.and_then(|ty| self.type_table.get(ty)).map(|t| &t.kind),
+            Some(TypeKind::TypeParameter { .. })
+        )
+    }
+
+    /// The `want` scalar an erased field's loaded `word` holds, under
+    /// `RAYZOR_ERASED_WORDS`; None when the read keeps its raw conversion.
+    pub(crate) fn erased_field_word(&mut self, word: IrId, want: &IrType) -> Option<IrId> {
+        if !crate::debug_flags::erased_words() {
+            return None;
+        }
+        if *want == IrType::dynamic_ptr()
+            || matches!(want, IrType::Ptr(inner) if **inner == IrType::Void)
+        {
+            // A scalar word boxes; a reference is its own Dynamic.
+            let box_fn = self.get_or_register_extern_function(
+                "haxe_word_to_dynamic",
+                vec![IrType::I64],
+                want.clone(),
+            );
+            return self
+                .builder
+                .build_call_direct(box_fn, vec![word], want.clone());
+        }
+        erased_word::is_word_scalar(want)
+            .then(|| self.from_word(word, want))
+            .flatten()
+    }
+
     /// `value` as the i64 an erased slot holds. A register that already is a
     /// slot (i64, pointer, NullInt) is returned unchanged.
     pub(crate) fn into_word(&mut self, value: IrId) -> Option<IrId> {

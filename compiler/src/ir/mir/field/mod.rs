@@ -306,6 +306,11 @@ impl<'a> HirToMirContext<'a> {
         // Type erasure coercion: if field is I64 (erased type param) but expr expects concrete type
         let expected_ir_ty = self.convert_type(field_ty);
         if field_ir_ty == IrType::I64 && expected_ir_ty != IrType::I64 {
+            if self.field_is_erased(field)
+                && let Some(value) = self.erased_field_word(field_value, &expected_ir_ty)
+            {
+                return Some(value);
+            }
             return self.coerce_from_i64(field_value, field_ty);
         }
 

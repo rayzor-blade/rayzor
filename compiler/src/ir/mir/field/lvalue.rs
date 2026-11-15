@@ -838,9 +838,12 @@ impl<'a> HirToMirContext<'a> {
                 ) {
                     // Type erasure coercion: if field is I64 (erased type param)
                     // but value is a concrete type, coerce before storing
+                    let words = crate::debug_flags::erased_words() && self.field_is_erased(*field);
                     let store_value = if field_ty == IrType::I64 {
                         if let Some(val_ty) = self.builder.get_register_type(value) {
-                            if val_ty != IrType::I64 {
+                            if words && crate::ir::erased_word::is_word_scalar(&val_ty) {
+                                self.into_word(value).unwrap_or(value)
+                            } else if val_ty != IrType::I64 {
                                 match val_ty {
                                     IrType::F64 | IrType::F32 => self
                                         .builder

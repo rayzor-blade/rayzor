@@ -1428,6 +1428,9 @@ impl<'a> HirToMirContext<'a> {
         // resolved field_ty says whether coercion is needed.
         let expected_ir_ty = self.convert_type(field_ty);
         if field_is_type_param && expected_ir_ty != IrType::I64 {
+            if let Some(value) = self.erased_field_word(field_value, &expected_ir_ty) {
+                return Some(value);
+            }
             let coerced = self.coerce_from_i64(field_value, field_ty)?;
             self.builder.set_register_type(coerced, expected_ir_ty);
             return Some(coerced);
