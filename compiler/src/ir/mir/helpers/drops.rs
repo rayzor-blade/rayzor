@@ -41,9 +41,13 @@ impl<'a> HirToMirContext<'a> {
                     }
                 };
 
-                // Skip lambda captures - they're owned by the closure
+                // Skip lambda captures - they're owned by the closure. A value
+                // passed to a call, returned or stored may be kept by its new
+                // holder (`xs.push(v)`), so scope exit does not free it.
                 if let Some(drop_points) = &self.current_drop_points {
-                    if drop_points.lambda_captures.contains(&symbol) {
+                    if drop_points.lambda_captures.contains(&symbol)
+                        || drop_points.escaping.contains(&symbol)
+                    {
                         continue;
                     }
                 }
