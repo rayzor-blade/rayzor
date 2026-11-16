@@ -463,6 +463,21 @@ impl<'a> HirToMirContext<'a> {
                         } else {
                             v
                         };
+                        // A number in a literal of Float (or Single) elements
+                        // takes that width, so Int and Single beside Float do
+                        // not make the literal a boxed one.
+                        let float_slot = element_type_id
+                            .map(|et| self.convert_type(et))
+                            .filter(|t| matches!(t, IrType::F64 | IrType::F32));
+                        let v = match (float_slot, self.builder.get_register_type(v)) {
+                            (
+                                Some(slot),
+                                Some(IrType::I32 | IrType::I64 | IrType::F32 | IrType::F64),
+                            ) if self.builder.get_register_type(v) != Some(slot.clone()) => {
+                                self.coerce_reg_to(v, &slot)?
+                            }
+                            _ => v,
+                        };
                         let t = self.builder.get_register_type(v);
                         let hir_kind = {
                             let type_table = self.type_table;
