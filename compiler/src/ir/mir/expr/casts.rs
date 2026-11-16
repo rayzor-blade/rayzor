@@ -444,6 +444,14 @@ impl<'a> HirToMirContext<'a> {
                 self.type_table.get(expr.ty).map(|t| &t.kind),
                 Some(TypeKind::TypeParameter { .. })
             ) {
+                // Under RAYZOR_ERASED_WORDS a T value cast to a scalar
+                // decodes its word.
+                if from_type == IrType::I64
+                    && crate::ir::erased_word::is_word_scalar(&to_type)
+                    && self.array_element_is_word(expr.ty)
+                {
+                    return self.from_word(value_reg, &to_type);
+                }
                 return self.coerce_reg_to(value_reg, &to_type);
             }
             return self.builder.build_cast(value_reg, from_type, to_type);
