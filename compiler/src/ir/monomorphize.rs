@@ -2157,6 +2157,7 @@ impl Monomorphizer {
                     word,
                 });
         }
+        let mut registered: BTreeSet<IrFunctionId> = BTreeSet::new();
         for function in module.functions.values_mut() {
             let mut regs = super::erased_word::Regs::new(function);
             let blocks: Vec<IrBlockId> = regs.function().cfg.blocks.keys().copied().collect();
@@ -2224,6 +2225,7 @@ impl Monomorphizer {
                             continue;
                         };
                         let new_args = if Some(registrar) == register_entries {
+                            registered.insert(entries.clone);
                             let target = record(&mut out, Some(entries.clone));
                             let slot = record(&mut out, entries.slot);
                             vec![target, slot, args[2]]
@@ -2255,6 +2257,102 @@ impl Monomorphizer {
                     .instructions = out;
             }
         }
+        // A template registered by another module's init leaves nothing here
+        // to register beside; the clone registers its own entries from this
+        // module's.
+        let unregistered: Vec<ClonedEntries> = by_template
+            .into_values()
+            .flatten()
+            .filter(|entries| !registered.contains(&entries.clone) && entries.slot.is_some())
+            .collect();
+        if !unregistered.is_empty() {
+            self.register_in_module_init(module, &unregistered);
+        }
+    }
+
+    /// Register `clones`' slot and word entries from this module's vtable
+    /// init, with no dynamic entry.
+    fn register_in_module_init(&mut self, module: &mut IrModule, clones: &[ClonedEntries]) {
+        let Some(init) = module
+            .functions
+            .values()
+            .find(|f| f.name == "__vtable_init__" && !f.cfg.blocks.is_empty())
+            .map(|f| f.id)
+        else {
+            panic!("no __vtable_init__ to register specialized closure entries in");
+        };
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        module.next_function_id = module.next_function_id.max(self.next_func_id);
+        let register_entries = super::erased_word::extern_fn_with(
+            module,
+            "haxe_closure_register_entries",
+            vec![ptr_u8.clone(), ptr_u8.clone(), ptr_u8.clone()],
+            IrType::Void,
+        );
+        let register_word = super::erased_word::extern_fn_with(
+            module,
+            "haxe_closure_register_word_entry",
+            vec![ptr_u8.clone(), ptr_u8.clone()],
+            IrType::Void,
+        );
+        self.next_func_id = self.next_func_id.max(module.next_function_id);
+        let function = module.functions.get_mut(&init).expect("init exists");
+        let exits: Vec<IrBlockId> = function
+            .cfg
+            .blocks
+            .iter()
+            .filter(|(_, b)| matches!(b.terminator, IrTerminator::Return { .. }))
+            .map(|(id, _)| *id)
+            .collect();
+        let Some(exit) = exits.first().copied() else {
+            panic!("__vtable_init__ has no return");
+        };
+        let mut regs = super::erased_word::Regs::new(function);
+        let mut out = Vec::new();
+        let call = |func_id: IrFunctionId, args: Vec<IrId>| IrInstruction::CallDirect {
+            dest: None,
+            func_id,
+            arg_ownership: vec![super::OwnershipMode::Copy; args.len()],
+            args,
+            type_args: vec![],
+            is_tail_call: false,
+        };
+        for entries in clones {
+            let mut record = |out: &mut Vec<IrInstruction>, f: Option<IrFunctionId>| {
+                let raw = match f {
+                    Some(func_id) => {
+                        let dest = regs.fresh(IrType::I64);
+                        out.push(IrInstruction::FunctionRef { dest, func_id });
+                        dest
+                    }
+                    None => {
+                        let dest = regs.fresh(IrType::Ptr(Box::new(IrType::Void)));
+                        out.push(IrInstruction::Const {
+                            dest,
+                            value: IrValue::Null,
+                        });
+                        dest
+                    }
+                };
+                regs.bitcast(out, raw, &ptr_u8)
+            };
+            let target = record(&mut out, Some(entries.clone));
+            let slot = record(&mut out, entries.slot);
+            let dynamic = record(&mut out, None);
+            out.push(call(register_entries, vec![target, slot, dynamic]));
+            if let Some(word) = entries.word {
+                let target = record(&mut out, Some(entries.clone));
+                let word = record(&mut out, Some(word));
+                out.push(call(register_word, vec![target, word]));
+            }
+        }
+        let block = regs
+            .function()
+            .cfg
+            .blocks
+            .get_mut(&exit)
+            .expect("exit block");
+        block.instructions.extend(out);
     }
 
     /// The slot- or word-shaped entry of a specialized closure target,

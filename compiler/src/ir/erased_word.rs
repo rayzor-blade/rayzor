@@ -98,6 +98,16 @@ pub(crate) fn extern_fn(
     param: IrType,
     ret: IrType,
 ) -> IrFunctionId {
+    extern_fn_with(module, name, vec![param], ret)
+}
+
+/// A runtime function of `params` returning `ret`, declared once per module.
+pub(crate) fn extern_fn_with(
+    module: &mut IrModule,
+    name: &str,
+    params: Vec<IrType>,
+    ret: IrType,
+) -> IrFunctionId {
     if let Some(f) = module.extern_functions.values().find(|f| f.name == name) {
         return f.id;
     }
@@ -107,12 +117,15 @@ pub(crate) fn extern_fn(
         name: name.to_string(),
         symbol_id: crate::tast::SymbolId::from_raw(0),
         signature: IrFunctionSignature {
-            parameters: vec![IrParameter {
-                name: String::new(),
-                ty: param,
-                reg: IrId(0),
-                by_ref: false,
-            }],
+            parameters: params
+                .into_iter()
+                .map(|ty| IrParameter {
+                    name: String::new(),
+                    ty,
+                    reg: IrId(0),
+                    by_ref: false,
+                })
+                .collect(),
             return_type: ret,
             calling_convention: super::CallingConvention::C,
             can_throw: false,
