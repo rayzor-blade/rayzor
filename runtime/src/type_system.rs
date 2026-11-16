@@ -2253,6 +2253,20 @@ pub extern "C" fn haxe_std_downcast(value_ptr: *mut u8, expected_type_id: i64) -
         _ => expected_type_id,
     };
     unsafe {
+        // A Dynamic can hold a class instance itself (an erased slot's word)
+        // rather than its reference box: the instance's header is its class
+        // id, with no box mark beside it.
+        let header = *(value_ptr as *const u32);
+        if !is_reference_box(value_ptr)
+            && is_class_type(header)
+            && *(value_ptr as *const u32).add(1) == 0
+        {
+            return if type_id_matches_with_hierarchy(header as i64, expected_type_id) {
+                value_ptr
+            } else {
+                std::ptr::null_mut()
+            };
+        }
         let dynamic = *(value_ptr as *const DynamicValue);
         if type_id_matches_with_hierarchy(dynamic.type_id.0 as i64, expected_type_id) {
             dynamic.value_ptr
