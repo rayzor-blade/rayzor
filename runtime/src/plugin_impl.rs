@@ -2048,6 +2048,14 @@ register_symbol!(
     "haxe_word_to_dynamic",
     crate::erased_word::haxe_word_to_dynamic
 );
+register_symbol!(
+    "haxe_word_open_reference",
+    crate::erased_word::haxe_word_open_reference
+);
+register_symbol!(
+    "haxe_word_open_interface",
+    crate::erased_word::haxe_word_open_interface
+);
 register_symbol!("haxe_word_from_int", crate::erased_word::haxe_word_from_int);
 register_symbol!(
     "haxe_word_from_float",

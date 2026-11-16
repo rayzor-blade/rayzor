@@ -96,6 +96,31 @@ pub extern "C" fn haxe_word_to_dynamic(word: u64) -> *mut u8 {
     }
 }
 
+/// The reference a word holds for a parameter typed as a class or
+/// interface: a class instance's Dynamic box opens to the instance, so an
+/// erased slot filled through a Dynamic view reads as the instance it boxes.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_word_open_reference(word: u64) -> *mut u8 {
+    let p = word as *mut u8;
+    crate::type_system::class_box_instance(p).unwrap_or(p)
+}
+
+/// The interface value a word holds for an interface-typed parameter: a
+/// class instance's Dynamic box becomes the interface's handle to it, a cell
+/// holding the instance, as an upcast builds one.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_word_open_interface(word: u64) -> *mut u8 {
+    let p = word as *mut u8;
+    match crate::type_system::class_box_instance(p) {
+        Some(instance) => unsafe {
+            let cell = libc::malloc(8) as *mut *mut u8;
+            *cell = instance;
+            cell as *mut u8
+        },
+        None => p,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_word_from_int(value: i32) -> u64 {
     encode_int(value)
