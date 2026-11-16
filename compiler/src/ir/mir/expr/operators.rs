@@ -1871,6 +1871,49 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Under RAYZOR_ERASED_WORDS a T operand of numeric arithmetic or an
+        // ordering is a word; it decodes to the scalar it holds.
+        let word_side = |ctx: &Self, e: &HirExpr| ctx.array_element_is_word(e.ty);
+        let numeric_word = |ctx: &Self, me: &HirExpr, other: &HirExpr| {
+            word_side(ctx, me)
+                && match op {
+                    _ if is_arith => true,
+                    HirBinaryOp::Lt | HirBinaryOp::Gt | HirBinaryOp::Le | HirBinaryOp::Ge => {
+                        scalar_side(ctx, other) || word_side(ctx, other)
+                    }
+                    _ => false,
+                }
+        };
+        let (decode_lhs, decode_rhs) = (numeric_word(self, lhs, rhs), numeric_word(self, rhs, lhs));
+        if decode_lhs || decode_rhs {
+            let int_result = matches!(
+                op,
+                HirBinaryOp::BitAnd
+                    | HirBinaryOp::BitOr
+                    | HirBinaryOp::BitXor
+                    | HirBinaryOp::Shl
+                    | HirBinaryOp::Shr
+                    | HirBinaryOp::Ushr
+            ) || (is_arith
+                && matches!(
+                    self.type_table.get(expr.ty).map(|t| &t.kind),
+                    Some(TypeKind::Int)
+                ));
+            let (want, want_ty) = if int_result {
+                (IrType::I32, self.type_table.int_type())
+            } else {
+                (IrType::F64, self.type_table.float_type())
+            };
+            if decode_lhs {
+                lhs_reg = self.from_word(lhs_reg, &want)?;
+                lhs_ty = want_ty;
+            }
+            if decode_rhs {
+                rhs_reg = self.from_word(rhs_reg, &want)?;
+                rhs_ty = want_ty;
+            }
+        }
+
         let lhs_type = self.convert_type(lhs_ty);
         let rhs_type = self.convert_type(rhs_ty);
 
