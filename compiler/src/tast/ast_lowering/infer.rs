@@ -1305,7 +1305,13 @@ impl<'a> AstLowering<'a> {
                         })
                     };
                     let reference = |ty: TypeId| {
-                        let ty = Self::resolve_alias_chain(&table, ty);
+                        let mut ty = Self::resolve_alias_chain(&table, ty);
+                        // `Null<Brush>` is a reference as much as `Brush`.
+                        if let Some(TypeKind::Optional { inner_type }) =
+                            table.get(ty).map(|t| &t.kind)
+                        {
+                            ty = Self::resolve_alias_chain(&table, *inner_type);
+                        }
                         matches!(
                             table.get(ty).map(|t| &t.kind),
                             Some(
