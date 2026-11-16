@@ -249,6 +249,12 @@ impl<'a> HirToMirContext<'a> {
             if !calls {
                 continue;
             }
+            // A scalar already widened to the slot is encoded from its source.
+            let widened = if crate::debug_flags::erased_words() {
+                erased_word::widened_scalars(function)
+            } else {
+                BTreeMap::new()
+            };
             let mut regs = crate::ir::erased_word::Regs::new(function);
             let block_ids: Vec<_> = regs.function().cfg.blocks.keys().copied().collect();
             for id in block_ids {
@@ -263,11 +269,15 @@ impl<'a> HirToMirContext<'a> {
                         && let Some(offset) = args.len().checked_sub(flags.len())
                     {
                         for (arg, erased) in args[offset..].iter_mut().zip(flags) {
-                            let ty = regs.function().register_types.get(arg).cloned();
-                            if let Some(ty) =
-                                ty.filter(|ty| *erased && erased_word::is_word_scalar(ty))
-                            {
-                                *arg = regs.encode(&mut out, *arg, &ty);
+                            if !*erased {
+                                continue;
+                            }
+                            let source = match regs.function().register_types.get(arg).cloned() {
+                                Some(ty) if erased_word::is_word_scalar(&ty) => Some((*arg, ty)),
+                                _ => widened.get(arg).cloned(),
+                            };
+                            if let Some((src, ty)) = source {
+                                *arg = regs.encode(&mut out, src, &ty);
                             }
                         }
                     }

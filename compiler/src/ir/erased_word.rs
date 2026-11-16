@@ -30,6 +30,37 @@ pub(crate) fn is_word_scalar(ty: &IrType) -> bool {
     matches!(ty, IrType::F64 | IrType::F32 | IrType::I32 | IrType::Bool)
 }
 
+/// The scalars `function` widened to an i64 slot without changing them: a
+/// Float's bits, an Int or Bool extended. Keyed by the widened register.
+pub(crate) fn widened_scalars(
+    function: &IrFunction,
+) -> std::collections::BTreeMap<IrId, (IrId, IrType)> {
+    let mut out = std::collections::BTreeMap::new();
+    for block in function.cfg.blocks.values() {
+        for instruction in &block.instructions {
+            let (dest, src, ty) = match instruction {
+                IrInstruction::BitCast {
+                    dest,
+                    src,
+                    ty: IrType::I64,
+                } => match function.register_types.get(src) {
+                    Some(ty @ (IrType::F64 | IrType::F32)) => (*dest, *src, ty.clone()),
+                    _ => continue,
+                },
+                IrInstruction::Cast {
+                    dest,
+                    src,
+                    from_ty: from @ (IrType::I32 | IrType::Bool),
+                    to_ty: IrType::I64,
+                } => (*dest, *src, from.clone()),
+                _ => continue,
+            };
+            out.insert(dest, (src, ty));
+        }
+    }
+    out
+}
+
 /// The runtime decoders, declared before a pass borrows a function.
 #[derive(Clone, Copy)]
 pub(crate) struct Decoders {

@@ -1812,6 +1812,11 @@ impl Monomorphizer {
             for reg in func.register_types.keys() {
                 next = next.max(reg.0 + 1);
             }
+            let widened = if self.word_decoders.is_some() {
+                super::erased_word::widened_scalars(func)
+            } else {
+                BTreeMap::new()
+            };
             for (index, specialized_id) in sites {
                 let (ptys, _) = match param_tys.get(&specialized_id) {
                     Some(p) => p,
@@ -1839,17 +1844,24 @@ impl Monomorphizer {
                     let declared = erased_params
                         .get(&specialized_id)
                         .is_some_and(|params| params.contains(&i));
-                    let word_arg = match func.register_types.get(arg) {
+                    // A scalar the lowering already widened to the slot is
+                    // encoded from its source.
+                    let source = match func.register_types.get(arg) {
+                        Some(ty) if super::erased_word::is_word_scalar(ty) => {
+                            Some((*arg, ty.clone()))
+                        }
+                        _ => widened.get(arg).cloned(),
+                    };
+                    let word_arg = match source.as_ref().map(|(_, ty)| ty) {
                         Some(IrType::F64 | IrType::F32) => true,
                         Some(IrType::I32) => declared || float_bindings.contains(&specialized_id),
                         Some(IrType::Bool) => declared,
                         _ => false,
                     };
-                    if self.word_decoders.is_some() && word_arg {
-                        let Some(mut ty) = func.register_types.get(arg).cloned() else {
-                            continue;
-                        };
-                        let mut src = *arg;
+                    if self.word_decoders.is_some()
+                        && word_arg
+                        && let Some((mut src, mut ty)) = source
+                    {
                         if float_bindings.contains(&specialized_id) && ty == IrType::I32 {
                             let wide = IrId::new(next);
                             next += 1;
