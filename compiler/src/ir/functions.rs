@@ -61,6 +61,11 @@ pub struct IrFunction {
     #[serde(default)]
     pub type_param_metadata_fixups: Vec<(IrId, String)>,
 
+    /// Positions of the parameters declared at a bare type parameter: the
+    /// erased slots a caller fills with a word under `RAYZOR_ERASED_WORDS`.
+    #[serde(default)]
+    pub erased_params: Vec<usize>,
+
     /// Whether this function should be exported from WASM (@:export metadata).
     /// When true, the WASM backend exports it with its qualified_name.
     #[serde(default)]
@@ -297,6 +302,7 @@ impl IrFunction {
             next_reg_id: 0,
             type_param_tag_fixups: Vec::new(),
             type_param_metadata_fixups: Vec::new(),
+            erased_params: Vec::new(),
             wasm_export: false,
             js_import: None,
         };

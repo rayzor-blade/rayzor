@@ -530,6 +530,7 @@ impl<'a> HirToMirContext<'a> {
             next_reg_id: 0,
             type_param_tag_fixups: Vec::new(),
             type_param_metadata_fixups: Vec::new(),
+            erased_params: Vec::new(),
             wasm_export: false,
             js_import: None,
         };

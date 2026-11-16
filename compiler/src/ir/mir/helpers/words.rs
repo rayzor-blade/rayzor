@@ -164,9 +164,6 @@ impl<'a> HirToMirContext<'a> {
 }
 
 impl<'a> HirToMirContext<'a> {
-    /// Encode every scalar a direct call passes to a parameter declared as a
-    /// type parameter. Specialization keeps such a parameter an erased slot,
-    /// so the caller is where the scalar's type is known.
     /// Under `RAYZOR_ERASED_WORDS` a T value is a word wherever a tag
     /// describes it, so every type-parameter tag starts as the Word tag;
     /// specialization adds the bound type as a hint.
@@ -199,6 +196,9 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// Encode every scalar a direct call passes to a parameter declared as a
+    /// type parameter. Specialization keeps such a parameter an erased slot,
+    /// so the caller is where the scalar's type is known.
     pub(crate) fn encode_erased_call_args(&self, module: &mut IrModule) {
         let erased: BTreeMap<IrFunctionId, Vec<bool>> = self
             .function_param_hir_types
@@ -228,6 +228,15 @@ impl<'a> HirToMirContext<'a> {
                     })
             })
             .collect();
+        for (id, flags) in &erased {
+            if let Some(function) = module.functions.get_mut(id) {
+                let offset = function.signature.parameters.len() - flags.len();
+                function.erased_params = (0..flags.len())
+                    .filter(|k| flags[*k])
+                    .map(|k| offset + k)
+                    .collect();
+            }
+        }
         if erased.is_empty() {
             return;
         }
