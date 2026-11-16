@@ -54,10 +54,10 @@ fn unregister_erased_vector<T>(vector: *mut T) {
     erased_vectors().lock().unwrap().remove(&(vector as usize));
 }
 
-/// Retain the logical element type when a generic vector uses pointer-sized slots.
+/// Retain the logical element type when a generic vector uses pointer-sized
+/// slots. A word tag is kept: the slots then hold words.
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_set_element_descriptor(vector: *mut u8, tag: i32, metadata: u64) {
-    let tag = crate::erased_word::element_tag(tag);
     register_erased_vector(vector, ErasedVectorKind::TypedPointer { tag, metadata });
 }
 
@@ -116,7 +116,7 @@ pub(crate) fn set_erased_vector(vector: *mut u8, index: usize, value: *mut u8) -
         }
         ErasedVectorKind::Pointer => rayzor_vec_ptr_set(vector.cast(), index, value),
         ErasedVectorKind::TypedPointer { tag, .. } => {
-            let bits = if tag == ValueTag::NullInt as i32 {
+            let bits = if crate::erased_word::element_tag(tag) == ValueTag::NullInt as i32 {
                 haxe_null_int_from_dynamic(value)
             } else {
                 haxe_unbox_generic_return(value, tag)
