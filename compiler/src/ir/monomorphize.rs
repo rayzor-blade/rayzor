@@ -2389,6 +2389,21 @@ impl Monomorphizer {
             self.next_func_id = self.next_func_id.max(module.next_function_id);
             id
         });
+        let mut open = |name: &str| {
+            (word && declared.iter().any(|t| matches!(t, IrType::Ptr(_)))).then(|| {
+                module.next_function_id = module.next_function_id.max(self.next_func_id);
+                let id = super::erased_word::extern_fn(
+                    module,
+                    name,
+                    IrType::I64,
+                    IrType::Ptr(Box::new(IrType::U8)),
+                );
+                self.next_func_id = self.next_func_id.max(module.next_function_id);
+                id
+            })
+        };
+        let open_reference = open("haxe_word_open_reference");
+        let open_interface = open("haxe_word_open_interface");
         let id = IrFunctionId(self.next_func_id);
         self.next_func_id += 1;
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
@@ -2425,6 +2440,19 @@ impl Monomorphizer {
                 IrType::NullInt => regs.call(&mut out, null_int_from_slot?, *input, ty),
                 _ if word && (is_word_scalar(ty) || *ty == IrType::dynamic_ptr()) => {
                     regs.decode(decoders.as_ref(), &mut out, *input, ty)
+                }
+                // A reference filled through a Dynamic view holds the
+                // instance's box; the parameter takes the instance.
+                IrType::Ptr(inner) if word => {
+                    let interface = matches!(&**inner,
+                        IrType::Opaque { name, .. } if name == "__haxe_interface");
+                    let open = if interface {
+                        open_interface?
+                    } else {
+                        open_reference?
+                    };
+                    let instance = regs.call(&mut out, open, *input, &ptr_u8);
+                    regs.cast(&mut out, instance, &ptr_u8, ty)
                 }
                 _ => regs.from_slot(&mut out, *input, ty),
             });

@@ -1001,6 +1001,29 @@ impl<'a> HirToMirContext<'a> {
             {
                 self.from_word(reg, want)
             }
+            // A reference filled through a Dynamic view holds the instance's
+            // box; the parameter takes the instance.
+            EntryShape::Word if matches!(kind, SlotKind::Reference(_)) => {
+                let interface = matches!(want, IrType::Ptr(inner)
+                    if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_interface"));
+                let open = self.get_or_register_extern_function(
+                    if interface {
+                        "haxe_word_open_interface"
+                    } else {
+                        "haxe_word_open_reference"
+                    },
+                    vec![IrType::I64],
+                    ptr_u8.clone(),
+                );
+                let instance = self
+                    .builder
+                    .build_call_direct(open, vec![reg], ptr_u8.clone())?;
+                if *want == ptr_u8 {
+                    Some(instance)
+                } else {
+                    self.builder.build_cast(instance, ptr_u8, want.clone())
+                }
+            }
             EntryShape::Slot | EntryShape::Word => match kind {
                 SlotKind::Erased => Some(reg),
                 SlotKind::Float(IrType::F32) => {
