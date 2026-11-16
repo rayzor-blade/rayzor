@@ -945,10 +945,10 @@ pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
 /// 9=Function
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i64 {
-    // A null word equals only null and sorts first; a `Null<Int>` slot
-    // holds its raw value.
+    // A null word equals only null and sorts first; a raw-hint slot holds
+    // its value's bits.
     if crate::erased_word::is_word_tag(type_tag)
-        && crate::erased_word::element_tag(type_tag) != crate::type_system::ValueTag::NullInt as i32
+        && !crate::erased_word::is_raw_hint(type_tag)
         && (a == 0) != (b == 0)
     {
         return if a == 0 { -1 } else { 1 };

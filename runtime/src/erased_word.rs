@@ -166,18 +166,29 @@ pub fn native_value(value: i64, tag: i32) -> (i64, i32) {
     if !is_word_tag(tag) {
         return (value, tag);
     }
+    if is_raw_hint(tag) {
+        return (value, element_tag(tag));
+    }
     let word = value as u64;
     match kind(word) {
         WordKind::Int => (i64::from(word as u32 as i32), ValueTag::Int as i32),
         WordKind::Float => (decode_float(word).to_bits() as i64, ValueTag::Float as i32),
         WordKind::Bool => (i64::from(word == TRUE_WORD), ValueTag::Bool as i32),
-        // Null is null whatever the hint names, but for a `Null<Int>` slot,
-        // which holds its raw value.
-        WordKind::Reference if word == 0 && (tag >> 8) & 0xff != ValueTag::NullInt as i32 => {
-            (0, ValueTag::Dynamic as i32)
-        }
+        // Null is null whatever the hint names.
+        WordKind::Reference if word == 0 => (0, ValueTag::Dynamic as i32),
         WordKind::Reference => (value, (tag >> 8) & 0xff),
     }
+}
+
+/// Whether a word tag's hint names a binding whose slot holds the raw
+/// value: `Null<Int>` and `Int64`, whose bits use the whole word.
+pub fn is_raw_hint(tag: i32) -> bool {
+    use crate::type_system::ValueTag;
+    is_word_tag(tag)
+        && matches!(
+            ValueTag::from_i32(element_tag(tag)),
+            Some(ValueTag::NullInt | ValueTag::Int64)
+        )
 }
 
 /// The element type a tag describes: a word tag's hint, else the tag.

@@ -3955,6 +3955,9 @@ pub extern "C" fn haxe_unbox_erased_return(ptr: *mut u8) -> i64 {
 pub extern "C" fn haxe_unbox_generic_return(ptr: *mut u8, type_tag: i32) -> i64 {
     // A word is its own result; a box in the slot opens into one, a
     // reference box by the hint where it names a reference type.
+    if crate::erased_word::is_raw_hint(type_tag) {
+        return haxe_unbox_generic_return(ptr, crate::erased_word::element_tag(type_tag));
+    }
     if type_tag & 0xff == ValueTag::Word as i32 {
         let hint = crate::erased_word::element_tag(type_tag);
         let scalar = matches!(
