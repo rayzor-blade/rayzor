@@ -2128,6 +2128,23 @@ impl<'a> AstLowering<'a> {
         if !conflict {
             return Some(most_general);
         }
+        // Numbers of differing kinds (Int, Float, Single) meet at Float.
+        let numeric = |ty: TypeId| {
+            let ty = self.unalias(ty);
+            let table = self.context.type_table.borrow();
+            match table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Int | TypeKind::Float) => true,
+                Some(TypeKind::Abstract { symbol_id, .. }) => self
+                    .context
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .is_some_and(|s| self.context.string_interner.get(s.name) == Some("Single")),
+                _ => false,
+            }
+        };
+        if types.iter().all(|&ty| numeric(ty)) {
+            return Some(self.context.type_table.borrow().float_type());
+        }
         if let Some(shape) = self.unify_min_fields(types) {
             return Some(shape);
         }
