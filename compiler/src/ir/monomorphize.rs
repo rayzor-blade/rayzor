@@ -1908,6 +1908,18 @@ impl Monomorphizer {
                         Some(IrType::Bool) => declared,
                         _ => false,
                     };
+                    // A box reaching a declared slot crosses as its Dynamic
+                    // view: a scalar box opens, a reference is itself.
+                    if declared
+                        && matches!(func.register_types.get(arg), Some(IrType::Ptr(_)))
+                        && let Some(decoders) = self.word_decoders.as_ref()
+                    {
+                        func.next_reg_id = func.next_reg_id.max(next);
+                        let mut regs = super::erased_word::Regs::new(func);
+                        new_args[i] = regs.encode_dynamic(Some(decoders), &mut coercions, *arg);
+                        next = regs.function().next_reg_id;
+                        continue;
+                    }
                     if self.word_decoders.is_some()
                         && word_arg
                         && let Some((mut src, mut ty)) = source
