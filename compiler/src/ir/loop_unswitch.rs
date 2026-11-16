@@ -24,6 +24,10 @@ const MAX_LOOP_SIZE: usize = 160;
 /// Loop nests larger than this are not versioned.
 const MAX_NEST_SIZE: usize = 600;
 
+/// The flags an array's plain test reads under word slots: all but the
+/// element-kind byte.
+const PLAIN_FLAGS_MASK: i64 = !(rayzor_runtime::haxe_array::HAXE_ARRAY_KIND_MASK as i64);
+
 /// Copies made per function, which bounds the growth of a function whose
 /// loops branch on several invariant conditions.
 const MAX_COPIES_PER_FUNCTION: usize = 6;
@@ -782,6 +786,24 @@ fn plan_version(
                     field: ArrayField::Flags,
                     ..
                 }) if (ctx.outside)(*array) => Some((vec![Need::Plain((ctx.canon)(*array))], true)),
+                // Flags past the element-kind byte, the plain test word slots use.
+                Some(IrInstruction::BinOp {
+                    op: BinaryOp::And,
+                    left: flags,
+                    right: mask,
+                    ..
+                }) if (ctx.constant)(*mask) == Some(PLAIN_FLAGS_MASK) => {
+                    match ctx.def_of.get(&(ctx.canon)(*flags)) {
+                        Some(IrInstruction::ArrayHeader {
+                            array,
+                            field: ArrayField::Flags,
+                            ..
+                        }) if (ctx.outside)(*array) => {
+                            Some((vec![Need::Plain((ctx.canon)(*array))], true))
+                        }
+                        _ => None,
+                    }
+                }
                 _ if ctx.arrays.contains(&(ctx.canon)(*left)) => {
                     Some((vec![Need::NotNull((ctx.canon)(*left))], false))
                 }
@@ -876,6 +898,12 @@ fn plan_version(
             Need::NotNull(array) => facts.push(pre.push_cmp(CompareOp::Ne, array, zero)),
             Need::Plain(array) => {
                 let flags = pre.header(array, ArrayField::Flags);
+                let flags = if crate::debug_flags::erased_words() {
+                    let mask = pre.push_const(PLAIN_FLAGS_MASK);
+                    pre.push_binop(BinaryOp::And, flags, mask)
+                } else {
+                    flags
+                };
                 facts.push(pre.push_cmp(CompareOp::Eq, flags, zero));
             }
             Need::ConstIndex(c, array) => {
