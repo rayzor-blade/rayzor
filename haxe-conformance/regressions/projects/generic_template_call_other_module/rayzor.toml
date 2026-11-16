@@ -1,0 +1,5 @@
+[project]
+name = "generic-template-call-other-module"
+entry = "./GenericTemplateCallOtherModule.hx"
+[build]
+class-paths = ["."]

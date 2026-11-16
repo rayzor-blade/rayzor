@@ -278,6 +278,7 @@ impl Monomorphizer {
         // (e.g., set__String_i32 calls setLoop which has fixups for Reflect.compare).
         // Propagate the substitution map to create specialized versions of those callees.
         self.propagate_transitive_fixups(module);
+        self.encode_template_call_args(module);
         self.adapt_specialized_call_returns(module);
         self.fold_generic_value_adapters(module);
         Self::widen_generic_box_floats(module);
@@ -2483,6 +2484,60 @@ impl Monomorphizer {
         };
         module.functions.insert(id, entry);
         Some(id)
+    }
+}
+
+impl Monomorphizer {
+    /// Encode each scalar a call still aimed at a generic template passes to
+    /// one of its declared erased parameters. A call whose type arguments
+    /// were not recovered (a callee from another module) keeps the template,
+    /// and nothing else hands its slot the word.
+    fn encode_template_call_args(&mut self, module: &mut IrModule) {
+        if self.word_decoders.is_none() {
+            return;
+        }
+        let erased: BTreeMap<IrFunctionId, Vec<usize>> = module
+            .functions
+            .iter()
+            .filter(|(_, f)| !f.signature.type_params.is_empty() && !f.erased_params.is_empty())
+            .map(|(id, f)| (*id, f.erased_params.clone()))
+            .collect();
+        if erased.is_empty() {
+            return;
+        }
+        for function in module.functions.values_mut() {
+            let widened = super::erased_word::widened_scalars(function);
+            let blocks: Vec<IrBlockId> = function.cfg.blocks.keys().copied().collect();
+            for block_id in blocks {
+                let instructions = std::mem::take(
+                    &mut function.cfg.blocks.get_mut(&block_id).unwrap().instructions,
+                );
+                let mut out = Vec::with_capacity(instructions.len());
+                for mut inst in instructions {
+                    if let IrInstruction::CallDirect { func_id, args, .. } = &mut inst
+                        && let Some(positions) = erased.get(func_id)
+                    {
+                        for &i in positions {
+                            let Some(arg) = args.get(i).copied() else {
+                                continue;
+                            };
+                            let source = match function.register_types.get(&arg) {
+                                Some(ty) if super::erased_word::is_word_scalar(ty) => {
+                                    Some((arg, ty.clone()))
+                                }
+                                _ => widened.get(&arg).cloned(),
+                            };
+                            if let Some((src, ty)) = source {
+                                let mut regs = super::erased_word::Regs::new(function);
+                                args[i] = regs.encode(&mut out, src, &ty);
+                            }
+                        }
+                    }
+                    out.push(inst);
+                }
+                function.cfg.blocks.get_mut(&block_id).unwrap().instructions = out;
+            }
+        }
     }
 }
 
