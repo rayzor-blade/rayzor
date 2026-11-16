@@ -94,10 +94,31 @@ impl<'a> HirToMirContext<'a> {
                 )
             )
         };
+        // A class instance, or a nullable one, enters a Dynamic result as
+        // its reference box, as an assignment to Dynamic boxes it.
+        let instance = |ty: TypeId| {
+            let ty = self.resolve_through_aliases(ty);
+            match self.type_table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Class { .. } | TypeKind::Interface { .. }) => Some(ty),
+                Some(TypeKind::Optional { inner_type }) => {
+                    let inner = self.resolve_through_aliases(*inner_type);
+                    matches!(
+                        self.type_table.get(inner).map(|t| &t.kind),
+                        Some(TypeKind::Class { .. } | TypeKind::Interface { .. })
+                    )
+                    .then_some(inner)
+                }
+                _ => None,
+            }
+        };
         if matches!(source_kind, Some(TypeKind::Dynamic)) && concrete(target_kind) {
             self.maybe_unbox_value(value, source, target)
         } else if matches!(target_kind, Some(TypeKind::Dynamic)) && concrete(source_kind) {
             self.maybe_box_value(value, source, target)
+        } else if matches!(target_kind, Some(TypeKind::Dynamic))
+            && let Some(class) = instance(source)
+        {
+            self.maybe_box_value(value, class, target)
         } else {
             Some(value)
         }
