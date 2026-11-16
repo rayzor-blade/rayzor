@@ -1763,6 +1763,7 @@ fn run_file(
         let import_hash = compiler::ir::blade::compute_import_set_hash(&source, &manifest_dirs);
         import_hash.hash(&mut h);
         compiler::BUILD_ID.hash(&mut h);
+        compiler::debug_flags::erased_words().hash(&mut h);
         h.finish()
     };
     let mir_cache_path = {

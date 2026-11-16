@@ -79,8 +79,8 @@ cached_flag!(
 );
 cached_flag!(
     /// `RAYZOR_ERASED_WORDS`: an erased generic slot holds a self-describing
-    /// word instead of raw bits. Incomplete until every crossing uses it; not
-    /// safe to run with yet. Compile with `--no-cache`.
+    /// word instead of raw bits. Cached artifacts are keyed by it. Not yet the
+    /// default; WASM lacks the word runtime.
     erased_words,
     "RAYZOR_ERASED_WORDS"
 );

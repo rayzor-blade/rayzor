@@ -184,6 +184,17 @@ impl CompilationConfig {
     }
 
     fn discriminator_for(defines: &[String]) -> String {
+        // An erased slot's representation changes what every generic body
+        // lowers to, so artifacts of the two never share a key.
+        let base = Self::defines_discriminator(defines);
+        if crate::debug_flags::erased_words() {
+            format!("{base}-words")
+        } else {
+            base
+        }
+    }
+
+    fn defines_discriminator(defines: &[String]) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         if defines.is_empty() {
