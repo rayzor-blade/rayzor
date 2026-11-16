@@ -1225,6 +1225,16 @@ impl<'a> HirToMirContext<'a> {
                                 return Some(boxed);
                             }
                         }
+                        // A concrete scalar returned as T (a GADT arm) leaves
+                        // as a word, which specialization decodes.
+                        if self.array_element_is_word(fn_ret_ty)
+                            && self
+                                .builder
+                                .get_register_type(val)
+                                .is_some_and(|ty| crate::ir::erased_word::is_word_scalar(&ty))
+                        {
+                            return self.into_word(val);
+                        }
                         // A generic return consumes a Dynamic box according to T.
                         if self
                             .resolve_type_param_name(fn_ret_ty)

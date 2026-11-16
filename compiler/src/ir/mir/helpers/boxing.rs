@@ -581,7 +581,13 @@ impl<'a> HirToMirContext<'a> {
                     .build_const(IrValue::U64(source.value_metadata()))?,
             )
         };
-        let target_tag = self.builder.build_const(IrValue::I32(0))?;
+        // The T side is a word under RAYZOR_ERASED_WORDS, its fixup a hint.
+        let default_target = if crate::debug_flags::erased_words() {
+            rayzor_runtime::type_system::ValueTag::Word as i32
+        } else {
+            0
+        };
+        let target_tag = self.builder.build_const(IrValue::I32(default_target))?;
         self.builder
             .current_function_mut()?
             .type_param_tag_fixups
