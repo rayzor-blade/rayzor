@@ -2,32 +2,29 @@
 //! conversion (`runtime/src/erased_word.rs`). It changes nothing; it reports
 //! each crossing so the representation change has a worklist.
 //!
-//! A crossing is a register whose type is a scalar (Int, Float, Single, Bool,
-//! Null<Int>) meeting a slot typed `i64` or a type variable:
-//! - `arg`: a direct call to a function with a body passes one into such a
-//!   parameter;
+//! A crossing is a register whose type is a scalar (Int, Float, Single, Bool)
+//! meeting a slot typed `i64` or a type variable. A `Null<Int>` is not one: a
+//! slot bound to it holds the raw value.
+//! - `arg`: a direct call to a function with a body passes one into a
+//!   parameter declared at a type parameter;
 //! - `ret`: such a call's result lands in a scalar register;
 //! - `bits`: a bitcast moves a Float between the two, other than the bits
-//!   a word encode reads;
-//! - `closure`: a function value is cast between signatures that disagree on
-//!   one parameter or the return in the same way.
+//!   a word encode reads, bits a native call takes or returns, a round trip
+//!   back to the same type, and a closure slot entry's native slot ABI;
+//! - `closure`: an indirect call passes one into such a parameter or reads
+//!   one from such a result. A closure keeps its target's native signature,
+//!   so a cast between function types only relabels it; a call through an
+//!   erased type reaches the target through a view, with words.
 
 use super::{IrFunction, IrId, IrInstruction, IrModule, IrType};
 use std::collections::BTreeMap;
 
 fn is_scalar(ty: &IrType) -> bool {
-    matches!(
-        ty,
-        IrType::I32 | IrType::F64 | IrType::F32 | IrType::Bool | IrType::NullInt
-    )
+    matches!(ty, IrType::I32 | IrType::F64 | IrType::F32 | IrType::Bool)
 }
 
 fn is_word(ty: &IrType) -> bool {
     matches!(ty, IrType::I64 | IrType::TypeVar(_))
-}
-
-fn crosses(a: &IrType, b: &IrType) -> bool {
-    (is_scalar(a) && is_word(b)) || (is_word(a) && is_scalar(b))
 }
 
 /// Register types, constants included: a constant's register has no entry
@@ -49,27 +46,17 @@ fn register_types(function: &IrFunction) -> BTreeMap<IrId, IrType> {
     types
 }
 
-fn closure_crosses(from: &IrType, to: &IrType) -> bool {
-    let (
-        IrType::Function {
-            params: from_params,
-            return_type: from_ret,
-            ..
-        },
-        IrType::Function {
-            params: to_params,
-            return_type: to_ret,
-            ..
-        },
-    ) = (from, to)
-    else {
-        return false;
-    };
-    crosses(from_ret, to_ret)
-        || from_params
-            .iter()
-            .zip(to_params)
-            .any(|(a, b)| crosses(a, b))
+fn has_body(module: &IrModule, id: super::IrFunctionId) -> bool {
+    module
+        .functions
+        .get(&id)
+        .is_some_and(|f| !f.cfg.blocks.is_empty())
+}
+
+/// A closure's slot-shaped entry, which the runtime's array helpers call
+/// with native slot bits (`ensure_closure_slot_entry`).
+fn is_slot_entry(function: &IrFunction) -> bool {
+    function.name.starts_with("__closure_slot_entry_")
 }
 
 fn function_label(function: &IrFunction) -> &str {
@@ -105,6 +92,42 @@ pub fn report(module: &IrModule, label: &str) {
                 _ => None,
             })
             .collect();
+        // Bits passed to or returned by a native function travel with the
+        // native call's own tag; they never sit in an erased slot.
+        let native_bits: std::collections::BTreeSet<IrId> = function
+            .cfg
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|inst| match inst {
+                IrInstruction::CallDirect {
+                    dest,
+                    func_id,
+                    args,
+                    ..
+                } if !has_body(module, *func_id) => Some(args.iter().copied().chain(*dest)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        // The middle register of a bitcast round trip, Float to i64 and back.
+        let bitcasts: BTreeMap<IrId, IrId> = function
+            .cfg
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|inst| match inst {
+                IrInstruction::BitCast { dest, src, .. } => Some((*dest, *src)),
+                _ => None,
+            })
+            .collect();
+        let round_trips: std::collections::BTreeSet<IrId> = bitcasts
+            .iter()
+            .filter_map(|(dest, mid)| {
+                let origin = bitcasts.get(mid)?;
+                (register_type(*origin) == register_type(*dest)).then_some(*mid)
+            })
+            .collect();
         for block in function.cfg.blocks.values() {
             for inst in &block.instructions {
                 match inst {
@@ -123,8 +146,10 @@ pub fn report(module: &IrModule, label: &str) {
                         for (i, (arg, param)) in
                             args.iter().zip(&callee.signature.parameters).enumerate()
                         {
+                            let erased = matches!(param.ty, IrType::TypeVar(_))
+                                || callee.erased_params.contains(&i);
                             if let Some(ty) = register_type(*arg) {
-                                if is_scalar(ty) && is_word(&param.ty) {
+                                if is_scalar(ty) && erased {
                                     note(
                                         "arg",
                                         function,
@@ -148,7 +173,14 @@ pub fn report(module: &IrModule, label: &str) {
                             }
                         }
                     }
-                    IrInstruction::BitCast { src, ty, .. } if !nan_tested.contains(src) => {
+                    IrInstruction::BitCast { dest, src, ty }
+                        if !nan_tested.contains(src)
+                            && !native_bits.contains(src)
+                            && !native_bits.contains(dest)
+                            && !round_trips.contains(src)
+                            && !round_trips.contains(dest)
+                            && !is_slot_entry(function) =>
+                    {
                         if let Some(from) = register_type(*src) {
                             let float = |t: &IrType| matches!(t, IrType::F64 | IrType::F32);
                             if (float(from) && is_word(ty)) || (is_word(from) && float(ty)) {
@@ -156,9 +188,32 @@ pub fn report(module: &IrModule, label: &str) {
                             }
                         }
                     }
-                    IrInstruction::Cast { from_ty, to_ty, .. } => {
-                        if closure_crosses(from_ty, to_ty) {
-                            note("closure", function, format!("{from_ty} to {to_ty}"));
+                    IrInstruction::CallIndirect {
+                        dest,
+                        args,
+                        signature:
+                            IrType::Function {
+                                params,
+                                return_type,
+                                ..
+                            },
+                        ..
+                    } => {
+                        for (i, (arg, param)) in args.iter().zip(params).enumerate() {
+                            if let Some(ty) = register_type(*arg) {
+                                if is_scalar(ty) && is_word(param) {
+                                    note(
+                                        "closure",
+                                        function,
+                                        format!("{ty} into param {i} ({param})"),
+                                    );
+                                }
+                            }
+                        }
+                        if let Some(ty) = dest.and_then(register_type) {
+                            if is_word(return_type) && is_scalar(ty) {
+                                note("closure", function, format!("{return_type} result as {ty}"));
+                            }
                         }
                     }
                     _ => {}
