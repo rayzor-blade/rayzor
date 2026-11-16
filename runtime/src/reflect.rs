@@ -945,8 +945,31 @@ pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
 /// 9=Function
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i64 {
-    let (b, _) = crate::erased_word::native_value(b, type_tag);
+    // A null word equals only null and sorts first; a `Null<Int>` slot
+    // holds its raw value.
+    if crate::erased_word::is_word_tag(type_tag)
+        && crate::erased_word::element_tag(type_tag) != crate::type_system::ValueTag::NullInt as i32
+        && (a == 0) != (b == 0)
+    {
+        return if a == 0 { -1 } else { 1 };
+    }
+    let (b, b_tag) = crate::erased_word::native_value(b, type_tag);
     let (a, type_tag) = crate::erased_word::native_value(a, type_tag);
+    // Two words of different numeric kinds compare as numbers.
+    let float = crate::type_system::ValueTag::Float as i32;
+    let int = crate::type_system::ValueTag::Int as i32;
+    if type_tag != b_tag && [type_tag, b_tag].iter().all(|t| *t == int || *t == float) {
+        let number = |v: i64, t: i32| {
+            if t == int {
+                v as i32 as f64
+            } else {
+                f64::from_bits(v as u64)
+            }
+        };
+        return number(a, type_tag)
+            .partial_cmp(&number(b, b_tag))
+            .map_or(1, |o| o as i64);
+    }
     match type_tag {
         1 | 3 => {
             // Int comparison (type_tag 1=TYPE_INT, 3=legacy)

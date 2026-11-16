@@ -205,6 +205,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn word_compare_mixes_numbers_and_keeps_null_apart() {
+        use crate::reflect::haxe_reflect_compare_typed as compare;
+        use crate::type_system::ValueTag;
+        let word = ValueTag::Word as i32;
+        let (two, two_f) = (encode_int(2) as i64, encode_float(2.0) as i64);
+        assert_eq!(compare(two_f, two, word), 0);
+        assert_eq!(compare(encode_float(2.5) as i64, two, word), 1);
+        let zero = encode_float(0.0) as i64;
+        assert_ne!(compare(zero, 0, word), 0);
+        assert_ne!(compare(0, zero, word), 0);
+        assert_eq!(compare(0, 0, word), 0);
+        // A `Null<Int>` slot's raw 0 is the Int 0.
+        let null_int = word | (ValueTag::NullInt as i32) << 8;
+        assert_eq!(compare(0, 0, null_int), 0);
+    }
+
+    #[test]
     fn ints_round_trip_and_are_ints() {
         for v in [0, 1, -1, 15, i32::MIN, i32::MAX] {
             let w = encode_int(v);
