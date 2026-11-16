@@ -93,7 +93,12 @@ impl Decoders {
     }
 }
 
-fn extern_fn(module: &mut IrModule, name: &str, param: IrType, ret: IrType) -> IrFunctionId {
+pub(crate) fn extern_fn(
+    module: &mut IrModule,
+    name: &str,
+    param: IrType,
+    ret: IrType,
+) -> IrFunctionId {
     if let Some(f) = module.extern_functions.values().find(|f| f.name == name) {
         return f.id;
     }
@@ -143,13 +148,13 @@ impl<'f> Regs<'f> {
         self.function
     }
 
-    fn fresh(&mut self, ty: IrType) -> IrId {
+    pub(crate) fn fresh(&mut self, ty: IrType) -> IrId {
         let reg = self.function.alloc_reg();
         self.function.register_types.insert(reg, ty);
         reg
     }
 
-    fn constant(&mut self, out: &mut Vec<IrInstruction>, value: i64) -> IrId {
+    pub(crate) fn constant(&mut self, out: &mut Vec<IrInstruction>, value: i64) -> IrId {
         let dest = self.fresh(IrType::I64);
         out.push(IrInstruction::Const {
             dest,
@@ -175,7 +180,7 @@ impl<'f> Regs<'f> {
         dest
     }
 
-    fn cast(
+    pub(crate) fn cast(
         &mut self,
         out: &mut Vec<IrInstruction>,
         src: IrId,
@@ -192,7 +197,7 @@ impl<'f> Regs<'f> {
         dest
     }
 
-    fn bitcast(&mut self, out: &mut Vec<IrInstruction>, src: IrId, to: &IrType) -> IrId {
+    pub(crate) fn bitcast(&mut self, out: &mut Vec<IrInstruction>, src: IrId, to: &IrType) -> IrId {
         let dest = self.fresh(to.clone());
         out.push(IrInstruction::BitCast {
             dest,
@@ -229,6 +234,47 @@ impl<'f> Regs<'f> {
             IrType::I32 | IrType::Bool => self.cast(out, src, ty, &IrType::I64),
             _ if *ty == IrType::dynamic_ptr() => self.cast(out, src, ty, &IrType::I64),
             _ => src,
+        }
+    }
+
+    /// The `ty` value whose raw bits an array slot holds.
+    pub(crate) fn from_slot(
+        &mut self,
+        out: &mut Vec<IrInstruction>,
+        bits: IrId,
+        ty: &IrType,
+    ) -> IrId {
+        match ty {
+            IrType::F64 => self.bitcast(out, bits, ty),
+            IrType::F32 => {
+                let wide = self.bitcast(out, bits, &IrType::F64);
+                self.cast(out, wide, &IrType::F64, &IrType::F32)
+            }
+            IrType::I64 | IrType::TypeVar(_) => bits,
+            _ => self.cast(out, bits, &IrType::I64, ty),
+        }
+    }
+
+    /// `func_id(arg) -> ty` into a fresh register.
+    pub(crate) fn call(
+        &mut self,
+        out: &mut Vec<IrInstruction>,
+        func_id: IrFunctionId,
+        arg: IrId,
+        ty: &IrType,
+    ) -> IrId {
+        let dest = self.fresh(ty.clone());
+        out.push(call(dest, func_id, arg));
+        dest
+    }
+
+    /// `src: ty` as the raw bits an array slot holds.
+    pub(crate) fn to_slot(&mut self, out: &mut Vec<IrInstruction>, src: IrId, ty: &IrType) -> IrId {
+        match ty {
+            IrType::F64 | IrType::F32 => self.raw(out, src, ty),
+            IrType::NullInt => self.bitcast(out, src, &IrType::I64),
+            IrType::I64 | IrType::TypeVar(_) => src,
+            _ => self.cast(out, src, ty, &IrType::I64),
         }
     }
 

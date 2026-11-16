@@ -689,6 +689,20 @@ impl Monomorphizer {
                             }
                         }
                     }
+                    // A dispatched method's erased parameter stays a slot.
+                    IrInstruction::CallIndirect {
+                        args,
+                        signature: IrType::Function { params, .. },
+                        ..
+                    } => {
+                        for (position, arg) in args.iter().enumerate() {
+                            if let Some(IrType::TypeVar(name)) = function.register_types.get(arg)
+                                && matches!(params.get(position), Some(IrType::I64 | IrType::U64))
+                            {
+                                out.push((*id, index, WordSite::Arg(position), name.clone()));
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -745,7 +759,11 @@ impl Monomorphizer {
                 };
                 for (site, bound) in here {
                     match (site, &mut instruction) {
-                        (WordSite::Arg(position), IrInstruction::CallDirect { args, .. }) => {
+                        (
+                            WordSite::Arg(position),
+                            IrInstruction::CallDirect { args, .. }
+                            | IrInstruction::CallIndirect { args, .. },
+                        ) => {
                             if let Some(arg) = args.get_mut(*position) {
                                 *arg = encode(&mut regs, &mut out, *arg, bound);
                             }
@@ -1556,6 +1574,7 @@ impl Monomorphizer {
         // Worklist: start with all initially monomorphized functions
         let mut worklist: Vec<IrFunctionId> = self.instantiation_sub_maps.keys().copied().collect();
         let mut processed: BTreeSet<IrFunctionId> = BTreeSet::new();
+        let mut closure_clones: BTreeSet<(IrFunctionId, IrFunctionId)> = BTreeSet::new();
 
         while let Some(func_id) = worklist.pop() {
             if processed.contains(&func_id) {
@@ -1657,6 +1676,7 @@ impl Monomorphizer {
                             let (new_id, is_new) =
                                 self.instantiate_with_sub_map(&closure, &sub_map);
                             rewrites.push((*block_id, inst_idx, new_id));
+                            closure_clones.insert((*target, new_id));
                             if is_new {
                                 for function in std::mem::take(&mut self.pending_transitive_funcs) {
                                     module.functions.insert(function.id, function);
@@ -1691,6 +1711,7 @@ impl Monomorphizer {
                 }
             }
         }
+        self.register_closure_clones(module, &closure_clones);
     }
 
     /// Create a specialized version of a function using an explicit substitution map.
@@ -2083,6 +2104,267 @@ pub fn references_type_params(function: &IrFunction) -> bool {
         return true;
     }
     function.locals.values().any(|l| is_var(&l.ty))
+}
+
+impl Monomorphizer {
+    /// Register each specialized closure target. A slot or word caller goes
+    /// through entries built from the clone's own signature; a Dynamic or
+    /// packed caller through the template's, as the clone captures what the
+    /// template captures and the template's body takes erased values.
+    fn register_closure_clones(
+        &mut self,
+        module: &mut IrModule,
+        clones: &BTreeSet<(IrFunctionId, IrFunctionId)>,
+    ) {
+        if clones.is_empty() {
+            return;
+        }
+        let registrar = |name: &str| {
+            module
+                .functions
+                .values()
+                .map(|f| (f.id, f.name.as_str()))
+                .chain(
+                    module
+                        .extern_functions
+                        .values()
+                        .map(|f| (f.id, f.name.as_str())),
+                )
+                .find(|(_, n)| *n == name)
+                .map(|(id, _)| id)
+        };
+        let register_entries = registrar("haxe_closure_register_entries");
+        let register_word = registrar("haxe_closure_register_word_entry");
+        let register_packed = registrar("haxe_closure_register_packed_entry");
+        let mut by_template: BTreeMap<IrFunctionId, Vec<ClonedEntries>> = BTreeMap::new();
+        for (template, clone) in clones {
+            if template == clone {
+                continue;
+            }
+            let slot = self.build_clone_entry(module, *clone, false);
+            let word = match slot {
+                Some(_) if self.word_decoders.is_some() => {
+                    self.build_clone_entry(module, *clone, true)
+                }
+                _ => None,
+            };
+            by_template
+                .entry(*template)
+                .or_default()
+                .push(ClonedEntries {
+                    clone: *clone,
+                    slot,
+                    word,
+                });
+        }
+        for function in module.functions.values_mut() {
+            let mut regs = super::erased_word::Regs::new(function);
+            let blocks: Vec<IrBlockId> = regs.function().cfg.blocks.keys().copied().collect();
+            for block_id in blocks {
+                let instructions = std::mem::take(
+                    &mut regs
+                        .function()
+                        .cfg
+                        .blocks
+                        .get_mut(&block_id)
+                        .unwrap()
+                        .instructions,
+                );
+                // A registrar takes each record as `*u8`, bitcast from the ref.
+                let mut refs: BTreeMap<IrId, (IrFunctionId, Option<IrType>)> = BTreeMap::new();
+                let mut out = Vec::with_capacity(instructions.len());
+                for inst in instructions {
+                    match &inst {
+                        IrInstruction::FunctionRef { dest, func_id } => {
+                            refs.insert(*dest, (*func_id, None));
+                        }
+                        IrInstruction::BitCast { dest, src, ty } => {
+                            if let Some((func_id, None)) = refs.get(src).cloned() {
+                                refs.insert(*dest, (func_id, Some(ty.clone())));
+                            }
+                        }
+                        _ => {}
+                    }
+                    let found = match &inst {
+                        IrInstruction::CallDirect { func_id, args, .. } => args
+                            .first()
+                            .and_then(|target| refs.get(target))
+                            .and_then(|(template, cast)| {
+                                Some((*func_id, by_template.get(template)?, cast.clone()))
+                            }),
+                        _ => None,
+                    };
+                    out.push(inst.clone());
+                    let Some((registrar, cloned, cast)) = found else {
+                        continue;
+                    };
+                    for entries in cloned {
+                        let mut record = |out: &mut Vec<IrInstruction>, f: Option<IrFunctionId>| {
+                            let raw = match f {
+                                Some(func_id) => {
+                                    let dest = regs.fresh(IrType::I64);
+                                    out.push(IrInstruction::FunctionRef { dest, func_id });
+                                    dest
+                                }
+                                None => {
+                                    let dest = regs.fresh(IrType::Ptr(Box::new(IrType::Void)));
+                                    out.push(IrInstruction::Const {
+                                        dest,
+                                        value: IrValue::Null,
+                                    });
+                                    dest
+                                }
+                            };
+                            match &cast {
+                                Some(ty) => regs.bitcast(out, raw, ty),
+                                None => raw,
+                            }
+                        };
+                        let IrInstruction::CallDirect { args, .. } = &inst else {
+                            continue;
+                        };
+                        let new_args = if Some(registrar) == register_entries {
+                            let target = record(&mut out, Some(entries.clone));
+                            let slot = record(&mut out, entries.slot);
+                            vec![target, slot, args[2]]
+                        } else if Some(registrar) == register_word {
+                            let Some(word) = entries.word else {
+                                continue;
+                            };
+                            let target = record(&mut out, Some(entries.clone));
+                            let word = record(&mut out, Some(word));
+                            vec![target, word]
+                        } else if Some(registrar) == register_packed {
+                            let target = record(&mut out, Some(entries.clone));
+                            vec![target, args[1]]
+                        } else {
+                            continue;
+                        };
+                        let mut call = inst.clone();
+                        if let IrInstruction::CallDirect { args, .. } = &mut call {
+                            *args = new_args;
+                        }
+                        out.push(call);
+                    }
+                }
+                regs.function()
+                    .cfg
+                    .blocks
+                    .get_mut(&block_id)
+                    .unwrap()
+                    .instructions = out;
+            }
+        }
+    }
+
+    /// The slot- or word-shaped entry of a specialized closure target,
+    /// `(env, i64..) -> i64`, converting through the clone's own parameter
+    /// and result types. None when every one already is a slot.
+    fn build_clone_entry(
+        &mut self,
+        module: &mut IrModule,
+        clone_id: IrFunctionId,
+        word: bool,
+    ) -> Option<IrFunctionId> {
+        use super::erased_word::is_word_scalar;
+        let target = module.functions.get(&clone_id)?;
+        let sig = target.signature.clone();
+        let name: String = target
+            .name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let env_ty = sig.parameters.first()?.ty.clone();
+        let declared: Vec<IrType> = sig.parameters[1..].iter().map(|p| p.ty.clone()).collect();
+        let is_slot = |ty: &IrType| matches!(ty, IrType::I64 | IrType::Ptr(_) | IrType::Void);
+        if declared.iter().all(is_slot) && is_slot(&sig.return_type) {
+            return None;
+        }
+        let null_int_from_slot = declared.contains(&IrType::NullInt).then(|| {
+            module.next_function_id = module.next_function_id.max(self.next_func_id);
+            let id = super::erased_word::extern_fn(
+                module,
+                "haxe_null_int_from_slot",
+                IrType::I64,
+                IrType::NullInt,
+            );
+            self.next_func_id = self.next_func_id.max(module.next_function_id);
+            id
+        });
+        let id = IrFunctionId(self.next_func_id);
+        self.next_func_id += 1;
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let slot_param = |name: String, ty: IrType| IrParameter {
+            name,
+            ty,
+            reg: IrId(0),
+            by_ref: false,
+        };
+        let mut parameters = vec![slot_param("env".into(), ptr_u8.clone())];
+        parameters.extend((0..declared.len()).map(|i| slot_param(format!("a{i}"), IrType::I64)));
+        let signature = IrFunctionSignature {
+            parameters,
+            return_type: IrType::I64,
+            calling_convention: super::CallingConvention::Haxe,
+            can_throw: sig.can_throw,
+            type_params: vec![],
+            uses_sret: false,
+        };
+        let shape = if word { "word" } else { "slot" };
+        let mut entry = IrFunction::new(
+            id,
+            crate::tast::SymbolId::from_raw(0),
+            format!("__closure_{shape}_entry__{name}"),
+            signature,
+        );
+        let inputs: Vec<IrId> = entry.signature.parameters.iter().map(|p| p.reg).collect();
+        let decoders = self.word_decoders;
+        let mut out = Vec::new();
+        let mut regs = super::erased_word::Regs::new(&mut entry);
+        let mut args = vec![regs.cast(&mut out, inputs[0], &ptr_u8, &env_ty)];
+        for (input, ty) in inputs[1..].iter().zip(&declared) {
+            args.push(match ty {
+                IrType::NullInt => regs.call(&mut out, null_int_from_slot?, *input, ty),
+                _ if word && (is_word_scalar(ty) || *ty == IrType::dynamic_ptr()) => {
+                    regs.decode(decoders.as_ref(), &mut out, *input, ty)
+                }
+                _ => regs.from_slot(&mut out, *input, ty),
+            });
+        }
+        let ret = sig.return_type.clone();
+        let dest = (ret != IrType::Void).then(|| regs.fresh(ret.clone()));
+        out.push(IrInstruction::CallDirect {
+            dest,
+            func_id: clone_id,
+            arg_ownership: vec![super::OwnershipMode::Copy; args.len()],
+            args,
+            type_args: vec![],
+            is_tail_call: false,
+        });
+        let result = match dest {
+            None => regs.constant(&mut out, 0),
+            Some(r) if word && is_word_scalar(&ret) => regs.encode(&mut out, r, &ret),
+            Some(r) if word && ret == IrType::dynamic_ptr() => {
+                regs.encode_dynamic(decoders.as_ref(), &mut out, r)
+            }
+            Some(r) => regs.to_slot(&mut out, r, &ret),
+        };
+        let block = entry.cfg.entry_block;
+        let block = entry.cfg.blocks.get_mut(&block)?;
+        block.instructions = out;
+        block.terminator = IrTerminator::Return {
+            value: Some(result),
+        };
+        module.functions.insert(id, entry);
+        Some(id)
+    }
+}
+
+/// The entries a specialized closure target registers.
+struct ClonedEntries {
+    clone: IrFunctionId,
+    slot: Option<IrFunctionId>,
+    word: Option<IrFunctionId>,
 }
 
 /// Location of a call site in the IR
