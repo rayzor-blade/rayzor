@@ -1276,6 +1276,7 @@ pub fn lower_hir_to_mir_with_function_map(
 
     let mut module = context.lower_module(hir_module)?;
     context.encode_erased_call_args(&mut module);
+    HirToMirContext::word_tag_fixups(&mut module);
 
     // Reverse map func_id -> qualified_name for external functions: lets the
     // blade cache resolve cross-module references when function ids change

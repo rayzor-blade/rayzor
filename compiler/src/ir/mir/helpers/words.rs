@@ -167,6 +167,38 @@ impl<'a> HirToMirContext<'a> {
     /// Encode every scalar a direct call passes to a parameter declared as a
     /// type parameter. Specialization keeps such a parameter an erased slot,
     /// so the caller is where the scalar's type is known.
+    /// Under `RAYZOR_ERASED_WORDS` a T value is a word wherever a tag
+    /// describes it, so every type-parameter tag starts as the Word tag;
+    /// specialization adds the bound type as a hint.
+    pub(crate) fn word_tag_fixups(module: &mut IrModule) {
+        if !crate::debug_flags::erased_words() {
+            return;
+        }
+        let word = rayzor_runtime::type_system::ValueTag::Word as i32;
+        for function in module.functions.values_mut() {
+            if function.type_param_tag_fixups.is_empty() {
+                continue;
+            }
+            let tags: BTreeSet<IrId> = function
+                .type_param_tag_fixups
+                .iter()
+                .map(|(reg, _)| *reg)
+                .collect();
+            for block in function.cfg.blocks.values_mut() {
+                for instruction in &mut block.instructions {
+                    if let IrInstruction::Const {
+                        dest,
+                        value: value @ IrValue::I32(_),
+                    } = instruction
+                        && tags.contains(dest)
+                    {
+                        *value = IrValue::I32(word);
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn encode_erased_call_args(&self, module: &mut IrModule) {
         let erased: BTreeMap<IrFunctionId, Vec<bool>> = self
             .function_param_hir_types
