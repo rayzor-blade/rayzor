@@ -345,6 +345,7 @@ pub enum ParamType {
     Anon = 7,    // anonymous object handle
     Boxed = 8,   // DynamicValue pointer or null (a `Null<scalar>` slot)
     NullInt = 9, // unboxed `Null<Int>`: `NULL_INT` is null, else an Int
+    Word = 10,   // erased-slot word (`erased_word.rs`), which describes itself
 }
 
 /// Enum variant metadata
@@ -1458,7 +1459,8 @@ pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32, string_params:
                 | ParamType::Array
                 | ParamType::Anon
                 | ParamType::Boxed
-                | ParamType::NullInt => va == vb,
+                | ParamType::NullInt
+                | ParamType::Word => va == vb,
                 ParamType::Float => f64::from_bits(va as u64) == f64::from_bits(vb as u64),
                 ParamType::String => haxe_string_ptr_eq(va, vb),
             };
@@ -1810,6 +1812,7 @@ pub extern "C" fn haxe_register_enum_variant(
                     2 => ParamType::Bool,
                     3 => ParamType::String,
                     5 => ParamType::Dynamic,
+                    10 => ParamType::Word,
                     _ => ParamType::Object,
                 })
                 .collect()
@@ -2519,6 +2522,16 @@ fn format_enum_boxed(type_id: u32, ptr: *const u8) -> String {
                     let val = *(field_ptr as *const i64);
                     out.push_str(&format!("<object@0x{:x}>", val));
                 }
+                // A word prints as the Dynamic it opens into.
+                ParamType::Word => {
+                    let val = *(field_ptr as *const u64);
+                    let text = haxe_std_string_ptr(crate::erased_word::haxe_word_to_dynamic(val));
+                    if !text.is_null() {
+                        let text = &*text;
+                        let bytes = std::slice::from_raw_parts(text.ptr as *const u8, text.len);
+                        out.push_str(&String::from_utf8_lossy(bytes));
+                    }
+                }
             }
         }
         out.push(')');
@@ -2629,6 +2642,7 @@ pub extern "C" fn haxe_trace_enum_boxed_typed(
                     2 => ParamType::Bool,
                     3 => ParamType::String,
                     5 => ParamType::Dynamic,
+                    10 => ParamType::Word,
                     _ => ParamType::Object,
                 })
                 .collect()
@@ -2686,6 +2700,16 @@ pub extern "C" fn haxe_trace_enum_boxed_typed(
                     | ParamType::Boxed => {
                         let val = *(field_ptr as *const i64);
                         print!("{}", val);
+                    }
+                    ParamType::Word => {
+                        let val = *(field_ptr as *const u64);
+                        let text =
+                            haxe_std_string_ptr(crate::erased_word::haxe_word_to_dynamic(val));
+                        if !text.is_null() {
+                            let text = &*text;
+                            let bytes = std::slice::from_raw_parts(text.ptr as *const u8, text.len);
+                            print!("{}", String::from_utf8_lossy(bytes));
+                        }
                     }
                 }
             }
@@ -4842,6 +4866,7 @@ pub unsafe fn box_class_field_as_dynamic(value: u64, ty: ParamType) -> *mut u8 {
         }
         ParamType::Boxed => value as *mut u8,
         ParamType::NullInt => haxe_null_int_to_dynamic(value as i64),
+        ParamType::Word => crate::erased_word::haxe_word_to_dynamic(value),
     }
 }
 
