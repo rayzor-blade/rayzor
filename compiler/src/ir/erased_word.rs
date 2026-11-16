@@ -1,8 +1,8 @@
 //! The erased-slot word of `runtime/src/erased_word.rs`, emitted as MIR
 //! instructions for passes that run after lowering.
 //!
-//! With `RAYZOR_ERASED_WORDS` unset a slot holds the scalar's raw bits;
-//! set, the self-describing word. `mir/helpers/words.rs` is the same
+//! With `debug_flags::erased_words()` a slot holds the self-describing word;
+//! without it, the scalar's raw bits. `mir/helpers/words.rs` is the same
 //! encoding through the builder.
 
 use super::{
@@ -71,8 +71,7 @@ pub(crate) struct Decoders {
 }
 
 impl Decoders {
-    /// Declared only with `RAYZOR_ERASED_WORDS` set; unset, decoding needs
-    /// no call.
+    /// Declared only for word slots; raw slots decode with no call.
     pub(crate) fn declare(module: &mut IrModule) -> Option<Self> {
         crate::debug_flags::erased_words().then(|| Self {
             to_float: extern_fn(module, "haxe_word_to_float", IrType::I64, IrType::F64),

@@ -14,7 +14,7 @@
 //!   result are `DynamicValue` boxes;
 //! - the *word* entry is `(env, word..) -> word`: every argument and the
 //!   result are erased-slot words (`erased_word.rs`), for a call from code
-//!   compiled with `RAYZOR_ERASED_WORDS`.
+//!   compiled with word slots, the default.
 
 use crate::type_system::{
     TYPE_BOOL, TYPE_FLOAT, TYPE_INT, dynamic_value_if_boxed, haxe_unbox_float, haxe_unbox_int,
@@ -263,7 +263,7 @@ pub extern "C" fn haxe_closure_slot_view(closure: *mut u8) -> *mut u8 {
 /// A view of `closure` taking and returning erased-slot words. The closure
 /// itself when it has no slot entry either (every declared type already is
 /// a word); a closure with a slot entry but no word entry was compiled
-/// without `RAYZOR_ERASED_WORDS`, which cannot be mixed.
+/// with raw erased slots, which cannot be mixed with words.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_closure_word_view(closure: *mut u8) -> *mut u8 {
     if closure.is_null() {
@@ -279,9 +279,7 @@ pub extern "C" fn haxe_closure_word_view(closure: *mut u8) -> *mut u8 {
     match (entries.word, entries.slot) {
         (0, 0) => closure,
         (0, _) => {
-            eprintln!(
-                "closure has a slot entry but no word entry: compiled without RAYZOR_ERASED_WORDS"
-            );
+            eprintln!("closure has a slot entry but no word entry: compiled with raw erased slots");
             std::process::abort();
         }
         (word, _) => Box::into_raw(Box::new([word, env])) as *mut u8,

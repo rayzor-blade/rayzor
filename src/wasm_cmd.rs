@@ -136,6 +136,7 @@ fn prepare_wasm_compile_inputs(
 }
 
 fn wasm_defines(project: Option<&compiler::workspace::Project>) -> Vec<String> {
+    compiler::debug_flags::use_raw_slots();
     let mut seen = BTreeSet::new();
     let mut defines = Vec::new();
     seen.insert("wasm".to_string());

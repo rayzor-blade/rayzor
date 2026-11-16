@@ -77,10 +77,20 @@ cached_flag!(
     erased_census,
     "RAYZOR_ERASED_CENSUS"
 );
-cached_flag!(
-    /// `RAYZOR_ERASED_WORDS`: an erased generic slot holds a self-describing
-    /// word instead of raw bits. Cached artifacts are keyed by it. Not yet the
-    /// default; WASM lacks the word runtime.
-    erased_words,
-    "RAYZOR_ERASED_WORDS"
-);
+/// Whether an erased generic slot holds a self-describing word rather than
+/// raw bits. On by default; `RAYZOR_ERASED_WORDS=0` keeps raw slots, safe to
+/// run with. Off for a WASM target, whose slots are 32-bit. Cached artifacts
+/// are keyed by it.
+pub fn erased_words() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let requested = *ON
+        .get_or_init(|| std::env::var_os("RAYZOR_ERASED_WORDS").is_none_or(|value| value != "0"));
+    requested && !RAW_SLOT_TARGET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static RAW_SLOT_TARGET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Compile for a target that keeps raw erased slots. Set before lowering.
+pub fn use_raw_slots() {
+    RAW_SLOT_TARGET.store(true, std::sync::atomic::Ordering::Relaxed);
+}

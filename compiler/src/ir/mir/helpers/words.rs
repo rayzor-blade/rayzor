@@ -1,8 +1,7 @@
 //! Moving a scalar into and out of an erased generic slot.
 //!
-//! With `RAYZOR_ERASED_WORDS` unset a slot holds the scalar's raw bits, as
-//! it always has; set, it holds the self-describing word of
-//! `runtime/src/erased_word.rs`. Every crossing goes through these two
+//! A slot holds the self-describing word of `runtime/src/erased_word.rs`,
+//! or the scalar's raw bits where `debug_flags::erased_words()` is off. Every crossing goes through these two
 //! helpers, so the switch changes every endpoint at once.
 
 use super::*;
