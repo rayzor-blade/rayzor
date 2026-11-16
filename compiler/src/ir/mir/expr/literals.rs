@@ -273,6 +273,26 @@ impl<'a> HirToMirContext<'a> {
         if !elements.is_empty() {
             self.init_array_element_layout(array_ptr, array_type)?;
         }
+        // Erased code reads a concrete array's elements as words, which needs
+        // their native kind.
+        if crate::debug_flags::erased_words()
+            && let Some(element) = element_type_id
+            && !self.array_element_is_word(element)
+        {
+            let kind = self.erased_array_slot_layout(element, 0);
+            if matches!(kind, 2 | 3 | 4 | 8) {
+                let ptr = IrType::Ptr(Box::new(IrType::U8));
+                let mark = self.get_or_register_extern_function(
+                    "haxe_array_mark_elem_kind",
+                    vec![ptr.clone(), IrType::U64],
+                    IrType::Void,
+                );
+                let array = self.coerce_reg_to(array_ptr, &ptr)?;
+                let kind = self.builder.build_const(IrValue::U64(kind))?;
+                self.builder
+                    .build_call_direct(mark, vec![array, kind], IrType::Void);
+            }
+        }
 
         // Word elements are pushed as words, which the runtime stores in
         // their native form.

@@ -1371,6 +1371,19 @@ impl<'a> HirToMirContext<'a> {
             )?;
             return self.to_null_int(boxed);
         }
+        // A Dynamic consumer boxes a scalar word, whatever IR type holds it.
+        let dynamic = self.is_any_type(ty)
+            || matches!(
+                self.type_table
+                    .get(self.resolve_storage_type(ty))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            );
+        if dynamic {
+            let boxed = self.erased_field_word(word, &IrType::dynamic_ptr())?;
+            self.boxed_value_regs.insert(boxed);
+            return self.coerce_reg_to(boxed, target);
+        }
         if let Some(value) = self.erased_field_word(word, target) {
             return Some(value);
         }
@@ -1616,6 +1629,10 @@ impl<'a> HirToMirContext<'a> {
         if matches!(protocol, IterProtocol::Iterator) && method == "next" {
             if let Some(elem_ty) = self.iter_elem_ir_type(receiver.ty) {
                 return self.array_iterator_next_result(result, expr.ty, &elem_ty);
+            }
+            if crate::debug_flags::erased_words() {
+                let target = self.convert_type(expr.ty);
+                return self.array_iterator_next_result(result, expr.ty, &target);
             }
             if matches!(
                 self.type_table
