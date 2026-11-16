@@ -187,6 +187,20 @@ impl<'f> Regs<'f> {
         word
     }
 
+    /// `src: ty` as the raw i64 bits a native field holds.
+    pub(crate) fn raw(&mut self, out: &mut Vec<IrInstruction>, src: IrId, ty: &IrType) -> IrId {
+        match ty {
+            IrType::F32 => {
+                let wide = self.cast(out, src, &IrType::F32, &IrType::F64);
+                self.bitcast(out, wide, &IrType::I64)
+            }
+            IrType::F64 => self.bitcast(out, src, &IrType::I64),
+            IrType::I32 | IrType::Bool => self.cast(out, src, ty, &IrType::I64),
+            _ if *ty == IrType::dynamic_ptr() => self.cast(out, src, ty, &IrType::I64),
+            _ => src,
+        }
+    }
+
     /// `src: ty` as an erased-slot word, appending its instructions to `out`.
     /// Not a word scalar: `src` unchanged.
     pub(crate) fn encode(&mut self, out: &mut Vec<IrInstruction>, src: IrId, ty: &IrType) -> IrId {

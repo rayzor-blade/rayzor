@@ -35,6 +35,9 @@ enum WordSite {
     Encode,
     /// A T register as this call argument.
     Arg(usize),
+    /// A T register as this native field call argument, which takes the
+    /// value's raw bits.
+    NativeArg(usize),
     /// A cast that converts a T register from its erased i64 form; it
     /// converts from the bound type instead.
     Retype,
@@ -227,6 +230,8 @@ impl Monomorphizer {
             return; // No generic functions to monomorphize
         }
         self.word_decoders = super::erased_word::Decoders::declare(module);
+        // Instances take ids after the decoders just declared.
+        self.next_func_id = self.next_func_id.max(module.next_function_id);
         const NATIVE_FIELD_CALLS: &[&str] = &[
             "rayzor_anon_set_field_by_index",
             "rayzor_anon_set_field",
@@ -635,7 +640,12 @@ impl Monomorphizer {
                 match instruction {
                     IrInstruction::BitCast { dest, src, .. }
                     | IrInstruction::Cast { dest, src, .. }
-                        if native_defs.contains(src) || native_only(dest) => {}
+                        if native_defs.contains(src)
+                            || (native_only(dest)
+                                && matches!(
+                                    function.register_types.get(src),
+                                    Some(IrType::TypeVar(_))
+                                )) => {}
                     IrInstruction::BitCast { src, ty, .. } => {
                         match (function.register_types.get(src), ty) {
                             (source, IrType::TypeVar(name)) if slot(source) => {
@@ -666,10 +676,16 @@ impl Monomorphizer {
                         }
                         _ => {}
                     },
-                    IrInstruction::CallDirect { args, .. } => {
+                    IrInstruction::CallDirect { args, func_id, .. } => {
+                        let native = self.native_field_calls.contains(func_id);
                         for (position, arg) in args.iter().enumerate() {
                             if let Some(IrType::TypeVar(name)) = function.register_types.get(arg) {
-                                out.push((*id, index, WordSite::Arg(position), name.clone()));
+                                let site = if native {
+                                    WordSite::NativeArg(position)
+                                } else {
+                                    WordSite::Arg(position)
+                                };
+                                out.push((*id, index, site, name.clone()));
                             }
                         }
                     }
@@ -732,6 +748,11 @@ impl Monomorphizer {
                         (WordSite::Arg(position), IrInstruction::CallDirect { args, .. }) => {
                             if let Some(arg) = args.get_mut(*position) {
                                 *arg = encode(&mut regs, &mut out, *arg, bound);
+                            }
+                        }
+                        (WordSite::NativeArg(position), IrInstruction::CallDirect { args, .. }) => {
+                            if let Some(arg) = args.get_mut(*position) {
+                                *arg = regs.raw(&mut out, *arg, bound);
                             }
                         }
                         (
@@ -1747,6 +1768,7 @@ impl Monomorphizer {
     ) {
         let mut param_tys: BTreeMap<IrFunctionId, (Vec<IrType>, IrType)> = BTreeMap::new();
         let mut float_bindings = BTreeSet::new();
+        let mut erased_params: BTreeMap<IrFunctionId, Vec<usize>> = BTreeMap::new();
         let mut by_block: BTreeMap<(IrFunctionId, IrBlockId), Vec<(usize, IrFunctionId)>> =
             BTreeMap::new();
         for (key, locations) in requests {
@@ -1758,6 +1780,7 @@ impl Monomorphizer {
                 float_bindings.insert(specialized_id);
             }
             if let Some(f) = module.functions.get(&specialized_id) {
+                erased_params.insert(specialized_id, f.erased_params.clone());
                 param_tys.entry(specialized_id).or_insert_with(|| {
                     (
                         f.signature
@@ -1807,6 +1830,42 @@ impl Monomorphizer {
                 let mut new_args = args.clone();
                 for (i, arg) in args.iter().enumerate() {
                     if ptys.get(i) != Some(&IrType::I64) {
+                        continue;
+                    }
+                    // Under RAYZOR_ERASED_WORDS a scalar reaching an erased slot
+                    // crosses as its word: a Float always, as no other i64
+                    // parameter takes one; an Int or Bool where the parameter
+                    // is declared at a bare type parameter.
+                    let declared = erased_params
+                        .get(&specialized_id)
+                        .is_some_and(|params| params.contains(&i));
+                    let word_arg = match func.register_types.get(arg) {
+                        Some(IrType::F64 | IrType::F32) => true,
+                        Some(IrType::I32) => declared || float_bindings.contains(&specialized_id),
+                        Some(IrType::Bool) => declared,
+                        _ => false,
+                    };
+                    if self.word_decoders.is_some() && word_arg {
+                        let Some(mut ty) = func.register_types.get(arg).cloned() else {
+                            continue;
+                        };
+                        let mut src = *arg;
+                        if float_bindings.contains(&specialized_id) && ty == IrType::I32 {
+                            let wide = IrId::new(next);
+                            next += 1;
+                            coercions.push(IrInstruction::Cast {
+                                dest: wide,
+                                src,
+                                from_ty: IrType::I32,
+                                to_ty: IrType::F64,
+                            });
+                            func.register_types.insert(wide, IrType::F64);
+                            (src, ty) = (wide, IrType::F64);
+                        }
+                        func.next_reg_id = func.next_reg_id.max(next);
+                        let mut regs = super::erased_word::Regs::new(func);
+                        new_args[i] = regs.encode(&mut coercions, src, &ty);
+                        next = regs.function().next_reg_id;
                         continue;
                     }
                     if float_bindings.contains(&specialized_id)
