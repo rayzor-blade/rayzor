@@ -496,6 +496,38 @@ impl<'a> HirToMirContext<'a> {
             let lambda_func = self.builder.module.functions.get(&func_id)?;
             self.infer_lambda_return_type(lambda_func, entry_block, body_result)
         };
+        // A result declared at a bare type parameter is an erased slot, as a
+        // parameter declared at one is, so a specialization gives both the
+        // type argument and concrete callers read the type they cast to.
+        let return_type = match self.type_table.get(lambda_type).map(|t| &t.kind) {
+            Some(TypeKind::Function {
+                return_type: declared,
+                ..
+            }) if matches!(return_type, IrType::I64 | IrType::TypeVar(_))
+                && matches!(
+                    self.type_table
+                        .get(self.resolve_through_aliases(*declared))
+                        .map(|t| &t.kind),
+                    Some(TypeKind::TypeParameter { .. })
+                ) =>
+            {
+                let names: Vec<String> = self
+                    .builder
+                    .module
+                    .functions
+                    .get(&func_id)?
+                    .signature
+                    .type_params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect();
+                match self.convert_type_or_type_var(*declared, &names) {
+                    var @ IrType::TypeVar(_) => var,
+                    _ => return_type,
+                }
+            }
+            _ => return_type,
+        };
 
         // The block the builder ended on after lowering the body: for a body whose
         // last construct is a loop or conditional that is the loop-exit / merge
