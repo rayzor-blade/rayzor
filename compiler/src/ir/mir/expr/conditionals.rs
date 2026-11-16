@@ -49,6 +49,22 @@ impl<'a> HirToMirContext<'a> {
         if is_function && !dynamic_result {
             return self.builder.build_bitcast(value, other.clone());
         }
+        // So is an array, an object or a string an element read left in i64.
+        let is_reference = matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(ty))
+                .map(|t| &t.kind),
+            Some(
+                TypeKind::Array { .. }
+                    | TypeKind::Class { .. }
+                    | TypeKind::Interface { .. }
+                    | TypeKind::Anonymous { .. }
+                    | TypeKind::String
+            )
+        );
+        if is_reference && ir == IrType::I64 && !dynamic_result {
+            return self.builder.build_bitcast(value, other.clone());
+        }
         if self.resolve_enum_symbol(ty).is_some() {
             if !dynamic_result && !self.is_tag_only_enum_type(ty) {
                 return self.builder.build_bitcast(value, other.clone());
