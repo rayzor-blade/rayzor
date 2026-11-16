@@ -1117,7 +1117,17 @@ impl Monomorphizer {
                     .collect(),
             );
         }
+        // Under RAYZOR_ERASED_WORDS an instance's scalar result reaching an
+        // erased slot of another instance crosses as its word; a concrete
+        // caller reads the slot's raw bits.
+        let instances: BTreeSet<IrFunctionId> = if self.word_decoders.is_some() {
+            self.instances.values().copied().collect()
+        } else {
+            BTreeSet::new()
+        };
         for function in module.functions.values_mut() {
+            let caller_is_instance = instances.contains(&function.id);
+            let mut word_results: BTreeMap<IrId, IrType> = BTreeMap::new();
             let erased_float_returns: BTreeSet<_> = function
                 .cfg
                 .blocks
@@ -1216,6 +1226,13 @@ impl Monomorphizer {
                             let target = *dest;
                             *dest = source;
                             function.register_types.insert(source, returned.clone());
+                            if expected == IrType::I64
+                                && caller_is_instance
+                                && instances.contains(func_id)
+                                && super::erased_word::is_word_scalar(returned)
+                            {
+                                word_results.insert(target, returned.clone());
+                            }
                             Some(
                                 if matches!(
                                     (returned, &expected),
@@ -1248,6 +1265,39 @@ impl Monomorphizer {
                 block.instructions = instructions;
             }
             function.next_reg_id = next;
+            if !word_results.is_empty() {
+                Self::encode_word_results(function, &word_results);
+            }
+        }
+    }
+
+    /// Replace each widening of an instance result in `results` with the
+    /// result's word.
+    fn encode_word_results(function: &mut IrFunction, results: &BTreeMap<IrId, IrType>) {
+        let mut regs = super::erased_word::Regs::new(function);
+        let ids: Vec<_> = regs.function().cfg.blocks.keys().copied().collect();
+        for id in ids {
+            let Some(block) = regs.function().cfg.blocks.get_mut(&id) else {
+                continue;
+            };
+            let old = std::mem::take(&mut block.instructions);
+            let mut out = Vec::with_capacity(old.len());
+            for instruction in old {
+                match &instruction {
+                    IrInstruction::BitCast { dest, src, .. }
+                    | IrInstruction::Cast { dest, src, .. }
+                        if results.contains_key(dest) =>
+                    {
+                        let (dest, src) = (*dest, *src);
+                        let word = regs.encode(&mut out, src, &results[&dest]);
+                        out.push(IrInstruction::Copy { dest, src: word });
+                    }
+                    _ => out.push(instruction),
+                }
+            }
+            if let Some(block) = regs.function().cfg.blocks.get_mut(&id) {
+                block.instructions = out;
+            }
         }
     }
 
