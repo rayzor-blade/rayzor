@@ -143,6 +143,11 @@ fn word_to_slot(array: *mut HaxeArray, word: i64) -> i64 {
         8 => i64::from(haxe_word_to_int(word)),
         4 => haxe_word_to_float(word).to_bits() as i64,
         9 => crate::type_system::haxe_unbox_int_ptr(word as *mut u8),
+        // A String slot holds the string, not its box.
+        5 if word != 0 => crate::type_system::haxe_unbox_generic_return(
+            word as *mut u8,
+            crate::type_system::ValueTag::String as i32,
+        ),
         _ => word as i64,
     }
 }
@@ -219,6 +224,15 @@ pub extern "C" fn haxe_array_get_typed(arr: *const HaxeArray, index: i64, tag: i
         let bits = ptr::read_unaligned(array.ptr.add(index as usize * 8).cast::<i64>());
         if crate::erased_word::is_word_tag(tag) {
             apply_kind_hint(arr as *mut HaxeArray, tag);
+            // A reader with no hint, or a Dynamic one, cannot tell a String
+            // from another reference, so it gets the String's box.
+            let dynamic_reader = matches!(
+                ValueTag::from_i32(crate::erased_word::element_tag(tag)),
+                Some(ValueTag::Unresolved | ValueTag::Dynamic)
+            );
+            if dynamic_reader && elem_kind(&*arr) == 5 && bits != 0 {
+                return box_erased_array_slot(bits as u64, 5) as i64;
+            }
             return slot_to_word(&*arr, bits);
         }
         if tag == ValueTag::Unresolved as i32 {
@@ -2660,6 +2674,21 @@ mod shared_array_layout_tests {
         let slot = unsafe { ptr::read_unaligned(hinted.ptr.cast::<f64>()) };
         assert_eq!(slot, 3.0);
         haxe_array_free(&mut hinted);
+
+        // A Dynamic reader of a String array gets the String's box, and a
+        // box written back is stored as the string.
+        let dynamic_hint = word | (ValueTag::Dynamic as i32) << 8;
+        let text = crate::haxe_string::boxed_string(b"x".to_vec());
+        let mut strings = array();
+        haxe_array_mark_elem_kind(&mut strings, 5);
+        haxe_array_push_typed(&mut strings, text as i64, word, 0);
+        let boxed = haxe_array_get_typed(&strings, 0, dynamic_hint);
+        assert_ne!(boxed, text as i64);
+        assert_eq!(haxe_unbox_reference_ptr(boxed as *mut u8), text as *mut u8);
+        haxe_array_set_typed(&mut strings, 0, boxed, dynamic_hint, 0);
+        let slot = unsafe { ptr::read_unaligned(strings.ptr.cast::<i64>()) };
+        assert_eq!(slot, text as i64);
+        haxe_array_free(&mut strings);
     }
 
     #[test]
