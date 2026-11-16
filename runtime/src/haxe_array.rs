@@ -37,7 +37,8 @@ pub const HAXE_ARRAY_SLOT_LAYOUT: usize = 8;
 
 /// Bits 56..63: the elements' native kind, as an `erased_array_slot_layout`
 /// code, recorded for erased code that moves words in and out. Compiled
-/// concrete code ignores them.
+/// concrete code ignores them: every bit that keeps it off the inline path
+/// lies in the low 32 bits, which is all its plain test reads.
 pub const HAXE_ARRAY_KIND_SHIFT: u32 = 56;
 pub const HAXE_ARRAY_KIND_MASK: usize = 0xff << HAXE_ARRAY_KIND_SHIFT;
 

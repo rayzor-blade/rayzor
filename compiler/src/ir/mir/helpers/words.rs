@@ -29,14 +29,13 @@ impl<'a> HirToMirContext<'a> {
         if element_ty.is_some_and(|ty| self.array_element_is_word(ty)) {
             return self.builder.build_const(IrValue::Bool(false));
         }
-        let flags = if crate::debug_flags::erased_words() {
-            let mask = self.builder.build_const(IrValue::I64(
-                !(rayzor_runtime::haxe_array::HAXE_ARRAY_KIND_MASK as i64),
-            ))?;
-            self.builder.build_binop(BinaryOp::And, flags, mask)?
-        } else {
-            flags
-        };
+        // Word slots record the element kind above bit 32; every bit that
+        // makes an array not plain lies below it.
+        if crate::debug_flags::erased_words() {
+            let low = self.builder.build_cast(flags, IrType::I64, IrType::I32)?;
+            let zero = self.builder.build_const(IrValue::I32(0))?;
+            return self.builder.build_cmp(CompareOp::Eq, low, zero);
+        }
         let zero = self.builder.build_const(IrValue::I64(0))?;
         self.builder.build_cmp(CompareOp::Eq, flags, zero)
     }

@@ -24,10 +24,6 @@ const MAX_LOOP_SIZE: usize = 160;
 /// Loop nests larger than this are not versioned.
 const MAX_NEST_SIZE: usize = 600;
 
-/// The flags an array's plain test reads under word slots: all but the
-/// element-kind byte.
-const PLAIN_FLAGS_MASK: i64 = !(rayzor_runtime::haxe_array::HAXE_ARRAY_KIND_MASK as i64);
-
 /// Copies made per function, which bounds the growth of a function whose
 /// loops branch on several invariant conditions.
 const MAX_COPIES_PER_FUNCTION: usize = 6;
@@ -786,24 +782,22 @@ fn plan_version(
                     field: ArrayField::Flags,
                     ..
                 }) if (ctx.outside)(*array) => Some((vec![Need::Plain((ctx.canon)(*array))], true)),
-                // Flags past the element-kind byte, the plain test word slots use.
-                Some(IrInstruction::BinOp {
-                    op: BinaryOp::And,
-                    left: flags,
-                    right: mask,
+                // The flags' low half, the plain test word slots use.
+                Some(IrInstruction::Cast {
+                    src: flags,
+                    from_ty: IrType::I64,
+                    to_ty: IrType::I32,
                     ..
-                }) if (ctx.constant)(*mask) == Some(PLAIN_FLAGS_MASK) => {
-                    match ctx.def_of.get(&(ctx.canon)(*flags)) {
-                        Some(IrInstruction::ArrayHeader {
-                            array,
-                            field: ArrayField::Flags,
-                            ..
-                        }) if (ctx.outside)(*array) => {
-                            Some((vec![Need::Plain((ctx.canon)(*array))], true))
-                        }
-                        _ => None,
+                }) => match ctx.def_of.get(&(ctx.canon)(*flags)) {
+                    Some(IrInstruction::ArrayHeader {
+                        array,
+                        field: ArrayField::Flags,
+                        ..
+                    }) if (ctx.outside)(*array) => {
+                        Some((vec![Need::Plain((ctx.canon)(*array))], true))
                     }
-                }
+                    _ => None,
+                },
                 _ if ctx.arrays.contains(&(ctx.canon)(*left)) => {
                     Some((vec![Need::NotNull((ctx.canon)(*left))], false))
                 }
@@ -898,13 +892,14 @@ fn plan_version(
             Need::NotNull(array) => facts.push(pre.push_cmp(CompareOp::Ne, array, zero)),
             Need::Plain(array) => {
                 let flags = pre.header(array, ArrayField::Flags);
-                let flags = if crate::debug_flags::erased_words() {
-                    let mask = pre.push_const(PLAIN_FLAGS_MASK);
-                    pre.push_binop(BinaryOp::And, flags, mask)
+                // Word slots record the element kind above bit 32.
+                facts.push(if crate::debug_flags::erased_words() {
+                    let low = pre.low_half(flags);
+                    let zero = pre.push_value(IrValue::I32(0));
+                    pre.push_cmp(CompareOp::Eq, low, zero)
                 } else {
-                    flags
-                };
-                facts.push(pre.push_cmp(CompareOp::Eq, flags, zero));
+                    pre.push_cmp(CompareOp::Eq, flags, zero)
+                });
             }
             Need::ConstIndex(c, array) => {
                 let len = pre.header(array, ArrayField::Len);
@@ -981,10 +976,23 @@ impl Prelude {
     }
 
     fn push_const(&mut self, value: i64) -> IrId {
+        self.push_value(IrValue::I64(value))
+    }
+
+    fn push_value(&mut self, value: IrValue) -> IrId {
         let dest = self.fresh();
-        self.insts.push(IrInstruction::Const {
+        self.insts.push(IrInstruction::Const { dest, value });
+        dest
+    }
+
+    /// The low 32 bits of an i64 `reg`.
+    fn low_half(&mut self, reg: IrId) -> IrId {
+        let dest = self.fresh();
+        self.insts.push(IrInstruction::Cast {
             dest,
-            value: IrValue::I64(value),
+            src: reg,
+            from_ty: IrType::I64,
+            to_ty: IrType::I32,
         });
         dest
     }
@@ -1167,6 +1175,11 @@ fn apply(function: &mut IrFunction, natural: &NaturalLoop, split: Split) {
                     op: BinaryOp::And, ..
                 } => IrType::Bool,
                 IrInstruction::ArrayHeader { field, .. } => field.ir_type(),
+                IrInstruction::Cast { to_ty, .. } => to_ty.clone(),
+                IrInstruction::Const {
+                    value: IrValue::I32(_),
+                    ..
+                } => IrType::I32,
                 _ => IrType::I64,
             };
             function.register_types.insert(dest, ty);
