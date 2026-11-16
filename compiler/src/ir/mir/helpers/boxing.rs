@@ -1951,6 +1951,7 @@ impl<'a> HirToMirContext<'a> {
             self.convert_type_arg(ty).value_tag() as i32
         };
         let tag = self.builder.build_const(IrValue::I32(default_tag))?;
+        let current = name.is_some();
         if let Some(name) = name
             && let Some(function) = self.builder.current_function_mut()
         {
@@ -1963,8 +1964,14 @@ impl<'a> HirToMirContext<'a> {
             vec![ptr, IrType::I32],
             IrType::I64,
         );
-        self.builder
-            .build_call_direct(unbox, vec![value, tag], IrType::I64)
+        let word = self
+            .builder
+            .build_call_direct(unbox, vec![value, tag], IrType::I64)?;
+        // A word tag unboxes to a word, which specialization decodes as T.
+        if current && let Some(value) = self.erased_value_as_type_var(word, ty) {
+            return Some(value);
+        }
+        Some(word)
     }
 
     pub(crate) fn maybe_unbox_for_extern_return(
