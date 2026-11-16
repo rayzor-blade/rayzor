@@ -147,7 +147,7 @@ impl<'a> HirToMirContext<'a> {
                 }
 
                 if let Some(&cell) = self.capture_cells.get(symbol) {
-                    let _ = self.builder.build_store(cell, value);
+                    let _ = self.store_capture_cell(cell, value);
                     self.symbol_map.insert(*symbol, value);
                     return Some(value);
                 }

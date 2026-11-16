@@ -289,7 +289,7 @@ impl<'a> HirToMirContext<'a> {
                         } else if let Some(global_id) = self.static_global_for(*symbol) {
                             self.builder.build_store_global(global_id, new_value);
                         } else if let Some(&cell) = self.capture_cells.get(symbol) {
-                            self.builder.build_store(cell, new_value);
+                            self.store_capture_cell(cell, new_value);
                             self.symbol_map.insert(*symbol, new_value);
                         } else {
                             // If we're inside a lambda with captured variables, also store back to environment

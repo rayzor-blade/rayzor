@@ -49,6 +49,19 @@ impl<'a> HirToMirContext<'a> {
     /// introduces a NEW binding, so it gets a new cell: reusing one makes every
     /// closure created by successive executions -- the iterations of a loop --
     /// share a slot and read whatever the last one left there.
+    /// Store `value` in a capture cell. A cell's readers load it at the
+    /// binding's erased type, so a T value goes in as its slot: the bitcast
+    /// is where specialization encodes it.
+    pub(crate) fn store_capture_cell(&mut self, cell: IrId, value: IrId) -> Option<()> {
+        let value = match self.builder.get_register_type(value) {
+            Some(IrType::TypeVar(_)) if crate::debug_flags::erased_words() => {
+                self.builder.build_bitcast(value, IrType::I64)?
+            }
+            _ => value,
+        };
+        self.builder.build_store(cell, value)
+    }
+
     pub(crate) fn box_capture_binding_fresh(
         &mut self,
         symbol: SymbolId,
@@ -58,7 +71,7 @@ impl<'a> HirToMirContext<'a> {
             return Some(value);
         }
         let cell = self.build_heap_alloc(8)?;
-        self.builder.build_store(cell, value)?;
+        self.store_capture_cell(cell, value)?;
         self.capture_cells.insert(symbol, cell);
         Some(cell)
     }
@@ -68,11 +81,11 @@ impl<'a> HirToMirContext<'a> {
             return Some(value);
         }
         if let Some(&cell) = self.capture_cells.get(&symbol) {
-            self.builder.build_store(cell, value)?;
+            self.store_capture_cell(cell, value)?;
             return Some(cell);
         }
         let cell = self.build_heap_alloc(8)?;
-        self.builder.build_store(cell, value)?;
+        self.store_capture_cell(cell, value)?;
         self.capture_cells.insert(symbol, cell);
         Some(cell)
     }
