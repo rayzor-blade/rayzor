@@ -165,22 +165,31 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Generic slots carry bits; the registered entry adapts the concrete closure ABI.
-        let uses_generic_slots = self.type_table.get(callee.ty).is_some_and(|ty| {
-            let TypeKind::Function {
-                params,
-                return_type,
-                ..
-            } = &ty.kind
-            else {
-                return false;
-            };
-            params.iter().chain(std::iter::once(return_type)).any(|ty| {
-                matches!(
-                    self.type_table.get(*ty).map(|ty| &ty.kind),
-                    Some(TypeKind::TypeParameter { .. })
-                )
+        let generic_signature = |ty: TypeId| {
+            self.type_table.get(ty).is_some_and(|ty| {
+                let TypeKind::Function {
+                    params,
+                    return_type,
+                    ..
+                } = &ty.kind
+                else {
+                    return false;
+                };
+                params.iter().chain(std::iter::once(return_type)).any(|ty| {
+                    matches!(
+                        self.type_table.get(*ty).map(|ty| &ty.kind),
+                        Some(TypeKind::TypeParameter { .. })
+                    )
+                })
             })
-        });
+        };
+        // A field declared at a type parameter's function type is an erased
+        // slot whatever the receiver binds it to: the closure in it keeps the
+        // signature it was made with.
+        let declared_generic = crate::debug_flags::erased_words()
+            && matches!(&callee.kind, HirExprKind::Field { field, .. }
+                if self.symbol_table.get_symbol(*field).is_some_and(|s| generic_signature(s.type_id)));
+        let uses_generic_slots = generic_signature(callee.ty) || declared_generic;
         if uses_generic_slots {
             return self.lower_generic_slot_call(
                 expr,
@@ -282,6 +291,20 @@ impl<'a> HirToMirContext<'a> {
                     self.builder.build_bitcast(boxed, IrType::I64)?
                 }
                 IrType::F64 | IrType::F32 | IrType::I32 | IrType::Bool => self.into_word(*reg)?,
+                // A Dynamic's word opens a scalar box; a reference is itself.
+                ref ty
+                    if crate::debug_flags::erased_words()
+                        && (*ty == IrType::dynamic_ptr()
+                            || matches!(ty, IrType::Ptr(inner) if **inner == IrType::Void)) =>
+                {
+                    let open = self.get_or_register_extern_function(
+                        "haxe_word_from_dynamic",
+                        vec![IrType::dynamic_ptr()],
+                        IrType::I64,
+                    );
+                    self.builder
+                        .build_call_direct(open, vec![*reg], IrType::I64)?
+                }
                 ty if ty.is_integer() => self.builder.build_cast(*reg, ty, IrType::I64)?,
                 _ => self.builder.build_bitcast(*reg, IrType::I64)?,
             };

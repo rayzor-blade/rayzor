@@ -1,0 +1,5 @@
+[project]
+name = "generic-closure-fields-other-module"
+entry = "./GenericClosureFieldsOtherModule.hx"
+[build]
+class-paths = ["."]
