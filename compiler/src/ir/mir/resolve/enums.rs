@@ -299,6 +299,10 @@ impl<'a> HirToMirContext<'a> {
         enum_type: TypeId,
         variant_name: InternedString,
     ) -> Vec<bool> {
+        // An abstract over an enum reads its underlying enum's payloads.
+        let enum_type = self
+            .abstract_enum_instance(enum_type)
+            .map_or(enum_type, |(underlying, _)| underlying);
         self.resolve_enum_symbol(enum_type)
             .and_then(|enum_sym| self.symbol_table.get_enum_variants(enum_sym))
             .and_then(|variants| {
