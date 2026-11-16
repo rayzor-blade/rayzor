@@ -3953,8 +3953,8 @@ pub extern "C" fn haxe_unbox_erased_return(ptr: *mut u8) -> i64 {
 /// A generic Dynamic keeps its box; concrete type arguments consume its payload.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_generic_return(ptr: *mut u8, type_tag: i32) -> i64 {
-    // A word is its own result; a box in the slot opens into one, by the
-    // hint where it names a reference type.
+    // A word is its own result; a box in the slot opens into one, a
+    // reference box by the hint where it names a reference type.
     if type_tag & 0xff == ValueTag::Word as i32 {
         let hint = crate::erased_word::element_tag(type_tag);
         let scalar = matches!(
@@ -3969,10 +3969,15 @@ pub extern "C" fn haxe_unbox_generic_return(ptr: *mut u8, type_tag: i32) -> i64 
             )
         );
         return match crate::erased_word::kind(ptr as u64) {
-            crate::erased_word::WordKind::Reference if scalar => {
-                crate::erased_word::haxe_word_from_dynamic(ptr) as i64
+            crate::erased_word::WordKind::Reference => {
+                // A scalar box opens to its word whatever the hint names.
+                let word = crate::erased_word::haxe_word_from_dynamic(ptr) as i64;
+                if scalar || word != ptr as i64 {
+                    word
+                } else {
+                    haxe_unbox_generic_return(ptr, hint)
+                }
             }
-            crate::erased_word::WordKind::Reference => haxe_unbox_generic_return(ptr, hint),
             _ => ptr as i64,
         };
     }
