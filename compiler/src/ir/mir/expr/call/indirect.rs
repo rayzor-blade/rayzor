@@ -336,7 +336,51 @@ impl<'a> HirToMirContext<'a> {
                 self.from_word(result, &expected)
             }
             ty if ty.is_integer() => self.builder.build_cast(result, IrType::I64, ty),
+            // A result that may be a scalar word is its Dynamic view: a
+            // scalar boxes, a reference is itself.
+            IrType::Ptr(_)
+                if crate::debug_flags::erased_words() && self.may_hold_scalar(expr.ty) =>
+            {
+                let boxer = self.get_or_register_extern_function(
+                    "haxe_word_to_dynamic",
+                    vec![IrType::I64],
+                    IrType::Ptr(Box::new(IrType::U8)),
+                );
+                let boxed = self.builder.build_call_direct(
+                    boxer,
+                    vec![result],
+                    IrType::Ptr(Box::new(IrType::U8)),
+                )?;
+                self.builder.build_bitcast(boxed, expected)
+            }
             ty => self.builder.build_bitcast(result, ty),
+        }
+    }
+
+    /// Whether a value of Haxe type `ty` may be a scalar: Dynamic, a type
+    /// parameter, or a nullable one of those or of a scalar.
+    fn may_hold_scalar(&self, ty: TypeId) -> bool {
+        let kind = |ty: TypeId| {
+            self.type_table
+                .get(self.resolve_through_aliases(ty))
+                .map(|t| t.kind.clone())
+        };
+        let open = |kind: Option<TypeKind>| {
+            matches!(
+                kind,
+                Some(TypeKind::Dynamic | TypeKind::TypeParameter { .. })
+            )
+        };
+        match kind(ty) {
+            Some(TypeKind::Optional { inner_type }) => {
+                let inner = kind(inner_type);
+                open(inner.clone())
+                    || matches!(
+                        inner,
+                        Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+                    )
+            }
+            other => open(other) || self.is_any_type(ty),
         }
     }
 
