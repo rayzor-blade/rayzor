@@ -1942,16 +1942,17 @@ impl<'a> HirToMirContext<'a> {
         let lhs_is_float = matches!(lhs_type, IrType::F32 | IrType::F64);
         let rhs_is_float = matches!(rhs_type, IrType::F32 | IrType::F64);
 
-        // Cast int to float when mixing types (promotes to F64)
+        // An Int beside a float takes that float's width: the operands of a
+        // binary op must share a type.
         if lhs_is_int && rhs_is_float {
             lhs_reg = self
                 .builder
-                .build_cast(lhs_reg, lhs_type.clone(), IrType::F64)?;
+                .build_cast(lhs_reg, lhs_type.clone(), rhs_type.clone())?;
         }
         if rhs_is_int && lhs_is_float {
             rhs_reg = self
                 .builder
-                .build_cast(rhs_reg, rhs_type.clone(), IrType::F64)?;
+                .build_cast(rhs_reg, rhs_type.clone(), lhs_type.clone())?;
         }
 
         // Haxe division always yields Float, so int operands are promoted first.
