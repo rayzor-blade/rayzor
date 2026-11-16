@@ -64,7 +64,33 @@ impl<'a> HirToMirContext<'a> {
             let params = self.class_slot_param_types(Some(func_id), &args, Vec::new());
             self.build_class_slot_call(pointer, args, params, return_type)
         } else {
-            self.builder.build_call_direct(func_id, args, return_type)
+            // A generic class's accessor specializes with the receiver's type
+            // arguments, as its other methods do.
+            let receiver = self.resolve_through_aliases(receiver_ty);
+            let type_args: Vec<IrType> = match self.type_table.get(receiver).map(|t| &t.kind) {
+                Some(
+                    TypeKind::GenericInstance { type_args, .. }
+                    | TypeKind::Class { type_args, .. }
+                    | TypeKind::Abstract { type_args, .. },
+                ) => type_args
+                    .clone()
+                    .iter()
+                    .map(|&ta| self.convert_type_arg(ta))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let generic = self
+                .builder
+                .module
+                .functions
+                .get(&func_id)
+                .is_some_and(|f| !f.signature.type_params.is_empty());
+            if generic && !type_args.is_empty() {
+                self.builder
+                    .build_call_direct_with_type_args(func_id, args, return_type, type_args)
+            } else {
+                self.builder.build_call_direct(func_id, args, return_type)
+            }
         }
     }
 
