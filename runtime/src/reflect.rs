@@ -650,7 +650,7 @@ unsafe fn raw_value_to_slot(value: *mut u8, ty: ParamType) -> u64 {
         | ParamType::Boxed
         | ParamType::NullInt => value as u64,
         // A Dynamic written into a word slot opens into the word.
-        ParamType::Word => crate::erased_word::haxe_word_from_dynamic(value as *mut u8),
+        ParamType::Word => crate::erased_word::haxe_word_from_dynamic(value),
     }
 }
 
