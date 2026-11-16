@@ -171,6 +171,11 @@ pub fn native_value(value: i64, tag: i32) -> (i64, i32) {
         WordKind::Int => (i64::from(word as u32 as i32), ValueTag::Int as i32),
         WordKind::Float => (decode_float(word).to_bits() as i64, ValueTag::Float as i32),
         WordKind::Bool => (i64::from(word == TRUE_WORD), ValueTag::Bool as i32),
+        // Null is null whatever the hint names, but for a `Null<Int>` slot,
+        // which holds its raw value.
+        WordKind::Reference if word == 0 && (tag >> 8) & 0xff != ValueTag::NullInt as i32 => {
+            (0, ValueTag::Dynamic as i32)
+        }
         WordKind::Reference => (value, (tag >> 8) & 0xff),
     }
 }
