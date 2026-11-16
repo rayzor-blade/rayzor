@@ -4012,6 +4012,12 @@ pub extern "C" fn haxe_adapt_generic_value(
     }
     let (value, source_tag) = crate::erased_word::native_value(value, source_tag);
     if crate::erased_word::is_word_tag(target_tag) {
+        // A slot bound to Dynamic holds the Dynamic view: a String's box.
+        let dynamic = ValueTag::Dynamic as i32;
+        if crate::erased_word::element_tag(target_tag) == dynamic && source_tag != dynamic {
+            let boxed = haxe_box_generic_ptr(value, source_tag, metadata);
+            return crate::erased_word::haxe_word_from_dynamic(boxed) as i64;
+        }
         return crate::erased_word::word_from_native(value, source_tag);
     }
     if target_tag == ValueTag::Dynamic as i32 {
