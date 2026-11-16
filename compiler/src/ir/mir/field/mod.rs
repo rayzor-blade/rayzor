@@ -79,13 +79,22 @@ impl<'a> HirToMirContext<'a> {
                     .collect(),
                 _ => Vec::new(),
             };
-            let generic = self
-                .builder
-                .module
-                .functions
-                .get(&func_id)
-                .is_some_and(|f| !f.signature.type_params.is_empty());
-            if generic && !type_args.is_empty() {
+            // An imported accessor is a forward-ref stub whose type parameters
+            // are not visible yet; only a genuine extern takes none.
+            let externish = self.builder.module.extern_functions.contains_key(&func_id)
+                || self
+                    .builder
+                    .module
+                    .functions
+                    .get(&func_id)
+                    .is_some_and(|f| {
+                        matches!(
+                            f.kind,
+                            crate::ir::functions::FunctionKind::ExternC
+                                | crate::ir::functions::FunctionKind::Intrinsic
+                        )
+                    });
+            if !externish && !type_args.is_empty() {
                 self.builder
                     .build_call_direct_with_type_args(func_id, args, return_type, type_args)
             } else {

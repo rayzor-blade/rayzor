@@ -1,0 +1,5 @@
+[project]
+name = "generic-accessor-other-module"
+entry = "./GenericAccessorOtherModule.hx"
+[build]
+class-paths = ["."]
