@@ -132,6 +132,9 @@ impl<'a> HirToMirContext<'a> {
                 Some(TypeKind::Enum { .. }) => {
                     return IrFieldShape::Enum(self.runtime_type_id(cur));
                 }
+                Some(TypeKind::TypeParameter { .. }) if crate::debug_flags::erased_words() => {
+                    return IrFieldShape::Erased;
+                }
                 Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
                 Some(TypeKind::Optional { inner_type }) => {
                     if self.optional_inner_is_null_int(*inner_type) {

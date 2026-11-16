@@ -193,6 +193,8 @@ pub enum IrFieldShape {
     NullInt,
     /// An enum value, of the enum with this runtime type id.
     Enum(u32),
+    /// A type-parameter slot holding an erased-slot word.
+    Erased,
 }
 
 /// Struct field
