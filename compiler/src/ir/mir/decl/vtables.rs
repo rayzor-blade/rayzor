@@ -1070,11 +1070,13 @@ impl<'a> HirToMirContext<'a> {
                     self.builder.build_cast(raw, ptr_u8, want.clone())
                 }
                 _ => {
-                    let f = self.get_or_register_extern_function(
-                        "haxe_dynamic_to_slot",
-                        vec![ptr_u8],
-                        IrType::I64,
-                    );
+                    // An erased parameter takes a word under RAYZOR_ERASED_WORDS.
+                    let open = if *kind == SlotKind::Erased && crate::debug_flags::erased_words() {
+                        "haxe_word_from_dynamic"
+                    } else {
+                        "haxe_dynamic_to_slot"
+                    };
+                    let f = self.get_or_register_extern_function(open, vec![ptr_u8], IrType::I64);
                     let bits = self.builder.build_call_direct(f, vec![reg], IrType::I64)?;
                     if matches!(want, IrType::I64) {
                         Some(bits)
@@ -1173,6 +1175,15 @@ impl<'a> HirToMirContext<'a> {
                         );
                         return self.builder.build_call_direct(f, vec![bits, tag], ptr_u8);
                     }
+                    SlotKind::Erased if crate::debug_flags::erased_words() => (
+                        "haxe_word_to_dynamic",
+                        IrType::I64,
+                        if matches!(ret_ty, IrType::I64) {
+                            Some(r)
+                        } else {
+                            self.builder.build_cast(r, ret_ty.clone(), IrType::I64)
+                        },
+                    ),
                     SlotKind::Scalar(_) | SlotKind::Erased => (
                         if matches!(kind, SlotKind::Erased) {
                             "haxe_box_erased_ptr"
