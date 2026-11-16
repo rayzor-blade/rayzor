@@ -7,7 +7,8 @@
 //! - `arg`: a direct call to a function with a body passes one into such a
 //!   parameter;
 //! - `ret`: such a call's result lands in a scalar register;
-//! - `bits`: a bitcast moves a Float between the two;
+//! - `bits`: a bitcast moves a Float between the two, other than the bits
+//!   a word encode reads;
 //! - `closure`: a function value is cast between signatures that disagree on
 //!   one parameter or the return in the same way.
 
@@ -88,6 +89,22 @@ pub fn report(module: &IrModule, label: &str) {
     for function in module.functions.values() {
         let types = register_types(function);
         let register_type = |reg: IrId| types.get(&reg);
+        // A word encode reads a Float's bits after testing it for NaN.
+        let nan_tested: std::collections::BTreeSet<IrId> = function
+            .cfg
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|inst| match inst {
+                IrInstruction::Cmp {
+                    op: super::CompareOp::FUno,
+                    left,
+                    right,
+                    ..
+                } if left == right => Some(*left),
+                _ => None,
+            })
+            .collect();
         for block in function.cfg.blocks.values() {
             for inst in &block.instructions {
                 match inst {
@@ -131,7 +148,7 @@ pub fn report(module: &IrModule, label: &str) {
                             }
                         }
                     }
-                    IrInstruction::BitCast { src, ty, .. } => {
+                    IrInstruction::BitCast { src, ty, .. } if !nan_tested.contains(src) => {
                         if let Some(from) = register_type(*src) {
                             let float = |t: &IrType| matches!(t, IrType::F64 | IrType::F32);
                             if (float(from) && is_word(ty)) || (is_word(from) && float(ty)) {
