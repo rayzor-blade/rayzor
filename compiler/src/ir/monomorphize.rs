@@ -2529,8 +2529,9 @@ impl Monomorphizer {
             open("haxe_word_open_reference"),
             open("haxe_word_open_interface"),
         );
+        // A `*u8` is the runtime's untyped view, which reads a box as Dynamic.
         let opener = |ty: &IrType, (reference, interface): (IrFunctionId, IrFunctionId)| match ty {
-            IrType::Ptr(inner) if *ty != IrType::dynamic_ptr() => Some(
+            IrType::Ptr(inner) if *ty != IrType::dynamic_ptr() && **inner != IrType::U8 => Some(
                 if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_interface") {
                     interface
                 } else {

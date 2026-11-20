@@ -374,7 +374,12 @@ impl<'a> HirToMirContext<'a> {
                         Some(TypeKind::Interface { .. })
                     )
             ) || (matches!(&src_kind, Some(TypeKind::Dynamic))
-                && !matches!(&tgt_kind, Some(TypeKind::Dynamic)));
+                && !matches!(&tgt_kind, Some(TypeKind::Dynamic)))
+                // An array carries no header naming it: as a Dynamic it is boxed.
+                || matches!(
+                    (&src_kind, &tgt_kind),
+                    (Some(TypeKind::Array { .. }), Some(TypeKind::Dynamic))
+                );
             if !needs_runtime_check {
                 return self.lower_expression(expr);
             }

@@ -1086,6 +1086,16 @@ impl<'a> HirToMirContext<'a> {
         if let Some((set_fn_name, key_ir_type)) = self.map_index_set_info(object_ty) {
             let ptr_void = IrType::Ptr(Box::new(IrType::Void));
             let key_reg = self.coerce_map_key(idx_reg, &key_ir_type);
+            // `m[k] = v` into a Dynamic value slot boxes `v` by its own type.
+            let value = match (
+                self.pending_store_value_ty,
+                self.map_index_info(self.resolve_storage_type(object_ty)),
+            ) {
+                (Some(ty), Some((_, _, element))) if !self.boxed_value_regs.contains(&value) => {
+                    self.maybe_box_value(value, ty, element).unwrap_or(value)
+                }
+                _ => value,
+            };
             // The setter takes the value as a 64-bit slot, so a
             // float or pointer is reinterpreted rather than
             // converted -- the get side bitcasts it back.
