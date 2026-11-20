@@ -5213,8 +5213,12 @@ pub struct HaxeObjectMap {
 }
 
 /// A key's identity: a box of an enum value is its cell or discriminant, a
-/// box of an anonymous object its handle.
+/// box of an anonymous object its handle, a box of a class instance the
+/// instance.
 fn objectmap_key(key: u64) -> u64 {
+    if let Some(instance) = crate::type_system::class_box_instance(key as *mut u8) {
+        return instance as u64;
+    }
     let Some(boxed) = crate::type_system::dynamic_box_at(key as *mut u8) else {
         return key;
     };

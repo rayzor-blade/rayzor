@@ -2495,9 +2495,10 @@ impl Monomorphizer {
 
 impl Monomorphizer {
     /// Encode each scalar a call still aimed at a generic template passes to
-    /// one of its declared erased parameters. A call whose type arguments
-    /// were not recovered (a callee from another module) keeps the template,
-    /// and nothing else hands its slot the word.
+    /// one of its declared erased parameters, and open the reference box a
+    /// template's T result may be where the caller takes it as a reference.
+    /// A call whose type arguments were not recovered (a callee from another
+    /// module) keeps the template, and nothing else crosses its words.
     fn encode_template_call_args(&mut self, module: &mut IrModule) {
         if self.word_decoders.is_none() {
             return;
@@ -2517,20 +2518,29 @@ impl Monomorphizer {
             })
             .map(|(id, _)| *id)
             .collect();
-        if erased.is_empty() && word_results.is_empty() {
-            return;
-        }
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let mut open = |name: &str| {
-            (!word_results.is_empty()).then(|| {
-                module.next_function_id = module.next_function_id.max(self.next_func_id);
-                let id = super::erased_word::extern_fn(module, name, IrType::I64, ptr_u8.clone());
-                self.next_func_id = self.next_func_id.max(module.next_function_id);
-                id
-            })
+            module.next_function_id = module.next_function_id.max(self.next_func_id);
+            let id = super::erased_word::extern_fn(module, name, IrType::I64, ptr_u8.clone());
+            self.next_func_id = self.next_func_id.max(module.next_function_id);
+            id
         };
-        let opens = open("haxe_word_open_reference").zip(open("haxe_word_open_interface"));
+        let opens = (
+            open("haxe_word_open_reference"),
+            open("haxe_word_open_interface"),
+        );
+        let opener = |ty: &IrType, (reference, interface): (IrFunctionId, IrFunctionId)| match ty {
+            IrType::Ptr(inner) if *ty != IrType::dynamic_ptr() => Some(
+                if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_interface") {
+                    interface
+                } else {
+                    reference
+                },
+            ),
+            _ => None,
+        };
         for function in module.functions.values_mut() {
+            let concrete = function.signature.type_params.is_empty();
             let widened = super::erased_word::widened_scalars(function);
             let blocks: Vec<IrBlockId> = function.cfg.blocks.keys().copied().collect();
             for block_id in blocks {
@@ -2541,25 +2551,40 @@ impl Monomorphizer {
                 for mut inst in instructions {
                     // A template's T result taken at a reference type may be
                     // the instance's Dynamic box; the caller takes the instance.
-                    let mut opened = None;
-                    if let Some((reference, interface)) = opens
-                        && let IrInstruction::CallDirect {
-                            dest: Some(dest),
-                            func_id,
+                    // So does a T word a concrete function casts to one, as
+                    // an inlined template's result.
+                    if concrete
+                        && let IrInstruction::Cast {
+                            dest,
+                            src,
+                            to_ty: ty,
                             ..
-                        } = &mut inst
+                        }
+                        | IrInstruction::BitCast { dest, src, ty } = &inst
+                        && matches!(function.register_types.get(src), Some(IrType::TypeVar(_)))
+                        && let Some(open) = opener(ty, opens)
+                    {
+                        let (dest, src, ty) = (*dest, *src, ty.clone());
+                        let mut regs = super::erased_word::Regs::new(function);
+                        let instance = regs.call(&mut out, open, src, &ptr_u8);
+                        out.push(IrInstruction::Cast {
+                            dest,
+                            src: instance,
+                            from_ty: ptr_u8.clone(),
+                            to_ty: ty,
+                        });
+                        continue;
+                    }
+                    let mut opened = None;
+                    if let IrInstruction::CallDirect {
+                        dest: Some(dest),
+                        func_id,
+                        ..
+                    } = &mut inst
                         && word_results.contains(func_id)
                         && let Some(ty) = function.register_types.get(dest).cloned()
-                        && let IrType::Ptr(inner) = &ty
-                        && ty != IrType::dynamic_ptr()
+                        && let Some(open) = opener(&ty, opens)
                     {
-                        let open = if matches!(&**inner,
-                            IrType::Opaque { name, .. } if name == "__haxe_interface")
-                        {
-                            interface
-                        } else {
-                            reference
-                        };
                         let word = super::erased_word::Regs::new(function).fresh(IrType::I64);
                         opened = Some((*dest, word, ty, open));
                         *dest = word;

@@ -96,13 +96,19 @@ pub extern "C" fn haxe_word_to_dynamic(word: u64) -> *mut u8 {
     }
 }
 
-/// The reference a word holds for a parameter typed as a class or
-/// interface: a class instance's Dynamic box opens to the instance, so an
-/// erased slot filled through a Dynamic view reads as the instance it boxes.
+/// The reference a word holds for a value typed as a class, array or
+/// structure: a reference's Dynamic box opens to what it boxes, so an erased
+/// slot filled through a Dynamic view reads as the reference itself.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_word_open_reference(word: u64) -> *mut u8 {
     let p = word as *mut u8;
-    crate::type_system::class_box_instance(p).unwrap_or(p)
+    if !crate::type_system::is_reference_box(p) {
+        return p;
+    }
+    match crate::type_system::dynamic_box_at(p) {
+        Some(boxed) if !boxed.value_ptr.is_null() => boxed.value_ptr,
+        _ => p,
+    }
 }
 
 /// The interface value a word holds for an interface-typed parameter: a
