@@ -353,6 +353,15 @@ pub(crate) fn format_f64_for_string(v: f64) -> String {
 }
 
 fn format_array_slot(val: i64) -> String {
+    // Under the unboxed-Dynamic switch a slot may hold a scalar word.
+    if crate::erased_word::unboxed_dynamic_scalars()
+        && let Some(word) = crate::erased_word::scalar_word(val as *const u8)
+    {
+        return match word {
+            crate::erased_word::Scalar::Int(i) => i.to_string(),
+            crate::erased_word::Scalar::Float(f) => format_f64_for_string(f),
+        };
+    }
     // Null pointer (or integer 0) — for heterogeneous-array slots this
     // came from a `null` literal that the compiler stored as a raw
     // null pointer. Showing `null` here instead of `0` is right almost

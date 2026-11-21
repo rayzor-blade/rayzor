@@ -60,7 +60,7 @@ fn decode_float(word: u64) -> f64 {
 
 /// `RAYZOR_UNBOXED_DYNAMIC=1` keeps an Int or Float word unboxed where it
 /// becomes a Dynamic. Under test: readers that do not decode words yet fail.
-fn unboxed_dynamic_scalars() -> bool {
+pub(crate) fn unboxed_dynamic_scalars() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("RAYZOR_UNBOXED_DYNAMIC").is_some_and(|v| v == "1"))
 }

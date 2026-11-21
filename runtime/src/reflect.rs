@@ -332,7 +332,8 @@ fn static_field_set(type_id: u32, field: *mut u8, value: *mut u8) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
-    if obj.is_null() {
+    // A scalar word has no fields.
+    if obj.is_null() || crate::erased_word::scalar_word(obj).is_some() {
         return std::ptr::null_mut();
     }
     // A class or enum used as a value.
@@ -489,7 +490,8 @@ fn class_declares_method(start_type_id: u32, name: &str) -> bool {
 /// taken as the object itself.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
-    if obj.is_null() {
+    // A scalar word has no fields.
+    if obj.is_null() || crate::erased_word::scalar_word(obj).is_some() {
         return std::ptr::null_mut();
     }
     // A class or enum used as a value.
@@ -630,6 +632,18 @@ unsafe fn raw_value_to_slot(value: *mut u8, ty: ParamType) -> u64 {
         if let Some(payload) = payload {
             return payload;
         }
+    }
+    // Under the unboxed-Dynamic switch a scalar arrives as its word.
+    if crate::erased_word::unboxed_dynamic_scalars()
+        && matches!(ty, ParamType::Int | ParamType::Bool | ParamType::Float)
+        && let Some(word) = crate::erased_word::scalar_word(value)
+    {
+        return match (word, ty) {
+            (crate::erased_word::Scalar::Int(i), ParamType::Float) => (i as f64).to_bits(),
+            (crate::erased_word::Scalar::Int(i), _) => i as i64 as u64,
+            (crate::erased_word::Scalar::Float(f), ParamType::Float) => f.to_bits(),
+            (crate::erased_word::Scalar::Float(f), _) => f as i64 as u64,
+        };
     }
     match ty {
         // Primitive payloads are bitcast into the `*mut u8` slot by
@@ -1082,6 +1096,12 @@ fn same_array_reference(a: i64, b: i64) -> bool {
 pub(crate) fn type_token_id(value: i64) -> Option<u32> {
     if value >= 0 && value <= u32::MAX as i64 {
         return Some(value as u32);
+    }
+    // A token carried as an Int word, as an Int box carries one.
+    if let Some(crate::erased_word::Scalar::Int(id)) =
+        crate::erased_word::scalar_word(value as *const u8)
+    {
+        return u32::try_from(id).ok();
     }
     let boxed = crate::type_system::dynamic_value_if_boxed(value as *mut u8)?;
     if boxed.type_id == TYPE_INT && !boxed.value_ptr.is_null() {

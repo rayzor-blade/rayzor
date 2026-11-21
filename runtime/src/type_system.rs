@@ -1629,6 +1629,19 @@ fn create_enum_value_from_slots(
             // `Null<Int>` field takes the box (or null) as a `NullInt`.
             if param_types.get(i) == Some(&ParamType::NullInt) {
                 val = haxe_null_int_from_dynamic(val as *mut u8);
+            } else if crate::erased_word::unboxed_dynamic_scalars()
+                && let Some(param_type) = param_types.get(i)
+                && let Some(word) = crate::erased_word::scalar_word(val as *const u8)
+            {
+                // Under the unboxed-Dynamic switch a scalar arrives as its
+                // word. As with a box, only the matching kind opens it.
+                val = match (word, param_type) {
+                    (crate::erased_word::Scalar::Int(i), ParamType::Int | ParamType::Bool) => {
+                        i as i64
+                    }
+                    (crate::erased_word::Scalar::Float(f), ParamType::Float) => f.to_bits() as i64,
+                    _ => val,
+                };
             } else if let Some(param_type) = param_types.get(i)
                 && let Some(dynamic) =
                     dynamic_box_at(val as *mut u8).filter(|_| stamped_enum_cell_type(val).is_none())
@@ -1666,6 +1679,12 @@ fn create_enum_value_from_slots(
             });
             let boxed_parameter = match slot_box {
                 Some(_) => slot as *mut u8,
+                // A scalar word is already a Dynamic.
+                None if crate::erased_word::unboxed_dynamic_scalars()
+                    && crate::erased_word::scalar_word(slot as *const u8).is_some() =>
+                {
+                    slot as *mut u8
+                }
                 None if param_types.get(i) == Some(&ParamType::NullInt) => {
                     haxe_null_int_to_dynamic(val)
                 }
@@ -2247,7 +2266,8 @@ pub extern "C" fn haxe_std_is(value_ptr: *mut u8, expected_type_id: i64) -> bool
 /// Used by `Std.downcast()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_downcast(value_ptr: *mut u8, expected_type_id: i64) -> *mut u8 {
-    if value_ptr.is_null() {
+    // A scalar word is no instance of a class.
+    if value_ptr.is_null() || crate::erased_word::scalar_word(value_ptr).is_some() {
         return std::ptr::null_mut();
     }
     // Class tokens use stable IDs; boxed Array and String values use builtin tags.
@@ -3383,6 +3403,10 @@ pub extern "C" fn haxe_null_int_from_slot(bits: i64) -> i64 {
 /// any other box or raw non-zero value is true.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_truthy(ptr: *mut u8) -> bool {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(ptr as *const u8) {
+        return haxe_dynamic_truthy(word.ptr());
+    }
     if ptr.is_null() {
         return false;
     }
@@ -3694,6 +3718,17 @@ fn box_trace_tick(value: i64) {
 /// Box an Int as Dynamic (returns opaque pointer to DynamicValue)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_int_ptr(value: i64) -> *mut u8 {
+    // An Int is its own Dynamic, unboxed, under the switch; a value wider
+    // than 32 bits (an Int64's) keeps its box.
+    if crate::erased_word::unboxed_dynamic_scalars() && i32::try_from(value).is_ok() {
+        return crate::erased_word::encode_int(value as i32) as *mut u8;
+    }
+    box_int_heap(value)
+}
+
+/// An Int in a heap box: the representation a type token or an enum
+/// discriminant keeps, which readers tell from an Int by the box.
+fn box_int_heap(value: i64) -> *mut u8 {
     box_trace_tick(value);
     let dynamic = haxe_box_int(value);
     let boxed = Box::new(dynamic);
@@ -3734,6 +3769,10 @@ unsafe fn int64_from_object(obj: *const u8) -> i64 {
 /// Box a Float as Dynamic (returns opaque pointer to DynamicValue)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_float_ptr(value: f64) -> *mut u8 {
+    // A Float is its own Dynamic, unboxed, under the switch.
+    if crate::erased_word::unboxed_dynamic_scalars() {
+        return crate::erased_word::encode_float(value) as *mut u8;
+    }
     let dynamic = haxe_box_float(value);
     let boxed = Box::new(dynamic);
     Box::into_raw(boxed) as *mut u8
@@ -3931,6 +3970,10 @@ pub extern "C" fn haxe_iter_handle_from_dynamic(
 /// The tag of a Dynamic value's box, or 0 for a slot that is not one.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_tag(ptr: *mut u8) -> u32 {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(ptr as *const u8) {
+        return haxe_dynamic_tag(word.ptr());
+    }
     dynamic_box_at(ptr)
         .filter(|d| d.tag_is_known())
         .map_or(0, |d| d.type_id.0)
@@ -4291,6 +4334,13 @@ fn dynamic_is_integral(p: *mut u8) -> bool {
 /// (other than `/`) give an Int box, anything else a Float box.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_arith(op: i32, a: *mut u8, b: *mut u8) -> *mut u8 {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(a as *const u8) {
+        return haxe_dynamic_arith(op, word.ptr(), b);
+    }
+    if let Some(mut word) = crate::erased_word::WordBox::of(b as *const u8) {
+        return haxe_dynamic_arith(op, a, word.ptr());
+    }
     let is_string =
         |p: *mut u8| dynamic_value_if_boxed(p).is_some_and(|d| d.type_id == TYPE_STRING);
     if op == 0 && (is_string(a) || is_string(b)) {
@@ -4322,6 +4372,13 @@ pub extern "C" fn haxe_dynamic_arith(op: i32, a: *mut u8, b: *mut u8) -> *mut u8
 /// value, else by address. -1, 0 or 1.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_order(a: *mut u8, b: *mut u8) -> i32 {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(a as *const u8) {
+        return haxe_dynamic_order(word.ptr(), b);
+    }
+    if let Some(mut word) = crate::erased_word::WordBox::of(b as *const u8) {
+        return haxe_dynamic_order(a, word.ptr());
+    }
     let strings = match (dynamic_value_if_boxed(a), dynamic_value_if_boxed(b)) {
         (Some(x), Some(y)) if x.type_id == TYPE_STRING && y.type_id == TYPE_STRING => Some((x, y)),
         _ => None,
@@ -4506,7 +4563,7 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
             }
             // A type token or a tag-only enum's discriminant has no header.
             if (p as usize) <= u32::MAX as usize {
-                return haxe_box_int_ptr(value);
+                return box_int_heap(value);
             }
             // An enum cell boxes as its enum; its first word, the variant
             // index, would read as a builtin box's tag.
@@ -4540,7 +4597,7 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
             haxe_box_reference_ptr(p, tag)
         }
         // Unresolved, or a tag from outside the space.
-        _ => haxe_box_int_ptr(value),
+        _ => box_int_heap(value),
     }
 }
 
@@ -4574,7 +4631,7 @@ const ERASED_BOX_MARK: u32 = 0x4552_4153;
 /// Box the bits of an erased type parameter's value.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_erased_ptr(bits: i64) -> *mut u8 {
-    let boxed = haxe_box_int_ptr(bits);
+    let boxed = box_int_heap(bits);
     unsafe { *(boxed as *mut u32).add(1) = ERASED_BOX_MARK };
     boxed
 }
@@ -4748,6 +4805,10 @@ pub extern "C" fn haxe_channel_unbox_erased(box_ptr: *mut u8) -> i64 {
 /// FLOAT/BOOL-tagged box still compares by value.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_null_int_eq(box_ptr: *mut u8, value: i64) -> bool {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(box_ptr as *const u8) {
+        return haxe_null_int_eq(word.ptr(), value);
+    }
     if box_ptr.is_null() {
         return false;
     }
@@ -4757,6 +4818,10 @@ pub extern "C" fn haxe_null_int_eq(box_ptr: *mut u8, value: i64) -> bool {
 /// Float variant of `haxe_null_int_eq` (either side statically Float).
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_null_float_eq(box_ptr: *mut u8, value: f64) -> bool {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(box_ptr as *const u8) {
+        return haxe_null_float_eq(word.ptr(), value);
+    }
     if box_ptr.is_null() {
         return false;
     }
@@ -4767,6 +4832,13 @@ pub extern "C" fn haxe_null_float_eq(box_ptr: *mut u8, value: f64) -> bool {
 /// otherwise compare the unboxed values.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_null_null_eq_int(a: *mut u8, b: *mut u8) -> bool {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(a as *const u8) {
+        return haxe_null_null_eq_int(word.ptr(), b);
+    }
+    if let Some(mut word) = crate::erased_word::WordBox::of(b as *const u8) {
+        return haxe_null_null_eq_int(a, word.ptr());
+    }
     match (a.is_null(), b.is_null()) {
         (true, true) => true,
         (true, false) | (false, true) => false,
@@ -4780,6 +4852,13 @@ pub extern "C" fn haxe_null_null_eq_int(a: *mut u8, b: *mut u8) -> bool {
 /// Float variant of `haxe_null_null_eq_int`.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_null_null_eq_float(a: *mut u8, b: *mut u8) -> bool {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(a as *const u8) {
+        return haxe_null_null_eq_float(word.ptr(), b);
+    }
+    if let Some(mut word) = crate::erased_word::WordBox::of(b as *const u8) {
+        return haxe_null_null_eq_float(a, word.ptr());
+    }
     match (a.is_null(), b.is_null()) {
         (true, true) => true,
         (true, false) | (false, true) => false,
@@ -4970,7 +5049,7 @@ pub unsafe fn box_class_field_as_dynamic(value: u64, ty: ParamType) -> *mut u8 {
             };
             haxe_box_reference_ptr(p, tag)
         }
-        ParamType::Dynamic => haxe_box_int_ptr(value as i64),
+        ParamType::Dynamic => box_int_heap(value as i64),
         ParamType::Array => haxe_box_reference_ptr(value as *mut u8, crate::json::TYPE_ARRAY.0),
         ParamType::Anon => {
             haxe_box_reference_ptr(value as *mut u8, crate::anon_object::TYPE_ANON_OBJECT.0)
@@ -5122,6 +5201,19 @@ pub extern "C" fn haxe_checked_cast_dynamic(value: *mut u8, target: i64) -> *mut
 pub extern "C" fn haxe_checked_cast_basic(value: *mut u8, target: i64) -> *mut u8 {
     if haxe_dynamic_is_null(value) {
         return std::ptr::null_mut();
+    }
+    // A scalar word fits its own kind, and an Int fits Float.
+    if let Some(word) = crate::erased_word::scalar_word(value) {
+        let fits = match word {
+            crate::erased_word::Scalar::Int(_) => {
+                target == TYPE_INT.0 as i64 || target == TYPE_FLOAT.0 as i64
+            }
+            crate::erased_word::Scalar::Float(_) => target == TYPE_FLOAT.0 as i64,
+        };
+        if fits {
+            return value;
+        }
+        crate::exception::throw_with_message("Class cast error".to_string())
     }
     let fits = dynamic_box_at(value).is_some_and(|d| {
         d.type_id.0 as i64 == target || (target == TYPE_FLOAT.0 as i64 && d.type_id == TYPE_INT)

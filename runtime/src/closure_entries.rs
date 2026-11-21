@@ -497,6 +497,10 @@ pub extern "C" fn haxe_dynamic_to_slot(ptr: *mut u8) -> i64 {
 /// A box's payload as a float: a Float's value, an Int's conversion.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_to_f64(ptr: *mut u8) -> f64 {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(ptr as *const u8) {
+        return haxe_dynamic_to_f64(word.ptr());
+    }
     if ptr.is_null() {
         return 0.0;
     }

@@ -179,6 +179,12 @@ pub extern "C" fn rayzor_exception_as_dynamic() -> *mut u8 {
 fn open_thrown_box(value: i64) -> (i64, u32) {
     use crate::type_system::*;
     let p = value as *mut u8;
+    // A scalar word is its value.
+    match crate::erased_word::scalar_word(p) {
+        Some(crate::erased_word::Scalar::Int(i)) => return (i as i64, TYPE_INT.0),
+        Some(crate::erased_word::Scalar::Float(f)) => return (f.to_bits() as i64, TYPE_FLOAT.0),
+        None => {}
+    }
     let Some(boxed) = dynamic_box_at(p) else {
         return (value, TYPE_FROM_HEADER.0);
     };

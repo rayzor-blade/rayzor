@@ -619,8 +619,15 @@ pub extern "C" fn rayzor_anon_set_field(
         String::from_utf8_lossy(std::slice::from_raw_parts(name_ptr, name_len as usize)).to_string()
     };
 
-    // Extract type_id and raw value from DynamicValue pointer
-    let (type_id, raw_value) = if value_ptr.is_null() {
+    // Extract type_id and raw value from DynamicValue pointer. A scalar word
+    // is its own value; a Dynamic slot keeps the word itself.
+    let word = crate::erased_word::scalar_word(value_ptr);
+    let (type_id, raw_value) = if let Some(word) = word {
+        match word {
+            crate::erased_word::Scalar::Int(i) => (TYPE_INT.0, i as i64 as u64),
+            crate::erased_word::Scalar::Float(f) => (TYPE_FLOAT.0, f.to_bits()),
+        }
+    } else if value_ptr.is_null() {
         (TYPE_NULL.0, 0u64)
     } else {
         unsafe {
@@ -641,7 +648,11 @@ pub extern "C" fn rayzor_anon_set_field(
         }
     };
 
-    let layout = crate::type_system::boxed_array_slot_layout(value_ptr).unwrap_or(0);
+    let layout = if word.is_some() {
+        0
+    } else {
+        crate::type_system::boxed_array_slot_layout(value_ptr).unwrap_or(0)
+    };
 
     unsafe {
         let obj = object_mut(ptr);
