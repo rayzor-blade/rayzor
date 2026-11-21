@@ -3172,6 +3172,13 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
         return haxe_enum_to_string_boxed(type_id, dynamic_ptr) as *mut HaxeString;
     }
 
+    // A raw anonymous-object handle prints as the structure it is.
+    if crate::anon_object::is_anon_handle(dynamic_ptr) {
+        return haxe_std_string_ptr(haxe_box_reference_ptr(
+            dynamic_ptr,
+            crate::anon_object::TYPE_ANON_OBJECT.0,
+        ));
+    }
     // A Dynamic slot holding an erased primitive carries the VALUE, not a box:
     // an array element, an iterator yield, a `Map.get` result. Reading one as a
     // pointer is what faulted on the element's own bits, so validate the

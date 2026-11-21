@@ -1296,10 +1296,19 @@ impl<'a> HirToMirContext<'a> {
         // the tag, and a raw handle has none.
         if let Some(type_id) = hir_type_id {
             let is_anon = matches!(
-                self.type_table.get(type_id).map(|t| &t.kind),
+                self.type_table
+                    .get(self.resolve_through_aliases(type_id))
+                    .map(|t| &t.kind),
                 Some(TypeKind::Anonymous { .. })
             );
-            if is_anon && matches!(from_type, IrType::Ptr(_)) {
+            // An element read from an erased slot holds the handle in an i64.
+            let value = if is_anon && matches!(from_type, IrType::I64) {
+                self.builder
+                    .build_bitcast(value, IrType::Ptr(Box::new(IrType::U8)))?
+            } else {
+                value
+            };
+            if is_anon && matches!(from_type, IrType::Ptr(_) | IrType::I64) {
                 let dynamic_ty = self.type_table.dynamic_type();
                 let boxed = self
                     .maybe_box_value(value, type_id, dynamic_ty)
