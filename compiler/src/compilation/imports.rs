@@ -583,6 +583,24 @@ impl CompilationUnit {
                 }
                 TypeDeclaration::Typedef(typedef_decl) => {
                     extract_type_deps(&typedef_decl.type_def, &mut deps);
+                    // `> Base, {...}` is typed with Base's fields.
+                    fn extension_bases(ty: &Type, deps: &mut std::collections::BTreeSet<String>) {
+                        match ty {
+                            Type::Intersection { left, right, .. } => {
+                                extension_bases(left, deps);
+                                extension_bases(right, deps);
+                            }
+                            Type::Path { path, .. } if !path.package.is_empty() => {
+                                let mut full = path.package.clone();
+                                full.push(path.name.clone());
+                                deps.insert(format!("ext:{}", full.join(".")));
+                            }
+                            _ => {}
+                        }
+                    }
+                    if matches!(typedef_decl.type_def, Type::Intersection { .. }) {
+                        extension_bases(&typedef_decl.type_def, &mut deps);
+                    }
                 }
                 TypeDeclaration::Enum(enum_decl) => {
                     for ctor in &enum_decl.constructors {
@@ -761,6 +779,8 @@ impl CompilationUnit {
         // Which files each file CONSTRUCTS, split off from its dependencies:
         // a cycle is broken by emitting the constructed class first.
         let mut constructs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        // The modules each file's typedefs extend: a cycle emits those first.
+        let mut extends: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut to_process: VecDeque<String> = VecDeque::new();
         for name in imports {
             if is_stdtypes_ambient_import(name) {
@@ -915,6 +935,15 @@ impl CompilationUnit {
                 }
                 Err(_) => Vec::new(),
             };
+            let (extension_marks, deps): (Vec<String>, Vec<String>) =
+                deps.into_iter().partition(|d| d.starts_with("ext:"));
+            extends.insert(
+                qualified_path.clone(),
+                extension_marks
+                    .iter()
+                    .map(|d| d["ext:".len()..].to_string())
+                    .collect(),
+            );
             let (ctor_marks, deps): (Vec<String>, Vec<String>) =
                 deps.into_iter().partition(|d| d.starts_with("new:"));
             constructs.insert(
@@ -1124,10 +1153,23 @@ impl CompilationUnit {
                                     })
                                 })
                                 .unwrap_or(false);
-                            (outstanding, builds_a_stuck_file, name.clone())
+                            // A typedef extension is typed with its base's
+                            // fields, so a file waits for the modules it extends.
+                            let extends_pending = extends.get(name).is_some_and(|bases| {
+                                bases.iter().any(|b| {
+                                    resolve_dependency(b)
+                                        .is_some_and(|r| r != *name && stuck.contains_key(&r))
+                                })
+                            });
+                            (
+                                extends_pending,
+                                outstanding,
+                                builds_a_stuck_file,
+                                name.clone(),
+                            )
                         })
                         .min()
-                        .map(|(_, _, name)| name);
+                        .map(|(_, _, _, name)| name);
                     if let Some(name) = victim {
                         compile_order.push(name.clone());
                         emitted.insert(name.clone());

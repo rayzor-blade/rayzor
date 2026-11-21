@@ -1,0 +1,5 @@
+[project]
+name = "structure-extension-in-import-cycle"
+entry = "./StructureExtensionInImportCycle.hx"
+[build]
+class-paths = [".", "vendor"]

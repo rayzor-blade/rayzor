@@ -1820,7 +1820,7 @@ impl CompilationUnit {
                     imports.extend(discovered);
                     let user_deps: Vec<String> = Self::extract_all_dependencies(ast)
                         .into_iter()
-                        .filter(|d| !d.starts_with("new:"))
+                        .filter(|d| !d.starts_with("new:") && !d.starts_with("ext:"))
                         .collect();
                     imports.extend(Self::enclosing_package_candidates(ast, &user_deps));
                     imports.extend(user_deps);
