@@ -2083,6 +2083,20 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Storage behind an abstract, used after resolving its own accessors.
+    /// A structure field of an abstract type (or `Null` of one) is stored as
+    /// the abstract's underlying value; any other field type as itself.
+    pub(crate) fn abstract_field_storage(&self, type_id: TypeId) -> TypeId {
+        let mut inner = self.resolve_through_aliases(type_id);
+        if let Some(TypeKind::Optional { inner_type }) = self.type_table.get(inner).map(|t| &t.kind)
+        {
+            inner = self.resolve_through_aliases(*inner_type);
+        }
+        match self.type_table.get(inner).map(|t| &t.kind) {
+            Some(TypeKind::Abstract { .. }) => self.resolve_storage_type(inner),
+            _ => type_id,
+        }
+    }
+
     pub(crate) fn resolve_storage_type(&self, type_id: TypeId) -> TypeId {
         let mut current = self.resolve_through_aliases(type_id);
         let mut seen = BTreeSet::new();

@@ -597,6 +597,7 @@ impl<'a> HirToMirContext<'a> {
                         self.dynamic_member_names.insert(field_name.clone());
                         let name_reg = self.builder.build_const(IrValue::String(field_name))?;
                         let dynamic = self.type_table.dynamic_type();
+                        let field_ty = self.abstract_field_storage(field_ty);
                         let boxed = self.maybe_box_value(value, field_ty, dynamic)?;
                         let object_ptr = self.coerce_reg_to(obj_reg, &ptr_ty)?;
                         let setter = self.get_or_register_extern_function(

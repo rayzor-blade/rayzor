@@ -956,11 +956,12 @@ impl<'a> HirToMirContext<'a> {
 
                         // Coerce with the struct's field type; the expression-level
                         // type may be Dynamic.
+                        let stored_ty = self.abstract_field_storage(actual_field_ty);
                         if self
-                            .resolve_enum_symbol(actual_field_ty)
+                            .resolve_enum_symbol(stored_ty)
                             .is_some_and(|symbol| self.enum_is_boxed(symbol))
                         {
-                            let value = self.unbox_generic_value(raw_val, actual_field_ty)?;
+                            let value = self.unbox_generic_value(raw_val, stored_ty)?;
                             return self
                                 .builder
                                 .build_bitcast(value, self.convert_type_arg(actual_field_ty));
