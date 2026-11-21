@@ -554,6 +554,15 @@ impl<'a> HirToMirContext<'a> {
                 let value_reg = self.lower_expression(expr)?;
                 self.unbox_generic_value(value_reg, *target)
             }
+            // `(d : A)` of an abstract checks nothing at run time, and an
+            // abstract has no runtime type of its own to test against.
+            (Some(TypeKind::Dynamic), Some(TypeKind::Abstract { .. })) => {
+                let value_reg = self.lower_expression(expr)?;
+                Some(
+                    self.unbox_unchecked_from_dynamic(value_reg, expr.ty, *target)
+                        .unwrap_or(value_reg),
+                )
+            }
             // Dynamic → non-primitive type: runtime downcast (null on failure)
             (Some(TypeKind::Dynamic), _) if !matches!(&target_kind, Some(TypeKind::Dynamic)) => {
                 let value_reg = self.lower_expression(expr)?;

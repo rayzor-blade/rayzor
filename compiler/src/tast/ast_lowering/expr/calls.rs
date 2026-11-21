@@ -2371,7 +2371,23 @@ impl<'a> AstLowering<'a> {
                 }
             }
         };
-        if arg_is_same_abstract || self.header_from_accepts(abstract_symbol, arg.expr_type) {
+        // Dynamic unifies with the abstract itself, before any `@:from`.
+        let arg_is_dynamic = {
+            let tt = self.context.type_table.borrow();
+            let mut resolved = arg.expr_type;
+            for _ in 0..8 {
+                match tt.get(resolved).map(|ti| &ti.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => resolved = *target_type,
+                    Some(TypeKind::Optional { inner_type }) => resolved = *inner_type,
+                    _ => break,
+                }
+            }
+            matches!(tt.get(resolved).map(|ti| &ti.kind), Some(TypeKind::Dynamic))
+        };
+        if arg_is_same_abstract
+            || arg_is_dynamic
+            || self.header_from_accepts(abstract_symbol, arg.expr_type)
+        {
             return arg;
         }
         if !self.abstract_from_methods.contains_key(&abstract_symbol) {
