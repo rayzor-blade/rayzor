@@ -1,0 +1,5 @@
+[project]
+name = "get-type-imported-module-subtype"
+entry = "./GetTypeImportedModuleSubtype.hx"
+[build]
+class-paths = ["."]

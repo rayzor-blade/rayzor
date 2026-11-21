@@ -2103,9 +2103,26 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                         .iter()
                         .any(|(path, wildcard)| {
                             if *wildcard {
-                                path.trim_end_matches(".*") == package
-                            } else {
-                                *path == qualified || qualified.starts_with(&format!("{path}."))
+                                return path.trim_end_matches(".*") == package;
+                            }
+                            if *path == qualified || qualified.starts_with(&format!("{path}.")) {
+                                return true;
+                            }
+                            // `import pkg.Module` brings in every type `Module` declares.
+                            let (module_package, module) =
+                                path.rsplit_once('.').unwrap_or(("", path.as_str()));
+                            module_package == package && {
+                                let interner = &self.lowering.context.string_interner;
+                                let segments: Vec<_> = module_package
+                                    .split('.')
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| interner.intern(s))
+                                    .collect();
+                                self.lowering.context.namespace_resolver.module_declares(
+                                    &segments,
+                                    interner.intern(module),
+                                    interned,
+                                )
                             }
                         });
                 let own_package = self
