@@ -101,3 +101,30 @@ pub fn ordered_inits(module: &IrModule, name: &str) -> Vec<IrFunctionId> {
     }
     order
 }
+
+/// With `RAYZOR_INIT_ORDER_DEBUG` set, prints each `__init__` in run order with
+/// the globals it stores. Debug output only; safe to run with.
+pub fn trace_inits(module: &IrModule, inits: &[IrFunctionId]) {
+    if std::env::var_os("RAYZOR_INIT_ORDER_DEBUG").is_none() {
+        return;
+    }
+    for id in inits {
+        let Some(func) = module.functions.get(id) else {
+            continue;
+        };
+        let mut stored: Vec<&str> = func
+            .cfg
+            .blocks
+            .values()
+            .flat_map(|b| b.instructions.iter())
+            .filter_map(|i| match i {
+                IrInstruction::StoreGlobal { global_id, .. } => {
+                    module.globals.get(global_id).map(|g| g.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        stored.dedup();
+        eprintln!("[init] {} {:?} stores {:?}", func.name, id, stored);
+    }
+}

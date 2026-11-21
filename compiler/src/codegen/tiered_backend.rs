@@ -1798,6 +1798,7 @@ impl TieredBackend {
             // default), so we don't need a trap-stub-skip here.
             for init_name in ["__vtable_init__", "__init__"] {
                 let init_ids = crate::ir::init_order::ordered_inits(module, init_name);
+                crate::ir::init_order::trace_inits(module, &init_ids);
                 for init_id in init_ids {
                     interp
                         .execute(module, init_id, vec![])
@@ -1840,6 +1841,7 @@ impl TieredBackend {
             // recoverable, but a SIGILL is not.
             for &init_name in init_names {
                 let init_ids = crate::ir::init_order::ordered_inits(module, init_name);
+                crate::ir::init_order::trace_inits(module, &init_ids);
                 for init_id in init_ids {
                     let Some(&func_ptr) = function_pointers.get(&init_id) else {
                         continue;
