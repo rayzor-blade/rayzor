@@ -2749,6 +2749,21 @@ impl<'a> AstLowering<'a> {
                     self.context.expected_new_type_hint = previous_hint;
                     let value = self.coerce_arg_via_abstract_to(value?, target);
                     let value = self.coerce_arg_via_abstract_from(value, target);
+                    // A `Null<T>` into a `T` field is stored as the `T` it holds.
+                    let value = match target {
+                        Some(target) if self.is_nullable_of(value.expr_type, target) => {
+                            TypedExpression {
+                                expr_type: target,
+                                kind: TypedExpressionKind::Cast {
+                                    expression: Box::new(value.clone()),
+                                    target_type: target,
+                                    cast_kind: CastKind::Implicit,
+                                },
+                                ..value
+                            }
+                        }
+                        _ => value,
+                    };
                     typed_fields.push(TypedObjectField {
                         name: field_name,
                         value,
@@ -4544,6 +4559,25 @@ impl<'a> AstLowering<'a> {
 impl<'a> AstLowering<'a> {
     /// The structure a type stands for, through aliases, typedefs registered
     /// as classes, and `Null<T>`.
+    /// Whether `ty` is `Null<target>` for a non-nullable `target`.
+    fn is_nullable_of(&self, ty: TypeId, target: TypeId) -> bool {
+        use crate::tast::core::TypeKind;
+        let tt = self.context.type_table.borrow();
+        let target = Self::resolve_alias_chain(&tt, target);
+        if matches!(
+            tt.get(target).map(|t| &t.kind),
+            Some(TypeKind::Optional { .. } | TypeKind::Dynamic) | None
+        ) {
+            return false;
+        }
+        match tt.get(Self::resolve_alias_chain(&tt, ty)).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => {
+                Self::resolve_alias_chain(&tt, *inner_type) == target
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn structure_fields(
         &self,
         ty: TypeId,

@@ -1329,7 +1329,9 @@ impl<'a> AstLowering<'a> {
                 }
                 // A function stored into an array of functions takes the element
                 // type, so an untyped literal is typed as the slot it fills; a
-                // `new Map()` stored into an array of maps takes its key type.
+                // `new Map()` stored into an array of maps takes its key type;
+                // an object literal stored into an array of structures takes
+                // the declared field types.
                 let function_elem = array_elem.filter(|elem| {
                     let is_function = {
                         let tt = self.context.type_table.borrow();
@@ -1339,7 +1341,9 @@ impl<'a> AstLowering<'a> {
                             Some(crate::tast::core::TypeKind::Function { .. })
                         )
                     };
-                    is_function || self.map_class_name(*elem).is_some()
+                    is_function
+                        || self.map_class_name(*elem).is_some()
+                        || self.structure_fields(*elem).is_some()
                 });
                 if let Some(elem) = function_elem {
                     let int = self.context.type_table.borrow().int_type();
