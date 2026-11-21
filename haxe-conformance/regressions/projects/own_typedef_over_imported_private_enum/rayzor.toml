@@ -1,0 +1,5 @@
+[project]
+name = "own-typedef-over-imported-private-enum"
+entry = "./OwnTypedefOverImportedPrivateEnum.hx"
+[build]
+class-paths = ["."]

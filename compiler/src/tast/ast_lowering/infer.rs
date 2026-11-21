@@ -1112,6 +1112,15 @@ impl<'a> AstLowering<'a> {
                 if else_null && !then_null && reference(&then_kind) {
                     return Ok(then_t);
                 }
+                // So does an empty array literal next to an array: its elements are
+                // the other branch's.
+                let empty_array = |e: &TypedExpression| matches!(&e.kind, TypedExpressionKind::ArrayLiteral { elements } if elements.is_empty());
+                if empty_array(then_expr) && matches!(else_kind, Some(TypeKind::Array { .. })) {
+                    return Ok(else_t);
+                }
+                if empty_array(else_e) && matches!(then_kind, Some(TypeKind::Array { .. })) {
+                    return Ok(then_t);
+                }
                 // Int64 is a value type too: its null branch makes it nullable.
                 let int64 = |kind: &Option<TypeKind>| match kind {
                     Some(TypeKind::Abstract { symbol_id, .. }) => self
