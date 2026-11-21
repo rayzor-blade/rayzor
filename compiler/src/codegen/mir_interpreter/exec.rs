@@ -759,7 +759,9 @@ fn step(m: &Machine, fr: &mut Frame, region_here: bool) -> Result<Action, Stop> 
                 Op::Const { dest, bits } => r[*dest as usize] = *bits,
                 Op::Copy { dest, src } => r[*dest as usize] = r[*src as usize],
                 Op::Conv { dest, src, conv } => {
-                    r[*dest as usize] = conv.apply(r[*src as usize]).map_err(trap)?;
+                    r[*dest as usize] = conv
+                        .apply(r[*src as usize])
+                        .map_err(|message| trap(&format!("{message} in `{}`", f.name)))?;
                 }
                 Op::IBin { dest, op, mt, a, b } => {
                     r[*dest as usize] = ibin(*op, *mt, r[*a as usize], r[*b as usize])?;
